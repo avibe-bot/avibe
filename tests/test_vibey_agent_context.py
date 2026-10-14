@@ -506,7 +506,10 @@ async def test_a_threshold_checkpoint_and_an_overflow_roll_through_the_real_loop
 
     from modules.agents.vibey.models import registry_providers
 
-    served = json.dumps({"provider": "upstream", "api": "anthropic", "model": "served-model"}, separators=(",", ":"))
+    served = json.dumps(
+        {"provider": "upstream", "api": "anthropic", "model": "served-model", "source": "src_upstream01"},
+        separators=(",", ":"),
+    )
     overflow = json.dumps(
         {"type": "error", "error": {"type": "invalid_request_error", "message": "prompt is too long: 40000 tokens > 32000 maximum"}}
     )

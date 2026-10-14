@@ -15,7 +15,7 @@ import core.agent_core.ai.anthropic as anthropic_module
 import core.agent_core.ai.sse as sse_module
 import core.agent_core.ai.openai_responses as responses_module
 from core.agent_core.ai.anthropic import AnthropicAdapter, build_messages_payload
-from core.agent_core.ai._common import OutputBudgetExceeded, StreamAssembler, read_response_body
+from core.agent_core.ai._common import OutputBudgetExceeded, ServedHop, StreamAssembler, read_response_body
 from core.agent_core.ai.openai_chat import OpenAIChatAdapter, build_chat_payload
 from core.agent_core.ai.openai_responses import OpenAIResponsesAdapter, build_responses_payload
 from core.agent_core.ai.provider import (
@@ -30,7 +30,7 @@ from core.agent_core.ai.provider import (
     ToolCallDelta,
     ToolCallStart,
 )
-from core.agent_core.ai.registry import ADAPTERS, adapter_class
+from core.agent_core.ai.registry import ADAPTERS, adapter_class, build_wire_request, sent_effort
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
     AssistantMessage,
@@ -2560,14 +2560,47 @@ def test_openai_payloads_forward_explicit_none_reasoning_effort(
         assert "include" not in payload
 
 
-def test_anthropic_adaptive_xhigh_maps_to_max_effort() -> None:
-    payload = build_messages_payload(
-        _request("anthropic", model_id="claude-opus-5", reasoning_effort="xhigh"),
-        (),
-    )
+@pytest.mark.parametrize(
+    ("model_id", "effort", "sent"),
+    [
+        # Native on Opus 4.7 and later (Anthropic's effort docs): the hop declares it, so it goes as given.
+        ("claude-opus-5", "xhigh", "xhigh"),
+        ("claude-opus-4-7", "xhigh", "xhigh"),
+        ("claude-haiku-5-5", "xhigh", "xhigh"),
+        ("claude-opus-4-6", "max", "max"),
+        # Anthropic has no minimal level.
+        ("claude-opus-5", "minimal", "low"),
+    ],
+)
+def test_anthropic_sends_the_declared_effort_as_given(model_id: str, effort: str, sent: str) -> None:
+    payload = build_messages_payload(_request("anthropic", model_id=model_id, reasoning_effort=effort), ())
 
     assert payload["thinking"] == {"type": "adaptive"}
-    assert payload["output_config"] == {"effort": "max"}
+    assert payload["output_config"] == {"effort": sent}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("protocol", "model_id"),
+    [
+        ("anthropic", "claude-opus-5-5"),
+        ("anthropic", "claude-opus-4-5"),
+        ("openai_responses", "gpt-6-sol"),
+        ("openai_chat", "deepseek-v4"),
+    ],
+)
+@pytest.mark.parametrize("effort", ["minimal", "low", "high", "xhigh", "max", "none", "off", "XHIGH"])
+async def test_sent_effort_is_the_token_each_adapter_puts_on_the_wire(protocol: str, model_id: str, effort: str) -> None:
+    """Model Hub's effort menu reads ``sent_effort``; it must name exactly the token the request carries."""
+
+    wire = await build_wire_request(_request(protocol, model_id=model_id, reasoning_effort=effort), gateway=True)
+
+    carried = {
+        "anthropic": (wire.body.get("output_config") or {}).get("effort"),
+        "openai_responses": (wire.body.get("reasoning") or {}).get("effort"),
+        "openai_chat": wire.body.get("reasoning_effort"),
+    }[protocol]
+    assert carried == sent_effort(protocol, model_id, effort)
 
 
 @pytest.mark.asyncio
@@ -2814,8 +2847,32 @@ async def test_malformed_tool_arguments_are_terminal_invalid_requests() -> None:
     assert "malformed tool arguments" in error.message
 
 
+_ORIGIN_KEYS = '"provider":"anthropic","api":"anthropic","model":"model-x"'
+
+
+@pytest.mark.parametrize("report,expected", [
+    pytest.param(
+        "{" + _ORIGIN_KEYS + ',"source":"src_fixture01"}',
+        ServedHop(Origin("anthropic", "anthropic", "model-x"), "src_fixture01"),
+        id="exact",
+    ),
+    pytest.param("{" + _ORIGIN_KEYS + "}", None, id="v11-without-source"),
+    pytest.param("{" + _ORIGIN_KEYS + ',"source":"src_fixture01","extra":"x"}', None, id="extra-key"),
+    pytest.param("{" + _ORIGIN_KEYS + ',"source":12345678}', None, id="non-string"),
+    pytest.param("{" + _ORIGIN_KEYS + ',"source":"src_short"}', None, id="bad-source-id"),
+    pytest.param(
+        "{" + _ORIGIN_KEYS + ',"source":"src_fixture01","source":"src_fixture02"}', None, id="duplicate-key",
+    ),
+])
+def test_served_hop_report_is_exactly_origin_and_source(report: str, expected: ServedHop | None) -> None:
+    """MH-VIBEY-002: only the exact v12 report verifies an origin; any other shape leaves it unverified."""
+    assert common_module.default_served_hop_resolver({"x-avibe-served-hop": report}) == expected
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("served_hop", [None, "invalid", '{"provider":"anthropic","api":"anthropic","model":"model-x"}'])
+@pytest.mark.parametrize("served_hop", [
+    None, "invalid", '{"provider":"anthropic","api":"anthropic","model":"model-x","source":"src_fixture01"}',
+])
 async def test_gateway_origin_sanitization_preserves_streamed_block_indexes(served_hop: str | None) -> None:
     body = (
         'data: {"type":"message_start","message":{"usage":{}}}\n\n'
@@ -3489,11 +3546,11 @@ class _StalledResolver:
         self.started = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def __call__(self, headers: Mapping[str, str]) -> Origin | None:
+    async def __call__(self, headers: Mapping[str, str]) -> ServedHop | None:
         del headers
         self.started.set()
         await self.release.wait()
-        return Origin("served", "openai_chat", "served-model")
+        return ServedHop(Origin("served", "openai_chat", "served-model"), "src_served01")
 
 
 class _CloseFailStream(httpx.AsyncByteStream):
@@ -3734,7 +3791,7 @@ async def test_http_error_classification_precedes_served_hop_resolution(
     resolver_calls = []
     closed = []
 
-    async def resolver(headers: Mapping[str, str]) -> Origin | None:
+    async def resolver(headers: Mapping[str, str]) -> ServedHop | None:
         resolver_calls.append(headers)
         raise RuntimeError("served-hop resolution failed")
 

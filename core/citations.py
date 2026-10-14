@@ -28,7 +28,7 @@ import re
 import secrets
 from dataclasses import dataclass
 from html.entities import html5 as HTML5_ENTITIES
-from typing import Any, Callable, Iterable, Mapping, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional, Protocol
 from urllib.parse import unquote
 
 import idna
@@ -1063,6 +1063,61 @@ def register_citations(
         markers=tuple(markers),
         sources=tuple(consulted.values()),
     )
+
+
+class TextCitation(Protocol):
+    """A citation a provider attached to a text block (C-1 ``Citation``)."""
+
+    url: str
+    title: Optional[str]
+    start: Optional[int]
+    end: Optional[int]
+
+
+def register_text_citations(
+    blocks: Iterable[tuple[str, Iterable[TextCitation]]],
+    *,
+    unresolved_label: str,
+    separator: str = "\n\n",
+    transform: Callable[[str], str] = lambda text: text,
+) -> tuple[str, Optional[CitationBundle]]:
+    """Register the citations providers attach to text blocks, as ``register_citations`` does markers.
+
+    The one builder from ``(text, TextBlock.citations)`` to the delivered shape
+    (``vibey-hosted-tools.md`` §4.2): each block's text joined by ``separator``,
+    with an opaque token where each citation is written out at delivery, and the
+    bundle that writes Markdown links plus the Web's badge sidecar.
+
+    A citation with a range is attributed where its cited span ends (OpenAI and
+    xAI ``url_citation``); one without covers its whole block, so it is
+    attributed at the block's end (Anthropic). ``transform`` runs on the joined
+    text before registration - the display rules, such as dropping silent
+    blocks - and a citation whose place it removed, or that falls in code, is
+    left out rather than written as a stray marker.
+    """
+    sources: dict[str, CitationSource] = {}
+    parts: list[str] = []
+    for block_index, (text, citations) in enumerate(blocks):
+        at: dict[int, list[str]] = {}
+        # A block the display rules remove entirely shows nothing to cite; its
+        # end-of-block citation would otherwise survive past the removed text.
+        if not transform(text).strip():
+            citations = ()
+        for citation_index, citation in enumerate(citations or ()):
+            ref = f"t{block_index}c{citation_index}"
+            sources[ref] = CitationSource(ref_id=ref, title=citation.title or "", url=citation.url)
+            end = len(text) if citation.end is None else min(max(citation.end, 0), len(text))
+            at.setdefault(end, []).append(ref)
+        marked = text
+        for offset in sorted(at, reverse=True):
+            marker = f"{_START}cite{_SEP}{_SEP.join(at[offset])}{_END}"
+            marked = marked[:offset] + marker + marked[offset:]
+        parts.append(marked)
+    joined = transform(separator.join(part for part in parts if part))
+    if not sources:
+        return joined, None
+    registered, bundle = register_citations(joined, sources, unresolved_label=unresolved_label)
+    return CITATION_MARKER_RE.sub("", registered or ""), bundle
 
 
 def materialize_citations(

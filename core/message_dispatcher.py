@@ -2590,6 +2590,7 @@ class ConsolidatedMessageDispatcher:
         terminal_error: Optional[str] = None,
         delivery: DeliveryEvidence | None = None,
         citations: Optional[CitationBundle] = None,
+        hosted: Optional[dict] = None,
     ) -> Optional[str]:
         """Centralized dispatch for agent messages.
 
@@ -2632,6 +2633,10 @@ class ConsolidatedMessageDispatcher:
         compatibility default remains one terminal result. Explicit nonterminal
         outputs remain in the current Turn, while detached outputs are delivered
         to the Session/IM surface without touching a newer Turn or its stream.
+
+        ``hosted`` is a ``toolcall``'s hosted-tool card (``core.hosted_activity``,
+        ``HostedActivity.to_payload``). It rides on the persisted row for the Web
+        activity group; every IM surface delivers ``text``, its one-line form.
 
         ``citations`` is the registered source bundle for a message whose text
         still carries an opaque token where each cited marker was (see
@@ -3678,6 +3683,7 @@ class ConsolidatedMessageDispatcher:
             citations=citations,
             metadata={TRANSCRIPT_COPY_KEY: "interim"} if interim_row else None,
             existing_row_id=existing_row_id,
+            hosted=hosted if canonical_type == "toolcall" else None,
         )
 
         # The row above is the only copy of an intermediate message that carries a

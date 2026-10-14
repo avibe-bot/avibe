@@ -83,6 +83,14 @@
         },
         "ref": {
           "$ref": "#/definitions/LargeRef"
+        },
+        "citations": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/definitions/Citation"
+          },
+          "description": "Assistant text only, and only with inline `text`. Presentation only; never replayed."
         }
       },
       "oneOf": [
@@ -96,7 +104,12 @@
             "ref"
           ]
         }
-      ]
+      ],
+      "dependencies": {
+        "citations": [
+          "text"
+        ]
+      }
     },
     "ImageBlock": {
       "type": "object",
@@ -318,6 +331,9 @@
               },
               {
                 "$ref": "#/definitions/ToolCallBlock"
+              },
+              {
+                "$ref": "#/definitions/HostedToolBlock"
               }
             ]
           }
@@ -334,6 +350,38 @@
         "error_message": {
           "type": "string",
           "description": "Present when `stop_reason` is `error` or `aborted`."
+        },
+        "hosted_summary": {
+          "$ref": "#/definitions/HostedSummary"
+        }
+      },
+      "if": {
+        "properties": {
+          "content": {
+            "contains": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "hosted_tool"
+                }
+              },
+              "required": [
+                "type"
+              ]
+            }
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "hosted_summary"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "hosted_summary"
+          ]
         }
       }
     },
@@ -375,6 +423,807 @@
         },
         "is_error": {
           "type": "boolean"
+        },
+        "hosted": {
+          "type": "object",
+          "required": [
+            "record"
+          ],
+          "additionalProperties": false,
+          "description": "Set only on the result of a proxied hosted call. `execution` is present exactly when an executor ran; without it the record failed. `action` is what the executor reports it did, such as a generated image's rendered prompt and resolved size and quality.",
+          "properties": {
+            "record": {
+              "$ref": "#/definitions/HostedRecord"
+            },
+            "execution": {
+              "$ref": "#/definitions/ProxyExecution"
+            },
+            "action": {
+              "$ref": "#/definitions/HostedAction"
+            }
+          },
+          "if": {
+            "not": {
+              "required": [
+                "execution"
+              ]
+            }
+          },
+          "then": {
+            "properties": {
+              "record": {
+                "properties": {
+                  "status": {
+                    "const": "failed"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "hosted"
+            ]
+          },
+          "then": {
+            "properties": {
+              "tool_name": {
+                "$ref": "#/definitions/HostedToolName"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "hosted"
+            ],
+            "properties": {
+              "hosted": {
+                "properties": {
+                  "record": {
+                    "properties": {
+                      "status": {
+                        "enum": [
+                          "failed",
+                          "incomplete"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "is_error": {
+                "const": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "hosted"
+            ],
+            "properties": {
+              "hosted": {
+                "properties": {
+                  "record": {
+                    "properties": {
+                      "status": {
+                        "enum": [
+                          "completed",
+                          "pending"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "is_error": {
+                "const": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "hosted"
+            ],
+            "properties": {
+              "tool_name": {
+                "const": "image_generation"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "hosted": {
+                "properties": {
+                  "record": {
+                    "required": [
+                      "images"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "hosted"
+            ],
+            "properties": {
+              "tool_name": {
+                "enum": [
+                  "web_search",
+                  "x_search"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "hosted": {
+                "properties": {
+                  "record": {
+                    "not": {
+                      "required": [
+                        "images"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "Citation": {
+      "type": "object",
+      "required": [
+        "url"
+      ],
+      "additionalProperties": false,
+      "description": "A source the provider attached to assistant text. `start` and `end` come together, as a half-open code-point range into the block's `text` (0 <= start <= end <= its length).",
+      "properties": {
+        "url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "type": "string"
+        },
+        "cited_text": {
+          "type": "string"
+        },
+        "start": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "end": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "dependencies": {
+        "start": [
+          "end"
+        ],
+        "end": [
+          "start"
+        ]
+      }
+    },
+    "HostedToolName": {
+      "enum": [
+        "web_search",
+        "x_search",
+        "image_generation"
+      ],
+      "description": "Catalog name of a hosted tool (`vibey-hosted-tools.md` §2)."
+    },
+    "HostedAction": {
+      "description": "What a hosted call did, provider-neutral (`vibey-hosted-tools.md` §4.2 mapping rule). An item the mapping does not know is `other`, never dropped.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "queries"
+          ],
+          "additionalProperties": false,
+          "description": "A web search; `queries` from `action.queries`, else the deprecated singular `action.query`.",
+          "properties": {
+            "type": {
+              "const": "search"
+            },
+            "queries": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "url"
+          ],
+          "additionalProperties": false,
+          "description": "A web search opened a page.",
+          "properties": {
+            "type": {
+              "const": "open_page"
+            },
+            "url": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "url",
+            "pattern"
+          ],
+          "additionalProperties": false,
+          "description": "A web search searched within a page.",
+          "properties": {
+            "type": {
+              "const": "find_in_page"
+            },
+            "url": {
+              "type": "string",
+              "minLength": 1
+            },
+            "pattern": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "variant",
+            "query"
+          ],
+          "additionalProperties": false,
+          "description": "An X post search; `limit` and `mode` are kept when the call carries them.",
+          "properties": {
+            "type": {
+              "const": "x_search"
+            },
+            "variant": {
+              "enum": [
+                "keyword",
+                "semantic"
+              ]
+            },
+            "query": {
+              "type": "string",
+              "minLength": 1
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "mode": {
+              "enum": [
+                "Latest",
+                "Top"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "query"
+          ],
+          "additionalProperties": false,
+          "description": "An X user search.",
+          "properties": {
+            "type": {
+              "const": "x_user_search"
+            },
+            "query": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "ref"
+          ],
+          "additionalProperties": false,
+          "description": "An X thread fetch.",
+          "properties": {
+            "type": {
+              "const": "x_thread_fetch"
+            },
+            "ref": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "additionalProperties": false,
+          "description": "An image generation. `prompt` is the provider's revised prompt, required for a completed record; `size` and `quality` are the resolved output settings.",
+          "properties": {
+            "type": {
+              "const": "generate"
+            },
+            "prompt": {
+              "type": "string",
+              "minLength": 1
+            },
+            "size": {
+              "type": "string",
+              "minLength": 1
+            },
+            "quality": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "name"
+          ],
+          "additionalProperties": false,
+          "description": "Any other item under a declared hosted tool, with the provider's item name.",
+          "properties": {
+            "type": {
+              "const": "other"
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      ]
+    },
+    "HostedSource": {
+      "type": "object",
+      "required": [
+        "url"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "type": "string"
+        },
+        "snippet": {
+          "type": "string"
+        },
+        "page_age": {
+          "type": "string"
+        }
+      }
+    },
+    "HostedImage": {
+      "type": "object",
+      "required": [
+        "path",
+        "mime"
+      ],
+      "additionalProperties": false,
+      "description": "A generated image saved as a local file. Image bytes are never stored in a message; `bytes` is the file's size.",
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mime": {
+          "enum": [
+            "image/png",
+            "image/jpeg",
+            "image/gif",
+            "image/webp"
+          ]
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "HostedRecord": {
+      "type": "object",
+      "required": [
+        "status",
+        "sources"
+      ],
+      "additionalProperties": false,
+      "description": "Per-call facts of one hosted call. `images` is present exactly for `image_generation`.",
+      "properties": {
+        "status": {
+          "enum": [
+            "completed",
+            "failed",
+            "incomplete",
+            "pending"
+          ]
+        },
+        "error": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 400,
+          "description": "Bounded and redacted. Model-facing English: the provider's own reason, or one Avibe wrote."
+        },
+        "error_code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "description": "The stable code of a reason Avibe wrote (`HOSTED_ERROR_CODES`), by which a display localizes it; absent for a provider's own reason. A reader accepts any snake_case code."
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/HostedSource"
+          },
+          "description": "This call's own results. Empty when the provider returns none per call (xAI X search), except in a proxied call's record."
+        },
+        "images": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/HostedImage"
+          }
+        }
+      },
+      "dependencies": {
+        "error_code": [
+          "error"
+        ]
+      },
+      "if": {
+        "properties": {
+          "status": {
+            "enum": [
+              "failed",
+              "incomplete"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "error"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "error"
+          ]
+        }
+      }
+    },
+    "HostedToolBlock": {
+      "type": "object",
+      "required": [
+        "type",
+        "id",
+        "tool",
+        "action",
+        "record",
+        "native"
+      ],
+      "additionalProperties": false,
+      "description": "One native hosted call. A proxied call is a `ToolCallBlock` plus `ToolResultMessage.hosted`, never this block.",
+      "properties": {
+        "type": {
+          "const": "hosted_tool"
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tool": {
+          "$ref": "#/definitions/HostedToolName"
+        },
+        "action": {
+          "$ref": "#/definitions/HostedAction"
+        },
+        "record": {
+          "$ref": "#/definitions/HostedRecord"
+        },
+        "native": {
+          "type": "object",
+          "required": [
+            "source_id",
+            "payload"
+          ],
+          "additionalProperties": false,
+          "description": "The provider's own items, verbatim and in order. Their origin is the message's `origin`; replay is decided at every request from current evidence and never stored.",
+          "properties": {
+            "source_id": {
+              "type": "string",
+              "pattern": "^src_[a-z0-9]{8,}$"
+            },
+            "payload": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "tool": {
+                "const": "web_search"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "action": {
+                "properties": {
+                  "type": {
+                    "enum": [
+                      "search",
+                      "open_page",
+                      "find_in_page",
+                      "other"
+                    ]
+                  }
+                }
+              },
+              "record": {
+                "not": {
+                  "required": [
+                    "images"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "tool": {
+                "const": "x_search"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "action": {
+                "properties": {
+                  "type": {
+                    "enum": [
+                      "x_search",
+                      "x_user_search",
+                      "x_thread_fetch",
+                      "other"
+                    ]
+                  }
+                }
+              },
+              "record": {
+                "not": {
+                  "required": [
+                    "images"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "tool": {
+                "const": "image_generation"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "action": {
+                "properties": {
+                  "type": {
+                    "enum": [
+                      "generate",
+                      "other"
+                    ]
+                  }
+                }
+              },
+              "record": {
+                "required": [
+                  "images"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "properties": {
+                  "type": {
+                    "const": "generate"
+                  }
+                }
+              },
+              "record": {
+                "properties": {
+                  "status": {
+                    "const": "completed"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "action": {
+                "required": [
+                  "prompt"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "HostedCost": {
+      "type": "object",
+      "required": [
+        "basis"
+      ],
+      "additionalProperties": false,
+      "description": "`reported`: the provider's figure; `list`: computed by Model Hub's pricing module; `included`: a subscription Source, no per-call charge.",
+      "properties": {
+        "basis": {
+          "enum": [
+            "reported",
+            "list",
+            "included"
+          ]
+        },
+        "usd": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "if": {
+        "properties": {
+          "basis": {
+            "const": "included"
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "required": [
+            "usd"
+          ]
+        }
+      },
+      "else": {
+        "required": [
+          "usd"
+        ]
+      }
+    },
+    "HostedSummary": {
+      "type": "object",
+      "required": [
+        "counts",
+        "cited_sources"
+      ],
+      "additionalProperties": false,
+      "description": "Response-scoped hosted facts, never copied into calls. `cost` is absent when no price is known: unknown is never priced as zero.",
+      "properties": {
+        "cost": {
+          "$ref": "#/definitions/HostedCost"
+        },
+        "counts": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[a-z0-9_]{1,64}$"
+          },
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "description": "Provider-reported counters by name, e.g. `web_search_calls`, `x_posts_fetched`, `web_search_requests`."
+        },
+        "cited_sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/HostedSource"
+          },
+          "description": "Sources the response cites when the provider gives none per call (xAI X-search `url_citation`s)."
+        }
+      }
+    },
+    "ProxyExecution": {
+      "type": "object",
+      "required": [
+        "mode",
+        "executor_origin",
+        "executor_source_id",
+        "executor_billing"
+      ],
+      "additionalProperties": false,
+      "description": "Which executor ran a proxied hosted call. `cost` is absent when no price is known.",
+      "properties": {
+        "mode": {
+          "const": "proxy"
+        },
+        "executor_origin": {
+          "$ref": "#/definitions/Origin"
+        },
+        "executor_source_id": {
+          "type": "string",
+          "pattern": "^src_[a-z0-9]{8,}$"
+        },
+        "executor_billing": {
+          "enum": [
+            "monthly",
+            "metered"
+          ]
+        },
+        "cost": {
+          "$ref": "#/definitions/HostedCost"
         }
       }
     }

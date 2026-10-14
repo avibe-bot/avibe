@@ -8799,6 +8799,73 @@ def test_explicit_runtime_ignores_unrelated_malformed_node_override(monkeypatch,
     assert result.runtime_reason != "runtime_start_node_command_invalid"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="native Windows path semantics are covered separately")
+def test_configured_node_path_with_spaces_executes_intact(monkeypatch, tmp_path):
+    node = tmp_path / "Application Support" / "node"
+    node.parent.mkdir(parents=True)
+    node.symlink_to(Path(sys.executable).resolve())
+    monkeypatch.setenv("VIBE_SHOW_RUNTIME_NODE_BIN", str(node))
+
+    command = show_runtime._resolve_node_command()
+
+    assert command == [str(node)]
+    result = subprocess.run(
+        [
+            *command,
+            "-c",
+            "import sys; print(sys.argv[1])",
+            "desktop-node-path-intact",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stdout.strip() == "desktop-node-path-intact"
+
+
+def test_invalid_configured_node_path_does_not_resolve_valid_split_prefix(
+    monkeypatch,
+    tmp_path,
+):
+    valid_prefix = tmp_path / ("node.exe" if os.name == "nt" else "node")
+    if os.name == "nt":
+        shutil.copy2(sys.executable, valid_prefix)
+    else:
+        valid_prefix.symlink_to(Path(sys.executable).resolve())
+    configured = f"{valid_prefix} missing"
+    assert not Path(configured).exists()
+    monkeypatch.setenv("VIBE_SHOW_RUNTIME_NODE_BIN", configured)
+
+    assert show_runtime._resolve_node_command() is None
+
+
+def test_configured_windows_node_path_reaches_native_path_validation_intact(
+    monkeypatch,
+):
+    configured = r"C:\Program Files\Avibe Runtime\tools\node.exe"
+    observed = []
+    monkeypatch.setenv("VIBE_SHOW_RUNTIME_NODE_BIN", configured)
+
+    def resolve(path):
+        observed.append(str(path))
+        return str(path)
+
+    monkeypatch.setattr(show_runtime, "_resolve_executable_path", resolve)
+
+    assert show_runtime._resolve_node_command() == [configured]
+    assert observed == [configured]
+
+
+def test_generic_command_resolver_preserves_command_arguments(monkeypatch):
+    monkeypatch.setattr(show_runtime.shutil, "which", lambda executable: f"/resolved/{executable}")
+
+    assert show_runtime._resolve_command("runtime-cli --port 4321") == [
+        "/resolved/runtime-cli",
+        "--port",
+        "4321",
+    ]
+
+
 def test_managed_runtime_normalizes_malformed_node_override(monkeypatch, tmp_path):
     monkeypatch.setenv("VIBE_SHOW_RUNTIME_NODE_BIN", "'unterminated")
     manager = ShowRuntimeManager(
@@ -13842,6 +13909,110 @@ def test_show_runtime_vendor_asset_proxy_does_not_mark_errors_immutable(monkeypa
 
     assert response.status_code == 404
     assert response.headers["cache-control"] == "no-store"
+
+
+def _raw_asgi_request(method: str, raw_path: str, *, host: str, client_ip: str) -> tuple[int, dict[str, str]]:
+    """Drive the ASGI app with an un-normalized path.
+
+    HTTP test clients normalize `..` segments before sending, which would turn a
+    traversal probe into an ordinary request and hide the bug under test.
+    """
+    sent: list[dict] = []
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": method,
+        "scheme": "https" if host.endswith(".avibe.bot") else "http",
+        "path": urllib.parse.unquote(raw_path),
+        "raw_path": raw_path.encode("ascii"),
+        "root_path": "",
+        "query_string": b"",
+        "headers": [(b"host", host.encode("ascii"))],
+        "client": (client_ip, 50000),
+        "server": (host.split(":")[0], 443),
+    }
+    asyncio.run(app(scope, receive, send))
+    start = next(message for message in sent if message["type"] == "http.response.start")
+    headers = {key.decode("latin-1").lower(): value.decode("latin-1") for key, value in start["headers"]}
+    return start["status"], headers
+
+
+_VENDOR_PROXY_PEERS = (
+    pytest.param("127.0.0.1:5123", "127.0.0.1", id="loopback"),
+    pytest.param("alex.avibe.bot", _remote_peer()["REMOTE_ADDR"], id="remote-public-host"),
+)
+
+
+@pytest.mark.parametrize("host,client_ip", _VENDOR_PROXY_PEERS)
+@pytest.mark.parametrize("method", ("GET", "HEAD"))
+@pytest.mark.parametrize(
+    "raw_path",
+    (
+        "/_show-runtime/vendor/../../sessions/ses-target/events",
+        "/_show-runtime/vendor/abc123/../../../sessions/ses-target/messages",
+        "/_show-runtime/vendor/%2e%2e/%2e%2e/sessions/ses-target/events",
+        "/_show-runtime/vendor/%252e%252e/%252e%252e/sessions/ses-target/events",
+        "/_show-runtime/vendor/..%5c..%5csessions/ses-target/events",
+        "/_show-runtime/vendor/../../health",
+        "/_show-runtime/vendor/abc123/.hidden",
+    ),
+)
+def test_show_runtime_vendor_asset_proxy_never_forwards_dot_segments(
+    monkeypatch, tmp_path, raw_path, method, host, client_ip
+):
+    # The vendor route is auth-exempt. If a dot segment reached the runtime, the HTTP
+    # client would normalize it away and the request would land on the runtime's
+    # unauthenticated `/sessions/<id>/...` routes instead of the vendor bundle.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    manager = _FakeShowRuntimeManager(body=b'{"events":[]}', extra_headers={"content-type": "application/json"})
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        status, headers = _raw_asgi_request(method, raw_path, host=host, client_ip=client_ip)
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert status == 404
+    assert manager.calls == []
+    assert "immutable" not in headers.get("cache-control", "")
+
+
+@pytest.mark.parametrize("host,client_ip", _VENDOR_PROXY_PEERS)
+def test_show_runtime_vendor_asset_proxy_raw_path_still_forwards_vendor_files(
+    monkeypatch, tmp_path, host, client_ip
+):
+    # Control for the dot-segment test: the same raw ASGI driver reaches the handler
+    # and real vendor file shapes (entry and `chunks/`) are still proxied.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    manager = _FakeShowRuntimeManager(
+        body=b"export const React = {};",
+        extra_headers={"content-type": "text/javascript; charset=utf-8"},
+    )
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        entry_status, _ = _raw_asgi_request(
+            "GET", "/_show-runtime/vendor/39f78992444bc94c/react__jsx-runtime-3CM2R4UI.js", host=host, client_ip=client_ip
+        )
+        chunk_status, _ = _raw_asgi_request(
+            "GET", "/_show-runtime/vendor/39f78992444bc94c/chunks/chunk-ABC123.js", host=host, client_ip=client_ip
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert (entry_status, chunk_status) == (200, 200)
+    assert [call[1] for call in manager.calls] == [
+        "/_show-runtime/vendor/39f78992444bc94c/react__jsx-runtime-3CM2R4UI.js",
+        "/_show-runtime/vendor/39f78992444bc94c/chunks/chunk-ABC123.js",
+    ]
 
 
 def test_retired_show_runtime_deps_route_is_gone(monkeypatch, tmp_path):

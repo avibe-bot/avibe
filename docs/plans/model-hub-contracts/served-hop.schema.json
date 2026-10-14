@@ -1,0 +1,15 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "model-hub/served-hop.schema.json",
+  "title": "ServedHop",
+  "description": "The exact x-avibe-served-hop response header value: the admitted attempt's origin plus the serving Source id, because two Sources can share an origin.",
+  "type": "object",
+  "required": ["provider", "api", "model", "source"],
+  "additionalProperties": false,
+  "properties": {
+    "provider": { "type": "string", "minLength": 1 },
+    "api": { "$ref": "source.schema.json#/properties/protocol" },
+    "model": { "type": "string", "minLength": 1 },
+    "source": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" }
+  }
+}

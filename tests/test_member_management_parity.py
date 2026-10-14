@@ -118,7 +118,10 @@ def test_complete_registered_api_management_inventory():
         for method in (getattr(route, "methods", None) or ())
         if method not in {"HEAD", "OPTIONS"}
     }
-    assert len(endpoints) == 281
+    assert len(endpoints) == 285
+    for method in ("PUT", "DELETE"):
+        assert (method, "/api/vault/secrets/{name}/fields/{field}") in endpoints
+        assert http_authorization_policy(method, "/api/vault/secrets/LOGIN/fields/username").minimum_role == "editor"
     assert http_authorization_policy("POST", "/api/desktop-mini/session").minimum_role == "editor"
     assert http_authorization_policy("GET", "/api/desktop/capabilities").minimum_role == "member"
     assert http_authorization_policy("GET", "/api/desktop/computer-use/status").minimum_role == "member"

@@ -16,11 +16,26 @@ keeps the command in the foreground.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Awaitable, Callable, Mapping, Optional, Sequence
 
+import httpx
+
+from core.agent_core.agent.models import ModelSelection
 from core.agent_core.agent.recovery import RecoveryRenderer
-from core.agent_core.tools.base import CallInstance, JobHost, Tool
+from core.agent_core.ai._common import CONNECT_TIMEOUT_S, auth_headers, join_endpoint_url
+from core.agent_core.ai.hosted import failure, generate_action, image_dimensions, record_text
+from core.agent_core.ai.provider import HostedExecutor, MediaSink, ModelEndpoint
+from core.agent_core.messages import (
+    HostedImage,
+    HostedRecord,
+    HostedResult,
+    TextBlock,
+    ToolResultMessage,
+    message_from_dict,
+)
+from core.agent_core.tools.base import CallInstance, JobHost, Tool, ToolContext, ToolResult, ToolSpec
+from core.agent_core.tools.hosted import hosted_tool_spec
 from core.agent_core.tools.shell import default_shell
 
 ImageSink = Callable[[bytes, str, str], Awaitable[str]]
@@ -91,4 +106,163 @@ def local_tool_suite(jobs_dir: Optional[str] = None, *, route: Optional[HandOver
         find_job=host.find_job,
         prune=prune,
         shell=host.shell.describe(),
+    )
+
+
+#: The hosted tools a Turn registers, each serving both modes. A generated image, native or proxied, is saved through
+#: the media sink as it arrives, so history holds only its path (§7.3).
+PARSED_HOSTED_TOOLS = ("web_search", "x_search", "image_generation")
+
+
+@dataclass(frozen=True)
+class HostedTool:
+    """One hosted tool of the Turn (``vibey-hosted-tools.md`` §3.4, §4.1), with one name and schema in both modes.
+
+    On a hop whose route for it is native, the adapter sends the provider's declaration in its spec's place and the
+    provider runs the call. A call that reaches ``execute`` is proxied: the gateway runs it on the executor Model Hub
+    bound for the Turn, and nothing else. The gateway writes the record; this tool writes the text the model reads,
+    with the same function that renders a replayed call.
+    """
+
+    spec: ToolSpec
+    executor: Optional[HostedExecutor]
+    #: The Turn's gateway: where the executor endpoint lives, and the token and headers that authorize the call.
+    endpoint: ModelEndpoint = field(repr=False)
+    client: Optional[httpx.AsyncClient] = field(default=None, repr=False)
+    #: Where a proxied image is saved: the same sink as a native one.
+    media: Optional[MediaSink] = field(default=None, repr=False)
+
+    async def execute(self, arguments: Mapping[str, Any], ctx: ToolContext) -> ToolResult:
+        del ctx
+        hosted = await self._run(dict(arguments))
+        # The prompt an image was rendered from, when the executor reports it, as a native call's record shows it.
+        rendered = hosted.action.prompt if hosted.action is not None else None
+        query = rendered or arguments.get("query") or arguments.get("prompt")
+        text = record_text(self.spec.name, hosted.record, query=query if isinstance(query, str) else None)
+        failed = hosted.record.status in ("failed", "incomplete")
+        return ToolResult(content=(TextBlock(text),), is_error=failed, hosted=hosted)
+
+    async def _run(self, arguments: dict[str, Any]) -> HostedResult:
+        url = join_endpoint_url(self.endpoint.base_url, f"/hosted-tools/{self.spec.name}")
+        executor = self.executor
+        body = {
+            "arguments": arguments,
+            "executor": {"source_id": executor.source_id, "model_id": executor.model_id} if executor else None,
+        }
+        headers = auth_headers(self.endpoint, provider="openai", gateway=True)
+        # The gateway bounds the call (180 s for a search); only connecting is bounded here.
+        timeout = httpx.Timeout(None, connect=CONNECT_TIMEOUT_S)
+        try:
+            if self.client is not None:
+                response = await self.client.post(url, json=body, headers=headers, timeout=timeout)
+            else:
+                # The Model Hub gateway is loopback: an environment or system proxy must never carry it.
+                async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+                    response = await client.post(url, json=body, headers=headers)
+        except httpx.HTTPError as error:
+            reason = f"the gateway could not run the call ({type(error).__name__})"
+            return _failed(self.spec.name, reason, "gateway_unreachable")
+        if response.status_code != 200:
+            reason = f"the gateway refused the call (HTTP {response.status_code} {_error_code(response)})"
+            return _failed(self.spec.name, reason, "gateway_refused")
+        try:
+            # A proxied image's answer carries megabytes of base64: parsed off the controller loop.
+            answer = await asyncio.to_thread(response.json)
+            hosted = _hosted_result(self.spec.name, answer)
+        except (TypeError, ValueError):
+            return _failed(self.spec.name, "the gateway answered with no hosted result", "gateway_no_result")
+        if self.spec.name == "image_generation" and hosted.record.status == "completed":
+            hosted = await self._saved(hosted, answer)
+        return hosted
+
+    async def _saved(self, hosted: HostedResult, answer: Mapping[str, Any]) -> HostedResult:
+        """A proxied image, saved through the media sink as a native one is (§7.3, item 27): the executor returns its
+        base64, and the record lists the file. A completed call that saved no image failed."""
+
+        generation = answer.get("generation")
+        generation = generation if isinstance(generation, Mapping) else {}
+        width, height = image_dimensions(generation.get("size"))
+        images = answer.get("images")
+        if not isinstance(images, list) or not images:
+            failed = _failed_record(self.spec.name, "the executor returned no image", "executor_no_image")
+            return replace(hosted, record=failed)
+        if self.media is None:
+            failed = _failed_record(self.spec.name, "nothing here can keep a generated image", "image_no_store")
+            return replace(hosted, record=failed)
+        saved: list[HostedImage] = []
+        try:
+            for item in images:
+                encoded = item.get("data") if isinstance(item, Mapping) else None
+                if not isinstance(encoded, str):
+                    raise ValueError("the executor's image is not base64 text")
+                saved.append(replace(await self.media.save_image(encoded), width=width, height=height))
+        except (ValueError, OSError) as error:
+            failed = _failed_record(self.spec.name, f"the image could not be saved: {error}", "image_not_saved")
+            return replace(hosted, record=failed)
+        # The executor's rendered prompt and resolved size and quality: where a native call's block carries them.
+        return replace(hosted, record=replace(hosted.record, images=tuple(saved)), action=generate_action(generation))
+
+
+def _failed_record(tool: str, reason: str, code: str) -> HostedRecord:
+    error, error_code = failure(reason, code)
+    return HostedRecord(
+        status="failed", error=error, error_code=error_code, images=() if tool == "image_generation" else None
+    )
+
+
+def _failed(tool: str, reason: str, code: str) -> HostedResult:
+    """A call that never reached an executor: a failed record, and no execution (§4.2)."""
+
+    return HostedResult(record=_failed_record(tool, reason, code))
+
+
+def _error_code(response: httpx.Response) -> str:
+    try:
+        error = response.json().get("error")
+    except (TypeError, ValueError, AttributeError):
+        return ""
+    code = error.get("code") or error.get("type") if isinstance(error, Mapping) else None
+    return code if isinstance(code, str) else ""
+
+
+def _hosted_result(tool: str, body: Any) -> HostedResult:
+    """The executor's answer, read with the transcript's own reader for ``ToolResultMessage.hosted``."""
+
+    if not isinstance(body, Mapping) or not isinstance(body.get("record"), Mapping):
+        raise ValueError("no hosted record")
+    hosted = {key: body[key] for key in ("record", "execution") if key in body}
+    if tool == "image_generation":
+        # The executor answers an image's bytes beside the record (``images``); the record lists what is saved.
+        hosted["record"] = {**hosted["record"], "images": []}
+    message = message_from_dict(
+        {
+            "role": "tool_result",
+            "tool_call_id": "proxied",
+            "tool_name": tool,
+            "content": [],
+            "is_error": body["record"].get("status") in ("failed", "incomplete"),
+            "hosted": hosted,
+        }
+    )
+    if not isinstance(message, ToolResultMessage) or message.hosted is None:
+        raise ValueError("no hosted result")
+    return message.hosted
+
+
+def hosted_tools(
+    selection: Optional[ModelSelection],
+    client: Optional[httpx.AsyncClient] = None,
+    media: Optional[MediaSink] = None,
+) -> tuple[Tool, ...]:
+    """The Turn's hosted tools: every tool the user enabled, in Model Hub's order, whatever preflight's hop runs it as.
+    They lead the Turn's tools, so its last tool stays a local one whatever a hop renders them as, and the list stays
+    the same for the whole Turn."""
+
+    if selection is None:
+        return ()
+    endpoint = selection.endpoint
+    return tuple(
+        HostedTool(hosted_tool_spec(name), route.executor, endpoint, client, media)
+        for name, route in endpoint.hosted_tools.items()
+        if name in PARSED_HOSTED_TOOLS
     )

@@ -9,7 +9,7 @@ import shutil
 import tempfile
 import threading
 from contextlib import contextmanager
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from datetime import datetime
 from pathlib import Path
 from typing import (
@@ -35,6 +35,7 @@ from config.platform_registry import (
     supported_platform_ids,
     supported_platform_set,
 )
+from core.agent_core.messages import HOSTED_TOOLS
 from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, AgentBackend, DEFAULT_AGENT_BACKEND
 from modules.im.base import BaseIMConfig
 from vibe.i18n import normalize_language
@@ -2635,6 +2636,7 @@ class ModelHubBackendModelConfig:
             # server-owned policy into persisted state.
             "locked",
             "routeable",
+            "effort_menu",
         }
         if set(payload) - allowed:
             raise ValueError("Config 'model_hub.agents.models' contains unknown fields")
@@ -3011,6 +3013,90 @@ class ModelHubAgentSupplyConfig:
         return payload
 
 
+# The hosted-tool catalog names are owned by the C-1 contract.
+MODEL_HUB_HOSTED_TOOLS: tuple[str, ...] = HOSTED_TOOLS
+
+
+def _drop_vibey_client_presets(agent: "ModelHubAgentSupplyConfig") -> None:
+    """Keep client presets (Codex ``ultra``) out of Vibey's model rows.
+
+    A preset is a name another client maps before sending, never a wire tier,
+    and Vibey is not that client. 3.2.0 saved Vibey rows carrying one (#2539),
+    so every read drops them here, the single owner of those rows: the catalog
+    payload, the picker, the launch and the API then agree, and the next save
+    writes the clean list. No I/O: the preset index is read once per process.
+    """
+
+    from vibe.backend_model_catalog import without_client_presets
+
+    agent.models = [
+        replace(model, reasoning_efforts=without_client_presets((model.id,), model.reasoning_efforts))
+        if model.reasoning_efforts
+        else model
+        for model in agent.models
+    ]
+
+
+@dataclass(frozen=True)
+class ModelHubHostedToolConfig:
+    """One hosted tool's user toggle (``vibey-hosted-tools.md`` §3.3).
+
+    ``executor`` is the proxy executor the user chose, or None to let hop
+    resolution pick the first verified candidate.
+    """
+
+    enabled: bool = False
+    executor: Optional[ModelHubRouteHopConfig] = None
+
+    @classmethod
+    def from_payload(cls, payload: object, *, tool: str) -> "ModelHubHostedToolConfig":
+        if not isinstance(payload, dict) or set(payload) != {"enabled", "executor"}:
+            raise ValueError(f"Config 'model_hub.hosted_tools.{tool}' must contain enabled and executor")
+        if not isinstance(payload["enabled"], bool):
+            raise ValueError(f"Config 'model_hub.hosted_tools.{tool}.enabled' must be a boolean")
+        executor = payload["executor"]
+        return cls(
+            enabled=payload["enabled"],
+            executor=None if executor is None else ModelHubRouteHopConfig.from_payload(executor),
+        )
+
+    def to_payload(self) -> dict:
+        return {"enabled": self.enabled, "executor": None if self.executor is None else self.executor.to_payload()}
+
+
+def _hosted_tools_from_payload(
+    payload: object,
+    sources: list["ModelHubSourceConfig"],
+) -> dict[str, ModelHubHostedToolConfig]:
+    """Read ``model_hub.hosted_tools`` as an optional feature that degrades on its own.
+
+    Absent means every tool is off. A malformed section or entry turns off only
+    what it describes, with a warning; Sources and Agents still load. An
+    executor whose Source or model no longer exists reads as None.
+    """
+
+    if payload is None:
+        return {}
+    if not isinstance(payload, dict):
+        logger.warning("Config 'model_hub.hosted_tools' is not an object; hosted tools are off")
+        return {}
+    models = {source.id: {model.id for model in source.models} for source in sources}
+    tools: dict[str, ModelHubHostedToolConfig] = {}
+    for tool, raw in payload.items():
+        if tool not in MODEL_HUB_HOSTED_TOOLS:
+            logger.warning("Config 'model_hub.hosted_tools' has an unknown tool %r; it is off", tool)
+            continue
+        try:
+            entry = ModelHubHostedToolConfig.from_payload(raw, tool=tool)
+        except ValueError as exc:
+            logger.warning("%s; hosted tool %r is off", exc, tool)
+            continue
+        if entry.executor is not None and entry.executor.model_id not in models.get(entry.executor.source_id, ()):
+            entry = ModelHubHostedToolConfig(enabled=entry.enabled, executor=None)
+        tools[tool] = entry
+    return tools
+
+
 @dataclass
 class ModelHubConfig:
     # New installations enable the runtime. Disk loading promotes pre-marker
@@ -3028,6 +3114,8 @@ class ModelHubConfig:
     # retain a pending false marker until lock-owning startup commits promotion;
     # an unrelated save must not acknowledge an upgrade it did not perform.
     runtime_default_applied: bool = True
+    # Absent on every released config: absence means every hosted tool is off.
+    hosted_tools: dict[str, ModelHubHostedToolConfig] = field(default_factory=dict)
     # Not persisted, like ``V2Config.load_warnings``. True while the Vibey
     # entry was never supplied: a fresh install, or a file written before
     # Vibey existed. The empty entry standing in waits for its starting
@@ -3081,7 +3169,7 @@ class ModelHubConfig:
     def from_payload(cls, payload: dict, *, repairing: bool = False) -> "ModelHubConfig":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub' must be an object")
-        if set(payload) - {"enabled", "sources", "agents", "runtime_default_applied"}:
+        if set(payload) - {"enabled", "sources", "agents", "runtime_default_applied", "hosted_tools"}:
             raise ValueError("Config 'model_hub' contains unknown fields")
         enabled = payload.get("enabled", True)
         if not isinstance(enabled, bool):
@@ -3148,7 +3236,9 @@ class ModelHubConfig:
             sources=sources,
             agents=agents,
             runtime_default_applied=runtime_default_applied,
+            hosted_tools=_hosted_tools_from_payload(payload.get("hosted_tools"), sources),
         )
+        _drop_vibey_client_presets(config.agents["vibey"])
         agents = config.agents
         for backend in MODEL_HUB_BACKENDS:
             configured_sources = agents[backend].sources
@@ -3186,7 +3276,7 @@ class ModelHubConfig:
         unseeded = self.vibey_supply_pending and self.agents["vibey"] == ModelHubAgentSupplyConfig.default(
             "vibey", mode="hub"
         )
-        return {
+        payload = {
             "enabled": self.enabled,
             "runtime_default_applied": self.runtime_default_applied,
             "sources": [source.to_payload() for source in self.sources],
@@ -3196,6 +3286,13 @@ class ModelHubConfig:
                 if not (backend == "vibey" and unseeded)
             },
         }
+        if self.hosted_tools:
+            payload["hosted_tools"] = {
+                tool: self.hosted_tools[tool].to_payload()
+                for tool in MODEL_HUB_HOSTED_TOOLS
+                if tool in self.hosted_tools
+            }
+        return payload
 
 
 @dataclass

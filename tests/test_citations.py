@@ -40,6 +40,7 @@ from core.citations import (
     has_citation_markers,
     materialize_citations,
     register_citations,
+    register_text_citations,
     resolve_citations,
     safe_url,
     source_label,
@@ -1522,3 +1523,80 @@ class TestAuthorityBracketsAcrossTheBoundary:
     def test_the_accepted_spelling_is_still_a_fixed_point(self, case):
         """A restored bracket must not be spelled away by the next pass."""
         assert safe_url(case["safe_url"]) == case["safe_url"]
+
+
+class TestTextBlockCitations:
+    """Citations a provider attached to text blocks, through the same delivered shape (§4.2)."""
+
+    FILTERS = "https://platform.openai.com/docs/changelog"
+    WINDOWS = "https://x.com/OpenAI/status/4"
+
+    @staticmethod
+    def cite(url, title=None, start=None, end=None):
+        from core.agent_core.messages import Citation
+
+        return Citation(url=url, title=title, start=start, end=end)
+
+    def test_a_ranged_citation_is_attributed_where_its_span_ends(self):
+        text = "Domain filters shipped. Codex is on Windows."
+        registered, bundle = register_text_citations(
+            [(text, [self.cite(self.FILTERS, "Changelog", 0, len("Domain filters shipped."))])],
+            unresolved_label=UNRESOLVED,
+        )
+        body, citations = finalize_citations(registered, bundle)
+
+        assert [row["url"] for row in citations] == [self.FILTERS]
+        [span] = citations[0]["spans"]
+        link = utf16_slice(body, *span)
+        # Written after the sentence it supports, and before the one it does not.
+        assert body.index("Domain filters shipped.") < body.index(link) < body.index("Codex is on Windows.")
+        assert link.endswith(f"({self.FILTERS})")
+
+    def test_an_unranged_citation_covers_its_whole_block(self):
+        """Anthropic cites a block, not a span: the link closes that block, in the joined text."""
+        registered, bundle = register_text_citations(
+            [
+                ("The posts this week:", []),
+                ("Codex is on Windows.", [self.cite(self.WINDOWS, "The Codex app is now on Windows")]),
+            ],
+            unresolved_label=UNRESOLVED,
+        )
+        body, citations = finalize_citations(registered, bundle)
+
+        first, second = body.split("\n\n")
+        assert first == "The posts this week:"
+        assert second.startswith("Codex is on Windows.") and second.endswith(f"({self.WINDOWS})")
+        assert [row["index"] for row in citations] == [1]
+
+    def test_a_citation_the_display_rules_removed_leaves_no_marker_behind(self):
+        """A citation in a silent block or in code cannot be shown, so nothing of it may be."""
+        silent = "Visible.<silent>internal note</silent>"
+        code = "Run `vibe status` now."
+        registered, bundle = register_text_citations(
+            [
+                (silent, [self.cite(self.FILTERS, start=len("Visible.<silent>internal"), end=len("Visible.<silent>internal"))]),
+                (code, [self.cite(self.WINDOWS, start=len("Run `vibe"), end=len("Run `vibe"))]),
+            ],
+            unresolved_label=UNRESOLVED,
+            transform=strip_silent_blocks,
+        )
+        body, citations = finalize_citations(registered, bundle)
+
+        assert body == "Visible.\n\nRun `vibe status` now."
+        assert citations == []
+
+    def test_a_block_the_display_rules_remove_takes_its_citations_with_it(self):
+        """An unranged citation sits after its block; when the whole block is silent, nothing is left to cite."""
+        registered, bundle = register_text_citations(
+            [("<silent>internal note</silent>", [self.cite(self.WINDOWS, "The Codex app is now on Windows")])],
+            unresolved_label=UNRESOLVED,
+            transform=strip_silent_blocks,
+        )
+        assert (registered, bundle) == ("", None)
+
+    def test_text_without_citations_is_the_plain_display(self):
+        registered, bundle = register_text_citations(
+            [("One.", []), ("Two.", [])], unresolved_label=UNRESOLVED
+        )
+        assert (registered, bundle) == ("One.\n\nTwo.", None)
+

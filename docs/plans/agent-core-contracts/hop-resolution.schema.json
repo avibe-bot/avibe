@@ -14,7 +14,8 @@
     "source_id",
     "provider",
     "capabilities",
-    "request_headers"
+    "request_headers",
+    "hosted_tools"
   ],
   "additionalProperties": false,
   "properties": {
@@ -53,7 +54,7 @@
       "additionalProperties": {
         "type": "string"
       },
-      "description": "Correlation metadata the gateway needs; always present, empty when there is none."
+      "description": "Correlation metadata the gateway needs, sent on every gateway request; always present, empty when there is none. A Turn's resolution carries `x-avibe-turn-id`."
     },
     "capabilities": {
       "type": "object",
@@ -116,6 +117,216 @@
         }
       },
       "description": "Null means Model Hub does not know the value; it never guesses. supports_images is null when the model declares no input modalities."
+    },
+    "hosted_tools": {
+      "type": "object",
+      "description": "One entry per hosted tool the user enabled (vibey-hosted-tools.md §3.5). `mode` is the primary hop's; `declaration` and `include` are the overlay's wire declaration, present exactly for native; `executor` is the proxy executor bound for this turn, present for every entry because a native request answered pin_unavailable is re-rendered with the proxy in the same turn; `replay` is true only for the primary hop Source's positive replay evidence taken on the current engine and probe shape. A request carrying native content is pinned with x-avibe-pin-source: source_id.",
+      "propertyNames": {
+        "enum": [
+          "web_search",
+          "x_search",
+          "image_generation"
+        ]
+      },
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "mode",
+          "executor",
+          "replay"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "enum": [
+              "native",
+              "proxy"
+            ]
+          },
+          "declaration": {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "include": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "executor": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "source_id",
+                  "model_id"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "source_id": {
+                    "type": "string",
+                    "pattern": "^src_[a-z0-9]{8,}$"
+                  },
+                  "model_id": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            ]
+          },
+          "replay": {
+            "type": "boolean"
+          }
+        },
+        "if": {
+          "properties": {
+            "mode": {
+              "const": "native"
+            }
+          }
+        },
+        "then": {
+          "required": [
+            "declaration",
+            "include"
+          ]
+        },
+        "else": {
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "declaration"
+                ]
+              },
+              {
+                "required": [
+                  "include"
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "properties": {
+        "image_generation": {
+          "allOf": [
+            {
+              "type": "object",
+              "required": [
+                "mode",
+                "executor",
+                "replay"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "mode": {
+                  "enum": [
+                    "native",
+                    "proxy"
+                  ]
+                },
+                "declaration": {
+                  "type": "object",
+                  "required": [
+                    "type"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                },
+                "include": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "executor": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "object",
+                      "required": [
+                        "source_id",
+                        "model_id"
+                      ],
+                      "additionalProperties": false,
+                      "properties": {
+                        "source_id": {
+                          "type": "string",
+                          "pattern": "^src_[a-z0-9]{8,}$"
+                        },
+                        "model_id": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      }
+                    }
+                  ]
+                },
+                "replay": {
+                  "type": "boolean"
+                }
+              },
+              "if": {
+                "properties": {
+                  "mode": {
+                    "const": "native"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "declaration",
+                  "include"
+                ]
+              },
+              "else": {
+                "not": {
+                  "anyOf": [
+                    {
+                      "required": [
+                        "declaration"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "include"
+                      ]
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "replay": {
+                  "const": false
+                }
+              }
+            }
+          ]
+        }
+      }
     }
   },
   "examples": [
@@ -142,6 +353,16 @@
           "high",
           "xhigh"
         ]
+      },
+      "hosted_tools": {
+        "web_search": {
+          "mode": "proxy",
+          "executor": {
+            "source_id": "src_xai00001",
+            "model_id": "grok-4.6"
+          },
+          "replay": false
+        }
       }
     }
   ]

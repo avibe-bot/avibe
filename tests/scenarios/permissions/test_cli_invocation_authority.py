@@ -238,6 +238,7 @@ def test_permissions_026_a_personal_pairing_admits_a_snapshot_without_organizati
 
 
 def test_permissions_026_unbound_background_editor_cannot_become_local_owner(invoke, monkeypatch, capsys):
+    """PERMISSIONS-026: a background command carrying an Editor's snapshot stays that Editor."""
     from core.caller_context import background_command_env
 
     env = background_command_env(

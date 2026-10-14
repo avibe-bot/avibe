@@ -1,0 +1,124 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "model-hub/hosted-tools-status.schema.json",
+  "title": "HostedToolsStatus",
+  "description": "The Tools tab read (vibey-hosted-tools.md §6.1): each catalog tool's toggle and chosen executor, where it can run with that evidence, and how many hosted-tool probe records need a re-verify. A report only: hop resolution reads config and evidence itself.",
+  "type": "object",
+  "required": ["tools", "reverify"],
+  "additionalProperties": false,
+  "properties": {
+    "tools": {
+      "type": "array",
+      "description": "Every catalog tool, in catalog order.",
+      "items": {
+        "type": "object",
+        "required": ["name", "enabled", "executor", "bound", "candidates"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "enum": ["web_search", "x_search", "image_generation"] },
+          "enabled": { "type": "boolean" },
+          "executor": {
+            "description": "The executor the user chose, or null for the first verified candidate.",
+            "oneOf": [
+              { "type": "null" },
+              {
+                "type": "object",
+                "required": ["source_id", "model_id"],
+                "additionalProperties": false,
+                "properties": {
+                  "source_id": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
+                  "model_id": { "type": "string", "minLength": 1 }
+                }
+              }
+            ]
+          },
+          "bound": {
+            "description": "The executor a turn would bind now, by the same rule hop resolution uses: the chosen executor if verified, else the first verified candidate in Vibey's Source order; null when none is verified.",
+            "oneOf": [
+              { "type": "null" },
+              {
+                "type": "object",
+                "required": ["source_id", "model_id"],
+                "additionalProperties": false,
+                "properties": {
+                  "source_id": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
+                  "model_id": { "type": "string", "minLength": 1 }
+                }
+              }
+            ]
+          },
+          "candidates": {
+            "type": "array",
+            "description": "Every (Source, model) the overlay offers the tool on, with an eligible credential and an untranslated path; Vibey's Source order first.",
+            "items": {
+              "type": "object",
+              "required": ["source_id", "model_id", "call", "replay", "billing", "price"],
+              "additionalProperties": false,
+              "properties": {
+                "source_id": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
+                "model_id": { "type": "string", "minLength": 1 },
+                "call": { "$ref": "#/definitions/Evidence" },
+                "replay": {
+                  "description": "Null for image_generation, which is never replayed.",
+                  "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/Evidence" }]
+                },
+                "billing": { "enum": ["monthly", "metered"], "description": "The Source's billing: monthly shows \"included in subscription\", metered shows the list price \"at API price\"." },
+                "price": {
+                  "description": "The overlay's list price for this tool on this provider, or null when no list price is known (never zero). OpenAI lists no per-image price, so image_generation has none.",
+                  "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/ListPrice" }]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "reverify": {
+      "type": "object",
+      "required": ["engine_upgraded", "aged"],
+      "additionalProperties": false,
+      "properties": {
+        "engine_upgraded": { "type": "integer", "minimum": 0, "description": "Probe records taken on another engine or probe shape; they route as unknown." },
+        "aged": { "type": "integer", "minimum": 0, "description": "Probe records older than 30 days; they still route." }
+      }
+    }
+  },
+  "definitions": {
+    "ListPrice": {
+      "type": "object",
+      "required": ["unit", "usd_per_1k", "extra", "as_of", "url"],
+      "additionalProperties": false,
+      "properties": {
+        "unit": { "enum": ["call", "search", "post", "profile"] },
+        "usd_per_1k": { "type": "number", "minimum": 0 },
+        "extra": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["unit", "usd_per_1k"],
+            "additionalProperties": false,
+            "properties": {
+              "unit": { "enum": ["call", "search", "post", "profile"] },
+              "usd_per_1k": { "type": "number", "minimum": 0 }
+            }
+          }
+        },
+        "as_of": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "url": { "type": "string", "pattern": "^https://" }
+      }
+    },
+    "Evidence": {
+      "type": "object",
+      "required": ["status", "stale", "basis", "observed_at", "detail", "changes_at"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "enum": ["verified", "unsupported", "unknown"], "description": "As routing reads it." },
+        "stale": { "enum": [null, "wire", "age"] },
+        "basis": { "enum": [null, "probe", "observed"] },
+        "observed_at": { "type": ["string", "null"] },
+        "detail": { "type": ["string", "null"], "maxLength": 64 },
+        "changes_at": { "type": ["string", "null"], "description": "When this record stops reading as it does now: an observed record's expiry or a probe record's re-verify mark; null when nothing is scheduled." }
+      }
+    }
+  }
+}

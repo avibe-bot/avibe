@@ -277,6 +277,109 @@ def test_a_narration_row_carries_its_citation_sidecar(isolated_state):
     assert "citations" not in rows["m_plain"]
 
 
+def test_a_hosted_tool_row_carries_its_card(isolated_state):
+    """A hosted call's card (``core.hosted_activity``) is what the Web renders for it.
+
+    Its row text is the IM line, which the card does not parse, so the row
+    contract has to carry the card or the call degrades to a plain tool line. An
+    ordinary tool call keeps the wire shape it always had.
+    """
+    engine = create_sqlite_engine()
+    sid = "ses_hosted_card"
+    card = {
+        "version": 1, "call_id": "call_x1", "tool": "x_search", "mode": "proxy", "status": "completed",
+        "subject": "from:OpenAI", "sources": [{"url": "https://x.com/OpenAI/status/1"}], "images": [],
+    }
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(conn, scope, sid, mid="m_u", mtype="user", author="user", created_at="2026-06-01T10:00:00.000000+00:00", text="q", source="user")
+        conn.execute(
+            agent_events.insert().values(
+                id="e_hosted", scope_id=scope, session_id=sid, platform="avibe", event_type="tool_call",
+                visibility="trace", content_text="🔎 X search “from:OpenAI” · via xAI proxy · 1 post",
+                content_json=json.dumps({"kind": "toolcall", "hosted": card}), metadata_json="{}", source="agent",
+                created_at="2026-06-01T10:00:01.000000+00:00", updated_at="2026-06-01T10:00:01.000000+00:00",
+            )
+        )
+        _evt(conn, scope, sid, eid="e_plain", created_at="2026-06-01T10:00:02.000000+00:00", text="🔧 `Read`")
+        _msg(conn, scope, sid, mid="m_r", mtype="result", author="agent", created_at="2026-06-01T10:00:03.000000+00:00", text="done")
+
+    with engine.connect() as conn:
+        [group] = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
+        detail = agent_activity_service.get_turn_group(conn, session_id=sid, group_id=group["id"])
+
+    assert detail is not None
+    rows = {row["id"]: row for row in detail["rows"]}
+    assert rows["e_hosted"]["hosted"] == card
+    assert "hosted" not in rows["e_plain"]
+
+
+def test_a_native_hosted_card_sorts_before_the_response_that_carried_it(isolated_state):
+    """The card is written after its response row commits, but the call came first.
+
+    Without the ordering key the final reply would close the group before the
+    card, leaving it after the answer; narration would read before the search
+    it summarizes.
+    """
+    engine = create_sqlite_engine()
+    sid = "ses_hosted_order"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(conn, scope, sid, mid="msg_00063f0000000000aaaaaaaa", mtype="user", author="user", created_at="2026-06-01T10:00:00.000000+00:00", text="q", source="user")
+        _msg(conn, scope, sid, mid="msg_00063f0000000100bbbbbbbb", mtype="result", author="agent", created_at="2026-06-01T10:00:02.000000+00:00", text="Domain filters shipped.")
+        conn.execute(
+            agent_events.insert().values(
+                id="evt_00063f0000000200cccccccc", scope_id=scope, session_id=sid, platform="avibe", event_type="tool_call",
+                visibility="trace", content_text="🔎 Web search",
+                content_json=json.dumps({"kind": "toolcall", "hosted": {"version": 1, "call_id": "srvtoolu_1"}}),
+                metadata_json=json.dumps({"canonical_type": "toolcall", "precedes_message_id": "msg_00063f0000000100bbbbbbbb"}),
+                source="agent", created_at="2026-06-01T10:00:03.000000+00:00", updated_at="2026-06-01T10:00:03.000000+00:00",
+            )
+        )
+
+    with engine.connect() as conn:
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
+        detail = agent_activity_service.get_turn_group(conn, session_id=sid, group_id=groups[-1]["id"])
+
+    assert detail is not None and detail["status"] == "done"
+    assert detail["anchor_message_id"] == "msg_00063f0000000100bbbbbbbb"
+    assert [row["id"] for row in detail["rows"]] == ["evt_00063f0000000200cccccccc"]
+
+
+def test_a_native_hosted_card_stays_with_its_response_at_the_scan_window_edge(isolated_state, monkeypatch):
+    """The card sorts just ahead of its response, but belongs to the window that response is in.
+
+    When the response is the oldest message the bounded scan keeps, a window cut by
+    the card's sort key would drop the card while its answer stays visible.
+    """
+    monkeypatch.setattr(agent_activity_service, "MESSAGE_SCAN_LIMIT", 1)
+    engine = create_sqlite_engine()
+    sid = "ses_hosted_edge"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(conn, scope, sid, mid="msg_00063f0000000000aaaaaaaa", mtype="user", author="user", created_at="2026-06-01T10:00:00.000000+00:00", text="q", source="user")
+        _msg(conn, scope, sid, mid="msg_00063f0000000100bbbbbbbb", mtype="result", author="agent", created_at="2026-06-01T10:00:02.000000+00:00", text="Domain filters shipped.")
+        conn.execute(
+            agent_events.insert().values(
+                id="evt_00063f0000000200cccccccc", scope_id=scope, session_id=sid, platform="avibe", event_type="tool_call",
+                visibility="trace", content_text="🔎 Web search",
+                content_json=json.dumps({"kind": "toolcall", "hosted": {"version": 1, "call_id": "srvtoolu_1"}}),
+                metadata_json=json.dumps({"canonical_type": "toolcall", "precedes_message_id": "msg_00063f0000000100bbbbbbbb"}),
+                source="agent", created_at="2026-06-01T10:00:03.000000+00:00", updated_at="2026-06-01T10:00:03.000000+00:00",
+            )
+        )
+
+    with engine.connect() as conn:
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
+        rows = [
+            row["id"]
+            for group in groups
+            for row in (agent_activity_service.get_turn_group(conn, session_id=sid, group_id=group["id"]) or {}).get("rows", [])
+        ]
+
+    assert rows == ["evt_00063f0000000200cccccccc"]
+
+
 def test_narration_the_transcript_draws_is_not_repeated_in_activity(isolated_state):
     """A narration with an ``interim`` transcript copy appears once, as the bubble."""
     engine = create_sqlite_engine()

@@ -332,13 +332,14 @@ async def test_google_router_gateway_failover_preserves_visible_history_and_orig
         async with aiohttp.ClientSession() as client:
             async with client.post(
                 f'{hop["base_url"]}/models/{hop["runtime_model"]}:{action}',
-                json=signed, headers={"x-goog-api-key": hop["token"]},
+                json=signed, headers={"x-goog-api-key": hop["token"], **hop["request_headers"]},
             ) as response:
                 assert response.status == 200, await response.text()
                 assert await response.read() == raw
                 origin = json.loads(response.headers[SERVED_HOP_HEADER])
                 assert origin == {
                     "provider": "custom", "api": fallback.protocol, "model": fallback.models[0].id,
+                    "source": fallback.id,
                 }
         assert service.adapter.requests[0] == signed
         assert service.adapter.requests[1] == (signed if same_origin else plain)
@@ -350,7 +351,7 @@ async def test_google_router_gateway_failover_preserves_visible_history_and_orig
             await completion
         record = service.provenance.get("turn-google")
         _validate("turn-provenance.schema.json", record)
-        assert record["served"]["origin"] == origin
+        assert {**record["served"]["origin"], "source": record["served"]["source_id"]} == origin
     finally:
         await gateway.close()
 
@@ -448,7 +449,7 @@ async def test_google_local_errors_are_native_and_never_admit_a_hop(tmp_path, su
         async with aiohttp.ClientSession() as client:
             async with client.post(
                 f'{hop["base_url"]}/models/{hop["runtime_model"]}{suffix}', json=payload,
-                headers={"x-goog-api-key": hop["token"] if token_valid else "invalid"},
+                headers={"x-goog-api-key": hop["token"] if token_valid else "invalid", **hop["request_headers"]},
             ) as response:
                 assert response.status == status
                 assert SERVED_HOP_HEADER not in response.headers
@@ -504,7 +505,7 @@ async def test_google_skips_unsupported_hops_before_admission(
         async with aiohttp.ClientSession() as client:
             async with client.post(
                 f'{base}/models/{hop["runtime_model"]}:{action}',
-                headers={"x-goog-api-key": hop["token"]},
+                headers={"x-goog-api-key": hop["token"], **hop["request_headers"]},
                 json={"contents": [{"role": "user", "parts": [{"text": "hello"}]}]},
             ) as response:
                 if working_fallback:

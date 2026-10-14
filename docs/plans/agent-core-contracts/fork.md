@@ -188,6 +188,9 @@ because they are rendered into the prompt (C-9 §6).
   byte for byte.
 - It narrows capability when a call executes, never in the tool list. Removing a denied tool from the request would
   shift every byte after it.
+- That includes a native hosted tool's declaration (`../vibey-hosted-tools.md` §4.1). The provider runs such a call
+  upstream, so the policy cannot deny it at execution: a side turn may make one, billed like any other. A side turn's
+  prompt asks for its reply, and a warm prefix on every checkpoint is worth more than that rare call.
 
 **A fork Session is cache-cold today.**
 

@@ -466,6 +466,41 @@ describe('VaultsPage protected reveal', () => {
     expect(api.createVaultRevealContext).toHaveBeenCalledTimes(fetches);
   });
 
+  it('keeps the fields warning visible and exposes the current named field line', async () => {
+    api.listVaultSecrets.mockResolvedValue({
+      secrets: [{ ...protectedSecret('alpha'), default_field: 'password', fields: ['password', 'username'], fields_state: 'corrupt' }],
+    });
+    renderPage();
+    expect(await screen.findByText(/password/)).toBeTruthy();
+    expect(screen.getByRole('alert')).toBeTruthy();
+    await openMenu();
+    expect(screen.getByRole('combobox', { name: 'Field to reveal' })).toBeTruthy();
+    expect(screen.getByRole('menuitem', { name: 'Show value' })).toBeTruthy();
+  });
+
+  it('reveals a selected field using its canonical record name', async () => {
+    api.listVaultSecrets.mockResolvedValue({
+      secrets: [{ ...protectedSecret('alpha'), default_field: 'password', fields: ['password', 'username'] }],
+    });
+    api.createVaultRevealContext.mockImplementation(async (_name, payload) => ({ ok: true, context: { field: payload.field }, envelope }));
+    await openMenu();
+    fireEvent.change(screen.getByRole('combobox', { name: 'Field to reveal' }), { target: { value: 'username' } });
+    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenLastCalledWith('alpha', { session_label: 'Vaults', field: 'username' }));
+    await clickShowValue();
+    expect(revealProtectedValue.mock.calls[0][0].name).toBe('alpha.username');
+    expect(revealProtectedValue.mock.calls[0][1]).toEqual({ field: 'username' });
+  });
+
+  it('keeps a stale field handoff visible without preparing a default field', async () => {
+    api.listVaultSecrets.mockResolvedValue({
+      secrets: [{ ...protectedSecret('alpha'), default_field: 'password', fields: ['password'] }],
+    });
+    renderPage(remoteOwner, '/vaults?reveal=alpha&field=username&sort=recent');
+    expect((await screen.findByRole('alert')).textContent).toBe('This link points to a field that no longer exists. Open the secret and choose a current field.');
+    expect(api.createVaultRevealContext).not.toHaveBeenCalled();
+    expect(revealProtectedValue).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByTestId('location').textContent).toContain('sort=recent'));
+  });
   it('keeps Show value waiting while the context or the sandbox client are not ready', async () => {
     let answer: () => void = () => undefined;
     api.createVaultRevealContext.mockImplementation(

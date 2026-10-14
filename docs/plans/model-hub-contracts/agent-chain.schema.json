@@ -7,7 +7,7 @@
   "required": ["contract_version", "backend", "model_id", "manual_override", "route_origin", "chain", "current", "supply_state"],
   "additionalProperties": false,
   "properties": {
-    "contract_version": { "const": 11 },
+    "contract_version": { "const": 12 },
     "backend": { "enum": ["claude", "codex", "opencode", "vibey"] },
     "model_id": { "type": "string" },
     "manual_override": {
@@ -97,6 +97,23 @@
             "type": ["string", "null"],
             "format": "date-time",
             "description": "When health is backoff, this live deadline is strictly later than the read assembler's captured assembly time. The API normalizes an expired overlay to its underlying non-backoff health before validation and serialization; JSON Schema enforces only the date-time shape, not the relation to a moving clock."
+          },
+          "refused_efforts": {
+            "type": "array",
+            "minItems": 1,
+            "description": "Reasoning efforts this exact hop is currently known to refuse (capability evidence, model-hub-capability-model.md §3.4), oldest evidence first; absent when none. A request at one of them skips this hop. The effort menu omits a tier only when every hop that can serve the model lists it, and otherwise marks it \"not on: <Source>\". Read-only: routing reads the evidence store itself.",
+            "items": {
+              "type": "object",
+              "required": ["effort", "basis", "observed_at", "detail", "changes_at"],
+              "additionalProperties": false,
+              "properties": {
+                "effort": { "type": "string", "minLength": 1 },
+                "basis": { "enum": ["probe", "observed"] },
+                "observed_at": { "type": "string", "format": "date-time" },
+                "detail": { "type": ["string", "null"], "maxLength": 64 },
+                "changes_at": { "type": ["string", "null"], "format": "date-time", "description": "When this refusal stops reading as it does now (observed expiry, probe re-verify mark); null when nothing is scheduled." }
+              }
+            }
           }
         },
         "allOf": [
@@ -237,7 +254,7 @@
   ],
   "examples": [
     {
-      "contract_version": 11,
+      "contract_version": 12,
       "backend": "codex",
       "model_id": "unlisted-model",
       "manual_override": null,
@@ -247,7 +264,7 @@
       "supply_state": "ok"
     },
     {
-      "contract_version": 11,
+      "contract_version": 12,
       "backend": "codex",
       "model_id": "gpt-5.6",
       "manual_override": null,
@@ -257,7 +274,7 @@
       "supply_state": "ok"
     },
     {
-      "contract_version": 11,
+      "contract_version": 12,
       "backend": "claude",
       "model_id": "claude-opus-4-6",
       "manual_override": null,
@@ -267,7 +284,7 @@
       "supply_state": "waiting"
     },
     {
-      "contract_version": 11,
+      "contract_version": 12,
       "backend": "opencode",
       "model_id": "glm-5.2",
       "manual_override": { "hops": [{ "source_id": "src_relay9c1x", "model_id": "glm-5.2" }] },
@@ -277,7 +294,7 @@
       "supply_state": "waiting"
     },
     {
-      "contract_version": 11,
+      "contract_version": 12,
       "backend": "codex",
       "model_id": "gpt-5.6",
       "manual_override": null,
@@ -287,7 +304,7 @@
       "supply_state": "interrupted"
     },
     {
-      "contract_version": 11,
+      "contract_version": 12,
       "backend": "codex",
       "model_id": "gpt-5.6",
       "manual_override": null,
@@ -297,7 +314,7 @@
       "supply_state": "interrupted"
     },
     {
-      "contract_version": 11,
+      "contract_version": 12,
       "backend": "claude",
       "model_id": "claude-haiku-4-5",
       "manual_override": null,

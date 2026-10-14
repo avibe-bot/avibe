@@ -64,7 +64,6 @@
   border-radius:28px;
   padding:14px 20px;
   background:var(--pet-card);
-  box-shadow:0 18px 50px rgba(0,0,0,.45);
   text-align:left;
   pointer-events:auto}
 
@@ -79,11 +78,9 @@
 .pet-mini-eyebrow {
   margin-bottom:2px;
   color:color-mix(in srgb,var(--mint) 80%,transparent);
-  font-size:10px;
+  font-size:11px;
   font-weight:600;
-  letter-spacing:.14em;
-  line-height:15px;
-  text-transform:uppercase}
+  line-height:15px}
 
 .pet-mini-title,.pet-mini-subtitle {
   min-width:0;
@@ -335,8 +332,7 @@ to {
   min-width:0;
   align-items:center;
   border-radius:22px;
-  background:var(--pet-card);
-  box-shadow:0 12px 32px rgba(0,0,0,.45)}
+  background:var(--pet-card)}
 .pet-mini-marquee {
   gap:8px;
   padding:8px 16px 8px 12px}
@@ -419,28 +415,90 @@ to {
   color:color-mix(in srgb,var(--pet-ink) 30%,transparent);
   cursor:default}
 
+/* The picker is a card like the others (no backing panel, §3.2), bottom-aligned
+   next to Vibey. `flex:none` keeps the scroll box from shrinking it to 292px: a
+   shrunk column squeezes its overflow-hidden rows below their text height. */
 .pet-mini-session-picker {
   display:flex;
-  min-height:100%;
+  flex:none;
   flex-direction:column;
-  justify-content:flex-start;
   gap:2px;
-  padding:4px}
+  min-width:0;
+  margin-top:auto;
+  border:1px solid color-mix(in srgb,var(--pet-ink) 8%,transparent);
+  border-radius:28px;
+  padding:8px;
+  background:var(--pet-card);
+  pointer-events:auto}
+.pet-mini-session-picker > .pet-mini-detail-muted {
+  padding:9px 12px;
+  font-size:13px}
 .pet-mini-session-option {
+  flex:none;
   min-width:0;
   border:0;
   border-radius:12px;
   background:transparent;
-  padding:9px 10px;
+  padding:9px 12px;
   color:var(--pet-ink);
   text-align:left;
   font-size:13px;
+  line-height:19.5px;
   overflow:hidden;
   text-overflow:ellipsis;
   white-space:nowrap;
   cursor:pointer}
 .pet-mini-session-option:hover {
   background:color-mix(in srgb,var(--pet-ink) 8%,transparent)}
+.pet-mini-session-option:disabled {
+  cursor:default;
+  opacity:.5}
+.pet-mini-session-option.is-vibey {
+  color:color-mix(in srgb,var(--mint) 90%,transparent);
+  font-weight:600}
+
+/* Small pill action on the dark mini surface ("Switch session"). */
+.pet-mini-action-row {
+  display:flex;
+  justify-content:flex-end;
+  min-width:0}
+.pet-mini-detail-inner > .pet-mini-action-row {
+  margin-bottom:10px}
+/* Without a main card the row sits directly above the bottom-aligned list. */
+.pet-mini-scroll > .pet-mini-action-row {
+  flex:none;
+  margin-top:auto;
+  padding-top:10px}
+.pet-mini-scroll > .pet-mini-action-row + .pet-mini-list {
+  margin-top:0}
+.pet-mini-scroll > .pet-mini-action-row + .pet-mini-session-picker {
+  margin-top:8px}
+.pet-mini-chip {
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  height:28px;
+  border:1px solid color-mix(in srgb,var(--pet-ink) 10%,transparent);
+  border-radius:999px;
+  padding:0 12px;
+  background:color-mix(in srgb,var(--pet-ink) 8%,transparent);
+  color:color-mix(in srgb,var(--pet-ink) 82%,transparent);
+  font-size:12px;
+  font-weight:500;
+  white-space:nowrap;
+  cursor:pointer;
+  pointer-events:auto;
+  transition:background 150ms ease,color 150ms ease}
+.pet-mini-chip:hover {
+  background:color-mix(in srgb,var(--pet-ink) 14%,transparent);
+  color:var(--pet-ink)}
+.pet-mini-chip:focus-visible {
+  outline:2px solid color-mix(in srgb,var(--mint) 70%,transparent);
+  outline-offset:2px}
+.pet-mini-chip svg {
+  width:14px;
+  height:14px;
+  flex:none}
 
 .pet-mini-avatar-wrap {
   position:absolute;
@@ -497,15 +555,15 @@ to {
   display:flex;
   align-items:center;
   gap:4px;
+  border:1px solid color-mix(in srgb,var(--pet-ink) 8%,transparent);
   border-radius:999px;
   background:var(--pet-card);
   padding:4px;
-  box-shadow:0 8px 24px rgba(0,0,0,.45);
   opacity:0;
   transform:translateY(-6px) scale(.92);
   pointer-events:none;
   transition:opacity 180ms ease,transform 220ms var(--settle)}
-.pet-mini-avatar-wrap:hover .pet-mini-dock,.pet-mini-avatar-wrap:focus-within .pet-mini-dock,.pet-mini-dock.is-active {
+.pet-mini-avatar-wrap:hover .pet-mini-dock,.pet-mini-avatar-wrap.is-hovered .pet-mini-dock,.pet-mini-avatar-wrap:focus-within .pet-mini-dock,.pet-mini-dock.is-active {
   opacity:1;
   transform:none;
   pointer-events:auto}
@@ -544,7 +602,6 @@ to {
   border-radius:24px;
   background:var(--pet-card);
   padding:16px;
-  box-shadow:0 18px 50px rgba(0,0,0,.45);
   font-size:12px}
 
 @media (hover:none) {
@@ -590,13 +647,11 @@ to {
    border: 1px solid color-mix(in srgb,var(--mint) 45%,transparent);
    border-radius: 28px;
    background: var(--pet-main);
-   box-shadow: 0 18px 50px rgba(0,0,0,.45);
    }
 
 .pet-mini-card-wrap.is-main > .pet-mini-card  {
    border: 0;
    background: transparent;
-   box-shadow: none;
    }
 
 .pet-mini-card[role=button]  {
@@ -683,3 +738,10 @@ to {
 @media (prefers-reduced-motion: reduce) {
   .pet-mini-cards:has(.pet-mini-swap.is-switching) { overflow: visible; }
 }
+
+.pet-mini-input-note {
+  margin:0 0 6px;
+  padding:0 14px;
+  color:color-mix(in srgb,var(--pet-ink) 70%,transparent);
+  font-size:12px;
+  line-height:16px}

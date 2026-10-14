@@ -22,6 +22,30 @@ STOP_REASONS: tuple[str, ...] = ("stop", "length", "tool_use", "refusal", "safet
 IMAGE_MIME_TYPES: tuple[str, ...] = ("image/png", "image/jpeg", "image/gif", "image/webp")
 
 _LARGE_REF_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_SOURCE_ID_RE = re.compile(r"^src_[a-z0-9]{8,}$")
+_COUNTER_NAME_RE = re.compile(r"^[a-z0-9_]{1,64}$")
+_ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+
+HostedToolName = Literal["web_search", "x_search", "image_generation"]
+HOSTED_TOOLS: tuple[str, ...] = ("web_search", "x_search", "image_generation")
+HostedStatus = Literal["completed", "failed", "incomplete", "pending"]
+HOSTED_STATUSES: tuple[str, ...] = ("completed", "failed", "incomplete", "pending")
+HOSTED_ERROR_MAX_CHARS = 400
+#: The stable code of each hosted failure Avibe words itself (``HostedRecord.error_code``), by which a display localizes
+#: it; a provider's own reason has none. A record loads with any snake_case code, so one a newer build wrote still reads.
+HOSTED_ERROR_CODES: tuple[str, ...] = (
+    "provider_no_reason",
+    "provider_no_image",
+    "image_not_streamed",
+    "image_not_saved",
+    "image_no_store",
+    "executor_no_image",
+    "gateway_unreachable",
+    "gateway_refused",
+    "gateway_no_result",
+)
+COST_BASES: tuple[str, ...] = ("reported", "list", "included")
+SOURCE_BILLINGS: tuple[str, ...] = ("monthly", "metered")
 
 
 def _require(value: Any, kind: type, what: str, *, optional: bool = False) -> None:
@@ -47,16 +71,59 @@ class LargeRef:
             raise ValueError(f"invalid large-content reference: {self.ref!r}")
 
 
+def _require_text(value: Any, what: str, *, optional: bool = False) -> None:
+    _require(value, str, what, optional=optional)
+    if value is not None and not value:
+        raise ValueError(f"{what} must not be empty")
+
+
+@dataclass(frozen=True)
+class Citation:
+    """A source the provider attached to assistant text; presentation only, never replayed.
+
+    ``start`` and ``end`` come together, as a half-open code-point range into the block's text.
+    """
+
+    url: str
+    title: Optional[str] = None
+    cited_text: Optional[str] = None
+    start: Optional[int] = None
+    end: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        _require_text(self.url, "citation url")
+        _require(self.title, str, "citation title", optional=True)
+        _require(self.cited_text, str, "cited_text", optional=True)
+        _require(self.start, int, "citation start", optional=True)
+        _require(self.end, int, "citation end", optional=True)
+        if (self.start is None) != (self.end is None):
+            raise ValueError("a citation range needs both start and end")
+        if self.start is not None and not 0 <= self.start <= self.end:
+            raise ValueError("a citation range must satisfy 0 <= start <= end")
+
+
 @dataclass(frozen=True)
 class TextBlock:
     text: Optional[str] = None
     ref: Optional[LargeRef] = None
+    citations: Optional[tuple[Citation, ...]] = None
+    """Assistant text only, and only with inline ``text``; absent when the provider attached none."""
 
     def __post_init__(self) -> None:
         _require(self.text, str, "text", optional=True)
         _require(self.ref, LargeRef, "ref", optional=True)
         if (self.text is None) == (self.ref is None):
             raise ValueError("a text block holds exactly one of text or ref")
+        if self.citations is None:
+            return
+        if not isinstance(self.citations, tuple) or not self.citations:
+            raise ValueError("citations, when present, are a non-empty tuple")
+        if not all(isinstance(citation, Citation) for citation in self.citations):
+            raise ValueError("citations must be Citation values")
+        if self.text is None:
+            raise ValueError("citations index into inline text")
+        if any(c.end is not None and c.end > len(self.text) for c in self.citations):
+            raise ValueError("a citation range must lie within the text")
 
 
 @dataclass(frozen=True)
@@ -150,8 +217,296 @@ def _require_blocks(content: Any, allowed: tuple[type, ...], what: str) -> None:
         raise ValueError(f"{what} content must be a tuple of {', '.join(k.__name__ for k in allowed)}")
 
 
+def _refuse_citations(content: tuple[Any, ...], what: str) -> None:
+    if any(isinstance(block, TextBlock) and block.citations is not None for block in content):
+        raise ValueError(f"{what} text carries no citations")
+
+
+# --- hosted tools (``vibey-hosted-tools.md`` §4.2) ----------------------------
+#
+# A native hosted call is one ``HostedToolBlock`` in assistant content. A proxied
+# call is an ordinary ``ToolCallBlock`` whose ``ToolResultMessage`` carries
+# ``hosted``. Neither ever holds image bytes: a generated image is a file, and
+# the record holds its path.
+
+# Per action type: (owning tool or None for any hosted tool, required fields, optional fields).
+_HOSTED_ACTIONS: dict[str, tuple[Optional[str], dict[str, type], dict[str, type]]] = {
+    "search": ("web_search", {"queries": list}, {}),
+    "open_page": ("web_search", {"url": str}, {}),
+    "find_in_page": ("web_search", {"url": str, "pattern": str}, {}),
+    "x_search": ("x_search", {"variant": str, "query": str}, {"limit": int, "mode": str}),
+    "x_user_search": ("x_search", {"query": str}, {}),
+    "x_thread_fetch": ("x_search", {"ref": str}, {}),
+    "generate": ("image_generation", {}, {"prompt": str, "size": str, "quality": str}),
+    "other": (None, {"name": str}, {}),
+}
+_X_SEARCH_VARIANTS = ("keyword", "semantic")
+_X_SEARCH_MODES = ("Latest", "Top")
+
+
+@dataclass(frozen=True)
+class HostedAction:
+    """What a hosted call did, provider-neutral. Only the fields of its ``type`` are set."""
+
+    type: str
+    queries: Optional[tuple[str, ...]] = None
+    url: Optional[str] = None
+    pattern: Optional[str] = None
+    variant: Optional[str] = None
+    query: Optional[str] = None
+    limit: Optional[int] = None
+    mode: Optional[str] = None
+    ref: Optional[str] = None
+    prompt: Optional[str] = None
+    size: Optional[str] = None
+    quality: Optional[str] = None
+    name: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        _require(self.type, str, "hosted action type")
+        if self.type not in _HOSTED_ACTIONS:
+            raise ValueError(f"unknown hosted action type: {self.type}")
+        _, required, optional = _HOSTED_ACTIONS[self.type]
+        for name in _HOSTED_ACTION_FIELDS:
+            value = getattr(self, name)
+            if name in required and value is None:
+                raise ValueError(f"a {self.type} action needs {name}")
+            if name not in required and name not in optional and value is not None:
+                raise ValueError(f"a {self.type} action has no {name}")
+        if self.queries is not None:
+            if not isinstance(self.queries, tuple) or not self.queries:
+                raise ValueError("search queries are a non-empty tuple")
+            for query in self.queries:
+                _require_text(query, "search query")
+        for name in ("url", "pattern", "query", "ref", "prompt", "size", "quality", "name"):
+            _require_text(getattr(self, name), f"action {name}", optional=True)
+        _require(self.variant, str, "action variant", optional=True)
+        if self.variant is not None and self.variant not in _X_SEARCH_VARIANTS:
+            raise ValueError(f"unknown x_search variant: {self.variant}")
+        _require(self.mode, str, "action mode", optional=True)
+        if self.mode is not None and self.mode not in _X_SEARCH_MODES:
+            raise ValueError(f"unknown x_search mode: {self.mode}")
+        _require(self.limit, int, "action limit", optional=True)
+        if self.limit is not None and self.limit < 1:
+            raise ValueError("an x_search limit is at least 1")
+
+    def fits(self, tool: str) -> bool:
+        owner = _HOSTED_ACTIONS[self.type][0]
+        return owner is None or owner == tool
+
+
+_HOSTED_ACTION_FIELDS: tuple[str, ...] = (
+    "queries", "url", "pattern", "variant", "query", "limit", "mode", "ref", "prompt", "size", "quality", "name",
+)
+
+
+@dataclass(frozen=True)
+class HostedSource:
+    url: str
+    title: Optional[str] = None
+    snippet: Optional[str] = None
+    page_age: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        _require_text(self.url, "source url")
+        for name in ("title", "snippet", "page_age"):
+            _require(getattr(self, name), str, f"source {name}", optional=True)
+
+
+@dataclass(frozen=True)
+class HostedImage:
+    """A generated image saved as a local file; the model sees only this record. ``bytes`` is the file's size."""
+
+    path: str
+    mime: str
+    width: Optional[int] = None
+    height: Optional[int] = None
+    bytes: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        _require_text(self.path, "image path")
+        _require(self.mime, str, "image mime")
+        if self.mime not in IMAGE_MIME_TYPES:
+            raise ValueError(f"unsupported image type: {self.mime}")
+        for name in ("width", "height", "bytes"):
+            value = getattr(self, name)
+            _require(value, int, f"image {name}", optional=True)
+            if value is not None and value < 1:
+                raise ValueError(f"image {name} is at least 1")
+
+
+@dataclass(frozen=True)
+class HostedRecord:
+    """Per-call facts. ``images`` is set exactly for ``image_generation`` (possibly empty).
+
+    ``error`` is model-facing English. ``error_code`` names a reason Avibe wrote (``HOSTED_ERROR_CODES``), only beside
+    an ``error``.
+    """
+
+    status: HostedStatus
+    error: Optional[str] = None
+    sources: tuple[HostedSource, ...] = ()
+    images: Optional[tuple[HostedImage, ...]] = None
+    error_code: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        _require(self.status, str, "hosted status")
+        if self.status not in HOSTED_STATUSES:
+            raise ValueError(f"unknown hosted status: {self.status}")
+        _require_text(self.error, "hosted error", optional=True)
+        if (self.error is not None) != (self.status in ("failed", "incomplete")):
+            raise ValueError("a hosted error is present exactly for failed and incomplete records")
+        if self.error is not None and len(self.error) > HOSTED_ERROR_MAX_CHARS:
+            raise ValueError(f"a hosted error is at most {HOSTED_ERROR_MAX_CHARS} characters")
+        _require(self.error_code, str, "hosted error code", optional=True)
+        if self.error_code is not None and (self.error is None or not _ERROR_CODE_RE.fullmatch(self.error_code)):
+            raise ValueError("a hosted error code is snake_case and comes only with an error")
+        if not isinstance(self.sources, tuple) or not all(isinstance(s, HostedSource) for s in self.sources):
+            raise ValueError("hosted sources must be a tuple of HostedSource")
+        if self.images is not None and (
+            not isinstance(self.images, tuple) or not all(isinstance(i, HostedImage) for i in self.images)
+        ):
+            raise ValueError("hosted images must be a tuple of HostedImage")
+
+    def check_tool(self, tool: str) -> None:
+        if (self.images is not None) != (tool == "image_generation"):
+            raise ValueError("a hosted record lists images exactly for image_generation")
+
+
+@dataclass(frozen=True)
+class HostedNative:
+    """The provider's own items for one call, verbatim and in order; their origin is the message's."""
+
+    source_id: str
+    payload: tuple[dict[str, Any], ...]
+
+    def __post_init__(self) -> None:
+        _require(self.source_id, str, "native source_id")
+        if not _SOURCE_ID_RE.fullmatch(self.source_id):
+            raise ValueError(f"invalid source id: {self.source_id!r}")
+        if not isinstance(self.payload, tuple) or not self.payload:
+            raise ValueError("a native payload is a non-empty tuple of provider items")
+        for index, item in enumerate(self.payload):
+            _require(item, dict, f"native payload[{index}]")
+            require_json_value(item, f"native payload[{index}]")
+        object.__setattr__(self, "payload", copy.deepcopy(self.payload))
+
+
+@dataclass(frozen=True)
+class HostedToolBlock:
+    id: str
+    tool: HostedToolName
+    action: HostedAction
+    record: HostedRecord
+    native: HostedNative
+
+    def __post_init__(self) -> None:
+        _require_text(self.id, "hosted call id")
+        _require(self.tool, str, "hosted tool")
+        if self.tool not in HOSTED_TOOLS:
+            raise ValueError(f"unknown hosted tool: {self.tool}")
+        _require(self.action, HostedAction, "hosted action")
+        _require(self.record, HostedRecord, "hosted record")
+        _require(self.native, HostedNative, "native payload")
+        if not self.action.fits(self.tool):
+            raise ValueError(f"a {self.action.type} action does not belong to {self.tool}")
+        self.record.check_tool(self.tool)
+        if self.action.type == "generate" and self.record.status == "completed" and self.action.prompt is None:
+            raise ValueError("a completed generate action needs its prompt")
+
+
+@dataclass(frozen=True)
+class HostedCost:
+    """Money for one response, from the pricing module or the provider; ``usd`` is absent exactly when included."""
+
+    basis: str
+    usd: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        _require(self.basis, str, "cost basis")
+        if self.basis not in COST_BASES:
+            raise ValueError(f"unknown cost basis: {self.basis}")
+        if self.usd is not None and (isinstance(self.usd, bool) or not isinstance(self.usd, (int, float))):
+            raise ValueError("cost usd must be a number")
+        if (self.usd is None) != (self.basis == "included"):
+            raise ValueError("cost usd is present exactly when the basis is not included")
+        if self.usd is not None:
+            require_json_value(self.usd, "cost usd")
+            if self.usd < 0:
+                raise ValueError("cost usd must not be negative")
+
+
+@dataclass(frozen=True)
+class HostedSummary:
+    """Response-scoped hosted facts, present exactly when the message has a ``HostedToolBlock``.
+
+    ``cost`` is absent when no price is known: unknown is never priced as zero.
+    """
+
+    counts: Mapping[str, int] = field(default_factory=dict)
+    cited_sources: tuple[HostedSource, ...] = ()
+    cost: Optional[HostedCost] = None
+
+    def __post_init__(self) -> None:
+        _require(self.counts, dict, "hosted counts")
+        for name, value in self.counts.items():
+            if not isinstance(name, str) or not _COUNTER_NAME_RE.fullmatch(name):
+                raise ValueError(f"invalid hosted counter name: {name!r}")
+            _require(value, int, f"hosted count {name}")
+            if value < 0:
+                raise ValueError("hosted counts must not be negative")
+        object.__setattr__(self, "counts", dict(self.counts))
+        if not isinstance(self.cited_sources, tuple) or not all(
+            isinstance(s, HostedSource) for s in self.cited_sources
+        ):
+            raise ValueError("cited sources must be a tuple of HostedSource")
+        _require(self.cost, HostedCost, "hosted cost", optional=True)
+
+
+@dataclass(frozen=True)
+class ProxyExecution:
+    """Which executor ran a proxied hosted call; absent when the call never reached one."""
+
+    executor_origin: Origin
+    executor_source_id: str
+    executor_billing: str
+    cost: Optional[HostedCost] = None
+
+    @property
+    def mode(self) -> Literal["proxy"]:
+        return "proxy"
+
+    def __post_init__(self) -> None:
+        _require(self.executor_origin, Origin, "executor origin")
+        _require(self.executor_source_id, str, "executor source id")
+        if not _SOURCE_ID_RE.fullmatch(self.executor_source_id):
+            raise ValueError(f"invalid source id: {self.executor_source_id!r}")
+        _require(self.executor_billing, str, "executor billing")
+        if self.executor_billing not in SOURCE_BILLINGS:
+            raise ValueError(f"unknown billing: {self.executor_billing}")
+        _require(self.cost, HostedCost, "executor cost", optional=True)
+
+
+@dataclass(frozen=True)
+class HostedResult:
+    """``ToolResultMessage.hosted``: the canonical record of a proxied hosted call. ``action`` is what the executor
+    reports it did, where that differs from the model's request: for ``image_generation``, the prompt it rendered and
+    the output's resolved size and quality, as a native call's block carries them."""
+
+    record: HostedRecord
+    execution: Optional[ProxyExecution] = None
+    action: Optional[HostedAction] = None
+
+    def __post_init__(self) -> None:
+        _require(self.record, HostedRecord, "hosted record")
+        _require(self.execution, ProxyExecution, "proxy execution", optional=True)
+        _require(self.action, HostedAction, "hosted result action", optional=True)
+        if self.execution is None and self.record.status != "failed":
+            raise ValueError("a hosted result without an execution is a failed record")
+
+
 UserContent = Union[TextBlock, ImageBlock]
-AssistantContent = Union[TextBlock, ThinkingBlock, ToolCallBlock]
+AssistantContent = Union[TextBlock, ThinkingBlock, ToolCallBlock, HostedToolBlock]
 
 
 @dataclass(frozen=True)
@@ -194,6 +549,7 @@ class UserMessage:
 
     def __post_init__(self) -> None:
         _require_blocks(self.content, (TextBlock, ImageBlock), "user message")
+        _refuse_citations(self.content, "user message")
         if not self.content:
             raise ValueError("a user message needs content")
 
@@ -209,13 +565,18 @@ class AssistantMessage:
     stop_reason: StopReason
     usage: Optional[Usage] = None
     error_message: Optional[str] = None
+    hosted_summary: Optional[HostedSummary] = None
 
     def __post_init__(self) -> None:
-        _require_blocks(self.content, (TextBlock, ThinkingBlock, ToolCallBlock), "assistant message")
+        _require_blocks(self.content, (TextBlock, ThinkingBlock, ToolCallBlock, HostedToolBlock), "assistant message")
         _require(self.origin, Origin, "origin")
         _require(self.stop_reason, str, "stop_reason")
         _require(self.usage, Usage, "usage", optional=True)
         _require(self.error_message, str, "error_message", optional=True)
+        _require(self.hosted_summary, HostedSummary, "hosted_summary", optional=True)
+        hosted = any(isinstance(block, HostedToolBlock) for block in self.content)
+        if hosted != (self.hosted_summary is not None):
+            raise ValueError("a hosted summary is present exactly when the message has hosted tool blocks")
         if self.error_message is not None and not self.error_message:
             raise ValueError("an error message, when present, must not be empty")
         if self.stop_reason not in STOP_REASONS:
@@ -236,14 +597,24 @@ class ToolResultMessage:
     tool_name: str
     content: tuple[UserContent, ...]
     is_error: bool = False
+    hosted: Optional[HostedResult] = None
+    """Set only on the result of a proxied hosted tool call."""
 
     def __post_init__(self) -> None:
         _require(self.tool_call_id, str, "tool_call_id")
         _require(self.tool_name, str, "tool_name")
         _require_blocks(self.content, (TextBlock, ImageBlock), "tool result")
+        _refuse_citations(self.content, "tool result")
         _require(self.is_error, bool, "is_error")
+        _require(self.hosted, HostedResult, "hosted", optional=True)
         if not self.tool_call_id or not self.tool_name:
             raise ValueError("a tool result needs its call id and tool name")
+        if self.hosted is not None:
+            if self.tool_name not in HOSTED_TOOLS:
+                raise ValueError(f"{self.tool_name} is not a hosted tool")
+            self.hosted.record.check_tool(self.tool_name)
+            if self.is_error != (self.hosted.record.status in ("failed", "incomplete")):
+                raise ValueError("a hosted result is an error exactly when its record failed or is incomplete")
 
     @property
     def role(self) -> Literal["tool_result"]:
@@ -255,6 +626,21 @@ Message = Union[UserMessage, AssistantMessage, ToolResultMessage]
 
 def text(value: str) -> TextBlock:
     return TextBlock(text=value)
+
+
+def has_reply(message: AssistantMessage) -> bool:
+    """Whether a response says something to the user: non-blank text, or an image a hosted call generated.
+
+    The one rule for "the model replied", read by the loop's empty-reply test and
+    by a final row's outcome. A generated image is a reply on its own: a model
+    asked for a picture may answer with the picture alone.
+    """
+    for block in message.content:
+        if isinstance(block, TextBlock) and block.text and block.text.strip():
+            return True
+        if isinstance(block, HostedToolBlock) and block.record.status == "completed" and block.record.images:
+            return True
+    return False
 
 
 # --- persisted form ---------------------------------------------------------
@@ -293,11 +679,99 @@ def _put(out: dict[str, Any], name: str, value: Any) -> None:
         out[name] = value
 
 
+def _source_to_dict(source: HostedSource) -> dict[str, Any]:
+    out: dict[str, Any] = {"url": source.url}
+    for name in ("title", "snippet", "page_age"):
+        _put(out, name, getattr(source, name))
+    return out
+
+
+def _source_from_dict(data: Any) -> HostedSource:
+    return HostedSource(**_read(data, "hosted source", {"url": str}, {"title": str, "snippet": str, "page_age": str}))
+
+
+def _record_to_dict(record: HostedRecord) -> dict[str, Any]:
+    out: dict[str, Any] = {"status": record.status}
+    _put(out, "error", record.error)
+    _put(out, "error_code", record.error_code)
+    out["sources"] = [_source_to_dict(source) for source in record.sources]
+    if record.images is not None:
+        images = []
+        for image in record.images:
+            item: dict[str, Any] = {"path": image.path, "mime": image.mime}
+            _put(item, "width", image.width)
+            _put(item, "height", image.height)
+            _put(item, "bytes", image.bytes)
+            images.append(item)
+        out["images"] = images
+    return out
+
+
+def _record_from_dict(data: Any) -> HostedRecord:
+    f = _read(data, "hosted record", {"status": str, "sources": list}, {"error": str, "error_code": str, "images": list})
+    images = None
+    if "images" in f:
+        images = tuple(
+            HostedImage(
+                **_read(item, "hosted image", {"path": str, "mime": str}, {"width": int, "height": int, "bytes": int})
+            )
+            for item in f["images"]
+        )
+    return HostedRecord(
+        status=f["status"],
+        error=f.get("error"),
+        sources=tuple(_source_from_dict(source) for source in f["sources"]),
+        images=images,
+        error_code=f.get("error_code"),
+    )
+
+
+def _action_to_dict(action: HostedAction) -> dict[str, Any]:
+    out: dict[str, Any] = {"type": action.type}
+    for name in _HOSTED_ACTION_FIELDS:
+        value = getattr(action, name)
+        _put(out, name, list(value) if isinstance(value, tuple) else value)
+    return out
+
+
+def _action_from_dict(data: Any) -> HostedAction:
+    kind = data.get("type") if isinstance(data, Mapping) else None
+    if kind not in _HOSTED_ACTIONS:
+        raise ValueError(f"unknown hosted action type: {kind!r}")
+    _, required, optional = _HOSTED_ACTIONS[kind]
+    f = _read(data, f"{kind} action", {"type": str, **required}, optional)
+    if "queries" in f:
+        f["queries"] = tuple(f["queries"])
+    return HostedAction(**f)
+
+
+def _cost_to_dict(cost: HostedCost) -> dict[str, Any]:
+    out: dict[str, Any] = {"basis": cost.basis}
+    _put(out, "usd", cost.usd)
+    return out
+
+
+def _cost_from_dict(data: Any) -> HostedCost:
+    if isinstance(data, Mapping) and isinstance(data.get("usd"), int) and not isinstance(data.get("usd"), bool):
+        data = {**data, "usd": float(data["usd"])}
+    return HostedCost(**_read(data, "hosted cost", {"basis": str}, {"usd": float}))
+
+
+def _citation_to_dict(citation: Citation) -> dict[str, Any]:
+    out: dict[str, Any] = {"url": citation.url}
+    for name in ("title", "cited_text", "start", "end"):
+        _put(out, name, getattr(citation, name))
+    return out
+
+
 def _block_to_dict(block: Any) -> dict[str, Any]:
     if isinstance(block, TextBlock):
         if block.ref is not None:
             return {"type": "text", "ref": {"ref": block.ref.ref, "bytes": block.ref.bytes}}
-        return {"type": "text", "text": block.text}
+        out: dict[str, Any] = {"type": "text", "text": block.text}
+        if block.citations is not None:
+            out["citations"] = [_citation_to_dict(citation) for citation in block.citations]
+        return out
     if isinstance(block, ImageBlock):
         out: dict[str, Any] = {"type": "image", "mime_type": block.mime_type, "media_token": block.media_token}
         _put(out, "name", block.name)
@@ -315,6 +789,15 @@ def _block_to_dict(block: Any) -> dict[str, Any]:
         _put(out, "native_id", block.native_id)
         _put(out, "signature", block.signature)
         return out
+    if isinstance(block, HostedToolBlock):
+        return {
+            "type": "hosted_tool",
+            "id": block.id,
+            "tool": block.tool,
+            "action": _action_to_dict(block.action),
+            "record": _record_to_dict(block.record),
+            "native": {"source_id": block.native.source_id, "payload": copy.deepcopy(list(block.native.payload))},
+        }
     raise TypeError(f"not a content block: {type(block).__name__}")
 
 
@@ -323,12 +806,34 @@ def _block_from_dict(data: Any, allowed_types: tuple[str, ...]) -> Any:
     if kind not in allowed_types:
         raise ValueError(f"block type {kind!r} is not allowed here")
     if kind == "text":
-        f = _read(data, "text block", {"type": str}, {"text": str, "ref": dict})
+        f = _read(data, "text block", {"type": str}, {"text": str, "ref": dict, "citations": list})
         ref = None
         if "ref" in f:
             r = _read(f["ref"], "large-content reference", {"ref": str, "bytes": int})
             ref = LargeRef(ref=r["ref"], bytes=r["bytes"])
-        return TextBlock(text=f.get("text"), ref=ref)
+        citations = None
+        if "citations" in f:
+            citations = tuple(
+                Citation(
+                    **_read(item, "citation", {"url": str}, {"title": str, "cited_text": str, "start": int, "end": int})
+                )
+                for item in f["citations"]
+            )
+        return TextBlock(text=f.get("text"), ref=ref, citations=citations)
+    if kind == "hosted_tool":
+        f = _read(
+            data,
+            "hosted tool block",
+            {"type": str, "id": str, "tool": str, "action": dict, "record": dict, "native": dict},
+        )
+        native = _read(f["native"], "native payload", {"source_id": str, "payload": list})
+        return HostedToolBlock(
+            id=f["id"],
+            tool=f["tool"],
+            action=_action_from_dict(f["action"]),
+            record=_record_from_dict(f["record"]),
+            native=HostedNative(source_id=native["source_id"], payload=tuple(native["payload"])),
+        )
     if kind == "image":
         f = _read(data, "image block", {"type": str, "mime_type": str, "media_token": str}, {"name": str})
         return ImageBlock(mime_type=f["mime_type"], media_token=f["media_token"], name=f.get("name"))
@@ -378,15 +883,44 @@ def message_to_dict(message: Message) -> dict[str, Any]:
         if message.usage is not None:
             out["usage"] = usage_to_dict(message.usage)
         _put(out, "error_message", message.error_message)
+        if message.hosted_summary is not None:
+            summary = message.hosted_summary
+            hosted: dict[str, Any] = {
+                "counts": dict(summary.counts),
+                "cited_sources": [_source_to_dict(source) for source in summary.cited_sources],
+            }
+            if summary.cost is not None:
+                hosted["cost"] = _cost_to_dict(summary.cost)
+            out["hosted_summary"] = hosted
         return out
     if isinstance(message, ToolResultMessage):
-        return {
+        result: dict[str, Any] = {
             "role": "tool_result",
             "tool_call_id": message.tool_call_id,
             "tool_name": message.tool_name,
             "content": [_block_to_dict(b) for b in message.content],
             "is_error": message.is_error,
         }
+        if message.hosted is not None:
+            hosted_result: dict[str, Any] = {"record": _record_to_dict(message.hosted.record)}
+            execution = message.hosted.execution
+            if execution is not None:
+                hosted_result["execution"] = {
+                    "mode": execution.mode,
+                    "executor_origin": {
+                        "provider": execution.executor_origin.provider,
+                        "api": execution.executor_origin.api,
+                        "model": execution.executor_origin.model,
+                    },
+                    "executor_source_id": execution.executor_source_id,
+                    "executor_billing": execution.executor_billing,
+                }
+                if execution.cost is not None:
+                    hosted_result["execution"]["cost"] = _cost_to_dict(execution.cost)
+            if message.hosted.action is not None:
+                hosted_result["action"] = _action_to_dict(message.hosted.action)
+            result["hosted"] = hosted_result
+        return result
     raise TypeError(f"not a message: {type(message).__name__}")
 
 
@@ -400,25 +934,65 @@ def message_from_dict(data: Mapping[str, Any]) -> Message:
             data,
             "assistant message",
             {"role": str, "content": list, "origin": dict, "stop_reason": str},
-            {"usage": dict, "error_message": str},
+            {"usage": dict, "error_message": str, "hosted_summary": dict},
         )
+        summary = None
+        if "hosted_summary" in f:
+            h = _read(f["hosted_summary"], "hosted summary", {"counts": dict, "cited_sources": list}, {"cost": dict})
+            summary = HostedSummary(
+                counts=dict(h["counts"]),
+                cited_sources=tuple(_source_from_dict(source) for source in h["cited_sources"]),
+                cost=_cost_from_dict(h["cost"]) if "cost" in h else None,
+            )
         return AssistantMessage(
-            content=tuple(_block_from_dict(b, ("text", "thinking", "tool_call")) for b in f["content"]),
+            content=tuple(_block_from_dict(b, ("text", "thinking", "tool_call", "hosted_tool")) for b in f["content"]),
             origin=origin_from_dict(f["origin"]),
             stop_reason=f["stop_reason"],
             usage=usage_from_dict(f["usage"]) if "usage" in f else None,
             error_message=f.get("error_message"),
+            hosted_summary=summary,
         )
     if role == "tool_result":
         f = _read(
             data,
             "tool result message",
             {"role": str, "tool_call_id": str, "tool_name": str, "content": list, "is_error": bool},
+            {"hosted": dict},
         )
+        hosted_result = None
+        if "hosted" in f:
+            h = _read(f["hosted"], "hosted result", {"record": dict}, {"execution": dict, "action": dict})
+            execution = None
+            if "execution" in h:
+                e = _read(
+                    h["execution"],
+                    "proxy execution",
+                    {
+                        "mode": str,
+                        "executor_origin": dict,
+                        "executor_source_id": str,
+                        "executor_billing": str,
+                    },
+                    {"cost": dict},
+                )
+                if e["mode"] != "proxy":
+                    raise ValueError("proxy execution.mode must be proxy")
+                execution = ProxyExecution(
+                    executor_origin=origin_from_dict(e["executor_origin"]),
+                    executor_source_id=e["executor_source_id"],
+                    executor_billing=e["executor_billing"],
+                    cost=_cost_from_dict(e["cost"]) if "cost" in e else None,
+                )
+            hosted_result = HostedResult(
+                record=_record_from_dict(h["record"]),
+                execution=execution,
+                action=_action_from_dict(h["action"]) if "action" in h else None,
+            )
         return ToolResultMessage(
             tool_call_id=f["tool_call_id"],
             tool_name=f["tool_name"],
             content=tuple(_block_from_dict(b, ("text", "image")) for b in f["content"]),
             is_error=f["is_error"],
+            hosted=hosted_result,
         )
     raise ValueError(f"unknown message role: {role!r}")

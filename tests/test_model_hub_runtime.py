@@ -1349,7 +1349,7 @@ def test_manifest_resolution_drives_admission_persistence_and_schema(
         installer=manager,
         state_store=EngineStateStore(tmp_path / "state"),
     )
-    projected = {"contract_version": 11, **supervisor.status()}
+    projected = {"contract_version": 12, **supervisor.status()}
     schema = json.loads(
         Path("docs/plans/model-hub-contracts/runtime-dependency.schema.json").read_text(
             encoding="utf-8"
@@ -1932,6 +1932,8 @@ def test_mixed_anthropic_credentials_disable_cloak_only_for_api_key_entry(
 
     payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert payload["disable-claude-cloak-mode"] is True
+    # The engine forwards declared image tools unchanged; Codex CLI gets its own from the gateway.
+    assert payload["disable-image-generation"] == "passthrough"
     assert payload["claude-api-key"] == [
         {
             "api-key": "api-key-fixture",
@@ -7510,6 +7512,9 @@ def test_slow_source_prelude_is_bounded_without_blocking_other_routes(
 
             def get_source(self, source_id: str) -> SourceRecord | None:
                 return self.sources.get(source_id)
+
+            def codex_plan_type(self, *_args, **_kwargs) -> str | None:
+                return None  # API keys carry no plan
 
         class Supervisor:
             def __init__(self, client: EngineClient) -> None:

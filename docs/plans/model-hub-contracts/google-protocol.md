@@ -1,6 +1,6 @@
 # Google protocol consumer extension
 
-Normative for the v11 Model Hub contract. This extends the existing gateway,
+Normative since the v11 Model Hub contract. This extends the existing gateway,
 EngineAdapter and pinned CPA transport; it does not add a provider implementation
 to agent-core, change backend registration, or upgrade the engine.
 

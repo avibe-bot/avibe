@@ -36,7 +36,7 @@ verified for X search.
 
 ## 2. Concepts
 
-- **One user-facing tool per capability.** Phase 1 has `web_search` and `x_search`.
+- **One user-facing tool per capability.** Phase 1 has `web_search`, `x_search` and `image_generation`.
 - **Two execution modes behind one name and schema.**
   - **Native:** the provider's hosted declaration on the wire. The provider runs the search.
   - **Proxy:** a function with the canonical schema. Vibey's tool runtime asks the gateway's executor to run it.
@@ -218,6 +218,13 @@ verified for X search.
 
   The value is `HopResolution.source_id` for the first two. For a continuation it is the Source the previous
   response came from, according to the served-hop report.
+
+  **As implemented (orchestrator decision, 2026-10-14):** every model attempt resolves a fresh hop (C-6 item 3), so
+  verbatim content goes only to the hop whose own Source served it, on the same origin, and every pin is
+  `HopResolution.source_id`. A continuation whose fresh hop is another Source takes the in-place text form (§4.4),
+  unpinned. Pinning it to the previous Source would build the request for one hop (declarations, model, efforts,
+  signature target) and serve it from another. A continuation also sends `x-avibe-pin-model` with its served model
+  when that id is ASCII. Without the header, the gateway takes the pinned Source's own model, which is the same hop.
   - The gateway serves a pinned request only from that Source, with no failover and no recovery wait.
   - The gateway answers the local error `pin_unavailable` in three cases:
     - the Source cannot be admitted for this content, checked before invoking anything: it is cooling down, it was
@@ -251,7 +258,7 @@ verified for X search.
 
 | Protocol | Native declaration | Proxy declaration |
 | --- | --- | --- |
-| `openai_responses` (OpenAI, xAI) | `{"type": "web_search"}`, `{"type": "x_search"}`, `{"type": "image_generation", "partial_images": 2}`, plus the overlay entry's `include` values. OpenAI's web search requires `include: ["web_search_call.action.sources"]`, merged with Vibey's existing `reasoning.encrypted_content`; without it, `action.sources` is not returned. xAI's `web_search_call` carried `action.sources` without it (spike). | `{"type": "function", "name": "web_search", "parameters": <canonical>}` |
+| `openai_responses` (OpenAI, xAI) | `{"type": "web_search"}`, `{"type": "x_search"}`, `{"type": "image_generation", "partial_images": 2, "output_format": "jpeg", "output_compression": 90}`, plus the overlay entry's `include` values. OpenAI's web search requires `include: ["web_search_call.action.sources"]`, merged with Vibey's existing `reasoning.encrypted_content`; without it, `action.sources` is not returned. xAI's `web_search_call` carried `action.sources` without it (spike). | `{"type": "function", "name": "web_search", "parameters": <canonical>}` |
 | `anthropic` | `{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}` | `{"name": "web_search", "input_schema": <canonical>}` |
 | `openai_chat`, `google` | none in Phase 1 | a function with the canonical schema. Vibey reaches a `google` hop over Chat Completions at the gateway (C-1 conversion tables), so the Chat form applies, and the engine translates it to Gemini `functionDeclarations`. |
 
@@ -322,8 +329,8 @@ as a half-open code-point range into `text`.
   `CitationBadge` (numbered sources, UTF-16 ranges, `body_sha256`). Adapters only parse; IM gets the Markdown links.
 
 **`ToolResultMessage.hosted`** (optional): `{record, execution?}`.
-- `execution` is a `ProxyExecution`, every field required: `mode: "proxy"`, `executor_origin`,
-  `executor_source_id`, `executor_billing`, `cost`. It is present exactly when an executor ran. A call that never
+- `execution` is a `ProxyExecution`: `mode: "proxy"`, `executor_origin`, `executor_source_id`,
+  `executor_billing`, and `cost` when the pricing module can value the call. It is present exactly when an executor ran. A call that never
   reached one (none verified, or the bound Source removed) has none, and its `record.status` is `failed`.
 - `is_error` is `true` exactly when `record.status` is `failed` or `incomplete`.
 - So a proxied call renders like a native one, and the card names the exact Source even when two Sources share an
@@ -353,6 +360,15 @@ as a half-open code-point range into `text`.
   - Each continuation is pinned to the Source the paused response came from (§3.5). On `pin_unavailable`, the
     continuation is re-rendered in portable form, with the paused server blocks converted in place (§4.4), and goes
     out unpinned.
+  - **As implemented (orchestrator decision, 2026-10-14):** a continuation goes only to the Source that served the
+    paused response, pinned there, and is never re-rendered in portable form. A continuation that Source answers
+    `pin_unavailable`, or a pause of a send that carried no pin, ends the response with one terminal
+    `ProviderError(kind="interrupted")` whose partial keeps all assembled content, as at the bound. The merged
+    message is then always one origin's, so no paused part needs a stored form other than the one it streamed in.
+    The merged message is verified only when every response in it was verified and reported the same origin;
+    otherwise it is sanitized as any unverified response. The case given up is rare: the pinned Source becoming
+    unavailable seconds into a paused turn. The user keeps the partial answer and can retry. A turn's first request
+    still gets its one portable resend on `pin_unavailable` (§3.5).
   - **After the 5th continuation**, if the response is still `pause_turn`, the adapter ends with one terminal
     `ProviderError(kind="interrupted")`. Its partial keeps all assembled content and the summed usage, and its
     `error_message` is "the provider paused the turn more than 5 times". C-2's existing rule then applies: terminal
@@ -362,6 +378,12 @@ as a half-open code-point range into `text`.
   - Its `usage` is the **sum** of every continuation response's counters: input, output, and cache read and write.
     Today's parser resets usage at each `message_start`. The gateway already meters each continuation as its own
     call, so the usage ledger and provenance need no change.
+  - **As implemented (orchestrator decision, 2026-10-14):** the merged message carries the **final** continuation's
+    usage, not the sum. The context estimate anchors on a response's usage as the size of the request that produced
+    it, and the final request's input already holds every paused part, so a sum would roughly double the next
+    estimate. Billing and the ledger come from the gateway's per-call metering, and `hosted_summary` still sums
+    counts and cost across continuations. Vibey-side token sums that read message usage, such as side-turn audit
+    totals, undercount the earlier continuations.
   - **Pending calls carry over by id.** The adapter keeps its hosted blocks keyed by tool-call id across
     continuations. A result arriving in a continuation for a `pending` block finalizes that block, its `record` and
     its `native.payload`, so each call stays exactly one block.
@@ -412,11 +434,14 @@ These rules become C-1 rows in `cross-provider.md` and per-protocol rows in `con
   - An `image_generation` action becomes one `image_generation` call with `{prompt}`, plus `size` when the action
     has it. Its result is the **text path record** (§7.3). Image bytes are never resent: no base64 and no image
     block, even to the same Source.
-  - A non-search action (`open_page`, `find_in_page`, `x_thread_fetch`, `other`) becomes a line in the result of the
-    preceding synthetic call of the same tool in that response, e.g. "opened <url>" or "fetched thread <ref>".
-    Without a preceding call, it becomes its own call with `{query: "<action type> <target>"}`.
-  - The response's `hosted_summary.cited_sources` are listed once, in the first synthetic result of that tool, as
-    "posts cited in the answer".
+  - A non-search action (`open_page`, `find_in_page`, `x_thread_fetch`, `other`) is its own call with
+    `{query: "<action type> <target>"}`. A completed one's result says what it did, e.g. "Opened <url>" or "Fetched
+    thread <ref>".
+    - **Deviation (orchestrator decision, PR #2561 review).** The design first folded such an action into the result
+      of its tool's preceding call. Each rendering defect found in review came from that folding, where a line could
+      land on a result that does not show it. So every hosted block is exactly one call, with its own status.
+  - The response's `hosted_summary.cited_sources` are listed once, as "posts cited in the answer". They go on the
+    first call that was not cut off, whether it is replayed as a synthetic call or in place.
   - A `failed` or `incomplete` record renders as an error result: Anthropic `is_error: true`, or text starting
     `[<tool> failed: <error>]` where the protocol has no error flag.
   - A `pending` record (a call cut off with the turn) renders as the C-1 interrupted-call result.
@@ -442,14 +467,16 @@ These rules become C-1 rows in `cross-provider.md` and per-protocol rows in `con
       contract change pending at that time joins it.
   - The gateway and the served-hop parser change in that same release.
   - **Phase 1's native mode therefore lands with or after v12.** Proxy mode does not depend on it.
-  - **The v12 bump edits these exact-shape contracts together:**
-    - `model-hub-contracts/hop-origin.schema.json`: add `source` (required);
+  - **The v12 bump edited these exact-shape contracts together** (Phase 1 foundation PR):
+    - `model-hub-contracts/served-hop.schema.json` (new): the header is exactly `provider`, `api`, `model`,
+      `source`. `hop-origin.schema.json` stays the persisted provenance origin (`provider`, `api`, `model`), because
+      provenance attempts already carry `source_id` beside it and records written at v5–11 must keep validating;
     - `model-hub-contracts/vibey-consumer.md`, Response origin;
     - `agent-core-contracts/provider.md`, the served-hop sentence;
-    - `agent-core-contracts/conversion-tables.md`, the Origin row ("exactly `provider`, `api`, `model`");
+    - `agent-core-contracts/conversion-tables.md`, the Origin row;
     - `agent-core-contracts/model-hub-consumer.md`, item 4.
 
-    These files are frozen at v11, so this PR states the change and leaves their text alone.
+    A message's C-1 `origin` stays exactly `provider`, `api`, `model`; the served `source` tags `native.source_id`.
 
 ## 6. User interface
 
@@ -564,9 +591,18 @@ Each has a **Re-verify** action with its cost. Unknown shows nothing.
   - If the model wants to look, it opens the file with its `read` tool, the same as any other file.
   - The file the record names must fit `read`'s inline image cap. `MAX_INLINE_IMAGE_BYTES` in
     `core/agent_core/tools/read.py` is about 3.4 MiB, and `read` does not resize. A high-quality PNG of 4–6 MB would
-    come back as "Image omitted". So either the declaration bounds the output (`output_format` and compression), or
-    the store also writes a bounded preview and the record names it. The Phase 1 PR picks one and tests it with a
-    6 MB image.
+    come back as "Image omitted". Phase 1 bounds it in the declaration: OpenAI's asks for `output_format: "jpeg"`
+    at `output_compression: 90`, so a 1.6 MP image is about 0.3–1 MB, and every IM platform shows JPEG. An image
+    still over the cap gets a record saying it is too large to view inline.
+  - Known limitation: no transparent backgrounds in Phase 1. A later per-call format choice (an
+    `output_format`/`background` argument on the tool) restores them.
+  - Known limitation (orchestrator decision, 2026-10-14): a file is saved before the row that names it commits. A
+    cancel, crash or kill in between leaves a file no row references. Such files are content-addressed, so they never
+    duplicate, and the per-response image budget bounds them. A startup sweep of the agent media root removes them
+    (#2588, before the 3.2.1 RC).
+  - Avibe-authored failure reasons in a record's `error` are English model-facing text. Each carries a stable
+    `error_code` (C-1 `HostedRecord.error_code`, one of `HOSTED_ERROR_CODES`), by which the display boundary localizes
+    it; a provider's own reason carries none and shows as it is (#2589).
 - **The user sees the image.** The Workbench renders it inline from the file, and IM attaches it. That is display,
   separate from model context.
 - **History and replay never contain base64.**
@@ -583,8 +619,9 @@ Each has a **Re-verify** action with its cost. Unknown shows nothing.
   events carry bytes during generation.
   - The gateway counts a partial image as model output (`stream_wire.py`), so response headers are released at the
     first partial.
-  - Partials are previews for the user's display, written to a temporary file and replaced by the final image.
-    They never enter history or model context.
+  - Phase 1 drops previews: Vibey counts each one against the response's image budget and keeps none, so no preview
+    reaches a file, history or model context, and the user sees the final image. Showing previews while an image is
+    drawn is a later display change: a temporary file the final image replaces.
 - **What was measured.** A failing generation went 35.4 s without a byte after `generating`; healthy generations took
   64–130 s.
 - **Phase 1 acceptance gate.** Through the gateway, with partials, the largest byte gap of every successful test
@@ -610,8 +647,9 @@ Each has a **Re-verify** action with its cost. Unknown shows nothing.
   - OpenAI web search: $10 / 1k calls plus content tokens;
   - Anthropic: $10 / 1k searches plus result tokens, re-billed while they stay in context;
   - xAI: web search $5 / 1k calls, X search $5 / 1k posts and $10 / 1k profiles;
-  - OpenAI image generation: per image, by quality and size. The overlay records the vendor's table with its date
-    and URL, and the card shows the reported or list cost.
+  - OpenAI image generation: OpenAI lists no per-image price; image generation is billed per image token at the
+    image model's rate (2026-10-13 pricing page). The overlay's `image_generation` entry therefore has no list
+    price, and the cost comes from the call's image-token usage at that rate (Phase 1 pricing PR).
 - **Relays** show list price, labelled as such, and may bill differently.
 - **Anthropic OAuth policy:** a Claude subscription Source is never probed and never runs a hosted tool, whether
   natively or as proxy executor. Credential eligibility is checked before the probe, the native mode and the executor
@@ -652,9 +690,10 @@ Each has a **Re-verify** action with its cost. Unknown shows nothing.
    the same for either mode. One function renders a record to model-facing text, for proxied results and for
    synthetic replay alike. A failed record never renders as a successful empty result.
 5. Any transcript with hosted calls replays to any supported target without a history-shape error.
-6. `pause_turn` never ends a turn. Continuations are bounded, pinned to the paused response's Source, merged into
-   one message, and their usage is summed. Past the bound, the turn ends with one `interrupted` error that keeps
-   the partial.
+6. `pause_turn` never ends a turn while its Source can continue it. Continuations are bounded, pinned to the
+   paused response's Source, and merged into one message that carries the final request's usage and summed hosted
+   counters (§4.3 as implemented). Past the bound, or when that Source cannot continue it, the turn ends with one
+   `interrupted` error that keeps the partial.
 7. A generated image never enters model context or history as bytes. The model gets the text path record, and the
    user sees the image.
 8. A Codex CLI request reaches the upstream with exactly the image tool CPA would have injected. No other caller
@@ -673,7 +712,7 @@ shapes. No live upstream and no real credentials.
 | --- | --- | --- |
 | Adapter parsing | each adapter against stub SSE | the mapping rule, one case per row of §4.2's table, including `queries[]` versus the deprecated `query`, every xAI X-search variant, and an unknown item becoming `other`; `hosted_summary` with one and with several X searches (reported cost once, no per-call copies); Anthropic citations; pending `server_tool_use` at `pause_turn`; a hosted call that fails |
 | Cross-provider transform | `ai` request builders | each hosted block to each target, verified same Source versus other: native verbatim, synthetic call/result, split assistant message; citations never sent |
-| `pause_turn` | Anthropic adapter, stub returns `pause_turn`, then `end_turn` | one logical response; the bound; the merged message with summed usage; the pin header; `pin_unavailable` falls back to the in-place text form |
+| `pause_turn` | Anthropic adapter, stub returns `pause_turn`, then `end_turn` | one logical response; the bound; the merged message with the final request's usage and summed hosted counters; the pin header; `pin_unavailable` on a continuation ends `interrupted` with the partial (§4.3 as implemented) |
 | Gateway selection and pinning | real gateway + loopback fake engine | native only with evidence and an eligible credential; a pinned request is never failed over; an inadmissible pinned Source and a pre-output failure both answer `pin_unavailable`; Vibey's portable re-render is then served by failover; `x_search` to OpenAI never sent |
 | Evidence | classifier against recorded error bodies | `400 Unsupported tool type`, `invalid_value` effort and `Invalid encrypted_content` each create exactly one record; overload and 5xx create none |
 | Proxy executor | gateway endpoint, stub provider | executor choice; no effort sent; the record with excerpts; metering on the executor Source; error when no executor is verified; refusal of a Claude subscription |
@@ -710,17 +749,22 @@ encoded either as a schema clause or as a producer test. The PR names which for 
    `sources[]` entry requires `url`.
 4. `AssistantMessage.hosted_summary`:
    - it is present exactly when the message has a `HostedToolBlock`;
+   - `counts` and `cited_sources` are required (possibly empty); `cost` is optional, absent when no price is known,
+     because unknown is never priced as zero;
    - `cost.usd` is present exactly when `basis` is not `included`.
 5. `TextBlock.citations`: `start` and `end` come together.
 6. `ToolResultMessage.hosted` requires `record`. `execution` is present exactly when an executor ran; without it,
    `record.status` is `failed`.
-   - `execution` requires `mode: "proxy"`, `executor_origin`, `executor_source_id`, `executor_billing` and `cost`.
+   - `execution` requires `mode: "proxy"`, `executor_origin`, `executor_source_id` and `executor_billing`; its
+     `cost` is optional on the same rule as item 4.
    - `is_error` is `true` exactly when `record.status` is `failed` or `incomplete`.
 
 **C-6 `HopResolution.hosted_tools` (both copies):**
 7. Each entry requires `mode`, `replay` and `executor`.
    - `executor` is `{source_id, model_id}` or `null`, and is present for every entry whatever the mode.
-   - `declaration` is present exactly for `native`, and includes the overlay entry's `include` values.
+   - `declaration` and `include` (the overlay entry's Responses `include` values, possibly empty) are present exactly
+     for `native`.
+   - `hosted_tools` itself is required, and empty when no tool is enabled.
 
 **Model Hub:**
 8. V2 `model_hub.hosted_tools`: keys are catalog tool names, and each entry requires `enabled` and `executor`.
@@ -744,8 +788,9 @@ encoded either as a schema clause or as a producer test. The PR names which for 
 16. Across `pause_turn` continuations, a result for a `pending` block finalizes that block by tool-call id. The
     merged message has one `hosted_summary`, with summed `counts` and `cost.usd` and URL-deduplicated
     `cited_sources` (§4.3).
-17. Image prices in the overlay are keyed variants: each `extra[]` entry for unit `image` carries `quality` and
-    `size`, and pricing selects the entry that matches the declaration that ran (capability model §4).
+17. Image cost is valued from the call's image-token usage at the image model's per-token rate, because OpenAI
+    lists no per-image price (capability model §4). If a vendor later lists per-image prices, those entries are
+    keyed by the resolved `quality` and `size` (item 22).
 18. The image file a path record names fits `read`'s `MAX_INLINE_IMAGE_BYTES`, tested with a 6 MB generated image
     (§7.3).
 19. The executor binding is held for the turn. Only removal or disablement of the bound Source makes a call fail,
@@ -753,3 +798,31 @@ encoded either as a schema clause or as a producer test. The PR names which for 
 20. Hosted-tool `call` and `replay` evidence whose `engine` or `shape` differs from the current one resolves as
     unknown: proxy mode and synthetic replay. Age-only staleness keeps routing. Effort evidence is unchanged
     (capability model §3.3, §3.4).
+
+**Added after review of the merged design (implementation-level, binding on the Phase 1 PRs):**
+
+21. Continuations merge into one `AssistantMessage` only when the served-hop report shows the same origin. A
+    `pin_unavailable` continuation served by another origin makes the merged message take the serving origin, and
+    the paused part is kept in the portable form that was actually sent (§4.4 fallback, C-1 cross-origin rules), so
+    no payload or signature from the first origin remains.
+    **As implemented (orchestrator decision, 2026-10-14):** there is no portable continuation, so no cross-origin
+    merge (§4.3). A continuation whose response reports another origin, or none, leaves the merged message
+    unverified, so it keeps no payload or signature of any response.
+22. The `generate` action records the output's resolved `quality` and `size`; pricing uses those output values, not
+    the declaration's.
+23. The replay probe asks for a URL the call probe actually returned (such as the first). An answer with no earlier
+    URL, or a refusal, is inconclusive; `unsupported` comes only from a 400 naming the replayed content or a new call
+    to the tool.
+24. For OpenAI and xAI executors, each source's `snippet` is the answer text its `url_citation` span covers, extended
+    to the enclosing sentence; the executor instruction asks for one or two cited sentences per result so the spans
+    align. A source without a span has no snippet; Anthropic keeps `cited_text`. Tested against a recorded executor
+    response.
+25. Each response has a maximum number of image events (final plus requested partials, plus a small margin) and a
+    cumulative decoded-byte budget; exceeding either ends the stream as a provider error. The terminal duplicate is
+    still discarded undecoded.
+26. Context-tier thresholds use total context input: input plus cache-read and cache-write tokens.
+27. The proxy endpoint returns a generated image's bytes to Vibey's tool runtime over the local hop. Vibey saves them
+    through the same session media sink the native path uses, then builds the `HostedRecord` with the path record.
+    The bytes are never persisted in a transcript, and Vibey stays the only writer of session media.
+28. `generate.prompt` is required only for a `completed` record; a `failed` or `incomplete` record may omit it when
+    the provider's `revised_prompt` is absent or null.

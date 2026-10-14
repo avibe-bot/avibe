@@ -152,14 +152,17 @@ Every Vibey model response that the gateway serves carries the response header
 `x-avibe-served-hop`. Its value is compact ASCII-escaped JSON:
 
 ```json
-{"provider":"openai","api":"openai_responses","model":"upstream-model"}
+{"provider":"openai","api":"openai_responses","model":"upstream-model","source":"src_relay9c1x"}
 ```
 
-The exact object is `hop-origin.schema.json`. The provider and protocol are
-captured from the Source snapshot used at attempt admission, and the model is the
-configured upstream target of that attempt. The same immutable `HopOrigin` travels
-with `ResolvedInvocation` and the request's `AttemptIdentity`; successful settlement
-stores it as the required `TurnProvenance.served.origin` for Vibey. Historical and
+The exact object is `served-hop.schema.json`: exactly `provider`, `api`, `model`
+and `source`, since contract v12. The provider and protocol are captured from the
+Source snapshot used at attempt admission, the model is the configured upstream
+target of that attempt, and `source` is that Source's id, because two Sources can
+share an origin. The same immutable `HopOrigin` travels with `ResolvedInvocation`
+and the request's `AttemptIdentity`; successful settlement stores its `provider`,
+`api` and `model` (`hop-origin.schema.json`) as the required
+`TurnProvenance.served.origin` for Vibey, beside the attempt's `source_id`. Historical and
 native records may omit origin; Vibey has no pre-v11 historical record.
 Failed/canceled attempts can also retain that snapshot, without implying success.
 For a turn making several model requests, each response header names its own

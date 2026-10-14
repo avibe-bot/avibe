@@ -103,7 +103,7 @@ scenarios:
     status: covered
     kind: recovery
     layer: contract
-    test: tests/test_session_delivery_fsm.py::test_lost_accepted_receipt_restarts_unknown_without_resteer
+    test: tests/test_session_delivery_fsm.py::test_lost_accepted_receipt_materializes_from_exact_restart_evidence
   - id: MESSAGE-DELIVERY-012
     name: Definitive P1 refusal and idle drain start one fallback Turn
     status: covered
@@ -121,7 +121,7 @@ scenarios:
     status: covered
     kind: concurrency
     layer: contract
-    test: tests/test_session_delivery_fsm.py::test_p0_terminal_restart_claims_successor_once_after_old_terminal
+    test: tests/test_session_delivery_fsm.py::test_content_p0_preserves_open_hold_and_claims_successor_once
   - id: MESSAGE-DELIVERY-015
     name: Concurrent idle P3 admissions choose one Turn owner and retain one FIFO loser
     status: covered
@@ -247,7 +247,10 @@ scenarios:
     status: covered
     kind: happy_path
     layer: contract
-    test: tests/test_delivery_ack_reaction.py::AdmissionAckTests
+    test:
+      - tests/test_delivery_ack_reaction.py::AdmissionAckTests::test_steered_input_reports_a_receipt
+      - tests/test_delivery_ack_reaction.py::AdmissionAckTests::test_queued_and_pending_steer_report_the_queued_receipt
+      - tests/test_delivery_ack_reaction.py::AdmissionAckTests::test_unconfirmed_and_undelivered_states_are_distinguishable
   - id: MESSAGE-DELIVERY-302
     name: A queued admission receipt is replaced by the running turn indicator
     status: covered
@@ -271,7 +274,9 @@ scenarios:
     status: covered
     kind: recovery
     layer: contract
-    test: tests/test_delivery_ack_reaction.py::ReactionTargetSurvivalTests
+    test:
+      - tests/test_delivery_ack_reaction.py::ReactionTargetSurvivalTests::test_quick_reply_echo_is_captured_from_the_ingress_context
+      - tests/test_delivery_ack_reaction.py::ReactionTargetSurvivalTests::test_hydrated_context_gets_its_reaction_target_back
   - id: MESSAGE-DELIVERY-306
     name: A native-less quick reply reacts on its persisted echo target
     status: covered

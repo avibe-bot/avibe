@@ -143,6 +143,11 @@ def test_backend_model_entries_normalize_runtime_catalog_shape():
                             {"effort": "ultra"},
                         ],
                     },
+                    {
+                        "id": "gpt-6-astra",
+                        "reasoning_efforts": ["high", "ultra"],
+                        "client_presets": ["ultra", "turbo", "ultra"],
+                    },
                 ]
             }
         },
@@ -156,7 +161,62 @@ def test_backend_model_entries_normalize_runtime_catalog_shape():
             "visibility": "list",
             "reasoning_efforts": ["low", "ultra"],
         },
+        {
+            "id": "gpt-6-astra",
+            "reasoning_efforts": ["high", "ultra"],
+            "client_presets": ["ultra"],
+        },
     ]
+
+
+def test_bundled_client_presets_name_codex_ultra_without_leaving_its_menu():
+    presets = backend_model_catalog.bundled_catalog_client_presets_by_model()
+    efforts = backend_model_catalog.bundled_catalog_reasoning_efforts_by_model()
+
+    assert dict(presets) == {
+        "gpt-6-astra": ("ultra",),
+        "gpt-5.6-sol": ("ultra",),
+        "gpt-5.6-terra": ("ultra",),
+    }
+    assert all("ultra" in efforts[model] for model in presets)
+    assert backend_model_catalog._read_complete_catalog(
+        backend_model_catalog.get_bundled_catalog_path()
+    )
+    with pytest.raises(TypeError):
+        presets["gpt-6-astra"] = ()
+
+
+@pytest.mark.parametrize(
+    "providers",
+    [
+        pytest.param("bundled", id="bundled"),
+        pytest.param([], id="not-an-object"),
+        pytest.param({"xai": {"models": [{"match": {}}]}}, id="invalid-vendor"),
+        pytest.param({"openai": {"models": [], "future_field": 1}}, id="unknown-shape"),
+    ],
+)
+def test_providers_section_never_changes_backend_rows(monkeypatch, tmp_path, providers):
+    bundled = json.loads(
+        backend_model_catalog.get_bundled_catalog_path().read_text(encoding="utf-8")
+    )
+    without = {key: value for key, value in bundled.items() if key != "providers"}
+    with_providers = {
+        **without,
+        "providers": bundled["providers"] if providers == "bundled" else providers,
+    }
+    path = tmp_path / "backend_models.json"
+    path.write_text(json.dumps(with_providers), encoding="utf-8")
+    payloads = iter([without, with_providers])
+    monkeypatch.setattr(
+        backend_model_catalog.urllib.request,
+        "urlopen",
+        lambda request, timeout: _FakeResponse(next(payloads)),
+    )
+
+    rows = backend_model_catalog.fetch_remote_catalog("https://example.test/catalog.json")
+
+    assert backend_model_catalog.fetch_remote_catalog("https://example.test/catalog.json") == rows
+    assert backend_model_catalog.load_bundled_catalog(path) == rows
 
 
 def test_codex_hub_catalog_projects_complete_catalog(monkeypatch, tmp_path):
@@ -1343,6 +1403,9 @@ def test_fetch_remote_catalog_rejects_invalid_model_entries(monkeypatch):
         ({"id": "gpt-invalid", "visibility": "sometimes"}, "invalid visibility"),
         ({"id": "gpt-invalid", "priority": "first"}, "invalid priority"),
         ({"id": "gpt-invalid", "reasoning_efforts": "ultra"}, "invalid reasoning efforts"),
+        ({"id": "gpt-invalid", "reasoning_efforts": ["high"], "client_presets": ["ultra"]}, "invalid client presets"),
+        ({"id": "gpt-invalid", "client_presets": ["ultra"]}, "invalid client presets"),
+        ({"id": "gpt-invalid", "reasoning_efforts": ["ultra"], "client_presets": "ultra"}, "invalid client presets"),
     ],
 )
 def test_fetch_remote_catalog_rejects_malformed_model_metadata(monkeypatch, model_entry, error):

@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import queue
+import copy
 import re
 import shutil
 import threading
@@ -22,6 +23,7 @@ from urllib.parse import urlsplit
 from config import paths
 from config.atomic_io import write_atomic
 from config.v2_config import MODEL_HUB_BACKENDS, ModelHubConfig, ModelHubSourceConfig
+from core.handlers.model_hub.capability_evidence import identity_digest
 from core.handlers.model_hub.classification import ResolutionDecision
 from core.handlers.model_hub.events import (
     EventAgent,
@@ -59,7 +61,7 @@ from core.handlers.model_hub.service import (
     turn_refusal,
 )
 from core.services.settings import load_config_or_default
-from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
+from core.handlers.model_hub.turn_gateway import VIBEY_TURN_HEADER, ModelHubTurnGateway
 from core.native_dispatch_phase import mark_prewrite_recovery_required
 from modules.agents.catalog import display_name_for_backend
 from vibe.codex_config import format_toml_basic_string
@@ -187,6 +189,8 @@ class ModelHubLaunch:
     provider: Optional[str] = None
     input_limit: Optional[int] = None
     supports_images: Optional[bool] = None
+    # Vibey only: each enabled hosted tool's mode, declaration, executor and replay.
+    hosted_tools: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
     def to_hop_resolution(self) -> dict[str, Any]:
         """Project C-6 from the same launch that owns routing and credentials."""
@@ -216,6 +220,7 @@ class ModelHubLaunch:
                 "supports_reasoning": self.supports_reasoning,
                 "reasoning_efforts": list(self.reasoning_efforts),
             },
+            "hosted_tools": copy.deepcopy({tool: dict(entry) for tool, entry in self.hosted_tools.items()}),
         }
 
     @property
@@ -762,6 +767,23 @@ def overlay_identifier_bytes(content: bytes) -> bytes:
     return json.dumps(identifiers, ensure_ascii=True, separators=(",", ":")).encode()
 
 
+def _hosted_executor_bindings(
+    config: ModelHubConfig, hosted_tools: Mapping[str, Mapping[str, Any]],
+) -> tuple[tuple[str, tuple[str, str, str] | None], ...]:
+    """Each enabled tool's bound executor with its Source identity at launch, for the gateway's route."""
+
+    sources = {source.id: source for source in config.sources}
+    bindings: list[tuple[str, tuple[str, str, str] | None]] = []
+    for tool, entry in sorted(hosted_tools.items()):
+        executor = entry.get("executor")
+        source = sources.get(executor["source_id"]) if executor else None
+        bindings.append((
+            tool,
+            (source.id, executor["model_id"], identity_digest(source)) if source is not None else None,
+        ))
+    return tuple(bindings)
+
+
 class ModelHubRuntimeRouter:
     """Select a supply channel once per turn and build ephemeral injections."""
 
@@ -943,6 +965,7 @@ class ModelHubRuntimeRouter:
         via_mapping: bool = False,
         gateway_request_model_id: Optional[str] = None,
         primary_origin: HopOrigin | None = None,
+        hosted_executors: tuple[tuple[str, tuple[str, str, str] | None], ...] = (),
     ) -> tuple[str, str]:
         if self.turn_gateway is not None:
             return await self.turn_gateway.endpoint(
@@ -956,6 +979,7 @@ class ModelHubRuntimeRouter:
                 gateway_request_model_id=gateway_request_model_id,
                 request_scoped=backend == "codex",
                 **({"primary_origin": primary_origin} if primary_origin is not None else {}),
+                **({"hosted_executors": hosted_executors} if hosted_executors else {}),
             )
         await self.service._ensure_engine_synced()
         status = await self.service._engine_call(self.service.adapter.start())
@@ -1312,6 +1336,24 @@ class ModelHubRuntimeRouter:
                 if self.turn_gateway is not None and backend == "codex"
                 else target_model
             )
+            # A turn's first resolution binds its hosted tools and executors;
+            # later attempts of the turn keep that binding (settings apply from
+            # the next turn) and recompute only what belongs to their hop.
+            frozen = (
+                self.turn_gateway.correlation.turn_hosted_executors(turn_id)
+                if backend == "vibey" and self.turn_gateway is not None
+                else None
+            )
+            hosted_tools = (
+                # Off the controller loop: the first resolution loads the evidence file.
+                await asyncio.to_thread(
+                    self.service.hosted_tools_for_hop, config, source, target_model,
+                    {tool: bound[:2] if bound is not None else None for tool, bound in frozen}
+                    if frozen is not None else None,
+                )
+                if backend == "vibey"
+                else {}
+            )
             gateway_base_url, gateway_token = await self._gateway_credentials(
                 backend,
                 process_scope=str(process_scope or "").strip() or f"{backend}:untracked",
@@ -1322,13 +1364,32 @@ class ModelHubRuntimeRouter:
                 via_mapping=False,
                 gateway_request_model_id=runtime_model,
                 primary_origin=(
-                    HopOrigin(source.vendor, source.protocol, target_model)
+                    HopOrigin(source.vendor, source.protocol, target_model, source.id)
                     if backend == "vibey" else None
+                ),
+                # The proxy endpoint runs only the executor this launch bound per
+                # tool, and only while its Source keeps the identity it had now.
+                hosted_executors=(
+                    frozen if frozen is not None else _hosted_executor_bindings(config, hosted_tools)
                 ),
             )
             if self.turn_gateway is None:
                 prefix = await self._source_prefix(source.id)
                 runtime_model = f"{prefix}/{target_model}"
+            request_metadata: dict[str, str] = {}
+            if self.turn_gateway is not None and backend == "codex":
+                request_metadata = self.turn_gateway.correlation.gateway_request_metadata(
+                    backend=backend, token=gateway_token, turn_id=turn_id,
+                    route=PreparedGatewayRoute(
+                        requested_model_id=requested_model,
+                        resolved_model_id=target_model,
+                        source_id=source.id,
+                        gateway_request_model_id=runtime_model,
+                    ),
+                )
+            elif self.turn_gateway is not None and backend == "vibey" and str(turn_id or "").strip():
+                # Vibey names its turn on every gateway request (HopResolution.request_headers).
+                request_metadata = {VIBEY_TURN_HEADER: str(turn_id).strip()}
             launch = ModelHubLaunch(
                 backend=backend,
                 channel="hub",
@@ -1338,19 +1399,7 @@ class ModelHubRuntimeRouter:
                 source_id=source.id,
                 gateway_base_url=gateway_base_url,
                 gateway_token=gateway_token,
-                gateway_request_metadata=(
-                    self.turn_gateway.correlation.gateway_request_metadata(
-                        backend=backend, token=gateway_token, turn_id=turn_id,
-                        route=PreparedGatewayRoute(
-                            requested_model_id=requested_model,
-                            resolved_model_id=target_model,
-                            source_id=source.id,
-                            gateway_request_model_id=runtime_model,
-                        ),
-                    )
-                    if self.turn_gateway is not None and backend == "codex"
-                    else {}
-                ),
+                gateway_request_metadata=request_metadata,
                 context_window=context_window,
                 max_output_tokens=max_output_tokens,
                 supports_tools=supports_tools,
@@ -1363,6 +1412,7 @@ class ModelHubRuntimeRouter:
                     if backend_model is not None and backend_model.input_modalities
                     else None
                 ),
+                hosted_tools=hosted_tools,
             )
         self._emit_transition(launch, config)
         return launch

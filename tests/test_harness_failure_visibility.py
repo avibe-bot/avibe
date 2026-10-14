@@ -233,7 +233,7 @@ def _cancel_mid_write(sqlite_store, run_id: str, *, fire_on: str):
 def test_a_cancel_landing_under_the_coalesced_completer_is_not_overwritten(
     tmp_path: Path,
 ) -> None:
-    """Subordinate to HFR-060/061 — Stop must outrank a stale terminal snapshot.
+    """Subordinate to HFR-060/HFR-061 — Stop must outrank a stale terminal snapshot.
 
     HFR-061 stopped the coalesced completer clobbering an already-SETTLED row by
     skipping terminal statuses, but it deliberately let ``canceled`` fall through so a
@@ -284,7 +284,7 @@ def test_a_cancel_landing_under_the_coalesced_completer_is_not_overwritten(
 def test_a_cancel_landing_under_settle_run_terminal_is_not_overwritten(
     tmp_path: Path,
 ) -> None:
-    """Subordinate to HFR-060/061 — the same hole in the zombie-settlement writer.
+    """Subordinate to HFR-060/HFR-061 — the same hole in the zombie-settlement writer.
 
     ``settle_run_terminal`` scopes its UPDATE to ``queued|running``, which catches a
     cancel of a QUEUED row because ``cancel_run`` flips that one straight to
@@ -399,7 +399,7 @@ def test_a_cancel_landing_before_deferred_owner_reservation_is_not_overwritten(
 
 
 def test_the_cancel_cas_does_not_leave_an_uncancelled_run_unsettled(tmp_path: Path) -> None:
-    """Subordinate to HFR-060/061 — the guard must not cost an ordinary settlement.
+    """Subordinate to HFR-060/HFR-061 — the guard must not cost an ordinary settlement.
 
     The negative control for the two races above. A ``cancel_requested`` predicate is
     the kind of guard that quietly refuses writes nobody raced — the failure mode

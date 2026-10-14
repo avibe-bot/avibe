@@ -98,6 +98,7 @@ def _svc(im, *, reactions=True):
 
 class AdmissionAckTests(unittest.IsolatedAsyncioTestCase):
     async def test_steered_input_reports_a_receipt(self):
+        """MESSAGE-DELIVERY-301: input steered into the running turn reports that to its sender."""
         im = _FakeIM()
         svc = _svc(im)
 
@@ -107,6 +108,7 @@ class AdmissionAckTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(im.calls, [("add", "m1", STEERED_REACTION_EMOJI)])
 
     async def test_queued_and_pending_steer_report_the_queued_receipt(self):
+        """MESSAGE-DELIVERY-301: queued input, and input still waiting to steer, report the queued receipt."""
         for state in ("queued", "pending_steer"):
             with self.subTest(state=state):
                 im = _FakeIM()
@@ -118,6 +120,7 @@ class AdmissionAckTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(im.calls, [("add", "m1", QUEUED_REACTION_EMOJI)])
 
     async def test_unconfirmed_and_undelivered_states_are_distinguishable(self):
+        """MESSAGE-DELIVERY-301: an unconfirmed steer and an undelivered input read differently."""
         cases = {
             "reconciling_steer": UNCONFIRMED_REACTION_EMOJI,
             "retired": NOT_DELIVERED_REACTION_EMOJI,
@@ -408,6 +411,7 @@ class ReactionTargetSurvivalTests(unittest.TestCase):
     """The reaction target must survive admission and durable hydration."""
 
     def test_quick_reply_echo_is_captured_from_the_ingress_context(self):
+        """MESSAGE-DELIVERY-305: the receipt target is captured from the context that took the input."""
         from core.handlers.message_handler import MessageHandler
 
         context = _ctx(message_id=None)
@@ -421,6 +425,7 @@ class ReactionTargetSurvivalTests(unittest.TestCase):
         self.assertIsNone(MessageHandler._reaction_target(_ctx()))
 
     def test_hydrated_context_gets_its_reaction_target_back(self):
+        """MESSAGE-DELIVERY-305: a context hydrated from its Delivery in a new process gets the target back."""
         from core.handlers.message_handler import MessageHandler
 
         hydrated = _ctx(message_id="delivery-abc")

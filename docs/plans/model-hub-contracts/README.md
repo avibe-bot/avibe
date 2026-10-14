@@ -1,6 +1,8 @@
 # Model Hub contracts
 
-Status: **contract_version 11**, 2026-10-02: the Vibey Hub-only consumer, primary-hop
+Status: **contract_version 12**, 2026-10-13: the served-hop response header also names
+the serving Source id (`served-hop.schema.json`), because two Sources can share an origin.
+It builds on v11 (2026-10-02): the Vibey Hub-only consumer, primary-hop
 resolution and response origin linked to the served attempt, plus the Google protocol
 vocabulary and Gemini gateway frontend, with API/config-only Source admission. See
 [`vibey-consumer.md`](vibey-consumer.md) and [`google-protocol.md`](google-protocol.md).
@@ -182,7 +184,7 @@ comparison. A gate may not report success by comparing stale input with itself.
 
 ## Version closure
 
-`contract_version` 11 must coexist in all registered version locations on the same tested head:
+`contract_version` 12 must coexist in all registered version locations on the same tested head:
 
 - `mirror-registry.json`
 - `agent-chain.schema.json`
@@ -240,6 +242,7 @@ revision; the discovering lane does not reinterpret or edit the contract in plac
 | `turn-provenance.schema.json` | Exactly attributed turn attempts and terminal outcome; no policy or mapping discriminator. The one versioned object persisted to disk, so it accepts every released version. |
 | `usage-summary.schema.json` | Metered token usage over a trailing local-day window, aggregated from proxied turns, with its list-API-price valuation. A report only: no consumer may feed it back into resolution, admission, or cooldown. |
 | `quota-summary.schema.json` | Rate-limit windows of hub-held subscriptions, parsed from each vendor's own usage report, and the API-price value of each subscription's metered usage against its monthly fee. A report only; carries no grant or raw body. |
+| `hosted-tools-status.schema.json` | The Tools tab read: each hosted tool's toggle and chosen executor, every eligible (Source, model) the overlay offers it on with its `call` and `replay` evidence, and re-verify counts. A report only; hop resolution reads config and evidence itself. |
 | `resolution-event.schema.json` | Pull-feed Source/resolution records and their closed reason/detail vocabulary. |
 | `oauth-flow.schema.json` | Subscription creation and re-auth presentation without secret material. |
 | `migration-scan.schema.json` | Server-owned custody-takeover scan of existing native CLI/provider configuration; not an internal contract migration. |
@@ -253,6 +256,9 @@ revision; the discovering lane does not reinterpret or edit the contract in plac
 | `vibey-consumer.md` | C-6 launch projection, capability authority, served-hop response headers, and delivery boundaries. |
 | `google-protocol.md` | Google API/config admission, native gateway paths, discovery, stream facts, and pinned-engine translation boundary. |
 | `vibey-boundary-matrix.json` | Executable Vibey backend/channel audit: all declared schema shapes, runtime admission owners, and Hub-only refusal cases. |
-| `hop-resolution.schema.json` | Ephemeral in-process Vibey consumer result, including gateway-only credentials and nullable capabilities. |
-| `hop-origin.schema.json` | Non-secret response origin shared by the HTTP response header and provenance attempt. |
+| `hop-resolution.schema.json` | Ephemeral in-process Vibey consumer result, including gateway-only credentials, nullable capabilities, and each enabled hosted tool's mode, declaration, bound executor, and replay authorization. |
+| `hop-origin.schema.json` | Non-secret upstream origin persisted on the provenance attempt, beside its `source_id`. |
+| `served-hop.schema.json` | Exact `x-avibe-served-hop` response header value: the admitted origin plus the serving Source id. |
+| `capability-evidence.schema.json` | One persisted (Source, model, feature) evidence record: probe or observed, with its engine and probe-shape stamps and the Source identity it follows. |
+| `provider-overlay.schema.json` | The `providers` section of `vibe/data/backend_models.json`: per-vendor model families with wire efforts and hosted-tool declarations, includes, and list prices. |
 | `README.md` | This ownership, version-closure, and contract-index document. |

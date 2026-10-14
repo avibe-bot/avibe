@@ -73,6 +73,7 @@ from core.agent_core.messages import (
     AssistantMessage,
     TextBlock,
     ToolResultMessage,
+    has_reply,
     UserMessage,
     message_from_dict,
     message_to_dict,
@@ -123,8 +124,7 @@ def final_outcome(message: AssistantMessage) -> FinalOutcome:
     empty-reply test (loop-control.md section 2). Failures only a live run can
     observe after the commit are applied by the live caller.
     """
-    has_text = any(isinstance(block, TextBlock) and block.text and block.text.strip() for block in message.content)
-    return "completed" if has_text else "failed"
+    return "completed" if has_reply(message) else "failed"
 
 
 def _response_type(message: AssistantMessage, *, final: bool, display_text: str) -> str:

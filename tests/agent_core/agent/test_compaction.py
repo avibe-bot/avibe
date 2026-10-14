@@ -56,6 +56,12 @@ from core.agent_core.harness.context import (
 from core.agent_core.harness.projection import context_view, project
 from core.agent_core.messages import (
     AssistantMessage,
+    HostedAction,
+    HostedCost,
+    HostedNative,
+    HostedRecord,
+    HostedSummary,
+    HostedToolBlock,
     Origin,
     TextBlock,
     ThinkingBlock,
@@ -74,6 +80,7 @@ from tests.agent_core.fakes import (
     FakeModelRouter,
     FakeTool,
     InMemoryTranscriptStore,
+    ORIGIN,
     WINDOW_REFUSAL,
     anthropic_error,
     assistant,
@@ -717,6 +724,28 @@ async def test_the_checkpoint_usage_keeps_every_reported_field():
     compaction = next(row for row in await agent.store.load("session") if row.kind == "compaction")
     assert compaction.payload["usage"] == expected
     assert agent.store.audits[0][2]["usage"] == expected
+
+
+async def test_a_hosted_call_a_checkpoint_turn_makes_is_recorded_with_its_cost_and_the_checkpoint_holds():
+    """MH-HOSTED-VIBEY-002, C-10 F2: a side turn keeps the native hosted declarations, so a provider may run a hosted
+    call during a checkpoint. That call cannot be denied at execution; it is parsed like any other, kept in the turn's
+    audit with its reported cost, and the checkpoint text beside it still holds."""
+    search = HostedToolBlock(
+        id="srvtoolu_1",
+        tool="web_search",
+        action=HostedAction("search", queries=("release notes",)),
+        record=HostedRecord(status="completed"),
+        native=HostedNative(source_id="src_served00001", payload=({"type": "server_tool_use", "id": "srvtoolu_1"},)),
+    )
+    summary = HostedSummary(counts={"web_search_requests": 1}, cost=HostedCost(basis="reported", usd=0.01))
+    reply = AssistantMessage((search, text(CHECKPOINT)), ORIGIN, "stop", hosted_summary=summary)
+    agent = make_agent(Model(after_checkpoint(), [[Done(reply)]]), tools=[reader(tokens(3_000))], selection=ROOMY)
+    await run(agent)
+    assert (await cross(agent))[-1].reason == "completed"
+    assert [row for row in await agent.store.load("session") if row.kind == "compaction"]
+    audited = agent.store.audits[0][2]["messages"][-1]
+    assert audited["content"][0]["type"] == "hosted_tool"
+    assert audited["hosted_summary"]["cost"] == {"basis": "reported", "usd": 0.01}
 
 
 async def test_failing_checkpoints_stop_after_two_in_a_run_and_the_next_run_tries_again():

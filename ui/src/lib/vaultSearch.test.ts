@@ -30,9 +30,19 @@ describe('Vault metadata search (literal, case-insensitive AND)', () => {
     expect(matchesVaultQuery(keypair, vaultSearchTerms('keypair secp256k1 签名密钥 标准档'), ['签名密钥', '标准档'])).toBe(true);
   });
 
-  it.each(['hidden-value', 'auth-password', 'private-material', 'sealed-bytes', 'policy-value'])('never searches %s', (query) => {
+  it('searches field labels and value-free record references, including the default alias', () => {
+    const login = { ...secret, name: 'GITHUB_LOGIN', default_field: 'password', fields: ['password', 'username'] };
+    expect(matchesVaultQuery(login, vaultSearchTerms('password'), [])).toBe(true);
+    expect(matchesVaultQuery(login, vaultSearchTerms('GITHUB_LOGIN.username'), [])).toBe(true);
+    expect(matchesVaultQuery(login, vaultSearchTerms('GITHUB_LOGIN.password'), [])).toBe(true);
+  });
+
+  it.each(['hidden-value', 'auth-password', 'private-material', 'sealed-bytes', 'policy-value', 'secret-value'])('never searches %s', (query) => {
     const extended = {
-      ...secret, value: 'hidden-value', private_key: 'private-material', ciphertext: 'sealed-bytes',
+      ...secret,
+      value: 'hidden-value', private_key: 'private-material', ciphertext: 'sealed-bytes',
+      default_field: 'password', fields: ['password'], fields_state: 'corrupt',
+      envelope: { password: 'secret-value' }, field_values: { password: 'secret-value' },
       policy: { ...secret.policy, value: 'policy-value', auth: { type: 'header', name: 'X-API-Key', value: 'auth-password' } },
     };
     expect(matchesVaultQuery(extended, vaultSearchTerms(query), [])).toBe(false);

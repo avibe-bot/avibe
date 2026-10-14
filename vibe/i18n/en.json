@@ -1092,6 +1092,7 @@
       "candidate_suppliers_changed": "The available suppliers changed. Reload the model choices and confirm again.",
       "models_dev_unavailable": "models.dev is unavailable. Enter the model metadata manually or retry later.",
       "codex_catalog_unavailable": "Codex could not prepare the local Model Hub catalog. Retry this turn.",
+      "hosted_content_unpinned": "This request carries hosted-tool content that is not pinned to the Source it was rendered for, so no Source may receive it.",
       "request_too_large": "This request exceeds Avibe's local {limit_mib} MiB request limit. Reduce the images or conversation context and retry.",
       "engine_down": "The local model gateway is unavailable.",
       "engine_down_streamed": "The local model gateway is unavailable. This turn's output may be incomplete.",
@@ -1101,6 +1102,21 @@
       "upstream_request_invalid": "The upstream service rejected the request.",
       "upstream_unauthorized": "The upstream service rejected authorization after refresh.",
       "upstream_error": "The upstream service returned an error."
+    },
+    "hostedTools": {
+      "noExecutor": "No Source is verified to run {tool}. Verify it on a Source in Models.",
+      "executorUnavailable": "The Source bound to run {tool} for this turn is no longer available.",
+      "providerRefused": "The executor's provider refused the call ({detail}).",
+      "timedOut": "The executor call timed out.",
+      "unreachable": "The executor could not be reached.",
+      "unreadable": "The executor's response could not be read.",
+      "tooLarge": "The executor's response was larger than allowed.",
+      "didNotRun": "The executor did not run {tool}.",
+      "responseEnded": "The executor's response ended as {status}.",
+      "callFailed": "The provider's {tool} call failed.",
+      "callEnded": "The provider's {tool} call ended as {status}.",
+      "imageFormat": "The provider returned an unsupported image format: {format}.",
+      "imageUnreadable": "The provider returned an image that could not be used."
     },
     "events": {
       "sourceFallback": "source",
@@ -1716,5 +1732,36 @@
     "sessionTitle": "Vibey · Desktop mini",
     "noChatProject": "Create a project in Avibe first, so the desktop mini has a place for its conversation.",
     "builtinAgentUnavailable": "The built-in Agent is not available, so the desktop mini has no one to talk to."
+  },
+  "hostedTools": {
+    "tool": {
+      "web_search": "Web search",
+      "x_search": "X search",
+      "image_generation": "Image generation"
+    },
+    "quoted": "“{subject}”",
+    "mode": {
+      "native": "native ({provider})",
+      "proxy": "via {provider} proxy"
+    },
+    "count": {
+      "sourceOne": "1 source",
+      "sources": "{count} sources",
+      "postOne": "1 post",
+      "posts": "{count} posts",
+      "imageOne": "1 image",
+      "images": "{count} images"
+    },
+    "cost": {
+      "included": "included in subscription",
+      "list": "≈ ${usd}",
+      "reported": "${usd}",
+      "calls": "{cost} for {calls} calls"
+    },
+    "status": {
+      "failed": "failed: {error}",
+      "incomplete": "incomplete: {error}",
+      "pending": "cut off"
+    }
   }
 }

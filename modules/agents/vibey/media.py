@@ -11,16 +11,20 @@ transcript replays. Loading re-checks the digest.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hashlib
 import os
 import secrets
+import stat
 from pathlib import Path
 from typing import Optional
 
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
 
-from core.agent_core.messages import IMAGE_MIME_TYPES, ImageBlock
+from core.agent_core.messages import IMAGE_MIME_TYPES, HostedImage, ImageBlock
+from core.agent_core.tools.read import detect_supported_image_mime_type
 from storage import media_service
 from storage.models import agent_sessions
 
@@ -33,7 +37,7 @@ class MediaUnavailable(RuntimeError):
 
 
 class MediaSnapshots:
-    """``MediaLoader`` for the provider adapters plus the snapshot writer."""
+    """``MediaLoader`` and ``MediaSink`` for the provider adapters, plus the snapshot writer."""
 
     def __init__(self, engine: Engine, root: Path) -> None:
         self._engine = engine
@@ -79,17 +83,49 @@ class MediaSnapshots:
 
         return sink
 
+    # --- MediaSink -------------------------------------------------------------
+
+    async def save_image(self, encoded: str) -> HostedImage:
+        """A generated image (``vibey-hosted-tools.md`` §7.3), kept as an immutable file the agent's ``read`` opens.
+        The surfaces register it for display when the row that names it commits."""
+        return await asyncio.to_thread(self._save_image, encoded)
+
+    def _save_image(self, encoded: str) -> HostedImage:
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError):
+            raise ValueError("the image is not valid base64") from None
+        mime_type = detect_supported_image_mime_type(data)
+        if mime_type not in _EXTENSIONS:
+            raise ValueError("the image is not a PNG, JPEG, GIF or WebP")
+        return HostedImage(path=str(self._store(data, mime_type)), mime=mime_type, bytes=len(data))
+
+    def _store(self, data: bytes, mime_type: str) -> Path:
+        """The content-addressed file holding ``data``. An entry already at that name is reused only while it is a
+        regular file that still holds those bytes: history reads these paths directly, and their owner can change
+        them. Anything else is replaced by one atomic rename, which never follows the entry it replaces, so nothing is
+        repaired in place and a link's target is never touched."""
+        digest = hashlib.sha256(data).hexdigest()
+        path = self._root / f"{digest}.{_EXTENSIONS[mime_type]}"
+        try:
+            if stat.S_ISREG(os.lstat(path).st_mode) and hashlib.sha256(path.read_bytes()).hexdigest() == digest:
+                return path
+        except OSError:
+            pass  # missing or unreadable: written below
+        self._root.mkdir(parents=True, exist_ok=True)
+        tmp = self._root / f".{digest}.{secrets.token_hex(4)}.tmp"
+        try:
+            tmp.write_bytes(data)
+            os.replace(tmp, path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+        return path
+
     def _snapshot(self, data: bytes, mime_type: str, session_id: str, name: Optional[str]) -> str:
         if mime_type not in IMAGE_MIME_TYPES:
             raise ValueError(f"unsupported image type: {mime_type}")
-        digest = hashlib.sha256(data).hexdigest()
-        path = self._root / f"{digest}.{_EXTENSIONS[mime_type]}"
-        if not path.is_file():
-            self._root.mkdir(parents=True, exist_ok=True)
-            tmp = self._root / f".{digest}.{secrets.token_hex(4)}.tmp"
-            tmp.write_bytes(data)
-            os.chmod(tmp, 0o444)
-            os.replace(tmp, path)
+        path = self._store(data, mime_type)
         with self._engine.begin() as conn:
             scope_id = conn.execute(
                 select(agent_sessions.c.scope_id).where(agent_sessions.c.id == session_id)

@@ -33,6 +33,7 @@ class ModelHubRequest(dict[str, Any]):
         protocol: str,
         headers: Mapping[str, str] | None = None,
         primary_origin: HopOrigin | None = None,
+        pinned_hop: tuple[str, str | None] | None = None,
     ) -> None:
         super().__init__(payload)
         self.protocol = protocol
@@ -40,6 +41,10 @@ class ModelHubRequest(dict[str, Any]):
         # Launch snapshot, not wire JSON. Every retry compares against this
         # origin, even when resolution restarts after cooldown/config changes.
         self.primary_origin = primary_origin
+        # The one (Source, model) a Vibey request carrying Source-specific hosted
+        # content may be served by: no failover, no recovery wait, no rewrite.
+        # A model of None matches no hop.
+        self.pinned_hop = pinned_hop
 
 
 _OPAQUE_FIELDS = frozenset({"signature", "thoughtSignature", "thought_signature", "encrypted_content"})
@@ -104,6 +109,32 @@ def without_opaque_history(request: Mapping[str, Any]) -> Mapping[str, Any]:
     if isinstance(request, ModelHubRequest):
         return ModelHubRequest(
             payload, protocol=request.protocol, headers=request.headers,
-            primary_origin=request.primary_origin,
+            primary_origin=request.primary_origin, pinned_hop=request.pinned_hop,
         )
     return payload
+
+
+def declared_tool_types(request: Mapping[str, Any]) -> frozenset[str]:
+    """The ``type`` of every tool the request declares."""
+
+    tools = request.get("tools")
+    if not isinstance(tools, list):
+        return frozenset()
+    return frozenset(
+        kind for tool in tools if isinstance(tool, Mapping) and isinstance(kind := tool.get("type"), str)
+    )
+
+
+def replays_history_items(request: Mapping[str, Any], kinds: frozenset[str]) -> bool:
+    """Whether the request's history carries an item of one of these ``type`` values, at any depth."""
+
+    pending: list[Any] = [request.get("messages", request.get("input"))]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, Mapping):
+            if value.get("type") in kinds:
+                return True
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
+    return False
