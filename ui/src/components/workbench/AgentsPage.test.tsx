@@ -52,6 +52,7 @@ type FakeModelCatalog = {
   models: string[];
   reasoningOptions?: Record<string, { value: string; label: string }[]>;
   effortMenus?: Record<string, { omitted: string[]; not_on: Record<string, string[]> }>;
+  hubUnread?: true;
 };
 let modelCatalog: FakeModelCatalog = { models: [] };
 let modelCatalogReads = 0;
@@ -1744,7 +1745,8 @@ describe('AgentsPage reconnect reconciliation', () => {
     const field = () => document.querySelector('[data-effort-field]') as HTMLElement;
 
     // A refresh whose Hub read failed answers with the native ladder, which offers `xhigh`.
-    modelCatalog = { models: [], reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }, { value: 'xhigh', label: 'xhigh' }] } };
+    const native = { models: [], reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }, { value: 'xhigh', label: 'xhigh' }] } };
+    modelCatalog = { ...native, hubUnread: true };
     fireEvent.pointerEnter(field());
     expect(screen.queryByRole('button', { name: 'xhigh', exact: true })).toBeNull();
 
@@ -1753,6 +1755,11 @@ describe('AgentsPage reconnect reconciliation', () => {
     const reads = modelCatalogReads;
     fireEvent.pointerEnter(field());
     expect(modelCatalogReads).toBe(reads + 1);
+
+    // Another tab switched the backend to Direct: a confirmed answer replaces the Hub one.
+    modelCatalog = native;
+    fireEvent.pointerEnter(field());
+    expect(screen.getByRole('button', { name: 'xhigh', exact: true })).toBeTruthy();
   });
 
   it('drops an effort-menu read still out when Settings covers the page', async () => {

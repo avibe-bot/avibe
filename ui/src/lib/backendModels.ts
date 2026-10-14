@@ -24,6 +24,9 @@ export interface BackendModels {
   effortMenus?: Record<string, EffortMenu>;
   /** True while a background remote-catalog refresh may produce a newer snapshot. */
   catalogRefreshPending?: boolean;
+  /** Model Hub gave no answer (the read failed, or the server predates the read),
+   *  so these are the native list. A Direct-mode answer is an answer: absent. */
+  hubUnread?: true;
 }
 
 const CATALOG_REFRESH_RETRY_DELAY_MS = 3_500;
@@ -73,13 +76,13 @@ const hubCatalogModels = (agent: PickerAgentCatalog | null, backend: string): Ba
 /**
  * Whether `result` may replace what a surface shows for a backend. Model Hub
  * answers with effort menus; a Hub read that fails comes back as the native
- * list, which says nothing about Hub routing and would offer efforts Hub
- * refuses. So once a backend has answered from Hub in a surface's activation,
- * only another Hub answer replaces it: the last one stands, and the next read
- * asks Hub again.
+ * list (`hubUnread`), which says nothing about Hub routing and would offer
+ * efforts Hub refuses. So once a backend has answered from Hub in a surface's
+ * activation, an unread Hub does not replace it: the last answer stands, and the
+ * next read asks Hub again. A confirmed Direct answer does replace it.
  */
 export const supersedesHubAnswer = (result: BackendModels, knownHub: boolean): boolean =>
-  !knownHub || result.effortMenus !== undefined;
+  !knownHub || result.effortMenus !== undefined || result.hubUnread !== true;
 
 // Single source of truth for "list the selectable models for a backend",
 // shared by ChatPage, the Agents detail panel, and the New Agent dialog so a
@@ -98,8 +101,14 @@ export async function fetchBackendModels(
   api: ApiContextType,
   backend: string,
 ): Promise<BackendModels> {
-  const hub = hubCatalogModels(await api.readModelHubAgentCatalogForModelPicker(backend), backend);
+  const agent = await api.readModelHubAgentCatalogForModelPicker(backend);
+  const hub = hubCatalogModels(agent, backend);
   if (hub) return hub;
+  const native = await nativeBackendModels(api, backend);
+  return agent === null ? { ...native, hubUnread: true } : native;
+}
+
+async function nativeBackendModels(api: ApiContextType, backend: string): Promise<BackendModels> {
   if (!getBackendUiMeta(backend).capabilities.supports_cli) return { models: [] };
   if (backend === 'claude') {
     const res = await api.claudeModels();

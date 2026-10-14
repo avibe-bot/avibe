@@ -29,6 +29,8 @@ vi.mock('../../lib/useSourceNames', () => ({ useSourceNames: () => sourceNames }
 // catalog read keys on it, so a fresh object per render would re-read on its own.
 // The Hub read answers per test; `useAddModelPath` owns what it means.
 let hubMode: 'hub' | 'direct' = 'direct';
+// Whether the next catalog read finds Model Hub unreadable (the native list, marked unread).
+let hubUnread = false;
 const API = {
   readModelHubAgentCatalogForModelPicker: (backend: string) => Promise.resolve({ backend, mode: hubMode }),
 };
@@ -59,6 +61,7 @@ vi.mock('../../lib/backendModels', async (importOriginal) => ({
       modelLabels: Record<string, string>;
       reasoningOptions: Record<string, { value: string; label: string }[]>;
       effortMenus?: Record<string, { omitted: string[]; not_on: Record<string, string[]> }>;
+      hubUnread?: true;
       catalogRefreshPending: boolean;
     }) => void,
   ) => {
@@ -68,7 +71,7 @@ vi.mock('../../lib/backendModels', async (importOriginal) => ({
       modelLabels: {},
       reasoningOptions: catalogReasoning,
       // As the real loader answers: only a Hub catalog carries effort menus.
-      ...(hubMode === 'hub' ? { effortMenus: catalogMenus } : {}),
+      ...(hubUnread ? { hubUnread: true as const } : hubMode === 'hub' ? { effortMenus: catalogMenus } : {}),
       catalogRefreshPending: false,
     });
     if (deferReads) pendingReads.push(answer);
@@ -183,6 +186,7 @@ describe('AgentRoutePicker', () => {
     catalogMenus = {};
     sourceNames = null;
     hubMode = 'direct';
+    hubUnread = false;
     catalogReads = 0;
     deferReads = false;
     pendingReads.length = 0;
@@ -346,7 +350,7 @@ describe('AgentRoutePicker', () => {
 
     // This open's Hub read failed over to the native ladder, which offers `low` and
     // says nothing about Hub routing: the Hub answer stands.
-    hubMode = 'direct';
+    hubUnread = true;
     catalogReasoning = { sonnet: [{ value: 'low', label: 'low' }, { value: 'high', label: 'high' }] };
     await openMenu(user);
     expect(catalogReads).toBe(2);
@@ -355,9 +359,26 @@ describe('AgentRoutePicker', () => {
     await user.keyboard('{Escape}');
 
     // Hub answers again, and the next open still asks it.
-    hubMode = 'hub';
+    hubUnread = false;
     await openMenu(user);
     expect(catalogReads).toBe(3);
+  });
+
+  it('takes a confirmed Direct answer over an earlier Hub one', async () => {
+    hubMode = 'hub';
+    catalogReasoning = { sonnet: [{ value: 'high', label: 'high' }] };
+    catalogMenus = { sonnet: { omitted: ['low'], not_on: {} } };
+    const user = userEvent.setup();
+    render(<HubPicker role="owner" />);
+    await openMenu(user);
+    await user.keyboard('{Escape}');
+
+    // Another tab switched the backend to Direct: its native list is the answer now.
+    hubMode = 'direct';
+    catalogReasoning = { sonnet: [{ value: 'low', label: 'low' }, { value: 'high', label: 'high' }] };
+    await openMenu(user);
+    expect(effortColumn().getByRole('button', { name: /chat\.picker\.effortOptions\.low/ }).textContent)
+      .toBe('chat.picker.effortOptions.low');
   });
 
   it('keeps a refused saved effort when the current model is chosen again', async () => {

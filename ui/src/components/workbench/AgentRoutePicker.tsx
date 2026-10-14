@@ -6,6 +6,7 @@ import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
 import type { VibeAgentBrief } from '../../context/ApiContext';
+import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import type { EffortMenu } from '../settings/models/types';
 import { loadBackendModelsWithRefresh, modelOptionLabel, supersedesHubAnswer, useAddModelExit } from '../../lib/backendModels';
 import { isEffortSupported, refusedSavedEffort, resolveEffortOptions } from '../../lib/effortOptions';
@@ -99,6 +100,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
 }) => {
   const { t } = useTranslation();
   const api = useApi();
+  const authorization = useInstanceAuthorization();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [modelsByBackend, setModelsByBackend] = useState<Record<string, string[]>>({});
@@ -305,7 +307,11 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   const showEffortColumn = effortOptions.length > 0 || refusedEffort !== null;
   // Names only when an effort needs one; a role that cannot read Sources gets the
   // hint without them.
-  const sourceNames = useSourceNames(open && effortNotOn !== null && Object.keys(effortNotOn).length > 0, surfaceActive);
+  const sourceNames = useSourceNames(
+    open && effortNotOn !== null && Object.keys(effortNotOn).length > 0,
+    surfaceActive,
+    authorization.instanceRole ?? 'none',
+  );
   const notOnLabel = (effort: string): string | null => {
     // Efforts are free-form strings: only the map's own entry for this one counts,
     // never one inherited from Object.prototype (an effort named "constructor").

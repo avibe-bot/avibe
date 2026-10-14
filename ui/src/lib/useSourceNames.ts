@@ -4,7 +4,8 @@ import { modelsApi } from '../components/settings/models/modelsApi';
 
 /**
  * Model Hub Source display names by id, read once per activation of the surface
- * that shows them, when it first wants them.
+ * that shows them and per viewer (`viewer` names the role reading them), when
+ * it first wants them.
  *
  * Sources are renamed, added and replaced in Settings, which covers the surface,
  * so each uncovering reads them afresh; the last names show until the new answer
@@ -14,11 +15,12 @@ import { modelsApi } from '../components/settings/models/modelsApi';
  * surfaces, so a refused read is an expected answer: it yields null, and the
  * caller says what it can without the names.
  */
-export function useSourceNames(wanted: boolean, surfaceActive: boolean): Record<string, string> | null {
+export function useSourceNames(wanted: boolean, surfaceActive: boolean, viewer: string): Record<string, string> | null {
   const [names, setNames] = useState<Record<string, string> | null>(null);
-  // One token per activation (each change of `surfaceActive` starts a new one),
-  // and the activation the last answer belongs to.
-  const activation = useMemo(() => ({ surfaceActive }), [surfaceActive]);
+  // One token per activation and viewer: each change of `surfaceActive` starts a
+  // new activation, and a change of who is looking (a role change) may change
+  // whether the names may be read at all. The last answer belongs to one token.
+  const activation = useMemo(() => ({ surfaceActive, viewer }), [surfaceActive, viewer]);
   const [answeredFor, setAnsweredFor] = useState<object | null>(null);
   useEffect(() => {
     if (!wanted || !surfaceActive || answeredFor === activation) return undefined;

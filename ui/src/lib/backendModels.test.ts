@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { blankBackendModel, candidateBackendModel } from '../components/settings/models/backendCatalog';
 import type { AgentSupply, BackendModel } from '../components/settings/models/types';
 import { ApiError, type ApiContextType } from '../context/ApiContext';
-import { fetchBackendModels, loadBackendModelsWithRefresh, modelOptionLabel } from './backendModels';
+import { fetchBackendModels, loadBackendModelsWithRefresh, modelOptionLabel, supersedesHubAnswer } from './backendModels';
 import { resolveEffortOptions } from './effortOptions';
 
 /** No Model Hub record to read, which is what every pre-Hub server, unreadable
@@ -108,6 +108,7 @@ describe('fetchBackendModels for OpenCode', () => {
       reasoningOptions: {
         'moonshotai/kimi-k2': [{ value: 'high', label: 'High' }],
       },
+      hubUnread: true,
     });
   });
 
@@ -119,7 +120,7 @@ describe('fetchBackendModels for OpenCode', () => {
         .mockRejectedValue(new ApiError('forbidden', 403, 'instance_access_forbidden')),
     } as unknown as ApiContextType;
 
-    await expect(fetchBackendModels(api, 'opencode')).resolves.toEqual({ models: [] });
+    await expect(fetchBackendModels(api, 'opencode')).resolves.toEqual({ models: [], hubUnread: true });
   });
 
   it('still propagates a failure that is not the expected refusal', async () => {
@@ -149,7 +150,8 @@ describe('fetchBackendModels in gateway mode', () => {
     });
     expect(readModelHubAgentCatalogForModelPicker).toHaveBeenCalledWith('vibey');
     readModelHubAgentCatalogForModelPicker.mockResolvedValue(null);
-    expect(await fetchBackendModels(api, 'vibey')).toEqual({ models: [] });
+    // No answer from Model Hub: the native list, marked as such.
+    expect(await fetchBackendModels(api, 'vibey')).toEqual({ models: [], hubUnread: true });
     expect(claudeModels).not.toHaveBeenCalled();
     expect(codexModels).not.toHaveBeenCalled();
     expect(readOpencodeOptionsForModelPicker).not.toHaveBeenCalled();
@@ -220,6 +222,20 @@ describe('fetchBackendModels in gateway mode', () => {
     expect(result.effortMenus).toEqual({ 'gpt-6-astra': { omitted: ['ultra'], not_on: { xhigh: ['src_relaygpt1'] } } });
     // A model with no evidence is offered exactly what its row declares.
     expect(resolveEffortOptions('vibey', 'grok-4.6', result.reasoningOptions)).toEqual(['low', 'high']);
+  });
+
+  it('tells an unread Model Hub from a confirmed Direct answer, so a Hub answer is replaced only by an answer', async () => {
+    const claudeModels = vi.fn().mockResolvedValue({ ok: true, models: ['sonnet'] });
+    const read = vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce({ backend: 'claude', mode: 'direct' });
+    const api = { readModelHubAgentCatalogForModelPicker: read, claudeModels } as unknown as ApiContextType;
+
+    const unread = await fetchBackendModels(api, 'claude');
+    const direct = await fetchBackendModels(api, 'claude');
+    expect(unread.hubUnread).toBe(true);
+    expect(direct.hubUnread).toBeUndefined();
+    // A surface that had a Hub answer keeps it over an unread Hub, and takes a Direct one.
+    expect(supersedesHubAnswer(unread, true)).toBe(false);
+    expect(supersedesHubAnswer(direct, true)).toBe(true);
   });
 
   it('states "no efforts" for every routeable model the catalog says does not reason', async () => {
