@@ -67,7 +67,7 @@ uses the narrow ephemeral-file transport below instead.
 The adapter requires Harbor 0.24.0, a trusted local **ordinary Avibe wheel**, its
 explicit SHA256, a Profile, and a matching explicit model. It hashes an immutable
 copy **before uploading anything**. It installs the wheel into a private venv,
-not editable source. Only six tracked wrapper files are copied beside it;
+not editable source. Only seven tracked wrapper files are copied beside it;
 product packages, tests, oracle solutions and user home are never source-uploaded.
 Wheel version/SHA, actual Harbor version, wrapper commit/hash/dirty state and
 execution metadata are recorded. Real paired runs should use a clean committed
@@ -135,6 +135,66 @@ only when the product reports tokens. Cost stays null (unknown provider bill),
 accounting completeness stays explicit, and verifier reward stays separate.
 No model text is passed to Harbor's regex-based CLI error classifier. Reports,
 not the runner's exit status, identify completion/failure/time limit.
+
+## Failure diagnosis and remote ownership
+
+`execution.json.diagnostics` is a bounded, allowlisted projection fetched via
+`vibe data query` before the service stops. It records canonical stop reasons,
+text/thinking/tool block counts, character counts and reported token counts for
+up to eight recent responses in the root Session's last 32 context messages.
+`responses_truncated` and `history_complete=false` make its limits explicit.
+No prompt, reasoning text, tool arguments, raw service log or database is exported.
+If the query fails, diagnostics say `unavailable`; the real outcome and shutdown
+still take precedence. `has_error_message` is presence, not an error taxonomy.
+
+For remote execution, do not keep Harbor owned by an SSH connection. On the
+**dedicated Linux evaluation instance**, use the source-only systemd supervisor:
+
+```sh
+# Config paths must be absolute ON THE REMOTE INSTANCE. Preserve the original
+# config and record any explicit path relocation; do not silently change budgets.
+/path/to/harbor-venv/bin/python -m scripts.terminal_bench.remote_job preflight \
+  --config /private/bench/job.json
+/path/to/harbor-venv/bin/python -m scripts.terminal_bench.remote_job submit \
+  --config /private/bench/job.json --root /private/bench/runs/unique-run \
+  --credential-file /private/staging/credential/provider.key --wall-seconds 1800
+/path/to/harbor-venv/bin/python -m scripts.terminal_bench.remote_job status \
+  --root /private/bench/runs/unique-run
+```
+
+The credential parent must be owned mode0700 and the regular file mode0600;
+the supervisor consumes it before starting Harbor. Full-runtime jobs derive the
+environment-variable name from the profile, and explicit mismatches are refused.
+For a reference agent specify its provider variable with `--credential-env`.
+No secret value enters systemd properties or command arguments.
+
+The host-wide `/run/lock/avibe-benchmark.active.json` reservation rejects a second
+submission regardless of run-root parent. A permanent per-job destination claim
+also prevents accidental reuse after completion. An unconfirmed owner remains a
+blocker; never delete its reservation merely to launch another paid attempt.
+The supervisor requires Harbor 0.24.0, one local single-step task, one attempt,
+zero retries and concurrency one. It keeps the frozen config and wheel hash;
+preflight never calls a model. The remote hard wall covers the whole job and is
+recorded separately from Harbor's agent-execution budget. It does not secretly
+extend setup, output, model or verification budgets.
+
+The pinned Harbor driver's awaited START hook records exact agent and verifier
+Compose project labels **before** resources are created, including network-only
+startup failures. systemd owns the worker and descendants; ExecStopPost runs
+only after their process group is fenced. This phase recovers declared task
+artifacts within a small total budget, removes only proven-owned containers and
+networks, and writes `receipt.json`. Missing/malformed Harbor output cannot skip
+cleanup. A zero child exit plus a job timestamp is not enough: completion needs
+the one exact trial's terminal receipt as well. Harbor results are never rewritten
+and orchestration failure never invents a reward or usage.
+
+Observe `status` with one Avibe Harness Watch (exit75 = still active). A dead unit
+without a terminal receipt is an explicit failure, not an endless wait. Reconnect
+and inspect after an SSH failure; **do not resubmit** the workload. The supervisor
+needs systemd and Docker inside an explicitly authorized dedicated environment;
+it does not provision hosts, relax Incus security, restart shared services, or
+change other projects. Read-only diagnostics and no-paid lifecycle fixtures are
+not benchmark capability scores.
 
 ## Focused optional tests
 

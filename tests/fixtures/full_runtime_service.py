@@ -50,7 +50,13 @@ class ScriptedEngine(ModelHubScenarioAdapter):
                                          "timeout": 20, "watch": False})}}]}
             reason = "tool_calls"
         else:
-            delta, reason = {"content": "Finished integration fixture. fixture-private-key-not-real"}, "stop"
+            scenario = os.environ.get("TB_TEST_SCENARIO")
+            if scenario == "empty-response":
+                delta, reason = {}, "stop"
+            elif scenario == "thinking-length":
+                delta, reason = {"reasoning_content": "private-reasoning-秘密"}, "length"
+            else:
+                delta, reason = {"content": "Finished integration fixture. fixture-private-key-not-real"}, "stop"
         rows = [
             {"id": "fixture-response", "model": model_id,
              "choices": [{"index": 0, "delta": delta, "finish_reason": None}]},

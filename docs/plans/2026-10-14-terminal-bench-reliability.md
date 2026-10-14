@@ -50,6 +50,23 @@ tasks/verifiers, or old results.
    Reject missing/empty/wrong-mode credential files before Harbor starts. Consume
    transport files promptly; diagnostics and receipts must pass sentinel scans.
 
+## Diagnosis decision
+
+The read-only audit confirmed the parser preserves `length` vs `stop` and
+thinking vs text; recovery does not replay a failed task. A visible tool-free
+`length` final was incorrectly considered completed by both the loop and the
+transcript outcome function. The orchestrator chooses one consistent final
+classification: every final `length` is failed/`length`, including no-answer
+shapes, with generic output-limit copy. This deliberately corrects the old
+no-answer matrix expectation too, rather than retaining its misleading
+`empty_response` label. Ordinary empty `stop` remains failed/`empty_response`;
+non-final continuations and bounded tool-call retries are unchanged. No automatic
+continuation or larger budget is introduced.
+
+Before-code evidence: the extended no-answer matrix failed four cases with
+`empty_response != length` on the dedicated remote host; 14 controls passed.
+The historical pilot still lacks evidence identifying its final stop reason.
+
 ## Validation gates
 
 - Table-driven provider/loop regressions: empty vs reasoning-only vs length,
@@ -65,6 +82,30 @@ tasks/verifiers, or old results.
 - Focused tests and lint remotely, independent review, then normal PR/CI gates.
   No merge, deployment to the live user runtime, official-task rerun, or expanded
   benchmark batch is included.
+
+## Verified repair evidence
+
+- Core red test: four final no-answer `length` cases reproduced the lost cause
+  (`empty_response` rather than `length`); 14 controls passed.
+- Core/adapter green: 83 focused cases, including persisted error rows and
+  localized length causes for empty, thinking-only and visible partial finals.
+- Wrapper/host green: 48 focused tests before the additional credential-name
+  regression; final suite results are recorded at delivery.
+- Real full-runtime source acceptance: two simulated provider cases (empty stop,
+  thinking-only length) both completed failure reporting, retained the distinct
+  canonical stop/block diagnostics and proved owned cleanup. No model bill.
+- Dedicated remote systemd + real Harbor/Docker acceptance after review fixes:
+  SSH submit/exit completed normally; a seven-second hard wall, SIGKILL of the
+  supervisor, and SIGKILL of the Harbor child each produced their own terminal
+  orchestration receipt, retained fixture artifacts, and left no owned container
+  or network. A separate bystander container remained running and was removed
+  only by the test owner after all assertions. No paid task was repeated.
+
+Review findings fixed as a class: parse failures cannot block cleanup; one
+host-wide reservation plus permanent destination claim; post-stop-only receipt
+publication; exact trial terminal evidence; total finalization budget; ownership
+journal before network creation; absolute-path preflight; profile-bound secret
+variable. Original Harbor results and historical failures remain untouched.
 
 ## Historical limitations to retain in reporting
 

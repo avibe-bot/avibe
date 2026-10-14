@@ -22,6 +22,7 @@ from typing import Mapping
 
 import psutil
 
+from .diagnostics import project_responses, response_query
 from .profile import Profile, validate_layout
 
 _CONTROL = Path(__file__).with_name("control.py")
@@ -398,6 +399,19 @@ class FullRuntimeTrial:
             self._result["usage_unavailable"] = True
 
     def close(self):
+        # Capture only allowlisted response shapes while the normal CLI can
+        # still reach this trial's service. Failure is explicit but never
+        # changes the measured outcome or prevents owned-process cleanup.
+        session_id = self._result.get("session_id")
+        self._result["diagnostics"] = {"schema_version": 1, "status": "no_session", "raw_text_exported": False}
+        if session_id and self._service and self._service.poll() is None:
+            try:
+                payload = self._call("cli", "data", "query", "--sql", response_query(session_id), "--limit", "9", timeout=10)
+                self._result["diagnostics"] = project_responses(payload)
+            except Exception:
+                self._result["diagnostics"] = {"schema_version": 1, "status": "unavailable", "raw_text_exported": False}
+        elif session_id:
+            self._result["diagnostics"]["status"] = "service_unavailable"
         try:
             if self._processes:
                 self._result["cleanup"] = self._processes.close(self.profile.cleanup_seconds)

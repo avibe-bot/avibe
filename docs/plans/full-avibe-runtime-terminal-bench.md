@@ -89,7 +89,10 @@ installation, credential custody, provider connectivity, or a benchmark score.
   single source-only wrapper. Optional `harbor_agent.py`, `launch.py` and
   `credential.py` adapt its lifecycle and private credential transport to
   Harbor; no extracted product packages are uploaded.
-- Product `pyproject.toml`, `uv.lock`, service, Agent and storage files are unchanged.
+- The initial wrapper left product dependency, service, Agent and storage files
+  unchanged. The follow-up reliability repair also changes shared final-response
+  classification so an explicit output-limit stop cannot be persisted as success;
+  dependency files, service ownership and database schema remain unchanged.
 - The subprocess test uses normal `main.py`, IPC Source/catalog/route APIs and
   the real CLI Run path. It proves a native Bash tool writes a Unicode note and
   task SQLite, with no framework files in task cwd; task `config.py` cannot
@@ -124,7 +127,13 @@ Docker Compose can preserve a host UID on uploaded files; credential setup
 adopts only a validated single-link regular inode under its private directory,
 while normal consumption retains strict ownership and permission checks.
 
-Remaining gates: one same-profile paired official task with measured usage,
+The first remote paired pilot reached a real candidate verifier (reward 0 after
+an empty-reply Run failure); its final raw provider stop was not retained. The
+reference lost its owner without terminal verification. These do not form a valid
+paired capability comparison. Reliability diagnosis and repair are tracked in
+[the follow-up contract](2026-10-14-terminal-bench-reliability.md).
+
+Remaining gates: a separately authorized paired run after reliability acceptance,
 cost assessment before larger batches, and current-head review/CI before code
 delivery. Benchmark results must name the tested wheel and wrapper revisions,
 not assume they match the latest product branch. Preserve failed attempts and

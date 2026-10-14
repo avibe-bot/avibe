@@ -75,7 +75,7 @@ def test_sandbox_environment_retains_task_home_and_toolchains(tmp_path):
 
 @pytest.mark.reap_processes
 @pytest.mark.allow_foreign_signals("Full-runtime supervisor reaps its subprocess's recorded descendants by identity")
-@pytest.mark.parametrize("scenario", ["success", "watch", "deadline", "missing_credential"])
+@pytest.mark.parametrize("scenario", ["success", "watch", "deadline", "missing_credential", "empty-response", "thinking-length"])
 def test_real_service_cli_hub_vibey_writes_and_isolates_state(tmp_path, monkeypatch, scenario):
     task = tmp_path / "任务"
     task.mkdir()
@@ -95,6 +95,8 @@ def test_real_service_cli_hub_vibey_writes_and_isolates_state(tmp_path, monkeypa
         trial.env["PATH"] = str(shim.parent) + os.pathsep + trial.env["PATH"]
     if scenario == "deadline":
         trial.env["TB_TEST_SCENARIO"] = "slow-tool"
+    if scenario in {"empty-response", "thinking-length"}:
+        trial.env["TB_TEST_SCENARIO"] = scenario
     original_command = trial._command
 
     def command(operation, *args):
@@ -130,6 +132,11 @@ def test_real_service_cli_hub_vibey_writes_and_isolates_state(tmp_path, monkeypa
             assert trial._result["outcome"] == "time_limit", trial._result
             assert trial._result["run_id"]
             assert (task / "still-writing").exists(), "the real tool must run before the deadline"
+        elif scenario in {"empty-response", "thinking-length"}:
+            assert trial._result["outcome"] == "failed", trial._result
+            assert trial._result["harness_quiescent"] is True
+            expected_error = "output limit" if scenario == "thinking-length" else "empty reply"
+            assert expected_error in trial._result["final_text"]
         else:
             assert trial._result["outcome"] == "blocked"
             assert trial._result["blocker"] == "model_source_credential_required"
@@ -138,7 +145,7 @@ def test_real_service_cli_hub_vibey_writes_and_isolates_state(tmp_path, monkeypa
         assert not (trial.avibe_home / "runtime" / "vibe-ui.pid").exists()
         assert not (trial.avibe_home / "runtime" / "remote-access-cloudflared.pid").exists()
     assert dict(os.environ) == before
-    expected = {"config.py", "笔记.md", "task.sqlite", "task-env.json"} if scenario == "success" else {"config.py"}
+    expected = {"config.py", "笔记.md", "task.sqlite", "task-env.json"} if scenario in {"success", "empty-response", "thinking-length"} else {"config.py"}
     if scenario == "watch":
         expected.add("watch-note.txt")
     if scenario == "deadline":
@@ -152,6 +159,15 @@ def test_real_service_cli_hub_vibey_writes_and_isolates_state(tmp_path, monkeypa
     assert "fixture-private-key-not-real" not in report_text
     if scenario == "success":
         assert "[REDACTED]" in report["final_text"]
+    if scenario in {"success", "empty-response", "thinking-length"}:
+        diagnostic = report["diagnostics"]
+        assert diagnostic["status"] == "available", diagnostic
+        last = diagnostic["responses"][0]
+        assert last["stop_reason"] == ("length" if scenario == "thinking-length" else "stop")
+        assert last["thinking_blocks"] == int(scenario == "thinking-length")
+        assert last["text_blocks"] == int(scenario == "success")
+        assert last["tool_calls"] == 0
+        assert "private-reasoning" not in json.dumps(diagnostic)
     assert report["cleanup"]["owned_processes_stopped"] is True
     assert report["verifier_reward"] is None
     assert report["accounting_complete"] is False

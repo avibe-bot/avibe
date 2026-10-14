@@ -25,7 +25,7 @@ from harbor.agents.installed.base import BaseInstalledAgent, with_prompt_templat
 from .profile import Profile
 
 
-_WRAPPER_FILES = ("__init__.py", "profile.py", "control.py", "runner.py", "launch.py", "credential.py")
+_WRAPPER_FILES = ("__init__.py", "profile.py", "control.py", "runner.py", "launch.py", "credential.py", "diagnostics.py")
 
 
 async def _join_transfer(awaitable):

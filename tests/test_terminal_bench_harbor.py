@@ -150,6 +150,7 @@ async def test_verified_wheel_and_only_wrapper_are_installed(tmp_path, wheel, mo
         "scripts/__init__.py", "scripts/terminal_bench/__init__.py",
         "scripts/terminal_bench/profile.py", "scripts/terminal_bench/control.py",
         "scripts/terminal_bench/runner.py", "scripts/terminal_bench/launch.py", "scripts/terminal_bench/credential.py",
+        "scripts/terminal_bench/diagnostics.py",
     }
     assert agent.provenance["wheel_sha256"] == wheel[1]
     assert agent.provenance["avibe_version"] == "9.9.9"
