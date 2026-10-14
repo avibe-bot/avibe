@@ -25,6 +25,9 @@ from vibe.internal_client import (
 
 DEFAULT_SCRIPT_TIMEOUT_SECONDS = 300.0
 _SCRIPT_DIAGNOSTIC_TAIL_BYTES = 64 * 1024
+_SCRIPT_RESULT_MAX_BYTES = 8 * 1024 * 1024
+_SCRIPT_RESULT_PATH_ENV = "AVIBE_COMPUTER_RESULT_PATH"
+_PROCESS_REAP_TIMEOUT_SECONDS = 0.25
 _FAILURE_ENVELOPE_FIELDS: tuple[str, ...] | None = None
 
 _SCRIPT_OPEN_ERROR_KEYS = {
@@ -51,6 +54,10 @@ class ComputerScriptRunnerError(RuntimeError):
         self.details = details or {}
         self.structured_error = structured_error
         super().__init__(key)
+
+
+class _ComputerScriptProtocolError(RuntimeError):
+    """The child process produced an invalid or oversized protocol result."""
 
 
 def parse_script_arguments(values: Iterable[str]) -> dict[str, str]:
@@ -150,7 +157,7 @@ def _runtime_state(path: Path) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _kill_process_group(process: subprocess.Popen[str]) -> None:
+def _kill_process_group(process: subprocess.Popen[Any]) -> None:
     if process.poll() is not None:
         return
     try:
@@ -162,12 +169,38 @@ def _kill_process_group(process: subprocess.Popen[str]) -> None:
         pass
 
 
-def _read_diagnostic_tail(stream: Any) -> str:
-    stream.flush()
-    stream.seek(0, os.SEEK_END)
-    end = stream.tell()
-    stream.seek(max(0, end - _SCRIPT_DIAGNOSTIC_TAIL_BYTES))
-    return stream.read().decode("utf-8", errors="replace")
+def _read_file_tail(path: Path, limit: int) -> bytes:
+    with path.open("rb") as stream:
+        stream.seek(0, os.SEEK_END)
+        end = stream.tell()
+        stream.seek(max(0, end - limit))
+        return stream.read(limit)
+
+
+def _read_diagnostic_tail(paths: Iterable[Path]) -> str:
+    chunks = [
+        _read_file_tail(path, _SCRIPT_DIAGNOSTIC_TAIL_BYTES)
+        for path in paths
+        if path.exists()
+    ]
+    return b"".join(chunks)[-_SCRIPT_DIAGNOSTIC_TAIL_BYTES :].decode(
+        "utf-8",
+        errors="replace",
+    )
+
+
+def _read_protocol_result(path: Path) -> str:
+    try:
+        size = path.stat().st_size
+    except FileNotFoundError:
+        return ""
+    if size > _SCRIPT_RESULT_MAX_BYTES:
+        raise _ComputerScriptProtocolError("script result exceeds the size limit")
+    with path.open("rb") as stream:
+        encoded = stream.read(_SCRIPT_RESULT_MAX_BYTES + 1)
+    if len(encoded) > _SCRIPT_RESULT_MAX_BYTES:
+        raise _ComputerScriptProtocolError("script result exceeds the size limit")
+    return encoded.decode("utf-8", errors="replace")
 
 
 def _run_node_process(
@@ -177,37 +210,70 @@ def _run_node_process(
     timeout_seconds: float,
 ) -> subprocess.CompletedProcess[str]:
     command = [str(node), str(runner)]
-    with tempfile.TemporaryFile(mode="w+b") as diagnostic_output:
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=diagnostic_output,
-            text=True,
+    supervisor_directory = Path(
+        tempfile.mkdtemp(prefix="avibe-computer-script-runner-")
+    ).resolve()
+    try:
+        try:
+            os.chmod(supervisor_directory, 0o700)
+        except OSError:
+            pass
+        request_path = supervisor_directory / "request.json"
+        result_path = supervisor_directory / "result.json"
+        stdout_path = supervisor_directory / "stdout.log"
+        stderr_path = supervisor_directory / "stderr.log"
+        request_path.write_text(
+            json.dumps(request, ensure_ascii=False),
             encoding="utf-8",
-            errors="replace",
-            start_new_session=os.name == "posix",
         )
         try:
-            stdout, _ = process.communicate(
-                input=json.dumps(request, ensure_ascii=False),
-                timeout=timeout_seconds,
-            )
-        except subprocess.TimeoutExpired as exc:
-            _kill_process_group(process)
-            stdout, _ = process.communicate()
-            raise subprocess.TimeoutExpired(
+            os.chmod(request_path, 0o600)
+        except OSError:
+            pass
+        child_environment = os.environ.copy()
+        child_environment[_SCRIPT_RESULT_PATH_ENV] = str(result_path)
+
+        with (
+            request_path.open("r", encoding="utf-8") as request_input,
+            stdout_path.open("w+b") as stdout_output,
+            stderr_path.open("w+b") as stderr_output,
+        ):
+            # A descendant that creates a new session is outside the process-group
+            # guarantee, but file-backed output cannot keep this supervisor blocked.
+            process = subprocess.Popen(
                 command,
-                timeout_seconds,
-                output=stdout,
-                stderr=_read_diagnostic_tail(diagnostic_output),
-            ) from exc
+                stdin=request_input,
+                stdout=stdout_output,
+                stderr=stderr_output,
+                env=child_environment,
+                start_new_session=os.name == "posix",
+            )
+            try:
+                returncode = process.wait(timeout=timeout_seconds)
+            except subprocess.TimeoutExpired as exc:
+                _kill_process_group(process)
+                try:
+                    process.wait(timeout=_PROCESS_REAP_TIMEOUT_SECONDS)
+                except subprocess.TimeoutExpired:
+                    pass
+                stdout_output.flush()
+                stderr_output.flush()
+                raise subprocess.TimeoutExpired(
+                    command,
+                    timeout_seconds,
+                    stderr=_read_diagnostic_tail((stdout_path, stderr_path)),
+                ) from exc
+            stdout_output.flush()
+            stderr_output.flush()
+
         return subprocess.CompletedProcess(
             command,
-            process.returncode,
-            stdout,
-            _read_diagnostic_tail(diagnostic_output),
+            returncode,
+            _read_protocol_result(result_path),
+            _read_diagnostic_tail((stdout_path, stderr_path)),
         )
+    finally:
+        shutil.rmtree(supervisor_directory, ignore_errors=True)
 
 
 def _decode_runner_output(
@@ -414,6 +480,22 @@ def run_computer_script(
                 code="script_timeout",
                 message="The script deadline expired.",
                 params={},
+                step=str(runtime_state.get("step") or "script"),
+                screenshot_path=screenshot_path,
+                ambiguous=True,
+            )
+            payload = {"ok": False, "error": failure_envelope}
+            raise _script_failure(failure_envelope) from exc
+        except _ComputerScriptProtocolError as exc:
+            runtime_state = _runtime_state(runtime_state_path)
+            screenshot_path = runtime_state.get("screenshot_path")
+            if not isinstance(screenshot_path, str) or not screenshot_path:
+                screenshot_path = None
+            failure_envelope = _failure_envelope(
+                name="ControllerError",
+                code="computer_script_protocol_error",
+                message="The script result exceeded the protocol size limit.",
+                params={"limit_bytes": _SCRIPT_RESULT_MAX_BYTES},
                 step=str(runtime_state.get("step") or "script"),
                 screenshot_path=screenshot_path,
                 ambiguous=True,

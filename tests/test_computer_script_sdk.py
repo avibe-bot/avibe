@@ -8,7 +8,6 @@ from pathlib import Path
 import shutil
 import socket
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -65,18 +64,20 @@ def _fake_controller(
     dynamic_elements_after_action: bool = False,
     response_delay_by_tool: dict[str, float] | None = None,
     apps: list[dict] | None = None,
+    app_responses: list[list[dict]] | None = None,
     windows: list[dict] | None = None,
 ) -> Iterator[tuple[ThreadingHTTPServer, list[dict]]]:
     requests: list[dict] = []
     observations = 0
     clicks = 0
+    app_lookups = 0
     connection_ids: set[int] = set()
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
         def do_POST(self) -> None:  # noqa: N802
-            nonlocal observations, clicks
+            nonlocal observations, clicks, app_lookups
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length))
             connection_ids.add(id(self.connection))
@@ -95,10 +96,17 @@ def _fake_controller(
                 if delay:
                     time.sleep(delay)
                 if tool == "list_apps":
+                    if app_responses is not None:
+                        app_records = app_responses[
+                            min(app_lookups, len(app_responses) - 1)
+                        ]
+                        app_lookups += 1
+                    else:
+                        app_records = apps
                     body = _result(
                         {
-                            "apps": apps
-                            if apps is not None
+                            "apps": app_records
+                            if app_records is not None
                             else [
                                 {
                                     "pid": 41,
@@ -317,6 +325,7 @@ def _run_node_script(
     dynamic_elements_after_action: bool = False,
     response_delay_by_tool: dict[str, float] | None = None,
     apps: list[dict] | None = None,
+    app_responses: list[list[dict]] | None = None,
     windows: list[dict] | None = None,
 ) -> tuple[dict, ThreadingHTTPServer, list[dict]]:
     if NODE is None:
@@ -342,6 +351,7 @@ def _run_node_script(
         dynamic_elements_after_action=dynamic_elements_after_action,
         response_delay_by_tool=response_delay_by_tool,
         apps=apps,
+        app_responses=app_responses,
         windows=windows,
     ) as (server, requests):
         request = {
@@ -361,16 +371,14 @@ def _run_node_script(
             "runtime_state_path": str(artifacts / "runtime-state.json"),
         }
         started = time.monotonic()
-        completed = subprocess.run(
-            [NODE, str(SDK_DIRECTORY / "runner.mjs")],
-            input=json.dumps(request),
-            capture_output=True,
-            text=True,
-            cwd=tmp_path,
-            timeout=10,
-            check=False,
+        completed = computer_script_runner._run_node_process(
+            Path(NODE),
+            SDK_DIRECTORY / "runner.mjs",
+            request,
+            10,
         )
         server.subprocess_elapsed = time.monotonic() - started  # type: ignore[attr-defined]
+        server.completed = completed  # type: ignore[attr-defined]
         assert completed.returncode == 0, completed.stderr
         return json.loads(completed.stdout), server, requests
 
@@ -1002,6 +1010,98 @@ export default async () => {
     ]
 
 
+def test_sdk_app_handle_rejects_pid_reuse_by_another_bundle(
+    tmp_path: Path,
+) -> None:
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  const mail = await computer.app({ bundleId: "com.apple.mail" });
+  await mail.forceQuit();
+};
+""",
+        app_responses=[
+            [
+                {
+                    "pid": 41,
+                    "name": "Mail",
+                    "bundle_id": "com.apple.mail",
+                    "running": True,
+                    "active": False,
+                }
+            ],
+            [
+                {
+                    "pid": 41,
+                    "name": "Notes",
+                    "bundle_id": "com.apple.notes",
+                    "running": True,
+                    "active": True,
+                }
+            ],
+        ],
+    )
+
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "stale_app_handle"
+    assert payload["error"]["step"] == "app.forceQuit"
+    tools = [
+        request["payload"].get("tool")
+        for request in requests
+        if request["path"].endswith("/request")
+    ]
+    assert tools == ["list_apps", "list_apps"]
+
+
+def test_sdk_app_handle_rejects_same_bundle_relaunched_with_new_pid(
+    tmp_path: Path,
+) -> None:
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  const mail = await computer.app({ bundleId: "com.apple.mail" });
+  await mail.window({ label: "New Message" });
+};
+""",
+        app_responses=[
+            [
+                {
+                    "pid": 41,
+                    "name": "Mail",
+                    "bundle_id": "com.apple.mail",
+                    "running": True,
+                    "active": False,
+                }
+            ],
+            [
+                {
+                    "pid": 42,
+                    "name": "Mail",
+                    "bundle_id": "com.apple.mail",
+                    "running": True,
+                    "active": True,
+                }
+            ],
+        ],
+    )
+
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "stale_app_handle"
+    assert payload["error"]["step"] == "app.window"
+    tools = [
+        request["payload"].get("tool")
+        for request in requests
+        if request["path"].endswith("/request")
+    ]
+    assert tools == ["list_apps", "list_apps"]
+
+
 def test_sdk_window_index_uses_descending_z_order(tmp_path: Path) -> None:
     windows = [
         {
@@ -1093,35 +1193,95 @@ export default async () => {
 def test_python_runner_retains_only_a_bounded_diagnostic_tail(
     tmp_path: Path,
 ) -> None:
-    fixture = tmp_path / "diagnostic_fixture.py"
-    fixture.write_text(
+    payload, server, _requests = _run_node_script(
+        tmp_path,
         """
-import json
-import sys
-
-json.loads(sys.stdin.read())
-sys.stderr.write("discarded-marker\\n")
-sys.stderr.write("x" * (128 * 1024))
-sys.stderr.write("\\nretained-tail\\n")
-sys.stdout.write('{"ok":true,"result":null}')
+export default async () => {
+  process.stdout.write("discarded-marker\\n");
+  process.stdout.write("x".repeat(128 * 1024));
+  process.stdout.write("\\nretained-tail\\n");
+};
 """,
-        encoding="utf-8",
     )
 
-    completed = computer_script_runner._run_node_process(
-        Path(sys.executable),
-        fixture,
-        {},
-        5,
-    )
+    completed = server.completed  # type: ignore[attr-defined]
 
+    assert payload == {"ok": True, "result": None}
     assert completed.returncode == 0
-    assert completed.stdout == '{"ok":true,"result":null}'
     assert len(completed.stderr.encode("utf-8")) <= (
         computer_script_runner._SCRIPT_DIAGNOSTIC_TAIL_BYTES
     )
     assert "discarded-marker" not in completed.stderr
     assert completed.stderr.endswith("\nretained-tail\n")
+
+
+def test_python_runner_rejects_an_oversized_result_with_canonical_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    error, requests, elapsed = _run_python_deadline_script(
+        monkeypatch,
+        tmp_path,
+        f"""
+export default async () => "x".repeat(
+  {computer_script_runner._SCRIPT_RESULT_MAX_BYTES}
+);
+""",
+        timeout_seconds=5,
+    )
+
+    assert error.details == {
+        "name": "ControllerError",
+        "code": "computer_script_protocol_error",
+        "message": "The script result exceeded the protocol size limit.",
+        "params": {
+            "limit_bytes": computer_script_runner._SCRIPT_RESULT_MAX_BYTES,
+        },
+        "step": "script",
+        "screenshot_path": None,
+        "ambiguous": True,
+    }
+    assert [
+        request
+        for request in requests
+        if request["path"].endswith("/request")
+    ] == []
+    assert elapsed < 2
+
+
+def test_python_deadline_is_not_held_by_a_detached_descendant_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    error, requests, elapsed = _run_python_deadline_script(
+        monkeypatch,
+        tmp_path,
+        """
+import { spawn } from "node:child_process";
+
+export default async () => {
+  const child = spawn(
+    process.execPath,
+    ["-e", "setTimeout(() => process.exit(0), 2000)"],
+    { detached: true, stdio: ["ignore", "inherit", "inherit"] },
+  );
+  child.unref();
+  await new Promise(() => {});
+};
+""",
+    )
+
+    assert error.details == {
+        "name": "Timeout",
+        "code": "script_timeout",
+        "message": "The script deadline expired.",
+        "params": {},
+        "step": "script",
+        "screenshot_path": None,
+        "ambiguous": True,
+    }
+    assert requests == []
+    assert elapsed < 1.0
 
 
 @pytest.mark.parametrize(
@@ -1194,7 +1354,7 @@ def test_python_parent_owns_the_canonical_total_deadline(
         assert tools == []
     else:
         assert expected_tool in tools
-    assert elapsed < 1.5
+    assert elapsed < 1.0
 
 
 def test_python_total_deadline_preserves_the_last_screenshot(

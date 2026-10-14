@@ -54,6 +54,32 @@ const ELEMENT_SELECTOR_FIELDS = new Set([
 ]);
 const windowState = new WeakMap();
 
+class AppIdentity {
+  constructor(record) {
+    this.pid =
+      Number.isInteger(record.pid) && record.pid >= 0 ? record.pid : null;
+    this.bundleId =
+      typeof record.bundle_id === "string" && record.bundle_id
+        ? record.bundle_id
+        : null;
+    this.name =
+      this.bundleId === null && typeof record.name === "string"
+        ? record.name
+        : null;
+    Object.freeze(this);
+  }
+
+  matches(record) {
+    if (record.pid !== this.pid) {
+      return false;
+    }
+    if (this.bundleId !== null) {
+      return record.bundle_id === this.bundleId;
+    }
+    return record.name === this.name;
+  }
+}
+
 export class ControllerError extends Error {
   constructor(message, options = {}) {
     super(message);
@@ -517,6 +543,7 @@ class Computer {
 class AppHandle {
   constructor(_owner, _selector, record) {
     this._record = record;
+    this._identity = new AppIdentity(record);
   }
 
   get pid() {
@@ -568,17 +595,14 @@ class AppHandle {
   async _current(deadline) {
     const apps = structured(await callToolBefore("list_apps", {}, deadline)).apps;
     const records = Array.isArray(apps) ? apps : [];
-    const current = this._record;
-    const matches = records.filter((item) => {
-      if (Number.isInteger(current.pid) && current.pid > 0) {
-        return item.pid === current.pid;
-      }
-      if (typeof current.bundle_id === "string" && current.bundle_id) {
-        return item.bundle_id === current.bundle_id;
-      }
-      return item.name === current.name;
-    });
-    this._record = selectOne(matches, {}, "application");
+    const matches = records.filter((item) => this._identity.matches(item));
+    if (matches.length !== 1) {
+      throw new ControllerError(
+        "The selected application process is no longer available.",
+        { code: "stale_app_handle" },
+      );
+    }
+    this._record = matches[0];
     return this._record;
   }
 

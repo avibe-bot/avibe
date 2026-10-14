@@ -917,6 +917,7 @@
         "scriptInvalidSelector": "脚本使用了无效选择器。",
         "scriptInvalidTimeout": "脚本使用了无效超时。",
         "scriptOperationTimedOut": "Computer Use 操作超时。",
+        "scriptStaleAppHandle": "所选应用进程已失效。",
         "scriptTargetNotFound": "未找到请求的 Computer Use 目标。",
         "scriptTurnEnded": "启动此脚本的 Avibe Turn 已结束。",
         "scriptWindowOrderUnavailable": "此选择器无法确定窗口顺序。",

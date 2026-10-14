@@ -917,6 +917,7 @@
         "scriptInvalidSelector": "The script used an invalid selector.",
         "scriptInvalidTimeout": "The script used an invalid timeout.",
         "scriptOperationTimedOut": "The Computer Use operation timed out.",
+        "scriptStaleAppHandle": "The selected application process is no longer available.",
         "scriptTargetNotFound": "The requested Computer Use target was not found.",
         "scriptTurnEnded": "The Avibe Turn that launched this script has ended.",
         "scriptWindowOrderUnavailable": "Window order is unavailable for this selector.",

@@ -1,21 +1,20 @@
+import fs from "node:fs";
 import { register } from "node:module";
 import * as runtime from "./runtime.mjs";
 
-const stdoutWrite = process.stdout.write.bind(process.stdout);
+const resultPath = process.env.AVIBE_COMPUTER_RESULT_PATH;
 let output;
 
 try {
+  if (typeof resultPath !== "string" || !resultPath) {
+    throw new Error("missing Computer Use runner result path");
+  }
   const input = await readStdin();
   register(new URL("./loader.mjs", import.meta.url), {
     data: { sdkUrl: input.sdk_url },
   });
 
   runtime.configureRuntime(input);
-
-  process.stdout.write = process.stderr.write.bind(process.stderr);
-  console.log = console.error;
-  console.info = console.error;
-  console.debug = console.error;
 
   try {
     const keepAlive = setInterval(() => {}, 1000);
@@ -51,9 +50,17 @@ try {
   });
 }
 
-stdoutWrite(output, (error) => {
-  process.exit(error ? 1 : 0);
-});
+try {
+  fs.writeFileSync(resultPath, output, {
+    encoding: "utf8",
+    flag: "w",
+    mode: 0o600,
+  });
+  process.exit(0);
+} catch (error) {
+  console.error(error);
+  process.exit(1);
+}
 
 async function readStdin() {
   const chunks = [];
