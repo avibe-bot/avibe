@@ -43,7 +43,7 @@ capability:
     - tests/test_opencode_model_hub_retry.py
     - ui/src/lib/modelHubRecovery.test.ts
     - tests/test_model_hub_request_body_budget.py
-    - tests/test_model_hub_codex_image_tool.py
+    - tests/test_model_hub_declared_tools.py
     - tests/test_model_hub_l3.py
     - tests/test_model_hub_hosted_executor.py
     - tests/test_model_hub_usage.py
@@ -103,6 +103,7 @@ capability:
     - tests/e2e/test_model_hub_sources.py
     - tests/e2e/test_model_hub_usage_events.py
     - tests/e2e/test_model_hub_service_acceptance.py
+    - tests/e2e/test_model_hub_codex_image.py
 status_legend:
   covered:
     description: closed-loop coverage exists at the declared layer
@@ -976,13 +977,13 @@ scenarios:
     layer: unit
     test: tests/test_model_hub_request_body_budget.py::test_bad_auth_does_not_parse_or_admit
   - id: MH-HOSTED-GATEWAY-001
-    name: The engine forwards declared tools unchanged; only Codex CLI gets the engine's hosted image tool, byte for byte under its skip conditions
+    name: The engine forwards declared tools unchanged, and no caller, Codex CLI included, gets a hosted image tool it did not declare
     status: covered
     kind: contract
     layer: contract
-    test: tests/test_model_hub_codex_image_tool.py::test_codex_requests_reach_the_engine_with_the_engines_own_image_tool
+    test: tests/test_model_hub_declared_tools.py::test_every_caller_reaches_the_engine_with_exactly_its_declared_tools
     related_tests:
-      - tests/test_model_hub_codex_image_tool.py::test_other_callers_reach_the_engine_with_exactly_their_declared_tools
+      - tests/e2e/test_model_hub_codex_image.py::test_codex_through_the_hub_gets_no_image_tool_from_a_passthrough_engine
       - tests/test_model_hub_runtime.py::test_mixed_anthropic_credentials_disable_cloak_only_for_api_key_entry
   - id: MH-PROTOCOL-001
     name: Source protocol is response-observed before persistence with no transient residue

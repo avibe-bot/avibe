@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import hashlib
 import hmac
 import json
@@ -1064,31 +1063,6 @@ class EngineStateStore:
         )
         return _oauth_account_label(payload) if payload is not None else None
 
-    def codex_plan_type(self, credential_ref: str, *, source_id: str, vendor: str) -> str | None:
-        """The plan the engine derives for a bound Codex grant; None for any other credential.
-
-        It is the engine's own reading of the auth file it watches (CLIProxyAPI,
-        MIT, ``internal/watcher/synthesizer/file.go`` at d318bcc3): the file's
-        ``plan_type``, which the engine rewrites on every refresh, else the
-        ``id_token`` claim ``chatgpt_plan_type``, defaulting to ``free`` when
-        the token carries none or does not parse.
-        """
-
-        payload = self._bound_oauth_payload(
-            credential_ref, source_id=source_id, vendor=vendor, auth_provider="codex",
-        )
-        if payload is None:
-            return None
-        plan = payload.get("plan_type")
-        if isinstance(plan, str) and plan.strip():
-            return plan.strip()
-        id_token = payload.get("id_token")
-        if not isinstance(id_token, str) or not id_token.strip():
-            return None
-        auth = _jwt_claims(id_token).get("https://api.openai.com/auth")
-        plan = auth.get("chatgpt_plan_type") if isinstance(auth, dict) else None
-        return plan.strip() if isinstance(plan, str) and plan.strip() else "free"
-
     def _bound_oauth_payload(
         self, credential_ref: str, *, source_id: str, vendor: str, auth_provider: str,
     ) -> dict[str, Any] | None:
@@ -1507,18 +1481,6 @@ class EngineStateStore:
             return
         if not stat.S_ISREG(mode) or not private_fs.is_private(path, mode):
             raise EngineStateError(message)
-
-
-def _jwt_claims(token: str) -> dict[str, Any]:
-    """A token's claims as local grant metadata, never a signature verdict; {} when unreadable."""
-    parts = token.split(".")
-    if len(parts) != 3:
-        return {}
-    try:
-        claims = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
-    except (ValueError, UnicodeError):
-        return {}
-    return claims if isinstance(claims, dict) else {}
 
 
 def _oauth_account_label(payload: dict[str, Any]) -> str | None:

@@ -88,8 +88,7 @@ contract (one OpenAI-compatible provider, `vendor/model` ids); nothing of that s
   dropped; `parallel_tool_calls: true`, `instructions: ""`) — a known engine limitation the implementation verifies against each real
   `openai_responses` Source before enabling the route, and tracks as an engine follow-up.
   The engine no longer adds its hosted `image_generation` tool: it runs with
-  `disable-image-generation: passthrough`, and the gateway adds that tool back for Codex CLI
-  requests only (`vibey-hosted-tools.md` §7.1).
+  `disable-image-generation: passthrough`, and nothing adds it back (`vibey-hosted-tools.md` §7.1).
   When the hop's protocol differs, the engine's automatic translation applies; S4 records what
   survives: Responses-frontend effort reaches an `anthropic` upstream intact, an
   Anthropic-frontend `output_config.effort` is dropped on the way to an `openai_chat` upstream

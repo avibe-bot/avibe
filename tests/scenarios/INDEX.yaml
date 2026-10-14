@@ -45,6 +45,7 @@ capabilities:
       - tests/e2e/test_model_hub_sources.py
       - tests/e2e/test_model_hub_usage_events.py
       - tests/e2e/test_model_hub_service_acceptance.py
+      - tests/e2e/test_model_hub_codex_image.py
     harness:
       - tests/scenario_harness/model_hub.py
     unit_or_contract_tests:
@@ -98,7 +99,7 @@ capabilities:
       - tests/test_opencode_model_hub_retry.py
       - ui/src/lib/modelHubRecovery.test.ts
       - tests/test_model_hub_request_body_budget.py
-      - tests/test_model_hub_codex_image_tool.py
+      - tests/test_model_hub_declared_tools.py
       - tests/test_model_hub_l3.py
       - tests/test_model_hub_hosted_executor.py
       - tests/test_model_hub_usage.py

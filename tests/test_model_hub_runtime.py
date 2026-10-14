@@ -1932,7 +1932,7 @@ def test_mixed_anthropic_credentials_disable_cloak_only_for_api_key_entry(
 
     payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert payload["disable-claude-cloak-mode"] is True
-    # The engine forwards declared image tools unchanged; Codex CLI gets its own from the gateway.
+    # The engine forwards declared image tools unchanged and never adds one.
     assert payload["disable-image-generation"] == "passthrough"
     assert payload["claude-api-key"] == [
         {
@@ -7512,9 +7512,6 @@ def test_slow_source_prelude_is_bounded_without_blocking_other_routes(
 
             def get_source(self, source_id: str) -> SourceRecord | None:
                 return self.sources.get(source_id)
-
-            def codex_plan_type(self, *_args, **_kwargs) -> str | None:
-                return None  # API keys carry no plan
 
         class Supervisor:
             def __init__(self, client: EngineClient) -> None:

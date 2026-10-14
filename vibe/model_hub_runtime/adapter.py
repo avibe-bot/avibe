@@ -59,7 +59,6 @@ from vibe.model_hub_runtime.client import (
     upstream_api_url,
 )
 from vibe.model_hub_runtime.api_key_vendors import pinned_api_key_protocol, validate_api_key_auth_scheme
-from vibe.model_hub_runtime.codex_image_tool import with_codex_image_tool
 from vibe.model_hub_runtime.installer import (
     INSTALL_ALREADY_RUNNING_REASON,
     INSTALL_PLATFORM_UNSUPPORTED_REASON,
@@ -2822,17 +2821,6 @@ class CLIProxyEngineAdapter:
                 raise EngineStateError("source is not registered")
             if source.allowed_origins and origin not in source.allowed_origins:
                 raise OriginNotAllowedError(f"origin {origin!r} is not allowed to use source {source_id!r}")
-            # The engine serves every Responses Source through its Codex executor
-            # (an API key or the ChatGPT grant), where it used to add its image tool.
-            codex_image_tool = origin == "codex" and source.protocol == "openai_responses"
-            plan_type = (
-                await asyncio.to_thread(
-                    self.state_store.codex_plan_type,
-                    source.credential_ref, source_id=source.source_id, vendor=source.vendor,
-                )
-                if codex_image_tool
-                else None
-            )
             try:
                 client = await asyncio.to_thread(self.supervisor.client)
             except EngineUnavailableError as exc:
@@ -2862,8 +2850,6 @@ class CLIProxyEngineAdapter:
                 "claude": "anthropic",
                 "codex": "openai_responses",
             }.get(origin, getattr(request, "protocol", None) or source.protocol)
-            if codex_image_tool:
-                request = with_codex_image_tool(request, model_id=model_id, plan_type=plan_type)
             return await client.invoke(
                 source,
                 model_id,

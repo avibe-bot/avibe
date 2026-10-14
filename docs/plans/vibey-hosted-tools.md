@@ -557,48 +557,39 @@ Each has a **Re-verify** action with its cost. Unknown shows nothing.
 
 ## 7. Image generation (Phase 1)
 
-### 7.1 The injected tool moves from the engine to the gateway, per caller
+### 7.1 No caller gets an image tool it did not declare
 
-- **Today.** The engine injects `{"type": "image_generation", "output_format": "png"}` into every Codex-executor
-  request: CPA `ensureImageGenerationTool`, with `disable-image-generation` unset in
-  `vibe/model_hub_runtime/config.py`. That covers OpenAI API keys, the ChatGPT subscription and xAI keys, for any
-  caller, Claude Code and OpenCode included. GPT calls it from a Vibey request when asked for a picture; the image is
-  billed and then dropped.
-- **How Codex consumes it today.**
-  - Codex maps a hosted `image_generation_call` item to a `TurnItem::ImageGeneration` (`codex-rs/core/src/event_mapping.rs`)
-    and emits app-server `imageGeneration` thread items.
-  - Avibe's Codex backend persists those items as files: `modules/agents/codex/event_handler.py`
-    `_persist_generated_image`, covered by `tests/test_codex_event_handler.py`.
-  - Codex's own `image_gen` extension tool is gated to OpenAI-auth providers (`codex-rs/core/src/tools/spec_plan.rs`
-    `image_generation_available`). So through Model Hub, the injected hosted tool is Codex's only image path, and it
-    must be preserved exactly.
-- **Decision (orchestrator, 2026-10-13):**
+- **Before.** The engine injected `{"type": "image_generation", "output_format": "png"}` into every Codex-executor
+  request (CPA `ensureImageGenerationTool`): OpenAI API keys, the ChatGPT subscription and xAI keys, for any caller,
+  Claude Code and OpenCode included. GPT could call it when asked for a picture, and the image was billed and then
+  dropped.
+- **Codex no longer reports hosted image calls.** From Codex CLI 0.144.0 (2026-07-09, openai/codex#31596, "Use the
+  image generation extension by default"), Codex produces images only through its own `image_gen` extension tool,
+  which `codex-rs/core/src/tools/spec_plan.rs` (`image_generation_available`) gates to OpenAI-auth providers. A hosted
+  `image_generation_call` in a response stream is no longer mapped to a turn item: `stream_events_utils.rs` maps only
+  messages, reasoning and web search calls. So Codex emits no `imageGeneration` item, and Avibe's Codex backend
+  (`event_handler.py` `_persist_generated_image`) has nothing to persist.
+  - Observed in the 3.2.1rc4 release E2E with Codex CLI 0.162.1: the gateway and engine delivered the image intact,
+    and Codex reported only the user and agent messages.
+  - Avibe does not pin Codex: it installs `npm install -g @openai/codex`, the latest release. Every Codex it has
+    installed since July 2026 is at least 0.144.0.
+- **Decision (orchestrator, 2026-10-13, revised 2026-10-14):**
   1. The engine runs with `disable-image-generation: passthrough`, a fixed key in `config.py`. CPA then forwards
      requests with exactly the tools the client declared, never injecting and never stripping.
-  2. The gateway reproduces CPA's injection **only for Codex CLI requests** (`backend == "codex"`), byte for byte,
-     under CPA's own conditions:
-     - the hop's Source is served by CPA's Codex executor (an `openai_responses` API key or the ChatGPT subscription);
-     - the model id does not end in `spark`;
-     - the credential is not a ChatGPT free plan, read from the same plan attribute CPA reads;
-     - the body's `client_metadata.ws_request_header_x_openai_internal_codex_responses_lite` is not true. The header
-       form is not forwarded by the gateway today, so it is not consulted.
-
-     It then appends the same tool to `tools`, or sets `tools` to it when absent. It leaves the body unchanged when
-     an `image_generation` tool, or the `image_gen` function or namespace, is already present.
-  3. Vibey declares `image_generation` itself, only when the user's toggle is on.
-- **Effect on other backends.** Claude Code and OpenCode requests routed to a Codex-executor Source stop receiving
-  the hidden image tool. They could not show the result, so this removes billed images that nobody saw.
-- **Rule boundary.** "The gateway never rewrites hosted content" (§3.5) is about Vibey's requests. This injection is
-  a compatibility step for one native caller and adds the tool CPA added.
+  2. Nothing adds the tool back, for Codex CLI either. An injected tool only billed images that Codex then
+     dropped.
+  3. Vibey declares `image_generation` itself, only when the user's toggle is on (§7.2).
+- **Effect.** No caller routed to a Codex-executor Source receives a hidden image tool. A user still on a Codex CLI
+  older than 0.144.0 loses images through Model Hub that it used to show. Codex's own `image_gen` remains available
+  wherever Codex enables it.
 - **Regression tests.**
-  - **Gateway, table-driven from CPA's injection cases:** for a Codex request, the fake engine receives exactly the
-    bytes CPA would have produced. One row per condition: no tools, other tools, an existing image tool, the
-    `image_gen` function and namespace, `spark`, free plan, and lite metadata.
-  - **Other backends:** Claude, OpenCode and Vibey requests reach the engine with no image tool unless they declared
-    one.
-  - The existing Codex image persistence tests stay unchanged.
-  - **E2E once per release:** the real engine in passthrough, a stub upstream, a Codex request. The upstream sees
-    exactly one image tool and the Codex backend persists the image.
+  - **Gateway:** every caller (Codex CLI with an API key and with a subscription, Claude, OpenCode and Vibey)
+    reaches the engine with exactly its declared tools, declared image tool or not (MH-HOSTED-GATEWAY-001).
+  - The existing Codex image persistence tests stay unchanged; they cover Codex's own `image_gen` output.
+  - **E2E once per release** (`tests/e2e/test_model_hub_codex_image.py`): the real engine in passthrough, a stub
+    upstream and the real Codex CLI. A Codex turn through the Hub reaches the upstream with no image tool, and a Vibey
+    request to the same Source with none either. Persistence is not asserted, because current Codex never reports
+    a hosted image.
 
 ### 7.2 Native and proxy
 
@@ -706,8 +697,8 @@ Each has a **Re-verify** action with its cost. Unknown shows nothing.
    - `HopResolution.hosted_tools`, request pinning and `pin_unavailable`, and the V2 `hosted_tools` config;
    - the C-1 blocks and adapter parsing;
    - replay and conversion, `pause_turn` continuation, the tool card, and the IM line;
-   - image generation (§7): engine passthrough, the gateway's per-caller injection for Codex, files instead of
-     base64, partial images, and the SSE caps.
+   - image generation (§7): engine passthrough with no injected tool for any caller, files instead of base64,
+     partial images, and the SSE caps.
 
 ## 10. Acceptance properties
 
@@ -728,8 +719,7 @@ Each has a **Re-verify** action with its cost. Unknown shows nothing.
    `interrupted` error that keeps the partial.
 7. A generated image never enters model context or history as bytes. The model gets the text path record, and the
    user sees the image.
-8. A Codex CLI request reaches the upstream with exactly the image tool CPA would have injected. No other caller
-   gets one unless it declared it.
+8. No caller, Codex CLI included, reaches the upstream with an image tool it did not declare (§7.1).
 9. No probe and no proxy call runs without a user action or a model tool call in a turn the user started. Every
    probe shows its cost first.
 10. A real error creates evidence only through a narrow rule for the named (Source, model, feature).
@@ -750,7 +740,7 @@ shapes. No live upstream and no real credentials.
 | Proxy executor | gateway endpoint, stub provider | executor choice; no effort sent; the record with excerpts; metering on the executor Source; error when no executor is verified; refusal of a Claude subscription |
 | Record rendering and citations | the record-to-text function; `core/citations.py` builder | completed, failed, incomplete and pending records; every action's synthetic rule; summary cited sources listed once; provider annotations through to the Web sidecar and the IM Markdown link (end to end) |
 | Config | `ModelHubConfig` loader | a released config without `hosted_tools` loads with all tools off; an unknown tool key degrades with a warning |
-| Image injection | gateway + loopback fake engine | the §7.1 table (CPA's conditions, byte for byte); Claude, OpenCode and Vibey requests get no image tool unless declared; the existing Codex image persistence tests unchanged |
+| Declared tools only | gateway + loopback fake engine | Codex (API key and subscription), Claude, OpenCode and Vibey requests reach the engine with exactly their declared tools; the existing Codex image persistence tests unchanged |
 | Images | Responses adapter against stub SSE | partials then a final image twice: one file written, no base64 in history, the duplicate in `response.completed` not decoded, a 9 MiB image line accepted under the image cap, the text path record as model context |
 | Probes | gateway, stub provider | verified / unsupported / dropped / transient outcomes; a replay probe whose answer lacks the first search's URL is `unsupported`; probes only from the API action |
 | UI | Models Tools tab, Source chips, tool card | toggle off by default; Verify shows the cost; chips per evidence state; card modes; IM line |
@@ -808,8 +798,8 @@ encoded either as a schema clause or as a producer test. The PR names which for 
 11. Native replay requires all three: same Source, same origin, and current `replay` evidence. `image_generation`
     blocks are never replayed verbatim, and their synthetic call carries `size` when the action has it.
 12. A probe with no tool item is inconclusive and writes no evidence.
-13. The engine config renders `disable-image-generation: passthrough`. The gateway's Codex image injection is a
-    single function covered by the §7.1 table.
+13. The engine config renders `disable-image-generation: passthrough`, and no caller, Codex CLI included, reaches the
+    engine with an image tool it did not declare (§7.1).
 
 **Added after review of the final design head (implementation-level, binding on the Phase 1 PR):**
 
