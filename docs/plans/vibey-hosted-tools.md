@@ -846,4 +846,5 @@ and no real credentials.
 7. **rc-era state is not migrated** (owner directive): probe evidence carries `basis: probe`, which v2's loader does not
    accept, so those records are pruned; an rc-era `hosted_tools` section keeps each tool's `enabled`, and its unknown
    keys and fields are ignored (§3.3); an rc session holding a native `image_generation` block no longer loads its
-   context (§4.2).
+   context (§4.2), and its turn ends with the existing localized context-load error ("this session's history can't
+   be loaded; start a new session"), never a raw traceback: ordinary error handling, not a compatibility path.
