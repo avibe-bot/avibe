@@ -109,37 +109,46 @@ The evidence store, its record and its owner are the capability model's §3. v2 
 
 - **No probes.** `basis: probe` no longer exists. Every record is `basis: observed`, written by the gateway's
   classifier (`evidence_rules.py`) from a real request, and only for the exact (Source, model, feature) it names.
-- **Positive (`verified`, display only).** A served response that carries the provider's own item for a tool the
-  request declared natively: Responses `web_search_call` or a `custom_tool_call` named `x_keyword_search`,
-  `x_semantic_search`, `x_user_search` or `x_thread_fetch`; Anthropic `server_tool_use` named `web_search` with its
-  `web_search_tool_result`. A proxy executor call is itself a native call on the executor Source, so it writes the
+- **Positive (`verified`, display only).** A served response that carries the provider's own completed item for a
+  tool the request declared natively: Responses `web_search_call` with `status: completed`, or a `custom_tool_call`
+  named `x_keyword_search`, `x_semantic_search`, `x_user_search` or `x_thread_fetch`; Anthropic `server_tool_use`
+  named `web_search` with a `web_search_tool_result` whose `content` is a result list, not the error object
+  (`web_search_tool_result_error`), which arrives under the same block type. A proxy executor call is itself a native call on the executor Source, so it writes the
   same record for the executor's (Source, model). A successful `image_generate` writes it for (Source, image model).
   - **Where the gateway sees it.** The served-stream observer (`ProtocolSSEState` / `ProtocolFactProjector`) keeps
     only bounded scalar projections today, and no item types. It gains projection paths: Responses
     `response.output_item.done` → `item.type`, `item.name`, `item.status`, and the buffered `output[*].type` and
-    `output[*].name`; Anthropic `content_block_start.content_block.type` and `.name`. Buffered responses take the
-    same paths through `observe_buffered_protocol_response`.
-  - **Bounded writes.** Each write rewrites the evidence file, so a positive record is written when the state
-    changes (no record, or a negative one) or when the existing positive record is older than one hour, never on
-    every response. It is keyed on the serving Source's identity from the final admission snapshot.
+    `output[*].name` and `output[*].status`; Anthropic `content_block_start.content_block.type`, `.name` and
+    `.content.type`. Buffered responses take the same paths through `observe_buffered_protocol_response`.
+  - **Bounded writes, off the response path.** Each write rewrites the evidence file, so a positive record is written
+    at settlement, off the loop, after the response completes, and only when the state changes (no record, or a
+    negative one) or the existing positive record is older than one hour, never on every response. It is keyed on
+    the serving Source's identity from the final admission snapshot.
   - `resolve()` reads a record by its `status`, no longer by its `basis`: today it reads every `observed` record as
     a refusal.
   - Positive evidence never changes routing. It feeds the "最近一次 … 正常" lines (§8) and nothing else.
   - A `google` hop has no native hosted tools, and the Chat route Vibey uses gives no hosted item to observe.
-- **Negative (`unsupported`).** The narrow rules of #2551 on a real error before output, unchanged in form:
+- **Negative (`unsupported`) is routing state.** When the file write fails, the narrow rule still updates the
+  in-memory store and logs the loss, so the re-resolve that follows (§3.5) cannot declare the refused tool natively
+  again. The narrow rules of #2551 fire on a real error before output, unchanged in form:
   - `Unsupported tool type: <type>` for a declared type → hosted tool `call`;
   - `Invalid encrypted_content in search_result block` while the request replays a web-search result → `web_search`
     `replay`;
   - **new:** xAI's plain-text refusal of a replayed payload, `Could not decrypt the provided encrypted_content`,
     which carries no code. It does not say which ciphertext failed, and a stale or foreign blob draws it as well as
     an unsupported replay, so it writes no evidence unless the Vibey lane's xAI A/B shows that xAI refuses fresh
-    ciphertext from the same account. Vibey handles it per turn (§3.5).
+    ciphertext from the same account. The gateway does not classify it: it is no failover-class failure and no narrow
+    rule fires, so it passes through as the provider's 400 on pinned and unpinned requests alike, and Vibey's adapter
+    is its one classifier (§3.5). If the A/B makes it evidence, it becomes a narrow rule here and its pinned case a
+    `hosted_unsupported` reason.
   - Generic errors never create evidence: 5xx, overload, rate limit, auth, and any 400 that does not name the
     feature.
 - **Lifetime.** Negative evidence expires after 7 days (relays change). It also never outlives the wire it was
   learned on: every record carries the wire stamp it was observed under, the engine release plus a digest of the
   Source's rendered engine entry (credentials and the model list excluded), and a record whose stamp differs from
-  the current one reads as unknown. So a refusal learned under one engine or one rendered config cannot survive a
+  the current one reads as unknown. The stamp is computed when the engine config is rendered (`sync_sources`) and
+  held in memory per Source; evidence reads and writes take it from memory and never render on a request path, as
+  `engine_stamp()` is never called on one. So a refusal learned under one engine or one rendered config cannot survive a
   change that could reverse it, such as the dependency lane's `is-compat` flip for xAI (#2620), which changes what
   xAI receives for replayed reasoning. The 7-day TTL bounds whatever the stamp does not catch. A Source identity
   change drops the Source's evidence as before.
@@ -251,8 +260,9 @@ failover, and is refused unpinned (C-6 item 7). What changes is what happens aft
     hosted items verbatim only while the fresh hop still declares that tool natively. Otherwise the items take the
     in-place text form (§4.4), because a provider refuses `server_tool_use` without its declaration.
   - **A decrypt refusal** (§3.2, xAI) is mostly unpinned: xAI's encrypted reasoning (ThinkingBlock signatures,
-    `rs_…`/`tco_…` items) rides ordinary requests, and only hosted content pins. So Vibey's adapter classifies that
-    400, before any output, as an opaque-payload refusal on either path, and the loop re-resolves and renders with
+    `rs_…`/`tco_…` items) rides ordinary requests, and only hosted content pins. The gateway passes it through as the
+    provider's 400 on either path, so Vibey's adapter, its one classifier, recognizes that 400 before any output as
+    an opaque-payload refusal, and the loop re-resolves and renders with
     **every** opaque payload of that Source identity dropped for the rest of the turn: signatures, encrypted reasoning
     and native hosted payloads, since the refusal does not say which one failed. Once per (turn, identity); no
     evidence is written (§3.2).
@@ -384,8 +394,12 @@ These rules are C-1 rows in `cross-provider.md` and per-protocol rows in `conver
 
 - **Endpoint:** `POST {base_url}/hosted-tools/{tool}` on the gateway, with the turn's Bearer token and its
   `request_headers`, and the body `{"arguments": <canonical arguments>}`. There is no executor in the body: the
-  gateway resolves the chain from the caller's live turn (`x-avibe-turn-id`). A call without a live turn, for a tool
-  not enabled in that turn, or from a turn that no longer admits work is 409 `executor_not_bound`, and nothing runs.
+  gateway resolves the chain from the caller's live turn (`x-avibe-turn-id`). A call without a live turn, or from a
+  turn that no longer admits work, is 409 `turn_not_live`; a tool outside the turn's frozen tool set (§3.4) is 409
+  `tool_not_enabled`. Nothing runs. v1's `executor_not_bound` is retired with the binding.
+- **The frozen tool set lives on the turn.** The turn's first resolution writes its tool set, and the
+  `image_generate` enum, once to the turn trace (`hosted_tools`, replacing the write-once `hosted_executors`), and
+  the endpoint authorizes every call against it.
 - **The turn still owns the call.** The endpoint stays authorized by the live named turn (#2586's `x-avibe-turn-id`
   and closed admission); only the per-turn executor binding goes. Stopping the turn cancels the call, and it is
   still metered. A candidate whose identity changed since the chain was built is not used.
@@ -394,14 +408,21 @@ These rules are C-1 rows in `cross-provider.md` and per-protocol rows in `conver
      vendor's `executor_model` and no current negative `call` evidence for that pair. So a subscription that does
      not list the vendor's lightweight model is excluded when the chain is built, not found by a 404.
   2. Order: the user's `executor_order` when set, then the remaining candidates in Vibey's Source order.
-  3. The gateway calls the first candidate: one short native request on that Source's `executor_model`, with the
+  3. The gateway admits each candidate on the final snapshot, under the mutation lock, at the moment it calls it
+     (`runs_on`, identity, no negative `call` evidence), so a config change during the chain moves on instead of
+     calling a removed or re-identified Source. It calls the first admitted candidate: one short native request on
+     that Source's `executor_model`, with the
      overlay's declaration, the tool forced where the protocol allows it (`tool_choice: "required"` on Responses;
      Anthropic is asked in the message alone), a fixed instruction to search and list numbered results with one or
      two cited sentences each, a small output cap, and no reasoning effort.
   4. On a failure that normal routing fails over from, or a narrow-rule refusal (which also writes negative
      evidence), it tries the next candidate. A model refusal (404 `model_not_found`, "model not supported") skips
      that Source for this call without settling its health, as `_InvocationUnsupported` does: it is inventory, not
-     capability, and writes evidence only if a narrow rule names it. Any other outcome ends the chain.
+     capability, and writes evidence only if a narrow rule names it. A failure mid-stream moves on too: nothing
+     reaches Vibey until the gateway returns the record, so "before output" here means before the result is
+     returned, and the partial call is still metered on its Source. A completed response that never ran the tool
+     (the model chose not to; Anthropic is asked in the message alone) ends the chain with a `failed` record: it is
+     a model choice, not a Source failure, and moving on would double the cost. Any other outcome ends the chain.
   5. With no candidate, or every candidate failed, the call returns a `failed` record naming what to add ("add an
      xAI Source to use X search").
   - **One deadline for the whole chain**, the tool's call timeout (180 s for search), not one per candidate.
@@ -498,6 +519,20 @@ Unchanged from v1 §7.3 (owner decision, 2026-10-13 19:14), with the producer no
   grok-imagine, and a Gemini image model (e.g. Nano Banana 2, `gemini-3.1-flash-image`) through the chat route
   with the image modality. A model whose route is not verified ships without an overlay entry, so it is never
   offered and the UI never needs an "unverified" tag.
+- **Authorized by the turn's enum.** The gateway resolves the Source from the turn's frozen `image_generate` enum
+  (§3.4): a model outside it is 409 `tool_not_enabled`, and the chosen (Source, model) is admitted on the final
+  snapshot (`runs_on` and identity). So a caller cannot bill an image model or Source the turn was not offered.
+- **Bounds.** The endpoint's 1 MiB request bound becomes per tool: `image_generate` allows its reference images,
+  at most 4, each within `read`'s inline limit, plus 1 MiB; the size check stays before parsing and the JSON parse
+  stays off the loop. `n` is at most 4, and decoded bytes are capped per image and per call as the executor caps
+  them today; a buffered response with several base64 images is parsed and size-checked off the loop.
+- **No idle cut for a buffered call.** The engine client's 120 s socket-read bound applies only to streamed calls on
+  the measured Sources, so a buffered images call longer than 120 s is not cut; the tool's call deadline bounds it.
+  If an images path ever streams partial images, those partials must keep feeding the idle bound.
+- **A Codex-subscription image runs through a chat model inside the engine.** The engine's Codex executor uses
+  either the direct Image API or the hosted `image_generation` tool on a base model
+  (`multimedia.gpt-image-2-base-model`, default `gpt-5.4-mini`), so such a call is billed and limited as a model
+  call. The subscription E2E covers whichever path the engine takes.
 - **No silent fallback.** A failed call returns a `failed` record whose error names the alternatives ("gpt-image-2
   failed: <reason>. Available: grok-imagine-image, gemini-3.1-flash-image"). The model may call again with another
   model; the gateway never switches on its own.
@@ -588,7 +623,9 @@ under the freeze protocol (`model-hub-contracts/README.md`).
 - Admission of a pinned request reads negative evidence only: a declared native tool needs `runs_on` and no current
   negative `call` evidence; a replayed item needs no current negative `replay` evidence.
 - The `pin_unavailable` envelope gains `reason` (§3.5).
-- The executor body is `{"arguments"}` only; the gateway resolves the chain from the live turn (§6).
+- The executor body is `{"arguments"}` only; the gateway resolves the chain from the live turn (§6). The endpoint
+  keeps turn ownership; it authorizes each call against the turn's frozen tool set and, for `image_generate`, its
+  enum. Errors are 409 `turn_not_live` and `tool_not_enabled`; `executor_not_bound` is retired.
 
 ### 10.3 Model Hub contracts
 
@@ -615,7 +652,7 @@ under the freeze protocol (`model-hub-contracts/README.md`).
 | Area | Removed or changed |
 | --- | --- |
 | Model Hub | `core/handlers/model_hub/hosted_probe.py`; `ModelHubService.probe_hosted_tool`, `_record_probe_evidence`, `_probe_estimate`, `_probe_rejection`, `_probe_aspect`; the RPC and UI-server routes for `POST /api/models/hosted-tools/<tool>/probe`; `MODEL_HUB_RPC_TIMEOUT_SECONDS`' probe dependency (it moves back to `vibe/model_hub_client.py`); `HOSTED_PROBE_SHAPE` and every `shape` parameter; the evidence `probe` basis and probe staleness; `engine_stamp()`'s `hosted_wire` branch (#2623); the per-turn executor binding and `_executor`; `UserTestCall`'s probe-only callers |
-| Gateway | `stream_wire`'s `response.image_generation_call.partial_image` model-output envelope; the executor's native image path (`ResponsesStreamReader(partial_images=…)`, the 32 MiB image line cap, the image event and byte budget, `_image_result`, the `_IMAGE_*` constants, the 300 s image `call_timeout`), replaced by what the images endpoint needs; the OpenAI `image_generation` overlay declaration (#2580's JPEG q90 becomes the images-endpoint request parameters); `executor` in the proxy body; the `hosted_tools_status` candidates and bound-executor projection. Kept: `disable-image-generation: passthrough`; `hosted_admission`'s "image calls are never replayed" rule until no transcript can carry a native image call; #2616's per-turn identity binding and #2586's turn id. |
+| Gateway | `stream_wire`'s `response.image_generation_call.partial_image` model-output envelope; the executor's native image path (`ResponsesStreamReader(partial_images=…)`, the 32 MiB image line cap, the image event and byte budget, `_image_result`, the `_IMAGE_*` constants, the 300 s image `call_timeout`), replaced by what the images endpoint needs; the OpenAI `image_generation` overlay declaration (#2580's JPEG q90 becomes the images-endpoint request parameters); `executor` in the proxy body; `executor_request`'s image branch (its `include`/`partial_images` read of the overlay image declaration); the `hosted_executor_bindings` / `turn_hosted_executors` plumbing, replaced by the turn's frozen `hosted_tools` (§6); the `hosted_tools_status` candidates and bound-executor projection. `_own_turn_call` stays. Kept: `disable-image-generation: passthrough`; `hosted_admission`'s "image calls are never replayed" rule until no transcript can carry a native image call; #2616's per-turn identity binding and #2586's turn id. |
 | Vibey | the native `image_generation` declaration, its parsing (`responses_hosted_tool`'s `image_generation_call` mapping, `image=`/`image_error=` in `responses_hosted_block`), `_ImageBudget`, `_saved_image`, `_PARTIAL_IMAGE_EVENT`, `IMAGE_STREAM_LINE_BYTES`, the large-event JSON offload, `drive_sse_stream`'s `max_line_size` and `iter_sse_events`' offload (every stream returns to 8 MiB); `ModelRequest.tool_choice` and `_common.forced_tool`; `registry.build_wire_request` (its tests move to each adapter's `wire_request`); the adapters' probe-only `media_sink` parameter and the `media_sink` argument of `registry_providers(media_loader=…, media_sink=…)`; `HostedTool`'s `executor` field and its `executor` body; the agent's `_with_hosted_images` / `_emit_orphan_images` path for native images (`agent.py`), kept for `image_generate` results. `HostedRecord.images`, `HostedImage`, `generate_action` and the `generate` action stay, on `ToolResultMessage.hosted` only. |
 | UI | `ProbeAnswerNote.tsx` (with `ReplayNote`); in `ToolsTab.tsx` `ProbeCell`, the executor picker and its notes, the `needsCheck`/`needsExecutor` states, the "unchecked" chip and the probe column; in `HostedCapabilityChips.tsx` the recheck action, the keyboard focus-into-detail, and the reverify, engineUpgraded and unsupportedAged states; `useEstimateLabel.ts`; the `probeHostedTool` wiring and the Sources re-read after a probe in `SettingsModelsPage.tsx`; in `useHostedTools` `probe`, `probing`, `lostProbeOutcome`, `recordedOutcome` and `PROBE_NOT_RECORDED` (the serialized writes, identity fencing and re-read after Source mutations stay); in `hostedTools.ts` `ProbeTarget`, `probeKey`, `probeUnanswered`, `verifiedCandidates`, `sameExecutor` and the `aged`/`engineUpgraded` branches of `evidenceChip`; `modelsApi.probeHostedTool`; the types `HostedToolProbeResult`, `HostedProbeAspect`, `HostedCostEstimate`, `probe_estimate`, `HostedToolCandidate`, `bound`, and `executor` in `HostedToolPut`. Rebuilt on the new read rather than only trimmed: `modelCapabilities` and the Tools-tab rows on `status`; `cost.imageTokens` ("no per-image price yet") by per-image prices; `capability.chip.viaProxy` and `explain.viaProxy` go with the "via proxy" chip. Check-all is removed by the UI lane's pending PR. |
 | i18n (`settings.models`) | `tools.probe.*`; `tools.state.needsCheck` and `needsExecutor`; `tools.executor.*`; `tools.chip.unchecked`, `reverify`, `engineUpgraded`, `unsupportedAged`; `tools.reverify.*`; `capability.recheck`, `recheckCost`; `capability.chip.*` and `capability.explain.*` for reverify, engineUpgraded, viaProxy, viaProxyAged and unsupportedAged; `capability.expiryProbe`; `tools.col.*` and `tools.chip.native`/`unsupported`/`executor` (the candidate table goes). Rewritten: `tools.subtitle` (§8.1), `tools.empty` and `tools.noNative` against the new read; `tools.footnote` keeps its relay and subscription sentences. |
@@ -630,7 +667,7 @@ edits a frozen file, and later phases join it if it has not shipped.
 | Phase | Lane | Work | Depends on |
 | --- | --- | --- | --- |
 | A. Evidence and priors | foundation | passive positive rule and the xAI decrypt rule (status per the A/B) in `evidence_rules.py`; `wire` stamp and negative-only routing; drop `probe`, `shape`, the `hosted_wire` branch; overlay `executor_model` and `image_models` with loader and schema; `hosted_tools` config v2 with absence = on; hop facts (§3.4); `hosted-tools-status` v2 read and PUT; remove the probe stack (§11 Model Hub) | — |
-| B. Gateway | gateway | the served-stream observer's projection paths for hosted items, streamed and buffered (§3.2), feeding phase A's positive rule; `pin_unavailable.reason`; admission on negative evidence only; the search executor chain at call time with `executor_model`, `executor_order` and failover (§6); `image_generate` direct execution per kind (§7.4), with recorded stub tests; route verification of each shipped image model | A (hop facts, overlay) |
+| B. Gateway | gateway | the served-stream observer's projection paths for hosted items, streamed and buffered (§3.2), feeding phase A's positive rule; `pin_unavailable.reason`; admission on negative evidence only; the search executor chain at call time with `executor_model`, `executor_order` and failover (§6); `image_generate` direct execution per kind (§7.4), with recorded stub tests; route verification of each shipped image model | A (hop facts, overlay, the in-memory wire stamp and the positive rule the observer writes through) |
 | C. Vibey | Vibey | declarations from facts (§4.1); the turn freeze (§3.4); `pin_unavailable` surfaced to the loop and re-resolve with its bounds (§3.5); in-flight rule; `image_generate` tool with the enum, reference images and the path record; remove native image parsing and the probe-only seams (§11 Vibey) | A; B for the executor body and images |
 | D. UI | UI | the grouped Tools tab, status lines, executor order, image models and default; passive Source chips; removals (§11 UI, i18n); the Tools-tab and chip frames in `avibe-docs/design.pen`, edited through Pencil (the Pencil MCP must be connected on the host that does it) | A (read shape, overlay `image_models`); B for positive records, which "正常" and "已改用" need |
 | E. Docs | foundation | public docs: what each tool does, default-on, where content goes, cost (§9) | A–D |
@@ -668,10 +705,10 @@ and no real credentials.
 | Evidence | `evidence_rules` against recorded served streams and error bodies | a served native web search writes one positive record; an executor call writes one for the executor; `Unsupported tool type` and `Invalid encrypted_content` each write one negative record; overload, 5xx and other 400s write none; a negative record under another wire stamp reads as unknown; one older than 7 days reads as unknown |
 | Hop facts | `hosted_tools` resolution | `assumed` from priors with no evidence; `unsupported` with a current negative; a Claude subscription never `assumed`; a translated path never `assumed`; the image enum and default, deterministic |
 | Config | `ModelHubConfig` loader | a 3.2.0 config without the section has every tool on; an rc-era section is dropped with one warning; `executor_order` and `default_model` round-trip |
-| Gateway refusal | real gateway + loopback fake engine | a pinned native request refused with `Unsupported tool type` answers 409 with `reason`, and the evidence is written first; admission refuses a declared tool with current negative evidence |
+| Gateway refusal | real gateway + loopback fake engine | a pinned native request refused with `Unsupported tool type` answers 409 with `reason`, and the evidence is written first; admission refuses a declared tool with current negative evidence; a refusal whose evidence write fails still refuses the next native declaration; an Anthropic `web_search_tool_result_error` writes no positive record |
 | Re-render | Vibey loop with a stub gateway | re-resolve after `hosted_unsupported` resends with the function, other native content still pinned; the per-key and per-turn bounds; same facts go portable; an in-flight continuation whose tool turned proxy uses the in-place form; a decrypt 400 on an unpinned request re-renders once without that identity's opaque payloads; a `pause_turn` continuation's `pin_unavailable` still ends `interrupted` |
-| Executor chain | gateway endpoint, stub providers | order from `executor_order` then Source order; failover on 5xx and on a narrow refusal; `model_not_found` moves on; no candidate gives a `failed` record naming the fix; metering on the executor Source; a Claude subscription is never a candidate |
-| Images | gateway endpoint + Vibey tool runtime, stub endpoints | generations and edits per kind; JPEG requested where allowed; a failure names the alternatives and no other model is called; bytes saved once through the media sink; the path record; no base64 in history |
+| Executor chain | gateway endpoint, stub providers | order from `executor_order` then Source order; failover on 5xx and on a narrow refusal; a mid-stream failure moves on and is metered; a response that never ran the tool ends the chain; a candidate removed during the chain is skipped; `model_not_found` moves on; no candidate gives a `failed` record naming the fix; metering on the executor Source; a Claude subscription is never a candidate |
+| Images | gateway endpoint + Vibey tool runtime, stub endpoints | a model outside the turn's enum is refused; generations and edits per kind; a buffered call over 120 s is not cut; reference images within the per-tool request bound; JPEG requested where allowed; a failure names the alternatives and no other model is called; bytes saved once through the media sink; the path record; no base64 in history |
 | Parsing and replay | adapters and transforms | v1's mapping and replay cases minus native images; an injected `image_generation_call` maps to `other` without decoding |
 | UI | Tools tab, Source chips, tool card | default on; status lines appear only after use; executor order up/down and reset; image models and default; chips without actions; no probe UI |
 | E2E, once per release | real engine + stub upstream | a native web search, a proxied X search, and one `image_generate` per shipped image kind through the shipped engine |
