@@ -9607,6 +9607,12 @@ class ModelHubService:
                     # or a Source that changed while the engine was prepared counts.
                     if hosted and not self._admits_hosted(hosted, source, model_id):
                         raise _pin_unavailable()
+                    # Native content stays on one identity of the Source per turn. The
+                    # claim is made here, under the exclusion this call is admitted in,
+                    # so no concurrent request or config change slips between them.
+                    claim = getattr(request, "pin_identity_claim", None)
+                    if hosted and (claim is None or not claim(identity_digest(source), bool(hosted.in_flight))):
+                        raise _pin_unavailable()
                 if self._engine_synced:
                     if recovery_request is not None and recovery_request.expired:
                         raise _RecoveryWindowClosed

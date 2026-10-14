@@ -12,7 +12,9 @@ way it cannot be served there before output becomes ``pin_unavailable``, after
 which Vibey re-renders it in portable form. A pinned request's in-flight
 response (a ``pause_turn`` continuation, or client tool results after server
 tools in the same response) is the provider's own continuation contract, so
-its hosted items need no replay evidence.
+its hosted items need no replay evidence, only the identity that response was
+served under: a turn's native content on a Source never crosses an identity
+change (the turn's pin identity claim, made atomically at final admission).
 """
 
 from __future__ import annotations
@@ -59,14 +61,16 @@ class HostedContent:
     """What a request's hosted content needs from a hop.
 
     ``calls`` holds each declared (catalog tool, declaration ``type``);
-    ``replays`` the catalog tools whose native items it replays.
+    ``replays`` the catalog tools whose native items it replays; ``in_flight``
+    those whose native items it carries in the in-flight response.
     """
 
     calls: frozenset[tuple[str, str]] = frozenset()
     replays: frozenset[str] = frozenset()
+    in_flight: frozenset[str] = frozenset()
 
     def __bool__(self) -> bool:
-        return bool(self.calls or self.replays)
+        return bool(self.calls or self.replays or self.in_flight)
 
 
 @lru_cache(maxsize=1)
@@ -97,12 +101,12 @@ def hosted_content(request: Mapping[str, Any], protocol: str, *, pinned: bool) -
         if isinstance(tool, Mapping) and isinstance(tool.get("type"), str) and tool["type"] in declared
     )
     if protocol == "openai_responses":
-        replays = _responses_replays(request.get("input"), pinned=pinned)
+        replays, in_flight = _responses_replays(request.get("input"), pinned=pinned)
     elif protocol == "anthropic":
-        replays = _anthropic_replays(request.get("messages"), pinned=pinned)
+        replays, in_flight = _anthropic_replays(request.get("messages"), pinned=pinned)
     else:
-        replays = frozenset()
-    return HostedContent(calls, replays)
+        replays, in_flight = frozenset(), frozenset()
+    return HostedContent(calls, replays, in_flight)
 
 
 def _text(item: Any, key: str) -> str | None:
@@ -131,9 +135,11 @@ def _responses_output_item(item: Any) -> bool:
     return kind in _RESPONSES_MODEL_OUTPUTS
 
 
-def _responses_replays(items: Any, *, pinned: bool) -> frozenset[str]:
+def _responses_replays(items: Any, *, pinned: bool) -> tuple[frozenset[str], frozenset[str]]:
+    """The tools of hosted items to replay, and of those in the in-flight response."""
+
     if not isinstance(items, list):
-        return frozenset()
+        return frozenset(), frozenset()
     end = len(items)
     if pinned:
         # The in-flight response is the trailing run of output items, followed
@@ -145,10 +151,11 @@ def _responses_replays(items: Any, *, pinned: bool) -> frozenset[str]:
     tools = {tool for item in items[:end] if (tool := _responses_hosted_tool(item)) is not None}
     # An image call is never replayed verbatim, in flight or not: Vibey has
     # replaced its result with the path record, so no hop may receive it.
-    tools.update(
-        "image_generation" for item in items[end:] if _responses_hosted_tool(item) == "image_generation"
-    )
-    return frozenset(tools)
+    in_flight = {tool for item in items[end:] if (tool := _responses_hosted_tool(item)) is not None}
+    if "image_generation" in in_flight:
+        in_flight.discard("image_generation")
+        tools.add("image_generation")
+    return frozenset(tools), frozenset(in_flight)
 
 
 def _anthropic_hosted_tool(block: Any) -> str | None:
@@ -171,9 +178,11 @@ def _only_tool_results(message: Any) -> bool:
     )
 
 
-def _anthropic_replays(messages: Any, *, pinned: bool) -> frozenset[str]:
+def _anthropic_replays(messages: Any, *, pinned: bool) -> tuple[frozenset[str], frozenset[str]]:
+    """The tools of hosted blocks to replay, and of those in the in-flight response."""
+
     if not isinstance(messages, list):
-        return frozenset()
+        return frozenset(), frozenset()
     in_flight: int | None = None
     if pinned:
         # The in-flight response is the last assistant message, when only the
@@ -184,14 +193,15 @@ def _anthropic_replays(messages: Any, *, pinned: bool) -> frozenset[str]:
         if index and isinstance(messages[index - 1], Mapping) and messages[index - 1].get("role") == "assistant":
             in_flight = index - 1
     tools: set[str] = set()
+    carried: set[str] = set()
     for index, message in enumerate(messages):
-        if index == in_flight or not isinstance(message, Mapping) or message.get("role") != "assistant":
+        if not isinstance(message, Mapping) or message.get("role") != "assistant":
             continue
         content = message.get("content")
         for block in content if isinstance(content, list) else ():
             if (tool := _anthropic_hosted_tool(block)) is not None:
-                tools.add(tool)
-    return frozenset(tools)
+                (carried if index == in_flight else tools).add(tool)
+    return frozenset(tools), frozenset(carried)
 
 
 def admits(

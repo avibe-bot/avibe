@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import math
@@ -1132,6 +1133,12 @@ class ModelHubTurnGateway:
                         primary_origin=terminalizer.primary_origin,
                         pinned_hop=(
                             terminalizer.pinned_hop(pin_source_id, pin_model_id) if pin_source_id else None
+                        ),
+                        pin_identity_claim=(
+                            functools.partial(
+                                self.correlation.claim_pinned_identity, terminalizer.turn_id, pin_source_id,
+                            )
+                            if pin_source_id else None
                         ),
                     ),
                     stream=stream,

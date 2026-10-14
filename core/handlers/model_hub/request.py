@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Final, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Final, Mapping
 
 if TYPE_CHECKING:
     from .provenance import HopOrigin
@@ -34,6 +34,7 @@ class ModelHubRequest(dict[str, Any]):
         headers: Mapping[str, str] | None = None,
         primary_origin: HopOrigin | None = None,
         pinned_hop: tuple[str, str | None] | None = None,
+        pin_identity_claim: Callable[[str, bool], bool] | None = None,
     ) -> None:
         super().__init__(payload)
         self.protocol = protocol
@@ -45,6 +46,11 @@ class ModelHubRequest(dict[str, Any]):
         # content may be served by: no failover, no recovery wait, no rewrite.
         # A model of None matches no hop.
         self.pinned_hop = pinned_hop
+        # Claims the pinned Source's identity digest for the request's turn at
+        # final admission: ``(identity, continuation)`` -> whether native
+        # content may go there under it. A turn's first claim binds the
+        # identity; a continuation needs one already bound.
+        self.pin_identity_claim = pin_identity_claim
 
 
 _OPAQUE_FIELDS = frozenset({"signature", "thoughtSignature", "thought_signature", "encrypted_content"})
@@ -110,6 +116,7 @@ def without_opaque_history(request: Mapping[str, Any]) -> Mapping[str, Any]:
         return ModelHubRequest(
             payload, protocol=request.protocol, headers=request.headers,
             primary_origin=request.primary_origin, pinned_hop=request.pinned_hop,
+            pin_identity_claim=request.pin_identity_claim,
         )
     return payload
 
