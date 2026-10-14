@@ -97,6 +97,8 @@ def coding_prompt(tool_names: Iterable[str], *, builtin_agent: bool, rg: bool) -
         rules.append(f"Use bash for file operations like ls, {'rg' if rg else 'grep'}, find")
     if "powershell" in names:
         rules.append(f"Use powershell for file operations like Get-ChildItem, {'rg' if rg else 'Select-String'}")
+    if rg and ("bash" in names or "powershell" in names):
+        rules.append("Prefer rg (ripgrep) for file searches. Run the `rg` command directly.")
     for name in names:
         rules.extend(TOOL_GUIDELINES.get(name, ()))
     if names:
