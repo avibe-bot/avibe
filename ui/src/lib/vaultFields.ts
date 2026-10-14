@@ -3,6 +3,15 @@ import type { VaultSecret } from '@/context/ApiContext';
 export const VAULT_FIELD_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
 export const MAX_VAULT_FIELDS = 32;
 
+export type VaultFieldNameIssue = 'nameRequired' | 'nameInvalid' | 'nameTaken';
+
+/** The first naming rule `name` breaks beside its sibling field names, or null. */
+export function vaultFieldNameIssue(name: string, siblings: readonly string[]): VaultFieldNameIssue | null {
+  if (!name) return 'nameRequired';
+  if (!VAULT_FIELD_PATTERN.test(name)) return 'nameInvalid';
+  return siblings.includes(name) ? 'nameTaken' : null;
+}
+
 export function vaultDefaultField(secret: Pick<VaultSecret, 'default_field'>): string {
   return secret.default_field && VAULT_FIELD_PATTERN.test(secret.default_field) ? secret.default_field : 'value';
 }

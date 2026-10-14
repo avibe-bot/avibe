@@ -42,7 +42,7 @@ import {
 } from '@/lib/vaultCrypto';
 import { vaultErrorMessage } from '@/lib/vaultErrors';
 import { useProtectedVault } from '@/lib/useProtectedVault';
-import { MAX_VAULT_FIELDS, VAULT_FIELD_PATTERN, vaultRecordName } from '@/lib/vaultFields';
+import { MAX_VAULT_FIELDS, VAULT_FIELD_PATTERN, vaultFieldNameIssue, vaultRecordName } from '@/lib/vaultFields';
 import { openVaultsInBrowser } from '@/lib/vaultBrowserHandoff';
 import { Badge } from './badge';
 import { Button } from './button';
@@ -52,13 +52,25 @@ import { SigningAddressList } from './signing-address-list';
 import { Switch } from './switch';
 import { TagInput } from './tag-input';
 import { Textarea } from './textarea';
+import {
+  VaultFieldList,
+  VaultFieldReferences,
+  VaultFieldRemoveConfirm,
+  VaultFieldRow,
+  VaultFieldsHeader,
+  VaultFieldTemplateMenu,
+} from './vault-field-list';
 import { VaultProtectedUnlock } from './vault-protected-unlock';
 import { VaultSecretFieldsEditor } from './vault-secret-fields-editor';
 
 type VaultKind = 'static' | 'keypair';
 type FetchAuthMode = 'bearer' | 'header' | 'query';
 type StaticSecretSource = 'text' | 'file';
-type FieldDraft = { name: string; value: string };
+/** A create-form field row. Touched flags hold back blank-field errors until the user has been there. */
+type FieldDraft = { id: number; name: string; value: string; nameTouched?: boolean; valueTouched?: boolean };
+
+let nextFieldDraftId = 0;
+const fieldDraft = (name: string, value = ''): FieldDraft => ({ id: nextFieldDraftId++, name, value });
 
 const AVAULT_P2_MIN_VERSION = '0.1.3';
 const MAX_SECRET_FILE_BYTES = 1024 * 1024;
@@ -163,6 +175,9 @@ export const VaultSecretForm: React.FC<{
   const [value, setValue] = useState('');
   const [fieldRows, setFieldRows] = useState<FieldDraft[] | null>(null);
   const [defaultFieldIndex, setDefaultFieldIndex] = useState(0);
+  // The input that should take focus when its row first mounts (after Add field or a template).
+  const [focusField, setFocusField] = useState<{ id: number; part: 'name' | 'value' } | null>(null);
+  const [focusedNameId, setFocusedNameId] = useState<number | null>(null);
   const [fieldEditBusy, setFieldEditBusy] = useState(false);
   const staticValueRef = useRef('');
   const setStaticValue = useCallback((next: string) => {
@@ -299,7 +314,7 @@ export const VaultSecretForm: React.FC<{
     if (requestSpec.policy?.auth?.type) setFetchAuthMode(requestSpec.policy.auth.type);
     if (requestSpec.policy?.auth?.name) setFetchAuthName(requestSpec.policy.auth.name);
     if (requestSpec.fields?.length) {
-      setFieldRows(requestSpec.fields.map((field) => ({ name: field, value: '' })));
+      setFieldRows(requestSpec.fields.map((field) => fieldDraft(field)));
       setDefaultFieldIndex(Math.max(0, requestSpec.fields.indexOf(requestSpec.default_field ?? requestSpec.fields[0])));
     }
   }, [requestSpec, provisionRequestId]);
@@ -854,67 +869,112 @@ export const VaultSecretForm: React.FC<{
     </div>
   );
 
-  const staticFields = (
+  // Leaving the single value turns it into rows. Its value moves to the default row (`value`
+  // for Add field, `password` for a template), and a selected file is dropped because file
+  // uploads hold one value only.
+  const leaveSingleValue = () => {
+    setStaticValue('');
+    setStaticSource('text');
+    clearSelectedFile();
+  };
+  const addFieldRow = () => {
+    const added = fieldDraft('');
+    setFieldRows((rows) => [...(rows ?? [fieldDraft('value', value)]), added]);
+    setFocusField({ id: added.id, part: 'name' });
+    leaveSingleValue();
+  };
+  const applyFieldTemplate = (fields: string[], defaultField: string) => {
+    const rows = fields.map((field) => fieldDraft(field, field === defaultField ? value : ''));
+    setFieldRows(rows);
+    setDefaultFieldIndex(fields.indexOf(defaultField));
+    setFocusField({ id: (rows.find((row) => !row.value) ?? rows[0]).id, part: 'value' });
+    leaveSingleValue();
+  };
+  const patchFieldRow = (id: number, patch: Partial<FieldDraft>) =>
+    setFieldRows((rows) => rows?.map((row) => (row.id === id ? { ...row, ...patch } : row)) ?? null);
+  const removeFieldRow = (index: number) => {
+    setFieldRows((rows) => rows?.filter((_, i) => i !== index) ?? null);
+    setDefaultFieldIndex((current) => (index < current ? current - 1 : current));
+  };
+
+  const fieldNames = fieldRows?.map((row) => row.name) ?? [];
+  const fieldNameIssues = fieldNames.map((fieldName, index) =>
+    vaultFieldNameIssue(fieldName, fieldNames.filter((_, i) => i !== index)));
+  const focusedNameIssue = fieldNameIssues[fieldRows?.findIndex((row) => row.id === focusedNameId) ?? -1];
+  const showNameRule = focusedNameId !== null && focusedNameIssue !== 'nameInvalid' && focusedNameIssue !== 'nameTaken';
+
+  const staticFields = fieldRows ? (
     <div className="flex flex-col gap-2">
-      {fieldRows ? (
-        <div className="flex flex-col gap-3">
-          {fieldRows.map((field, index) => (
-            <div key={index} className="flex flex-col gap-2 rounded-lg border border-border p-3">
-              <div className="flex items-center gap-2">
-                <Input
-                  value={field.name}
-                  onChange={(event) => setFieldRows((rows) => rows!.map((row, i) => i === index ? { ...row, name: event.target.value } : row))}
-                  aria-label={t('vaults.fields.name', { index: index + 1 })}
-                  placeholder={t('vaults.fields.namePlaceholder')}
-                  pattern={VAULT_FIELD_PATTERN.source}
-                  maxLength={64}
-                  required
-                  disabled={submitting}
-                  className="min-w-0 font-mono"
-                />
-                <label className="flex shrink-0 items-center gap-1 text-xs text-muted">
-                  <input type="radio" name="default-field" checked={index === defaultFieldIndex} disabled={submitting}
-                    onChange={() => setDefaultFieldIndex(index)} />
-                  {t('vaults.fields.default')}
-                </label>
-                <Button type="button" variant="ghost" size="icon" disabled={submitting || index === defaultFieldIndex}
-                  aria-label={t('vaults.fields.remove', { field: field.name })}
-                  onClick={() => {
-                    setFieldRows((rows) => rows!.filter((_, i) => i !== index));
-                    if (index < defaultFieldIndex) setDefaultFieldIndex(defaultFieldIndex - 1);
-                  }}>
-                  <X className="size-4" />
-                </Button>
-              </div>
-              <Input type="password" value={field.value} autoComplete="off" spellCheck={false} required disabled={submitting}
-                aria-label={t('vaults.fields.value', { field: field.name || index + 1 })}
-                placeholder={t('vaults.dialog.valuePlaceholder')}
-                onChange={(event) => setFieldRows((rows) => rows!.map((row, i) => i === index ? { ...row, value: event.target.value } : row))} />
-            </div>
-          ))}
-          <span className="text-[11px] text-muted-foreground">{t('vaults.fields.namesHelp')}</span>
-        </div>
-      ) : valueField}
-      <div className="flex gap-2">
-        <Button type="button" variant="ghost" size="sm" disabled={submitting || staticSource === 'file' || (fieldRows?.length ?? 1) >= MAX_VAULT_FIELDS}
-          onClick={() => {
-            setFieldRows((rows) => [...(rows ?? [{ name: 'value', value }]), { name: '', value: '' }]);
-            setStaticValue('');
-            setStaticSource('text');
-            clearSelectedFile();
-          }}>
-          <Plus className="size-3.5" />{t('vaults.fields.add')}
+      <VaultFieldsHeader count={fieldRows.length} />
+      <VaultFieldList onAdd={addFieldRow} addDisabled={submitting || fieldRows.length >= MAX_VAULT_FIELDS}>
+        {fieldRows.map((row, index) => {
+          const label = row.name || String(index + 1);
+          const nameIssue = fieldNameIssues[index];
+          // A blank name or value only counts as an error once the user has been there.
+          const issue = nameIssue === 'nameRequired'
+            ? (row.nameTouched || row.value ? nameIssue : null)
+            : nameIssue ?? (row.valueTouched && !row.value ? 'valueRequired' : null);
+          return (
+            <VaultFieldRow
+              key={row.id}
+              field={label}
+              isDefault={index === defaultFieldIndex}
+              name={{
+                editable: true,
+                value: row.name,
+                label: t('vaults.fields.name', { index: index + 1 }),
+                onChange: (next) => patchFieldRow(row.id, { name: next }),
+                onFocus: () => setFocusedNameId(row.id),
+                onBlur: () => {
+                  setFocusedNameId(null);
+                  patchFieldRow(row.id, { nameTouched: true });
+                },
+                autoFocus: focusField?.id === row.id && focusField.part === 'name',
+              }}
+              value={{
+                value: row.value,
+                label: t('vaults.fields.value', { field: label }),
+                placeholder: row.name ? t('vaults.fields.value', { field: row.name }) : t('vaults.dialog.valuePlaceholder'),
+                onChange: (next) => patchFieldRow(row.id, { value: next }),
+                onBlur: () => patchFieldRow(row.id, { valueTouched: true }),
+                autoFocus: focusField?.id === row.id && focusField.part === 'value',
+              }}
+              onSetDefault={() => setDefaultFieldIndex(index)}
+              remove={{
+                label: t('vaults.fields.remove', { field: label }),
+                // Only a row that holds a value has something to lose.
+                confirm: row.value ? <VaultFieldRemoveConfirm field={label} revokesGrants={false} /> : undefined,
+                onRemove: () => removeFieldRow(index),
+                blockedReason: index === defaultFieldIndex ? t('vaults.fields.defaultNotRemovable') : undefined,
+              }}
+              issue={issue}
+              disabled={submitting}
+            />
+          );
+        })}
+      </VaultFieldList>
+      {showNameRule ? <span className="text-[11px] text-muted">{t('vaults.fields.nameRule')}</span> : null}
+      <VaultFieldReferences
+        secretName={secretName}
+        fields={fieldNames.filter((_, index) => fieldNameIssues[index] === null)}
+        defaultField={fieldNames[defaultFieldIndex] ?? ''}
+      />
+    </div>
+  ) : (
+    <div className="flex flex-col gap-1.5">
+      <span className={FIELD_LABEL}>{t('vaults.dialog.value')}</span>
+      {valueField}
+      <div className="-ml-2.5 flex flex-wrap items-center gap-0.5">
+        <Button type="button" variant="ghost" size="xs" className="px-2.5 text-[13px] text-muted hover:text-foreground"
+          disabled={submitting || staticSource === 'file'} onClick={addFieldRow}>
+          <Plus />
+          {t('vaults.fields.add')}
         </Button>
-        {!fieldRows && <Button type="button" variant="ghost" size="sm" disabled={submitting || staticSource === 'file'}
-          onClick={() => {
-            setFieldRows([{ name: 'username', value: '' }, { name: 'password', value }, { name: 'totp', value: '' }]);
-            setDefaultFieldIndex(1);
-            setStaticValue('');
-            setStaticSource('text');
-            clearSelectedFile();
-          }}>{t('vaults.fields.loginTemplate')}</Button>}
+        <VaultFieldTemplateMenu disabled={submitting || staticSource === 'file'} onApply={applyFieldTemplate} />
       </div>
-      {staticSource === 'file' && <span className="text-[11px] text-muted-foreground">{t('vaults.fields.singleFile')}</span>}
+      <span className="text-[11px] text-muted">
+        {staticSource === 'file' ? t('vaults.fields.singleFile') : t('vaults.fields.multiHint')}
+      </span>
     </div>
   );
 
@@ -943,7 +1003,7 @@ export const VaultSecretForm: React.FC<{
           />
         )}
       </div>
-      <span className="text-[11px] text-muted-foreground">{t('vaults.dialog.fetchAuthHelp')}</span>
+      <span className="text-[11px] text-muted">{t('vaults.dialog.fetchAuthHelp')}</span>
     </div>
   );
 
@@ -963,7 +1023,7 @@ export const VaultSecretForm: React.FC<{
         removeLabel={(value) => t('vaults.dialog.removeChip', { value })}
         onPendingChange={setTagsPending}
       />
-      <span className="text-[11px] text-muted-foreground">{t('vaults.dialog.tagsHelp')}</span>
+      <span className="text-[11px] text-muted">{t('vaults.dialog.tagsHelp')}</span>
     </div>
   );
 
@@ -981,7 +1041,7 @@ export const VaultSecretForm: React.FC<{
         removeLabel={(value) => t('vaults.dialog.removeChip', { value })}
         onPendingChange={setHostsPending}
       />
-      <span className="text-[11px] text-muted-foreground">{t('vaults.dialog.allowHostsHelp')}</span>
+      <span className="text-[11px] text-muted">{t('vaults.dialog.allowHostsHelp')}</span>
     </div>
   );
 
@@ -1018,7 +1078,7 @@ export const VaultSecretForm: React.FC<{
                 <span className="flex-1 text-[13.5px] font-semibold text-foreground">{title}</span>
                 {selected && <Check className="size-4 text-mint-ink" />}
               </span>
-              <span className="text-[11.5px] leading-snug text-muted-foreground">{desc}</span>
+              <span className="text-[11.5px] leading-snug text-muted">{desc}</span>
             </button>
           );
         })}
@@ -1034,7 +1094,7 @@ export const VaultSecretForm: React.FC<{
       <div className="flex items-start gap-3 rounded-[10px] border border-border bg-surface-2 px-3 py-3">
         <div className="flex min-w-0 flex-1 flex-col gap-1">
           <span className="text-[13px] font-semibold text-foreground">{t('vaults.dialog.alwaysAskSign')}</span>
-          <span className="text-[11.5px] leading-snug text-muted-foreground">{t('vaults.dialog.alwaysAskSignHelp')}</span>
+          <span className="text-[11.5px] leading-snug text-muted">{t('vaults.dialog.alwaysAskSignHelp')}</span>
         </div>
         <Switch
           checked={alwaysAsk}
@@ -1135,7 +1195,7 @@ export const VaultSecretForm: React.FC<{
             </div>
           </div>
         </div>
-        <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+        <p className="flex items-center gap-1.5 text-[11px] text-muted">
           <Lock className="size-3 shrink-0" />
           {t('vaults.edit.lockedHint')}
         </p>
@@ -1190,9 +1250,8 @@ export const VaultSecretForm: React.FC<{
 
         {!isKeypair && (
           <div className="flex flex-col gap-1.5">
-            <span className={FIELD_LABEL}>{t('vaults.dialog.value')}</span>
             {staticFields}
-            <span className="text-[11px] text-muted-foreground">{t('vaults.dialog.provisionValueHelp')}</span>
+            <span className="text-[11px] text-muted">{t('vaults.dialog.provisionValueHelp')}</span>
           </div>
         )}
 
@@ -1282,20 +1341,15 @@ export const VaultSecretForm: React.FC<{
           required
           className="font-mono"
         />
-        <span className="text-[11px] text-muted-foreground">{t('vaults.dialog.nameHint')}</span>
+        <span className="text-[11px] text-muted">{t('vaults.dialog.nameHint')}</span>
       </label>
 
       {/* Value (static) or signing-key builder (keypair) */}
-      {!isKeypair && (
-        <div className="flex flex-col gap-1.5">
-          <span className={FIELD_LABEL}>{t('vaults.dialog.value')}</span>
-          {staticFields}
-        </div>
-      )}
+      {!isKeypair && staticFields}
 
       {isKeypair && protection === 'standard' && (
         <div className="flex flex-col gap-2.5 rounded-[10px] border border-border bg-surface-2 px-3 py-3">
-          <span className="text-xs text-muted-foreground">{t('vaults.dialog.signingKeyHelp')}</span>
+          <span className="text-xs text-muted">{t('vaults.dialog.signingKeyHelp')}</span>
           <div className="grid grid-cols-2 gap-2">
             {(['generate', 'import'] as const).map((src) => (
               <Button
@@ -1365,7 +1419,7 @@ export const VaultSecretForm: React.FC<{
 
           {signingKey && (
             <div className="flex min-w-0 flex-col gap-1.5">
-              <span className="text-xs font-medium text-muted-foreground">{t('vaults.dialog.signingAddresses')}</span>
+              <span className="text-xs font-medium text-muted">{t('vaults.dialog.signingAddresses')}</span>
               {addressesLoading ? (
                 <span className="flex items-center gap-1.5 text-xs text-muted">
                   <Loader2 className="size-3.5 animate-spin" />
@@ -1374,9 +1428,9 @@ export const VaultSecretForm: React.FC<{
               ) : signingAddresses ? (
                 <SigningAddressList addresses={signingAddresses} />
               ) : (
-                <span className="text-xs text-muted-foreground">{t('vaults.dialog.signingAddressesUnavailable')}</span>
+                <span className="text-xs text-muted">{t('vaults.dialog.signingAddressesUnavailable')}</span>
               )}
-              <span className="text-xs text-muted-foreground">{t('vaults.dialog.signingAddressesHint')}</span>
+              <span className="text-xs text-muted">{t('vaults.dialog.signingAddressesHint')}</span>
             </div>
           )}
 
@@ -1396,7 +1450,7 @@ export const VaultSecretForm: React.FC<{
           the locked case. No import option — generate is the single path. */}
       {isKeypair && protection === 'protected' && protectedCreateReady && (
         <div className="flex flex-col gap-2.5 rounded-[10px] border border-border bg-surface-2 px-3 py-3">
-          <span className="text-xs text-muted-foreground">{t('vaults.dialog.signingKeyProtectedHelp')}</span>
+          <span className="text-xs text-muted">{t('vaults.dialog.signingKeyProtectedHelp')}</span>
           <Button
             type="button"
             variant="secondary"
@@ -1408,13 +1462,13 @@ export const VaultSecretForm: React.FC<{
           </Button>
           {protectedKeypair && (
             <div className="flex min-w-0 flex-col gap-1.5">
-              <span className="text-xs font-medium text-muted-foreground">{t('vaults.dialog.signingAddresses')}</span>
+              <span className="text-xs font-medium text-muted">{t('vaults.dialog.signingAddresses')}</span>
               {protectedKeypair.addresses ? (
                 <SigningAddressList addresses={protectedKeypair.addresses} />
               ) : (
-                <span className="text-xs text-muted-foreground">{t('vaults.dialog.signingAddressesUnavailable')}</span>
+                <span className="text-xs text-muted">{t('vaults.dialog.signingAddressesUnavailable')}</span>
               )}
-              <span className="text-xs text-muted-foreground">{t('vaults.dialog.signingKeyProtectedBornHint')}</span>
+              <span className="text-xs text-muted">{t('vaults.dialog.signingKeyProtectedBornHint')}</span>
             </div>
           )}
           {keypairError && <span className="text-xs text-destructive-ink">{keypairError}</span>}

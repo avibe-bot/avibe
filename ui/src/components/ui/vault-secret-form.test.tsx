@@ -38,6 +38,15 @@ void i18n.use(initReactI18next).init({
 });
 const form = (element: ReactElement) => <I18nextProvider i18n={i18n}>{element}</I18nextProvider>;
 const change = (label: string, value: string) => fireEvent.change(screen.getByLabelText(label), { target: { value } });
+const applyTemplate = (label: string) => {
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.fields.useTemplate }));
+  fireEvent.click(screen.getByRole('menuitem', { name: label }));
+};
+const nameInputs = () => [1, 2, 3, 4].flatMap((index) => {
+  const input = screen.queryByLabelText(`Field ${index} name`) as HTMLInputElement | null;
+  return input ? [input.value] : [];
+});
+const submitButton = () => screen.getByRole('button', { name: 'Save & let the agent continue' }) as HTMLButtonElement;
 beforeEach(() => {
   api.listDependencies.mockResolvedValue({ ok: true, deps: [{ id: 'avault', status: 'ready', version: '0.1.6' }] });
   api.createVaultSecret.mockResolvedValue({ ok: true });
@@ -60,7 +69,7 @@ it('checks only avault when the secret form opens, without creating a secret', a
 it.each(['standard', 'protected'] as const)('creates a complete %s login with canonical record names and no plaintext payload', async (protection) => {
   const onCreated = vi.fn();
   render(form(<VaultSecretForm fixedName="GITHUB_LOGIN" defaultProtection={protection} onCancel={vi.fn()} onCreated={onCreated} />));
-  fireEvent.click(screen.getByRole('button', { name: 'Login template' }));
+  applyTemplate('Login + 2FA');
   expect(screen.queryByRole('radio', { name: 'File' })).toBeNull();
   const submit = screen.getByRole('button', { name: 'Save & let the agent continue' }) as HTMLButtonElement;
   change('Value for username', '张三');
@@ -116,7 +125,7 @@ it('preserves a selected file instead of silently switching it to empty field ro
   fireEvent.change(container.querySelector('input[type="file"]')!, { target: { files: [file] } });
   expect(screen.getByText('credential.bin')).toBeTruthy();
   const add = screen.getByRole('button', { name: 'Add field' }) as HTMLButtonElement;
-  const template = screen.getByRole('button', { name: 'Login template' }) as HTMLButtonElement;
+  const template = screen.getByRole('button', { name: en.vaults.fields.useTemplate }) as HTMLButtonElement;
   expect(add.disabled).toBe(true);
   expect(template.disabled).toBe(true);
   fireEvent.click(add);
@@ -172,4 +181,98 @@ it('does not overwrite edited metadata when a refreshed secret object arrives', 
   fireEvent.change(description, { target: { value: 'local unsaved description' } });
   rerender(form(<VaultSecretForm {...props} editSecret={refreshed} />));
   expect((screen.getByLabelText('Description') as HTMLInputElement).value).toBe('local unsaved description');
+});
+
+// A template decides the field shape and where an already-typed single value lands. The payload
+// test above starts from an empty value, so it cannot catch the value moving to the wrong row.
+it.each([
+  ['Login', ['username', 'password']],
+  ['Login + 2FA', ['username', 'password', 'totp']],
+] as const)('applies the %s template with the typed value in its default password field', (label, fields) => {
+  render(form(<VaultSecretForm fixedName="LOGIN" onCancel={vi.fn()} onCreated={vi.fn()} />));
+  fireEvent.change(screen.getByPlaceholderText(en.vaults.dialog.valuePlaceholder), { target: { value: 'typed-secret' } });
+  applyTemplate(label);
+  expect(nameInputs()).toEqual(fields);
+  expect(fields.map((field) => (screen.getByLabelText(`Value for ${field}`) as HTMLInputElement).value))
+    .toEqual(fields.map((field) => (field === 'password' ? 'typed-secret' : '')));
+  expect(screen.queryByRole('button', { name: 'Set password as default' })).toBeNull();
+  expect(screen.getByRole('button', { name: 'Set username as default' })).toBeTruthy();
+});
+
+// Set default decides which field owns the bare secret record, and the default row stays put.
+it('moves the bare record to the field set as default and keeps the default row', async () => {
+  render(form(<VaultSecretForm fixedName="LOGIN" onCancel={vi.fn()} onCreated={vi.fn()} />));
+  applyTemplate('Login');
+  change('Value for username', 'alice');
+  change('Value for password', 'secret');
+  fireEvent.click(screen.getByRole('button', { name: 'Set username as default' }));
+  const removeDefault = screen.getByRole('button', { name: 'Remove username' });
+  expect(removeDefault.getAttribute('aria-disabled')).toBe('true');
+  expect(removeDefault.getAttribute('title')).toBe(en.vaults.fields.defaultNotRemovable);
+  fireEvent.click(removeDefault);
+  fireEvent.click(screen.getByRole('button', { name: 'Actions for username' }));
+  expect((screen.getByRole('menuitem', { name: new RegExp(en.vaults.fields.removeField) }) as HTMLButtonElement).disabled).toBe(true);
+  expect(nameInputs()).toEqual(['username', 'password']);
+  await waitFor(() => expect(submitButton().disabled).toBe(false));
+  fireEvent.click(submitButton());
+  await waitFor(() => expect(api.createVaultSecret).toHaveBeenCalledOnce());
+  const payload = api.createVaultSecret.mock.calls[0][0];
+  expect(payload.default_field).toBe('username');
+  expect(payload.fields).toEqual([{ name: 'password', record: 'LOGIN.password', blind_box: blindBox }]);
+});
+
+// A row holding a value asks inside the row, from either the desktop × or the phone menu.
+it('confirms removing a filled row inline', () => {
+  render(form(<VaultSecretForm fixedName="LOGIN" onCancel={vi.fn()} onCreated={vi.fn()} />));
+  applyTemplate('Login + 2FA');
+  change('Value for totp', 'seed');
+  fireEvent.click(screen.getByRole('button', { name: 'Remove totp' }));
+  expect(screen.getByText(/and its value\?/).textContent).toBe('Remove totp and its value?');
+  expect(screen.queryByRole('dialog')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.dialog.cancel }));
+  expect((screen.getByLabelText('Value for totp') as HTMLInputElement).value).toBe('seed');
+  fireEvent.click(screen.getByRole('button', { name: 'Actions for totp' }));
+  fireEvent.click(screen.getByRole('menuitem', { name: en.vaults.fields.removeField }));
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.fields.confirmRemove }));
+  expect(screen.queryByLabelText('Value for totp')).toBeNull();
+  expect(nameInputs()).toEqual(['username', 'password']);
+});
+
+// Each rule is reported under the row that breaks it; a blank row waits until it was visited.
+it('reports field problems on the offending row', () => {
+  render(form(<VaultSecretForm fixedName="LOGIN" onCancel={vi.fn()} onCreated={vi.fn()} />));
+  applyTemplate('Login');
+  fireEvent.click(screen.getByRole('button', { name: 'Add field' }));
+  const added = screen.getByLabelText('Field 3 name');
+  fireEvent.focus(added);
+  expect(screen.getByText(en.vaults.fields.nameRule)).toBeTruthy();
+  expect(screen.queryByText(en.vaults.fields.nameRequired)).toBeNull();
+  fireEvent.blur(added);
+  expect(screen.queryByText(en.vaults.fields.nameRule)).toBeNull();
+  expect(screen.getByText(en.vaults.fields.nameRequired).id).toBe(added.getAttribute('aria-describedby'));
+  change('Field 3 name', 'TOTP');
+  expect(screen.getByText(en.vaults.fields.nameInvalid)).toBeTruthy();
+  change('Field 3 name', 'username');
+  expect(screen.getAllByText("There's already a username field")).toHaveLength(2);
+  change('Field 3 name', 'totp');
+  expect(screen.queryByText("There's already a username field")).toBeNull();
+  const totpValue = screen.getByLabelText('Value for totp');
+  fireEvent.blur(totpValue);
+  expect(document.getElementById(totpValue.getAttribute('aria-describedby')!)!.textContent).toBe(en.vaults.fields.valueRequired);
+  expect(submitButton().disabled).toBe(true);
+});
+
+// The preview lists exactly what an agent can reference: valid fields, and the bare name for the default.
+it('previews agent references for valid fields and the default shorthand', () => {
+  render(form(<VaultSecretForm onCancel={vi.fn()} onCreated={vi.fn()} />));
+  applyTemplate('Login + 2FA');
+  const preview = () => screen.getByText(en.vaults.fields.references).parentElement!.parentElement!;
+  expect(preview().textContent).toBe(
+    'Agent referencesNAME.usernameNAME.passwordNAME.totpNAME alone resolves to the default field, password.',
+  );
+  fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'GITHUB_LOGIN' } });
+  change('Field 3 name', 'TOTP');
+  expect(preview().textContent).toBe(
+    'Agent referencesGITHUB_LOGIN.usernameGITHUB_LOGIN.passwordGITHUB_LOGIN alone resolves to the default field, password.',
+  );
 });
