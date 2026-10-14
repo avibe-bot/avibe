@@ -207,10 +207,10 @@ class MigrationAdapter:
 
 
 def _service(
-    tmp_path: Path, *, migration_home: Path | None = None,
+    tmp_path: Path, *, migration_home: Path | None = None, adapter: MigrationAdapter | None = None,
 ) -> tuple[ModelHubService, MemoryStore, MigrationAdapter]:
     store = MemoryStore()
-    adapter = MigrationAdapter()
+    adapter = adapter or MigrationAdapter()
     state = tmp_path / "avibe-state"
 
     async def verify_fixture_idle():
@@ -1930,3 +1930,171 @@ def test_mh_mig_007_default_copy_leaves_a_key_only_codex_store_byte_identical(
     assert ids
     assert asyncio.run(service.migration_apply(ids))["applied"] == len(ids)
     assert auth_path.read_bytes() == before
+
+
+class OfflineUpstreamAdapter(MigrationAdapter):
+    """Every upstream contact fails once the native keys are being migrated.
+
+    A key that the provider would reject and an endpoint that is offline look
+    the same to migration: it must never ask. Each call is recorded before it
+    raises, so a caller that swallows the failure is still caught.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.offline = False
+        self.upstream_calls: list[str] = []
+
+    def _refuse(self, name: str) -> None:
+        if self.offline:
+            self.upstream_calls.append(name)
+            raise AssertionError(f"static-key migration must not call {name}")
+
+    async def provision_transient_credential(self, *args, **kwargs):
+        self._refuse("provision_transient_credential")
+        return await super().provision_transient_credential(*args, **kwargs)
+
+    async def observe_source(self, *args, **kwargs):
+        self._refuse("observe_source")
+        return await super().observe_source(*args, **kwargs)
+
+    async def discover_models(self, *args, **kwargs):
+        self._refuse("discover_models")
+        return await super().discover_models(*args, **kwargs)
+
+
+_REUSED_CLAUDE_KEY = "sk-ant-revoked-123456789"
+
+
+def _write_offline_static_keys(home: Path) -> None:
+    """Static keys across backends, two of them on one backend, none reachable."""
+    # Already a Hub Source, whose last call found the key revoked upstream.
+    _write(
+        home / ".claude" / "settings.json",
+        json.dumps({"env": {"ANTHROPIC_API_KEY": _REUSED_CLAUDE_KEY}, "permissions": {"allow": ["Read"]}}),
+    )
+    # The relay speaks Chat Completions; nothing may re-detect it as Responses.
+    _write(home / ".codex" / "auth.json", json.dumps({"OPENAI_API_KEY": "sk-openai-offline-123456"}))
+    _write(
+        home / ".codex" / "config.toml",
+        'cli_auth_credentials_store = "file"\nmodel_provider = "Relay"\n\n'
+        '[model_providers.Relay]\nbase_url = "https://offline-relay.example/v1"\nwire_api = "chat"\n',
+    )
+    _write(
+        home / ".config" / "opencode" / "opencode.json",
+        json.dumps({"provider": {
+            "openrouter": {"models": {"manual-openrouter-model": {"name": "Manual OpenRouter Model"}}},
+            "zhipuai": {"options": {"baseURL": "https://offline-zhipu.example/v1"}},
+        }}),
+    )
+    _write(
+        home / ".local" / "share" / "opencode" / "auth.json",
+        json.dumps({
+            "openrouter": {"type": "api", "key": "sk-or-expired-123456"},
+            "zhipuai": {"type": "api", "key": "sk-zhipu-offline-123456"},
+        }),
+    )
+    _write(
+        home / ".cache" / "opencode" / "models.json",
+        json.dumps({
+            "openrouter": {
+                "id": "openrouter", "npm": "@openrouter/ai-sdk-provider",
+                "api": "https://openrouter.ai/api/v1",
+            },
+            "zhipuai": {
+                "id": "zhipuai", "npm": "@ai-sdk/openai-compatible",
+                "api": "https://offline-zhipu.example/v1",
+            },
+        }),
+    )
+
+
+@pytest.mark.parametrize("clean_api_keys", (False, True))
+def test_mh_mig_015_static_keys_migrate_from_saved_configuration_without_upstream_contact(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, clean_api_keys: bool,
+) -> None:
+    """Scenario: MH-MIG-015."""
+    native_home = tmp_path / "native-home"
+    _isolate_native_home(monkeypatch, native_home)
+    adapter = OfflineUpstreamAdapter()
+    service, store, _ = _service(tmp_path, adapter=adapter)
+    # Seeded while the provider still answered; it has since revoked the key.
+    asyncio.run(service.create_source({
+        "kind": "api_key", "vendor": "anthropic", "key": _REUSED_CLAUDE_KEY,
+        "display_name": "Existing Claude key",
+    }))
+    [reused] = store.config.sources
+    reused.state = ModelHubSourceStateConfig(
+        status="needs_action", detail_key="models.source.needs_action.credential_revoked",
+    )
+    reused_before = reused.to_payload()
+    provisioned_before = len(adapter.provisioned)
+
+    _write_offline_static_keys(native_home)
+    before = _tree_digest(native_home)
+    adapter.offline = True
+    items = service.migration_scan()["items"]
+    assert {(item["backend"], item.get("vendor")) for item in items} == {
+        ("claude", "anthropic"), ("codex", "openai"),
+        ("opencode", "openrouter"), ("opencode", "zhipuai"),
+    }
+    assert all(item["proposed_action"] == "import" for item in items)
+    ids = [item["id"] for item in items]
+
+    try:
+        result = asyncio.run(service.migration_apply(ids, clean_api_keys=clean_api_keys))
+    finally:
+        # A refused call may resurface only as a generic conflict; name it.
+        assert adapter.upstream_calls == []
+    assert set(result) == {"applied", "sources", "added_to"}
+    assert result["applied"] == len(items)
+    config = _assert_canonical_round_trip(store.config)
+    by_id = {source.id: source for source in config.sources}
+    # The matching Source keeps its identity, custody, inventory and the
+    # failure it last observed: migration neither re-verifies nor clears it.
+    assert by_id[reused.id].to_payload() == reused_before
+    # Every other key is a new Source built from its saved native settings.
+    assert len(adapter.provisioned) == provisioned_before + 3
+    new = {source.vendor: source for source in config.sources if source.id != reused.id}
+    assert set(new) == {"openai", "openrouter", "zhipuai"}
+    assert {vendor: (source.protocol, source.base_url) for vendor, source in new.items()} == {
+        "openai": ("openai_chat", "https://offline-relay.example/v1"),
+        "openrouter": ("openai_chat", "https://openrouter.ai/api/v1"),
+        "zhipuai": ("openai_chat", "https://offline-zhipu.example/v1"),
+    }
+    for source in new.values():
+        assert source.kind == "api_key" and source.supply_channel == "hub"
+        assert source.credential_ref in adapter.keys
+        # Saved, not tested: the first real call proves or fails it.
+        assert source.verification_pending and source.verification_pending.startswith("vp_")
+        assert source.state.status == "standby"
+        # Nothing was fetched, so nothing claims to be upstream inventory.
+        assert all(model.provenance == "manual" for model in source.models)
+    assert [
+        (model.id, model.display_name) for model in new["openrouter"].models
+    ] == [("manual-openrouter-model", "Manual OpenRouter Model")]
+    assert all(store.config.agents[backend].mode == "hub" for backend in ("claude", "codex", "opencode"))
+
+    receipt = service.migration_journal.completed()
+    assert receipt is not None and receipt["clean_api_keys"] is clean_api_keys
+    if clean_api_keys:
+        assert json.loads((native_home / ".claude" / "settings.json").read_text(encoding="utf-8")) == {
+            "env": {}, "permissions": {"allow": ["Read"]},
+        }
+        assert not (native_home / ".codex" / "auth.json").exists()
+        assert "sk-" not in (native_home / ".local" / "share" / "opencode" / "auth.json").read_text(encoding="utf-8")
+        assert receipt["retained_native_ids"] == {}
+    else:
+        assert _tree_digest(native_home) == before
+        assert {copy["source_id"] for copy in receipt["retained_native_ids"].values()} == set(by_id)
+    assert service.migration_scan()["items"] == []
+
+    # The same batch replays its receipt: still no upstream contact, no new
+    # custody, and the same Sources.
+    settled = store.config.to_payload()
+    replay = asyncio.run(service.migration_apply(ids, clean_api_keys=clean_api_keys))
+    assert adapter.upstream_calls == []
+    assert replay["applied"] == result["applied"]
+    assert replay["sources"] == result["sources"]
+    assert len(adapter.provisioned) == provisioned_before + 3
+    assert store.config.to_payload() == settled

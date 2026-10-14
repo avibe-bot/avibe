@@ -1822,6 +1822,12 @@ scenarios:
     test: tests/test_model_hub_native_takeover.py::test_refused_migration_says_whether_avibe_or_an_outside_cli_holds_the_backend
     related_tests:
       - ui/src/components/settings/models/MigrationDialog.test.tsx
+  - id: MH-MIG-015
+    name: Migration saves static API keys from their native configuration without contacting the provider, so rejected keys and offline endpoints import alike
+    status: covered
+    kind: migration
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_migration_scenarios.py::test_mh_mig_015_static_keys_migrate_from_saved_configuration_without_upstream_contact
   - id: MH-TAKEOVER-001
     name: Recoverable failures walk the configured route and exhaust only at its end
     status: covered
