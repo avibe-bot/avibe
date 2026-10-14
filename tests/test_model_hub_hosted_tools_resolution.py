@@ -62,17 +62,18 @@ SPECS = {
 EXECUTOR_MODELS = {"xai": "grok-fast", "openai": "gpt-mini", "anthropic": "claude-haiku"}
 
 
-def _image(model_id: str, description: str, *, price: float | None = None) -> ImageModelSpec:
+def _image(model_id: str, description: str, *, price: float | None = None, kinds=("api_key", "subscription")) -> ImageModelSpec:
     prices = (
         (ImageModelPrice(HostedToolPrice("image", price * 1000, date(2026, 10, 15), "https://docs.x.ai/pricing")),)
         if price is not None
         else ()
     )
-    return ImageModelSpec(model_id, description, "images", ("images", "size"), ("pixels",), prices)
+    return ImageModelSpec(model_id, description, ("images", "size"), ("pixels",), kinds=kinds, prices=prices)
 
 
 IMAGE_MODELS = {
-    "openai": (_image("gpt-image-2", "OpenAI's image model"),),
+    # Verified on API keys only: a subscription that lists the model is not offered it.
+    "openai": (_image("gpt-image-2", "OpenAI's image model", kinds=("api_key",)),),
     "xai": (_image("grok-imagine-image", "Grok Imagine", price=0.02),),
 }
 
@@ -192,6 +193,8 @@ def test_the_image_enum_is_deterministic_with_the_default_first(tmp_path):
     assert [choice.model_id for choice in choices.models] == ["grok-imagine-image"]
     assert (choices.saved_default_available, choices.default.model_id) == (False, "grok-imagine-image")
     assert image_choices(_config(sources=[CLAUDE_SUB, GEMINI]), evidence=evidence).models == ()
+    codex_sub = _source("src_osub0001", "openai", "openai_responses", "gpt-image-2", kind="subscription")
+    assert image_choices(_config(sources=[codex_sub]), evidence=evidence).models == ()
 
 
 def test_a_turn_freezes_its_tools_executors_and_image_enum_and_each_hop_states_its_own_facts(tmp_path):

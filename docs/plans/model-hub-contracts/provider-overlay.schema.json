@@ -186,7 +186,6 @@
       "required": [
         "id",
         "description",
-        "endpoint",
         "params",
         "size_forms"
       ],
@@ -201,13 +200,6 @@
           "maxLength": 80,
           "pattern": "^\\S(?:.*\\S)?$",
           "description": "One short line; it goes into every request's tool block."
-        },
-        "endpoint": {
-          "enum": [
-            "images",
-            "chat_image"
-          ],
-          "description": "images: the engine's /v1/images/generations and /v1/images/edits; chat_image: the chat route with the image response modality."
         },
         "params": {
           "type": "array",
@@ -231,6 +223,42 @@
             ]
           },
           "description": "Which forms of size the model accepts; non-empty exactly when params lists size."
+        },
+        "kinds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "api_key",
+              "subscription"
+            ]
+          },
+          "description": "The credential kinds the model's route was verified on through the shipped engine; absent means every kind. Every image model runs through the engine's /v1/images/generations and /v1/images/edits."
+        },
+        "request": {
+          "type": "object",
+          "propertyNames": {
+            "not": {
+              "enum": [
+                "model",
+                "prompt",
+                "size",
+                "n",
+                "images",
+                "stream"
+              ]
+            }
+          },
+          "additionalProperties": {
+            "type": [
+              "string",
+              "integer",
+              "number",
+              "boolean"
+            ]
+          },
+          "description": "Fixed fields every call to the model sends, such as an output format or base64 results; never a field a call names itself."
         },
         "prices": {
           "type": "array",

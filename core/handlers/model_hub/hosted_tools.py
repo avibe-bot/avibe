@@ -242,15 +242,15 @@ def executor_vendors(tool: str) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class ImageChoice:
-    """One image model ``image_generate`` may name, on the Source that serves it."""
+    """One image model ``image_generate`` may name, on the Source that serves it, under that Source's identity."""
 
     source_id: str
     model_id: str
     description: str
-    endpoint: Literal["images", "chat_image"]
     params: tuple[str, ...]
     size_forms: tuple[str, ...]
     spec: ImageModelSpec
+    identity: str = ""
 
 
 @dataclass(frozen=True)
@@ -263,8 +263,15 @@ class ImageChoices:
     saved_default_available: bool = False
 
 
-def _serves_image(source: ModelHubSourceConfig, model_id: str) -> bool:
-    return source.supply_channel == "hub" and credential_eligible(source) and _serves(source, model_id)
+def _serves_image(source: ModelHubSourceConfig, spec: ImageModelSpec) -> bool:
+    """The image model's route was verified on this kind of credential, and the Source serves the model."""
+
+    return (
+        source.supply_channel == "hub"
+        and source.kind in spec.kinds
+        and credential_eligible(source)
+        and _serves(source, spec.id)
+    )
 
 
 def image_choices(config: ModelHubConfig, *, evidence: HostedEvidence) -> ImageChoices:
@@ -280,13 +287,13 @@ def image_choices(config: ModelHubConfig, *, evidence: HostedEvidence) -> ImageC
     available: list[ImageChoice] = []
     for source in _vibey_order(config):
         for spec in provider_image_models(source.vendor):
-            if not _serves_image(source, spec.id) or evidence.unsupported(
+            if not _serves_image(source, spec) or evidence.unsupported(
                 source, spec.id, EvidenceFeature.hosted("image_generate", "call")
             ):
                 continue
-            available.append(
-                ImageChoice(source.id, spec.id, spec.description, spec.endpoint, spec.params, spec.size_forms, spec)
-            )
+            available.append(ImageChoice(
+                source.id, spec.id, spec.description, spec.params, spec.size_forms, spec, identity_digest(source),
+            ))
     if not available:
         return ImageChoices((), None, saved, False)
     saved_choice = next(

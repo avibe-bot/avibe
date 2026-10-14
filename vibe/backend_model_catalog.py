@@ -677,7 +677,10 @@ def bundled_catalog_wire_efforts_by_model() -> Mapping[str, tuple[str, ...]]:
 _HOSTED_TOOL_PRICE_UNITS = ("call", "search", "post", "profile", "image")
 # The tools a chat request may declare natively. Image generation is never one (vibey-hosted-tools.md §7).
 OVERLAY_SEARCH_TOOLS: tuple[str, ...] = ("web_search", "x_search")
-IMAGE_MODEL_ENDPOINTS: tuple[str, ...] = ("images", "chat_image")
+# The credential kinds an image model's route may be offered on; absent means every kind.
+IMAGE_MODEL_KINDS: tuple[str, ...] = ("api_key", "subscription")
+# What a call names itself; an image model's fixed request fields may not set them.
+IMAGE_CALL_FIELDS: frozenset[str] = frozenset({"model", "prompt", "size", "n", "images", "stream"})
 IMAGE_MODEL_PARAMS: tuple[str, ...] = ("images", "n", "size")
 IMAGE_SIZE_FORMS: tuple[str, ...] = ("pixels", "ratio")
 # One line in every request's tool block: bounded so a catalog line cannot grow every prompt prefix.
@@ -742,17 +745,25 @@ class ImageModelPrice:
 class ImageModelSpec:
     """One image model a vendor offers to ``image_generate`` (capability model §4).
 
+    Every one runs through the engine's images endpoints (``vibey-hosted-tools.md`` §7.4).
     ``params`` and ``size_forms`` are sorted, so anything built from them is stable.
+    ``kinds`` are the credential kinds its route was verified on. ``request`` holds the
+    fixed fields every call to it sends (an output format, base64 results).
     ``tokens_per_image`` lets the pricing module estimate a model with no per-image price.
     """
 
     id: str
     description: str
-    endpoint: Literal["images", "chat_image"]
     params: tuple[str, ...]
     size_forms: tuple[str, ...]
+    kinds: tuple[str, ...] = IMAGE_MODEL_KINDS
+    request_json: str = "{}"
     prices: tuple[ImageModelPrice, ...] = ()
     tokens_per_image: int | None = None
+
+    @property
+    def request(self) -> dict[str, Any]:
+        return json.loads(self.request_json)
 
 
 @dataclass(frozen=True)
@@ -878,17 +889,22 @@ def _overlay_image_model(raw: object) -> ImageModelSpec:
     model = _overlay_object(
         raw,
         "image model",
-        required=("id", "description", "endpoint", "params", "size_forms"),
-        optional=("prices", "tokens_per_image"),
+        required=("id", "description", "params", "size_forms"),
+        optional=("kinds", "request", "prices", "tokens_per_image"),
     )
     description = model["description"]
     if not isinstance(description, str) or not _OVERLAY_TOKEN.fullmatch(description) or (
         len(description) > IMAGE_MODEL_DESCRIPTION_MAX_CHARS
     ):
         raise ValueError(f"image model description must be one line of at most {IMAGE_MODEL_DESCRIPTION_MAX_CHARS} characters")
-    endpoint = model["endpoint"]
-    if endpoint not in IMAGE_MODEL_ENDPOINTS:
-        raise ValueError("image model endpoint is not known")
+    kinds = _overlay_tokens(model.get("kinds", list(IMAGE_MODEL_KINDS)), "image model kinds")
+    if not kinds or set(kinds) - set(IMAGE_MODEL_KINDS):
+        raise ValueError("image model kinds name an unknown credential kind")
+    request = model.get("request", {})
+    if not isinstance(request, dict) or set(request) & IMAGE_CALL_FIELDS or not all(
+        isinstance(value, (str, int, float, bool)) for value in request.values()
+    ):
+        raise ValueError("image model request holds fixed scalar fields a call does not name")
     params = _overlay_tokens(model["params"], "image model params")
     size_forms = _overlay_tokens(model["size_forms"], "image model size_forms")
     if set(params) - set(IMAGE_MODEL_PARAMS) or set(size_forms) - set(IMAGE_SIZE_FORMS):
@@ -904,9 +920,10 @@ def _overlay_image_model(raw: object) -> ImageModelSpec:
     return ImageModelSpec(
         id=_overlay_token(model["id"], "image model id"),
         description=description,
-        endpoint=endpoint,
         params=tuple(sorted(params)),
         size_forms=tuple(sorted(size_forms)),
+        kinds=tuple(sorted(kinds)),
+        request_json=json.dumps(request, sort_keys=True),
         prices=tuple(_overlay_image_price(item) for item in prices),
         tokens_per_image=tokens,
     )
