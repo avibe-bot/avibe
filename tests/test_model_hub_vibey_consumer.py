@@ -1096,6 +1096,15 @@ async def test_hop_resolution_states_each_enabled_hosted_tool(tmp_path):
                 "include": ["web_search_call.action.sources"],
                 "replay": "assumed",
             },
+            # The bundled overlay's verified image model on an OpenAI key, its params as sorted lists.
+            "image_generate": {
+                "models": [{
+                    "source_id": "src_primary01", "model_id": "gpt-image-2",
+                    "description": "GPT Image 2: precise prompts, legible text, edits",
+                    "params": ["images", "n", "size"], "size_forms": ["pixels"],
+                }],
+                "default": {"source_id": "src_primary01", "model_id": "gpt-image-2"},
+            },
         }
         _assert_mandatory_fields("hop-resolution.schema.json", hop, HOSTED_TOOL_MANDATORY_FIELDS)
         image = {"source_id": "src_primary01", "model_id": "gpt-image-2", "description": "OpenAI images",
