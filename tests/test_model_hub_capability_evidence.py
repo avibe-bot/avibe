@@ -124,6 +124,12 @@ def test_hosted_evidence_is_stamped_with_the_engines_hosted_wire(tmp_path, monke
     assert engine_stamp() == stamp
 
 
+def test_a_released_sources_identity_digest_is_unchanged():
+    """MH-HOSTED-003: evidence a released build recorded for a verified Source still follows it. The digest is the one
+    released builds computed for this Source, whose identity then included its verification marker (None)."""
+    assert identity_digest(_source()) == "sha256:b682a96ef48e2f2834ed22ba2d42cdae568e5768f3fc3a1334a24728ffdb7166"
+
+
 def test_a_changed_source_identity_reads_as_unknown_and_is_pruned(tmp_path):
     store = CapabilityEvidenceStore(tmp_path / "model_hub_capability_evidence.json")
     keep, rekeyed = _source("src_keep0001"), _source("src_swap0001")

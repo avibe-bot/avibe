@@ -30,11 +30,17 @@ RETRY_DELAYS = {
 
 
 def source_identity(source: ModelHubSourceConfig) -> tuple:
-    """Configuration identity, independent of mutable health and inventory."""
+    """Configuration identity, independent of mutable health, inventory and verification.
+
+    Every credential or endpoint change mints a new ``credential_generation``, which verification keeps, so the
+    identity changes once per change and never reverts: not when the change is verified, and not when OAuth
+    reauthentication keeps the credential's handle. A verified Source no change has touched since the field existed
+    has no generation, where its identity held a ``None`` marker, so its digest is unchanged.
+    """
 
     return (
         source.kind, source.vendor, source.protocol, source.supply_channel,
-        source.base_url, source.credential_ref, source.verification_pending,
+        source.base_url, source.credential_ref, source.credential_generation,
     )
 
 
@@ -291,16 +297,6 @@ class RecoveryPolicy:
             self._retired_cooldowns[source.id] = observation
         self.notify()
         return True
-
-    def verification_retired(self, source_id: str, previous: tuple, current: tuple) -> None:
-        """Retiring a verification marker does not replace the credential."""
-
-        state = self._sources.get(source_id)
-        if state is not None and state.identity == previous:
-            state.identity = current
-        retired = self._retired_cooldowns.get(source_id)
-        if retired is not None and retired[0] == previous:
-            self._retired_cooldowns[source_id] = (current, *retired[1:])
 
     async def wait(self, delay: float, changed: asyncio.Event) -> None:
         """Wait without owning the configuration lock or a transport."""

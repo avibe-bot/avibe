@@ -24,6 +24,11 @@
       "pattern": "^vp_[0-9a-f]{32}$",
       "description": "Opaque, non-secret pending-verification identity, replaced whenever Hub credential material or endpoint is stored without an add-time observation that authenticated it, same-handle OAuth reauthentication included. Presence means nothing upstream has accepted this credential yet, independently of routing health. An invocation captures this marker before admission; any successful call with the same current credential and marker may clear it through a fresh cross-process config mutation. Later same-credential calls do not invalidate proof. Inventory never clears it. Null or omission retains legacy behavior without a retrospective verification claim."
     },
+    "credential_generation": {
+      "type": ["string", "null"],
+      "pattern": "^vp_[0-9a-f]{32}$",
+      "description": "Opaque, non-secret identity of the Source's latest credential or endpoint change: the verification marker that change minted, kept after verification clears verification_pending. The Source identity that evidence, retry state, a turn's native-content pin and opaque-payload binding follow includes it instead of verification_pending, so verification changes no identity and an identity never returns to one an earlier credential had, even when OAuth reauthentication keeps the credential's handle. Absent on a Source no such change has touched since the field existed, whose identity is unchanged."
+    },
     "id": {
       "type": "string",
       "pattern": "^src_[a-z0-9]{8,}$"

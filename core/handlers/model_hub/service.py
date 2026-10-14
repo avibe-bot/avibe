@@ -820,8 +820,6 @@ class UserTestCall(NamedTuple):
     source: ModelHubSourceConfig
     outcome: RawCallOutcome
     elapsed_ms: int
-    # Whether this call's own success retired the pending verification it was made under.
-    retired_own_marker: bool
 
 
 def _call_usage(outcome: RawCallOutcome | None, observed: ProtocolSSEState | None) -> ProtocolUsageReport | None:
@@ -7703,7 +7701,7 @@ class ModelHubService:
                 async for _chunk in handle.stream:
                     pass
 
-        source, outcome, elapsed_ms, _retired = await self._user_test_call(
+        source, outcome, elapsed_ms = await self._user_test_call(
             source_id,
             model_id,
             selected,
@@ -7916,24 +7914,16 @@ class ModelHubService:
     ) -> str | None:
         """Record what a probe showed for the Source as it reads now; the identity recorded for, or None.
 
-        Only ``verified`` and ``unsupported`` are evidence. The one change a probe
-        may see is its own: its call's success retired the pending verification it
-        was made under, which settlement proves. Any other change during the probe
-        (a new credential, endpoint, protocol, or a marker another grant's call
-        retired) means the probe vouches for nothing there. ``identity``, when
-        given, is the one the probe's earlier aspect was recorded for: both
-        records then describe the same Source.
+        Only ``verified`` and ``unsupported`` are evidence. A Source whose identity
+        changed during the probe (a new credential, endpoint or protocol) is one the
+        probe vouches for nothing on; verifying the credential it ran on is no such
+        change. ``identity``, when given, is the one the probe's earlier aspect was
+        recorded for: both records then describe the same Source.
         """
 
         current = await asyncio.to_thread(self.store.load)
         live = next((item for item in current.sources if item.id == last.source.id), None)
-        if live is None or not (
-            identity_digest(live) == identity_digest(last.source)
-            or (
-                last.retired_own_marker
-                and identity_digest(replace(last.source, verification_pending=None)) == identity_digest(live)
-            )
-        ):
+        if live is None or identity_digest(live) != identity_digest(last.source):
             return None
         digest = identity_digest(live)
         if identity is not None and digest != identity:
@@ -8024,7 +8014,6 @@ class ModelHubService:
         admitted_at = None
         attempt_generation = PRE_ATTEMPT_SETTLEMENT_GENERATION
         cancelled_observed: ProtocolSSEState | None = None
-        retired_own_marker = False
 
         async def invoke_selected() -> None:
             nonlocal source, handle, outcome, admitted_at, attempt_generation, cancelled_observed
@@ -8085,7 +8074,6 @@ class ModelHubService:
             outcome = await self._engine_call(handle.outcome())
 
         async def settle_attempt() -> None:
-            nonlocal retired_own_marker
             try:
                 if source is not None and outcome is not None:
                     # The explicit test is the retry a cooldown waits for.
@@ -8093,7 +8081,7 @@ class ModelHubService:
                         await self._record_recovery_success(
                             source.id, attempt_generation, backend="system", model_id=model_id,
                         )
-                    retired_own_marker = await self._verify_successful_source(
+                    await self._verify_successful_source(
                         source.id, source.credential_ref, source.verification_pending, outcome,
                     )
             finally:
@@ -8136,7 +8124,7 @@ class ModelHubService:
                     pass
                 raise cancelled
         assert source is not None and outcome is not None
-        return UserTestCall(source, outcome, elapsed_ms, retired_own_marker)
+        return UserTestCall(source, outcome, elapsed_ms)
 
     @staticmethod
     def _probe_failure(
@@ -9447,8 +9435,11 @@ class ModelHubService:
 
     @staticmethod
     def _mark_source_unverified(source: ModelHubSourceConfig) -> None:
-        # Persist identity with the credential, including same-handle reauth.
-        source.verification_pending = f"vp_{uuid.uuid4().hex}"
+        # Persist identity with the credential, including same-handle reauth: the marker clears once a call verifies
+        # the credential, and the generation keeps it, so the Source's identity never reverts to an earlier one.
+        marker = f"vp_{uuid.uuid4().hex}"
+        source.verification_pending = marker
+        source.credential_generation = marker
 
     async def _verify_successful_source(
         self,
@@ -9456,14 +9447,16 @@ class ModelHubService:
         credential_ref: str | None,
         verification_pending: str | None,
         outcome: RawCallOutcome,
-    ) -> bool:
-        """Retire pending verification only for the current credential's call; whether this call retired it."""
+    ) -> None:
+        """Retire pending verification only for the current credential's call.
+
+        The Source's identity does not include the marker, so retiring it changes no identity: health, retry state
+        and evidence all carry over.
+        """
         if outcome.kind is not RawOutcomeKind.SUCCESS or verification_pending is None:
-            return False
-        retired_identity: tuple[tuple, tuple] | None = None
+            return
 
         def clear_current(config: ModelHubConfig) -> bool:
-            nonlocal retired_identity
             current = next((item for item in config.sources if item.id == source_id), None)
             if (
                 current is None
@@ -9471,20 +9464,13 @@ class ModelHubService:
                 or current.verification_pending != verification_pending
             ):
                 return False
-            previous_identity = source_identity(current)
             current.verification_pending = None
-            retired_identity = (previous_identity, source_identity(current))
             return True
 
         try:
             async with self._mutation_lock:
                 self.store.mutate(clear_current)
-                if retired_identity is not None:
-                    previous_identity, current_identity = retired_identity
-                    self.recovery.verification_retired(source_id, previous_identity, current_identity)
-                    if self._source_attempt_identities.get(source_id) == previous_identity:
-                        self._source_attempt_identities[source_id] = current_identity
-            return retired_identity is not None
+            return
         except ValueError as exc:
             if "recovery warnings" not in str(exc):
                 raise
@@ -9493,7 +9479,6 @@ class ModelHubService:
             # Advisory bookkeeping must not turn a completed model call into a
             # failed response. Retain pending verification for the next success.
             logger.warning("Could not persist Model Hub verification state")
-        return False
 
     async def settle_handle_outcome(
         self,
