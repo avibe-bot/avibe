@@ -50,7 +50,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { onPageReactivated } from '../../lib/pageActivity';
 import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { estimateTokens } from '../../lib/tokenEstimate';
-import { loadBackendModelsWithRefresh, modelOptionLabel, useAddModelExit } from '../../lib/backendModels';
+import { loadBackendModelsWithRefresh, modelOptionLabel, useAddModelExit, type BackendModels } from '../../lib/backendModels';
 import { compatibleEffort, refusedSavedEffort, resolveEffortOptions } from '../../lib/effortOptions';
 import { WorkbenchPageHeader } from './WorkbenchPageHeader';
 import { CapabilityTabs } from './CapabilityTabs';
@@ -2106,21 +2106,22 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
   // backend doesn't know about yet (e.g. a freshly-released preview). Read
   // again when Settings uncovers the page: the Model Hub there edits the list,
   // so the rows read before the visit go when Settings covers it.
+  const applyModelCatalog = useCallback((backend: string, { models, modelLabels, reasoningOptions: opts, effortMenus }: BackendModels) => {
+    setModelCatalogs((current) => ({
+      ...current,
+      [backend]: {
+        modelOptions: models.map((m) => ({ value: m, label: modelOptionLabel(m, modelLabels) })),
+        reasoningOptions: opts ?? {},
+        effortMenus,
+      },
+    }));
+  }, []);
   useEffect(() => {
     if (!surfaceActive) return;
     const cancel = loadBackendModelsWithRefresh(
       api,
       agent.backend,
-      ({ models, modelLabels, reasoningOptions: opts, effortMenus }) => {
-        setModelCatalogs((current) => ({
-          ...current,
-          [agent.backend]: {
-            modelOptions: models.map((m) => ({ value: m, label: modelOptionLabel(m, modelLabels) })),
-            reasoningOptions: opts ?? {},
-            effortMenus,
-          },
-        }));
-      },
+      (result) => applyModelCatalog(agent.backend, result),
       () => {
         setModelCatalogs((current) => ({
           ...current,
@@ -2136,7 +2137,21 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
         return next;
       });
     };
-  }, [agent.backend, api, surfaceActive]);
+  }, [agent.backend, api, surfaceActive, applyModelCatalog]);
+
+  // A Hub catalog's effort menu follows capability evidence, which a turn in any
+  // session can change while this panel stays open. Like the route picker, which
+  // reads it as its menu opens, read it again as the user turns to the effort
+  // field, the moment it is chosen from; the last answer shows until it lands.
+  const effortRefreshRef = useRef<(() => void) | null>(null);
+  const hubEfforts = activeModelCatalog?.effortMenus !== undefined;
+  const refreshEffortMenus = useCallback(() => {
+    if (!surfaceActive || !hubEfforts) return;
+    effortRefreshRef.current?.();
+    const backend = agent.backend;
+    effortRefreshRef.current = loadBackendModelsWithRefresh(api, backend, (result) => applyModelCatalog(backend, result));
+  }, [agent.backend, api, surfaceActive, hubEfforts, applyModelCatalog]);
+  useEffect(() => () => effortRefreshRef.current?.(), [agent.backend]);
 
   const lockHint = system
     ? t('agents.detail.systemLocked')
@@ -2478,6 +2493,9 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
         <div
           className="grid gap-0.5 rounded-lg border border-border-strong bg-surface-2 p-0.5"
           style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(3.25rem, 1fr))' }}
+          data-effort-field
+          onPointerEnter={refreshEffortMenus}
+          onFocusCapture={refreshEffortMenus}
         >
           {refusedEffort && (
             <span

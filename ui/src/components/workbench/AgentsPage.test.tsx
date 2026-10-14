@@ -1705,6 +1705,28 @@ describe('AgentsPage reconnect reconciliation', () => {
     expect(screen.getByText('xhigh', { exact: true }).getAttribute('title')).toBe('chat.picker.effortRefused');
   });
 
+  it('reads the effort menu again as the effort field is used, since any turn can change it', async () => {
+    modelCatalog = {
+      models: [],
+      reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }, { value: 'xhigh', label: 'xhigh' }] },
+      effortMenus: { 'reasoning-model': { omitted: [], not_on: {} } },
+    };
+    const initial = { ...brief('agent-a', 'description'), model: 'reasoning-model', reasoning_effort: 'medium' };
+    const getVibeAgent = vi.fn().mockResolvedValue(fullAgent(initial, 'initial prompt'));
+    const api = makeApi(vi.fn().mockResolvedValue(listResult(initial)), getVibeAgent);
+    renderPage(api, { canManageAgents: true });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'xhigh', exact: true })).toBeTruthy());
+
+    // Another session's turn records that every hop refuses `xhigh`.
+    modelCatalog = {
+      models: [],
+      reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }] },
+      effortMenus: { 'reasoning-model': { omitted: ['xhigh'], not_on: {} } },
+    };
+    fireEvent.pointerEnter(document.querySelector('[data-effort-field]') as HTMLElement);
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'xhigh', exact: true })).toBeNull());
+  });
+
   it('keeps a still-valid effort untouched when the model changes', async () => {
     modelCatalog = {
       models: [],
