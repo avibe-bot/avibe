@@ -6131,13 +6131,14 @@ class ModelHubService:
                             raise ExecutorResponseRefused("modelHub.hostedTools.tooLarge")
                         else:
                             body.extend(chunk)
-                    if reader is not None:
-                        # The last event may end without its blank line.
-                        await asyncio.to_thread(reader.finish)
                 except ExecutorResponseRefused as broken:
                     # The response broke a bound: the call failed, and nothing more
-                    # of it is read; settling closes the stream. Its usage is still metered.
+                    # of it is read. Its usage is still metered, from the outcome
+                    # when the call already has one (a buffered response does).
                     refused = broken.key
+                    await self._engine_call(handle.close_stream())
+                    if handle.outcome_available:
+                        outcome = await self._engine_call(handle.outcome())
                     return
             outcome = await self._engine_call(handle.outcome())
 

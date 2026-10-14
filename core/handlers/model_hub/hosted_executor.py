@@ -239,16 +239,6 @@ class ResponsesStreamReader:
         for event in events:
             self._event(event.data)
 
-    def finish(self) -> None:
-        """Read the stream's last event when it ended without its trailing blank line."""
-
-        try:
-            events = self._parser.finish()
-        except ValueError:
-            raise ExecutorResponseRefused("modelHub.hostedTools.tooLarge") from None
-        for event in events:
-            self._event(event.data)
-
     def _event(self, data: str) -> None:
         if not data or data == "[DONE]":
             return
@@ -620,7 +610,7 @@ def _anthropic_record(message: Any, say: Say) -> ExecutorResult:
         and citation["url"]
         and isinstance(citation.get("cited_text"), str)
         and citation["cited_text"].strip()
-    ]
+    ][:_MAX_CITATIONS]
     # Results keep the provider's order; a cited result gains the text it was cited for.
     sources = _merge_sources(results, cited)
     if errors:

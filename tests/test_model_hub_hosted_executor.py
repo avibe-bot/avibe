@@ -26,7 +26,7 @@ from core.handlers.model_hub import hosted_executor as executor_module
 from core.handlers.model_hub import service as service_module
 from core.handlers.model_hub.adapter import InvokeCancelledError, RawOutcomeKind
 from core.handlers.model_hub.capability_evidence import EvidenceFeature, EvidenceRecord, identity_digest
-from core.handlers.model_hub.hosted_executor import ResponsesReadout, excerpt, responses_result
+from core.handlers.model_hub.hosted_executor import ResponsesReadout, anthropic_result, excerpt, responses_result
 from core.handlers.model_hub.hosted_tools import HOSTED_PROBE_SHAPE, engine_stamp
 from core.handlers.model_hub.pricing import PriceTable
 from core.handlers.model_hub.stream_wire import ProtocolSSEState, ProtocolUsageReport
@@ -561,13 +561,27 @@ async def test_a_call_is_metered_in_the_slice_it_ended_in(tmp_path):
     assert {row["day"] for row in rows} == {NOW.astimezone().date().isoformat()}
 
 
-def test_a_record_reads_a_bounded_number_of_citations():
+@pytest.mark.parametrize("protocol", ["openai_responses", "anthropic"])
+def test_a_record_reads_a_bounded_number_of_citations(protocol):
     """MH-HOSTED-GATEWAY-004: however many citations an answer carries, its record reads a bounded number."""
 
     posts = [(f"Post {number}.", f"https://x.com/a/status/{number}", 0) for number in range(300)]
-    answer = {"type": "message", "role": "assistant", "content": [_cited(posts)]}
-    readout = ResponsesReadout(items=[X_CALL, answer], response={"status": "completed"})
-    record = responses_result("x_search", readout, lambda key, **_values: key).record
+
+    def say(key, **_values):
+        return key
+
+    if protocol == "openai_responses":
+        answer = {"type": "message", "role": "assistant", "content": [_cited(posts)]}
+        readout = ResponsesReadout(items=[X_CALL, answer], response={"status": "completed"})
+        record = responses_result("x_search", readout, say).record
+    else:
+        record = anthropic_result(json.dumps({"type": "message", "stop_reason": "end_turn", "content": [
+            {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {"query": "q"}},
+            {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1", "content": []},
+            {"type": "text", "text": "Posts.", "citations": [
+                {"type": "web_search_result_location", "url": url, "cited_text": sentence} for sentence, url, _ in posts
+            ]},
+        ]}).encode(), say).record
     assert record["status"] == "completed"
     assert [source["url"] for source in record["sources"]] == [url for _, url, _ in posts[:256]]
 
@@ -677,10 +691,6 @@ def _anthropic(stop_reason, *, use_id="srvtoolu_1", found=ANTHROPIC_FOUND) -> tu
      "could not be read", []),
     ("anthropic_nested_too_deep", (ANTHROPIC, "claude-haiku-4-5"), (DEEP.encode(),), "failed",
      "could not be read", []),
-    # The stream's last event counts even without its trailing blank line.
-    ("responses_last_frame_unterminated", (XAI, "grok-4.6"),
-     (*_responses(WEB_CALL, WEB_ANSWER)[:-1], _responses(WEB_CALL, WEB_ANSWER)[-1].rstrip(b"\n")), "completed", None,
-     [{"url": PAGE_B, "snippet": "v8.0.27 is the latest release. It adds a streaming keepalive."}, {"url": PAGE_A}]),
     # A provider field that is not the text it should be reads as unknown, never as a 500.
     ("responses_status_not_text", (XAI, "grok-4.6"), (*INCOMPLETE[:1], _event({
         "type": "response.completed", "response": {"id": "resp_1", "status": {"value": "completed"}},
@@ -705,7 +715,7 @@ async def test_only_a_response_that_completed_completes_the_call(tmp_path, case,
     })
     assert answer_status == 200
     assert answer["record"]["status"] == status
-    assert error in answer["record"]["error"] if error is not None else "error" not in answer["record"]
+    assert error in answer["record"]["error"]
     assert answer["record"]["sources"] == sources
     assert _hosted_result("web_search", answer).record.status == status
 
@@ -872,12 +882,13 @@ class _CountedHandle(LiveInvokeHandle):
 async def test_a_buffered_executor_response_is_bounded(tmp_path, monkeypatch):
     """MH-HOSTED-GATEWAY-005: an oversized buffered body fails the call instead of growing without bound.
 
-    Once refused, the response is not read any further.
+    Once refused, the response is not read any further, and the call is still metered from its outcome.
     """
 
     monkeypatch.setattr(service_module, "EXECUTOR_RESPONSE_MAX_BYTES", 64)
     oversized = b"{" + b" " * 128
-    handle = _CountedHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=ANTHROPIC), (oversized, b"}"))
+    usage = ProtocolUsageReport.of(input_tokens=900, cached_input_tokens=0, output_tokens=40)
+    handle = _CountedHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=ANTHROPIC, usage=usage), (oversized, b"}"))
     service = _vibey_service(tmp_path, _sources(), handles=[handle])
     _bind(service, "web_search", (ANTHROPIC, "claude-haiku-4-5"))
     status, answer = await _call(service, "web_search", {
@@ -887,6 +898,7 @@ async def test_a_buffered_executor_response_is_bounded(tmp_path, monkeypatch):
     assert answer["record"]["status"] == "failed" and "larger than allowed" in answer["record"]["error"]
     assert "execution" in answer
     assert handle.read == [oversized]
+    assert _usage_of(service, ANTHROPIC)
 
 
 @pytest.mark.asyncio
