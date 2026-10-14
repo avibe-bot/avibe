@@ -6103,7 +6103,7 @@ class ModelHubService:
         return learned
 
     def _admits_hosted(self, content: HostedContent, source: ModelHubSourceConfig, model_id: str) -> bool:
-        """Whether this hop has current positive evidence for a request's hosted content; off the loop."""
+        """Whether this hop runs a request's hosted content with current positive evidence; memory only."""
 
         return admits(
             content,
@@ -9471,6 +9471,7 @@ class ModelHubService:
         exact_retry: bool = False,
         on_admitted: Callable[[int], None] | None = None,
         recovery_request: RecoveryRequest | None = None,
+        hosted: HostedContent = HostedContent(),
     ) -> InvokeHandle:
         while True:
             await self._mutation_lock.acquire()
@@ -9533,6 +9534,10 @@ class ModelHubService:
                     # never rewritten; only an unpinned one is stripped here.
                     if pinned_hop is None and getattr(request, "primary_origin", None) != origin:
                         attempt_request = without_opaque_history(request)
+                    # Hosted content is admitted on this final snapshot, so evidence
+                    # or a Source that changed while the engine was prepared counts.
+                    if hosted and not self._admits_hosted(hosted, source, model_id):
+                        raise _pin_unavailable()
                 if self._engine_synced:
                     if recovery_request is not None and recovery_request.expired:
                         raise _RecoveryWindowClosed
@@ -9573,6 +9578,7 @@ class ModelHubService:
         exact_retry: bool = False,
         on_admitted: Callable[[int], None] | None = None,
         recovery_request: RecoveryRequest | None = None,
+        hosted: HostedContent = HostedContent(),
     ) -> tuple[InvokeHandle, Optional[RawCallOutcome], asyncio.CancelledError | None]:
         acquired_handle: InvokeHandle | None = None
         generation: int | None = None
@@ -9619,6 +9625,7 @@ class ModelHubService:
                     exact_retry=exact_retry,
                     on_admitted=admitted,
                     recovery_request=recovery_request,
+                    hosted=hosted,
                 )
             except InvokeCancelledError as cancelled:
                 await meter_observed(cancelled.observed, None)
@@ -9986,9 +9993,6 @@ class ModelHubService:
                 if pinned_hop is not None and getattr(request, "protocol", None) != source.protocol:
                     # Native content is never translated: the pinned hop must speak the request's protocol.
                     raise _pin_unavailable()
-                if hosted and not await asyncio.to_thread(self._admits_hosted, hosted, source, target_model):
-                    # The pinned hop has no current positive evidence for this content.
-                    raise _pin_unavailable()
                 await self._prepare_engine_for_demand(already_synced=engine_prepared)
                 engine_prepared = True
                 handle, outcome, cancelled = await self._invoke(
@@ -10003,6 +10007,7 @@ class ModelHubService:
                     supply_channel=supply_channel,
                     on_admitted=admitted,
                     recovery_request=recovery_request,
+                    hosted=hosted,
                 )
             except _InvocationUnsupported as skipped:
                 if pinned_hop is not None:
@@ -10076,6 +10081,7 @@ class ModelHubService:
                         exact_retry=True,
                         on_admitted=admitted,
                         recovery_request=recovery_request,
+                        hosted=hosted,
                     )
                 except _InvocationPlanChanged:
                     if attempt_observer is not None:
