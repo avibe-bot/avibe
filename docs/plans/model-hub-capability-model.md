@@ -221,12 +221,13 @@ and the existing tone vocabulary (`TimeHint` for dates):
 
 - Unknown draws nothing. A healthy unknown is the normal case and must not look like a warning (V6 rule:
   exceptions only).
-- A chip opens a detail popover (time, basis, the refusal's HTTP status and code). An effort refusal's popover has a
-  "清除" action, which clears that (Source, model, effort) record, so the next request at that effort tries the
+- A chip opens a detail popover (time, basis, the refusal's HTTP status and code). Every refusal chip's popover has
+  "清除" (owner-approved mockup, 2026-10-15); a hosted-tool refusal clears through the Tools `clear` endpoint
+  (`vibey-hosted-tools.md` §3.3). An effort refusal's popover has its "清除" action, which clears that (Source, model, effort) record, so the next request at that effort tries the
   Source again (`POST /api/models/sources/<source_id>/evidence/clear` with `{model_id, feature}`, the same verb and
   shape as the hosted clear). An unknown `source_id` is 404; a missing record is a no-op that answers the Source;
   `feature` must be `{kind: "effort", name}`, and a hosted-tool feature is 400; the file is written first, and a
-  failed write answers 5xx with nothing changed. Hosted-tool chips have no action; their refusals are cleared in Models → Tools (`vibey-hosted-tools.md` §8.2). Nothing re-checks: a
+  failed write answers 5xx with nothing changed. A positive chip has no action (`vibey-hosted-tools.md` §8.2). Nothing re-checks: a
   cleared record comes back only if a real request is refused again.
 - Because refusals no longer expire, the Agent route picker's refused-effort note says where to undo it:
   "当前没有供应商支持 · 可在模型 → 供应商中清除" / "No Source accepts it now · clear it under Models → Sources"

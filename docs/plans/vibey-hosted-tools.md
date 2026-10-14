@@ -627,21 +627,26 @@ Unchanged from v1 §7.3 (owner decision, 2026-10-13 19:14), with the producer no
 - **One status line per tool, from the read's `status` (§3.3), and only after something happened:**
   - "最近一次由 <Source> 执行 · 正常 · 10-15" from `latest_ok`. It shows a date, not a time: positive records are
     written at most hourly (§3.2);
-  - refusal lines are `refused[]` grouped by `source_id`, one line per Source with the group's newest `at` (the read
-    stays per record), naming the refused models, since evidence is per (Source, model) and the same Source may run
-    the tool on another model: "<Source> 不支持 · <models>" (joined with `Intl.ListFormat`), with "，已改用 <Source>"
-    appended when that newest `at` is older than `latest_ok` and `latest_ok` is on another Source;
-  - **clearing a refusal:** each Source's line has a "清除" action for that (Source, tool), and a card where two or
-    more Sources refused also has "全部清除" for the tool (the `clear` endpoint, §3.3). A cleared Source is tried
-    natively again from its next request; if it still refuses, the line comes back after that call. Refusals do not
-    expire on their own (§3.2);
+  - refusals come from `refused[]` grouped by `source_id` (the read stays per record), each group with its newest
+    `at` and its refused models, since evidence is per (Source, model) and the same Source may run the tool on
+    another model:
+    - **one Source refused:** the status line reads "<Source> 不支持 · <models>" (joined with `Intl.ListFormat`), with
+      "，已改用 <Source>" appended when that newest `at` is older than `latest_ok` and `latest_ok` is on another
+      Source, and has a "清除" action for that (Source, tool);
+    - **two or more Sources refused** (owner-approved mockup, 2026-10-15): the status line names the Sources
+      ("A、B 不支持"), and the per-Source "清除" actions and "全部清除" sit in the card's **Advanced** section;
+  - every clear uses the `clear` endpoint (§3.3). A cleared Source is tried natively again from its next request; if
+    it still refuses, the line comes back after that call. Refusals do not expire on their own (§3.2);
   - nothing before first use. No "unknown", "unverified" or "unchecked" wording anywhere.
-- **Search cards** show an optional **Advanced** section with the executor order over `executor_candidates`: up/down
+- **Search cards** show an optional **Advanced** section (which also holds the clear actions when two or more
+  Sources refused) with the executor order over `executor_candidates`: up/down
   buttons (keyboard- and screen-reader-accessible, the route chain editor's pattern), each row with its Source's
   per-call price ("at API price" for a relay), collapsed and fully automatic until touched, with "Reset to
   automatic" (a `null` PUT). The price shows per row because it depends on who runs the search.
-- **The image card** lists the available image models with their one-line descriptions and prices, and a
-  default-model picker over `default_model` / `effective_default`; a saved default that is no longer available
+- **The image card** lists the available image models with their one-line descriptions and a per-image price
+  (owner-approved mockup): the vendor's list price where it has one (Grok Imagine "$0.02"); an estimate from token
+  pricing, marked "≈", where the image's tokens are known (Nano Banana "≈$0.067"); "暂无单价" / "no unit price" where
+  neither is (gpt-image-2, which OpenAI prices per image token at a varying count). It has a default-model picker over `default_model` / `effective_default`; a saved default that is no longer available
   shows as itself, "(unavailable)". Image-endpoint refusals (§3.2) show and clear like search refusals; any other
   failed image call shows only on its tool card in chat, since passive evidence keeps no other image failures. With no image model available, the card names the vendors from
   `image_offered_by` ("Add an OpenAI or Google API key").
@@ -650,17 +655,17 @@ Unchanged from v1 §7.3 (owner decision, 2026-10-13 19:14), with the producer no
 
 ### 8.2 Source detail chips
 
-Each model row on a Source's detail panel shows only passive state, with the detail popover (time, basis, reason)
-and no action. There is no "via proxy" chip: proxying is the tool's business, not the Source's.
-- "网页搜索 · 正常 · 10-15";
-- "X 搜索 · 不支持";
-- "图片生成 · 正常" / "图片生成 · 不支持" (image models), actionless like the search chips; image refusals clear on the
-  image card;
-- "ultra · 不支持" (efforts), whose popover has "清除" for that (Source, model, effort) record (capability model §5).
+Each model row on a Source's detail panel shows only passive state, with the detail popover (time, basis, reason).
+There is no "via proxy" chip: proxying is the tool's business, not the Source's.
+- "网页搜索 · 正常 · 10-15", "图片生成 · 正常": a positive chip, with no action;
+- "X 搜索 · 不支持", "图片生成 · 不支持", "ultra · 不支持": a refusal chip, whose popover has "清除" for that record
+  (owner-approved mockup, 2026-10-15). A hosted-tool refusal clears through the Tools `clear` endpoint with that
+  `source_id` (§3.3); an effort refusal through the Source evidence clear (capability model §5). After a clear the
+  Sources and the hosted-tools read are both read again.
 
 Unknown shows nothing. The chips reuse `EvidenceChip`'s locale-composed spoken name and popup semantics, without the
-recheck action. A hosted-tool chip's detail has no action and so no keyboard path in; an effort refusal's detail
-keeps one, for its "清除".
+recheck action. A positive chip's detail has no action and so no keyboard path in; a refusal chip's detail keeps
+one, for its "清除".
 
 ### 8.3 Use time in Vibey
 
@@ -683,8 +688,10 @@ used and the cost; IM attaches the file.
   user started.
 - **Per-call prices** live in the overlay with date and source (capability model §6.2): OpenAI web search $10 / 1k
   calls plus content tokens; Anthropic $10 / 1k searches plus result tokens, re-billed while they stay in context;
-  xAI web search $5 / 1k calls, X search $5 / 1k posts and $10 / 1k profiles. Image models are priced per image or
-  per image token as each vendor lists them; a model with no list price shows its reported cost or none, never zero.
+  xAI web search $5 / 1k calls, X search $5 / 1k posts and $10 / 1k profiles. Image models show a per-image price on
+  the Tools card: the vendor's list price (Grok Imagine $0.02), or an estimate from token pricing marked "≈" (Nano
+  Banana ≈$0.067), or "暂无单价" (gpt-image-2); a real call shows its reported or valued cost, never zero for
+  unknown.
 - **Relays** show list price, labelled "at API price", and may bill differently.
 
 ## 10. Contract changes
@@ -749,7 +756,7 @@ under the freeze protocol (`model-hub-contracts/README.md`).
 | Model Hub | `core/handlers/model_hub/hosted_probe.py`; `ModelHubService.probe_hosted_tool`, `_record_probe_evidence`, `_probe_estimate`, `_probe_rejection`, `_probe_aspect`; the RPC and UI-server routes for `POST /api/models/hosted-tools/<tool>/probe`; `MODEL_HUB_RPC_TIMEOUT_SECONDS`' probe dependency (it moves back to `vibe/model_hub_client.py`); `HOSTED_PROBE_SHAPE` and every `shape` parameter; the evidence `probe` basis and probe staleness; `engine_stamp()`'s `hosted_wire` branch (#2623); the per-turn executor binding and `_executor`; `UserTestCall`'s probe-only callers |
 | Gateway | `stream_wire`'s `response.image_generation_call.partial_image` model-output envelope; the executor's native image path (`ResponsesStreamReader(partial_images=…)`, the 32 MiB image line cap, the image event and byte budget, `_image_result`, the `_IMAGE_*` constants, the 300 s image `call_timeout`), replaced by what the images endpoint needs; the OpenAI `image_generation` overlay declaration (#2580's JPEG q90 becomes the images-endpoint request parameters); `executor` in the proxy body; `executor_request`'s image branch (its `include`/`partial_images` read of the overlay image declaration); the `hosted_executor_bindings` / `turn_hosted_executors` plumbing, replaced by the turn's frozen `hosted_tools` (§6); the `hosted_tools_status` candidates and bound-executor projection. `_own_turn_call` stays. Kept: `disable-image-generation: passthrough`; `hosted_admission`'s "image calls are never replayed" rule until no transcript can carry a native image call; #2616's per-turn identity binding and #2586's turn id. |
 | Vibey | the native `image_generation` declaration, its parsing (`responses_hosted_tool`'s `image_generation_call` mapping, `image=`/`image_error=` in `responses_hosted_block`), `_ImageBudget`, `_saved_image`, `_PARTIAL_IMAGE_EVENT`, `IMAGE_STREAM_LINE_BYTES`, the large-event JSON offload, `drive_sse_stream`'s `max_line_size` and `iter_sse_events`' offload (every stream returns to 8 MiB); `ModelRequest.tool_choice` and `_common.forced_tool`; `registry.build_wire_request` (its tests move to each adapter's `wire_request`); the adapters' probe-only `media_sink` parameter and the `media_sink` argument of `registry_providers(media_loader=…, media_sink=…)`; `HostedTool`'s `executor` field and its `executor` body; the agent's `_with_hosted_images` / `_emit_orphan_images` path for native images (`agent.py`), kept for `image_generate` results. `HostedRecord.images`, `HostedImage`, `generate_action` and the `generate` action stay, on `ToolResultMessage.hosted` only. |
-| UI | `ProbeAnswerNote.tsx` (with `ReplayNote`); in `ToolsTab.tsx` `ProbeCell`, the executor picker and its notes, the `needsCheck`/`needsExecutor` states, the "unchecked" chip and the probe column; in `HostedCapabilityChips.tsx` the recheck action, the keyboard focus-into-detail for a chip whose detail has no action (it stays for an effort refusal, whose detail has "清除"), and the reverify, engineUpgraded and unsupportedAged states; `useEstimateLabel.ts`; the `probeHostedTool` wiring in `SettingsModelsPage.tsx`, whose Sources re-read after a probe moves to after a clear (the Source chips show the same refusals); in `useHostedTools` `probe`, `probing`, `lostProbeOutcome`, `recordedOutcome` and `PROBE_NOT_RECORDED` (the serialized writes, identity fencing and re-read after Source mutations stay); in `hostedTools.ts` `ProbeTarget`, `probeKey`, `probeUnanswered`, `verifiedCandidates`, `sameExecutor` and the `aged`/`engineUpgraded` branches of `evidenceChip`; `modelsApi.probeHostedTool`; the types `HostedToolProbeResult`, `HostedProbeAspect`, `HostedCostEstimate`, `probe_estimate`, `HostedToolCandidate`, `bound`, and `executor` in `HostedToolPut`. Rebuilt on the new read rather than only trimmed: `modelCapabilities` and the Tools-tab rows on `status`; `cost.imageTokens` ("no per-image price yet") by per-image prices; `capability.chip.viaProxy` and `explain.viaProxy` go with the "via proxy" chip. Check-all is removed by the UI lane's pending PR. |
+| UI | `ProbeAnswerNote.tsx` (with `ReplayNote`); in `ToolsTab.tsx` `ProbeCell`, the executor picker and its notes, the `needsCheck`/`needsExecutor` states, the "unchecked" chip and the probe column; in `HostedCapabilityChips.tsx` the recheck action, the keyboard focus-into-detail for a positive chip, whose detail has no action (it stays for every refusal chip, whose detail has "清除"), and the reverify, engineUpgraded and unsupportedAged states; `useEstimateLabel.ts`; the `probeHostedTool` wiring in `SettingsModelsPage.tsx`, whose Sources re-read after a probe moves to after a clear (the Source chips show the same refusals); in `useHostedTools` `probe`, `probing`, `lostProbeOutcome`, `recordedOutcome` and `PROBE_NOT_RECORDED` (the serialized writes, identity fencing and re-read after Source mutations stay); in `hostedTools.ts` `ProbeTarget`, `probeKey`, `probeUnanswered`, `verifiedCandidates`, `sameExecutor` and the `aged`/`engineUpgraded` branches of `evidenceChip`; `modelsApi.probeHostedTool`; the types `HostedToolProbeResult`, `HostedProbeAspect`, `HostedCostEstimate`, `probe_estimate`, `HostedToolCandidate`, `bound`, and `executor` in `HostedToolPut`. Rebuilt on the new read rather than only trimmed: `modelCapabilities` and the Tools-tab rows on `status`; `cost.imageTokens` ("no per-image price yet") by per-image prices; `capability.chip.viaProxy` and `explain.viaProxy` go with the "via proxy" chip. Check-all is removed by the UI lane's pending PR. |
 | i18n (`settings.models`) | `tools.probe.*`; `tools.state.needsCheck` and `needsExecutor`; `tools.executor.*`; `tools.chip.unchecked`, `reverify`, `engineUpgraded`, `unsupportedAged`; `tools.reverify.*`; `capability.recheck`, `recheckCost`; `capability.chip.*` and `capability.explain.*` for reverify, engineUpgraded, viaProxy, viaProxyAged and unsupportedAged; `capability.expiryProbe`; `tools.col.*` and `tools.chip.native`/`unsupported`/`executor` (the candidate table goes). Rewritten: `tools.subtitle` (§8.1), `tools.empty` and `tools.noNative` against the new read; `tools.footnote` keeps its relay and subscription sentences. |
 | Tests and scenarios | `tests/test_model_hub_hosted_probe.py`; the probe and executor-binding cases in `test_model_hub_hosted_tools_resolution.py`, `test_model_hub_hosted_executor.py`, `test_model_hub_hosted_pinning.py` and `test_model_hub_evidence_rules.py`; the native image cases in the Responses adapter tests; UI `ToolsTab.test` MH-HOSTED-UI-013 and 019, the executor cases of 001 and the probe parts of 003 and 018, `useHostedTools.test` 013 and parts of 007, `hostedTools.test` 013, `SourceDetailPanel.test` 013 and 017, `SettingsModelsPage.render` 016; catalog rows MH-HOSTED-007 (probe), UI-004 (the engine-upgraded and aged header), UI-013, UI-016 and UI-019 retire; UI-002 shrinks to the passive states; UI-018's "locked until verified" becomes "on by default, nothing locks"; UI-001's write contract becomes the per-field PUT |
 | Contracts | as §10 |
@@ -767,7 +774,7 @@ phase D's display work; that PR adds the codes' en and zh copy in `vibe/i18n` an
 | A. Evidence and priors | foundation | passive positive rule and the xAI decrypt rule (status per the A/B) in `evidence_rules.py`; `wire` stamp and negative-only routing; drop `probe`, `shape`, the `hosted_wire` branch; overlay `executor_model` and `image_models` with loader and schema; `hosted_tools` config v2 with absence = on; hop facts (§3.4); `hosted-tools-status` v2 read, PUT and the `clear` endpoint; negative evidence without a time limit, efforts included (the observed TTL goes), and the effort-refusal clear endpoint; remove the probe stack (§11 Model Hub) | — |
 | B. Gateway | gateway | the served-stream observer's projection paths for hosted items, streamed and buffered (§3.2), feeding phase A's positive rule; `pin_unavailable.reason`; admission on negative evidence only; the search executor chain at call time with `executor_model`, `executor_order` and failover (§6); `image_generate` direct execution per kind (§7.4), with recorded stub tests; route verification of each shipped image model | A (hop facts, overlay, the in-memory wire stamp and the positive rule the observer writes through) |
 | C. Vibey | Vibey | declarations from facts (§4.1); the turn freeze (§3.4); `pin_unavailable` surfaced to the loop and re-resolve with its bounds (§3.5); in-flight rule; `image_generate` tool with the enum, reference images and the path record; remove native image parsing and the probe-only seams (§11 Vibey) | A; B for the executor body and images |
-| D. UI | UI | the grouped Tools tab, status lines with "清除" and "全部清除", executor order, image models and default; passive Source chips with "清除" on an effort refusal; the route picker's refused-effort note pointing to Models → Sources; removals (§11 UI, i18n); the Tools-tab and chip frames in `avibe-docs/design.pen`, edited through Pencil (the Pencil MCP must be connected on the host that does it) | A (read shape, overlay `image_models`); B for positive records, which "正常" and "已改用" need |
+| D. UI | UI | the grouped Tools tab, status lines with "清除" and "全部清除", executor order, image models and default; passive Source chips with "清除" on every refusal chip; the route picker's refused-effort note pointing to Models → Sources; removals (§11 UI, i18n); the Tools-tab and chip frames in `avibe-docs/design.pen`, edited through Pencil (the Pencil MCP must be connected on the host that does it) | A (read shape, overlay `image_models`); B for positive records, which "正常" and "已改用" need |
 | E. Docs | foundation | public docs: what each tool does, default-on, where content goes, cost (§9) | A–D |
 
 ## 13. Acceptance properties
