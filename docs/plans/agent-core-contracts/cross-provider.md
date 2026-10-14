@@ -27,8 +27,9 @@ Invariants:
   takes the "same origin" column only if its origin equals the target's **and** its `source_identity` equals the
   hop's. A message another identity served (another Source, or the same Source after its key or relay changed), or
   one no known identity served (after a failover to another Source, or a row written before the field), takes the
-  "different origin" column at a hop that names an identity. The gateway applies the same binding at failover
-  (C-6 item 6).
+  "different origin" column at a hop that names an identity. So does a message whose identity's provider refused
+  an opaque payload earlier in the run (`ModelEndpoint.opaque_refused`): the refusal does not say which one failed.
+  The gateway applies the same binding at failover (C-6 item 6).
 - Tool-call id normalization is deterministic: the stored id when the target accepts it; otherwise
   `call_` + the first 24 hex characters of SHA-256 of the stored id. Anthropic accepts `^[a-zA-Z0-9_-]{1,64}$`; the
   other protocols' limits are recorded in the `ai` lane's conversion tables. The map is computed per request; the
@@ -44,4 +45,4 @@ Invariants:
   in-flight turn (`pause_turn`, or a client tool result after server tools in the same message), the request is
   pinned to the Source that produced the content, and the content goes back verbatim. This transform is the only
   converter of hosted content. The gateway never rewrites it: a pinned request it cannot serve comes back as
-  `pin_unavailable`, and the transform renders the request again in portable form.
+  `pin_unavailable`, and the loop renders the request again for a fresh hop (`provider.md`).

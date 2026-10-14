@@ -362,12 +362,16 @@ scenarios:
     layer: contract
     test: tests/test_vibey_agent.py::test_a_proxied_hosted_call_runs_on_the_turns_executor_chain_and_keeps_its_record
   - id: MH-HOSTED-VIBEY-005
-    name: A hosted call goes back verbatim and pinned only to the Source that served it, within its turn or with current replay evidence; pin_unavailable gets exactly one portable, unpinned resend
+    name: A hosted call goes back verbatim and pinned only to the Source that served it, within its turn while the hop still declares the tool natively or with current replay evidence; a refusal before any output (pin_unavailable, xAI's decrypt refusal) ends the send, and the loop renders the request again for a fresh hop within its bounds, portable only as the last resort
     status: covered
     kind: contract
     layer: contract
-    test: tests/agent_core/ai/test_hosted_replay.py::test_pin_unavailable_gets_exactly_one_portable_resend_and_never_the_generic_retry
+    test: tests/agent_core/ai/test_hosted_replay.py::test_a_narrow_refusal_is_answered_by_a_fresh_hop_that_runs_only_that_tool_as_its_function
     related_tests:
+      - tests/agent_core/ai/test_hosted_replay.py::test_pin_unavailable_ends_the_pinned_send_as_a_refusal_with_no_output
+      - tests/agent_core/ai/test_hosted_replay.py::test_refusals_are_answered_within_their_bounds_and_portable_rendering_is_the_last_resort
+      - tests/agent_core/ai/test_hosted_replay.py::test_a_decrypt_refusal_ends_the_send_as_an_opaque_refusal_of_its_source_identity
+      - tests/agent_core/ai/test_hosted_replay.py::test_a_decrypt_refusal_drops_every_opaque_payload_of_that_identity_for_the_rest_of_the_turn
       - tests/agent_core/ai/test_hosted_replay.py::test_a_hosted_call_goes_back_verbatim_and_pinned_only_to_its_own_source_with_replay_evidence
       - tests/agent_core/ai/test_hosted_replay.py::test_a_continuation_goes_back_verbatim_only_to_the_hop_that_served_it
   - id: MH-HOSTED-VIBEY-006

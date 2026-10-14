@@ -193,7 +193,7 @@ class HubModelRouter:
 
     ``first`` is the selection the adapter already resolved during preflight; the
     loop's first attempt reuses it, so a run resolves once and again only after a
-    retryable error.
+    retryable error or a refusal (``vibey-hosted-tools.md`` §3.5).
     """
 
     def __init__(

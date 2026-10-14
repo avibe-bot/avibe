@@ -21,8 +21,8 @@ from core.agent_core.ai._common import (
     drive_sse_stream,
     endpoint_origin,
     hosted_pin,
-    PIN_UNAVAILABLE,
-    portable_request,
+    PinUnavailable,
+    pin_refusal,
     join_endpoint_url,
     json_object,
     native_declaration,
@@ -637,51 +637,31 @@ class OpenAIChatAdapter(ProviderAdapter):
                 terminal = assembler.terminal(final if isinstance(final, ProviderError) else Done(final))
                 if terminal is not None:
                     yield terminal
-            sending = request
-            while True:
-                driver = drive_sse_stream(
-                    self._client,
-                    method="POST",
-                    url=wire.url,
-                    json_body=wire.body,
-                    headers=wire.headers,
-                    cancel=cancel,
-                    assembler=assembler,
-                    endpoint=sending.endpoint,
-                    resolver=self._served_hop_resolver,
-                    gateway=self._gateway,
-                    translate=translate,
-                )
-                unavailable = False
-                try:
-                    async for event in driver:
-                        if event is PIN_UNAVAILABLE:
-                            unavailable = True
-                            break
-                        yield event
-                finally:
-                    await driver.aclose()
-                if not unavailable or sending is not request:
-                    return
-                # The pinned Source cannot serve this content: the same request once more, in portable form and
-                # unpinned, which the gateway fails over as any other (§3.5). Never the generic retry.
-                sending = portable_request(request)
-                prepared = await prepare_messages(
-                    sending.messages,
-                    target=endpoint_origin(sending.endpoint),
-                    supports_images=sending.supports_images,
-                    protocol=self.protocol,
-                    media_loader=self._media_loader,
-                    cancel=cancel,
-                    endpoint=sending.endpoint,
-                )
-                if isinstance(prepared, ProviderError):
-                    terminal = assembler.terminal(prepared)
-                    if terminal is not None:
-                        yield terminal
-                    return
-                transformed_messages, loaded_images = prepared
-                wire = wire_request(sending, transformed_messages, gateway=self._gateway, loaded_images=loaded_images)
+            driver = drive_sse_stream(
+                self._client,
+                method="POST",
+                url=wire.url,
+                json_body=wire.body,
+                headers=wire.headers,
+                cancel=cancel,
+                assembler=assembler,
+                endpoint=request.endpoint,
+                resolver=self._served_hop_resolver,
+                gateway=self._gateway,
+                translate=translate,
+            )
+            try:
+                async for event in driver:
+                    if isinstance(event, PinUnavailable):
+                        # The pinned Source cannot serve this content; nothing reached a model. The loop renders the
+                        # request again for a fresh hop (§3.5).
+                        terminal = assembler.terminal(pin_refusal(assembler, request.endpoint, event))
+                        if terminal is not None:
+                            yield terminal
+                        return
+                    yield event
+            finally:
+                await driver.aclose()
         except Exception as exc:
             terminal = assembler.terminal(assembler.exception(exc))
             if terminal is not None:

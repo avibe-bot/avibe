@@ -105,9 +105,12 @@ class ModelEndpoint:
     #: That Source's credential-free identity (``HopResolution.source_identity``): the account a response's opaque
     #: payloads are bound to (``cross-provider.md``).
     source_identity: Optional[str] = None
-    #: A portable request (§3.5, ``portable_request``): never pinned, and no native hosted content. Its Source and
+    #: A portable request (§3.5, ``portable_endpoint``): never pinned, and no native hosted content. Its Source and
     #: identity stay, so a response its own Source serves is still attributed to them.
     portable: bool = False
+    #: The Source identities whose opaque payloads go nowhere for the rest of the turn: their provider refused one
+    #: (§3.5). A message they served is sent as a different origin's.
+    opaque_refused: frozenset[str | None] = frozenset()
     #: Each enabled search tool's route on this hop, in Model Hub's order; empty when none is enabled.
     hosted_tools: Mapping[str, HostedToolRoute] = field(default_factory=dict)
     #: The models ``image_generate`` may call; None when the tool is off or no model is available.
@@ -207,6 +210,26 @@ class ProviderError:
     #: The response streamed thinking and nothing else before this error (``THINKING_DROP_RETRY_KINDS``): it is
     #: ``retryable``, and the loop retries it at most once per request (``provider.md``).
     after_thinking: bool = False
+    #: A refusal before any output, which the loop answers by rendering the request again (``vibey-hosted-tools.md``
+    #: §3.5), never by the generic retry.
+    refusal: Optional["Refusal"] = None
+
+
+@dataclass(frozen=True)
+class Refusal:
+    """Why a request was refused before any output, so the next attempt renders it differently (§3.5).
+
+    ``pin_unavailable``: the gateway handed a pinned request back; ``tool`` and ``aspect`` name the narrow hosted rule
+    that fired, when one did. ``opaque_refused``: the provider refused a replayed ciphertext (xAI's "Could not decrypt
+    the provided encrypted_content"), which does not say which one. ``source_id`` and ``source_identity`` are the
+    refused request's hop.
+    """
+
+    kind: Literal["pin_unavailable", "opaque_refused"]
+    source_id: Optional[str] = None
+    source_identity: Optional[str] = None
+    tool: Optional[str] = None
+    aspect: Optional[str] = None
 
 
 ProviderEvent = Union[TextDelta, ThinkingDelta, ToolCallStart, ToolCallDelta, BlockEnd, Done, ProviderError]

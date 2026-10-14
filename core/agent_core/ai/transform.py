@@ -126,11 +126,9 @@ def transform_messages(
 
         pending_tool_ids.clear()
         # Opaque payloads are bound to the account that issued them, the Source identity: another account's ciphertext
-        # is refused (xAI, OpenAI). A message another identity served, or one no known identity did, is sent as a
-        # different origin's.
-        same_origin = message.origin == target and (
-            endpoint is None or message.source_identity == endpoint.source_identity
-        )
+        # is refused (xAI, OpenAI). A message another identity served, one no known identity did, or one whose
+        # identity's provider refused an opaque payload this turn is sent as a different origin's.
+        same_origin = message.origin == target and _opaque_admitted(message, endpoint)
         content: list[AssistantContent] = []
         turn_tool_ids: dict[str, list[str]] = {}
         in_flight = position == live
@@ -255,6 +253,15 @@ def in_flight_position(messages: list[Message] | tuple[Message, ...]) -> int | N
     return last
 
 
+def _opaque_admitted(message: AssistantMessage, endpoint: ModelEndpoint | None) -> bool:
+    """Whether ``message``'s opaque payloads may go to ``endpoint``: a hop of the Source identity that served it, whose
+    provider has not refused one this turn (§3.5)."""
+
+    return endpoint is None or (
+        message.source_identity == endpoint.source_identity and message.source_identity not in endpoint.opaque_refused
+    )
+
+
 def native_replay(
     message: AssistantMessage, *, in_flight: bool, endpoint: ModelEndpoint | None, target: Origin, protocol: str
 ) -> bool:
@@ -262,8 +269,8 @@ def native_replay(
 
     Only to the hop the request goes to, when that hop's Source served them on the same origin: one hop then builds
     the request and serves it (§3.5; a moved hop gets the in-place form). The hop must still declare each tool they
-    called natively, since a provider refuses its server items without their declaration, and have a Source, which a
-    portable request has not, over a protocol with native hosted content.
+    called natively, since a provider refuses its server items without their declaration, over a protocol with native
+    hosted content, and the request must not be portable.
     * The response its turn continues (``in_flight``) needs no ``replay``: that is the provider's own continuation
       contract.
     * Any earlier response needs ``replay`` assumed on the hop for every tool it called, and every one of its calls
@@ -274,7 +281,7 @@ def native_replay(
     if not blocks or endpoint is None or not endpoint.source_id or endpoint.portable or message.origin != target:
         return False
     # A native payload is opaque provider content too: it goes back only to the account that issued it.
-    if message.source_identity != endpoint.source_identity:
+    if not _opaque_admitted(message, endpoint):
         return False
     if protocol not in ("anthropic", "openai_responses"):
         return False
