@@ -2686,6 +2686,11 @@ async def test_a_proxied_image_is_saved_through_the_media_sink_and_its_record_na
     assert (image.mime, image.width, image.height, image.bytes) == ("image/jpeg", 1536, 1024, len(jpeg))
     assert f"Image saved: {image.path}" in result.content[0].text
     assert encoded not in json.dumps(models) and encoded not in json.dumps(message_to_dict(result))
+    # The executor's rendered prompt and resolved size and quality, kept as a native call's block keeps them.
+    assert result.hosted.action == HostedAction(
+        "generate", prompt="A lighthouse at dusk", size="1536x1024", quality="high"
+    )
+    assert result.content[0].text.startswith('[image_generation: "A lighthouse at dusk"]')
 
 
 _NATIVE_SEARCH = {"mode": "native", "declaration": {"type": "web_search"}, "include": [], "executor": None, "replay": False}

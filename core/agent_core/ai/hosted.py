@@ -122,7 +122,7 @@ def responses_hosted_block(
         if record_status == "completed" and image is None:
             record_status, error = "failed", bounded_error(image_error or "the provider returned no image")
         images = (image,) if image is not None and record_status == "completed" else ()
-        action, sources = _generate_action(item), ()
+        action, sources = generate_action(item), ()
         # The transcript's copy names the saved file in place of the base64 image.
         item = {key: value for key, value in item.items() if key != "result"}
         if images:
@@ -140,9 +140,10 @@ def responses_hosted_block(
     )
 
 
-def _generate_action(item: Mapping[str, Any]) -> HostedAction:
-    """An ``image_generation_call``: the prompt the provider rendered (its revision of the model's), and the output's
-    resolved size and quality, which pricing reads (§7.3, item 22)."""
+def generate_action(item: Mapping[str, Any]) -> HostedAction:
+    """An image generation as it ran: the prompt the provider rendered (its revision of the model's), and the output's
+    resolved size and quality, which pricing reads (§7.3, item 22). ``item`` is a native ``image_generation_call`` or
+    a proxy executor's ``generation`` facts, which carry the same names."""
 
     return HostedAction(
         "generate",

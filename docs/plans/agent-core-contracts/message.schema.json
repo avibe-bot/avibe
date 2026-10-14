@@ -430,13 +430,16 @@
             "record"
           ],
           "additionalProperties": false,
-          "description": "Set only on the result of a proxied hosted call. `execution` is present exactly when an executor ran; without it the record failed.",
+          "description": "Set only on the result of a proxied hosted call. `execution` is present exactly when an executor ran; without it the record failed. `action` is what the executor reports it did, such as a generated image's rendered prompt and resolved size and quality.",
           "properties": {
             "record": {
               "$ref": "#/definitions/HostedRecord"
             },
             "execution": {
               "$ref": "#/definitions/ProxyExecution"
+            },
+            "action": {
+              "$ref": "#/definitions/HostedAction"
             }
           },
           "if": {

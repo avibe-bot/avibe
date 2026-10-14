@@ -603,8 +603,9 @@ Each has a **Re-verify** action with its cost. Unknown shows nothing.
   events carry bytes during generation.
   - The gateway counts a partial image as model output (`stream_wire.py`), so response headers are released at the
     first partial.
-  - Partials are previews for the user's display, written to a temporary file and replaced by the final image.
-    They never enter history or model context.
+  - Phase 1 drops previews: Vibey counts each one against the response's image budget and keeps none, so no preview
+    reaches a file, history or model context, and the user sees the final image. Showing previews while an image is
+    drawn is a later display change: a temporary file the final image replaces.
 - **What was measured.** A failing generation went 35.4 s without a byte after `generating`; healthy generations took
   64–130 s.
 - **Phase 1 acceptance gate.** Through the gateway, with partials, the largest byte gap of every successful test

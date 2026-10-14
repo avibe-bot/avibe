@@ -467,14 +467,18 @@ class ProxyExecution:
 
 @dataclass(frozen=True)
 class HostedResult:
-    """``ToolResultMessage.hosted``: the canonical record of a proxied hosted call."""
+    """``ToolResultMessage.hosted``: the canonical record of a proxied hosted call. ``action`` is what the executor
+    reports it did, where that differs from the model's request: for ``image_generation``, the prompt it rendered and
+    the output's resolved size and quality, as a native call's block carries them."""
 
     record: HostedRecord
     execution: Optional[ProxyExecution] = None
+    action: Optional[HostedAction] = None
 
     def __post_init__(self) -> None:
         _require(self.record, HostedRecord, "hosted record")
         _require(self.execution, ProxyExecution, "proxy execution", optional=True)
+        _require(self.action, HostedAction, "hosted result action", optional=True)
         if self.execution is None and self.record.status != "failed":
             raise ValueError("a hosted result without an execution is a failed record")
 
@@ -889,6 +893,8 @@ def message_to_dict(message: Message) -> dict[str, Any]:
                 }
                 if execution.cost is not None:
                     hosted_result["execution"]["cost"] = _cost_to_dict(execution.cost)
+            if message.hosted.action is not None:
+                hosted_result["action"] = _action_to_dict(message.hosted.action)
             result["hosted"] = hosted_result
         return result
     raise TypeError(f"not a message: {type(message).__name__}")
@@ -931,7 +937,7 @@ def message_from_dict(data: Mapping[str, Any]) -> Message:
         )
         hosted_result = None
         if "hosted" in f:
-            h = _read(f["hosted"], "hosted result", {"record": dict}, {"execution": dict})
+            h = _read(f["hosted"], "hosted result", {"record": dict}, {"execution": dict, "action": dict})
             execution = None
             if "execution" in h:
                 e = _read(
@@ -953,7 +959,11 @@ def message_from_dict(data: Mapping[str, Any]) -> Message:
                     executor_billing=e["executor_billing"],
                     cost=_cost_from_dict(e["cost"]) if "cost" in e else None,
                 )
-            hosted_result = HostedResult(record=_record_from_dict(h["record"]), execution=execution)
+            hosted_result = HostedResult(
+                record=_record_from_dict(h["record"]),
+                execution=execution,
+                action=_action_from_dict(h["action"]) if "action" in h else None,
+            )
         return ToolResultMessage(
             tool_call_id=f["tool_call_id"],
             tool_name=f["tool_name"],

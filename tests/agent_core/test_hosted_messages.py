@@ -151,6 +151,8 @@ def _produced() -> list:
                 executor_billing="monthly",
                 cost=HostedCost(basis="included"),
             ),
+            # What the executor rendered: its revised prompt and the resolved size and quality.
+            action=HostedAction(type="generate", prompt="A lighthouse at dusk", size="1024x1024", quality="high"),
         ),
     )
     unexecuted = ToolResultMessage(

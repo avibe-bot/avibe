@@ -136,6 +136,25 @@ def proxy_failed():
     )
 
 
+def test_a_proxied_image_shows_what_its_executor_rendered_as_a_native_one_does():
+    """A proxied image's card reads the executor's rendered prompt and resolved size and quality from the result's
+    action, as a native image's reads its block's action: one reading, no mode branch."""
+
+    call = ToolCallBlock(id="call_i1", name="image_generation", arguments={"prompt": "a lighthouse", "size": "auto"})
+    activity = proxy_activity(
+        call,
+        HostedResult(
+            record=HostedRecord(status="completed", images=(HostedImage(path="/media/9c1d.jpg", mime="image/jpeg"),)),
+            execution=XAI,
+            action=HostedAction(type="generate", prompt=PROMPT, size="1536x1024", quality="high"),
+        ),
+        source_names=NAMES,
+    )
+
+    assert (activity.subject, activity.revised_prompt) == ("a lighthouse", PROMPT)
+    assert (activity.size, activity.quality) == ("1536x1024", "high")
+
+
 @pytest.mark.parametrize("build", [native_web_search, proxy_x_search, native_image, proxy_failed])
 def test_payloads_match_the_shape_the_web_card_renders(build):
     """MH-HOSTED-UI-009: every mode and outcome the card distinguishes, from the canonical records each producer writes.

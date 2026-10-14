@@ -24,7 +24,7 @@ import httpx
 from core.agent_core.agent.models import ModelSelection
 from core.agent_core.agent.recovery import RecoveryRenderer
 from core.agent_core.ai._common import CONNECT_TIMEOUT_S, auth_headers, join_endpoint_url
-from core.agent_core.ai.hosted import bounded_error, image_dimensions, record_text
+from core.agent_core.ai.hosted import bounded_error, generate_action, image_dimensions, record_text
 from core.agent_core.ai.provider import HostedExecutor, MediaSink, ModelEndpoint
 from core.agent_core.messages import (
     HostedImage,
@@ -135,7 +135,9 @@ class HostedTool:
     async def execute(self, arguments: Mapping[str, Any], ctx: ToolContext) -> ToolResult:
         del ctx
         hosted = await self._run(dict(arguments))
-        query = arguments.get("query") or arguments.get("prompt")
+        # The prompt an image was rendered from, when the executor reports it, as a native call's record shows it.
+        rendered = hosted.action.prompt if hosted.action is not None else None
+        query = rendered or arguments.get("query") or arguments.get("prompt")
         text = record_text(self.spec.name, hosted.record, query=query if isinstance(query, str) else None)
         failed = hosted.record.status in ("failed", "incomplete")
         return ToolResult(content=(TextBlock(text),), is_error=failed, hosted=hosted)
@@ -178,7 +180,8 @@ class HostedTool:
         base64, and the record lists the file. A completed call that saved no image failed."""
 
         generation = answer.get("generation")
-        width, height = image_dimensions(generation.get("size") if isinstance(generation, Mapping) else None)
+        generation = generation if isinstance(generation, Mapping) else {}
+        width, height = image_dimensions(generation.get("size"))
         saved: list[HostedImage] = []
         try:
             for item in answer.get("images") or ():
@@ -190,7 +193,8 @@ class HostedTool:
             return replace(hosted, record=_failed_record(self.spec.name, f"the image could not be saved: {error}"))
         if not saved:
             return replace(hosted, record=_failed_record(self.spec.name, "the executor returned no image"))
-        return replace(hosted, record=replace(hosted.record, images=tuple(saved)))
+        # The executor's rendered prompt and resolved size and quality: where a native call's block carries them.
+        return replace(hosted, record=replace(hosted.record, images=tuple(saved)), action=generate_action(generation))
 
 
 def _failed_record(tool: str, reason: str) -> HostedRecord:
