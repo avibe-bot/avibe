@@ -9,10 +9,9 @@ probing their protocols, or fetching their model lists during migration. An
 expired key, offline endpoint, or unavailable model list must not prevent or slow
 the batch. Normal Gateway use reports provider failures after migration.
 
-The discarded partial-skip implementation stays on its abandoned proposal branch;
-none of its skipped-result API, report UI, or receipt changes belong in delivery.
-The public response remains `{applied, sources, added_to}` and the existing
-transaction/replay format stays unchanged.
+The earlier partial-skip proposal is superseded; no skipped-result API, report UI,
+or receipt schema is added. The public response remains `{applied, sources, added_to}`
+and the existing transaction/replay format stays unchanged.
 
 ## Smallest complete change
 
@@ -30,6 +29,11 @@ transaction/replay format stays unchanged.
   download another migration admission gate. No per-provider upstream discovery
   in the static-key migration call path. Ordinary background discovery and later
   explicit tests/requests remain separate owners.
+- Keep Avibe-owned named Agent selections runnable when entering Gateway mode.
+  If a migrated static Source has no inventory, carry the selection through its
+  supported passthrough path. OpenCode's native provider prefix must match a
+  Source actually imported or reused in this batch. Preserve removed-model
+  intent and retired Source/model pairs; do not fabricate discovered entries.
 - Keep local format/URL/transport representability checks, stale-consent and file
   guards, credential access checks, backend retirement, copy-vs-cleanup consent,
   atomic write-ahead custody and recovery exactly as required. Do not skip or
@@ -58,11 +62,18 @@ rejects all requests; assert all keys import and no credential-bearing observati
 or discovery request was made during migration. Verify replay and native copy/
 cleanup in the disposable local Incus worktree, never on a live tenant.
 
-## Delivery
+## Validation and delivery
 
-Orchestrator: `sesuuh6ykjfc8`; branch `fix/model-hub-offline-key-migration` in
-`.worktrees/avibe/fix-model-hub-partial-migration` (existing disposable workspace).
-The old backend lane was canceled and has no edits; the old partial-result UI is
-not on this branch. One product PR, focused Python/UI validation, owner self-review,
-exact-head Codex review and passing required CI. No merge/deployment/restart without
-explicit authorization. `vibe-ui` remains unchanged.
+- MH-MIG-015 protects local transfer, saved protocols, neutral pending markers,
+  identity reuse, native copy/cleanup, and identical replay without any upstream
+  call. Its pre-fix failure is an attempted observation.
+- MH-SWITCH-001 keeps native model selections usable without discovery; a removed
+  model stays removed and an unrelated provider selection stays unconfigured.
+- The real HTTP/IPC suite passed all seven migration cases against a rejecting
+  fixture upstream inside an isolated local Incus worktree. Additional persisted
+  shell/native-input checks retain their file and credential-custody boundaries.
+- Migration dialog tests and the UI production build passed. Related existing
+  proof tests are updated to assert no observation, while keeping local consent,
+  canonical-value, transport, rollback, and OAuth recovery checks.
+- Delivery requires exact-head review and CI. Public documentation is coordinated
+  with the release; no deployment or service restart is implied by this change.
