@@ -4676,7 +4676,8 @@ def _resolve_node_command() -> list[str] | None:
     configured = os.environ.get("VIBE_SHOW_RUNTIME_NODE_BIN")
     try:
         if configured:
-            return _resolve_command(configured)
+            resolved = _resolve_executable_path(Path(configured))
+            return [resolved] if resolved else None
         return _resolve_command("node")
     except (OSError, ValueError):
         return None
