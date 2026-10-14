@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { evidenceChip, modelCapabilities, pendingChecks, probeTotal, type ProbeTarget } from './hostedTools';
+import { evidenceChip, modelCapabilities, pendingChecks, probeCostSummary, type ProbeTarget } from './hostedTools';
 import type { HostedEvidence, HostedToolCandidate } from './types';
 
 const evidence = (overrides: Partial<HostedEvidence>): HostedEvidence => ({
@@ -51,15 +51,14 @@ describe('hosted-tool evidence projection', () => {
       candidate: { ...candidate('src_relay001', 'gpt-6-astra', evidence({})), probe_estimate: estimate },
     });
 
-    expect(probeTotal([at({ basis: 'list', usd: 0.02 }), at({ basis: 'included' }), at({ basis: 'list', usd: 0.03 })]))
-      .toEqual({ basis: 'list', usd: 0.05 });
-    // One unknown estimate makes the whole set's cost unknown.
-    expect(probeTotal([at({ basis: 'list', usd: 0.02 }), at(null)])).toBeNull();
-    // A check run only on subscriptions adds no charge.
-    expect(probeTotal([at({ basis: 'included' })])).toEqual({ basis: 'included' });
+    expect(probeCostSummary([at({ basis: 'list', usd: 0.02 }), at({ basis: 'included' }), at({ basis: 'list', usd: 0.03 })]))
+      .toEqual({ usd: 0.05, priced: 2, included: 1, unpriced: 0 });
+    // An unknown estimate is counted, never added as zero.
+    expect(probeCostSummary([at({ basis: 'list', usd: 0.02 }), at(null)])).toEqual({ usd: 0.02, priced: 1, included: 0, unpriced: 1 });
+    expect(probeCostSummary([at({ basis: 'included' })])).toEqual({ usd: 0, priced: 0, included: 1, unpriced: 0 });
   });
 
-  it('MH-HOSTED-UI-013: offers to check every pair with no current answer, and never an image', () => {
+  it('MH-HOSTED-UI-013: offers to check every pair with no current answer, images included', () => {
     const verified = evidence({ status: 'verified', basis: 'probe', observed_at: AT });
     const status = {
       tools: [
@@ -75,7 +74,7 @@ describe('hosted-tool evidence projection', () => {
     };
 
     expect(pendingChecks(status).map(({ tool, candidate: c }) => `${tool}:${c.model_id}`))
-      .toEqual(['web_search:gpt-6-astra', 'web_search:gpt-6-luna', 'web_search:gpt-6-terra']);
+      .toEqual(['web_search:gpt-6-astra', 'web_search:gpt-6-luna', 'web_search:gpt-6-terra', 'image_generation:gpt-6.1-sol']);
   });
 
   it('MH-HOSTED-UI-006: gives a Source model one capability per tool with evidence, in catalog order', () => {

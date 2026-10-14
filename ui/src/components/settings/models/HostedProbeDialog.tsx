@@ -11,10 +11,10 @@ import { AlertCircle, AtSign, Check, Globe, Image as ImageIcon, Loader2, RotateC
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
-import { probeKey, probeTotal, probeUnanswered, type ProbeTarget } from './hostedTools';
+import { probeCostSummary, probeKey, probeUnanswered, type ProbeTarget } from './hostedTools';
 import { serverText } from './serverCopy';
 import type { HostedToolName, HostedToolProbeResult, Source } from './types';
-import { useEstimateLabel } from './useEstimateLabel';
+import { useCostSummaryLabel, useEstimateLabel } from './useEstimateLabel';
 
 const TOOL_ICON: Record<HostedToolName, React.ComponentType<{ className?: string }>> = {
   web_search: Globe,
@@ -70,7 +70,7 @@ const OutcomeChip: React.FC<{ outcome: Outcome }> = ({ outcome }) => {
  */
 export const ProbeAnswerNote: React.FC<{ result: HostedToolProbeResult | null }> = ({ result }) => {
   const { t } = useTranslation();
-  if (!probeUnanswered(result)) return null;
+  if (!probeUnanswered(result)) return result ? <ReplayNote replay={result.replay} /> : null;
   const failure = serverText(t, result?.call.error);
   return (
     <span className="model-hub-tool-cost-note flex items-center gap-1 model-hub-ink-gold" role="status">
@@ -84,6 +84,22 @@ export const ProbeAnswerNote: React.FC<{ result: HostedToolProbeResult | null }>
   );
 };
 
+/**
+ * The replay step a verified call is followed by, when it ran and did not verify.
+ * Null (no replay ran) and a verified replay say nothing; a replay that got no
+ * answer asks for another try, never reads as a failure.
+ */
+const ReplayNote: React.FC<{ replay: HostedToolProbeResult['replay'] }> = ({ replay }) => {
+  const { t } = useTranslation();
+  if (!replay || replay.outcome === 'verified') return null;
+  return (
+    <span className="model-hub-tool-cost-note flex items-center gap-1 model-hub-ink-gold" role="status">
+      <AlertCircle className="size-3 shrink-0" aria-hidden />
+      {t(replay.outcome === 'unsupported' ? 'settings.models.tools.probe.replay.unsupported' : 'settings.models.tools.probe.replay.unverified')}
+    </span>
+  );
+};
+
 /** Mounted for one check: the set it shows is the one it was opened with. */
 export const HostedProbeDialog: React.FC<{
   targets: readonly ProbeTarget[];
@@ -93,6 +109,7 @@ export const HostedProbeDialog: React.FC<{
 }> = ({ targets, sources, onRun, onClose }) => {
   const { t } = useTranslation();
   const estimateLabel = useEstimateLabel();
+  const costSummaryLabel = useCostSummaryLabel();
   // The set is fixed when the dialog opens: the read refreshes under it as probes land.
   const [planned, setPlanned] = React.useState<readonly ProbeTarget[]>(targets);
   const [phase, setPhase] = React.useState<'confirm' | 'running' | 'result'>('confirm');
@@ -107,13 +124,12 @@ export const HostedProbeDialog: React.FC<{
     setPhase('result');
   };
 
-  const total = probeTotal(planned);
-  const totalLabel = estimateLabel(total);
+  const totalLabel = costSummaryLabel(probeCostSummary(planned));
   const outcomes = planned.map((target) => outcomeOf(results.get(probeKey(target)) ?? null));
   const unverified = planned.filter((target) => results.has(probeKey(target)) && probeUnanswered(results.get(probeKey(target)) ?? null));
   const count = (wanted: (outcome: Outcome) => boolean) => outcomes.filter(wanted).length;
   // A retry is as paid as the first run, so it says its cost the same way.
-  const retryLabel = estimateLabel(probeTotal(unverified));
+  const retryLabel = costSummaryLabel(probeCostSummary(unverified));
   const done = results.size;
 
   return (
@@ -144,7 +160,7 @@ export const HostedProbeDialog: React.FC<{
                   <span className="font-semibold text-foreground">{t('settings.models.tools.dialog.total')}</span>
                   <span className="text-muted">{t('settings.models.tools.dialog.totalNote')}</span>
                 </span>
-                <span className="font-bold text-foreground">{totalLabel ?? t('settings.models.tools.probe.unknown')}</span>
+                <span className="font-bold text-foreground">{totalLabel}</span>
               </div>
             </>
           )}
@@ -181,6 +197,7 @@ export const HostedProbeDialog: React.FC<{
                           : <Loader2 className="size-3.5 animate-spin text-muted" aria-label={t('settings.models.tools.probe.running') as string} />}
                       />
                       {results.has(key) && reason && <p className="model-hub-probe-reason">{reason}</p>}
+                      {results.has(key) && !reason && result && <ReplayNote replay={result.replay} />}
                     </React.Fragment>
                   );
                 })}
@@ -194,7 +211,7 @@ export const HostedProbeDialog: React.FC<{
             <>
               <Button variant="outline" size="sm" onClick={onClose}>{t('settings.models.tools.dialog.cancel')}</Button>
               <Button size="sm" disabled={planned.length === 0} onClick={() => void run(planned)}>
-                {totalLabel ? t('settings.models.tools.dialog.startCost', { cost: totalLabel }) : t('settings.models.tools.dialog.start')}
+                {t('settings.models.tools.dialog.startCost', { cost: totalLabel })}
               </Button>
             </>
           )}
@@ -207,7 +224,7 @@ export const HostedProbeDialog: React.FC<{
                   void run(unverified);
                 }}>
                   <RotateCw className="size-3.5" aria-hidden />
-                  {t('settings.models.tools.result.retryCost', { count: unverified.length, cost: retryLabel ?? t('settings.models.tools.probe.unknown') })}
+                  {t('settings.models.tools.result.retryCost', { count: unverified.length, cost: retryLabel })}
                 </Button>
               )}
               <Button size="sm" onClick={onClose}>{t('settings.models.tools.result.done')}</Button>

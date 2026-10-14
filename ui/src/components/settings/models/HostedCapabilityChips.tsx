@@ -14,7 +14,7 @@ import { Button } from '@/components/ui/button';
 import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
 import { formatDayTime, formatMonthDay, formatSentences } from './format';
-import { probeableTool, probeKey, type ModelCapability, type ProbeTarget } from './hostedTools';
+import { probeKey, type ModelCapability, type ProbeTarget } from './hostedTools';
 import type { HostedToolName, HostedToolProbeResult, RefusedEffort } from './types';
 import { ProbeAnswerNote } from './HostedProbeDialog';
 import { useEstimateLabel } from './useEstimateLabel';
@@ -221,7 +221,7 @@ const CapabilityChip: React.FC<{
     tool,
     toolInline: t(`settings.models.tools.tool.${capability.tool}.inline`),
   }) as string;
-  const action = onProbe && probeableTool(capability.tool)
+  const action = onProbe
     ? (
         <span className="flex flex-col items-end gap-1">
           {last !== undefined && <ProbeAnswerNote result={last} />}

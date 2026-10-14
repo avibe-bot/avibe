@@ -2379,8 +2379,7 @@
           "on": "已开启",
           "off": "已关闭",
           "needsCheck": "已关闭 · 需先检测",
-          "needsExecutor": "已关闭 · 需先选择代理执行者",
-          "checkUnavailable": "已关闭 · 此工具的检测将在后续更新中提供"
+          "needsExecutor": "已关闭 · 需先选择代理执行者"
         },
         "toggle": {
           "turnOn": "开启{{name}}",
@@ -2448,6 +2447,14 @@
           "included": "订阅内含",
           "unknown": "费用未知",
           "notRecorded": "结果未能记录",
+          "plusIncluded_one": "，另 {{count}} 项订阅内含",
+          "plusIncluded_other": "，另 {{count}} 项订阅内含",
+          "plusUnpriced_one": "，另 {{count}} 项暂无单价",
+          "plusUnpriced_other": "，另 {{count}} 项暂无单价",
+          "replay": {
+            "unverified": "回放未验证 · 请重试",
+            "unsupported": "此供应商不支持回放"
+          },
           "outcome": {
             "inconclusive": "未能检测 · 模型没有调用工具，请重试",
             "transient": "未能检测 · 请重试",

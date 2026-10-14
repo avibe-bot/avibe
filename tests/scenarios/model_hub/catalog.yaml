@@ -444,6 +444,7 @@ scenarios:
       - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-003: says a re-check''s cost is unknown when no estimate is known'
       - 'ui/src/components/settings/models/hostedTools.test.ts::MH-HOSTED-UI-003: totals a check only from what the server estimates, and never counts unknown as zero'
       - 'ui/src/components/settings/models/format.test.ts::MH-HOSTED-UI-003: keeps the first significant digits of a per-call price, and never shows a nonzero price as zero'
+      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-003: lets the locale compose a set''s cost with its unpriced checks'
   - id: MH-HOSTED-UI-004
     name: The Tools tab says how many checks an engine upgrade made stale, and nothing when none did
     status: covered
@@ -498,7 +499,7 @@ scenarios:
       - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-013: checks a tool again from its chip, with the cost on the action, and answers there when the check is not evidence'
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-013: reads the record before calling a probe unanswered when its answer was lost'
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-013: reads a verdict the status does not carry as not verified, with why'
-      - 'ui/src/components/settings/models/hostedTools.test.ts::MH-HOSTED-UI-013: offers to check every pair with no current answer, and never an image'
+      - 'ui/src/components/settings/models/hostedTools.test.ts::MH-HOSTED-UI-013: offers to check every pair with no current answer, images included'
   - id: MH-HOSTED-UI-016
     name: A hosted-tool check is a real call on exactly one Source, so the Models page reads its Sources again after one, and a Source the probe verified shows as verified
     status: covered
@@ -508,7 +509,7 @@ scenarios:
       - 'ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-HOSTED-UI-016: reads the hosted-tools report again after a committed Source change, since its models decide which pairs could run a tool'
       - 'ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-HOSTED-UI-016: reads the Sources again after a check, since a probe can verify its Source'
   - id: MH-HOSTED-UI-018
-    name: The Tools tab never enables a tool that cannot run. It stays off until the server binds an executor, says whether a check or an executor pick is missing or checks are not available yet, and an enabled tool with nothing verified says its calls fail
+    name: The Tools tab never enables a tool that cannot run. It stays off until the server binds an executor, says whether a check or an executor pick is missing, and an enabled tool with nothing verified says its calls fail
     status: covered
     kind: contract
     layer: unit
@@ -516,7 +517,7 @@ scenarios:
       - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-018: cannot turn a tool on until a pair is verified to run it, but can always turn it off'
       - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-018: keeps a tool off while the server binds no executor for it, and says to choose one when a verified pair exists'
       - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-018: claims routing only while the tool is on, and shows an off tool''s executor as a saved preference'
-      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-018: says plainly when a tool cannot be checked yet, instead of asking for a check it cannot run'
+      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-018: keeps an image tool off until a check verifies one of its pairs, and offers that check'
       - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-018: says an enabled tool with nothing verified fails its calls, instead of naming a proxy'
   - id: MH-HOSTED-UI-017
     name: A Source's capability chip is usable without a mouse. Its spoken name is the locale's composition of the label, explanation and facts, it announces the detail it opens, and Enter moves focus to the detail's paid re-check
@@ -526,6 +527,12 @@ scenarios:
     test:
       - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-017: names the record time, how it was learned, the reason, and until when it holds'
       - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-017: moves keyboard focus into the detail on Enter, so its paid re-check can be reached'
+  - id: MH-HOSTED-UI-019
+    name: A check's replay step reads as its own result. A replay that ran and did not verify asks for another try (or says the Source does not support it), and no replay says nothing; neither reads as the call failing
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-019
   - id: MH-VIBEY-007
     name: Vibey starts once with the user's Sources and built-in Agent models, seeded when its first Source exists
     status: covered
