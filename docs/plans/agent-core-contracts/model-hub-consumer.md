@@ -86,6 +86,12 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
        protocol, for any vendor; a function never is one;
      - every replayed hosted item outside the in-flight response needs its tool to run on the hop, and `replay`
        evidence. A generated image never has it.
+     - **One identity per turn and Source.** Native content goes to a Source only under the identity (credential,
+       base URL, protocol, vendor, kind, verification) the turn's first pinned response from it was served under.
+       After a mid-turn change, such as a rotated key or an edited relay URL, every pinned request to that Source
+       is `pin_unavailable` for the rest of the turn, even with evidence taken anew. An in-flight response carrying
+       hosted items needs that identity recorded and unchanged, so it is `pin_unavailable` when no pinned response
+       from the Source was served this turn.
      - A `type` or `name` that is not non-blank text is absent, so its item is no hosted item and ends the
        in-flight run. A named call (`function_call`, `custom_tool_call`, `mcp_call`) without one cannot be
        classified and ends it too.

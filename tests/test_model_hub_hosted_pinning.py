@@ -238,6 +238,52 @@ async def test_a_pin_names_the_exact_hop_it_was_rendered_for(tmp_path, case):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("case", "statuses"), [
+    ("same_identity", [200, 200]),
+    ("credential_rotated_and_reverified", [200, 409]),
+    ("no_pinned_response_this_turn", [409]),
+])
+async def test_a_continuation_stays_on_the_identity_its_response_was_served_under(tmp_path, case, statuses):
+    """MH-HOSTED-GATEWAY-002: native content never crosses a Source's identity change within a turn.
+
+    The in-flight response is exempt from replay evidence only on the identity
+    the turn's first pinned response from that Source was served under, and
+    only once one was served. Evidence taken anew at a rotated credential does
+    not carry the earlier response's payload across.
+    """
+
+    primary, fallback = _sources()
+    service = _vibey_service(tmp_path, [primary, fallback], handles=[
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=primary.id), (b"{}",)) for _ in statuses
+    ])
+    _verify(service, primary, "grok-4.6", "x_search", "call")
+    gateway = ModelHubTurnGateway(service)
+    router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+    answers = []
+    try:
+        hop = await router.resolve_hop("menu-alias", process_scope="vibey:identity", turn_id="turn-identity")
+        if case != "no_pinned_response_this_turn":
+            answers.append(await _post(hop, _native(hop), pin=primary.id))
+        if case == "credential_rotated_and_reverified":
+            live = service.store.config.sources[0]
+            live.credential_ref = "cred_rotated0001"
+            _verify(service, live, "grok-4.6", "x_search", "call")
+        # Client tool results after the model's X search: the in-flight response carries its native item.
+        continuation = {
+            "model": hop["runtime_model"], "stream": False,
+            "input": [{"role": "user", "content": "posts from OpenAI this week"}, X_CALL, LOCAL_CALL, LOCAL_OUTPUT],
+            "tools": [{"type": "x_search"}, SHELL],
+        }
+        answers.append(await _post(hop, continuation, pin=primary.id))
+    finally:
+        await gateway.close()
+    assert [status for status, _answer in answers] == statuses
+    if statuses[-1] == 409:
+        assert answers[-1][1] == PIN_UNAVAILABLE
+    assert len(service.adapter.invocations) == statuses.count(200)
+
+
+@pytest.mark.asyncio
 async def test_the_portable_resend_fails_over_and_the_turn_settles_on_it(tmp_path):
     """MH-HOSTED-GATEWAY-002: the handed-back request leaves only its failed attempt in the turn."""
 

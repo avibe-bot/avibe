@@ -725,6 +725,9 @@ class TurnTrace:
     # Vibey: the hosted-tool executors the turn's first resolution bound, with
     # each executor Source's identity. Written once; settings apply next turn.
     hosted_executors: Optional[tuple[tuple[str, tuple[str, str, str] | None], ...]] = None
+    # Vibey: per Source, the identity digest the turn's first pinned response
+    # from it was served under. Each entry is written once.
+    pinned_identities: dict[str, str] = field(default_factory=dict)
 
     @property
     def pending_attempt(self) -> Optional[AttemptIdentity]:
@@ -1334,6 +1337,21 @@ class TurnCorrelationRegistry:
                     route=route,
                 )
         return token
+
+    def pinned_identity(self, turn_id: Optional[str], source_id: str) -> str | None:
+        """The identity a turn's first pinned response from this Source was served under; None before one."""
+
+        with self._lock:
+            trace = self._traces.get(str(turn_id or "").strip())
+            return trace.pinned_identities.get(source_id) if trace is not None else None
+
+    def record_pinned_identity(self, turn_id: Optional[str], source_id: str, identity: str) -> None:
+        """Record the identity a pinned response was served under, once per turn and Source."""
+
+        with self._lock:
+            trace = self._traces.get(str(turn_id or "").strip())
+            if trace is not None:
+                trace.pinned_identities.setdefault(source_id, identity)
 
     def turn_hosted_executors(
         self, turn_id: Optional[str],

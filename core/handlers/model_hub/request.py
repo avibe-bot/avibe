@@ -34,6 +34,7 @@ class ModelHubRequest(dict[str, Any]):
         headers: Mapping[str, str] | None = None,
         primary_origin: HopOrigin | None = None,
         pinned_hop: tuple[str, str | None] | None = None,
+        pinned_identity: str | None = None,
     ) -> None:
         super().__init__(payload)
         self.protocol = protocol
@@ -45,6 +46,9 @@ class ModelHubRequest(dict[str, Any]):
         # content may be served by: no failover, no recovery wait, no rewrite.
         # A model of None matches no hop.
         self.pinned_hop = pinned_hop
+        # The identity digest the turn's first pinned response from that Source
+        # was served under; None before one was served.
+        self.pinned_identity = pinned_identity
 
 
 _OPAQUE_FIELDS = frozenset({"signature", "thoughtSignature", "thought_signature", "encrypted_content"})
@@ -110,6 +114,7 @@ def without_opaque_history(request: Mapping[str, Any]) -> Mapping[str, Any]:
         return ModelHubRequest(
             payload, protocol=request.protocol, headers=request.headers,
             primary_origin=request.primary_origin, pinned_hop=request.pinned_hop,
+            pinned_identity=request.pinned_identity,
         )
     return payload
 
