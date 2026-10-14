@@ -5165,6 +5165,7 @@
       "deleteTitle": "Agent wants to delete a secret",
       "deleteSubtitle": "Review the details before permanently deleting this secret.",
       "deleteManagementHint": "Deleting needs instance management access. You can still deny this request.",
+      "deleteFields": "Deleting removes all fields: {{fields}}",
       "secret": "Secret",
       "description": "Description",
       "reason": "Reason",

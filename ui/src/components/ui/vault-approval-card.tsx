@@ -168,7 +168,13 @@ export const VaultApprovalCard: React.FC<{
     return option?.member_snapshot?.length ? option.member_snapshot : (card?.secret_names ?? (card?.secret_name ? [card.secret_name] : []));
   }, [card, isSign, option]);
   // Protected secret names to be granted (design: "show the protected secret names covered").
-  const protectedNames = useMemo(() => {
+  const namedDeleteFields = useMemo(() => {
+    if (!isDelete) return [];
+    return [...new Set((option?.member_fields ?? []).flatMap((member) => (
+      vaultHasNamedFieldShape(member) ? member.fields : []
+    )))];
+  }, [isDelete, option]);
+
     const materialNames = [...new Set(materials.map((m) => m.name.split('.')[0]))];
     return materialNames.length ? materialNames : (card?.protected_secret_names ?? []);
   }, [card, materials]);
@@ -487,7 +493,12 @@ export const VaultApprovalCard: React.FC<{
             </Badge>
           ) : null}
         </DetailRow>
-        {isDelete && card.description ? (
+        {isDelete && namedDeleteFields.length ? (
+          <span className="rounded-lg bg-destructive/5 px-3 py-2 text-xs text-muted">
+            {t('vaults.approval.deleteFields', { fields: namedDeleteFields.join(', ') })}
+          </span>
+        ) : null}
+
           <DetailRow label={t('vaults.approval.description')}><span className="text-[13px] text-foreground">{card.description}</span></DetailRow>
         ) : null}
         {isDelete && (card.reason || (request.delivery as { reason?: string } | null)?.reason) ? (

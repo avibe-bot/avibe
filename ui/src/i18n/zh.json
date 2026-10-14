@@ -5165,6 +5165,7 @@
       "deleteTitle": "Agent 想删除一个密钥",
       "deleteSubtitle": "请确认详情，再永久删除这条密钥。",
       "deleteManagementHint": "删除需要实例管理权限；你仍可以拒绝这个申请。",
+      "deleteFields": "删除会移除全部字段：{{fields}}",
       "secret": "密钥",
       "description": "说明",
       "reason": "原因",
