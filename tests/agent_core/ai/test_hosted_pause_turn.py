@@ -162,6 +162,32 @@ async def test_a_paused_response_continues_as_one_response_pinned_to_its_source_
     assert not [event for event in events if isinstance(event, ProviderError)]
 
 
+async def test_a_continuation_that_reports_no_usage_leaves_the_message_without_the_paused_requests():
+    """The merged message's usage stands for the final request; a final response that reports none leaves it unknown,
+    never the smaller paused request's."""
+
+    def answer(number: int) -> httpx.Response:
+        if number == 1:
+            body = _response(_text("part 1"), stop_reason="pause_turn", input_tokens=100, output_tokens=10)
+        else:
+            events = [
+                {"type": "message_start", "message": {}},
+                *({**frame, "index": 0} for frame in _text("done")),
+                {"type": "content_block_stop", "index": 0},
+                {"type": "message_delta", "delta": {"stop_reason": "end_turn"}},
+                {"type": "message_stop"},
+            ]
+            body = "".join(f"data: {json.dumps(event)}\n\n" for event in events)
+        return httpx.Response(200, headers=_served(), text=body)
+
+    sent, events = await _stream(answer)
+
+    message = events[-1].message
+    assert len(sent) == 2 and isinstance(events[-1], Done)
+    assert [block.text for block in message.content if isinstance(block, TextBlock)] == ["part 1", "done"]
+    assert message.usage is None
+
+
 async def test_a_response_paused_past_the_bound_ends_interrupted_and_keeps_everything_it_assembled():
     def answer(number: int) -> httpx.Response:
         body = _response(_text(f"step {number}"), stop_reason="pause_turn", input_tokens=10, output_tokens=1)

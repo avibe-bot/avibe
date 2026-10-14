@@ -252,8 +252,10 @@ class StreamAssembler:
 
     def set_origin(self, origin: Origin, verified_origin: bool, source_id: str | None = None) -> None:
         if self._continuing:
-            # A continued response is one message (§4.3): verified only when every response in it was, from one origin.
+            # A continued response is one message (§4.3): verified only when every response in it was, from one origin,
+            # and its usage is the latest response's, none if that reports none.
             verified_origin = verified_origin and self.verified_origin and origin == self.origin
+            self.usage = None
         self.origin = origin
         self.verified_origin = verified_origin
         self.source_id = source_id
