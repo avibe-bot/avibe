@@ -2375,7 +2375,8 @@
         "state": {
           "on": "On",
           "off": "Off",
-          "needsCheck": "Off · check a Source first"
+          "needsCheck": "Off · check a Source first",
+          "needsExecutor": "Off · choose an executor first"
         },
         "toggle": {
           "turnOn": "Turn on {{name}}",

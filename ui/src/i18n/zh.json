@@ -2375,7 +2375,8 @@
         "state": {
           "on": "已开启",
           "off": "已关闭",
-          "needsCheck": "已关闭 · 需先检测"
+          "needsCheck": "已关闭 · 需先检测",
+          "needsExecutor": "已关闭 · 需先选择代理执行者"
         },
         "toggle": {
           "turnOn": "开启{{name}}",

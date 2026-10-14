@@ -11,8 +11,10 @@ import type { HostedToolName, HostedToolProbeResult, HostedToolPut, HostedToolsS
  * The hosted-tools read, shared by the Tools tab and the Source chips.
  *
  * Read lazily, while either surface is open, like the other report tabs, and
- * again whenever `revision` changes: an edited endpoint or a replaced key
- * changes the Source's identity, which drops its evidence on the server.
+ * again whenever `revision` changes: `revision` is the open Source's identity
+ * (as `retry.source_identity` defines it: endpoint, credential, verification),
+ * a change of which drops its evidence on the server, so the old status is
+ * dropped here too before the new read.
  *
  * Every write answers the whole status, so writes run one at a time: each PUT
  * starts after the previous one settled, and each answer is then the newest
@@ -34,22 +36,30 @@ export function useHostedTools(active: boolean, revision: string | null = null) 
   const order = React.useRef({ reads: 0, writes: 0, queued: 0, rereadAfterWrites: false });
   const writeQueue = React.useRef<Promise<void>>(Promise.resolve());
 
-  const refresh = React.useCallback(async () => {
+  /** Read the status. `forget` drops what is shown first: it belonged to another Source identity. */
+  const refresh = React.useCallback(async ({ forget = false }: { forget?: boolean } = {}) => {
     const clock = order.current;
+    if (forget) setRead(loadingRegion);
     if (clock.queued > 0) {
       clock.rereadAfterWrites = true;
       return;
     }
     const readId = ++clock.reads;
     const writesAtStart = clock.writes;
-    setRead(beginRegionRead);
+    if (!forget) setRead(beginRegionRead);
     const incoming = await readRegion(() => modelsApi.getHostedTools());
     if (!alive.current || readId !== clock.reads || writesAtStart !== clock.writes) return;
     setRead((previous) => settleRegionRead(previous, incoming));
   }, []);
 
+  // `revision` is the open Source's identity. Evidence follows it, so a new one
+  // never shows the old one's records, even if its own read fails.
+  const shownRevision = React.useRef(revision);
   React.useEffect(() => {
-    if (active) void refresh();
+    if (!active) return;
+    const forget = shownRevision.current !== revision;
+    shownRevision.current = revision;
+    void refresh({ forget });
   }, [active, revision, refresh]);
 
   const save = React.useCallback(async (tool: HostedToolName, body: HostedToolPut) => {
@@ -112,8 +122,14 @@ export function useHostedTools(active: boolean, revision: string | null = null) 
     } catch {
       // The request may have run and recorded its evidence though its answer was
       // lost: read the record before calling it unanswered, and keep the check
-      // running until then, so no second paid request starts meanwhile.
-      return lostProbeOutcome(target, recordBefore);
+      // running until then, so no second paid request starts meanwhile. The
+      // status read for that lands as a probe's answer would.
+      const recovered = await lostProbeOutcome(target, recordBefore);
+      if (recovered && alive.current && clock.writes === writesAtStart && clock.queued === 0) {
+        clock.reads += 1;
+        setRead(readyRegion(recovered.status));
+      }
+      return recovered?.result ?? null;
     } finally {
       if (alive.current) {
         setProbing((previous) => {
@@ -134,23 +150,30 @@ export function useHostedTools(active: boolean, revision: string | null = null) 
  * pair (one the read did not have before it) is its outcome; anything else is
  * no answer (null).
  */
-async function lostProbeOutcome(target: ProbeTarget, recordBefore: string | null): Promise<HostedToolProbeResult | null> {
+async function lostProbeOutcome(
+  target: ProbeTarget,
+  recordBefore: string | null,
+): Promise<{ result: HostedToolProbeResult | null; status: HostedToolsStatus } | null> {
   try {
     const status = await modelsApi.getHostedTools();
     const call = status.tools
       .find((tool) => tool.name === target.tool)?.candidates
       .find((candidate) => sameExecutor(candidate, target.candidate))?.call;
-    if (call && call.basis === 'probe' && call.observed_at !== recordBefore && call.status !== 'unknown') {
-      return {
+    if (!call || call.basis !== 'probe' || call.observed_at === recordBefore || call.status === 'unknown') {
+      return { status, result: null };
+    }
+    return {
+      status,
+      result: {
         tool: target.tool,
         source_id: target.candidate.source_id,
         model_id: target.candidate.model_id,
         call: { outcome: call.status, error: null },
         replay: null,
-      };
-    }
+      },
+    };
   } catch {
     // Unread: still no answer.
+    return null;
   }
-  return null;
 }

@@ -170,4 +170,43 @@ describe('useHostedTools ordering', () => {
     // Verified, not "no answer", so nothing invites a second paid request.
     expect(outcome).toMatchObject({ call: { outcome: 'verified' } });
   });
+
+  it('lands the status read for a lost probe answer, even when the read after it fails', async () => {
+    const before = { status: 'unknown' as const, stale: null, basis: null, observed_at: null, detail: null, changes_at: null };
+    const candidate = {
+      source_id: 'src_relay001', model_id: 'gpt-6-astra', billing: 'metered' as const, price: null, probe_estimate: null, call: before, replay: null,
+    };
+    const recorded: HostedToolsStatus = {
+      tools: [{
+        name: 'web_search', enabled: true, executor: null, bound: null,
+        candidates: [{ ...candidate, call: { ...before, status: 'verified', basis: 'probe', observed_at: '2026-10-14T07:00:00Z' } }],
+      }],
+      reverify: { engine_upgraded: 0, aged: 0 },
+    };
+    vi.spyOn(modelsApi, 'getHostedTools')
+      .mockResolvedValueOnce(status(false))
+      .mockResolvedValueOnce(recorded)
+      .mockRejectedValue(new Error('offline'));
+    vi.spyOn(modelsApi, 'probeHostedTool').mockRejectedValue(new Error('connection reset'));
+    const { result } = renderHook(() => useHostedTools(true), { wrapper });
+    await waitFor(() => expect(shown(result.current.read)).toBe(false));
+
+    await act(async () => { await result.current.probe({ tool: 'web_search', candidate }); });
+    // The recovered status shows; the failed read after it only marks it degraded.
+    await waitFor(() => expect(shown(result.current.read)).toBe(true));
+  });
+
+  it('shows no status of the previous Source identity while the new identity\'s read fails', async () => {
+    vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValueOnce(status(true)).mockRejectedValue(new Error('offline'));
+    const { result, rerender } = renderHook(({ revision }) => useHostedTools(true, revision), {
+      wrapper,
+      initialProps: { revision: 'identity-a' },
+    });
+    await waitFor(() => expect(shown(result.current.read)).toBe(true));
+
+    // The key was replaced: the server dropped the old identity's evidence.
+    rerender({ revision: 'identity-b' });
+    await waitFor(() => expect(result.current.read.kind).not.toBe('loading'));
+    expect(shown(result.current.read)).toBeNull();
+  });
 });

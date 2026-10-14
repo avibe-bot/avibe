@@ -118,9 +118,7 @@ const ProbeCell: React.FC<{
   const action = unanswered ? 'retry' : checked ? 'recheck' : 'check';
   const label = running
     ? t('settings.models.tools.probe.running')
-    : estimate
-      ? t(`settings.models.tools.probe.${action}Cost`, { cost: estimate })
-      : t(`settings.models.tools.probe.${action}`);
+    : t(`settings.models.tools.probe.${action}Cost`, { cost: estimate ?? t('settings.models.tools.probe.unknown') });
   return (
     <span className="flex min-w-0 flex-col items-start gap-1 md:items-end">
       <Button
@@ -205,9 +203,11 @@ const ToolCard: React.FC<{
     : verified;
   // With nothing verified there is nothing to pick, but a saved choice still reads as itself.
   const pickable = verified.length > 0;
-  // Turning a tool on needs a verified pair to run it: on with none, every call
-  // would fail. Turning it off is always possible.
-  const locked = !tool.enabled && !pickable;
+  // Turning a tool on needs an executor the server binds (`bound`): on without
+  // one, every proxied call would fail. A verified pair Automatic cannot bind (its
+  // Source is outside Vibey's order) is picked explicitly, which binds it. Turning
+  // a tool off is always possible.
+  const locked = !tool.enabled && bound === null;
   return (
     <section className="model-hub-tool-card overflow-hidden rounded-xl border border-border bg-surface" aria-label={name} data-tool={tool.name}>
       <header className="model-hub-tool-card-head flex items-center gap-3 border-b border-border">
@@ -220,7 +220,11 @@ const ToolCard: React.FC<{
           <span className="model-hub-tool-description">{t(`settings.models.tools.tool.${tool.name}.description`)}</span>
         </span>
         <span className="flex shrink-0 items-center gap-2.5">
-          <span className={cn('model-hub-tool-state font-semibold', tool.enabled ? 'model-hub-ink-mint' : 'text-muted')}>{t(tool.enabled ? 'settings.models.tools.state.on' : locked ? 'settings.models.tools.state.needsCheck' : 'settings.models.tools.state.off')}</span>
+          <span className={cn('model-hub-tool-state font-semibold', tool.enabled ? 'model-hub-ink-mint' : 'text-muted')}>{t(tool.enabled
+            ? 'settings.models.tools.state.on'
+            : !locked
+              ? 'settings.models.tools.state.off'
+              : pickable ? 'settings.models.tools.state.needsExecutor' : 'settings.models.tools.state.needsCheck')}</span>
           <ToggleSwitch
             enabled={tool.enabled}
             disabled={pending || locked}

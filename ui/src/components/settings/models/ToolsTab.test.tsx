@@ -115,7 +115,7 @@ describe('ToolsTab writes', () => {
     const executor = { source_id: GROK.id, model_id: 'grok-4.6' };
     const onChange = renderTab(status([
       tool('web_search', { enabled: true, executor, candidates: [{ ...executor, call: verified, replay: verified }] }),
-      tool('x_search', { candidates: [{ ...executor, call: verified, replay: verified }] }),
+      tool('x_search', { bound: executor, candidates: [{ ...executor, call: verified, replay: verified }] }),
     ]));
 
     await userEvent.click(within(card('Web search')).getByRole('switch', { name: 'Turn off Web search' }));
@@ -140,6 +140,19 @@ describe('ToolsTab writes', () => {
 
     await userEvent.click(within(card('X search')).getByRole('switch', { name: 'Turn off X search' }));
     expect(onChange).toHaveBeenLastCalledWith('x_search', { enabled: false, executor: null });
+  });
+
+  it('keeps a tool off while the server binds no executor for it, and says to choose one when a verified pair exists', async () => {
+    // Verified, but outside Vibey's Source order: Automatic binds nothing (`bound: null`).
+    const onChange = renderTab(status([tool('web_search', {
+      candidates: [{ source_id: GROK.id, model_id: 'grok-4.6', call: verified, replay: verified }],
+    })]));
+    const toggle = within(card('Web search')).getByRole('switch', { name: 'Turn on Web search' }) as HTMLButtonElement;
+    expect(toggle.disabled).toBe(true);
+    within(card('Web search')).getByText('Off · choose an executor first');
+    // Picking the verified pair explicitly is how it binds.
+    await userEvent.selectOptions(within(card('Web search')).getByRole('combobox'), 'Grok · grok-4.6');
+    expect(onChange).toHaveBeenLastCalledWith('web_search', { enabled: false, executor: { source_id: GROK.id, model_id: 'grok-4.6' } });
   });
 
   it('writes a saved executor back only while the server would still accept it', async () => {
@@ -221,7 +234,7 @@ describe('ToolsTab writes', () => {
   it('holds a tool\'s controls while its write is in flight', () => {
     renderTab(status([
       tool('web_search', { candidates: [{ source_id: GROK.id, model_id: 'grok-4.6', call: verified, replay: verified }] }),
-      tool('x_search', { candidates: [{ source_id: GROK.id, model_id: 'grok-4.6', call: verified, replay: verified }] }),
+      tool('x_search', { bound: { source_id: GROK.id, model_id: 'grok-4.6' }, candidates: [{ source_id: GROK.id, model_id: 'grok-4.6', call: verified, replay: verified }] }),
     ]), { pending: new Set(['web_search']) });
 
     expect((within(card('Web search')).getByRole('switch') as HTMLButtonElement | HTMLSelectElement).disabled).toBe(true);
@@ -387,6 +400,11 @@ describe('ToolsTab checks', () => {
     await userEvent.click(within(row).getByRole('button', { name: 'Retry · about $0.02' }));
     within(row).getByText("Couldn't verify · try again");
     expect(row.textContent).not.toContain('models.source');
+  });
+
+  it('says a check\'s cost is unknown before it runs, when no estimate is known', () => {
+    renderTab(status([tool('web_search', { candidates: [{ source_id: CLAUDE.id, model_id: 'claude-opus-5-5', call: unknown, replay: unknown }] })]));
+    within(card('Web search')).getByRole('button', { name: 'Check · cost unknown' });
   });
 
   it('says an enabled tool with nothing verified fails its calls, instead of naming a proxy', () => {

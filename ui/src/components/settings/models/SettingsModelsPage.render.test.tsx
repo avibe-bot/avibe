@@ -2862,7 +2862,7 @@ describe('SettingsModelsPage tools region', () => {
     await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
   });
 
-  it('reads the Sources again after a check, since a probe can verify its Source', async () => {
+  it('MH-HOSTED-UI-016: reads the Sources again after a check, since a probe can verify its Source', async () => {
     const unknown = { status: 'unknown' as const, stale: null, basis: null, observed_at: null, detail: null, changes_at: null };
     const withCandidate: HostedToolsStatus = {
       ...hostedToolsStatus,
@@ -2881,7 +2881,7 @@ describe('SettingsModelsPage tools region', () => {
     const card = await screen.findByRole('region', { name: /^Web search$|^网页搜索$/ });
     const sourceReads = vi.mocked(modelsApi.listSources).mock.calls.length;
 
-    await userEvent.click(within(card).getByRole('button', { name: /^Check$|^检测$/ }));
+    await userEvent.click(within(card).getByRole('button', { name: /^Check · cost unknown$|^检测 · 费用未知$/ }));
     expect(probe).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(vi.mocked(modelsApi.listSources).mock.calls.length).toBeGreaterThan(sourceReads));
   });

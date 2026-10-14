@@ -194,9 +194,7 @@ export const HostedProbeDialog: React.FC<{
                   void run(unverified);
                 }}>
                   <RotateCw className="size-3.5" aria-hidden />
-                  {retryLabel
-                    ? t('settings.models.tools.result.retryCost', { count: unverified.length, cost: retryLabel })
-                    : t('settings.models.tools.result.retry', { count: unverified.length })}
+                  {t('settings.models.tools.result.retryCost', { count: unverified.length, cost: retryLabel ?? t('settings.models.tools.probe.unknown') })}
                 </Button>
               )}
               <Button size="sm" onClick={onClose}>{t('settings.models.tools.result.done')}</Button>

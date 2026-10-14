@@ -1247,7 +1247,14 @@ export const SettingsModelsPage: React.FC = () => {
   // Read while the tab is open, or while a Source's detail shows its capability
   // chips, and again when that Source changes: an edit can change its identity,
   // which drops its evidence on the server.
-  const hostedTools = useHostedTools(tab === 'tools' || selectedSource !== null, selectedSource ? JSON.stringify(selectedSource) : null);
+  // The open Source's identity as evidence follows it (`retry.source_identity`).
+  const selectedSourceIdentity = selectedSource
+    ? JSON.stringify([
+        selectedSource.id, selectedSource.kind, selectedSource.vendor, selectedSource.protocol, selectedSource.supply_channel,
+        selectedSource.base_url ?? null, selectedSource.credential_ref ?? null, selectedSource.verification_pending ?? null,
+      ])
+    : null;
+  const hostedTools = useHostedTools(tab === 'tools' || selectedSource !== null, selectedSourceIdentity);
   // A probe is a real call on exactly one Source, and a successful one verifies
   // that Source (a pending credential check clears), so the Sources read follows it.
   const probeHostedTool = React.useCallback(async (target: ProbeTarget) => {

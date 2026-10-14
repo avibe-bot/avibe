@@ -429,6 +429,12 @@ scenarios:
     kind: contract
     layer: unit
     test: ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-013
+  - id: MH-HOSTED-UI-016
+    name: A hosted-tool check is a real call on exactly one Source, so the Models page reads its Sources again after one, and a Source the probe verified shows as verified
+    status: covered
+    kind: contract
+    layer: unit
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-HOSTED-UI-016
   - id: MH-VIBEY-007
     name: Vibey starts once with the user's Sources and built-in Agent models, seeded when its first Source exists
     status: covered
