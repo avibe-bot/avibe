@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import logging
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -497,11 +499,38 @@ class ModelHubConfigStore(Protocol):
     def mutate(self, mutator: Callable[[ModelHubConfig], bool]) -> None: ...
 
 
+def _file_identity(path: Path) -> tuple | None:
+    """What changes whenever the config file is replaced or rewritten: its path, inode and size, and its times."""
+
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return None
+    return (str(path), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
 class V2ModelHubConfigStore:
+    """Model Hub's config, read from the shared config file and served from a snapshot (#2568).
+
+    Reading the file parses the whole config, which grows with Sources,
+    inventories and routes, and Model Hub reads it on every request. So the
+    store keeps the last parse and serves a copy of it while the file is
+    unchanged: a read costs one ``stat`` and a copy, never a parse. Any change to
+    the file (a write through this store, another writer in this process, the UI
+    process or the CLI) replaces or rewrites it, which changes its identity, and
+    the next read parses again. A write through this store keeps what it
+    committed as the snapshot, inside its own lock, so the reads after it parse
+    nothing.
+    """
+
     _NATIVE_AUTH_FIELDS = {
         "claude": ("auth_mode", "api_key", "base_url", "auth_mode_set"),
         "codex": ("auth_mode", "api_key", "base_url", "oauth_relay_marker"),
     }
+
+    def __init__(self) -> None:
+        self._snapshot_lock = threading.Lock()
+        self._snapshot: tuple[tuple, ModelHubConfig] | None = None
 
     def native_auth_snapshot(self, backends: tuple[str, ...]) -> dict[str, dict]:
         try:
@@ -524,26 +553,47 @@ class V2ModelHubConfigStore:
         *,
         expected_hub: tuple[dict, ...],
     ) -> None:
-        from config.v2_config import config_write_transaction
+        from config.v2_config import config_file_lock, config_write_transaction
 
         self.ensure_writable()
-        with config_write_transaction() as config:
-            if config.model_hub.to_payload() not in expected_hub:
-                raise MigrationConflictError
-            for backend, values in desired.items():
-                target = getattr(config.agents, backend)
-                actual = {name: getattr(target, name) for name in values}
-                if actual not in (expected.get(backend), values):
+        path = paths.get_config_path()
+        with config_file_lock(path):
+            with config_write_transaction(path) as config:
+                if config.model_hub.to_payload() not in expected_hub:
                     raise MigrationConflictError
-                for name, value in values.items():
-                    setattr(target, name, value)
-            config.model_hub = ModelHubConfig.from_payload(model_hub.to_payload())
+                for backend, values in desired.items():
+                    target = getattr(config.agents, backend)
+                    actual = {name: getattr(target, name) for name in values}
+                    if actual not in (expected.get(backend), values):
+                        raise MigrationConflictError
+                    for name, value in values.items():
+                        setattr(target, name, value)
+                config.model_hub = ModelHubConfig.from_payload(model_hub.to_payload())
+            self._seed(path, config.model_hub)
 
     def load(self) -> ModelHubConfig:
+        path = paths.get_config_path()
+        identity = _file_identity(path)
+        with self._snapshot_lock:
+            snapshot = self._snapshot
+        if snapshot is not None and identity is not None and snapshot[0] == identity:
+            # Callers own what they load and may change it; the snapshot stays as the file holds it.
+            return copy.deepcopy(snapshot[1])
+        fresh = self._read(path)
+        return default_config().model_hub if fresh is None else fresh[1]
+
+    def _read(self, path: Path) -> tuple[tuple, ModelHubConfig] | None:
+        """Parse the file and keep the parse, when the file did not change while it was read."""
+
+        before = _file_identity(path)
         try:
-            return V2Config.load().model_hub
+            model_hub = V2Config.load().model_hub
         except FileNotFoundError:
-            return default_config().model_hub
+            return None
+        if before is not None and _file_identity(path) == before:
+            with self._snapshot_lock:
+                self._snapshot = (before, copy.deepcopy(model_hub))
+        return (before or (), model_hub)
 
     def ensure_writable(self) -> None:
         try:
@@ -557,17 +607,36 @@ class V2ModelHubConfigStore:
     def save(self, model_hub: ModelHubConfig) -> None:
         model_hub = ModelHubConfig.from_payload(model_hub.to_payload())
         self.ensure_writable()
-        from config.v2_config import update_config_fields
+        from config.v2_config import config_file_lock, update_config_fields
 
-        update_config_fields(lambda cfg: setattr(cfg, "model_hub", model_hub))
+        path = paths.get_config_path()
+        with config_file_lock(path):
+            committed = update_config_fields(lambda cfg: setattr(cfg, "model_hub", model_hub), config_path=path)
+            self._seed(path, committed.model_hub)
 
     def mutate(self, mutator: Callable[[ModelHubConfig], bool]) -> None:
         from config.v2_config import config_file_lock
 
-        with config_file_lock():
+        path = paths.get_config_path()
+        with config_file_lock(path):
             config = V2Config.load()
             if mutator(config.model_hub):
                 config.save()
+                self._seed(path, config.model_hub)
+
+    def _seed(self, path: Path, model_hub: ModelHubConfig) -> None:
+        """Keep what a write just committed as the snapshot, without reading the file back.
+
+        Called inside the write's config lock, so no other writer can have
+        replaced the file since: its identity now names exactly this content. The
+        section is settled the way a load settles it (the one repairing door).
+        """
+
+        identity = _file_identity(path)
+        if identity is not None:
+            settled = ModelHubConfig.from_payload(model_hub.to_payload(), repairing=True)
+            with self._snapshot_lock:
+                self._snapshot = (identity, settled)
 
 class UnavailableEngineAdapter:
     """Explicit fail-closed adapter for isolated callers and tests."""
