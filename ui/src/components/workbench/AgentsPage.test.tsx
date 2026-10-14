@@ -1663,22 +1663,24 @@ describe('AgentsPage reconnect reconciliation', () => {
   });
 
   it('MH-EFFORT-MENU-003: shows a saved effort routing now refuses on every hop as itself, and says so', async () => {
-    // Model Hub leaves `xhigh` out of the menu, but this Agent still sends it.
+    // Model Hub leaves the explicit Off (`none`) out of the menu, but this Agent still sends it.
     modelCatalog = {
       models: [],
       reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }] },
-      effortMenus: { 'reasoning-model': { omitted: ['xhigh'], not_on: {} } },
+      effortMenus: { 'reasoning-model': { omitted: ['none'], not_on: {} } },
     };
-    const initial = { ...brief('agent-a', 'description'), model: 'reasoning-model', reasoning_effort: 'xhigh' };
+    const initial = { ...brief('agent-a', 'description'), model: 'reasoning-model', reasoning_effort: 'none' };
     const getVibeAgent = vi.fn().mockResolvedValue(fullAgent(initial, 'initial prompt'));
     const api = makeApi(vi.fn().mockResolvedValue(listResult(initial)), getVibeAgent);
     renderPage(api, { canManageAgents: true });
 
     await waitFor(() => expect(screen.getByDisplayValue('description')).toBeTruthy());
-    expect(screen.getByText('xhigh', { exact: true }).getAttribute('title')).toBe('chat.picker.effortRefused');
+    // Named as the page names it anywhere else, not as the raw token.
+    expect(screen.getByText('chat.picker.effortOptions.none').getAttribute('title')).toBe('chat.picker.effortRefused');
+    expect(screen.queryByText('none', { exact: true })).toBeNull();
     expect(screen.getByText('chat.picker.effortRefused')).toBeTruthy();
     // It is not offered: only what routing still serves can be picked.
-    expect(screen.queryByRole('button', { name: 'xhigh', exact: true })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'chat.picker.effortOptions.none' })).toBeNull();
     expect(screen.getByRole('button', { name: 'medium', exact: true }).className).not.toContain('bg-mint-soft');
   });
 

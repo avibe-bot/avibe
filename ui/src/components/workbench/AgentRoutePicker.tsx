@@ -289,12 +289,16 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   // Routing now refuses the saved effort on every hop: it is out of the menu, but
   // the route still sends it, so it shows as itself and says so.
   const refusedEffort = catalogAnswered ? refusedSavedEffort(currentEffort, currentModel, effortMenus) : null;
+  // The layout and the column read one answer, so a refused-only column keeps its place.
+  const showEffortColumn = effortOptions.length > 0 || refusedEffort !== null;
   // Names only when an effort needs one; a role that cannot read Sources gets the
   // hint without them.
-  const sourceNames = useSourceNames(open && effortNotOn !== null && Object.keys(effortNotOn).length > 0);
+  const sourceNames = useSourceNames(open && surfaceActive && effortNotOn !== null && Object.keys(effortNotOn).length > 0);
   const notOnLabel = (effort: string): string | null => {
-    const ids = effortNotOn?.[effort];
-    if (!ids || ids.length === 0) return null;
+    // Efforts are free-form strings: only the map's own entry for this one counts,
+    // never one inherited from Object.prototype (an effort named "constructor").
+    const ids = effortNotOn && Object.prototype.hasOwnProperty.call(effortNotOn, effort) ? effortNotOn[effort] : null;
+    if (!Array.isArray(ids) || ids.length === 0) return null;
     if (!sourceNames) return t('chat.picker.effortNotOnSome');
     return t('chat.picker.effortNotOn', { sources: ids.map((id) => sourceNames[id] ?? id).join(', ') });
   };
@@ -367,7 +371,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
         <div
           className={clsx(
             'grid grid-cols-1 divide-y divide-border sm:divide-x sm:divide-y-0',
-            effortOptions.length > 0 ? 'sm:grid-cols-[1fr_1.35fr_0.7fr]' : 'sm:grid-cols-[1fr_1.35fr]',
+            showEffortColumn ? 'sm:grid-cols-[1fr_1.35fr_0.7fr]' : 'sm:grid-cols-[1fr_1.35fr]',
           )}
         >
           {/* Column 1 — Agent */}
@@ -503,7 +507,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
           </RouteColumn>
 
           {/* Column 3 — Effort (uses per-model catalog entries when available) */}
-          {(effortOptions.length > 0 || refusedEffort) && (
+          {showEffortColumn && (
             <RouteColumn title={t('chat.picker.effort')}>
               {refusedEffort && (
                 <RouteItem active onClick={() => setOpen(false)}>

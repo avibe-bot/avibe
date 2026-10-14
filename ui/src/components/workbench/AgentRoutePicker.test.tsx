@@ -287,6 +287,34 @@ describe('AgentRoutePicker', () => {
       .toBe('chat.picker.effortOptions.high');
   });
 
+  it('keeps the effort column in its own grid column when the refused saved effort is its only item', async () => {
+    hubMode = 'hub';
+    catalogReasoning = { sonnet: [] };
+    catalogMenus = { sonnet: { omitted: ['low'], not_on: {} } };
+    const user = userEvent.setup();
+    render(<HubPicker role="owner" />);
+    await openMenu(user);
+
+    const column = screen.getByText('chat.picker.effort').parentElement as HTMLElement;
+    expect((column.parentElement as HTMLElement).className).toContain('sm:grid-cols-[1fr_1.35fr_0.7fr]');
+  });
+
+  it('reads a refusal only from the effort\'s own entry, never one an effort name inherits', async () => {
+    // Efforts are free-form: one named like an Object property has no entry of its own.
+    hubMode = 'hub';
+    catalogReasoning = { sonnet: [{ value: 'constructor', label: 'constructor' }, { value: 'high', label: 'high' }] };
+    catalogMenus = { sonnet: { omitted: [], not_on: { high: ['src_relaygpt1'] } } };
+    sourceNames = { src_relaygpt1: 'relay-gpt' };
+    const user = userEvent.setup();
+    render(<HubPicker role="owner" />);
+    await openMenu(user);
+
+    expect(effortColumn().getByRole('button', { name: /chat\.picker\.effortOptions\.constructor/ }).textContent)
+      .toBe('chat.picker.effortOptions.constructor');
+    expect(effortColumn().getByRole('button', { name: /chat\.picker\.effortOptions\.high/ }).textContent)
+      .toContain('chat.picker.effortNotOn:relay-gpt');
+  });
+
   it('reads the list again for a menu left open while Settings covered it', async () => {
     const user = userEvent.setup();
     const { rerender } = render(<HubPicker role="owner" />);

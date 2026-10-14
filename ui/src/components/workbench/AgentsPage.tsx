@@ -2482,7 +2482,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
               title={t('chat.picker.effortRefused')}
               className="truncate rounded-md bg-gold/10 px-1 py-1.5 text-center text-[11px] font-bold capitalize text-gold-ink"
             >
-              {refusedEffort}
+              {refusedEffort === 'none' ? t('chat.picker.effortOptions.none') : refusedEffort}
             </span>
           )}
           {effortOptions.map((opt) => {
