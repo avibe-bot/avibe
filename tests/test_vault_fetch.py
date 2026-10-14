@@ -54,6 +54,9 @@ def _create_standard_secret(
     allow_host: list[str] | None = None,
     auth_header: str | None = None,
     auth_query: str | None = None,
+    sealed: Sealed | None = None,
+    default_field: str | None = None,
+    fields: list[dict] | None = None,
 ) -> None:
     policy: dict = {}
     if allow_host:
@@ -66,8 +69,10 @@ def _create_standard_secret(
         vault_service.create_secret(
             conn,
             name=name,
-            sealed=_sealed(name.lower()),
+            sealed=sealed or _sealed(name.lower()),
             policy=policy or None,
+            default_field=default_field,
+            fields=fields,
         )
 
 
@@ -169,6 +174,49 @@ def test_fetch_passes_bearer_request_to_avault_and_writes_stdout(tmp_path, capfd
     assert request["url"] == "https://api.github.com/repos/o/r"
     with cli._open_vault_engine().connect() as conn:
         assert vault_service.get_secret_meta(conn, "GH_PAT")["use_count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("auth", "expected_name", "expected_sealed", "expected_field"),
+    [
+        ("GH_LOGIN.password", "GH_LOGIN", _sealed("password"), "password"),
+        ("GH_LOGIN.username", "GH_LOGIN.username", _sealed("username"), "username"),
+    ],
+)
+def test_fetch_canonicalizes_record_name_and_uses_secret_policy(
+    capfd,
+    monkeypatch,
+    auth,
+    expected_name,
+    expected_sealed,
+    expected_field,
+):
+    from unittest.mock import Mock
+
+    from vibe import api
+
+    _create_standard_secret(
+        "GH_LOGIN",
+        allow_host=["api.github.com"],
+        sealed=_sealed("password"),
+        default_field="password",
+        fields=[{"name": "username", "sealed": _sealed("username")}],
+    )
+    fetch = Mock(return_value={"status": 200, "headers": {}, "body": "ok"})
+    monkeypatch.setattr(api, "avault_deliver_fetch", fetch)
+
+    assert cli.cmd_vault_fetch(_ns(auth=auth, url="https://api.github.com/user")) == 0
+    capfd.readouterr()
+
+    name, sealed, request = fetch.call_args.args
+    assert name == expected_name
+    assert sealed == expected_sealed
+    assert request["allowed_hosts"] == ["api.github.com"]
+    with cli._open_vault_engine().connect() as conn:
+        assert vault_service.get_secret_meta(conn, "GH_LOGIN")["use_count"] == 1
+        audit_rows = vault_service.list_audit(conn, secret_name="GH_LOGIN")
+    proxied = [row for row in audit_rows if row["event"] == "proxied"]
+    assert json.loads(proxied[-1]["delivery"])["field"] == expected_field
 
 
 def test_fetch_rejects_keypair_before_avault_delivery(capfd, monkeypatch):

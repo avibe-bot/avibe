@@ -75,6 +75,35 @@
           "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
           "000000000000012c"
         ]
+      },
+      {
+        "purpose": "seal",
+        "name": "GITHUB_LOGIN.username",
+        "grant_id": "",
+        "sign_scheme": "",
+        "digest_hex": "",
+        "approval_nonce_hex": "",
+        "approval_expires_at_unix": null,
+        "operation_hash_hex": "",
+        "aad_hex": "617661756c743a626c696e642d626f783a6161643a7631000000047365616c000000154749544855425f4c4f47494e2e757365726e616d65000000116d616368696e652d61657367636d2d7631000000010100000000000000000000000000000000000000000000000000000000"
+      },
+      {
+        "purpose": "agent-deliver",
+        "name": "GITHUB_LOGIN.username",
+        "grant_id": "gr_123",
+        "sign_scheme": "",
+        "digest_hex": "",
+        "approval_nonce_hex": "0102030405060708090a0b0c0d0e0f10",
+        "approval_expires_at_unix": 4102444800,
+        "operation_hash_hex": "e4137f5335871dbb195eb2a7abb16ec57c7f18784c9f10792ae5a2e6e6d1582f",
+        "aad_hex": "617661756c743a626c696e642d626f783a6161643a76310000000d6167656e742d64656c69766572000000154749544855425f4c4f47494e2e757365726e616d65000000116d616368696e652d61657367636d2d763100000001010000000667725f313233000000000000000000000000000000100102030405060708090a0b0c0d0e0f100000000800000000f486570000000020e4137f5335871dbb195eb2a7abb16ec57c7f18784c9f10792ae5a2e6e6d1582f",
+        "ttl_secs": 300,
+        "operation_hash_kind": "agent-deliver",
+        "operation_hash_fields_hex": [
+          "6167656e742d64656c69766572",
+          "4749544855425f4c4f47494e2e757365726e616d65",
+          "000000000000012c"
+        ]
       }
     ],
     "approval_nonce_hex": "0102030405060708090a0b0c0d0e0f10",

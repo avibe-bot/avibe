@@ -2520,6 +2520,15 @@
     "retry": "Retry"
   },
   "errors": {
+    "invalid_field_name": "Use 1–64 lowercase letters, digits or underscores for field names, starting with a letter.",
+    "field_exists": "A field with this name already exists. Choose a different name.",
+    "field_not_found": "This field no longer exists. Refresh the secret and choose one of its current fields.",
+    "too_many_fields": "A secret can have at most 32 fields, including the default field.",
+    "fields_corrupt": "This secret's stored field data is damaged. The default value remains available; field changes are disabled to preserve existing data.",
+    "fields_not_supported": "Signing keys do not support named fields or default-field renaming.",
+    "record_mismatch": "This field changed while you were saving. Refresh the secret and try again.",
+    "secret_conflict": "This secret changed elsewhere. Review the refreshed fields and try again; your change was not saved.",
+    "secret_not_found": "This secret no longer exists. Refresh the vault and choose another secret.",
     "retry_not_available": "This notice cannot be retried. Send a message to continue.",
     "retry_stale": "Newer work has already started. Send a message if you want to continue.",
     "retry_busy": "The previous turn is still settling. Try again after it stops.",
@@ -4974,17 +4983,44 @@
       "copy": "Copy value",
       "showInBrowser": "Show in browser",
       "errors": {
+        "staleField": "This link points to a field that no longer exists. Open the secret and choose a current field.",
         "contextFailed": "Couldn't prepare the reveal. Please try again.",
         "unavailable": "Reveal isn't available for this secret yet."
       }
     },
     "saved": "Updated {{name}}",
-    "editSecret": "Edit info",
+    "editSecret": "Edit secret",
     "rowActions": "More actions",
     "edit": {
-      "title": "Edit info",
-      "subtitle": "Info edits keep grants; fetch policy changes require new approval",
+      "title": "Edit secret",
+      "subtitle": "Value or fetch policy changes require new approval",
       "lockedHint": "Name, kind and protection can't be changed"
+    },
+    "fields": {
+      "title": "Fields",
+      "name": "Field {{index}} name",
+      "namePlaceholder": "field_name",
+      "value": "Value for {{field}}",
+      "default": "Default",
+      "defaultName": "Default field name",
+      "newName": "New field name",
+      "newValue": "New field value",
+      "add": "Add field",
+      "loginTemplate": "Login template",
+      "remove": "Remove {{field}}",
+      "removeConfirm": "Remove this field and its value? Existing grants will expire.",
+      "rename": "Rename",
+      "save": "Save field",
+      "saveNamed": "Save {{field}}",
+      "saved": "Field saved",
+      "draftsDropped": "Drafts for fields removed elsewhere were dropped: {{fields}}.",
+      "recordConflict": "This field changed while you were saving. The value was not written; reload the secret and try again.",
+      "secretConflict": "This secret changed while you were saving. Its fields are now refreshed; review them and save again. Your value was not written.",
+      "replacePlaceholder": "Enter a replacement value",
+      "revealField": "Field to reveal",
+      "namesHelp": "Use lowercase letters, digits and underscores; start with a letter. Each field needs a unique name and a value.",
+      "singleFile": "File upload supports one value. Switch to Text before adding fields.",
+      "editHelp": "Changes save immediately. Adding, replacing or removing values expires grants; renaming the default field does not. Leave a value blank to keep it. Extra field names cannot be changed."
     },
     "protectedUnlock": {
       "checking": "Checking your protected vault…",
