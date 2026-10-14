@@ -78,7 +78,7 @@ runtime open. Once models are configured it participates in the runtime Stop gua
 | POST `/api/models/oauth/submit` | `{flow_id, value}` → OAuth result | Same terminal shape as status. A callback address is recognized with or without its `http(s)://` scheme, which browsers drop when copying a page that failed to load; any other value is a bare code. An address the flow refuses before anything reaches the provider is the non-terminal `422 submission_rejected`: one with no `code` or `error`, or one whose `state` answers a different sign-in link than this flow's (`detail: modelHub.errors.submission_rejected_other_attempt`). The flow stays `awaiting_action` and accepts another submission until its `expires_at`. |
 | POST `/api/models/oauth/cancel` | `{flow_id}` → `{ok}` | Cancels provider work. A committed flow with `client_nonce` remains the same bounded terminal `OAuthFlow` with `state: "cancelled"` until its existing `expires_at`; a flow without a nonce is forgotten. |
 | POST `/api/models/migration/scan` | → `{scan: MigrationScan}` | Read-only. |
-| POST `/api/models/migration/apply` | `{item_ids: string[]}` → `{applied, sources, added_to}` | Applies one grouped, server-owned custody transaction. It validates selected items before withdrawal, upgrades an existing native Source in place when present, commits Source/Routes/backend mode atomically, and removes only replaced native material. Pre-exposure failure is reversible; post-exposure recovery is forward-only and keeps the backend blocked until terminalized. |
+| POST `/api/models/migration/apply` | `{item_ids: string[], clean_api_keys?: boolean}` → `{applied, sources, added_to}` | Applies one grouped, server-owned custody transaction. It checks saved configuration and custody locally, copies API keys without upstream validation, upgrades an existing native subscription Source in place when present, and commits Source/Routes/backend mode atomically. API-key originals are kept unless cleanup was selected. Pre-exposure failure is reversible; post-exposure recovery is forward-only and keeps the backend blocked until terminalized. |
 | GET `/api/models/turns/<turn_id>/provenance` | → `{provenance: TurnProvenance}` or documented absence error | Debug read for exactly attributed Hub turns. |
 | GET `/api/models/runtime/status` | → `{runtime: RuntimeDependency}` | Read-only managed engine status. The nested object carries `contract_version` 12 and persisted user intent in `enabled`; `not_started` is installed lazy-start idleness, not an alarm. |
 | POST `/api/models/runtime/install` | → `{runtime: RuntimeDependency}` | Idempotently starts server-owned installation. It returns and persists `installing`; reload reads the same state. Uses the existing mutation authentication and CSRF guards. |
@@ -120,6 +120,23 @@ daily-only ledger can therefore contribute to daily reports while leaving affect
 hourly buckets incomplete; its daily count is never assigned to an hour using
 `last_metered_at`. Bucket rows are sparse `(source_id, model_id)` pairs, and the
 `totals`, `sources`, and `days` fields aggregate those same measured bucket rows.
+
+### Native API-key migration
+
+Static-key migration is a local configuration transfer, not a connection test.
+It never authenticates the key, probes the upstream interface, or fetches a model
+inventory as part of applying the migration. The protocol, Base URL and declared
+manual models come from the saved native configuration. New API-key Sources carry
+`verification_pending` and are presented as **Saved**, with no fabricated upstream
+inventory or discovery timestamp. A matching existing Source is reused without
+re-testing or resetting its inventory, health, or verification evidence.
+
+An expired key or unavailable endpoint therefore does not stop the other selected
+keys from being migrated; neither is silently dropped. Later Gateway calls report
+upstream failures and establish successful-use evidence. Background model discovery
+remains separate from migration, and optional catalog enrichment does not add a
+foreground network wait. Local parsing/transport checks, stale consent, credential
+access, cleanup consent, and atomic custody/recovery protections still apply.
 
 ### Native migration terminal recovery
 
