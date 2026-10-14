@@ -102,14 +102,18 @@ verified for X search.
   parsing, which keeps it only when it is an image; the probe keeps no file. The Tools tab's estimate covers both
   requests.
 - **The `replay` probe.** A second production request with the native declaration still present. Its history is
-  the call probe's turn, with the native payload verbatim, followed by "give the URL of the second result you found,
-  without searching again".
-  - **`verified`:** the answer contains a URL from the first response's results, and the response makes no new
-    call to the tool.
+  the call probe's turn, with the native payload verbatim, followed by "list the URLs of the other results you
+  found, without using any tool again". Nothing is forced.
+  - **`verified`:** the answer names a result URL the call returned that its visible answer does not show (only the
+    replayed payload holds it), and the response makes no new call to the tool.
   - **`unsupported`:** a 400 that names the replayed hosted content (observed on the Anthropic relay, 3 of 3:
-    `Invalid encrypted_content in search_result block`), or an answer that does not use the earlier results (a new
-    tool call, or no URL from them). Transport acceptance alone is never verification. xAI accepted verbatim
-    replay, 3 of 3.
+    `Invalid encrypted_content in search_result block`), or a new call to the tool (§12 item 23). Transport
+    acceptance alone is never verification. xAI accepted verbatim replay, 3 of 3.
+  - **Inconclusive:** an answer naming no such URL, or a refusal, and any request that did not carry the native
+    payload verbatim. With no hidden URL to ask about, no replay runs.
+  - **Within the UI's wait:** the whole probe answers inside the UI's RPC timeout. Each call's deadline is the
+    tool's (as for a turn's proxied call) or what the probe has left, whichever is shorter. A replay with under a
+    minute left is not sent and reads as transient: try again.
 - **Cost and when probes run.** A probe pair costs about $0.02–0.15 (spike: xAI $0.01–0.11 per call, Anthropic $0.01
   per search plus tokens). The Tools tab shows the estimate before running.
 - **What changes probe results** (capability model §3.3). A Source identity change drops them. An engine upgrade or
@@ -820,9 +824,11 @@ encoded either as a schema clause or as a producer test. The PR names which for 
     unverified, so it keeps no payload or signature of any response.
 22. The `generate` action records the output's resolved `quality` and `size`; pricing uses those output values, not
     the declaration's.
-23. The replay probe asks for a URL the call probe actually returned (such as the first). An answer with no earlier
-    URL, or a refusal, is inconclusive; `unsupported` comes only from a 400 naming the replayed content or a new call
-    to the tool.
+23. The replay probe asks for a result URL the call returned that its visible answer does not show, since only the
+    replayed native payload holds it. With no such URL (a single result, or results that stay encrypted, such as
+    xAI's X search) no replay runs and replay evidence stays unknown, so turns replay synthetically. An answer without
+    such a URL, or a refusal, is inconclusive; `unsupported` comes only from a 400 naming the replayed content or a new
+    call to the tool.
 24. For OpenAI and xAI executors, each source's `snippet` is the answer text its `url_citation` span covers, extended
     to the enclosing sentence; the executor instruction asks for one or two cited sentences per result so the spans
     align. A source without a span has no snippet; Anthropic keeps `cited_text`. Tested against a recorded executor

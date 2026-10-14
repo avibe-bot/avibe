@@ -38,11 +38,17 @@ def _sse(*events: dict[str, Any]) -> str:
     return "".join(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n" for event in events)
 
 
+# A result the call returned that its visible answer never shows: only the replayed native payload holds it.
+HIDDEN = "https://avibe.bot/docs/hosted-tools"
 SEARCH = {
     "id": "ws_1",
     "type": "web_search_call",
     "status": "completed",
-    "action": {"type": "search", "query": "Avibe local-first agent OS", "sources": [{"type": "url", "url": "https://avibe.bot/"}]},
+    "action": {
+        "type": "search",
+        "query": "Avibe local-first agent OS",
+        "sources": [{"type": "url", "url": "https://avibe.bot/"}, {"type": "url", "url": HIDDEN}],
+    },
 }
 ANSWER = {"id": "msg_1", "type": "message", "content": [{"type": "output_text", "text": "https://avibe.bot/", "annotations": []}]}
 
@@ -70,7 +76,10 @@ ANTHROPIC_SEARCH = _sse(
         "content_block": {
             "type": "web_search_tool_result",
             "tool_use_id": "srvtoolu_1",
-            "content": [{"type": "web_search_result", "title": "Avibe", "url": "https://avibe.bot/", "encrypted_content": "opaque"}],
+            "content": [
+                {"type": "web_search_result", "title": "Avibe", "url": "https://avibe.bot/", "encrypted_content": "opaque"},
+                {"type": "web_search_result", "title": "Hosted tools", "url": HIDDEN, "encrypted_content": "opaque"},
+            ],
         },
     },
     {"type": "content_block_stop", "index": 1},
@@ -80,16 +89,29 @@ ANTHROPIC_SEARCH = _sse(
     {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 40, "server_tool_use": {"web_search_requests": 1}}},
     {"type": "message_stop"},
 )
-# The replay probe's answer: it names the first result's URL without calling the tool again.
-ANTHROPIC_ANSWER = _sse(
-    {"type": "message_start", "message": {"usage": {"input_tokens": 1200}}},
-    {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
-    {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "https://avibe.bot/"}},
-    {"type": "content_block_stop", "index": 0},
-    {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 12}},
-    {"type": "message_stop"},
-)
-REPLAY_ANSWER = {"anthropic": ANTHROPIC_ANSWER, "openai_responses": _responses(ANSWER)}
+def _anthropic_text(text: str) -> str:
+    return _sse(
+        {"type": "message_start", "message": {"usage": {"input_tokens": 1200}}},
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 12}},
+        {"type": "message_stop"},
+    )
+
+
+def _responses_text(text: str) -> str:
+    return _responses({"id": "msg_2", "type": "message", "content": [{"type": "output_text", "text": text, "annotations": []}]})
+
+
+def _replay_reply(protocol: str, request: dict) -> str:
+    """A model answering the replay probe from what it was sent: it can name the result only the native payload
+    holds when that payload came back, and nothing more otherwise."""
+
+    text = HIDDEN if HIDDEN in json.dumps(request) else "I can't tell without searching again."
+    return _anthropic_text(text) if protocol == "anthropic" else _responses_text(text)
+
+
 
 
 def _stream(body: str) -> web.Response:
@@ -139,7 +161,7 @@ async def test_a_call_probe_sends_the_production_request_and_records_only_what_i
     async def respond(request):
         sent.append(await request.json())
         if len(sent) > 1:
-            return _stream(REPLAY_ANSWER[source.protocol])
+            return _stream(_replay_reply(source.protocol, sent[-1]))
         if isinstance(body, str):
             return web.Response(status=status, body=body.encode(), content_type="text/event-stream")
         return web.json_response(body, status=status)
@@ -319,7 +341,7 @@ async def test_each_request_the_adapter_sends_is_its_own_pinned_call(tmp_path, m
     async def respond(request):
         sent.append(await request.json())
         if len(sent) > 2:
-            return _stream(ANTHROPIC_ANSWER)
+            return _stream(_replay_reply("anthropic", sent[-1]))
         if '"ttl": "1h"' in json.dumps(sent[-1]):
             return web.json_response(
                 {"type": "error", "error": {"type": "invalid_request_error", "message": refusal}},
@@ -622,11 +644,13 @@ async def test_an_image_probe_verifies_only_an_image_vibey_could_keep(tmp_path, 
 
 REPLAY_CASES = [
     # (case, Source, the call's response, the replay's response or status and body, replay outcome, record)
-    ("names-a-result", XAI, _responses(SEARCH, ANSWER), _responses(ANSWER), "verified", "verified"),
-    ("anthropic-names-a-result", ANTHROPIC, ANTHROPIC_SEARCH, ANTHROPIC_ANSWER, "verified", "verified"),
+    ("names-a-result", XAI, _responses(SEARCH, ANSWER), "answer-from-payload", "verified", "verified"),
+    ("anthropic-names-a-result", ANTHROPIC, ANTHROPIC_SEARCH, "answer-from-payload", "verified", "verified"),
+    # Restating the answer it already gave proves nothing: that text came back in the visible transcript.
+    ("restates-the-visible-answer", XAI, _responses(SEARCH, ANSWER), _responses_text("https://avibe.bot/"), "inconclusive", None),
     # Searching again instead of using the results it holds is what a dropped replay looks like.
     ("searches-again", XAI, _responses(SEARCH, ANSWER), _responses(SEARCH, ANSWER), "unsupported", "unsupported"),
-    ("names-no-result", XAI, _responses(SEARCH, ANSWER), _responses({**ANSWER, "content": [{"type": "output_text", "text": "I can't tell.", "annotations": []}]}), "inconclusive", None),
+    ("names-no-result", XAI, _responses(SEARCH, ANSWER), _responses_text("I can't tell."), "inconclusive", None),
     (
         "anthropic-refuses-the-replayed-result",
         ANTHROPIC,
@@ -655,6 +679,8 @@ async def test_a_verified_call_is_followed_by_the_replay_probe(tmp_path, source,
             return _stream(first)
         if isinstance(second, tuple):
             return web.json_response(second[1], status=second[0])
+        if second == "answer-from-payload":
+            return _stream(_replay_reply(source.protocol, sent[-1]))
         return _stream(second)
 
     async with loopback_engine(tmp_path, service, respond):
@@ -665,9 +691,52 @@ async def test_a_verified_call_is_followed_by_the_replay_probe(tmp_path, source,
     assert replay["tools"] == call["tools"] and "tool_choice" not in replay
     native = SEARCH if source.protocol == "openai_responses" else {"type": "web_search_tool_result"}
     assert json.dumps(native["type"]) in json.dumps(replay)
-    assert "first result you found" in json.dumps(replay)
+    assert "other results you found" in json.dumps(replay)
+    assert HIDDEN in json.dumps(replay)
     probe = result["probe"]
     _assert_valid("hosted-tool-probe-result.schema.json", probe)
     assert probe["call"]["outcome"] == "verified"
     assert probe["replay"]["outcome"] == outcome
     assert [record.status for record in _records(service, REPLAY)] == ([written] if written else [])
+
+
+@pytest.mark.asyncio
+async def test_no_replay_runs_when_the_visible_answer_shows_every_result(tmp_path):
+    """MH-HOSTED-007: a replay is proved only by a result the visible answer does not show; with none, no replay is
+    spent, and the replay stays unknown, so turns replay synthetically."""
+    single = {**SEARCH, "action": {**SEARCH["action"], "sources": [{"type": "url", "url": "https://avibe.bot/"}]}}
+    service, _clock, _models = configured_service(tmp_path, sources=[XAI])
+    sent = []
+
+    async def respond(request):
+        sent.append(await request.json())
+        return _stream(_responses(single, ANSWER))
+
+    async with loopback_engine(tmp_path, service, respond):
+        result = await service.probe_hosted_tool("web_search", {"source_id": XAI.id, "model_id": "grok-4.6"})
+
+    assert len(sent) == 1
+    assert (result["probe"]["call"]["outcome"], result["probe"]["replay"]) == ("verified", None)
+    assert _records(service, REPLAY) == []
+
+
+@pytest.mark.asyncio
+async def test_a_replay_the_probe_has_no_time_left_for_reports_try_again(tmp_path, monkeypatch):
+    """MH-HOSTED-007: the whole probe answers inside the UI's RPC wait; a replay that could not finish in what is left
+    is not sent, and reads as a transient failure to try again."""
+    from core.handlers.model_hub import service as service_module
+
+    monkeypatch.setattr(service_module, "PROBE_BUDGET_SECONDS", 30.0)
+    service, _clock, _models = configured_service(tmp_path, sources=[XAI])
+    sent = []
+
+    async def respond(request):
+        sent.append(await request.json())
+        return _stream(_responses(SEARCH, ANSWER))
+
+    async with loopback_engine(tmp_path, service, respond):
+        result = await service.probe_hosted_tool("web_search", {"source_id": XAI.id, "model_id": "grok-4.6"})
+
+    assert len(sent) == 1
+    assert result["probe"]["replay"] == {"outcome": "transient", "error": None}
+    assert _records(service, REPLAY) == []

@@ -26,7 +26,7 @@ import base64
 import binascii
 import json
 from dataclasses import dataclass, replace
-from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Optional, Protocol
+from typing import Any, AsyncIterator, Awaitable, Callable, Final, Literal, Optional, Protocol
 
 import httpx
 
@@ -61,8 +61,11 @@ _MESSAGES = {
     "x_search": "Search X for posts about 'Avibe local-first agent OS' and reply with the first post's URL.",
     "image_generation": "Generate a small, simple image: a blue circle on a white background.",
 }
-# The replay probe's question: one a model can answer only from the results it already holds.
-_REPLAY_MESSAGE = "Without using any tool again, reply with the URL of the first result you found."
+# The replay probe's question: one a model can answer only from the results the replayed payload holds, since the
+# answer it already gave shows just the first.
+_REPLAY_MESSAGE = (
+    "Without using any tool again, list the URLs of the other results you found, beyond the one you already gave."
+)
 _SYSTEM = "You check that a tool works: use it, then answer in one line."
 # Room for a reasoning model to think, call the tool and answer in one line; a hop whose Vibey turns ask for less
 # gets that instead.
@@ -144,19 +147,27 @@ def replay_request(call: ModelRequest, tool: str, answered: AssistantMessage) ->
     )
 
 
-def result_urls(message: AssistantMessage) -> frozenset[str]:
-    """Every URL a response's hosted calls returned or its answer cited: what a replay answer may name."""
+def hidden_result_urls(message: AssistantMessage) -> frozenset[str]:
+    """The result URLs a response's hosted calls returned that its visible answer does not show.
 
-    urls = {source.url for block in message.content if isinstance(block, HostedToolBlock) for source in block.record.sources}
-    if message.hosted_summary is not None:
-        urls.update(source.url for source in message.hosted_summary.cited_sources)
-    urls.update(
+    Only these prove a replay: a model that names one read the replayed native
+    payload, since nothing else it was sent holds it. A URL the answer wrote or
+    cited is visible text, which any request carries.
+    """
+
+    returned = {source.url for block in message.content if isinstance(block, HostedToolBlock) for source in block.record.sources}
+    text = " ".join(block.text for block in message.content if isinstance(block, TextBlock) and block.text)
+    shown = {
         citation.url
         for block in message.content
         if isinstance(block, TextBlock) and block.citations
         for citation in block.citations
+    }
+    if message.hosted_summary is not None:
+        shown.update(source.url for source in message.hosted_summary.cited_sources)
+    return frozenset(
+        url for url in returned if url and url not in shown and url not in text and url.rstrip("/") not in text
     )
-    return frozenset(url for url in urls if url)
 
 
 def carries_native_payload(body: Any, message: AssistantMessage) -> bool:
@@ -196,6 +207,13 @@ class ProbeImageCheck:
             raise ValueError("the image is not a PNG, JPEG, GIF or WebP")
         return HostedImage(path="probe:discarded", mime=mime_type, bytes=len(data))
 
+
+# How long the UI process waits for any Model Hub RPC (``vibe/model_hub_client.py`` reads it from here). A probe
+# answers inside it, with room for the RPC's own overhead.
+MODEL_HUB_RPC_TIMEOUT_SECONDS: Final = 300.0
+PROBE_BUDGET_SECONDS: Final = MODEL_HUB_RPC_TIMEOUT_SECONDS - 20.0
+# The replay probe runs only with at least this long left; otherwise it reports a transient failure, sending nothing.
+REPLAY_MIN_SECONDS: Final = 60.0
 
 # A probe sends at most this many requests: its own, and the one resend an adapter makes when an endpoint refuses
 # a field before answering (Anthropic's one-hour cache lifetime). Only an answered request runs the model.
@@ -418,7 +436,8 @@ def replay_outcome(
 
     * ``unsupported``: a 400 naming the replayed content, through the narrow rule real requests learn from, or an
       answer that calls the tool again instead of using the results it holds;
-    * ``verified``: an answer that names a URL from those results (``asked``) without calling the tool;
+    * ``verified``: an answer that names a URL only those results hold (``asked``, ``hidden_result_urls``) without
+      calling the tool;
     * ``inconclusive``: an answer that names none, or a refusal, and any request that did not carry the native
       payload verbatim (``carried``), since it tested nothing;
     * ``transient``: as for the call probe.

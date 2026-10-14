@@ -8,6 +8,7 @@ import httpx
 
 from core.handlers.model_hub import ModelHubError
 from vibe import internal_client
+from core.handlers.model_hub.hosted_probe import MODEL_HUB_RPC_TIMEOUT_SECONDS
 from core.handlers.model_hub.usage import USAGE_DEFAULT_WINDOW_DAYS
 
 
@@ -17,7 +18,6 @@ _TRANSPORT_ERRORS = (
     OSError,
     internal_client.InternalServerUnavailable,
 )
-MODEL_HUB_RPC_TIMEOUT_SECONDS = 300.0
 _REORDER_ORDER_UNSET = object()
 
 

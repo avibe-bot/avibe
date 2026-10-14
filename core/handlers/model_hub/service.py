@@ -144,10 +144,12 @@ from .hosted_probe import ESTIMATED_USAGE as ESTIMATED_PROBE_USAGE
 from .hosted_probe import (
     NATIVE_REPLAY_PROTOCOLS,
     PROBE_MAX_OUTPUT_TOKENS,
+    PROBE_BUDGET_SECONDS,
     PROBED_TOOLS,
+    REPLAY_MIN_SECONDS,
     ProbeImageCheck,
     carries_native_payload,
-    result_urls,
+    hidden_result_urls,
 )
 from .hosted_probe import call_outcome as hosted_call_outcome
 from .hosted_probe import probe_request as hosted_probe_request
@@ -7698,6 +7700,13 @@ class ModelHubService:
                 raise ModelHubError("mapping_target_unavailable", status=409)
             return current
 
+        # The whole probe answers inside the UI's RPC wait. Each call gets as long as a turn's executor gives the
+        # tool, but never more than the probe has left.
+        deadline = time.monotonic() + PROBE_BUDGET_SECONDS
+
+        def remaining() -> float:
+            return deadline - time.monotonic()
+
         async def pinned_call(body: dict, read: Callable[[InvokeHandle], Awaitable[None]]):
             return await self._user_test_call(
                 source_id,
@@ -7707,8 +7716,7 @@ class ModelHubService:
                 stream=True,
                 origin="vibey",
                 consume=read,
-                # A hosted call takes as long here as when a turn's executor runs it.
-                timeout=call_timeout(tool),
+                timeout=max(1.0, min(call_timeout(tool), remaining())),
             )
 
         media_sink = ProbeImageCheck() if tool == "image_generation" else None
@@ -7725,14 +7733,20 @@ class ModelHubService:
         replay: Optional[dict] = None
         # The replay probe follows a call probe that verified and was recorded for the Source as it is, on a tool
         # whose payload can go back verbatim, when the call returned a result the replay can ask about.
-        asked = result_urls(terminal.message) if isinstance(terminal, Done) else frozenset()
-        if (
+        # Only a result the visible answer does not show proves the replayed payload was read; with none, the
+        # replay stays unknown and turns replay synthetically, which is lossless.
+        asked = hidden_result_urls(terminal.message) if isinstance(terminal, Done) else frozenset()
+        replayable = (
             call_verdict == "verified"
             and recorded_for is not None
             and "replay" in HOSTED_TOOL_ASPECTS[tool]
             and source.protocol in NATIVE_REPLAY_PROTOCOLS
-            and asked
-        ):
+            and bool(asked)
+        )
+        if replayable and remaining() < REPLAY_MIN_SECONDS:
+            # Too little of the probe's time is left for a replay that could finish: try again.
+            replay = {"outcome": "transient", "error": None}
+        elif replayable:
             assert isinstance(terminal, Done)
             replay_terminal, replay_calls = await run_hosted_probe(
                 hosted_replay_request(request, tool, terminal.message), pinned_call,
