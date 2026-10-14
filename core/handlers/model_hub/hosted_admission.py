@@ -46,6 +46,8 @@ _RESPONSES_MODEL_OUTPUTS: Final = frozenset({
     "file_search_call", "computer_call", "code_interpreter_call", "local_shell_call", "mcp_call",
     "mcp_list_tools", "mcp_approval_request",
 })
+# Output items identified by the tool they name; one without a textual name is malformed.
+_RESPONSES_NAMED_CALLS: Final = frozenset({"function_call", "custom_tool_call", "mcp_call"})
 _ANTHROPIC_SERVER_RESULTS: Final = {"web_search_tool_result": "web_search"}
 
 
@@ -122,10 +124,11 @@ def _responses_output_item(item: Any) -> bool:
         return False
     if item.get("type") in (None, "message"):
         return item.get("role") == "assistant"
-    if "name" in item and _text(item, "name") is None:
-        # A call whose name is not text is malformed, so it ends the run like any unknown item.
+    kind = _text(item, "type")
+    if kind in _RESPONSES_NAMED_CALLS and _text(item, "name") is None:
+        # A named call without a textual name cannot be classified, so it ends the run like any unknown item.
         return False
-    return _text(item, "type") in _RESPONSES_MODEL_OUTPUTS
+    return kind in _RESPONSES_MODEL_OUTPUTS
 
 
 def _responses_replays(items: Any, *, pinned: bool) -> frozenset[str]:

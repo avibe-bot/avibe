@@ -87,7 +87,8 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
      - every replayed hosted item outside the in-flight response needs its tool to run on the hop, and `replay`
        evidence. A generated image never has it.
      - A request field that is not of its kind (a non-text `type` or `name`) is absent, so its item is no hosted
-       item and ends the in-flight run.
+       item and ends the in-flight run. A named call (`function_call`, `custom_tool_call`, `mcp_call`) without a
+       textual `name` cannot be classified and ends it too.
      - The hosted items are Responses `web_search_call`, `image_generation_call`, and `custom_tool_call` named
        `x_keyword_search`, `x_semantic_search`, `x_user_search` or `x_thread_fetch`; and Anthropic `server_tool_use`
        named after a catalog tool, and `web_search_tool_result`.
