@@ -19,9 +19,8 @@ import { HostedProbeDialog, ProbeAnswerNote } from './HostedProbeDialog';
 import {
   evidenceChip,
   pendingChecks,
-  probeableTool,
   probeKey,
-  probeTotal,
+  probeCostSummary,
   probeUnanswered,
   sameExecutor,
   verifiedCandidates,
@@ -40,7 +39,7 @@ import type {
   HostedToolStatus,
   Source,
 } from './types';
-import { useEstimateLabel } from './useEstimateLabel';
+import { useCostSummaryLabel, useEstimateLabel } from './useEstimateLabel';
 
 type RunProbe = (target: ProbeTarget) => Promise<HostedToolProbeResult | null>;
 
@@ -232,7 +231,7 @@ const ToolCard: React.FC<{
               ? 'settings.models.tools.state.off'
               : pickable
                 ? 'settings.models.tools.state.needsExecutor'
-                : probeableTool(tool.name) ? 'settings.models.tools.state.needsCheck' : 'settings.models.tools.state.checkUnavailable')}</span>
+                : 'settings.models.tools.state.needsCheck')}</span>
           <ToggleSwitch
             enabled={tool.enabled}
             disabled={pending || locked}
@@ -260,9 +259,7 @@ const ToolCard: React.FC<{
                     candidate={candidate}
                     source={sources.get(candidate.source_id)}
                     executor={tool.enabled && sameExecutor(candidate, bound)}
-                    probe={probeableTool(tool.name)
-                      ? { running: probing.has(key), last: lastProbes.get(key), run: onProbe, disabled: probing.size > 0 && !probing.has(key) }
-                      : null}
+                    probe={{ running: probing.has(key), last: lastProbes.get(key), run: onProbe, disabled: probing.size > 0 && !probing.has(key) }}
                   />
                 );
               })}
@@ -331,7 +328,7 @@ export const ToolsTab: React.FC<{
   onRetry: () => void;
 }> = ({ read, sources, pending, probing, onChange, onProbe, onRetry }) => {
   const { t } = useTranslation();
-  const estimateLabel = useEstimateLabel();
+  const costSummaryLabel = useCostSummaryLabel();
   // A row's last answer that did not become evidence (inconclusive, transient, a
   // failed request) shows where it was asked, until that row is checked again.
   const [lastProbes, setLastProbes] = React.useState<ReadonlyMap<string, HostedToolProbeResult | null>>(() => new Map());
@@ -352,13 +349,13 @@ export const ToolsTab: React.FC<{
   const reverify = status?.reverify;
   const toCheck = status ? pendingChecks(status) : [];
   // 「全部已检测」 holds only where there is something a check could run on.
-  const checkable = status?.tools.some((tool) => probeableTool(tool.name) && tool.candidates.length > 0) ?? false;
-  const toCheckTotal = probeTotal(toCheck);
-  const toCheckCost = toCheckTotal === null
+  const checkable = status?.tools.some((tool) => tool.candidates.length > 0) ?? false;
+  const toCheckSummary = probeCostSummary(toCheck);
+  const toCheckCost = toCheckSummary.priced === 0 && toCheckSummary.included === 0
     ? t('settings.models.tools.header.totalUnknown')
-    : toCheckTotal.basis === 'included'
+    : toCheckSummary.priced === 0 && toCheckSummary.unpriced === 0
       ? t('settings.models.tools.header.totalIncluded')
-      : t('settings.models.tools.header.total', { cost: estimateLabel(toCheckTotal) });
+      : t('settings.models.tools.header.total', { cost: costSummaryLabel(toCheckSummary) });
   return (
     <section className="model-hub-tools flex flex-col" aria-label={t('settings.models.tools.title') as string}>
       <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">

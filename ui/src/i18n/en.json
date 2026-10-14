@@ -2379,8 +2379,7 @@
           "on": "On",
           "off": "Off",
           "needsCheck": "Off · check a Source first",
-          "needsExecutor": "Off · choose an executor first",
-          "checkUnavailable": "Off · checks for this tool come in a later update"
+          "needsExecutor": "Off · choose an executor first"
         },
         "toggle": {
           "turnOn": "Turn on {{name}}",
@@ -2448,6 +2447,14 @@
           "included": "included in subscription",
           "unknown": "cost unknown",
           "notRecorded": "the result couldn't be recorded",
+          "plusIncluded_one": "+ {{count}} included",
+          "plusIncluded_other": "+ {{count}} included",
+          "plusUnpriced_one": "+ {{count}} without a price",
+          "plusUnpriced_other": "+ {{count}} without a price",
+          "replay": {
+            "unverified": "Replay not verified · try again",
+            "unsupported": "Replay not supported on this Source"
+          },
           "outcome": {
             "inconclusive": "Not verified · the model didn't use the tool; try again",
             "transient": "Couldn't verify · try again",

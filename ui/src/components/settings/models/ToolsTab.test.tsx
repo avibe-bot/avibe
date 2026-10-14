@@ -365,36 +365,61 @@ describe('ToolsTab checks', () => {
     within(card('Web search').querySelector('[data-candidate="src_grok0001:grok-4.6"]') as HTMLElement).getByRole('button', { name: 'Check again · about $0.01' });
     within(card('Web search').querySelector('[data-candidate="src_chatgpt1:gpt-6.1-sol"]') as HTMLElement)
       .getByRole('button', { name: 'Check · included in subscription' });
-    // Images cannot be checked yet, so their rows offer nothing to run.
-    expect(within(card('Image generation')).queryByRole('button', { name: /Check/ })).toBeNull();
+    // An image check has no list price: it says so, and never shows $0.
+    within(card('Image generation').querySelector('[data-candidate="src_relay001:gpt-6.1-sol"]') as HTMLElement)
+      .getByRole('button', { name: 'Check · cost unknown' });
   });
 
   it('MH-HOSTED-UI-013: runs the header check only after the dialog shows what it sends and costs', async () => {
-    const onProbe = vi.fn<RunProbe>(async (target) => target.candidate.source_id === RELAY.id
+    const onProbe = vi.fn<RunProbe>(async (target) => target.tool === 'web_search' && target.candidate.source_id === RELAY.id
       ? result('verified', target.candidate.source_id, target.candidate.model_id)
       : { ...result('transient', target.candidate.source_id, target.candidate.model_id), call: { outcome: 'transient', error: 'models.source.cooldown.rate_limited' } });
     renderTab(searchable(), { onProbe });
 
-    // Two unchecked pairs (the verified one and the image are not offered); the subscription adds nothing.
-    screen.getByText('2 pairs to check · about $0.02 in total');
+    // Three unchecked pairs (the verified one is not offered): the priced one is summed,
+    // the included and the unpriced image are counted, and nothing is added as $0.
+    screen.getByText('3 pairs to check · about $0.02 + 1 included + 1 without a price in total');
     await userEvent.click(screen.getByRole('button', { name: 'Check available tools' }));
     const dialog = await screen.findByRole('dialog');
-    within(dialog).getByText('This sends 2 real requests to the Sources below to confirm they can run these tools natively.');
+    within(dialog).getByText('This sends 3 real requests to the Sources below to confirm they can run these tools natively.');
     expect(onProbe).not.toHaveBeenCalled();
 
-    await userEvent.click(within(dialog).getByRole('button', { name: 'Start check · about $0.02' }));
-    await within(dialog).findByText('Check finished');
-    expect(onProbe).toHaveBeenCalledTimes(2);
-    within(dialog).getByText('1 runs natively');
-    within(dialog).getByText('1 not verified');
-    // The reason sits where the locale puts it in the sentence.
-    within(dialog).getByText('Couldn\'t verify this time (Rate limited). Try again; this is not recorded as unsupported.');
-
-    // Retrying runs only the pair that got no answer.
-    await userEvent.click(within(dialog).getByRole('button', { name: 'Retry 1 · included in subscription' }));
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Start check · about $0.02 + 1 included + 1 without a price' }));
     await within(dialog).findByText('Check finished');
     expect(onProbe).toHaveBeenCalledTimes(3);
-    expect(onProbe.mock.calls[2][0]).toMatchObject({ candidate: { source_id: SUBSCRIPTION.id } });
+    within(dialog).getByText('1 runs natively');
+    within(dialog).getByText('2 not verified');
+    // The reason sits where the locale puts it in the sentence.
+    expect(within(dialog).getAllByText('Couldn\'t verify this time (Rate limited). Try again; this is not recorded as unsupported.')).toHaveLength(2);
+
+    // Retrying runs only the pairs that got no answer, with their cost said the same way.
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Retry 2 · included in subscription + 1 without a price' }));
+    await within(dialog).findByText('Check finished');
+    expect(onProbe).toHaveBeenCalledTimes(5);
+    expect(onProbe.mock.calls.slice(3).map(([target]) => target.candidate.source_id).sort()).toEqual([RELAY.id, SUBSCRIPTION.id].sort());
+  });
+
+  it('MH-HOSTED-UI-003: lets the locale compose a set\'s cost with its unpriced checks', () => {
+    renderTab(searchable(), { lng: 'zh' });
+    screen.getByText('3 项可检测 · 共约 $0.02，另 1 项订阅内含，另 1 项暂无单价');
+  });
+
+  it('MH-HOSTED-UI-019: shows a replay that did not verify as its own result, and nothing when no replay ran', async () => {
+    const replayed = (replay: HostedToolProbeResult['replay']): HostedToolProbeResult => ({ ...result('verified', RELAY.id, 'gpt-6-astra'), replay });
+    const onProbe = vi.fn<RunProbe>()
+      .mockResolvedValueOnce(replayed({ outcome: 'transient', error: null }))
+      .mockResolvedValueOnce(replayed(null));
+    renderTab(searchable(), { onProbe });
+    const row = card('Web search').querySelector('[data-candidate="src_relay001:gpt-6-astra"]') as HTMLElement;
+
+    // The call verified; the replay after it ran out of time. That asks for another try, never reads as a failure.
+    await userEvent.click(within(row).getByRole('button', { name: 'Check · about $0.02' }));
+    within(row).getByText('Replay not verified · try again');
+    expect(row.textContent).not.toMatch(/Not verified|Couldn't verify/);
+
+    // No replay ran: nothing more to say.
+    await userEvent.click(within(row).getByRole('button', { name: /^Check/ }));
+    expect(within(row).queryByText(/Replay/)).toBeNull();
   });
 
   it('MH-HOSTED-UI-013: says why a failed check failed, and never shows the server\'s key as text', async () => {
@@ -413,12 +438,12 @@ describe('ToolsTab checks', () => {
     expect(row.textContent).not.toContain('models.source');
   });
 
-  it('MH-HOSTED-UI-018: says plainly when a tool cannot be checked yet, instead of asking for a check it cannot run', () => {
+  it('MH-HOSTED-UI-018: keeps an image tool off until a check verifies one of its pairs, and offers that check', () => {
     renderTab(status([tool('image_generation', { candidates: [{ source_id: RELAY.id, model_id: 'gpt-6.1-sol', call: unknown, replay: null }] })]));
     const image = card('Image generation');
-    within(image).getByText('Off · checks for this tool come in a later update');
+    within(image).getByText('Off · check a Source first');
     expect((within(image).getByRole('switch') as HTMLButtonElement).disabled).toBe(true);
-    expect(within(image).queryByRole('button', { name: /Check/ })).toBeNull();
+    within(image).getByRole('button', { name: 'Check · cost unknown' });
   });
 
   it('MH-HOSTED-UI-003: says a check\'s cost is unknown before it runs, when no estimate is known', () => {
