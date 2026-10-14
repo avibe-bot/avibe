@@ -6186,15 +6186,16 @@ class ModelHubService:
                         # Cancelled after admission, before a handle: the wire
                         # facts already observed are still billed, so still metered.
                         cancelled_observed = cancelled_early.observed
-                        raise
+                        # Raised as a plain cancellation: the deadline converts
+                        # only that into its timeout, and any other canceller
+                        # reads it as its own.
+                        raise asyncio.CancelledError() from None
                     break
                 finally:
                     release_owner()
             if handle.stream is not None:
-                async for chunk in handle.stream:
-                    if refused is not None:
-                        continue
-                    try:
+                try:
+                    async for chunk in handle.stream:
                         if reader is not None:
                             # An image event is megabytes of JSON: parse it off the controller loop.
                             await asyncio.to_thread(reader.feed, chunk)
@@ -6202,12 +6203,20 @@ class ModelHubService:
                             raise ExecutorResponseRefused("modelHub.hostedTools.tooLarge")
                         else:
                             body.extend(chunk)
-                    except ExecutorResponseRefused as broken:
-                        # The response broke a bound: the call failed. Its usage is still metered.
-                        refused = broken.key
+                except ExecutorResponseRefused as broken:
+                    # The response broke a bound: the call failed, and nothing more
+                    # of it is read. Its usage is still metered, from the outcome
+                    # when the call already has one (a buffered response does).
+                    refused = broken.key
+                    await self._engine_call(handle.close_stream())
+                    if handle.outcome_available:
+                        outcome = await self._engine_call(handle.outcome())
+                    return
             outcome = await self._engine_call(handle.outcome())
 
         async def settle() -> None:
+            # The call ended now; a slow close must not move its usage to a later slice.
+            ended_at = self.now()
             try:
                 if handle is not None:
                     # Bounded like the gateway's own teardown: a stuck close must
@@ -6222,6 +6231,7 @@ class ModelHubService:
                         model_id=model_id,
                         outcome=outcome,
                         observed=handle.observed if handle is not None else cancelled_observed,
+                        at=ended_at,
                     )
 
         try:
@@ -9424,6 +9434,7 @@ class ModelHubService:
         model_id: str,
         outcome: RawCallOutcome | None,
         observed: ProtocolSSEState | None,
+        at: datetime | None = None,
     ) -> None:
         """Fold one bodyless upstream call into the usage ledger, best-effort.
 
@@ -9448,6 +9459,8 @@ class ModelHubService:
         the vendor had already billed. The writer's own bounded wait keeps the
         ordinary path leaving the row on disk before the caller sees its outcome,
         without putting an unresponsive disk in front of the next failover hop.
+
+        ``at`` is when the call ended, when its caller settles it later than that.
         """
 
         usage = _call_usage(outcome, observed)
@@ -9462,7 +9475,7 @@ class ModelHubService:
                 source_id=source_id,
                 model_id=model_id,
                 usage=usage,
-                at=self.now(),
+                at=at or self.now(),
             )
         )
 

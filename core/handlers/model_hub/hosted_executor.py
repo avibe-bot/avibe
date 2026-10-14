@@ -47,6 +47,8 @@ _IMAGES_TOTAL_MAX_BYTES: Final = 64 * 1024 * 1024
 # Image events per response: the requested partials and the final, with a small margin.
 _IMAGE_EVENT_MARGIN: Final = 2
 _SNIPPET_CHARS: Final = 500
+# The url_citation annotations one response's record reads; an executor's answer cites tens.
+_MAX_CITATIONS: Final = 256
 _X_POST_HOSTS: Final = ("x.com", "twitter.com", "www.x.com", "www.twitter.com", "mobile.twitter.com")
 _X_SEARCH_CALLS: Final = frozenset({"x_keyword_search", "x_semantic_search", "x_user_search", "x_thread_fetch"})
 _IMAGE_MIME: Final = {"png": "image/png", "jpeg": "image/jpeg", "jpg": "image/jpeg", "webp": "image/webp"}
@@ -176,6 +178,8 @@ def executor_request(call: ExecutorCall, source: ModelHubSourceConfig, model_id:
             "instructions": instructions,
             "input": [{"role": "user", "content": query}],
             "tools": [declaration],
+            # Forced, as the call probe forces it: a model answering from memory runs no search.
+            "tool_choice": "required",
             "store": False,
             "max_output_tokens": _RESPONSES_OUTPUT_TOKENS,
         }
@@ -244,9 +248,9 @@ class ResponsesStreamReader:
             return
         except RecursionError:
             raise ExecutorResponseRefused("modelHub.hostedTools.unreadable") from None
-        if not isinstance(payload, dict):
+        kind = payload.get("type") if isinstance(payload, dict) else None
+        if not isinstance(kind, str):
             return
-        kind = payload.get("type")
         item = payload.get("item")
         if kind == "response.image_generation_call.partial_image":
             self._count_image(payload.get("partial_image_b64"))
@@ -358,7 +362,7 @@ def _settled(response: Mapping[str, Any], sources: list[dict[str, Any]], say: Sa
     any other or missing ending is a failure.
     """
 
-    status = response.get("status")
+    status = _text_field(response, "status")
     if status == "completed":
         return {"status": "completed", "sources": sources}
     ended = _ended_without("", response, say) if status in {"failed", "incomplete"} else say(
@@ -369,19 +373,26 @@ def _settled(response: Mapping[str, Any], sources: list[dict[str, Any]], say: Sa
     return failed_record(ended, sources)
 
 
+def _text_field(item: Mapping[str, Any], key: str) -> str | None:
+    """A provider field read as text; anything else is absent."""
+
+    value = item.get(key)
+    return value if isinstance(value, str) else None
+
+
 def _responses_call_tool(item: Mapping[str, Any]) -> str | None:
     kind = item.get("type")
     if kind == "web_search_call":
         return "web_search"
     if kind == "image_generation_call":
         return "image_generation"
-    if kind == "custom_tool_call" and item.get("name") in _X_SEARCH_CALLS:
+    if kind == "custom_tool_call" and _text_field(item, "name") in _X_SEARCH_CALLS:
         return "x_search"
     return None
 
 
 def _ended_without(tool: str, response: Mapping[str, Any], say: Say) -> str:
-    status = response.get("status")
+    status = _text_field(response, "status")
     if status in {"failed", "incomplete"}:
         details = response.get("incomplete_details")
         reason = details.get("reason") if isinstance(details, dict) else None
@@ -404,6 +415,7 @@ def _cited_sources(parts: list[Mapping[str, Any]], *, x_posts_only: bool) -> lis
     """Each cited URL once, in citation order, with the sentence its span sits in as the snippet."""
 
     sources: list[dict[str, Any]] = []
+    budget = _MAX_CITATIONS
     for part in parts:
         text = part["text"]
         citations = [
@@ -411,12 +423,13 @@ def _cited_sources(parts: list[Mapping[str, Any]], *, x_posts_only: bool) -> lis
             for note in (part.get("annotations") if isinstance(part.get("annotations"), list) else ())
             if isinstance(note, dict) and note.get("type") == "url_citation"
             and isinstance(note.get("url"), str) and note["url"]
-        ]
-        spans = [
+        ][:budget]
+        budget -= len(citations)
+        spans = sorted(
             (note["start_index"], note["end_index"], note["url"])
             for note in citations
             if _valid_span(note.get("start_index"), note.get("end_index"), len(text))
-        ]
+        )
         for note in citations:
             url = note["url"]
             if x_posts_only and not _is_x_post(url):
@@ -465,6 +478,8 @@ _LIST_MARKER = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s*")
 def excerpt(text: str, start: int, end: int, url: str, spans: list[tuple[int, int, str]]) -> str | None:
     """The answer text a citation span belongs to, without citation markers (``vibey-hosted-tools.md`` §12 item 24).
 
+    ``spans`` are the text's citation spans, in text order.
+
     The executor asks for one list item per result, each ending in its
     citation, so a span on a line that cites only its own URL takes that whole
     line. On a line that cites several sources, it takes its sentence: the one
@@ -481,7 +496,7 @@ def excerpt(text: str, start: int, end: int, url: str, spans: list[tuple[int, in
     else:
         region_start, region_end = _sentence(text, start, end, line_start, line_end)
     pieces, cursor = [], region_start
-    for span_start, span_end, _url in sorted(spans):
+    for span_start, span_end, _url in spans:
         if span_end <= region_start or span_start >= region_end:
             continue
         pieces.append(text[cursor:max(cursor, span_start)])
@@ -517,16 +532,18 @@ def _image_result(
         # The one failure-precedence rule: a provider-marked failed call fails the call.
         return ExecutorResult(failed_record(say("modelHub.hostedTools.callFailed", tool="image_generation")))
     done = [call for call in calls if call.get("status") == "completed" and isinstance(call.get("result"), str)]
-    if done and done[-1]["result"] and failure is None and (readout.response or {}).get("status") != "completed":
+    image = done[-1] if done and done[-1]["result"] else None
+    status = _text_field(readout.response or {}, "status")
+    if failure is None and (status == "incomplete" or (image is not None and status != "completed")):
+        # Success is the allow-list: a response that stopped early, before or after its image, is not completed.
         settled = _settled(readout.response or {}, [], say)
         return ExecutorResult({**settled, "sources": []})
-    if failure is not None or not done or not done[-1]["result"]:
+    if failure is not None or image is None:
         error = failure or (
             say("modelHub.hostedTools.callEnded", tool="image_generation", status=str(calls[-1].get("status")))
             if calls else _ended_without("image_generation", readout.response or {}, say)
         )
         return ExecutorResult(failed_record(error))
-    image = done[-1]
     output_format = str(image.get("output_format") or "png").lower()
     mime = _IMAGE_MIME.get(output_format)
     if mime is None:
@@ -573,7 +590,10 @@ def _anthropic_record(message: Any, say: Say) -> ExecutorResult:
         if isinstance(found, dict):
             errors.append(str(found.get("error_code") or "unknown"))
             continue
-        for result in found if isinstance(found, list) else ():
+        if not isinstance(found, list):
+            # Only a list, possibly empty, is a result; anything else is not an answer.
+            return ExecutorResult(failed_record(say("modelHub.hostedTools.unreadable")))
+        for result in found:
             if isinstance(result, dict) and isinstance(result.get("url"), str) and result["url"]:
                 source = {"url": result["url"]}
                 for key in ("title", "page_age"):
@@ -590,7 +610,7 @@ def _anthropic_record(message: Any, say: Say) -> ExecutorResult:
         and citation["url"]
         and isinstance(citation.get("cited_text"), str)
         and citation["cited_text"].strip()
-    ]
+    ][:_MAX_CITATIONS]
     # Results keep the provider's order; a cited result gains the text it was cited for.
     sources = _merge_sources(results, cited)
     if errors:
@@ -599,14 +619,14 @@ def _anthropic_record(message: Any, say: Say) -> ExecutorResult:
         text = say("modelHub.hostedTools.callFailed", tool="web_search")
         return ExecutorResult(failed_record(f"{text} ({', '.join(errors)})", sources))
     # Success is an allow-list here too: an early stop is incomplete, anything else unknown fails.
-    stop = message.get("stop_reason")
+    stop = _text_field(message, "stop_reason")
     if stop in {"end_turn", "stop_sequence"}:
-        uses = {
+        uses = [
             block.get("id") for block in blocks
             if block.get("type") == "server_tool_use" and block.get("name") == "web_search"
-        }
-        answered = {block.get("tool_use_id") for block in blocks if block.get("type") == "web_search_tool_result"}
-        if not uses <= answered:
+        ]
+        answered = [block.get("tool_use_id") for block in blocks if block.get("type") == "web_search_tool_result"]
+        if not all(isinstance(ident, str) and ident for ident in (*uses, *answered)) or not set(uses) <= set(answered):
             # A finished response must carry every search's result block, even an empty one.
             return ExecutorResult(failed_record(say("modelHub.hostedTools.unreadable"), sources))
         return ExecutorResult({"status": "completed", "sources": sources})
