@@ -8,6 +8,7 @@
   "DELETE /api/terminal/example": "viewer",
   "DELETE /api/vault/grants/example": "editor",
   "DELETE /api/vault/secrets/example": "editor",
+  "DELETE /api/vault/secrets/example/fields/example": "editor",
   "DELETE /api/web-push/subscriptions": "viewer",
   "GET /api/agent-backends": "editor",
   "GET /api/agents": "editor",
@@ -138,5 +139,6 @@
   "POST /api/web-push/test": "viewer",
   "PUT /api/dock/order": "editor",
   "PUT /api/files/write": "editor",
-  "PUT /api/sessions/example/draft": "editor"
+  "PUT /api/sessions/example/draft": "editor",
+  "PUT /api/vault/secrets/example/fields/example": "editor"
 }

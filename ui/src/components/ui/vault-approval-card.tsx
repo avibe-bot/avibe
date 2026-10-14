@@ -16,6 +16,7 @@ import { partitionTags } from '@/lib/vaultTags';
 import { useProtectedVault, useVaultSandboxWarm, type ProtectedUnlockMaterial } from '@/lib/useProtectedVault';
 import { openVaultsInBrowser, vaultPasskeyNeedsBrowser } from '@/lib/vaultBrowserHandoff';
 import { vaultApprovalNeedsPasskey } from '@/lib/vaultRequestPlacement';
+import { vaultHasNamedFieldShape } from '@/lib/vaultFields';
 import { usePreparedRequest } from '@/lib/usePreparedRequest';
 import { openVaultAuthorizationWindow } from '@/lib/vaultSandboxClient';
 import { SigningAddressList } from './signing-address-list';
@@ -55,6 +56,7 @@ type GrantOption = {
   one_shot?: boolean;
   member_count?: number;
   member_snapshot?: string[];
+  member_fields?: Array<{ name: string; default_field: string; fields: string[] }>;
   source_selector?: VaultSourceSelector;
   /** Hydrated for UI audience: the protected members of this set to DEK-release. */
   unlock_material?: ProtectedUnlockMaterial[];
@@ -167,7 +169,7 @@ export const VaultApprovalCard: React.FC<{
   }, [card, isSign, option]);
   // Protected secret names to be granted (design: "show the protected secret names covered").
   const protectedNames = useMemo(() => {
-    const materialNames = materials.map((m) => m.name);
+    const materialNames = [...new Set(materials.map((m) => m.name.split('.')[0]))];
     return materialNames.length ? materialNames : (card?.protected_secret_names ?? []);
   }, [card, materials]);
   const isProtected = isSign ? card?.protection === 'protected' : protectedNames.length > 0 || card?.protection === 'protected';
@@ -494,6 +496,27 @@ export const VaultApprovalCard: React.FC<{
         {isDelete && card.tags?.length ? (
           <DetailRow label={t('vaults.approval.tags')}>{card.tags.map((tag) => <Badge key={tag} variant="outline">{tag}</Badge>)}</DetailRow>
         ) : null}
+        {!isSign && memberNames.map((name) => {
+          const metadata = option?.member_fields?.find((member) => member.name === name);
+          const labels = metadata?.fields ?? materials
+            .filter((material) => material.name === name || material.name.startsWith(`${name}.`))
+            .map((material) => material.field ?? material.name.split('.')[1] ?? 'value');
+          const shape = metadata ?? {
+            kind: isKeypair ? 'keypair' : 'static',
+            default_field: labels[0] ?? 'value',
+            fields: labels,
+          };
+          if (isKeypair || !vaultHasNamedFieldShape(shape)) return null;
+          return (
+            <DetailRow key={name} label={name}>
+              {labels.map((field) => (
+                <Badge key={field} variant="outline" className="font-mono">
+                  {field}{field === metadata?.default_field ? ` · ${t('vaults.fields.default')}` : ''}
+                </Badge>
+              ))}
+            </DetailRow>
+          );
+        })}
         {isSign && hasSchemeAddress ? (
           <DetailRow label={t('vaults.approval.signingAs')}>
             <SigningAddressList addresses={schemeAddresses} />

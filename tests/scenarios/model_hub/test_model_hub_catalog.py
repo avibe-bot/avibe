@@ -163,12 +163,16 @@ def test_mh_catalog_001_scenario_catalog_is_complete_and_executable() -> None:
         if not status["test_required"]:
             assert test_ref is None
         else:
-            _resolve_evidence_reference(
-                scenario_id=scenario["id"],
-                reference=test_ref,
-                canonical_tests=canonical_tests,
-                expected_fail=status["expected_fail"],
-            )
+            # A row whose contract several cases prove lists each of them.
+            references = test_ref if isinstance(test_ref, list) else [test_ref]
+            assert references, f"Scenario {scenario['id']} lists no evidence"
+            for reference in references:
+                _resolve_evidence_reference(
+                    scenario_id=scenario["id"],
+                    reference=reference,
+                    canonical_tests=canonical_tests,
+                    expected_fail=status["expected_fail"],
+                )
 
         partial_evidence = scenario.get("partial_evidence")
         if partial_evidence is not None:

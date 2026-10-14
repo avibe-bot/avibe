@@ -139,6 +139,25 @@ class RawOutcomeKind(str, Enum):
 
 
 @dataclass(frozen=True)
+class UpstreamRejection:
+    """Closed facts of an HTTP 400 the upstream returned before any output.
+
+    The only input of the capability-evidence rules (``model-hub-capability-model.md``
+    §3.2). L1 fills it from the error envelope: raw machine tokens, and the one
+    token each recognized message names. It never carries prose, and the
+    failover decision never reads it.
+    """
+
+    status: int
+    code: str | None = None  # raw machine code, e.g. "invalid_value"
+    error_type: str | None = None  # raw error type, e.g. "invalid_request_error"
+    param: str | None = None  # raw parameter path, e.g. "reasoning.effort"
+    invalid_value: str | None = None  # "Invalid value: '<value>'"
+    unsupported_tool_type: str | None = None  # "Unsupported tool type: <type>"
+    invalid_encrypted_content_block: str | None = None  # "Invalid encrypted_content in <kind> block"
+
+
+@dataclass(frozen=True)
 class RawCallOutcome:
     """Uninterpreted per-call result. Classification is L2's job, not L1's."""
 
@@ -175,6 +194,8 @@ class RawCallOutcome:
     # Recognized local OS failure only, never an upstream code or error prose.
     # Display-only; does not participate in classification or Source health.
     os_errno: int | None = None
+    # A 400 before output, as closed tokens for the capability-evidence rules.
+    rejection: UpstreamRejection | None = None
 
 
 class ObservationOutcome(str, Enum):

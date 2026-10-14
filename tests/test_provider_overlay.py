@@ -81,7 +81,7 @@ def test_bundled_providers_section_satisfies_its_schema():
             "openai_responses",
             " gpt-6-astra ",
             "image_generation",
-            ({"type": "image_generation", "partial_images": 2}, (), None),
+            ({"type": "image_generation", "partial_images": 2, "output_format": "jpeg", "output_compression": 90}, (), None),
         ),
         (
             "xai",
@@ -106,7 +106,7 @@ def test_bundled_providers_section_satisfies_its_schema():
             "claude-opus-5-5",
             "web_search",
             (
-                {"type": "web_search_20250305", "name": "web_search"},
+                {"type": "web_search_20250305", "name": "web_search", "max_uses": 5},
                 (),
                 HostedToolPrice("search", 10.0, AS_OF, "https://platform.claude.com/docs/en/about-claude/pricing"),
             ),

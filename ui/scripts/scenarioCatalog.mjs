@@ -34,6 +34,9 @@ const citedPath = (testRef) => testRef.split('::')[0];
 
 export const isUiEvidence = (testRef) => UI_SUFFIXES.has(path.extname(citedPath(testRef)));
 
+/** Keys that point a reader at neighbouring cases without claiming the row's coverage. */
+const POINTER_KEYS = ['related_tests', 'supporting_tests'];
+
 /**
  * Every UI citation the catalog's rows make, whatever key it sits in.
  *
@@ -50,12 +53,16 @@ export const isUiEvidence = (testRef) => UI_SUFFIXES.has(path.extname(citedPath(
  * the UI half of a row owned by a pytest scenario — and reading only the first
  * left five fully-written citations unasked, which is the legend hole again in
  * another key. It cost four of those five: three named cases #1401 deleted on
- * 2026-08-14, unnoticed because nothing read them.
+ * 2026-08-14, unnoticed because nothing read them. `partial_evidence` is a third
+ * such key and is read for the same reason.
  *
- * `related_tests` and `canonical_tests` stay unread, and that is the same rule
- * rather than an exception to it: they name a file and no case, so they cannot
- * evidence a row, and they do not claim to — "related" is a pointer, not a
- * coverage claim.
+ * `canonical_tests` stays unread, and so does a pointer key's bare file, and
+ * that is the same rule rather than an exception to it: they name a file and no
+ * case, so they cannot evidence a row, and they do not claim to. A pointer
+ * (`related_tests`, `supporting_tests`) that names a case is read, though. It
+ * claims no coverage, but a case renamed out from under it leaves the reader a
+ * reference to nothing, which is what one of MH-MIG-004's pointers had become.
+ * Such a citation carries `pointer`, the key it sits in.
  *
  * `cited` is null for a citation that names a file and no case in it, which
  * `resolveUiEvidence` reports rather than resolves.
@@ -63,8 +70,16 @@ export const isUiEvidence = (testRef) => UI_SUFFIXES.has(path.extname(citedPath(
 export const uiEvidenceRows = (catalog) =>
   (catalog.scenarios ?? []).flatMap((row) => {
     const citations = [];
-    if (typeof row.test === 'string' && isUiEvidence(row.test)) {
-      const [file, cited = null] = row.test.split('::');
+    // A row whose contract several cases prove lists each of them, and each must resolve on its own.
+    for (const evidence of Array.isArray(row.test) ? row.test : [row.test]) {
+      if (typeof evidence === 'string' && isUiEvidence(evidence)) {
+        const [file, cited = null] = evidence.split('::');
+        citations.push({ id: row.id, file, cited });
+      }
+    }
+    const partial = row.partial_evidence;
+    if (partial && typeof partial.test === 'string' && isUiEvidence(partial.test)) {
+      const [file, cited = null] = partial.test.split('::');
       citations.push({ id: row.id, file, cited });
     }
     const contract = row.ui_contract;
@@ -78,6 +93,18 @@ export const uiEvidenceRows = (catalog) =>
         // one citation; see `citedTerms`.
         inputs: (contract.inputs ?? []).map(String),
       });
+    }
+    for (const pointer of POINTER_KEYS) {
+      for (const reference of row[pointer] ?? []) {
+        const separator = typeof reference === 'string' ? reference.indexOf('::') : -1;
+        if (separator < 0 || !isUiEvidence(reference)) continue;
+        citations.push({
+          id: row.id,
+          file: reference.slice(0, separator),
+          cited: reference.slice(separator + 2),
+          pointer,
+        });
+      }
     }
     return citations;
   });
@@ -152,7 +179,8 @@ export const resolveUiEvidence = (rows, collected, ids = new Set(rows.map((row) 
       );
       continue;
     }
-    if (row.cited !== row.id && ids.has(row.cited)) {
+    // A pointer claims no evidence, so naming a case another row owns borrows nothing.
+    if (!row.pointer && row.cited !== row.id && ids.has(row.cited)) {
       problems.push(
         `${where} cites \`${row.cited}\`, which is another row's ID; a row resolves through evidence named for itself`,
       );
@@ -162,7 +190,17 @@ export const resolveUiEvidence = (rows, collected, ids = new Set(rows.map((row) 
     const matches = collected
       .filter((entry) => sameFile(entry.file, row.file))
       .filter((entry) => citableNames(entry).some((name) => terms.every((term) => name.includes(term))));
-    if (matches.length !== 1) {
+    if (row.pointer) {
+      // A pointer only has to lead somewhere live: it may name a group of cases,
+      // such as every case tagged with an ID, because it identifies no evidence.
+      // An empty name is contained in every case's, so it leads nowhere either.
+      if (matches.length === 0 || !row.cited.trim()) {
+        problems.push(
+          `${where}: its ${row.pointer} entry names \`${terms.join('` + `')}\` in ${row.file}, and vitest collects no `
+            + 'case by that name — a renamed or removed case leaves the pointer leading nowhere',
+        );
+      }
+    } else if (matches.length !== 1) {
       problems.push(
         `${where}: vitest collects ${matches.length} cases named \`${terms.join('` + `')}\` in ${row.file}, expected exactly one — `
           + 'a commented-out, skipped, unreachable or merely quoted case is not executable evidence, and a name '

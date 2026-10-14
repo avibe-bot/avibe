@@ -24,12 +24,26 @@ IMAGE_MIME_TYPES: tuple[str, ...] = ("image/png", "image/jpeg", "image/gif", "im
 _LARGE_REF_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SOURCE_ID_RE = re.compile(r"^src_[a-z0-9]{8,}$")
 _COUNTER_NAME_RE = re.compile(r"^[a-z0-9_]{1,64}$")
+_ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 HostedToolName = Literal["web_search", "x_search", "image_generation"]
 HOSTED_TOOLS: tuple[str, ...] = ("web_search", "x_search", "image_generation")
 HostedStatus = Literal["completed", "failed", "incomplete", "pending"]
 HOSTED_STATUSES: tuple[str, ...] = ("completed", "failed", "incomplete", "pending")
 HOSTED_ERROR_MAX_CHARS = 400
+#: The stable code of each hosted failure Avibe words itself (``HostedRecord.error_code``), by which a display localizes
+#: it; a provider's own reason has none. A record loads with any snake_case code, so one a newer build wrote still reads.
+HOSTED_ERROR_CODES: tuple[str, ...] = (
+    "provider_no_reason",
+    "provider_no_image",
+    "image_not_streamed",
+    "image_not_saved",
+    "image_no_store",
+    "executor_no_image",
+    "gateway_unreachable",
+    "gateway_refused",
+    "gateway_no_result",
+)
 COST_BASES: tuple[str, ...] = ("reported", "list", "included")
 SOURCE_BILLINGS: tuple[str, ...] = ("monthly", "metered")
 
@@ -301,19 +315,20 @@ class HostedSource:
 
 @dataclass(frozen=True)
 class HostedImage:
-    """A generated image saved as a local file; the model sees only this record."""
+    """A generated image saved as a local file; the model sees only this record. ``bytes`` is the file's size."""
 
     path: str
     mime: str
     width: Optional[int] = None
     height: Optional[int] = None
+    bytes: Optional[int] = None
 
     def __post_init__(self) -> None:
         _require_text(self.path, "image path")
         _require(self.mime, str, "image mime")
         if self.mime not in IMAGE_MIME_TYPES:
             raise ValueError(f"unsupported image type: {self.mime}")
-        for name in ("width", "height"):
+        for name in ("width", "height", "bytes"):
             value = getattr(self, name)
             _require(value, int, f"image {name}", optional=True)
             if value is not None and value < 1:
@@ -322,12 +337,17 @@ class HostedImage:
 
 @dataclass(frozen=True)
 class HostedRecord:
-    """Per-call facts. ``images`` is set exactly for ``image_generation`` (possibly empty)."""
+    """Per-call facts. ``images`` is set exactly for ``image_generation`` (possibly empty).
+
+    ``error`` is model-facing English. ``error_code`` names a reason Avibe wrote (``HOSTED_ERROR_CODES``), only beside
+    an ``error``.
+    """
 
     status: HostedStatus
     error: Optional[str] = None
     sources: tuple[HostedSource, ...] = ()
     images: Optional[tuple[HostedImage, ...]] = None
+    error_code: Optional[str] = None
 
     def __post_init__(self) -> None:
         _require(self.status, str, "hosted status")
@@ -338,6 +358,9 @@ class HostedRecord:
             raise ValueError("a hosted error is present exactly for failed and incomplete records")
         if self.error is not None and len(self.error) > HOSTED_ERROR_MAX_CHARS:
             raise ValueError(f"a hosted error is at most {HOSTED_ERROR_MAX_CHARS} characters")
+        _require(self.error_code, str, "hosted error code", optional=True)
+        if self.error_code is not None and (self.error is None or not _ERROR_CODE_RE.fullmatch(self.error_code)):
+            raise ValueError("a hosted error code is snake_case and comes only with an error")
         if not isinstance(self.sources, tuple) or not all(isinstance(s, HostedSource) for s in self.sources):
             raise ValueError("hosted sources must be a tuple of HostedSource")
         if self.images is not None and (
@@ -466,14 +489,18 @@ class ProxyExecution:
 
 @dataclass(frozen=True)
 class HostedResult:
-    """``ToolResultMessage.hosted``: the canonical record of a proxied hosted call."""
+    """``ToolResultMessage.hosted``: the canonical record of a proxied hosted call. ``action`` is what the executor
+    reports it did, where that differs from the model's request: for ``image_generation``, the prompt it rendered and
+    the output's resolved size and quality, as a native call's block carries them."""
 
     record: HostedRecord
     execution: Optional[ProxyExecution] = None
+    action: Optional[HostedAction] = None
 
     def __post_init__(self) -> None:
         _require(self.record, HostedRecord, "hosted record")
         _require(self.execution, ProxyExecution, "proxy execution", optional=True)
+        _require(self.action, HostedAction, "hosted result action", optional=True)
         if self.execution is None and self.record.status != "failed":
             raise ValueError("a hosted result without an execution is a failed record")
 
@@ -601,6 +628,21 @@ def text(value: str) -> TextBlock:
     return TextBlock(text=value)
 
 
+def has_reply(message: AssistantMessage) -> bool:
+    """Whether a response says something to the user: non-blank text, or an image a hosted call generated.
+
+    The one rule for "the model replied", read by the loop's empty-reply test and
+    by a final row's outcome. A generated image is a reply on its own: a model
+    asked for a picture may answer with the picture alone.
+    """
+    for block in message.content:
+        if isinstance(block, TextBlock) and block.text and block.text.strip():
+            return True
+        if isinstance(block, HostedToolBlock) and block.record.status == "completed" and block.record.images:
+            return True
+    return False
+
+
 # --- persisted form ---------------------------------------------------------
 #
 # Two owners, so no field can be checked differently from another:
@@ -651,6 +693,7 @@ def _source_from_dict(data: Any) -> HostedSource:
 def _record_to_dict(record: HostedRecord) -> dict[str, Any]:
     out: dict[str, Any] = {"status": record.status}
     _put(out, "error", record.error)
+    _put(out, "error_code", record.error_code)
     out["sources"] = [_source_to_dict(source) for source in record.sources]
     if record.images is not None:
         images = []
@@ -658,17 +701,20 @@ def _record_to_dict(record: HostedRecord) -> dict[str, Any]:
             item: dict[str, Any] = {"path": image.path, "mime": image.mime}
             _put(item, "width", image.width)
             _put(item, "height", image.height)
+            _put(item, "bytes", image.bytes)
             images.append(item)
         out["images"] = images
     return out
 
 
 def _record_from_dict(data: Any) -> HostedRecord:
-    f = _read(data, "hosted record", {"status": str, "sources": list}, {"error": str, "images": list})
+    f = _read(data, "hosted record", {"status": str, "sources": list}, {"error": str, "error_code": str, "images": list})
     images = None
     if "images" in f:
         images = tuple(
-            HostedImage(**_read(item, "hosted image", {"path": str, "mime": str}, {"width": int, "height": int}))
+            HostedImage(
+                **_read(item, "hosted image", {"path": str, "mime": str}, {"width": int, "height": int, "bytes": int})
+            )
             for item in f["images"]
         )
     return HostedRecord(
@@ -676,6 +722,7 @@ def _record_from_dict(data: Any) -> HostedRecord:
         error=f.get("error"),
         sources=tuple(_source_from_dict(source) for source in f["sources"]),
         images=images,
+        error_code=f.get("error_code"),
     )
 
 
@@ -870,6 +917,8 @@ def message_to_dict(message: Message) -> dict[str, Any]:
                 }
                 if execution.cost is not None:
                     hosted_result["execution"]["cost"] = _cost_to_dict(execution.cost)
+            if message.hosted.action is not None:
+                hosted_result["action"] = _action_to_dict(message.hosted.action)
             result["hosted"] = hosted_result
         return result
     raise TypeError(f"not a message: {type(message).__name__}")
@@ -912,7 +961,7 @@ def message_from_dict(data: Mapping[str, Any]) -> Message:
         )
         hosted_result = None
         if "hosted" in f:
-            h = _read(f["hosted"], "hosted result", {"record": dict}, {"execution": dict})
+            h = _read(f["hosted"], "hosted result", {"record": dict}, {"execution": dict, "action": dict})
             execution = None
             if "execution" in h:
                 e = _read(
@@ -934,7 +983,11 @@ def message_from_dict(data: Mapping[str, Any]) -> Message:
                     executor_billing=e["executor_billing"],
                     cost=_cost_from_dict(e["cost"]) if "cost" in e else None,
                 )
-            hosted_result = HostedResult(record=_record_from_dict(h["record"]), execution=execution)
+            hosted_result = HostedResult(
+                record=_record_from_dict(h["record"]),
+                execution=execution,
+                action=_action_from_dict(h["action"]) if "action" in h else None,
+            )
         return ToolResultMessage(
             tool_call_id=f["tool_call_id"],
             tool_name=f["tool_name"],

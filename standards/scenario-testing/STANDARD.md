@@ -184,14 +184,21 @@ Every scenario-backed automated test should expose the scenario ID in a searchab
 
 Every citation a row makes must name a **case**, and that name must resolve to
 exactly one case the suite collects in the cited file — in whichever key the row
-states its evidence, `test` and any layer-specific key alike. A citation that
+states its evidence, `test` and any layer-specific key alike. When several cases
+prove a row's contract together, `test` lists each of them, and each entry
+resolves to exactly one case on its own; a class or a file standing in for the
+group is not a citation of any of them. Only `test` takes a list:
+`partial_evidence.test` names one case. A citation that
 names only a file is not evidence for the row that makes it: the file stays
 collected for whatever else cites it, so deleting the one case that answered
 this row leaves the row reading `covered` with nothing executable tied to it.
 That is not hypothetical — it is how four dead citations survived a test-file
 rewrite unnoticed for five days. A pointer key such as `related_tests` may name
 bare files precisely because it claims no coverage; anything that does claim
-coverage names its case.
+coverage names its case. A pointer that does name a case must still name one
+that exists, or a rename leaves it leading nowhere. A pointer may also name a
+group: a test class, or, for a vitest file, every case whose name contains the
+term it names, such as an ID.
 
 ## 5. Harness Design Rules
 

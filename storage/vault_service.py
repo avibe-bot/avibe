@@ -22,6 +22,7 @@ import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -91,13 +92,27 @@ PROVISION_SPEC_ALLOWED_KEYS = {
     "tags",
     "policy",
     "links",
+    "fields",
+    "default_field",
 }
+PROVISION_FIELD_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+MAX_SECRET_FIELDS = 32
 PROVISION_SPEC_ALLOWED_POLICY_KEYS = {"allowed_hosts", "auth"}
 PROVISION_SPEC_ALLOWED_AUTH_KEYS = {"type", "name"}
 FETCH_AUTH_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 FETCH_AUTH_QUERY_NAME_RE = re.compile(r"^[A-Za-z0-9._~-]+$")
 FORBIDDEN_FETCH_AUTH_HEADER_NAMES = frozenset({"host"})
 _UNSET = object()
+
+
+@dataclass(frozen=True)
+class DeliveryIdentity:
+    """Value-free pre-handoff identity retained for post-delivery bookkeeping."""
+
+    secret_id: str
+    name: str
+    field: str
+    access_snapshot: dict[str, Any] | None
 
 
 @dataclass(frozen=True)
@@ -146,6 +161,38 @@ class InvalidSecretNameError(VaultServiceError):
 
 
 class SecretExistsError(VaultServiceError):
+    pass
+
+
+class InvalidFieldNameError(VaultServiceError):
+    pass
+
+
+class FieldExistsError(VaultServiceError):
+    pass
+
+
+class FieldNotFoundError(VaultServiceError):
+    pass
+
+
+class TooManyFieldsError(VaultServiceError):
+    pass
+
+
+class FieldsNotSupportedError(VaultServiceError):
+    pass
+
+
+class FieldsCorruptError(VaultServiceError):
+    pass
+
+
+class RecordMismatchError(VaultServiceError):
+    pass
+
+
+class SecretConflictError(VaultServiceError):
     pass
 
 
@@ -307,6 +354,14 @@ def _parse_iso_datetime(value: str | None) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _next_updated_at(previous: str | None = None) -> str:
+    current = datetime.now(timezone.utc)
+    previous_dt = _parse_iso_datetime(previous)
+    if previous_dt is not None and current <= previous_dt:
+        current = previous_dt + timedelta(microseconds=1)
+    return current.isoformat()
 
 
 def _id(prefix: str) -> str:
@@ -511,6 +566,148 @@ def _public_meta(raw: str | None) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _validate_field_name(name: Any, *, field: str = "field") -> str:
+    if not isinstance(name, str) or not PROVISION_FIELD_NAME_RE.fullmatch(name):
+        raise InvalidFieldNameError(f"{field} must match ^[a-z][a-z0-9_]{{0,63}}$")
+    return name
+
+
+def _default_field_name(row: dict[str, Any] | None = None, value: Any = None) -> str:
+    if row is not None and row.get("kind") == "keypair":
+        return "value"
+    candidate = value
+    if candidate is None and row is not None:
+        candidate = _public_meta(row.get("public_meta")).get("default_field")
+    try:
+        return _validate_field_name(candidate or "value", field="default_field")
+    except InvalidFieldNameError:
+        return "value"
+
+
+@lru_cache(maxsize=512)
+def _warn_corrupt_fields(name: str, secret_id: str, updated_at: str) -> None:
+    """Bounded warning cache: repeated reads of one damaged revision stay quiet."""
+    logger.warning("Vault secret %s has corrupt fields; extra records and field mutations are unavailable", name)
+
+
+def _extra_field_rows(row: dict[str, Any] | None, *, strict: bool = False) -> list[dict[str, Any]]:
+    """Read the complete optional section, never a lossy partial projection.
+
+    Default-record reads remain available when extras are corrupt. Any caller
+    that writes fields or needs an extra record must fail closed instead.
+    """
+    if not row or row.get("fields") is None:
+        return []
+    try:
+        raw = json.loads(row["fields"])
+        if not isinstance(raw, list) or len(raw) >= MAX_SECRET_FIELDS:
+            raise ValueError("invalid field array")
+        seen = {_default_field_name(row)}
+        if row.get("kind") == "keypair" and raw:
+            raise ValueError("keypair has extra fields")
+        for item in raw:
+            if not isinstance(item, dict):
+                raise ValueError("invalid field entry")
+            name = _validate_field_name(item.get("name"))
+            if name in seen:
+                raise ValueError("duplicate field label")
+            if not all(isinstance(item.get(key), str) and item[key] for key in ("ciphertext", "nonce", "wrap_meta", "created_at", "updated_at")):
+                raise ValueError("incomplete field envelope")
+            seen.add(name)
+        return [dict(item) for item in raw]
+    except (TypeError, ValueError, InvalidFieldNameError):
+        # Neither malformed serialized values nor exception details are safe to log.
+        _warn_corrupt_fields(str(row.get("name") or ""), str(row.get("id") or ""), str(row.get("updated_at") or ""))
+        if strict:
+            raise FieldsCorruptError(f"secret {row.get('name')!r} has corrupt fields; existing data was preserved") from None
+        return []
+
+
+def secret_field_names(row: dict[str, Any]) -> list[str]:
+    return [_default_field_name(row), *[str(item["name"]) for item in _extra_field_rows(row, strict=False)]]
+
+
+def record_name_for_field(secret_name: str, field_name: str, *, default_field: str = "value") -> str:
+    return secret_name if field_name == default_field else f"{secret_name}.{field_name}"
+
+
+def _record_entries(row: dict[str, Any], *, strict: bool = False) -> list[dict[str, Any]]:
+    default_field = _default_field_name(row)
+    entries = [
+        {
+            "name": row["name"],
+            "field": default_field,
+            "envelope": _row_sealed(row),
+            "kind": row.get("kind"),
+            "protection": row.get("protection"),
+        }
+    ]
+    for field in _extra_field_rows(row, strict=strict):
+        entries.append(
+            {
+                "name": record_name_for_field(str(row["name"]), str(field["name"]), default_field=default_field),
+                "field": str(field["name"]),
+                "envelope": Sealed(
+                    ciphertext=field["ciphertext"], nonce=field["nonce"], wrap_meta=field["wrap_meta"]
+                ),
+                "kind": row.get("kind"),
+                "protection": row.get("protection"),
+            }
+        )
+    return entries
+
+
+def _resolve_record_ref(conn: Connection, ref: str, *, user_context: Any = None) -> tuple[dict[str, Any], dict[str, Any]]:
+    raw = str(ref or "").strip()
+    parts = raw.split(".", 1)
+    secret_name = parts[0]
+    if not vault_crypto.is_valid_secret_name(secret_name):
+        raise InvalidSecretNameError(secret_name)
+    row = require_secret_access(conn, secret_name, user_context=user_context)
+    field_ref = parts[1] if len(parts) == 2 else None
+    default_field = _default_field_name(row)
+    if field_ref is not None and row.get("kind") == "keypair":
+        raise FieldsNotSupportedError(f"{secret_name} does not support fields")
+    if field_ref is None or field_ref == default_field:
+        field_name = default_field
+    else:
+        _validate_field_name(field_ref)
+        if field_ref not in {str(item["name"]) for item in _extra_field_rows(row, strict=True)}:
+            raise FieldNotFoundError(f"field {field_ref!r} not found on {secret_name}; fields: {', '.join(secret_field_names(row))}")
+        field_name = field_ref
+    entry = next(item for item in _record_entries(row) if item["field"] == field_name)
+    return row, entry
+
+
+def validate_field_name(value: Any, *, field: str = "field") -> str:
+    return _validate_field_name(value, field=field)
+
+
+def secret_record_names(secret: dict[str, Any]) -> list[str]:
+    name = str(secret.get("name") or "")
+    default_field = str(secret.get("default_field") or _default_field_name(secret))
+    raw_fields = secret.get("fields")
+    fields = raw_fields if isinstance(raw_fields, list) else [default_field]
+    result = [name]
+    for raw_field in fields:
+        field = str(raw_field)
+        if field != default_field:
+            result.append(f"{name}.{field}")
+    return result
+
+
+def get_secret_record_meta(conn: Connection, ref: str, *, user_context: Any = None) -> dict[str, Any]:
+    row, entry = _resolve_record_ref(conn, ref, user_context=user_context)
+    payload = _meta_payload(row)
+    payload["record_name"] = str(entry["name"])
+    payload["field"] = str(entry["field"])
+    return payload
+
+
+def require_secret_management(conn: Connection, name: str, *, user_context: Any = None) -> dict[str, Any]:
+    return _require_secret_resource_management(conn, _require_row(conn, name), resolve_resource_access_context(user_context))
+
+
 def _reject_provision_spec_secret_fields(value: Any, *, path: str = "spec") -> None:
     if isinstance(value, dict):
         for key, item in value.items():
@@ -703,6 +900,25 @@ def normalize_provision_spec(spec: Any) -> dict[str, Any]:
     tags = _string_list(spec.get("tags"), field="spec.tags") if "tags" in spec else []
     tags = _normalize_tags(tags)
 
+    if "fields" in spec:
+        raw_fields = spec.get("fields")
+        if not isinstance(raw_fields, list):
+            raise VaultServiceError("spec.fields must be an array of field names")
+        fields = [_validate_field_name(item, field="spec.fields") for item in raw_fields]
+        if len(fields) != len(set(fields)):
+            raise VaultServiceError("spec.fields must contain unique field names")
+        if not fields:
+            raise VaultServiceError("spec.fields must contain at least one field")
+        if len(fields) > MAX_SECRET_FIELDS:
+            raise TooManyFieldsError(f"a vault secret can have at most {MAX_SECRET_FIELDS} fields")
+        normalized["fields"] = fields
+        default_field = spec.get("default_field", fields[0])
+        default_field = _validate_field_name(default_field, field="spec.default_field")
+        if default_field not in fields:
+            raise VaultServiceError("spec.default_field must be one of spec.fields")
+        normalized["default_field"] = default_field
+    elif "default_field" in spec:
+        raise VaultServiceError("spec.default_field requires spec.fields")
     if "policy" in spec:
         normalized_policy = _normalize_fetch_policy(spec.get("policy"), field="spec.policy")
         if normalized_policy:
@@ -733,7 +949,7 @@ def _meta_payload(row: dict[str, Any]) -> dict[str, Any]:
     kind = row.get("kind")
     protection = row.get("protection")
     payload = {
-        "name": row["name"],
+        **_field_metadata(row),
         "tags": _row_tags(row),
         "kind": kind,
         "protection": protection,
@@ -775,10 +991,16 @@ def _row_sealed(row: dict[str, Any]) -> Sealed:
 
 
 def _protected_unlock_material(row: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the default record's opaque protected unlock material.
+
+    This single-object shape is still used by signing and reveal cards. Grant
+    options use ``_protected_unlock_material_records`` so every record is
+    covered without changing this legacy surface.
+    """
     if row.get("protection") != "protected":
         return None
     return {
-        "name": row["name"],
+        "name": str(row["name"]),
         "kind": row.get("kind"),
         "envelope": {
             "ciphertext": row["ciphertext"],
@@ -786,6 +1008,27 @@ def _protected_unlock_material(row: dict[str, Any]) -> dict[str, Any] | None:
             "wrap_meta": row["wrap_meta"],
         },
     }
+
+
+def _protected_unlock_material_records(row: dict[str, Any]) -> list[dict[str, Any]]:
+    if row.get("protection") != "protected":
+        return []
+    materials: list[dict[str, Any]] = []
+    for entry in _record_entries(row):
+        envelope = entry["envelope"]
+        materials.append(
+            {
+                "name": entry["name"],
+                "field": entry["field"],
+                "kind": row.get("kind"),
+                "envelope": {
+                    "ciphertext": envelope.ciphertext,
+                    "nonce": envelope.nonce,
+                    "wrap_meta": envelope.wrap_meta,
+                },
+            }
+        )
+    return materials
 
 
 def _member_version(row: dict[str, Any]) -> dict[str, Any]:
@@ -1037,13 +1280,25 @@ def _unique_grant_release_refs(rows: list[dict[str, Any]]) -> list[dict[str, str
     return refs
 
 
+def _field_metadata(row: dict[str, Any]) -> dict[str, Any]:
+    default_field = _default_field_name(row)
+    payload = {"name": str(row["name"]), "kind": str(row.get("kind") or "static"), "default_field": default_field, "fields": [default_field]}
+    try:
+        payload["fields"].extend(item["name"] for item in _extra_field_rows(row, strict=True))
+    except FieldsCorruptError:
+        payload["fields_state"] = "corrupt"
+    return payload
+
+
 def _hydrate_card_unlock_material(conn: Connection, row: dict[str, Any], card: dict[str, Any]) -> dict[str, Any]:
     card = dict(card)
     secret_name = row.get("secret_name")
     if secret_name:
         secret_row = conn.execute(select(vault_secrets).where(vault_secrets.c.name == secret_name)).mappings().first()
-        if secret_row is not None and (material := _protected_unlock_material(dict(secret_row))) is not None:
-            card["secret_unlock_material"] = material
+        if secret_row is not None:
+            material = _protected_unlock_material(dict(secret_row))
+            if material is not None:
+                card["secret_unlock_material"] = material
     hydrated_options: list[dict[str, Any]] = []
     for option in card.get("grant_options") or []:
         if not isinstance(option, dict):
@@ -1057,15 +1312,24 @@ def _hydrate_card_unlock_material(conn: Connection, row: dict[str, Any], card: d
                 current["name"]: dict(current)
                 for current in conn.execute(select(vault_secrets).where(vault_secrets.c.name.in_(names))).mappings()
             }
+            snapshots = {
+                str(item["name"]): item for item in option_payload.get("member_fields") or []
+                if isinstance(item, dict) and isinstance(item.get("name"), str)
+            }
+            # Labels are display metadata, not the frozen authorization member set.
+            # In particular, a default rename deliberately preserves this request.
+            option_payload["member_fields"] = [
+                _field_metadata(current_rows[name]) if name in current_rows else snapshots[name]
+                for name in option_payload.get("member_snapshot") or names
+                if name in current_rows or name in snapshots
+            ]
             for version in versions:
                 if not isinstance(version, dict):
                     continue
                 current = current_rows.get(version.get("name"))
                 if current is None or not _member_version_matches(current, version):
                     continue
-                material = _protected_unlock_material(current)
-                if material is not None:
-                    materials.append(material)
+                materials.extend(_protected_unlock_material_records(current))
         if materials:
             option_payload["unlock_material"] = materials
         hydrated_options.append(option_payload)
@@ -1415,6 +1679,30 @@ def _request_callback_disabled(row: dict[str, Any]) -> bool:
     return bool(isinstance(requester, dict) and requester.get("callback_disabled"))
 
 
+def has_named_field_shape(metadata: dict[str, Any]) -> bool:
+    """Whether provision guidance needs a field-aware hint instead of legacy NAME."""
+    if str(metadata.get("kind") or "static") == "keypair":
+        return False
+    default_field = str(metadata.get("default_field") or "value")
+    fields = list(metadata.get("fields") or [default_field])
+    return metadata.get("fields_state") == "corrupt" or fields != ["value"] or default_field != "value"
+
+
+def provision_field_hint(metadata: dict[str, Any]) -> str:
+    """Value-free current-field usage shared by synchronous and async provision replies."""
+    name = str(metadata["name"])
+    fields = list(metadata.get("fields") or [metadata.get("default_field") or "value"])
+    default_field = str(metadata.get("default_field") or fields[0])
+    labels = ", ".join(str(field) for field in fields)
+    usage = (
+        f" Current fields: {labels}. Default alias: `{name}.{default_field}`."
+        f" Select a field with `vibe vault run --env {name}.{fields[-1]} -- <command>`."
+    )
+    if metadata.get("fields_state") == "corrupt":
+        return usage + " Extra fields are unavailable because their stored metadata is corrupt."
+    return usage + " Tag and skill selectors deliver every field."
+
+
 def _build_request_callback_message(row: dict[str, Any]) -> str:
     """Agent-facing text delivered to the requesting session when a request resolves."""
     request_type = str(row.get("request_type") or "")
@@ -1434,6 +1722,9 @@ def _build_request_callback_message(row: dict[str, Any]) -> str:
             return f"The user approved deleting the secret{label}; it has been deleted. Continue the task."
         if request_type == "provision":
             usage = f" You can use it, e.g. `vibe vault run --env {name} -- <command>`." if name else ""
+            current = row.get("provision_secret")
+            if name and isinstance(current, dict) and has_named_field_shape(current):
+                usage = provision_field_hint(current)
             return f"The user provided your {subject}; the secret is now available.{usage} Continue the task."
         if request_type == "access":
             return f"The user approved your {subject}; the grant is ready. Continue the task."
@@ -1583,8 +1874,22 @@ def list_pending_request_callbacks(
     query = query.order_by(vault_requests.c.decided_at, vault_requests.c.id)
     if limit is not None:
         query = query.limit(limit)
-    rows = conn.execute(query).mappings()
-    return [dict(row) for row in rows]
+    rows = [dict(row) for row in conn.execute(query).mappings()]
+    for row in rows:
+        if row.get("request_type") != "provision" or row.get("status") != "fulfilled":
+            continue
+        # Transient callback projection: use the user's actual current fields,
+        # never the requested hints and never any envelope/value material.
+        secret = conn.execute(
+            select(vault_secrets.c.name, vault_secrets.c.kind, vault_secrets.c.id,
+                   vault_secrets.c.public_meta, vault_secrets.c.fields, vault_secrets.c.updated_at)
+            .where(vault_secrets.c.name == row.get("secret_name"))
+        ).mappings().first()
+        if secret is not None:
+            current = _field_metadata(dict(secret))
+            if has_named_field_shape(current):
+                row["provision_secret"] = current
+    return rows
 
 
 def mark_request_callback(conn: Connection, request_id: str, *, status: str) -> None:
@@ -2374,6 +2679,8 @@ def create_secret(
     source: str = "manual",
     policy: dict[str, Any] | None = None,
     public_meta: dict[str, Any] | None = None,
+    fields: list[dict[str, Any]] | None = None,
+    default_field: str | None = None,
     establishing_vmk: bool = False,
     authz_factor_registration: dict[str, Any] | None = None,
     authz_factor_origin: str | None = None,
@@ -2442,6 +2749,42 @@ def create_secret(
     public_meta = dict(public_meta or {})
     if description:
         public_meta["description"] = description
+    if kind == "keypair" and (fields or default_field is not None or "default_field" in public_meta):
+        raise FieldsNotSupportedError("keypair secrets do not support fields or default_field")
+    normalized_default_field = _default_field_name(value=default_field or public_meta.get("default_field"))
+    if default_field is not None:
+        _validate_field_name(default_field, field="default_field")
+    raw_fields = [] if fields is None else fields
+    if not isinstance(raw_fields, list):
+        raise VaultServiceError("fields must be an array")
+    if len(raw_fields) + 1 > MAX_SECRET_FIELDS:
+        raise TooManyFieldsError(f"a vault secret can have at most {MAX_SECRET_FIELDS} fields")
+    stored_fields: list[dict[str, Any]] = []
+    field_names_seen: set[str] = {normalized_default_field}
+    for raw_field in raw_fields:
+        if not isinstance(raw_field, dict):
+            raise VaultServiceError("fields entries must be objects")
+        field_name = _validate_field_name(raw_field.get("name"), field="field name")
+        if field_name in field_names_seen:
+            raise FieldExistsError(f"field {field_name!r} already exists on {name}")
+        if raw_field.get("record", f"{name}.{field_name}") != f"{name}.{field_name}":
+            raise RecordMismatchError(f"record does not match field {field_name!r} on {name}")
+        envelope = raw_field.get("sealed") or raw_field.get("envelope")
+        if not isinstance(envelope, Sealed):
+            raise VaultServiceError("fields entries require sealed envelopes")
+        field_names_seen.add(field_name)
+        stored_fields.append({
+            "name": field_name,
+            "ciphertext": envelope.ciphertext,
+            "nonce": envelope.nonce,
+            "wrap_meta": envelope.wrap_meta,
+            "created_at": now,
+            "updated_at": now,
+        })
+    if normalized_default_field == "value":
+        public_meta.pop("default_field", None)
+    else:
+        public_meta["default_field"] = normalized_default_field
     try:
         conn.execute(
             vault_secrets.insert().values(
@@ -2455,6 +2798,7 @@ def create_secret(
                 ciphertext=sealed.ciphertext,
                 nonce=sealed.nonce,
                 wrap_meta=sealed.wrap_meta,
+                fields=json.dumps(stored_fields) if stored_fields else None,
                 public_meta=json.dumps(public_meta) if public_meta else None,
                 policy=json.dumps(policy) if policy else None,
                 use_count=0,
@@ -2540,6 +2884,7 @@ def update_secret_metadata(
     description: Any = _UNSET,
     tags: Any = _UNSET,
     policy: Any = _UNSET,
+    default_field: Any = _UNSET,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
     release_scopes: list[dict[str, str]] | None = None,
     user_context: Any = None,
@@ -2555,6 +2900,8 @@ def update_secret_metadata(
     row = _require_secret_resource_management(conn, _require_row(conn, secret_name), context)
     values: dict[str, Any] = {}
     fields: list[str] = []
+    public_meta: dict[str, Any] | None = None
+    policy_changed = False
 
     if description is not _UNSET:
         public_meta = _public_meta(row.get("public_meta"))
@@ -2563,13 +2910,29 @@ def update_secret_metadata(
             public_meta["description"] = normalized_description
         else:
             public_meta.pop("description", None)
-        values["public_meta"] = json.dumps(public_meta) if public_meta else None
         fields.append("description")
 
     if tags is not _UNSET:
         normalized_tags = _normalize_tags(_string_list(tags, field="tags"))
         values["tags"] = json.dumps(normalized_tags) if normalized_tags else None
         fields.append("tags")
+
+    if default_field is not _UNSET:
+        if row.get("kind") == "keypair":
+            raise FieldsNotSupportedError("keypair secrets do not support default_field")
+        normalized_default = _validate_field_name(default_field, field="default_field")
+        extras = _extra_field_rows(row, strict=True)
+        existing_default = _default_field_name(row)
+        if normalized_default != existing_default:
+            if normalized_default in {str(item["name"]) for item in extras}:
+                raise FieldExistsError(f"field {normalized_default!r} already exists on {secret_name}")
+            if public_meta is None:
+                public_meta = _public_meta(row.get("public_meta"))
+            if normalized_default == "value":
+                public_meta.pop("default_field", None)
+            else:
+                public_meta["default_field"] = normalized_default
+            fields.append("default_field")
 
     if policy is not _UNSET:
         if policy is None:
@@ -2598,16 +2961,34 @@ def update_secret_metadata(
         values["policy"] = json.dumps(next_policy) if next_policy else None
         fields.append("policy")
         if normalized_policy != existing_visible_policy:
-            grant_rows = active_grant_rows_for_secret(conn, secret_name)
-            _expire_pending_requests_for_secret(conn, secret_name, reason="request-expired-policy-changed")
-            _expire_grant_rows(conn, grant_rows, cache=cache, reason="grant-expired-policy-changed")
-            if release_scopes is not None:
-                release_scopes.extend(agent_release_scopes_after_rows(conn, grant_rows, cache=cache))
+            policy_changed = True
+
+    if public_meta is not None:
+        values["public_meta"] = json.dumps(public_meta) if public_meta else None
 
     if not values:
         return _meta_payload(row)
 
-    conn.execute(vault_secrets.update().where(vault_secrets.c.name == secret_name).values(**values))
+    # Display metadata does not change the envelopes or their approval versions.
+    # Compare the written columns as well, since those edits share that version.
+    compared_columns = list(values)
+    result = conn.execute(
+        vault_secrets.update()
+        .where(
+            vault_secrets.c.id == row["id"],
+            vault_secrets.c.updated_at == row["updated_at"],
+            *(vault_secrets.c[key] == row.get(key) for key in compared_columns),
+        )
+        .values(**values)
+    )
+    if result.rowcount != 1:
+        raise SecretConflictError(f"secret {secret_name!r} changed while metadata was being updated")
+    if policy_changed:
+        policy_grant_rows = active_grant_rows_for_secret(conn, secret_name)
+        _expire_pending_requests_for_secret(conn, secret_name, reason="request-expired-policy-changed")
+        _expire_grant_rows(conn, policy_grant_rows, cache=cache, reason="grant-expired-policy-changed")
+        if release_scopes is not None:
+            release_scopes.extend(agent_release_scopes_after_rows(conn, policy_grant_rows, cache=cache))
     audit(conn, "metadata-updated", secret_name=secret_name, delivery={"fields": fields})
     return _meta_payload(_require_row(conn, secret_name))
 
@@ -2693,11 +3074,17 @@ def store_pubkey_pin(
         for key, value in pin.items()
         if key in {"public_key", "fingerprint", "attested_at", "attestation"}
     }
-    conn.execute(
+    result = conn.execute(
         vault_secrets.update()
-        .where(vault_secrets.c.name == name)
+        .where(
+            vault_secrets.c.id == row["id"],
+            vault_secrets.c.updated_at == row["updated_at"],
+            vault_secrets.c.public_meta == row.get("public_meta"),
+        )
         .values(public_meta=json.dumps(public_meta))
     )
+    if result.rowcount != 1:
+        raise SecretConflictError(f"secret {name!r} changed while metadata was being updated")
     audit(
         conn,
         "pubkey_pinned",
@@ -2729,6 +3116,10 @@ def _searchable_secret_text(secret: dict[str, Any]) -> str:
         secret.get("signer_kind"),
         secret.get("description"),
         secret.get("tags"),
+        secret.get("default_field"),
+        secret.get("fields"),
+        secret_record_names(secret),
+        f"{secret.get('name')}.{secret.get('default_field') or 'value'}",
     ]
     policy = secret.get("policy")
     if isinstance(policy, dict):
@@ -2847,23 +3238,160 @@ def rotate_secret(
 ) -> dict[str, Any]:
     context = resolve_resource_access_context(user_context)
     row = _require_secret_resource_management(conn, _require_row(conn, name), context)
+    _extra_field_rows(row, strict=True)
     public_meta = _public_meta(row.get("public_meta"))
     public_meta.pop("preview", None)
-    _expire_pending_requests_for_secret(conn, name, reason="request-expired-envelope-changed")
-    _expire_active_grants_for_secret(conn, name, cache=cache, reason="grant-expired-envelope-changed")
-    conn.execute(
+    result = conn.execute(
         vault_secrets.update()
-        .where(vault_secrets.c.name == name)
+        .where(
+            vault_secrets.c.id == row["id"],
+            vault_secrets.c.updated_at == row["updated_at"],
+            vault_secrets.c.public_meta == row.get("public_meta"),
+        )
         .values(
             ciphertext=sealed.ciphertext,
             nonce=sealed.nonce,
             wrap_meta=sealed.wrap_meta,
             public_meta=json.dumps(public_meta) if public_meta else None,
-            updated_at=_now(),
+            updated_at=_next_updated_at(str(row.get("updated_at") or "")),
         )
     )
+    if result.rowcount != 1:
+        raise SecretConflictError(f"secret {name!r} changed while its value was being updated")
+    _expire_pending_requests_for_secret(conn, name, reason="request-expired-envelope-changed")
+    _expire_active_grants_for_secret(conn, name, cache=cache, reason="grant-expired-envelope-changed")
     audit(conn, "updated", secret_name=name)
     return _meta_payload(_require_row(conn, name))
+
+
+def _expire_envelope_change(
+    conn: Connection,
+    secret_name: str,
+    *,
+    cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
+    release_scopes: list[dict[str, str]] | None = None,
+) -> None:
+    _expire_pending_requests_for_secret(conn, secret_name, reason="request-expired-envelope-changed")
+    grant_rows = active_grant_rows_for_secret(conn, secret_name)
+    _expire_grant_rows(conn, grant_rows, cache=cache, reason="grant-expired-envelope-changed")
+    if release_scopes is not None:
+        release_scopes.extend(agent_release_scopes_after_rows(conn, grant_rows, cache=cache))
+
+
+def _stored_fields_json(fields: list[dict[str, Any]]) -> str | None:
+    return json.dumps(fields) if fields else None
+
+
+def _require_field_record(row: dict[str, Any], field_name: str, record: str) -> None:
+    expected = record_name_for_field(str(row["name"]), field_name, default_field=_default_field_name(row))
+    if record != expected:
+        raise RecordMismatchError(f"record does not match field {field_name!r} on {row['name']}")
+
+
+def update_secret_field(
+    conn: Connection,
+    secret_name: str,
+    field_name: str,
+    sealed: Sealed,
+    *,
+    record: str,
+    expected_updated_at: str | None = None,
+    cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
+    release_scopes: list[dict[str, str]] | None = None,
+    user_context: Any = None,
+) -> dict[str, Any]:
+    context = resolve_resource_access_context(user_context)
+    row = _require_secret_resource_management(conn, _require_row(conn, secret_name), context)
+    field_name = _validate_field_name(field_name)
+    snapshot_updated_at = row.get("updated_at")
+    if expected_updated_at is not None and snapshot_updated_at != expected_updated_at:
+        raise SecretConflictError(f"secret {secret_name!r} changed while the field was being updated")
+    if row.get("kind") == "keypair":
+        raise FieldsNotSupportedError(f"{secret_name} does not support fields")
+    _require_field_record(row, field_name, record)
+    default_field = _default_field_name(row)
+    extras = _extra_field_rows(row, strict=True)
+    extra_by_name = {str(item["name"]): item for item in extras}
+    now = _next_updated_at(snapshot_updated_at)
+    if field_name == default_field:
+        values = {"ciphertext": sealed.ciphertext, "nonce": sealed.nonce, "wrap_meta": sealed.wrap_meta}
+        op = "replace"
+    else:
+        existing = extra_by_name.get(field_name)
+        if existing is None:
+            if len(extras) + 1 >= MAX_SECRET_FIELDS:
+                raise TooManyFieldsError(f"a vault secret can have at most {MAX_SECRET_FIELDS} fields")
+            extras.append({
+                "name": field_name,
+                "ciphertext": sealed.ciphertext,
+                "nonce": sealed.nonce,
+                "wrap_meta": sealed.wrap_meta,
+                "created_at": now,
+                "updated_at": now,
+            })
+            op = "add"
+        else:
+            existing.update({"ciphertext": sealed.ciphertext, "nonce": sealed.nonce, "wrap_meta": sealed.wrap_meta, "updated_at": now})
+            op = "replace"
+        values = {"fields": _stored_fields_json(extras)}
+    values["updated_at"] = now
+    stmt = vault_secrets.update().where(
+        vault_secrets.c.id == row["id"],
+        vault_secrets.c.updated_at == snapshot_updated_at,
+        vault_secrets.c.public_meta == row.get("public_meta"),
+    )
+    result = conn.execute(stmt.values(**values))
+    if result.rowcount != 1:
+        # A rename can race this transaction after its initial read without
+        # changing updated_at. Never store an envelope under the wrong record.
+        current = _require_row(conn, secret_name)
+        if current.get("id") == row.get("id"):
+            _require_field_record(current, field_name, record)
+        raise SecretConflictError(f"secret {secret_name!r} changed while the field was being updated")
+    _expire_envelope_change(conn, secret_name, cache=cache, release_scopes=release_scopes)
+    audit(conn, "updated", secret_name=secret_name, delivery={"field": field_name, "op": op})
+    return _meta_payload(_require_row(conn, secret_name))
+
+
+def remove_secret_field(
+    conn: Connection,
+    secret_name: str,
+    field_name: str,
+    *,
+    expected_updated_at: str | None = None,
+    cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
+    release_scopes: list[dict[str, str]] | None = None,
+    user_context: Any = None,
+) -> dict[str, Any]:
+    context = resolve_resource_access_context(user_context)
+    row = _require_secret_resource_management(conn, _require_row(conn, secret_name), context)
+    field_name = _validate_field_name(field_name)
+    snapshot_updated_at = row.get("updated_at")
+    if expected_updated_at is not None and snapshot_updated_at != expected_updated_at:
+        raise SecretConflictError(f"secret {secret_name!r} changed while the field was being removed")
+    if row.get("kind") == "keypair":
+        raise FieldsNotSupportedError(f"{secret_name} does not support fields")
+    if field_name == _default_field_name(row):
+        raise InvalidRequestError("the default field cannot be removed")
+    extras = _extra_field_rows(row, strict=True)
+    if not any(str(item["name"]) == field_name for item in extras):
+        raise FieldNotFoundError(f"field {field_name!r} not found on {secret_name}; fields: {', '.join(secret_field_names(row))}")
+    extras = [item for item in extras if str(item["name"]) != field_name]
+    stmt = vault_secrets.update().where(
+        vault_secrets.c.id == row["id"],
+        vault_secrets.c.updated_at == snapshot_updated_at,
+    )
+    result = conn.execute(
+        stmt.values(
+            fields=_stored_fields_json(extras),
+            updated_at=_next_updated_at(str(snapshot_updated_at or "")),
+        )
+    )
+    if result.rowcount != 1:
+        raise SecretConflictError(f"secret {secret_name!r} changed while the field was being removed")
+    _expire_envelope_change(conn, secret_name, cache=cache, release_scopes=release_scopes)
+    audit(conn, "updated", secret_name=secret_name, delivery={"field": field_name, "op": "remove"})
+    return _meta_payload(_require_row(conn, secret_name))
 
 
 def _disable_webauthn_factors_if_vault_deestablished(conn: Connection) -> None:
@@ -2932,51 +3460,41 @@ def delete_secret(
 
 def get_secret_policy(conn: Connection, name: str, *, user_context: Any = None) -> dict[str, Any]:
     """Return the secret's non-secret policy dict (allowed_hosts, auth scheme)."""
-    return _loads(require_secret_access(conn, name, user_context=user_context).get("policy")) or {}
+    row, _entry = _resolve_record_ref(conn, name, user_context=user_context)
+    return _loads(row.get("policy")) or {}
 
 
 def get_envelope(conn: Connection, name: str, *, user_context: Any = None) -> Sealed:
-    """Return one standard-tier secret's stored envelope (no decrypt, no audit).
-
-    For the brokered ``fetch`` proxy: the caller hands the envelope to the avault
-    client (which decrypts + delivers), then records its own ``record_proxy_use``.
-    Validate any policy (e.g. host allowlist) *before* delivering.
-
-    Protected delivery must go through :func:`resolve_secret_access` and the
-    resident avault agent so Python never opens released DEKs or plaintext.
-    """
-    row = require_secret_access(conn, name, user_context=user_context)
+    """Return one standard-tier record envelope for ``NAME`` or ``NAME.field``."""
+    row, entry = _resolve_record_ref(conn, name, user_context=user_context)
     if row.get("protection") != "standard":
         raise UnsupportedProtectionError(f"{name} is protected-tier; use resident-agent grant delivery")
-    _reject_keypair_value_delivery(row, name)
-    return _row_sealed(row)
+    _reject_keypair_value_delivery(row, str(row["name"]))
+    return entry["envelope"]
 
 
 def get_protected_envelope(conn: Connection, name: str, *, user_context: Any = None) -> Sealed:
-    row = require_secret_access(conn, name, user_context=user_context)
+    row, entry = _resolve_record_ref(conn, name, user_context=user_context)
     if row.get("protection") != "protected":
         raise UnsupportedProtectionError(f"{name} is standard-tier")
-    _reject_keypair_value_delivery(row, name)
-    return _row_sealed(row)
+    _reject_keypair_value_delivery(row, str(row["name"]))
+    return entry["envelope"]
 
 
 def get_protected_record_envelope(conn: Connection, name: str, *, user_context: Any = None) -> Sealed:
-    row = require_secret_access(conn, name, user_context=user_context)
-    if row.get("protection") != "protected":
-        raise UnsupportedProtectionError(f"{name} is standard-tier")
-    _reject_keypair_value_delivery(row, name)
-    return _row_sealed(row)
+    return get_protected_envelope(conn, name, user_context=user_context)
 
 
-def record_proxy_use(conn: Connection, name: str, *, requester: Any = None, delivery: Any = None) -> None:
-    """Bump usage + write a value-free ``proxied`` audit row after a brokered request."""
-    row = _require_row(conn, name)
+def record_proxy_use(conn: Connection, identity: DeliveryIdentity, *, requester: Any = None, delivery: Any = None) -> None:
+    """Record an actual egress from its pre-handoff identity, even after deletion."""
     conn.execute(
         vault_secrets.update()
-        .where(vault_secrets.c.name == name)
+        .where(vault_secrets.c.id == identity.secret_id)
         .values(last_used_at=_now(), use_count=vault_secrets.c.use_count + 1)
     )
-    audit(conn, "proxied", secret_name=name, requester=requester, delivery=delivery)
+    delivery_payload = dict(delivery) if isinstance(delivery, dict) else {}
+    delivery_payload["field"] = identity.field
+    audit(conn, "proxied", secret_name=identity.name, requester=requester, delivery=delivery_payload, access_snapshot=identity.access_snapshot)
 
 
 def record_signing_use(
@@ -3006,13 +3524,23 @@ def record_reveal_use(
     request_id: str | None = None,
 ) -> None:
     """Bump revealed secret usage + write a value-free ``revealed`` audit row."""
-    _require_row(conn, name)
+    row, entry = _resolve_record_ref(conn, name)
+    secret_name = str(row["name"])
     conn.execute(
         vault_secrets.update()
-        .where(vault_secrets.c.name == name)
+        .where(vault_secrets.c.name == secret_name)
         .values(last_used_at=_now(), use_count=vault_secrets.c.use_count + 1)
     )
-    audit(conn, "revealed", secret_name=name, requester=requester, delivery=delivery, request_id=request_id)
+    delivery_payload = dict(delivery) if isinstance(delivery, dict) else {}
+    delivery_payload["field"] = str(entry["field"])
+    audit(
+        conn,
+        "revealed",
+        secret_name=secret_name,
+        requester=requester,
+        delivery=delivery_payload,
+        request_id=request_id,
+    )
 
 
 def get_envelopes(conn: Connection, names: list[str], *, user_context: Any = None) -> dict[str, Sealed]:
@@ -3026,12 +3554,12 @@ def get_envelopes(conn: Connection, names: list[str], *, user_context: Any = Non
     """
     context = resolve_resource_access_context(user_context)
     out: dict[str, Sealed] = {}
-    for name in names:
-        row = _require_secret_resource_access(conn, _require_row(conn, name), context)
+    for ref in names:
+        row, entry = _resolve_record_ref(conn, ref, user_context=context)
         if row.get("protection") != "standard":
-            raise UnsupportedProtectionError(f"{name} is protected-tier; use resident-agent grant delivery")
-        _reject_keypair_value_delivery(row, name)
-        out[name] = _row_sealed(row)
+            raise UnsupportedProtectionError(f"{ref} is protected-tier; use resident-agent grant delivery")
+        _reject_keypair_value_delivery(row, str(row["name"]))
+        out[str(entry["name"])] = entry["envelope"]
     return out
 
 
@@ -3056,19 +3584,40 @@ def get_signing_envelope(conn: Connection, name: str, *, user_context: Any = Non
     return get_key_envelope(conn, name, user_context=user_context)
 
 
-def record_deliveries(conn: Connection, names: list[str], *, requester: Any = None, mode: str | None = None) -> None:
-    """Bump usage + write a value-free ``delivered`` audit row per name.
+def capture_delivery_identities(conn: Connection, refs: list[str], *, user_context: Any = None) -> list[DeliveryIdentity]:
+    """Capture labels and ACL identity while the selected records still exist."""
+    identities: list[DeliveryIdentity] = []
+    snapshots: dict[str, dict[str, Any] | None] = {}
+    for ref in refs:
+        row, entry = _resolve_record_ref(conn, ref, user_context=user_context)
+        name = str(row["name"])
+        if name not in snapshots:
+            snapshots[name] = _build_audit_access_snapshot(conn, [name])
+        identities.append(DeliveryIdentity(str(row["id"]), name, str(entry["field"]), snapshots[name]))
+    return identities
 
-    Call this only AFTER the delivery action (child spawn / file write / stream) succeeds,
-    so the audit trail and usage counts never record a delivery that didn't happen.
-    """
-    for name in names:
+
+def record_deliveries(conn: Connection, identities: list[DeliveryIdentity], *, requester: Any = None, mode: str | None = None) -> None:
+    """Bookkeep a completed handoff without resolving records a second time."""
+    delivered: dict[str, tuple[DeliveryIdentity, list[str]]] = {}
+    for identity in identities:
+        _, fields = delivered.setdefault(identity.secret_id, (identity, []))
+        if identity.field not in fields:
+            fields.append(identity.field)
+    for identity, fields in delivered.values():
         conn.execute(
             vault_secrets.update()
-            .where(vault_secrets.c.name == name)
+            .where(vault_secrets.c.id == identity.secret_id)
             .values(last_used_at=_now(), use_count=vault_secrets.c.use_count + 1)
         )
-        audit(conn, "delivered", secret_name=name, requester=requester, delivery={"mode": mode})
+        audit(
+            conn,
+            "delivered",
+            secret_name=identity.name,
+            requester=requester,
+            delivery={"mode": mode, "fields": fields},
+            access_snapshot=identity.access_snapshot,
+        )
 
 
 def _active_session_turn_anchor(
@@ -3251,14 +3800,20 @@ def _parse_env_selector(spec: str) -> tuple[str, str]:
     if not raw:
         raise InvalidRequestError("env selector must be non-empty")
     if "=" in raw:
-        env_name, secret_name = raw.split("=", 1)
+        env_name, record_ref = raw.split("=", 1)
         env_name = env_name.strip()
-        secret_name = secret_name.strip()
+        record_ref = record_ref.strip()
+        if not env_name:
+            raise InvalidRequestError("env selector alias must be non-empty")
     else:
-        env_name = secret_name = raw
-    if not _is_delivery_env_name(env_name) or not vault_crypto.is_valid_secret_name(secret_name):
+        record_ref = raw
+        base, separator, field = record_ref.partition(".")
+        env_name = base if not separator else f"{base}_{field.upper()}"
+    if not _is_delivery_env_name(env_name):
         raise InvalidRequestError("env selector must use a valid env alias and secret name")
-    return env_name, secret_name
+    if not vault_crypto.is_valid_secret_name(record_ref.split(".", 1)[0]):
+        raise InvalidRequestError("env selector must use a valid env alias and secret name")
+    return env_name, record_ref
 
 
 def _is_delivery_env_name(name: str) -> bool:
@@ -3279,26 +3834,29 @@ def expand_value_delivery_selector(
     selector = _source_selector_payload(source_selector or {"env": env or [], "tags": tags or [], "skills": skills or []})
     context = resolve_resource_access_context(user_context)
     selections: list[dict[str, Any]] = []
-    env_by_secret: dict[str, str] = {}
-    secret_by_env: dict[str, str] = {}
+    env_by_record: dict[str, str] = {}
+    record_by_env: dict[str, str] = {}
 
-    def add_selection(row: dict[str, Any], env_name: str) -> None:
+    def add_selection(row: dict[str, Any], entry: dict[str, Any], env_name: str) -> None:
         _require_secret_resource_access(conn, row, context)
         secret_name = str(row["name"])
         _reject_keypair_value_delivery(row, secret_name)
-        existing_env = env_by_secret.get(secret_name)
+        record = str(entry["name"])
+        existing_env = env_by_record.get(record)
         if existing_env is not None:
             if existing_env != env_name:
-                raise InvalidRequestError(f"{secret_name} was selected with conflicting env names")
+                raise InvalidRequestError(f"{record} was selected with conflicting env names")
             return
-        existing_secret = secret_by_env.get(env_name)
-        if existing_secret is not None and existing_secret != secret_name:
-            raise InvalidRequestError(f"env {env_name} maps to multiple vault secrets")
-        env_by_secret[secret_name] = env_name
-        secret_by_env[env_name] = secret_name
+        existing_record = record_by_env.get(env_name)
+        if existing_record is not None and existing_record != record:
+            raise InvalidRequestError(f"env {env_name} maps to multiple vault records")
+        env_by_record[record] = env_name
+        record_by_env[env_name] = record
         selections.append(
             {
                 "name": secret_name,
+                "field": str(entry["field"]),
+                "record": record,
                 "env": env_name,
                 "kind": row.get("kind"),
                 "protection": row.get("protection"),
@@ -3306,8 +3864,9 @@ def expand_value_delivery_selector(
         )
 
     for env_spec in selector.get("env") or []:
-        env_name, secret_name = _parse_env_selector(str(env_spec))
-        add_selection(_require_row(conn, secret_name), env_name)
+        env_name, record_ref = _parse_env_selector(str(env_spec))
+        row, entry = _resolve_record_ref(conn, record_ref, user_context=context)
+        add_selection(row, entry, env_name)
 
     for tag in selector.get("tags") or []:
         normalized = _normalize_tag(str(tag))
@@ -3317,7 +3876,11 @@ def expand_value_delivery_selector(
             if normalized in _row_tags(dict(row))
         ]
         for row in rows:
-            add_selection(row, str(row["name"]))
+            _require_secret_resource_access(conn, row, context)
+            for entry in _record_entries(row, strict=True):
+                field = str(entry["field"])
+                env_name = str(row["name"]) if entry["name"] == row["name"] else f"{row['name']}_{field.upper()}"
+                add_selection(row, entry, env_name)
 
     return {"source_selector": selector, "secrets": selections}
 
@@ -3330,8 +3893,13 @@ def _request_member_rows_for_selector(
 ) -> list[dict[str, Any]]:
     expanded = expand_value_delivery_selector(conn, source_selector=source_selector, user_context=user_context)
     rows: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
     for item in expanded["secrets"]:
-        row = _require_row(conn, str(item["name"]))
+        secret_name = str(item["name"])
+        if secret_name in seen_names:
+            continue
+        seen_names.add(secret_name)
+        row = _require_row(conn, secret_name)
         if row.get("protection") == "protected" or _secret_always_ask(row):
             rows.append(row)
     return rows
@@ -3436,6 +4004,7 @@ def _grant_option(
         "member_count": len(members),
         "member_snapshot": members,
         "member_versions": [_member_version(row) for row in rows],
+        "member_fields": [_field_metadata(row) for row in rows],
     }
     if one_shot:
         option["one_shot"] = True
@@ -3518,7 +4087,8 @@ def create_access_request(
     if protected_delivery_names:
         rows = _filter_request_rows_to_protected_names(rows, protected_delivery_names)
     if name:
-        direct_row = _require_secret_resource_access(conn, _require_row(conn, name), context)
+        direct_row, _entry = _resolve_record_ref(conn, name, user_context=context)
+        name = str(direct_row["name"])
         if not _secret_access_requestable(direct_row):
             raise NotGrantableError(f"{name} is not access-requestable")
     if not rows:
@@ -3898,6 +4468,12 @@ def _agent_binding_approval_record_cap(row_dict: dict[str, Any], new_record: dic
             members = option.get("member_snapshot")
             if isinstance(members, list):
                 member_count = max(member_count, len([name for name in members if isinstance(name, str) and name]))
+            member_fields = option.get("member_fields")
+            if isinstance(member_fields, list):
+                member_count = max(
+                    member_count,
+                    sum(len(secret_record_names(meta)) for meta in member_fields if isinstance(meta, dict)),
+                )
     return max(1, member_count, len(_agent_binding_record_item_names(new_record)))
 
 
@@ -5059,10 +5635,12 @@ def resolve_secret_access(
     expire the grant and re-run this resolver to create a fresh approval request.
     """
     context = resolve_resource_access_context(user_context)
-    row = _require_secret_resource_access(conn, _require_row(conn, name), context)
+    row, record_entry = _resolve_record_ref(conn, name, user_context=context)
+    secret_name = str(row["name"])
+    record_name = str(record_entry["name"])
     if purpose not in GRANT_PURPOSES:
         raise InvalidRequestError(f"invalid grant purpose: {purpose!r}")
-    _reject_keypair_value_delivery(row, name)
+    _reject_keypair_value_delivery(row, secret_name)
     delivery_payload = dict(delivery or {})
     effective_session_id = (
         session_id
@@ -5071,10 +5649,10 @@ def resolve_secret_access(
     )
     always_ask = _secret_always_ask(row)
     if row.get("protection") == "standard" and not always_ask:
-        return {"status": "standard", "secret": _meta_payload(row), "envelope": _row_sealed(row)}
+        return {"status": "standard", "secret": _meta_payload(row), "envelope": record_entry["envelope"]}
     grant = find_active_grant_for_secret(
         conn,
-        name,
+        secret_name,
         session_id=effective_session_id,
         purpose=purpose,
         cache=cache,
@@ -5085,7 +5663,7 @@ def resolve_secret_access(
             "status": "standard" if row.get("protection") == "standard" else "agent_delivery_ready",
             "secret": _meta_payload(row),
             "grant": grant,
-            "envelope": _row_sealed(row),
+            "envelope": record_entry["envelope"],
             "request": None,
         }
     request_payload = None
@@ -5094,8 +5672,8 @@ def resolve_secret_access(
             delivery_payload["session_id"] = effective_session_id
         request_payload = create_access_request(
             conn,
-            name,
-            source_selector={"env": [name]},
+            secret_name,
+            source_selector={"env": [record_name]},
             purpose=purpose,
             requester=requester,
             delivery=delivery_payload,

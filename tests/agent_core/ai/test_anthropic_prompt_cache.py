@@ -73,11 +73,17 @@ def _request(
     tools: tuple[ToolSpec, ...] = TOOLS,
     messages: tuple[Any, ...] = CONVERSATION,
     base_url: str | None = None,
+    source_id: str | None = None,
 ) -> ModelRequest:
     # A fresh endpoint per request unless one is given: a route's TTL memory lasts the process.
     return ModelRequest(
         endpoint=ModelEndpoint(
-            "anthropic", base_url or f"https://{uuid.uuid4().hex}.test/v1", model_id, "token", provider=provider
+            "anthropic",
+            base_url or f"https://{uuid.uuid4().hex}.test/v1",
+            model_id,
+            "token",
+            provider=provider,
+            source_id=source_id,
         ),
         system=system,
         messages=messages,
@@ -207,17 +213,21 @@ async def test_a_rejected_ttl_is_retried_once_without_it_and_remembered_for_the_
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=SUCCESS)
 
     caplog.set_level(logging.WARNING, logger="core.agent_core.ai.anthropic")
-    request = _request()
+    # Two Sources behind one gateway URL, as every Vibey hop is.
+    gateway = f"https://{uuid.uuid4().hex}.test/vibey/v1"
+    request = _request(base_url=gateway, source_id="src_relayaaaa01")
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         runs = [
             await _run(client, request),
             # A later run builds its own adapter; the route keeps the default for the process.
             await _run(client, request),
-            # The memory is the route's: another model on the same endpoint still asks for the hour.
-            await _run(client, _request(model_id="claude-sonnet-5", base_url=request.endpoint.base_url)),
+            # The memory is the route's: another model on the same endpoint still asks for the hour,
+            await _run(client, _request(model_id="claude-sonnet-5", base_url=gateway, source_id="src_relayaaaa01")),
+            # and so does another Source of the same model behind the same gateway URL.
+            await _run(client, _request(base_url=gateway, source_id="src_directbbb02")),
         ]
 
-    rejected, retried, remembered, other_rejected, other_retried = sent
+    rejected, retried, remembered, other_rejected, other_retried, source_rejected, source_retried = sent
     assert _breakpoints(rejected)[:2] == [("tools.1", HOUR), ("system.0", HOUR)]
     # Exactly one retry: the same request with the default lifetime.
     assert retried == _without_ttl(rejected)
@@ -225,13 +235,15 @@ async def test_a_rejected_ttl_is_retried_once_without_it_and_remembered_for_the_
     assert not _carries_ttl(remembered)
     assert _carries_ttl(other_rejected)
     assert other_retried == _without_ttl(other_rejected)
+    assert _carries_ttl(source_rejected)
+    assert source_retried == _without_ttl(source_rejected)
     for events in runs:
         # One terminal per run: a rejected attempt never reaches the consumer.
         terminals = [event for event in events if isinstance(event, (Done, ProviderError))]
         assert [type(event) for event in terminals] == [Done if retry_accepted else ProviderError]
         assert retry_accepted or terminals[0].status == 400
     # Logged once per route, not once per request.
-    assert len([record for record in caplog.records if record.name == "core.agent_core.ai.anthropic"]) == 2
+    assert len([record for record in caplog.records if record.name == "core.agent_core.ai.anthropic"]) == 3
 
 
 @pytest.mark.parametrize(

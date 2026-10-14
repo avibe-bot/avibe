@@ -8,12 +8,13 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import shlex
 import shutil
 import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 from sqlalchemy import select
@@ -158,10 +159,18 @@ def _set_protected_always_ask_grant(name: str, *, session_id: str | None = None,
         return _grant_from_request(conn, req, session_id=session_id)
 
 
-def _set_tag_grant(names: list[str], *, tag: str = "crypto", session_id: str | None = None) -> dict:
+def _set_tag_grant(
+    names: list[str],
+    *,
+    tag: str = "crypto",
+    session_id: str | None = None,
+    fields: list[dict] | None = None,
+) -> dict:
     with cli._open_vault_engine().begin() as conn:
         for name in names:
-            vault_service.create_secret(conn, name=name, protection="protected", tags=[tag], sealed=_sealed(name.lower()))
+            vault_service.create_secret(
+                conn, name=name, protection="protected", tags=[tag], sealed=_sealed(name.lower()), fields=fields
+            )
         req = vault_service.create_access_request(
             conn,
             source_selector={"tags": [tag]},
@@ -235,6 +244,28 @@ def test_parse_env_specs_rejects_duplicate_secret_alias():
         cli._parse_env_specs(["A=ASK_KEY", "B=ASK_KEY"])
 
     assert exc.value.code == "conflicting_env_alias"
+
+
+def test_parse_env_specs_uppercases_only_field_name():
+    assert cli._parse_env_specs(["lowerSecret.username"]) == {
+        "lowerSecret_USERNAME": "lowerSecret.username"
+    }
+
+
+def test_vault_skill_cli_examples_are_parser_backed():
+    skill_path = Path(__file__).parents[1] / "skills" / "use-avibe-vault" / "SKILL.md"
+    examples = [
+        shlex.split(line.strip()[1:-1])
+        for line in skill_path.read_text(encoding="utf-8").splitlines()
+        if line.startswith("`vibe ") and line.rstrip().endswith("`")
+    ]
+
+    assert examples
+    parser = cli.build_parser()
+    for example in examples:
+        assert example[0] == "vibe"
+        parsed = parser.parse_args(example[1:])
+        assert parsed.command == "vault"
 
 
 def test_vault_parser_does_not_expose_plaintext_set_command():
@@ -354,6 +385,13 @@ def test_edit_policy_releases_resident_grant(capfd, monkeypatch):
     assert status == "expired"
 
 
+def test_edit_cas_conflict_preserves_machine_readable_code(capfd, monkeypatch):
+    _create_standard_secret("EDIT_CONFLICT")
+    monkeypatch.setattr(vault_service, "update_secret_metadata", Mock(side_effect=vault_service.SecretConflictError("changed")))
+    assert cli.cmd_vault_edit(_ns(name="EDIT_CONFLICT", description="new")) == 1
+    assert json.loads(capfd.readouterr().err)["code"] == "secret_conflict"
+
+
 def test_edit_metadata_json_rejects_secret_material(capfd):
     _create_standard_secret("EDIT_SAFE")
 
@@ -362,6 +400,41 @@ def test_edit_metadata_json_rejects_secret_material(capfd):
     assert code == 1
     payload = json.loads(capfd.readouterr().err)
     assert payload["code"] == "secret_material_rejected"
+
+
+@pytest.mark.parametrize(
+    ("metadata", "field_hint"),
+    [
+        ({"name": "LOGIN", "kind": "static", "default_field": "value", "fields": ["value"]}, False),
+        ({"name": "LOGIN", "kind": "static", "default_field": "password", "fields": ["password"]}, True),
+        ({"name": "LOGIN", "kind": "static", "default_field": "password", "fields": ["password", "username"]}, True),
+        ({"name": "LOGIN", "kind": "static", "default_field": "value", "fields": ["value"], "fields_state": "corrupt"}, True),
+        ({"name": "SIGNING", "kind": "keypair", "default_field": "value", "fields": ["value"]}, False),
+    ],
+)
+def test_provision_field_hint_predicate_is_shared_across_callback_and_sync(metadata, field_hint, monkeypatch):
+    from vibe import cli
+
+    assert vault_service.has_named_field_shape(metadata) is field_hint
+    row = {
+        "id": "vrq_hint",
+        "request_type": "provision",
+        "status": "fulfilled",
+        "secret_name": metadata["name"],
+        "requester": json.dumps({}),
+        "delivery": json.dumps({}),
+        "provision_secret": metadata,
+    }
+    callback = vault_service._build_request_callback_message(row)
+    engine = MagicMock()
+    monkeypatch.setattr(vault_service, "get_secret_meta", lambda conn, name: metadata)
+    sync = cli._vault_provision_success_usage(engine, metadata["name"])
+    if field_hint:
+        assert "Current fields:" in callback and f"{metadata['name']}.{metadata['default_field']}" in callback
+        assert "Current fields:" in sync and f"{metadata['name']}.{metadata['default_field']}" in sync
+    else:
+        assert f"--env {metadata['name']} --" in callback and ".value" not in callback
+        assert f"--env {metadata['name']} --" in sync and ".value" not in sync
 
 
 def test_find_reports_value_free_capabilities(tmp_path, capfd, monkeypatch):
@@ -406,6 +479,8 @@ def test_find_reports_value_free_capabilities(tmp_path, capfd, monkeypatch):
         "name": "STANDARD_KEY",
         "kind": "static",
         "protection": "standard",
+        "default_field": "value",
+        "fields": ["value"],
         "tags": [],
         "description": None,
         "policy": {},
@@ -445,6 +520,46 @@ def test_find_filters_by_query_and_multiple_tags(capfd):
 
     assert [secret["name"] for secret in payload["secrets"]] == ["OPENAI_PROD_KEY"]
     assert payload["pagination"]["has_more"] is False
+
+
+@pytest.mark.parametrize("command", ["find", "list"])
+@pytest.mark.parametrize("query,expected_names", [
+    ("password", ["LOGIN"]), ("username", ["LOGIN"]),
+    ("LOGIN.password", ["LOGIN"]), ("LOGIN.username", ["LOGIN"]),
+    ("hidden_ciphertext", []),
+])
+def test_value_free_search_matches_field_labels(capfd, command, query, expected_names):
+    _create_standard_secret(
+        "LOGIN", default_field="password",
+        fields=[{"name": "username", "sealed": _sealed("hidden_ciphertext")}],
+    )
+    _create_standard_secret("UNRELATED")
+    assert getattr(cli, f"cmd_vault_{command}")(_ns(query_filter=query)) == 0
+    payload = json.loads(capfd.readouterr().out)
+    assert [secret["name"] for secret in payload["secrets"]] == expected_names
+    assert "hidden_ciphertext" not in json.dumps(payload["secrets"])
+
+
+@pytest.mark.parametrize("command", ["run", "inject"])
+@pytest.mark.parametrize("selector", [{"tag": ["deploy"]}, {"skill": ["deploy"]}])
+def test_corrupt_fields_are_visible_and_selector_delivery_fails_closed(tmp_path, capfd, monkeypatch, command, selector):
+    from vibe import api
+
+    _create_standard_secret("CORRUPT", tags=["deploy", "skill:deploy"])
+    with cli._open_vault_engine().begin() as conn:
+        conn.execute(vault_service.vault_secrets.update().where(vault_service.vault_secrets.c.name == "CORRUPT").values(fields='[{"name":"username"}]'))
+    for lookup in (cli.cmd_vault_find, cli.cmd_vault_list):
+        assert lookup(_ns()) == 0
+        payload = json.loads(capfd.readouterr().out)
+        assert payload["secrets"][0]["fields_state"] == "corrupt"
+        assert payload["secrets"][0]["fields"] == ["value"]
+    deliver = Mock()
+    for mode in ("run", "inject"):
+        monkeypatch.setattr(api, f"avault_deliver_{mode}", deliver)
+    args = _ns(command_argv=["python3", "-c", "pass"], out=str(tmp_path / "unused.env"), format="dotenv", **selector)
+    assert getattr(cli, f"cmd_vault_{command}")(args) == 1
+    assert json.loads(capfd.readouterr().err)["code"] == "fields_corrupt"
+    deliver.assert_not_called()
 
 
 def test_tags_lists_normal_and_skill_tags(capfd):
@@ -656,6 +771,14 @@ def test_access_request_cli_uses_caller_session(tmp_path, capfd, monkeypatch):
     assert payload["request"]["status"] == "pending"
 
 
+def test_access_non_requestable_standard_secret_keeps_not_grantable_code(capfd):
+    _create_standard_secret("STANDARD_KEY")
+    assert cli.cmd_vault_access(_ns(name="STANDARD_KEY")) == 1
+    assert json.loads(capfd.readouterr().err)["code"] == "not_grantable"
+    with cli._open_vault_engine().connect() as conn:
+        assert vault_service.list_requests(conn) == []
+
+
 def test_access_request_cli_accepts_protected_static_request(capfd):
     with cli._open_vault_engine().begin() as conn:
         vault_service.create_secret(conn, name="PROTECTED_KEY", protection="protected", sealed=_sealed("protected"))
@@ -666,6 +789,85 @@ def test_access_request_cli_accepts_protected_static_request(capfd):
     assert payload["kind"] == "vault_access_request"
     assert payload["request"]["secret_name"] == "PROTECTED_KEY"
     assert payload["request"]["card"]["protection"] == "protected"
+
+
+@pytest.mark.parametrize(
+    ("ref", "record"),
+    [("LOGIN.password", "LOGIN"), ("LOGIN.username", "LOGIN.username")],
+)
+def test_access_record_ref_uses_value_free_record_metadata(capfd, monkeypatch, ref, record):
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(
+            conn,
+            name="LOGIN",
+            protection="protected",
+            sealed=_sealed("password"),
+            default_field="password",
+            fields=[{"name": "username", "sealed": _sealed("username")}],
+        )
+    metadata = Mock(wraps=vault_service.get_secret_record_meta)
+    monkeypatch.setattr(vault_service, "get_secret_record_meta", metadata)
+    for getter in ("get_envelope", "get_protected_envelope"):
+        monkeypatch.setattr(
+            vault_service,
+            getter,
+            Mock(side_effect=AssertionError("access validation must not load an envelope")),
+        )
+
+    assert cli.cmd_vault_access(_ns(name=ref)) == 0
+    payload = json.loads(capfd.readouterr().out)
+
+    metadata.assert_called_once()
+    assert metadata.call_args.args[1] == ref
+    assert payload["request"]["secret_name"] == "LOGIN"
+    assert payload["request"]["delivery"]["record"] == record
+
+
+@pytest.mark.parametrize("command", ["run", "fetch", "inject", "access"])
+@pytest.mark.parametrize(
+    ("ref", "expected_code"),
+    [
+        ("LOGIN.missing", "field_not_found"),
+        ("LOGIN.UPPER", "invalid_field_name"),
+        ("LOGIN.bad-name", "invalid_field_name"),
+        ("SIGNING.value", "fields_not_supported"),
+    ],
+)
+def test_record_ref_errors_are_structured_before_delivery(
+    tmp_path, capfd, monkeypatch, command, ref, expected_code
+):
+    from vibe import api
+
+    _create_standard_secret(
+        "LOGIN",
+        default_field="password",
+        fields=[{"name": "username", "sealed": _sealed("username")}],
+    )
+    _create_standard_secret("SIGNING", kind="keypair", signer_kind="local")
+    deliver = Mock()
+    for operation in ("run", "fetch", "inject"):
+        monkeypatch.setattr(api, f"avault_deliver_{operation}", deliver)
+        monkeypatch.setattr(api, f"avault_agent_deliver_{operation}", deliver)
+    args = _ns(
+        name=ref,
+        auth=ref,
+        env=[ref],
+        command_argv=["python3", "-c", "pass"],
+        url="https://api.github.com/user",
+        out=str(tmp_path / "login.env"),
+        format="dotenv",
+    )
+
+    assert getattr(cli, f"cmd_vault_{command}")(args) == 1
+    payload = json.loads(capfd.readouterr().err)
+
+    assert payload["code"] == expected_code
+    assert payload["help_command"] == f"vibe vault {command} --help"
+    if expected_code == "field_not_found":
+        assert "password, username" in payload["error"]
+    deliver.assert_not_called()
+    with cli._open_vault_engine().connect() as conn:
+        assert vault_service.list_requests(conn) == []
 
 
 def test_sign_cli_standard_key_returns_inline_signature_without_request(capfd, monkeypatch):
@@ -857,13 +1059,116 @@ def test_run_calls_avault_with_env_mapping_and_records_delivery(tmp_path, capfd,
     code = cli.cmd_vault_run(_ns(env=["LOCAL_NAME=SRC_KEY"], command_argv=["python3", "-c", "pass"]))
     assert code == 0
     deliver.assert_called_once_with(
-        [{"name": "SRC_KEY", "env": "LOCAL_NAME", "envelope": _sealed("run")}],
+        [{"name": "SRC_KEY", "env": "LOCAL_NAME", "envelope": _sealed("run"), "tier": "standard"}],
         ["python3", "-c", "pass"],
     )
     cli.cmd_vault_list(_ns())
     secret = json.loads(capfd.readouterr().out)["secrets"][0]
     assert secret["use_count"] == 1
     assert secret["last_used_at"] is not None
+
+
+def test_run_canonicalizes_default_alias_and_delivers_extra_field(tmp_path, capfd, monkeypatch):
+    from vibe import api
+
+    _create_standard_secret(
+        "GITHUB_LOGIN",
+        sealed=_sealed("password"),
+        default_field="password",
+        fields=[{"name": "username", "sealed": _sealed("username")}],
+    )
+    deliver = Mock(return_value=0)
+    monkeypatch.setattr(api, "avault_deliver_run", deliver)
+
+    assert cli.cmd_vault_run(
+        _ns(
+            env=["GITHUB_LOGIN.password", "GITHUB_LOGIN.username"],
+            command_argv=["python3", "-c", "pass"],
+        )
+    ) == 0
+
+    assert deliver.call_args.args[0] == [
+        {
+            "name": "GITHUB_LOGIN",
+            "env": "GITHUB_LOGIN_PASSWORD",
+            "envelope": _sealed("password"),
+            "tier": "standard",
+        },
+        {
+            "name": "GITHUB_LOGIN.username",
+            "env": "GITHUB_LOGIN_USERNAME",
+            "envelope": _sealed("username"),
+            "tier": "standard",
+        },
+    ]
+
+
+def test_completed_run_audits_snapshot_fields_removed_or_renamed_during_child(capfd, monkeypatch):
+    from vibe import api
+
+    _create_standard_secret("LOGIN", default_field="password", fields=[{"name": "username", "sealed": _sealed("user")}])
+    _create_standard_secret("OTHER", fields=[{"name": "token", "sealed": _sealed("token")}])
+
+    def finish_run(secrets, command):
+        assert {entry["name"] for entry in secrets} == {"LOGIN", "LOGIN.username", "OTHER.token"}
+        with cli._open_vault_engine().begin() as conn:
+            vault_service.remove_secret_field(conn, "LOGIN", "username")
+            vault_service.update_secret_metadata(conn, "LOGIN", default_field="credential")
+        return {"exit_code": 0, "delivered": True}
+
+    monkeypatch.setattr(api, "avault_deliver_run", finish_run)
+    assert cli.cmd_vault_run(_ns(env=["LOGIN", "LOGIN.username", "OTHER.token"], command_argv=["python3", "-c", "pass"])) == 0
+    with cli._open_vault_engine().connect() as conn:
+        assert vault_service.get_secret_meta(conn, "LOGIN")["use_count"] == 1
+        assert vault_service.get_secret_meta(conn, "OTHER")["use_count"] == 1
+        delivered = {
+            event["secret_name"]: json.loads(event["delivery"])["fields"]
+            for event in vault_service.list_audit(conn)
+            if event["event"] == "delivered"
+        }
+        assert delivered == {"LOGIN": ["password", "username"], "OTHER": ["token"]}
+
+
+def test_run_rejects_alias_collision_after_record_canonicalization(capfd, monkeypatch):
+    from vibe import api
+
+    _create_standard_secret(
+        "GITHUB_LOGIN",
+        default_field="password",
+        fields=[{"name": "username", "sealed": _sealed("username")}],
+    )
+    deliver = Mock()
+    monkeypatch.setattr(api, "avault_deliver_run", deliver)
+
+    code = cli.cmd_vault_run(
+        _ns(
+            env=["PASSWORD=GITHUB_LOGIN", "EXPLICIT=GITHUB_LOGIN.password"],
+            command_argv=["python3", "-c", "pass"],
+        )
+    )
+    payload = json.loads(capfd.readouterr().err)
+
+    assert code == 1
+    assert payload["code"] == "conflicting_env_alias"
+    deliver.assert_not_called()
+
+
+def test_run_dedupes_default_refs_with_the_same_env_alias(capfd, monkeypatch):
+    from vibe import api
+
+    _create_standard_secret("LOGIN", default_field="password")
+    deliver = Mock(return_value=0)
+    monkeypatch.setattr(api, "avault_deliver_run", deliver)
+
+    assert cli.cmd_vault_run(
+        _ns(
+            env=["PASSWORD=LOGIN,PASSWORD=LOGIN.password"],
+            command_argv=["python3", "-c", "pass"],
+        )
+    ) == 0
+    assert deliver.call_args.args[0] == [
+        {"name": "LOGIN", "env": "PASSWORD", "envelope": _sealed(), "tier": "standard"}
+    ]
 
 
 def test_run_expands_tags_and_skill_tags_as_union(capfd, monkeypatch):
@@ -882,6 +1187,40 @@ def test_run_expands_tags_and_skill_tags_as_union(capfd, monkeypatch):
     assert delivered == {"A_KEY": "A_KEY", "B_KEY": "B_KEY", "C_KEY": "C_KEY"}
 
 
+@pytest.mark.parametrize("selector", [{"tag": ["deploy"]}, {"skill": ["release"]}])
+def test_run_tag_and_skill_select_every_field(capfd, monkeypatch, selector):
+    from vibe import api
+
+    _create_standard_secret(
+        "DEPLOY_LOGIN",
+        sealed=_sealed("password"),
+        default_field="password",
+        fields=[{"name": "username", "sealed": _sealed("username")}],
+        tags=["deploy", "skill:release"],
+    )
+    deliver = Mock(return_value=0)
+    monkeypatch.setattr(api, "avault_deliver_run", deliver)
+
+    assert cli.cmd_vault_run(
+        _ns(**selector, command_argv=["python3", "-c", "pass"])
+    ) == 0
+
+    assert deliver.call_args.args[0] == [
+        {
+            "name": "DEPLOY_LOGIN",
+            "env": "DEPLOY_LOGIN",
+            "envelope": _sealed("password"),
+            "tier": "standard",
+        },
+        {
+            "name": "DEPLOY_LOGIN.username",
+            "env": "DEPLOY_LOGIN_USERNAME",
+            "envelope": _sealed("username"),
+            "tier": "standard",
+        },
+    ]
+
+
 def test_run_skill_selects_skill_link_mirror_tag(monkeypatch):
     from vibe import api
 
@@ -894,7 +1233,9 @@ def test_run_skill_selects_skill_link_mirror_tag(monkeypatch):
     code = cli.cmd_vault_run(_ns(skill=["deploy"], command_argv=["python3", "-c", "pass"]))
 
     assert code == 0
-    assert deliver.call_args.args[0] == [{"name": "LINKED_KEY", "env": "LINKED_KEY", "envelope": _sealed("linked")}]
+    assert deliver.call_args.args[0] == [
+        {"name": "LINKED_KEY", "env": "LINKED_KEY", "envelope": _sealed("linked"), "tier": "standard"}
+    ]
 
 
 @pytest.mark.parametrize("selector", [{"tag": ["missing"]}, {"skill": ["missing"]}])
@@ -1252,7 +1593,7 @@ def test_inject_resolver_uses_session_bound_protected_grant(tmp_path):
 
     resolved_grant, one_shot_grants, secrets = cli._resolve_vault_inject_delivery(
         engine,
-        ["PROTECTED_KEY"],
+        {"PROTECTED_KEY": "PROTECTED_KEY"},
         path=str(tmp_path / "out.env"),
         fmt="dotenv",
         args=_ns(session_id="ses_cli"),
@@ -1260,7 +1601,9 @@ def test_inject_resolver_uses_session_bound_protected_grant(tmp_path):
 
     assert resolved_grant["id"] == grant["id"]
     assert one_shot_grants == []
-    assert secrets == [{"name": "PROTECTED_KEY", "key": "PROTECTED_KEY", "envelope": _sealed("protected")}]
+    assert secrets == [
+        {"name": "PROTECTED_KEY", "key": "PROTECTED_KEY", "envelope": _sealed("protected"), "tier": "protected"}
+    ]
 
 
 def test_run_fast_path_reserves_protected_always_ask_grant(tmp_path, capfd, monkeypatch):
@@ -1427,8 +1770,8 @@ def test_run_reuses_multi_secret_standard_one_shot_grant(tmp_path, capfd, monkey
     assert code == 0
     deliver.assert_called_once_with(
         [
-            {"name": "ASK_A", "env": "A", "envelope": _sealed("ask_a")},
-            {"name": "ASK_B", "env": "B", "envelope": _sealed("ask_b")},
+            {"name": "ASK_A", "env": "A", "envelope": _sealed("ask_a"), "tier": "standard"},
+            {"name": "ASK_B", "env": "B", "envelope": _sealed("ask_b"), "tier": "standard"},
         ],
         ["python3", "-c", "pass"],
     )
@@ -1491,9 +1834,9 @@ def test_run_tag_reuses_standard_one_shot_subset_with_normal_secrets(tmp_path, c
     assert code == 0
     deliver.assert_called_once_with(
         [
-            {"name": "ASK_A", "env": "ASK_A", "envelope": _sealed("ask_a")},
-            {"name": "ASK_B", "env": "ASK_B", "envelope": _sealed("ask_b")},
-            {"name": "NORMAL_DEPLOY", "env": "NORMAL_DEPLOY", "envelope": _sealed("normal")},
+            {"name": "ASK_A", "env": "ASK_A", "envelope": _sealed("ask_a"), "tier": "standard"},
+            {"name": "ASK_B", "env": "ASK_B", "envelope": _sealed("ask_b"), "tier": "standard"},
+            {"name": "NORMAL_DEPLOY", "env": "NORMAL_DEPLOY", "envelope": _sealed("normal"), "tier": "standard"},
         ],
         ["python3", "-c", "pass"],
     )
@@ -1517,8 +1860,8 @@ def test_inject_reuses_multi_secret_standard_one_shot_grant(tmp_path, capfd, mon
         str(out),
         "dotenv",
         [
-            {"name": "ASK_A", "key": "ASK_A", "envelope": _sealed("ask_a")},
-            {"name": "ASK_B", "key": "ASK_B", "envelope": _sealed("ask_b")},
+            {"name": "ASK_A", "key": "ASK_A", "envelope": _sealed("ask_a"), "tier": "standard"},
+            {"name": "ASK_B", "key": "ASK_B", "envelope": _sealed("ask_b"), "tier": "standard"},
         ],
     )
     with cli._open_vault_engine().connect() as conn:
@@ -1563,7 +1906,7 @@ def test_run_consumes_standard_always_ask_grant_after_delivery(tmp_path, capfd, 
 
     assert code == 0
     deliver.assert_called_once_with(
-        [{"name": "ASK_KEY", "env": "ASK_KEY", "envelope": _sealed("ask_key")}],
+        [{"name": "ASK_KEY", "env": "ASK_KEY", "envelope": _sealed("ask_key"), "tier": "standard"}],
         ["python3", "-c", "pass"],
     )
     with cli._open_vault_engine().connect() as conn:
@@ -1582,7 +1925,7 @@ def test_run_consumes_standard_always_ask_grant_when_child_exits_70(tmp_path, ca
 
     assert code == 70
     deliver.assert_called_once_with(
-        [{"name": "ASK_KEY", "env": "ASK_KEY", "envelope": _sealed("ask_key")}],
+        [{"name": "ASK_KEY", "env": "ASK_KEY", "envelope": _sealed("ask_key"), "tier": "standard"}],
         ["python3", "-c", "raise SystemExit(70)"],
     )
     with cli._open_vault_engine().connect() as conn:
@@ -1696,7 +2039,11 @@ def test_inject_uses_resolved_output_path_for_standard_always_ask_delivery(tmp_p
 
     assert code == 0
     assert payload["path"] == expected
-    deliver.assert_called_once_with(expected, "dotenv", [{"name": "ASK_KEY", "key": "ASK_KEY", "envelope": _sealed("ask_key")}])
+    deliver.assert_called_once_with(
+        expected,
+        "dotenv",
+        [{"name": "ASK_KEY", "key": "ASK_KEY", "envelope": _sealed("ask_key"), "tier": "standard"}],
+    )
     with cli._open_vault_engine().connect() as conn:
         status = conn.execute(vault_grants.select().where(vault_grants.c.id == grant["id"])).mappings().one()["status"]
     assert status == "expired"
@@ -2040,17 +2387,24 @@ def test_run_expires_grant_when_agent_cache_is_missing(capfd, monkeypatch):
     assert requests[0]["card"]["grant_options"][0]["purpose"] == "run"
 
 
-def test_run_reopens_one_selector_set_when_agent_cache_is_missing(capfd, monkeypatch):
+@pytest.mark.parametrize("field_refs", [False, True])
+def test_run_reopens_one_selector_set_when_agent_cache_is_missing(capfd, monkeypatch, field_refs):
     from vibe import api
 
-    grant = _set_tag_grant(["A_KEY", "B_KEY"])
-    monkeypatch.setattr(api, "avault_agent_deliver_run", Mock(side_effect=api.AvaultError("grant is missing or expired")))
+    grant = _set_tag_grant(
+        ["A_KEY", "B_KEY"],
+        fields=[{"name": "username", "sealed": _sealed("username")}] if field_refs else None,
+    )
+    refs = ["A_KEY.username", "B_KEY.username"] if field_refs else ["A_KEY", "B_KEY"]
+    deliver = Mock(side_effect=api.AvaultError("grant is missing or expired"))
+    monkeypatch.setattr(api, "avault_agent_deliver_run", deliver)
 
-    code = cli.cmd_vault_run(_ns(env=["A_KEY", "B_KEY"], command_argv=["python3", "-c", "pass"]))
+    code = cli.cmd_vault_run(_ns(env=refs, command_argv=["python3", "-c", "pass"]))
     captured = capfd.readouterr()
 
     assert code == 1
     assert json.loads(captured.err)["code"] == "approval_required"
+    assert [item["name"] for item in deliver.call_args.kwargs["secrets"]] == refs
     with cli._open_vault_engine().connect() as conn:
         status = conn.execute(vault_grants.select().where(vault_grants.c.id == grant["id"])).mappings().one()["status"]
         requests = vault_service.list_requests(conn, status="pending")
@@ -2058,9 +2412,12 @@ def test_run_reopens_one_selector_set_when_agent_cache_is_missing(capfd, monkeyp
     assert len(requests) == 1
     assert requests[0]["secret_name"] is None
     assert requests[0]["delivery"]["protected_secret_names"] == ["A_KEY", "B_KEY"]
-    assert requests[0]["delivery"]["source_selector"] == {"env": ["A_KEY", "B_KEY"]}
+    expected_selector = {
+        "env": ["A_KEY_USERNAME=A_KEY.username", "B_KEY_USERNAME=B_KEY.username"] if field_refs else refs
+    }
+    assert requests[0]["delivery"]["source_selector"] == expected_selector
     option = requests[0]["card"]["grant_options"][0]
-    assert option["source_selector"] == {"env": ["A_KEY", "B_KEY"]}
+    assert option["source_selector"] == expected_selector
     assert option["member_snapshot"] == ["A_KEY", "B_KEY"]
 
 
@@ -2176,7 +2533,7 @@ def test_inject_resolver_publishes_pending_request_when_approval_required(tmp_pa
     with pytest.raises(cli.TaskCliError) as exc_info:
         cli._resolve_vault_inject_delivery(
             cli._open_vault_engine(),
-            ["PROTECTED_KEY"],
+            {"PROTECTED_KEY": "PROTECTED_KEY"},
             path=str(tmp_path / "out.env"),
             fmt="dotenv",
             args=_ns(session_id="ses_cli"),
@@ -2360,6 +2717,40 @@ def test_request_for_existing_secret_returns_fulfilled(tmp_path, capfd, monkeypa
     _create_standard_secret("HAVE_KEY")
     assert cli.cmd_vault_request(_ns(name="HAVE_KEY", wait=30)) == 0
     assert json.loads(capfd.readouterr().out)["status"] == "fulfilled"
+
+
+@pytest.mark.parametrize("already_exists", [False, True])
+@pytest.mark.parametrize("with_spec", [False, True])
+def test_field_provision_success_hints_use_current_subset(capfd, monkeypatch, already_exists, with_spec):
+    def provide_subset():
+        _create_standard_secret(
+            "LOGIN", default_field="credential", sealed=_sealed("do-not-expose"),
+            fields=[{"name": "username", "sealed": _sealed("hidden-user")}],
+        )
+
+    def complete_during_wait(request_id, **_kwargs):
+        provide_subset()
+        with cli._open_vault_engine().connect() as conn:
+            return vault_service.get_request(conn, request_id)
+
+    wait = Mock(side_effect=complete_during_wait)
+    monkeypatch.setattr(cli, "_wait_for_provision", wait)
+    if already_exists:
+        provide_subset()
+    request_args = ["vault", "request", "LOGIN", "--wait", "30"]
+    if with_spec:
+        request_args.extend(["--spec-json", '{"fields":["username","password","totp"],"default_field":"password"}'])
+    args = cli.build_parser().parse_args(request_args)
+    assert cli.cmd_vault_request(args) == 0
+    payload = json.loads(capfd.readouterr().out)
+    assert payload["status"] == "fulfilled"
+    assert wait.call_count == (0 if already_exists else 1)
+    message = payload["message"]
+    assert "credential" in message and "username" in message
+    assert "LOGIN.credential" in message
+    assert "vibe vault run --env LOGIN.username" in message
+    assert "password" not in message and "totp" not in message
+    assert "do-not-expose" not in message and "hidden-user" not in message
 
 
 def test_request_wait_outputs_fulfilled_request(capfd, monkeypatch):

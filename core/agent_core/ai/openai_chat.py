@@ -15,14 +15,22 @@ import httpx
 
 from core.agent_core.ai._common import (
     ServedHopResolver,
+    WireRequest,
     auth_headers,
     content_parts,
     drive_sse_stream,
     endpoint_origin,
+    forced_tool,
+    hosted_pin,
+    PIN_UNAVAILABLE,
+    portable_request,
     join_endpoint_url,
     json_object,
+    native_declaration,
+    native_hosted_tools,
     prepare_messages,
     request_credential_values,
+    required_only_tool,
     StreamAssembler,
     validate_wire_shape,
     WireField,
@@ -192,6 +200,7 @@ class OpenAIChatAdapter(ProviderAdapter):
             protocol=self.protocol,
             media_loader=self._media_loader,
             cancel=cancel,
+            endpoint=request.endpoint,
         )
         if isinstance(prepared, ProviderError):
             terminal = assembler.terminal(prepared)
@@ -209,10 +218,7 @@ class OpenAIChatAdapter(ProviderAdapter):
         refusal_seen = False
         protocol_terminal = False
         try:
-            payload = build_chat_payload(request, transformed_messages, loaded_images=loaded_images)
-            headers = auth_headers(request.endpoint, provider="openai", gateway=self._gateway)
-            headers.setdefault("content-type", "application/json")
-            url = join_endpoint_url(request.endpoint.base_url, "/chat/completions")
+            wire = wire_request(request, transformed_messages, gateway=self._gateway, loaded_images=loaded_images)
             async def translate(events: AsyncIterator[Any]) -> AsyncIterator[Any]:
                 nonlocal finish_reason, native_finish_reason, refusal_seen, protocol_terminal
                 async for event in events:
@@ -633,24 +639,51 @@ class OpenAIChatAdapter(ProviderAdapter):
                 terminal = assembler.terminal(final if isinstance(final, ProviderError) else Done(final))
                 if terminal is not None:
                     yield terminal
-            driver = drive_sse_stream(
-                self._client,
-                method="POST",
-                url=url,
-                json_body=payload,
-                headers=headers,
-                cancel=cancel,
-                assembler=assembler,
-                endpoint=request.endpoint,
-                resolver=self._served_hop_resolver,
-                gateway=self._gateway,
-                translate=translate,
-            )
-            try:
-                async for event in driver:
-                    yield event
-            finally:
-                await driver.aclose()
+            sending = request
+            while True:
+                driver = drive_sse_stream(
+                    self._client,
+                    method="POST",
+                    url=wire.url,
+                    json_body=wire.body,
+                    headers=wire.headers,
+                    cancel=cancel,
+                    assembler=assembler,
+                    endpoint=sending.endpoint,
+                    resolver=self._served_hop_resolver,
+                    gateway=self._gateway,
+                    translate=translate,
+                )
+                unavailable = False
+                try:
+                    async for event in driver:
+                        if event is PIN_UNAVAILABLE:
+                            unavailable = True
+                            break
+                        yield event
+                finally:
+                    await driver.aclose()
+                if not unavailable or sending is not request:
+                    return
+                # The pinned Source cannot serve this content: the same request once more, in portable form and
+                # unpinned, which the gateway fails over as any other (§3.5). Never the generic retry.
+                sending = portable_request(request)
+                prepared = await prepare_messages(
+                    sending.messages,
+                    target=endpoint_origin(sending.endpoint),
+                    supports_images=sending.supports_images,
+                    protocol=self.protocol,
+                    media_loader=self._media_loader,
+                    cancel=cancel,
+                    endpoint=sending.endpoint,
+                )
+                if isinstance(prepared, ProviderError):
+                    terminal = assembler.terminal(prepared)
+                    if terminal is not None:
+                        yield terminal
+                    return
+                transformed_messages, loaded_images = prepared
+                wire = wire_request(sending, transformed_messages, gateway=self._gateway, loaded_images=loaded_images)
         except Exception as exc:
             terminal = assembler.terminal(assembler.exception(exc))
             if terminal is not None:
@@ -689,21 +722,49 @@ def build_chat_payload(
         payload["max_completion_tokens"] = request.max_tokens
     else:
         payload["max_tokens"] = request.max_tokens
-    if request.tools:
-        payload["tools"] = [
-            {
-                "type": "function",
-                "function": {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": dict(tool.input_schema),
-                },
-            }
-            for tool in request.tools
-        ]
-    if request.reasoning_effort and request.reasoning_effort.lower() not in {"off", "disabled"}:
-        payload["reasoning_effort"] = _openai_effort(request.reasoning_effort)
+    # A hosted tool this hop runs natively is sent as the provider's declaration in its spec's place (§4.1).
+    native = native_hosted_tools(request)
+    tools = [
+        native_declaration(native[tool.name])
+        if tool.name in native
+        else {
+            "type": "function",
+            "function": {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": dict(tool.input_schema),
+            },
+        }
+        for tool in request.tools
+    ]
+    if tools:
+        payload["tools"] = tools
+    forced = forced_tool(request)
+    if forced is not None:
+        name, route = forced
+        payload["tool_choice"] = (
+            required_only_tool(tools) if route is not None else {"type": "function", "function": {"name": name}}
+        )
+    effort = sent_effort(request.reasoning_effort or "")
+    if effort is not None:
+        payload["reasoning_effort"] = effort
     return payload
+
+
+def wire_request(
+    request: ModelRequest,
+    messages: tuple[Any, ...],
+    *,
+    gateway: bool,
+    loaded_images: Mapping[str, tuple[str, str]] | None = None,
+) -> WireRequest:
+    """The Chat Completions request for already prepared ``messages``, as the adapter sends it."""
+
+    payload = build_chat_payload(request, messages, loaded_images=loaded_images)
+    headers = auth_headers(request.endpoint, provider="openai", gateway=gateway)
+    headers.setdefault("content-type", "application/json")
+    headers.update(hosted_pin(request, messages))
+    return WireRequest(join_endpoint_url(request.endpoint.base_url, "/chat/completions"), headers, payload)
 
 
 def _message_to_chat(
@@ -851,11 +912,12 @@ def _signature_details(signature: str) -> Any:
     return value if isinstance(value, (list, dict)) else None
 
 
-def _openai_effort(value: str) -> str:
-    # Pi preserves extended tiers when the resolved model advertises them;
-    # the loop has already filtered ``reasoning_effort`` through
-    # ModelCapabilities.reasoning_efforts.
-    return value.lower()
+def sent_effort(effort: str) -> str | None:
+    """The token a Chat Completions request carries at ``reasoning_effort``: the effort as given, lower-cased, since the
+    loop sends only an effort the hop declares; None when it is off."""
+
+    value = effort.lower()
+    return None if not value or value in {"off", "disabled"} else value
 
 
 def _uses_completion_tokens(model: str, effort: str | None) -> bool:

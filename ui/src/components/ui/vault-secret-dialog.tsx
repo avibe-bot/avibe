@@ -23,7 +23,7 @@ export const VaultSecretDialog: React.FC<{
   name?: string;
   /** A pending provision request; spec / default protection / id are derived from it. */
   request?: VaultRequest | null;
-  /** An existing secret to edit (value-free metadata); mutually exclusive with create/provide. */
+  /** An existing secret to edit; mutually exclusive with create/provide. */
   editSecret?: VaultSecret | null;
   /** Start on the Protected tier even when a provision request defaults to Standard: a browser
    *  handoff carries the user's choice of Protected. It can only raise the tier, never lower it. */

@@ -258,6 +258,7 @@ async def test_failover_strips_opaque_history_only_when_origin_changes(tmp_path,
                 f'{hop["base_url"]}/{PROTOCOL_ENDPOINTS[protocol]}',
                 headers={
                     "Authorization": f'Bearer {hop["token"]}',
+                    **hop["request_headers"],
                     "anthropic-beta": "fixture-beta",
                     "User-Agent": "fixture-agent",
                 },
@@ -300,16 +301,17 @@ async def test_opaque_history_uses_launch_snapshot_without_requiring_turn_attrib
     try:
         if origin_state == "unverified":
             base, token = await gateway.endpoint("vibey", process_scope="vibey:unverified")
-            base_url, model = f"{base}/v1", "menu-alias"
+            base_url, model, request_headers = f"{base}/v1", "menu-alias", {}
         else:
             hop = await router.resolve_hop("menu-alias", process_scope="vibey:snapshot", turn_id=turn_id)
             base_url, model, token = hop["base_url"], hop["runtime_model"], hop["token"]
+            request_headers = hop["request_headers"]
         if origin_state == "changed":
             service.store.config.sources[0].vendor = "custom"
         async with aiohttp.ClientSession() as client:
             async with client.post(
                 f"{base_url}/messages",
-                headers={"Authorization": f"Bearer {token}"},
+                headers={"Authorization": f"Bearer {token}", **request_headers},
                 json={"model": model, **signed},
             ) as response:
                 assert response.status == 200
@@ -358,7 +360,7 @@ async def test_opaque_history_origin_survives_recovery_walks(tmp_path, recovered
         async with aiohttp.ClientSession() as client:
             async with client.post(
                 f'{hop["base_url"]}/messages',
-                headers={"Authorization": f'Bearer {hop["token"]}'},
+                headers={"Authorization": f'Bearer {hop["token"]}', **hop["request_headers"]},
                 json={"model": hop["runtime_model"], **signed},
             ) as response:
                 assert response.status == 200
@@ -463,7 +465,7 @@ async def test_sequential_vibey_retry_replaces_route_and_retains_served_provenan
         async with aiohttp.ClientSession() as client:
             async with client.post(
                 f'{initial["base_url"]}/messages',
-                headers={"Authorization": f'Bearer {initial["token"]}'},
+                headers={"Authorization": f'Bearer {initial["token"]}', **initial["request_headers"]},
                 json={"model": initial["runtime_model"], "stream": True, "messages": []},
             ) as response:
                 assert response.status == 200
@@ -472,7 +474,7 @@ async def test_sequential_vibey_retry_replaces_route_and_retains_served_provenan
             assert retry["source_id"] == fallback.id
             async with client.post(
                 f'{retry["base_url"]}/responses',
-                headers={"Authorization": f'Bearer {retry["token"]}'},
+                headers={"Authorization": f'Bearer {retry["token"]}', **retry["request_headers"]},
                 json={"model": retry["runtime_model"], "input": "retry"},
             ) as response:
                 assert response.status == 200
@@ -485,7 +487,7 @@ async def test_sequential_vibey_retry_replaces_route_and_retains_served_provenan
             ))
             async with client.post(
                 f'{initial["base_url"]}/messages',
-                headers={"Authorization": f'Bearer {initial["token"]}'},
+                headers={"Authorization": f'Bearer {initial["token"]}', **initial["request_headers"]},
                 **(
                     {"data": "invalid json"} if late_request == "malformed"
                     else {"json": {"model": initial["runtime_model"], "messages": []}}
@@ -532,7 +534,7 @@ async def test_a_vibey_sessions_turns_share_its_scope_and_each_keeps_its_provena
                 tokens += [preflight["token"], later["token"]]
                 async with client.post(
                     f'{later["base_url"]}/messages',
-                    headers={"Authorization": f'Bearer {later["token"]}'},
+                    headers={"Authorization": f'Bearer {later["token"]}', **later["request_headers"]},
                     json={"model": later["runtime_model"], "messages": []},
                 ) as response:
                     assert response.status == 200
@@ -547,6 +549,64 @@ async def test_a_vibey_sessions_turns_share_its_scope_and_each_keeps_its_provena
     finally:
         await gateway.close()
     assert len(set(tokens)) == 1
+
+@pytest.mark.asyncio
+async def test_a_finished_turns_request_is_never_credited_to_the_next_turn_on_its_route(tmp_path):
+    """MH-VIBEY-009: a Vibey request names its Turn, so a finished Turn's late request reaches no successor.
+
+    The Session's next Turn reuses the route credential. Only the Turn the
+    request names may own it, for a model call and for a proxied hosted call.
+    """
+    primary = _source("src_primary01", "Primary", vendor="anthropic", protocol="anthropic")
+    service = _vibey_service(tmp_path, [primary], handles=[
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=primary.id), (b"{}",)),
+        # The late request's refusal; a request error never changes Source health.
+        LiveInvokeHandle(_outcome(
+            RawOutcomeKind.HTTP_ERROR, status=400, code="invalid_request_error", source_id=primary.id,
+        ), ()),
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=primary.id), (b"{}",)),
+    ])
+    # On, with no executor: a call its live Turn owns answers a failed record; any other call is not bound.
+    service.store.config.hosted_tools["web_search"] = ModelHubHostedToolConfig(enabled=True, executor=None)
+    gateway = ModelHubTurnGateway(service)
+    router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+
+    async def post(client, hop, turn_headers, path, body):
+        async with client.post(
+            f'{hop["base_url"]}/{path}',
+            headers={"Authorization": f'Bearer {hop["token"]}', **turn_headers},
+            json=body,
+        ) as response:
+            return response.status, await response.json(content_type=None)
+
+    search = {"arguments": {"query": "q"}, "executor": None}
+    try:
+        async with aiohttp.ClientSession() as client:
+            finished = await router.resolve_hop("menu-alias", process_scope="vibey:session", turn_id="turn-finished")
+            message = {"model": finished["runtime_model"], "messages": []}
+            assert (await post(client, finished, finished["request_headers"], "messages", message))[0] == 200
+            completion = router.settle_turn("turn-finished", settled_by=SETTLED_BY_TERMINAL_RESULT, ts=NOW.isoformat())
+            if completion:
+                await completion
+            live = await router.resolve_hop("menu-alias", process_scope="vibey:session", turn_id="turn-live")
+            assert live["token"] == finished["token"]
+            stale = finished["request_headers"]
+            assert (await post(client, live, stale, "messages", message))[0] == 400
+            status, answer = await post(client, live, stale, "hosted-tools/web_search", search)
+            assert (status, answer["error"]["code"]) == (409, "executor_not_bound")
+            status, answer = await post(client, live, live["request_headers"], "hosted-tools/web_search", search)
+            assert status == 200 and answer["record"]["status"] == "failed"
+            assert (await post(client, live, live["request_headers"], "messages", message))[0] == 200
+        completion = router.settle_turn("turn-live", settled_by=SETTLED_BY_TERMINAL_RESULT, ts=NOW.isoformat())
+        if completion:
+            await completion
+        record = service.provenance.get("turn-live")
+        assert record is not None and record["outcome"] == "served"
+        assert record["failed_attempts"] == [] and record["terminal_error"] is None
+        _validate("turn-provenance.schema.json", record)
+    finally:
+        await gateway.close()
+
 
 @pytest.mark.asyncio
 async def test_vibey_route_replacement_refuses_overlap_without_poisoning_current_request(tmp_path):
@@ -574,7 +634,7 @@ async def test_vibey_route_replacement_refuses_overlap_without_poisoning_current
         async with aiohttp.ClientSession() as client:
             pending = asyncio.create_task(client.post(
                 f'{first["base_url"]}/messages',
-                headers={"Authorization": f'Bearer {first["token"]}'},
+                headers={"Authorization": f'Bearer {first["token"]}', **first["request_headers"]},
                 json={"model": first["runtime_model"], "messages": []},
             ))
             try:
@@ -1128,7 +1188,7 @@ async def test_failover_origin_is_available_before_body_and_matches_served_attem
         async with aiohttp.ClientSession() as client:
             async with client.post(
                 f'{hop["base_url"]}/{PROTOCOL_ENDPOINTS[protocol]}',
-                headers={"Authorization": f'Bearer {hop["token"]}'},
+                headers={"Authorization": f'Bearer {hop["token"]}', **hop["request_headers"]},
                 json={"model": hop["runtime_model"], "stream": stream, "messages": []},
             ) as response:
                 assert response.status == 200, await response.text() if response.status != 200 else ""
@@ -1268,7 +1328,9 @@ async def test_terminal_response_origin_follows_its_carrier(
         if backend == "vibey":
             protocol = launch.protocol
         headers = {"Authorization": f"Bearer {launch.gateway_token}"}
-        if launch.gateway_request_metadata:
+        if backend == "vibey":
+            headers.update(launch.gateway_request_metadata)
+        elif launch.gateway_request_metadata:
             headers["x-codex-turn-metadata"] = json.dumps(launch.gateway_request_metadata)
         async with aiohttp.ClientSession() as client:
             async with client.post(
@@ -1353,7 +1415,7 @@ async def test_origin_header_limit_is_checked_before_each_vibey_hop(tmp_path, mo
         async with aiohttp.ClientSession() as client:
             async with client.post(
                 f'{hop["base_url"]}/{PROTOCOL_ENDPOINTS[hop["protocol"]]}',
-                headers={"Authorization": f'Bearer {hop["token"]}'},
+                headers={"Authorization": f'Bearer {hop["token"]}', **hop["request_headers"]},
                 json={"model": hop["runtime_model"], "stream": False, "messages": []},
             ) as response:
                 if allowed:
@@ -1413,7 +1475,7 @@ async def test_slow_anthropic_resolution_waits_to_publish_origin_and_keeps_sourc
         hop = await router.resolve_hop("menu-alias", process_scope="vibey:test", turn_id="turn-slow")
         async with aiohttp.ClientSession() as client:
             task = asyncio.create_task(client.post(
-                f'{hop["base_url"]}/messages', headers={"x-api-key": hop["token"]},
+                f'{hop["base_url"]}/messages', headers={"x-api-key": hop["token"], **hop["request_headers"]},
                 json={"model": hop["runtime_model"], "stream": True, "messages": []},
             ))
             await asyncio.wait_for(entered.wait(), 2)
@@ -1479,7 +1541,7 @@ async def test_concurrent_responses_keep_their_own_origin(tmp_path):
             async def read(hop):
                 async with client.post(
                     f'{hop["base_url"]}/{PROTOCOL_ENDPOINTS[hop["protocol"]]}',
-                    headers={"Authorization": f'Bearer {hop["token"]}'},
+                    headers={"Authorization": f'Bearer {hop["token"]}', **hop["request_headers"]},
                     json={"model": hop["runtime_model"], "stream": True, "messages": []},
                 ) as response:
                     assert response.status == 200
@@ -1505,3 +1567,58 @@ async def test_concurrent_responses_keep_their_own_origin(tmp_path):
             pending.cancel()
             await asyncio.gather(pending, return_exceptions=True)
         await gateway.close()
+
+
+
+def test_a_released_vibey_row_loads_without_its_client_preset(tmp_path, monkeypatch):
+    """MH-HOSTED-006 (#2539): 3.2.0 saved Vibey rows with Codex's ``ultra``; every read drops it, once, at load."""
+    from config.v2_config import V2Config
+    from core.services.settings import default_config
+    from vibe import api
+
+    released = json.loads(
+        (Path(__file__).parent / "fixtures/model_hub/released_3_2_0_vibey_client_preset.json").read_text(encoding="utf-8")
+    )
+    clean = ["low", "medium", "high", "xhigh", "max"]
+
+    config = ModelHubConfig.from_payload(copy.deepcopy(released), repairing=True)
+    assert config.agents["vibey"].models[0].reasoning_efforts == clean
+    written = config.to_payload()
+    assert written["agents"]["vibey"]["models"][0]["reasoning_efforts"] == clean
+    # Only the preset changes: Sources, other Agents and the rest of the row are as 3.2.0 wrote them.
+    expected = copy.deepcopy(released)
+    expected["agents"]["vibey"]["models"][0]["reasoning_efforts"] = clean
+    assert written == expected
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["model_hub"] = copy.deepcopy(released)
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    loaded = V2Config.load(config_path=config_path)
+    assert not loaded.load_warnings
+    assert loaded.model_hub.agents["vibey"].models[0].reasoning_efforts == clean
+
+
+def test_loading_and_cloning_model_hub_config_reads_no_catalog_file(monkeypatch):
+    """MH-HOSTED-006: config load runs on the controller loop (service clones), so the preset index costs no I/O."""
+    from vibe.backend_model_catalog import bundled_client_presets_once, get_bundled_catalog_path
+
+    released = json.loads(
+        (Path(__file__).parent / "fixtures/model_hub/released_3_2_0_vibey_client_preset.json").read_text(encoding="utf-8")
+    )
+    bundled_client_presets_once()
+    bundled = get_bundled_catalog_path()
+    reads = []
+    original = Path.read_text
+
+    def counted(self, *args, **kwargs):
+        if self == bundled:
+            reads.append(self)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counted)
+    for _ in range(5):
+        config = ModelHubConfig.from_payload(copy.deepcopy(released), repairing=True)
+        ModelHubConfig.from_payload(config.to_payload())
+    assert reads == []

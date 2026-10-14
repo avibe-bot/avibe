@@ -542,6 +542,32 @@ def prepare_codex_hub_catalog(
     )
 
 
+#: Spellings that name the same model: a snapshot date or version tag, and a context-window tag.
+_MODEL_SNAPSHOT_SUFFIX: Final = re.compile(r"(?:-\d{8}|-\d{4}-\d{2}-\d{2}|@[^/]*)$")
+_MODEL_CONTEXT_TAG: Final = re.compile(r"\[[^\]]*\]$")
+
+
+def catalog_model_id(model_id: str) -> str:
+    """Fold the spellings agents send onto the one catalogs list.
+
+    ``anthropic/claude-opus-5[1m]`` and ``claude-opus-4-5-20251101`` become ``claude-opus-5`` and ``claude-opus-4-5``:
+    a provider prefix, the context-window tag and the snapshot date name the same model, its levels and its price.
+    """
+
+    text = model_id.strip().lower()
+    text = text.rsplit("/", 1)[-1]
+    text = _MODEL_CONTEXT_TAG.sub("", text)
+    text = _MODEL_SNAPSHOT_SUFFIX.sub("", text)
+    return text.strip()
+
+
+def catalog_row_value(index: Mapping[str, tuple[str, ...]], model_id: str) -> tuple[str, ...] | None:
+    """A per-model catalog list for ``model_id``: its own row's, else the row's its spelling folds to."""
+
+    value = index.get(model_id)
+    return value if value is not None else index.get(catalog_model_id(model_id))
+
+
 def load_bundled_catalog(path: Path | None = None) -> dict[str, Any]:
     return _read_catalog(path or get_bundled_catalog_path()) or {}
 
@@ -562,9 +588,11 @@ def bundled_catalog_client_presets_by_model() -> Mapping[str, tuple[str, ...]]:
     return _bundled_catalog_lists_by_model("client_presets")
 
 
-def _bundled_catalog_lists_by_model(key: str) -> Mapping[str, tuple[str, ...]]:
+def _bundled_catalog_lists_by_model(
+    key: str, catalog: Mapping[str, Any] | None = None
+) -> Mapping[str, tuple[str, ...]]:
     values_by_model: dict[str, tuple[str, ...]] = {}
-    backends = load_bundled_catalog().get("backends")
+    backends = (load_bundled_catalog() if catalog is None else catalog).get("backends")
     if not isinstance(backends, dict):
         return MappingProxyType(values_by_model)
     for backend in backends.values():
@@ -591,6 +619,54 @@ def bundled_catalog_reasoning_efforts_for_model(
     """Return one bundled catalog row's exact declared effort list."""
 
     return bundled_catalog_reasoning_efforts_by_model().get(model_id)
+
+
+@functools.lru_cache(maxsize=4)
+def _bundled_client_presets(path: str) -> Mapping[str, tuple[str, ...]]:
+    catalog = _read_catalog(Path(path))
+    # An unreadable bundle has no presets, like a model without a row.
+    return _bundled_catalog_lists_by_model("client_presets", catalog or {})
+
+
+def bundled_client_presets_once() -> Mapping[str, tuple[str, ...]]:
+    """The bundled client-preset index, read once per process.
+
+    The bundled file never changes while a process runs, and config loading and
+    cloning (on the controller loop) consult this index, so it must cost no I/O
+    after the first read. Keyed by path, so a different bundle is its own entry.
+    """
+
+    return _bundled_client_presets(str(get_bundled_catalog_path()))
+
+
+def without_client_presets(model_ids: Sequence[str], efforts: Sequence[str]) -> list[str]:
+    """Efforts as a wire client may send them: without any listed model's client presets.
+
+    Vibey is not the client a preset belongs to, so a preset is never one of its
+    tiers (#2539).
+    """
+
+    presets = bundled_client_presets_once()
+    dropped = {preset for model_id in model_ids for preset in catalog_row_value(presets, model_id) or ()}
+    return [effort for effort in efforts if effort not in dropped]
+
+
+def bundled_catalog_wire_efforts_by_model() -> Mapping[str, tuple[str, ...]]:
+    """Index bundled rows' efforts as a Source's wire tiers: each row's list minus its ``client_presets``.
+
+    One catalog read builds both, so a discovery batch still loads the bundled
+    file once (#2539).
+    """
+
+    catalog = load_bundled_catalog()
+    efforts = _bundled_catalog_lists_by_model("reasoning_efforts", catalog)
+    presets = _bundled_catalog_lists_by_model("client_presets", catalog)
+    return MappingProxyType(
+        {
+            model_id: tuple(effort for effort in values if effort not in presets.get(model_id, ()))
+            for model_id, values in efforts.items()
+        }
+    )
 
 
 # The ``providers`` section (model-hub-capability-model.md §4,
@@ -638,6 +714,12 @@ class HostedToolSpec:
         """A fresh copy of the wire declaration, safe to place in a request body."""
 
         return json.loads(self.declaration_json)
+
+    @property
+    def declaration_type(self) -> str:
+        """The declaration's tool ``type``, as the provider names it on the wire."""
+
+        return self.declaration["type"]
 
 
 @dataclass(frozen=True)

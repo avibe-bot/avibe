@@ -2409,6 +2409,8 @@ def test_backend_catalog_add_edit_and_runtime_refresh(
         "reasoning_efforts": ["low", "high"],
         "locked": False,
         "routeable": True,
+        # Server-derived like ``locked``: a client may send back the row it read, and the read states it again.
+        "effort_menu": {"omitted": [], "not_on": {}},
     }
     if backend == "opencode":
         added["native_protocol"] = "openai_responses"
@@ -2914,6 +2916,7 @@ def test_backend_catalog_add_validates_supplier_echo_and_stores_draft_literally(
         "reasoning_efforts": [],
         "locked": False,
         "routeable": True,
+        "effort_menu": {"omitted": [], "not_on": {}},
     }
     before = store.config.to_payload()
 
@@ -6131,7 +6134,7 @@ def test_create_source_rejects_omitted_protocol_for_an_uncataloged_vendor(tmp_pa
         (
             "openai_responses",
             DiscoveredModel(id="gpt-5.6-sol"),
-            ["low", "medium", "high", "xhigh", "max", "ultra"],
+            ["low", "medium", "high", "xhigh", "max"],
             "catalog",
         ),
     ),
@@ -6237,7 +6240,7 @@ def test_source_create_requires_explicit_consent_for_proven_inventory_failure(
         return {"catalog-manual": ("low", "ultra")}
 
     monkeypatch.setattr(
-        "core.handlers.model_hub.service.bundled_catalog_reasoning_efforts_by_model",
+        "core.handlers.model_hub.service.bundled_catalog_wire_efforts_by_model",
         load_catalog_index,
     )
     store = MemoryStore()
@@ -7036,14 +7039,7 @@ def test_add_model_upsert_cannot_bypass_catalog_tier_lock(tmp_path):
         )
     )["models"][0]
 
-    assert created["reasoning_efforts"] == [
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-        "max",
-        "ultra",
-    ]
+    assert created["reasoning_efforts"] == ["low", "medium", "high", "xhigh", "max"]
     assert created["reasoning_efforts_source"] == "catalog"
     with pytest.raises(ModelHubError) as error:
         asyncio.run(
@@ -7064,7 +7060,7 @@ def test_add_model_upsert_cannot_bypass_catalog_tier_lock(tmp_path):
     (
         (
             DiscoveredModel(id="gpt-5.6-sol"),
-            ["low", "medium", "high", "xhigh", "max", "ultra"],
+            ["low", "medium", "high", "xhigh", "max"],
             "catalog",
             "catalog_tiers",
         ),
@@ -7073,7 +7069,8 @@ def test_add_model_upsert_cannot_bypass_catalog_tier_lock(tmp_path):
                 id="gpt-5.6-sol",
                 supported_parameters=("reasoning_effort",),
             ),
-            ["minimal", "low", "medium", "high", "xhigh"],
+            # The protocol defaults, bounded by the model's catalog row.
+            ["low", "medium", "high", "xhigh"],
             "upstream",
             "upstream_tiers",
         ),
@@ -9003,14 +9000,7 @@ def test_completed_hub_oauth_persists_only_a_response_proven_protocol(tmp_path):
     assert result["source"]["protocol"] == "openai_chat"
     assert store.config.sources[0].protocol == "openai_chat"
     assert store.config.sources[0].credential_ref == "cred_oauth_proven"
-    assert store.config.sources[0].models[0].reasoning_efforts == [
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-        "max",
-        "ultra",
-    ]
+    assert store.config.sources[0].models[0].reasoning_efforts == ["low", "medium", "high", "xhigh", "max"]
     assert (
         store.config.sources[0].models[0].reasoning_efforts_source
         == "catalog"

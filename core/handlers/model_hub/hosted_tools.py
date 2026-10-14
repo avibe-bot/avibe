@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from functools import lru_cache
 from importlib import resources
 from pathlib import Path
@@ -26,7 +26,7 @@ from typing import Any, Callable, Mapping, Optional
 from config.v2_config import MODEL_HUB_HOSTED_TOOLS, ModelHubConfig, ModelHubHostedToolConfig, ModelHubSourceConfig
 from vibe.backend_model_catalog import HostedToolSpec
 
-from .capability_evidence import HOSTED_TOOL_ASPECTS, CapabilityEvidenceStore, EvidenceFeature
+from .capability_evidence import HOSTED_TOOL_ASPECTS, UNKNOWN_ENGINE_STAMP, CapabilityEvidenceStore, EvidenceFeature
 
 # The request shape a hosted-tool probe sends. Changing the probe or the native
 # request it mirrors bumps this, which makes earlier probe evidence wire-stale.
@@ -70,10 +70,15 @@ def engine_stamp() -> str:
 
     Engine upgrades ship as manifest changes, and a patched rebuild of the same
     upstream version gets a new asset release, so this is what a wire change
-    looks like from here.
+    looks like from here. Read once, when Model Hub's service is built; a
+    manifest that cannot be read is the fixed unknown engine, whose evidence
+    never matches a real release and never raises on a request.
     """
 
-    return _manifest_engine_stamp(os.environ.get("VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH") or None)
+    try:
+        return _manifest_engine_stamp(os.environ.get("VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH") or None)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return UNKNOWN_ENGINE_STAMP
 
 
 @dataclass(frozen=True)
@@ -129,22 +134,39 @@ def resolve_hosted_tools(
     engine: str,
     now: datetime,
     shape: int = HOSTED_PROBE_SHAPE,
+    frozen: Mapping[str, Optional[tuple[str, str]]] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """``HopResolution.hosted_tools`` for a Vibey hop served by ``source``/``model_id``."""
+    """``HopResolution.hosted_tools`` for a Vibey hop served by ``source``/``model_id``.
+
+    ``frozen`` is the turn's binding from its first resolution: which tools are
+    on and the executor bound to each. A later resolution in the same turn
+    keeps it, since settings apply from the next turn, and recomputes only what
+    belongs to the hop (mode, declaration, include, replay).
+    """
 
     context = _Context(evidence, spec_for, engine, shape, now)
     resolved: dict[str, dict[str, Any]] = {}
     for tool in MODEL_HUB_HOSTED_TOOLS:
         toggle = config.hosted_tools.get(tool)
-        if toggle is None or not toggle.enabled:
+        if frozen is not None:
+            if tool not in frozen:
+                continue
+        elif toggle is None or not toggle.enabled:
             continue
         spec = _runnable_spec(context, source, model_id, tool)
         entry: dict[str, Any] = {"mode": "native" if spec is not None else "proxy"}
         if spec is not None:
             entry["declaration"] = spec.declaration
             entry["include"] = list(spec.include)
-        chosen = (toggle.executor.source_id, toggle.executor.model_id) if toggle.executor is not None else None
-        entry["executor"] = _executor(context, config, tool, chosen)
+        if frozen is not None:
+            bound = frozen[tool]
+            entry["executor"] = {"source_id": bound[0], "model_id": bound[1]} if bound is not None else None
+        else:
+            chosen = (
+                (toggle.executor.source_id, toggle.executor.model_id)
+                if toggle is not None and toggle.executor is not None else None
+            )
+            entry["executor"] = _executor(context, config, tool, chosen)
         entry["replay"] = (
             "replay" in HOSTED_TOOL_ASPECTS[tool]
             and credential_eligible(source)
@@ -155,6 +177,10 @@ def resolve_hosted_tools(
     return resolved
 
 
+def _utc_text(moment: Optional[datetime]) -> Optional[str]:
+    return moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z") if moment is not None else None
+
+
 def _evidence_payload(view) -> dict[str, Any]:
     record = view.record
     return {
@@ -163,6 +189,21 @@ def _evidence_payload(view) -> dict[str, Any]:
         "basis": record.basis if record is not None else None,
         "observed_at": record.payload()["observed_at"] if record is not None else None,
         "detail": record.detail if record is not None else None,
+        "changes_at": _utc_text(view.changes_at),
+    }
+
+
+def _price_payload(price: Any) -> dict[str, Any] | None:
+    """The overlay's list price for the cost hint; None when no list price is known, never zero."""
+
+    if price is None:
+        return None
+    return {
+        "unit": price.unit,
+        "usd_per_1k": price.usd_per_1k,
+        "extra": [{"unit": part.unit, "usd_per_1k": part.usd_per_1k} for part in price.extra],
+        "as_of": price.as_of.isoformat(),
+        "url": price.url,
     }
 
 
@@ -203,7 +244,8 @@ def hosted_tools_status(
         candidates = []
         for source in _candidate_sources(config):
             for model in source.models:
-                if spec_for(source.vendor, source.protocol, model.id, tool) is None:
+                spec = spec_for(source.vendor, source.protocol, model.id, tool)
+                if spec is None:
                     continue
                 views = {
                     aspect: evidence.view(
@@ -217,13 +259,18 @@ def hosted_tools_status(
                         "model_id": model.id,
                         "call": _evidence_payload(views["call"]),
                         "replay": _evidence_payload(views["replay"]) if "replay" in views else None,
+                        "billing": source.billing,
+                        "price": _price_payload(spec.price),
                     }
                 )
+        chosen = (toggle.executor.source_id, toggle.executor.model_id) if toggle and toggle.executor else None
         tools.append(
             {
                 "name": tool,
                 "enabled": bool(toggle and toggle.enabled),
                 "executor": toggle.executor.to_payload() if toggle and toggle.executor else None,
+                # What a turn would bind now, by the same rule hop resolution uses.
+                "bound": _executor(_Context(evidence, spec_for, engine, shape, now), config, tool, chosen),
                 "candidates": candidates,
             }
         )

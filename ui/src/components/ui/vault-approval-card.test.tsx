@@ -152,6 +152,43 @@ const approveWhenReady = async () => {
 // placeholder, and a refresh during the release supersedes the contexts it is releasing. The
 // VaultsPage reveal tests cover only the reveal context, not these binding contexts.
 describe('VaultApprovalCard protected access approval', () => {
+  // Per-record DEKs must survive secret-level grouping. Single-record approvals do not catch
+  // deduplicating material by its base secret name or omitting standard always-ask field labels.
+  it.each(['protected', 'standard'] as const)('groups %s fields by secret and releases every protected record', async (protection) => {
+    const names = ['LOGIN', 'LOGIN.username', 'LOGIN.totp'];
+    const unlockMaterial = protection === 'protected' ? names.map((name) => ({ name, kind: 'static', envelope })) : [];
+    const request: VaultRequest = {
+      ...protectedAccess, secret_name: 'LOGIN',
+      card: {
+        request_type: 'access', protection, secret_names: ['LOGIN'],
+        protected_secret_names: protection === 'protected' ? ['LOGIN'] : [],
+        grant_options: [{
+          grant_id: 'grant_1', member_snapshot: ['LOGIN'], unlock_material: unlockMaterial,
+          member_fields: [{ name: 'LOGIN', default_field: 'password', fields: ['password', 'username', 'totp'] }],
+        }],
+      },
+    };
+    const batch = issuedFor(300);
+    api.createVaultAgentBindingsBatch.mockResolvedValue({
+      ...batch, items: names.map((name) => ({ ...batch.items[0], name })),
+    });
+    vault.approveProtectedRelease.mockResolvedValue(names.map(() => blindBox));
+    openWindow();
+    render(<I18nextProvider i18n={i18n}><VaultApprovalCard request={request} onResolved={vi.fn()} onCancel={vi.fn()} /></I18nextProvider>);
+    expect(screen.getByText('password · Default')).toBeTruthy();
+    expect(screen.getByText('username')).toBeTruthy();
+    expect(screen.getByText('totp')).toBeTruthy();
+    expect(screen.queryByText('LOGIN.username')).toBeNull();
+    if (protection === 'protected') {
+      await approveWhenReady();
+      await vi.waitFor(() => expect(api.fulfillVaultAccessRequest).toHaveBeenCalledOnce());
+      expect(vault.approveProtectedRelease.mock.calls[0][0].map((item: { material: { name: string } }) => item.material.name)).toEqual(names);
+      expect(api.fulfillVaultAccessRequest.mock.calls[0][1].deks.map((item: { name: string }) => item.name)).toEqual(names);
+    } else {
+      expect(api.createVaultAgentBindingsBatch).not.toHaveBeenCalled();
+    }
+  });
+
   it.each([
     { approving: 'the remembered duration', remembered: 900, pick: null, duration: 900 },
     { approving: 'a duration picked on the card', remembered: 300, pick: /^15 min$/, duration: 900 },
@@ -188,7 +225,21 @@ describe('VaultApprovalCard protected access approval', () => {
     expect(popup.close).toHaveBeenCalledOnce();
   });
 
-  // Contract: the approve button waits until the contexts for the duration it shows and the sandbox
+  it('shows a single custom field label in an access approval', () => {
+    const request: VaultRequest = {
+      ...protectedAccess,
+      card: {
+        request_type: 'access', protection: 'standard', secret_names: ['LOGIN'], protected_secret_names: [],
+        grant_options: [{
+          grant_id: 'grant_1', member_snapshot: ['LOGIN'], unlock_material: [],
+          member_fields: [{ name: 'LOGIN', default_field: 'password', fields: ['password'] }],
+        }],
+      },
+    };
+    render(<I18nextProvider i18n={i18n}><VaultApprovalCard request={request} onResolved={vi.fn()} onCancel={vi.fn()} /></I18nextProvider>);
+    expect(screen.getByText('password · Default')).toBeTruthy();
+  });
+
   // client are ready, so a click never has to wait on either after opening the window. Without the
   // wait (the regression), a click right after the card opens or the duration changes, or on a page
   // whose sandbox client is still building, reaches the daemon or the sandbox only after the window

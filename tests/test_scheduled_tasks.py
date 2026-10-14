@@ -3786,7 +3786,7 @@ def test_restart_recovers_delivery_owned_run_without_unrelated_run_arbitration(
     monkeypatch,
     tmp_path,
 ) -> None:
-    """Only the Delivery FIFO can block recovery; an unlinked Run cannot."""
+    """HFR-004: only the Delivery FIFO can block recovery; an unlinked Run cannot."""
 
     from core.session_turns import (
         SCHEDULED_PROVENANCE_KEY,
@@ -5567,7 +5567,7 @@ def test_legacy_queue_hold_metadata_has_no_sweep_authority(
 def test_legacy_hold_metadata_does_not_change_turn_or_run_ownership(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Only explicit Turn attribution owns running work; legacy flags own nothing."""
+    """HFR-026: only explicit Turn attribution owns running work; legacy flags own nothing."""
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     request_store = TaskExecutionStore()
@@ -5600,6 +5600,10 @@ def test_legacy_hold_metadata_does_not_change_turn_or_run_ownership(
 
     service._sweep_stale_runs()
 
+    # The attributed run outlives its orphan grace because a Turn owns it, and the
+    # legacy hold flag gives the other two rows no owner at all.
+    assert request_store.get_run(primary)["status"] == "running"
+    assert session_turns.owned_agent_run_ids() == {primary}
     assert request_store.get_run(held)["status"] == "queued"
     assert request_store.get_run(unowned)["status"] == "queued"
 
@@ -6031,7 +6035,7 @@ def test_sweep_spares_a_hold_parked_behind_a_live_session_turn(
 def test_canceling_a_delivery_owned_run_retires_its_exact_queue_row(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Run cancellation and exact Delivery retirement share one transaction."""
+    """HFR-028: Run cancellation and exact Delivery retirement share one transaction."""
 
     from storage.background import attach_agent_run_delivery_in_connection
     from storage.models import agent_sessions

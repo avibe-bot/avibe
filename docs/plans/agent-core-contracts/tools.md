@@ -13,6 +13,12 @@ the same response (C-3 [`loop-control.md`](loop-control.md) §2). When it is abs
 is exclusive. `read` and `bash` are concurrent; `write` and `edit` are exclusive. Pi instead runs a response's calls at
 the same time unless a tool opts out, and serializes `write` and `edit` only per file path, which `bash` bypasses.
 
+**Hosted tools** (Avibe, [`../vibey-hosted-tools.md`](../vibey-hosted-tools.md)) are not coding tools. Each enabled
+one (`web_search`, `x_search`) has its canonical spec in `core/agent_core/tools/hosted.py` and leads the Turn's tools.
+On a hop that runs it natively the provider runs the call. Anywhere else the model calls the same-named function, and
+its `execute` asks the gateway's executor bound for the Turn. The result's text is the record as `record_text` renders
+it, and `ToolResult.hosted` carries the record and execution onto `ToolResultMessage.hosted`.
+
 ## 1. Constants
 
 | Name | Value |

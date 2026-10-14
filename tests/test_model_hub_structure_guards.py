@@ -710,9 +710,10 @@ def test_usage_metering_has_one_owner_per_call_population() -> None:
     meter_calls = [
         node for node in ast.walk(service_tree) if _call_name(node) == "_meter_call"
     ]
-    # Explicit Source tests consume their own response rather than forwarding a
-    # Turn to the gateway. They reuse the same metering owner, exactly once.
-    consumers = (invoke, _functions(service_tree)["probe_source"])
+    # Explicit Source tests and proxied hosted-tool calls consume their own
+    # response rather than forwarding a Turn to the gateway. They reuse the same
+    # metering owner, exactly once.
+    consumers = (invoke, _functions(service_tree)["probe_source"], _functions(service_tree)["run_hosted_tool"])
     assert len(meter_calls) == len(consumers)
     assert all(
         sum(call in set(ast.walk(consumer)) for call in meter_calls) == 1
@@ -1234,11 +1235,22 @@ def test_machine_error_field_access_has_one_extractor() -> None:
         if path.name == "migration.py":
             continue  # its ``type`` field is an auth-record kind, not an error code
         tree = _tree(path)
-        # Request history discriminates content blocks, not error envelopes.
-        # Exempt only that function's type reads; code reads and the rest of
-        # request.py remain subject to the extraction-owner guard.
-        history = _functions(tree).get("_plain_history") if path.name == "request.py" else None
-        history_nodes = set(ast.walk(history)) if history is not None else set()
+        # Request history and declared tools discriminate request items, not
+        # error envelopes. Exempt only those functions' type reads; code reads
+        # and the rest of request.py remain subject to the extraction-owner guard.
+        functions = _functions(tree) if path.name == "request.py" else {}
+        history_nodes = {
+            node
+            for name in ("_plain_history", "declared_tool_types", "replays_history_items")
+            if (history := functions.get(name)) is not None
+            for node in ast.walk(history)
+        }
+        if path.name in {"hosted_admission.py", "hosted_executor.py"}:
+            # Hosted admission discriminates request tools and history items, and
+            # the proxy executor response items and stream events, never an error
+            # envelope (executor error codes come from the call's outcome). Their
+            # type reads are exempt too.
+            history_nodes = set(ast.walk(tree))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
                 continue

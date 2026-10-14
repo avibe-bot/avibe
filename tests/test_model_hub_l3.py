@@ -8017,7 +8017,9 @@ def test_auth_setup_executable_scenarios_are_registered() -> None:
         if match:
             scenario_id = match.group(1)
             assert scenario_id in registered, (scenario_id, node.name)
-            assert registered[scenario_id]["test"].endswith("::" + node.name)
+            evidence = registered[scenario_id]["test"]
+            references = evidence if isinstance(evidence, list) else [evidence]
+            assert any(reference.endswith("::" + node.name) for reference in references)
 
 
 @pytest.mark.parametrize("protocol", _MODEL_FREE_OBSERVATION_PROTOCOLS)

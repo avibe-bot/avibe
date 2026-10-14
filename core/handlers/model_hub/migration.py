@@ -51,7 +51,7 @@ from core.handlers.model_hub.migration_journal import (
 from core.handlers.model_hub.migration_persisted import PersistedInventory
 from vibe.backend_model_catalog import (
     backend_model_entries,
-    bundled_catalog_reasoning_efforts_by_model,
+    bundled_catalog_wire_efforts_by_model,
     load_bundled_catalog,
 )
 from vibe.codex_config import (
@@ -1742,7 +1742,7 @@ async def _prepare_takeover(
     provisioned: list[dict[str, str]] = []
     source_ids: list[str] = list(retained_source_ids or ())
     item_sources: dict[str, dict[str, str]] = {}
-    catalog = bundled_catalog_reasoning_efforts_by_model()
+    catalog = bundled_catalog_wire_efforts_by_model()
     handoff_attempted = False
     try:
         # A completed receipt can authorize cleanup of the exact old material

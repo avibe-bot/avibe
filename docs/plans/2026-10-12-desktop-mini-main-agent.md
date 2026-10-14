@@ -77,9 +77,15 @@ the main agent; there is no Follow up on cards.
 - **No backing panel on the desktop (owner decision, 2026-10-12).** The
   expanded list sits in a transparent wrapper with 6px padding (kept so the
   widths in §3.1 hold). Cards float directly over the desktop, separated by
-  their own border and shadow. The gaps between cards show the wallpaper and
+  their own border. The gaps between cards show the wallpaper and
   pass clicks through (§9.2). The prototype keeps a page-coloured plate only
   to hide the web page's own text behind it (§12).
+- **No shadows on any mini surface (owner decision, 2026-10-14).** Cards, the
+  switcher, the dock, the marquee and the input bubble separate from the
+  desktop by their border alone. A shadow overflows its box, and the scroll
+  box, the speech slot and the stack/list swap all clip it, so it showed as a
+  grey rectangle behind the switcher and the input and flashed as a square
+  during the swap.
 - **Scroll box:** **fixed height** of about 3.5 cards (prototype **292px**),
   horizontal padding 12px. The half card at the bottom signals "more".
   - Hidden scrollbar: `scrollbar-width: none`, plus `::-webkit-scrollbar
@@ -118,7 +124,7 @@ the main agent; there is no Follow up on cards.
 
 | Part | Spec |
 |---|---|
-| Container | Radius 28px; padding 20px × 14px; background `#2a2a2e`; border 1px `white / 8%`; shadow `0 18px 50px rgba(0,0,0,.45)`. |
+| Container | Radius 28px; padding 20px × 14px; background `#2a2a2e`; border 1px `white / 8%`; no shadow (§3.2). |
 | Title | 15px, semibold, tight tracking, white, one line, ellipsis. The full text is the tooltip. |
 | Subtitle | 13px, `white / 45%`, 2px below the title, one line, ellipsis, with the full text as the tooltip. While running it has a 6px pulsing dot (`emerald-400`) before the text. |
 | × (dismiss) | Expanded list only, never on the main agent card. 20px circle at the top-left corner, offset −6px/−6px. Background `#3a3a3e`, glyph 11px `white / 70%`; on hover `#4a4a50` with a white glyph. Sits above the card content. |
@@ -131,8 +137,11 @@ the main agent; there is no Follow up on cards.
 
 - **Position:** always the first card, collapsed or expanded. It cannot be
   dismissed and has no stop button in this version.
-- **Eyebrow:** "MAIN AGENT" above the title, 2px gap.
-  - 10px, semibold, uppercase, tracking 0.14em.
+- **Eyebrow:** the agent's name above the title, 2px gap: "Vibey" / "歪比"
+  as written, no forced uppercase (owner decision, 2026-10-14). The fallback
+  title and the input placeholder ("Message Vibey…" / "和歪比说…") name
+  Vibey the same way; "main agent" is never shown to the user.
+  - 11px, semibold, normal case and tracking.
   - Light green at 80%: map to the theme's mint token; the prototype used
     `emerald-300`.
   - It names the card type, not the speaker.
@@ -209,7 +218,7 @@ the main agent; there is no Follow up on cards.
     transform 260ms settle) and ignores the pointer. It comes back when
     dictation ends.
 - **Dock:** a pill under Vibey's feet that overlaps the image by 12px.
-  - Background `#2a2a2e`, padding 4px, shadow `0 8px 24px rgba(0,0,0,.45)`.
+  - Background `#2a2a2e`, padding 4px, border 1px `white / 8%`, no shadow.
   - Two 32px buttons with a 4px gap and a 1px × 16px `white / 10%` hairline
     between them:
     - **mic** starts or stops dictation; it turns solid rose with a stop
@@ -219,6 +228,12 @@ the main agent; there is no Follow up on cards.
   - Hidden by default. It fades and rises in (opacity 180ms ease, transform
     220ms settle, from `translateY(-6px) scale(.92)`) on hover over Vibey or
     the dock, or on keyboard focus.
+  - Hover comes from the shell: on macOS a webview gets no hover while its
+    window is not key, and the pet never takes focus by itself. The page marks
+    the rects of Vibey and the dock `hover: true` in `pet_hit_regions`; the
+    cursor poller (§9.2) sends `avibe:pet-hover { hover }` when the cursor
+    enters or leaves them, and the page shows the dock while it is set. CSS
+    `:hover` still applies where the webview does see hover.
   - It stays visible while dictating or typing, and is always visible on
     devices without hover (`@media (hover: none)`).
 
@@ -235,14 +250,14 @@ the main agent; there is no Follow up on cards.
   - the content fades and rises (opacity 180ms; `translateY(8px)
     scale(.97)` → rest over 300ms settle; 60ms delay on open);
   - closing reverses both;
-  - the slot clips while it moves, then unclips once open so shadows show;
+  - the slot clips while it moves, then unclips once open;
   - a closed slot stays mounted but `inert`.
 
 ### 5.3 Marquee (live transcript)
 
 - **Look:** one line, the same width as a card.
   - Pill: background `#2a2a2e`, padding 8px vertical, 12px left, 16px right,
-    shadow `0 12px 32px rgba(0,0,0,.45)`.
+    no shadow.
   - A 10px pulsing rose dot on the left, then 13px white text.
 - **Text:** the realtime preview from the existing pipeline
   (`VoiceRealtimeSession` preview text + stash).
@@ -261,9 +276,9 @@ the main agent; there is no Follow up on cards.
 - **Opens** after dictation, prefilled; or from the keyboard button, empty.
   Either way it gets focus.
 - **Look:** the same width as a card, radius 22px, background `#2a2a2e`,
-  border `white / 10%`, padding 6px (14px left), shadow as the marquee.
+  border `white / 10%`, padding 6px (14px left), no shadow.
 - **Textarea:** one line by default, auto-grows to 4 lines (96px), 13px,
-  placeholder "和 main agent 说…".
+  placeholder "和歪比说…".
 - **Buttons, right side:**
   - a 32px mic (`white / 10%`) that dictates more and appends;
   - a 32px send button: white with a black up-arrow SVG; `white / 10%` and
@@ -502,6 +517,12 @@ Until the `main` type exists, the mini's main agent is a Vibey conversation
   `409 no_chat_project`, and the mini asks the user to create a Project.
 - **Binding.** The mini binds that session whenever nothing is bound. An
   existing binding is kept; the switcher offers "和歪比对话" to move to it.
+- **Switcher navigation.** The switcher opens only from "切换会话", or by
+  itself when nothing is bound. While a session is bound it has a "返回"
+  control that goes back to the cards, and collapsing the panel leaves it. A
+  bound session with nothing to show (no exchange, no sub-tasks) expands to the
+  "切换会话" control alone, never to the switcher, so picking such a session
+  does not reopen the list.
   A session the mini already bound and then cleared as invalid is not
   re-bound automatically, so a bad answer cannot loop.
 - **A turn Vibey cannot run is shown.** When the latest exchange ended in a
@@ -563,7 +584,7 @@ Until the `main` type exists, the mini's main agent is a Vibey conversation
       the end; recomputed on resize.
 - [ ] Cards, marquee and bubble share one width. A long title truncates and
       never widens a card.
-- [ ] Main card: "MAIN AGENT" eyebrow; mint border; `#34343b` background;
+- [ ] Main card: "Vibey" / "歪比" eyebrow; mint border; `#34343b` background;
       16px after it; no ×; no stop; no avatar.
 - [ ] Clicking the main card opens and closes the detail inside the fixed
       box (280ms). The detail has the latest exchange, mark-read, More in

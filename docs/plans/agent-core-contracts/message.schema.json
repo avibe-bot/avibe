@@ -430,13 +430,16 @@
             "record"
           ],
           "additionalProperties": false,
-          "description": "Set only on the result of a proxied hosted call. `execution` is present exactly when an executor ran; without it the record failed.",
+          "description": "Set only on the result of a proxied hosted call. `execution` is present exactly when an executor ran; without it the record failed. `action` is what the executor reports it did, such as a generated image's rendered prompt and resolved size and quality.",
           "properties": {
             "record": {
               "$ref": "#/definitions/HostedRecord"
             },
             "execution": {
               "$ref": "#/definitions/ProxyExecution"
+            },
+            "action": {
+              "$ref": "#/definitions/HostedAction"
             }
           },
           "if": {
@@ -846,7 +849,7 @@
         "mime"
       ],
       "additionalProperties": false,
-      "description": "A generated image saved as a local file. Image bytes are never stored in a message.",
+      "description": "A generated image saved as a local file. Image bytes are never stored in a message; `bytes` is the file's size.",
       "properties": {
         "path": {
           "type": "string",
@@ -865,6 +868,10 @@
           "minimum": 1
         },
         "height": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "bytes": {
           "type": "integer",
           "minimum": 1
         }
@@ -891,7 +898,12 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 400,
-          "description": "Bounded and redacted."
+          "description": "Bounded and redacted. Model-facing English: the provider's own reason, or one Avibe wrote."
+        },
+        "error_code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "description": "The stable code of a reason Avibe wrote (`HOSTED_ERROR_CODES`), by which a display localizes it; absent for a provider's own reason. A reader accepts any snake_case code."
         },
         "sources": {
           "type": "array",
@@ -906,6 +918,11 @@
             "$ref": "#/definitions/HostedImage"
           }
         }
+      },
+      "dependencies": {
+        "error_code": [
+          "error"
+        ]
       },
       "if": {
         "properties": {
