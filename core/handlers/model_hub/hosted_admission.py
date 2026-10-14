@@ -20,15 +20,14 @@ change (the turn's pin identity claim, made atomically at final admission).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from functools import lru_cache
 from typing import Any, Callable, Final, Mapping, Optional
 
 from config.v2_config import ModelHubSourceConfig
 from vibe.backend_model_catalog import HostedToolSpec, bundled_provider_overlay
 
-from .capability_evidence import HOSTED_TOOL_ASPECTS, CapabilityEvidenceStore, EvidenceFeature
-from .hosted_tools import runs_on
+from .capability_evidence import HOSTED_TOOL_ASPECTS
+from .hosted_tools import HostedEvidence, hosted_tool_facts
 
 PIN_SOURCE_HEADER: Final = "x-avibe-pin-source"
 # The served-hop model a continuation was rendered for; without it a pin is the launch's primary hop.
@@ -210,35 +209,29 @@ def admits(
     source: ModelHubSourceConfig,
     model_id: str,
     spec_for: SpecLookup,
-    evidence: CapabilityEvidenceStore,
-    engine: str,
-    shape: int,
-    now: datetime,
+    evidence: HostedEvidence,
 ) -> bool:
-    """Whether this hop runs every piece of hosted content and has current positive evidence for it.
+    """Whether this hop runs every piece of hosted content, by the hop's own facts (``hosted_tool_facts``).
 
-    Where a tool may run is ``runs_on``, the rule hop resolution uses for
-    native mode, so the two agree by construction; a declaration must also
-    carry the type the overlay declares there. Evidence is read from memory.
+    Admission asks the one function that states a hop's facts, so the two agree
+    by construction: a declaration needs ``native`` assumed and the type the
+    overlay declares there, and a replayed item needs ``replay`` assumed, which
+    a current ``call`` refusal also withdraws. Evidence is read from memory, and
+    only refusals count: a tool the priors offer is assumed until a real request
+    refuses it.
     """
 
     if not content:
         return True
 
-    def offered(tool: str) -> HostedToolSpec | None:
-        return runs_on(source, model_id, tool, spec_for=spec_for)
-
-    def verified(tool: str, aspect: str) -> bool:
-        if aspect not in HOSTED_TOOL_ASPECTS.get(tool, ()):
+    def facts(tool: str):
+        if tool not in HOSTED_TOOL_ASPECTS:
             # A generated image is never replayed verbatim, so nothing can admit it.
-            return False
-        view = evidence.view(
-            source, model_id, EvidenceFeature.hosted(tool, aspect), engine=engine, shape=shape, now=now,
-        )
-        return view.status == "verified"
+            return None
+        return hosted_tool_facts(source, model_id, tool, evidence=evidence, spec_for=spec_for)
 
     for tool, kind in content.calls:
-        spec = offered(tool)
-        if spec is None or spec.declaration["type"] != kind or not verified(tool, "call"):
+        stated = facts(tool)
+        if stated is None or stated.native != "assumed" or (stated.declaration or {}).get("type") != kind:
             return False
-    return all(offered(tool) is not None and verified(tool, "replay") for tool in content.replays)
+    return all((stated := facts(tool)) is not None and stated.replay == "assumed" for tool in content.replays)

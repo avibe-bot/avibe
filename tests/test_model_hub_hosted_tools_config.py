@@ -1,21 +1,27 @@
-"""V2 ``model_hub.hosted_tools`` (``vibey-hosted-tools.md`` §3.3, §12 item 8).
+"""V2 ``model_hub.hosted_tools`` (``vibey-hosted-tools.md`` §3.3, §12).
 
-Hosted tools are an optional feature inside the Model Hub section. Released
-configs never carry them, and a broken entry must turn off only that tool:
-the rest of ``model_hub`` (Sources, Agents) has to load untouched, never through
-the whole-section recovery reset.
+Hosted tools are an optional feature inside the Model Hub section. Absence
+means every tool is on, an rc-era section keeps each tool's ``enabled``, and a
+broken entry takes only its own defaults: the rest of ``model_hub`` (Sources,
+Agents) has to load untouched, never through the whole-section recovery reset.
 """
 
 from __future__ import annotations
 
-import copy
 import json
 import logging
 from pathlib import Path
 
 import pytest
 
-from config.v2_config import ModelHubConfig, ModelHubHostedToolConfig, ModelHubRouteHopConfig, V2Config
+from config.v2_config import (
+    ModelHubConfig,
+    ModelHubHostedToolConfig,
+    ModelHubImageModelChoice,
+    V2Config,
+)
+from core.handlers.model_hub.capability_evidence import EvidenceFeature
+from core.handlers.model_hub.hosted_tools import enabled_tools
 from core.services.settings import default_config
 from vibe import api
 
@@ -33,6 +39,7 @@ SOURCE = {
     "created_at": "2026-10-13T00:00:00Z",
     "credential_ref": "cred_src_xai00001",
 }
+ALL_TOOLS = ("web_search", "x_search", "image_generate")
 
 
 def _section(hosted_tools) -> dict:
@@ -42,65 +49,79 @@ def _section(hosted_tools) -> dict:
     return section
 
 
-def test_released_configs_load_with_every_tool_off_and_stay_without_the_section():
+def test_released_configs_load_with_every_tool_on_and_stay_without_the_section():
+    """MH-HOSTED-002: an upgrade from 3.2.0 turns every tool on without writing a section (owner decision)."""
     section = json.loads((FIXTURES / "released_pre_vibey_consumer.json").read_text(encoding="utf-8"))
     config = ModelHubConfig.from_payload(section, repairing=True)
     assert config.hosted_tools == {}
+    assert enabled_tools(config) == ALL_TOOLS
     assert "hosted_tools" not in config.to_payload()
 
 
-def test_hosted_tool_toggles_round_trip_in_canonical_order():
+def test_hosted_tool_settings_round_trip_in_canonical_order():
     tools = {
-        "x_search": {"enabled": False, "executor": None},
-        "web_search": {"enabled": True, "executor": {"source_id": "src_xai00001", "model_id": "grok-4.6"}},
+        "image_generate": {"enabled": True, "default_model": {"source_id": "src_xai00001", "model_id": "grok-imagine-image"}},
+        "x_search": {"enabled": False},
+        "web_search": {"enabled": True, "executor_order": ["src_gone0001", "src_xai00001"]},
     }
     config = ModelHubConfig.from_payload(_section(tools))
     assert config.hosted_tools == {
-        "web_search": ModelHubHostedToolConfig(True, ModelHubRouteHopConfig("src_xai00001", "grok-4.6")),
-        "x_search": ModelHubHostedToolConfig(False, None),
+        "web_search": ModelHubHostedToolConfig(True, ("src_gone0001", "src_xai00001")),
+        "x_search": ModelHubHostedToolConfig(False),
+        "image_generate": ModelHubHostedToolConfig(
+            True, default_image=ModelHubImageModelChoice("src_xai00001", "grok-imagine-image"),
+        ),
     }
-    assert list(config.to_payload()["hosted_tools"]) == ["web_search", "x_search"]
+    assert list(config.to_payload()["hosted_tools"]) == list(ALL_TOOLS)
     assert ModelHubConfig.from_payload(config.to_payload()).to_payload() == config.to_payload()
 
 
-GOOD = {"enabled": True, "executor": None}
-# (case, raw section, tools that survive as (enabled, executor), whether a warning is logged)
+# (case, raw section, tools that survive as (enabled, executor_order, default_model), whether a warning is logged)
+OFF = (False, None, None)
 DEGRADED = [
-    ("not-an-object", ["web_search"], {}, True),
-    ("unknown-tool", {"code_interpreter": GOOD, "web_search": GOOD}, {"web_search": (True, None)}, True),
-    ("missing-executor", {"web_search": {"enabled": True}, "x_search": GOOD}, {"x_search": (True, None)}, True),
-    ("extra-field", {"web_search": {**GOOD, "replay": True}}, {}, True),
-    ("non-boolean-enabled", {"web_search": {"enabled": "yes", "executor": None}}, {}, True),
-    ("bad-executor-shape", {"web_search": {"enabled": True, "executor": {"source_id": "xai"}}}, {}, True),
+    # Damage never turns a cost-bearing tool on: a broken section or entry is off (AGENTS persisted-shape rule).
+    ("not-an-object", ["web_search"], dict.fromkeys(ALL_TOOLS, OFF), True),
+    # Present but null is damage, not absence.
+    ("null-section", None, dict.fromkeys(ALL_TOOLS, OFF), True),
+    # An rc build's section: its keys and fields are unknown to v2, but each tool's opt-out survives.
     (
-        "executor-source-gone",
-        {"web_search": {"enabled": True, "executor": {"source_id": "src_gone0001", "model_id": "grok-4.6"}}},
-        {"web_search": (True, None)},
-        False,
+        "rc-era-section",
+        {
+            "web_search": {"enabled": False, "executor": {"source_id": "src_xai00001", "model_id": "grok-4.6"}},
+            "image_generation": {"enabled": False, "executor": None},
+        },
+        {"web_search": OFF},
+        True,
     ),
-    (
-        "executor-model-gone",
-        {"x_search": {"enabled": True, "executor": {"source_id": "src_xai00001", "model_id": "grok-3"}}},
-        {"x_search": (True, None)},
-        False,
-    ),
+    ("unknown-tool", {"code_interpreter": {"enabled": False}, "x_search": {"enabled": False}}, {"x_search": OFF}, True),
+    ("field-of-another-tool", {"image_generate": {"enabled": False, "executor_order": ["src_xai00001"]}}, {"image_generate": OFF}, True),
+    ("non-boolean-enabled", {"web_search": {"enabled": "yes"}}, {"web_search": OFF}, True),
+    ("repeated-order", {"web_search": {"executor_order": ["src_xai00001", "src_xai00001"]}}, {"web_search": OFF}, True),
+    ("order-not-a-source-id", {"web_search": {"executor_order": [" src_xai00001"]}}, {"web_search": OFF}, True),
+    ("bad-default-shape", {"image_generate": {"default_model": {"source_id": "src_xai00001"}}}, {"image_generate": OFF}, True),
+    ("default-not-encodable", {"image_generate": {"default_model": {"source_id": "src_xai00001", "model_id": "x\ud800"}}}, {"image_generate": OFF}, True),
+    # Saved values are never resolved: an order naming a Source that is gone is kept and skipped when read.
+    ("order-source-gone", {"web_search": {"executor_order": ["src_gone0001"]}}, {"web_search": (True, ("src_gone0001",), None)}, False),
+    ("entry-not-an-object", {"x_search": None}, {"x_search": OFF}, True),
 ]
 
 
 @pytest.mark.parametrize("raw,expected,warns", [case[1:] for case in DEGRADED], ids=[case[0] for case in DEGRADED])
-def test_a_broken_hosted_tool_entry_turns_off_only_itself(raw, expected, warns, caplog):
-    """MH-HOSTED-002: a broken entry turns off only its tool; Sources and Agents still load."""
+def test_a_broken_hosted_tool_entry_turns_off_only_its_tool(raw, expected, warns, caplog):
+    """MH-HOSTED-002: a broken entry turns its tool off and an unknown field is ignored; Sources and Agents load."""
     with caplog.at_level(logging.WARNING, logger="config.v2_config"):
         config = ModelHubConfig.from_payload(_section(raw))
     assert [source.id for source in config.sources] == ["src_xai00001"]
-    assert {tool: (entry.enabled, entry.executor) for tool, entry in config.hosted_tools.items()} == expected
+    assert {
+        tool: (entry.enabled, entry.executor_order, entry.default_image) for tool, entry in config.hosted_tools.items()
+    } == expected
     assert bool(caplog.records) == warns
 
 
 def test_disk_load_with_a_broken_hosted_tools_section_keeps_model_hub(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
-    payload["model_hub"] = _section({"web_search": {"enabled": 1, "executor": None}, "x_search": GOOD})
+    payload["model_hub"] = _section({"web_search": {"enabled": 1}, "x_search": {"enabled": False}})
     config_path = tmp_path / "config.json"
     original = json.dumps(payload)
     config_path.write_text(original, encoding="utf-8")
@@ -109,15 +130,9 @@ def test_disk_load_with_a_broken_hosted_tools_section_keeps_model_hub(monkeypatc
 
     assert not loaded.load_warnings
     assert [source.id for source in loaded.model_hub.sources] == ["src_xai00001"]
-    assert set(loaded.model_hub.hosted_tools) == {"x_search"}
+    assert enabled_tools(loaded.model_hub) == ("image_generate",)
     assert config_path.read_text(encoding="utf-8") == original
     assert not list(tmp_path.glob("config.json.bak-recovery-*"))
-
-
-def test_hosted_tools_never_hold_credential_material():
-    section = _section({"web_search": {"enabled": True, "executor": {"source_id": "src_xai00001", "model_id": "sk-live-abc"}}})
-    config = ModelHubConfig.from_payload(copy.deepcopy(section))
-    assert "web_search" not in config.hosted_tools
 
 
 def _validate_status(status):
@@ -130,67 +145,191 @@ def _validate_status(status):
 
 
 def _api_service(tmp_path):
-    from config.v2_config import ModelHubSourceConfig
     from tests.test_model_hub_api import _service
 
     service, store, _adapter = _service(tmp_path)
-    store.config = ModelHubConfig.from_payload(
-        {
-            "sources": [
-                SOURCE,
-                {**SOURCE, "id": "src_gem00001", "vendor": "custom", "protocol": "google", "credential_ref": "cred_g",
-                 "models": [{**SOURCE["models"][0], "id": "gemini-3-pro"}]},
-            ]
-        }
-    )
-    assert all(isinstance(source, ModelHubSourceConfig) for source in store.config.sources)
+    store.config = ModelHubConfig.from_payload({"sources": [SOURCE]})
     return service, store
 
 
 @pytest.mark.asyncio
-async def test_the_tools_api_reads_and_writes_one_tool_at_a_time(tmp_path):
-    """MH-HOSTED-004: the Tools tab writes one toggle; nothing else in Model Hub changes."""
+async def test_the_tools_api_writes_one_field_of_one_tool_at_a_time(tmp_path):
+    """MH-HOSTED-004: a write changes only the fields it names; nothing else in Model Hub changes."""
     from core.handlers.model_hub.service import ModelHubError
 
     service, store = _api_service(tmp_path)
     before = store.config.to_payload()
 
     status = service.hosted_tools_status()["hosted_tools"]
-    assert [tool["name"] for tool in status["tools"]] == ["web_search", "x_search", "image_generation"]
-    assert not any(tool["enabled"] for tool in status["tools"])
-    x_search = next(tool for tool in status["tools"] if tool["name"] == "x_search")
-    assert [(c["source_id"], c["model_id"], c["call"]["status"]) for c in x_search["candidates"]] == [
-        ("src_xai00001", "grok-4.6", "unknown")
-    ]
-    # The cost hint: the overlay's dated list price and the Source's billing, never a computed zero.
-    assert x_search["bound"] is None
-    assert x_search["candidates"][0]["billing"] == "metered"
-    assert x_search["candidates"][0]["price"] == {
+    _validate_status(status)
+    by_name = {tool["name"]: tool for tool in status["tools"]}
+    assert list(by_name) == list(ALL_TOOLS) and all(tool["enabled"] for tool in status["tools"])
+    # The executor runs on the vendor's lightweight model, priced by the overlay's dated list price.
+    (candidate,) = by_name["x_search"]["executor_candidates"]
+    assert (candidate["source_id"], candidate["model_id"], candidate["billing"], candidate["relay"]) == (
+        "src_xai00001", "grok-4.20-0309-non-reasoning", "metered", False,
+    )
+    assert candidate["price"] == {
         "unit": "post",
         "usd_per_1k": 5,
         "extra": [{"unit": "profile", "usd_per_1k": 10}],
         "as_of": "2026-10-13",
         "url": "https://docs.x.ai/developers/pricing",
     }
-    _validate_status(status)
-    assert status["reverify"] == {"engine_upgraded": 0, "aged": 0}
 
-    executor = {"source_id": "src_xai00001", "model_id": "grok-4.6"}
-    written = await service.set_hosted_tool("x_search", {"enabled": True, "executor": executor})
+    await service.set_hosted_tool("x_search", {"executor_order": ["src_xai00001"]})
+    written = await service.set_hosted_tool("x_search", {"enabled": False})
     after = store.config.to_payload()
-    assert after.pop("hosted_tools") == {"x_search": {"enabled": True, "executor": executor}}
+    assert after.pop("hosted_tools") == {"x_search": {"enabled": False, "executor_order": ["src_xai00001"]}}
     assert after == before
-    assert next(tool for tool in written["hosted_tools"]["tools"] if tool["name"] == "x_search")["executor"] == executor
+    _validate_status(written["hosted_tools"])
+    await service.set_hosted_tool("x_search", {"executor_order": None})
+    assert store.config.to_payload()["hosted_tools"] == {"x_search": {"enabled": False}}
 
     for tool, body, code, status_code in [
-        ("code_interpreter", {"enabled": True, "executor": None}, "invalid_parameter", 400),
-        ("web_search", {"enabled": True}, "invalid_parameter", 400),
-        ("web_search", {"enabled": True, "executor": {"source_id": "src_gone0001", "model_id": "x"}}, "source_not_found", 404),
-        ("web_search", {"enabled": True, "executor": {"source_id": "src_gem00001", "model_id": "gemini-3-pro"}}, "invalid_parameter", 400),
-        ("web_search", {"enabled": True, "executor": {"source_id": "src_xai00001", "model_id": "grok-3"}}, "invalid_parameter", 400),
-        ("image_generation", {"enabled": True, "executor": executor}, "invalid_parameter", 400),
+        ("image_generation", {"enabled": True}, "hosted_tool_not_found", 404),
+        ("web_search", {}, "invalid_parameter", 400),
+        ("web_search", {"default_model": None}, "invalid_parameter", 400),
+        ("web_search", {"enabled": True, "executor": None}, "invalid_parameter", 400),
     ]:
         with pytest.raises(ModelHubError) as refused:
             await service.set_hosted_tool(tool, body)
         assert (refused.value.code, refused.value.status) == (code, status_code), (tool, body)
-    assert store.config.to_payload()["hosted_tools"] == {"x_search": {"enabled": True, "executor": executor}}
+    assert store.config.to_payload()["hosted_tools"] == {"x_search": {"enabled": False}}
+
+
+def _refuse(service, source, model_id, feature):
+    from core.handlers.model_hub.capability_evidence import EvidenceRecord, identity_digest
+
+    evidence = service.hosted_evidence()
+    service.capability_evidence.write_refusal(
+        EvidenceRecord(
+            source_id=source.id, model_id=model_id, feature=feature, status="unsupported",
+            observed_at=service.now(), wire=evidence.wire_for(source, model_id),
+            source_identity=identity_digest(source), detail="400 invalid_request_error",
+        ),
+        live=[source],
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_clear_removes_only_the_refusals_it_names(tmp_path):
+    """MH-HOSTED-003: the user clears a refusal; it is gone at once and the next request tries the feature again."""
+    from core.handlers.model_hub.service import ModelHubError
+
+    service, store = _api_service(tmp_path)
+    (source,) = store.config.sources
+    executor = "grok-4.20-0309-non-reasoning"
+    for model_id in ("grok-4.6", executor):
+        _refuse(service, source, model_id, EvidenceFeature.hosted("x_search", "call"))
+    _refuse(service, source, "grok-4.6", EvidenceFeature.hosted("web_search", "replay"))
+    _refuse(service, source, "grok-4.6", EvidenceFeature.effort("max"))
+
+    def refused(tool):
+        status = service.hosted_tools_status()["hosted_tools"]
+        tool = next(item for item in status["tools"] if item["name"] == tool)
+        return sorted((item["model_id"], item["aspect"]) for item in tool["status"]["refused"])
+
+    assert refused("x_search") == [("grok-4.20-0309-non-reasoning", "call"), ("grok-4.6", "call")]
+    cleared = await service.clear_hosted_refusals("x_search", {"source_id": source.id, "model_id": executor})
+    _validate_status(cleared["hosted_tools"])
+    assert refused("x_search") == [("grok-4.6", "call")]
+    await service.clear_hosted_refusals("x_search", {})
+    assert refused("x_search") == [] and refused("web_search") == [("grok-4.6", "replay")]
+
+    answer = await service.clear_source_evidence(source.id, {"model_id": "grok-4.6", "feature": {"kind": "effort", "name": "max"}})
+    assert answer["source"]["id"] == source.id
+    assert not service.hosted_evidence().unsupported(source, "grok-4.6", EvidenceFeature.effort("max"))
+    assert refused("web_search") == [("grok-4.6", "replay")]
+
+    for call, code, status_code in [
+        (service.clear_hosted_refusals("image_generation", {}), "hosted_tool_not_found", 404),
+        # Nothing is nullable: a malformed body is refused, never widened into a broader clear.
+        (service.clear_hosted_refusals("x_search", {"source_id": None}), "invalid_parameter", 400),
+        (service.clear_hosted_refusals("x_search", {"source_id": source.id, "model_id": None}), "invalid_parameter", 400),
+        (service.clear_hosted_refusals("x_search", {"source_id": source.id, "model_id": " grok-4.6"}), "invalid_parameter", 400),
+        (service.clear_source_evidence(source.id, {"model_id": "grok-4.6 ", "feature": {"kind": "effort", "name": "max"}}), "invalid_parameter", 400),
+        # The feature is exactly the shape the evidence writes: an effort has no aspect, not even a null one.
+        (service.clear_source_evidence(source.id, {"model_id": "grok-4.6", "feature": {"kind": "effort", "name": "max", "aspect": None}}), "invalid_parameter", 400),
+        (service.clear_hosted_refusals("x_search", {"model_id": executor}), "invalid_parameter", 400),
+        (service.clear_hosted_refusals("x_search", {"source_id": ""}), "invalid_parameter", 400),
+        (service.clear_source_evidence("src_gone0001", {"model_id": "grok-4.6", "feature": {"kind": "effort", "name": "max"}}), "source_not_found", 404),
+        (service.clear_source_evidence(source.id, {"model_id": "grok-4.6", "feature": {"kind": "hosted_tool", "name": "x_search", "aspect": "call"}}), "invalid_parameter", 400),
+    ]:
+        with pytest.raises(ModelHubError) as refusal:
+            await call
+        assert (refusal.value.code, refusal.value.status) == (code, status_code)
+
+
+@pytest.mark.asyncio
+async def test_a_clear_that_cannot_be_saved_changes_nothing(tmp_path, monkeypatch):
+    """MH-HOSTED-003: a failed write answers 500 and the refusal still holds, so nothing reappears after a restart."""
+    from core.handlers.model_hub import capability_evidence
+    from core.handlers.model_hub.service import ModelHubError
+
+    service, store = _api_service(tmp_path)
+    (source,) = store.config.sources
+    feature = EvidenceFeature.hosted("x_search", "call")
+    _refuse(service, source, "grok-4.6", feature)
+
+    def full_disk(*_args):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(capability_evidence, "write_state_document", full_disk)
+    with pytest.raises(ModelHubError) as refusal:
+        await service.clear_hosted_refusals("x_search", {})
+    assert (refusal.value.code, refusal.value.status) == ("state_write_failed", 500)
+    assert service.hosted_evidence().unsupported(source, "grok-4.6", feature)
+
+
+@pytest.mark.asyncio
+async def test_a_clear_waits_for_a_source_change_in_flight(tmp_path):
+    """MH-HOSTED-003: a clear runs after a concurrent Source change commits, so it keeps evidence under the identity
+    the config now holds and answers the Source as it now is."""
+    import asyncio
+    from dataclasses import replace
+
+    service, store = _api_service(tmp_path)
+    (source,) = store.config.sources
+    _refuse(service, source, "grok-4.6", EvidenceFeature.effort("max"))
+    body = {"model_id": "grok-4.6", "feature": {"kind": "effort", "name": "max"}}
+
+    async with service._mutation_lock:
+        clearing = asyncio.create_task(service.clear_source_evidence(source.id, body))
+        await asyncio.sleep(0.05)
+        assert not clearing.done()
+        store.config.sources = [replace(source, display_name="xAI 工作密钥")]
+    answer = await clearing
+    assert answer["source"]["display_name"] == "xAI 工作密钥"
+
+
+@pytest.mark.parametrize(
+    "prices,expected",
+    [
+        ((), None),
+        # A price for one size or quality is not every image's: the card shows no unit price rather than a wrong one.
+        ((("1024x1024", "low", 11),), None),
+        ((("1024x1024", "low", 11), (None, None, 20)), {"usd": 0.02, "basis": "list"}),
+    ],
+    ids=["unpriced", "conditional-only", "unqualified"],
+)
+def test_an_image_models_card_price_is_only_an_unqualified_list_price(tmp_path, monkeypatch, prices, expected):
+    """MH-HOSTED-004: gpt-image-2's prices vary by size and quality, so its card reads "no unit price" (owner rule)."""
+    from datetime import date
+
+    from core.handlers.model_hub import hosted_tools as hosted_tools_module
+    from vibe.backend_model_catalog import HostedToolPrice, ImageModelPrice, ImageModelSpec
+
+    spec = ImageModelSpec(
+        "gpt-image-2", "OpenAI image model", "images", ("images", "size"), ("pixels",),
+        tuple(
+            ImageModelPrice(HostedToolPrice("image", usd, date(2026, 10, 15), "https://openai.com/api/pricing"), size, quality)
+            for size, quality, usd in prices
+        ),
+    )
+    monkeypatch.setattr(hosted_tools_module, "provider_image_models", lambda vendor: (spec,) if vendor == "xai" else ())
+    service, _store = _api_service(tmp_path)
+    status = service.hosted_tools_status()["hosted_tools"]
+    _validate_status(status)
+    image = next(tool for tool in status["tools"] if tool["name"] == "image_generate")
+    assert [model["price"] for model in image["models"]] == [expected]

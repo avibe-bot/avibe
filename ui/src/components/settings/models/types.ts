@@ -10,8 +10,8 @@
 // and the PR records the server implementation and feature-flag activation
 // edge. The client never synthesizes a fallback payload shape.
 
-export const CONTRACT_VERSION = 14 as const;
-export const PERSISTED_TURN_CONTRACT_VERSIONS = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14] as const;
+export const CONTRACT_VERSION = 15 as const;
+export const PERSISTED_TURN_CONTRACT_VERSIONS = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] as const;
 export const AGENT_CHAIN_CONTRACT_VERSION = CONTRACT_VERSION;
 export const PROBE_RESULT_CONTRACT_VERSION = CONTRACT_VERSION;
 
@@ -117,13 +117,14 @@ export type SuppliedModel = {
   refused_efforts?: RefusedEffort[];
 };
 
-/** One reasoning effort a Source model refused, as capability evidence records it. */
+/** One reasoning effort a Source model refused, as capability evidence records it.
+ *  It stays until the user clears it or the Source's wire stamp changes. */
 export type RefusedEffort = {
   effort: string;
-  basis: 'probe' | 'observed';
+  basis: 'observed';
   observed_at: string;
+  /** The HTTP status and upstream code, never provider prose. */
   detail: string | null;
-  changes_at: string | null;
 };
 
 export type Source = {
@@ -1025,22 +1026,32 @@ export type QuotaSummary = {
 
 // ── hosted-tools-status.schema.json ─────────────────────────────────────
 /** The catalog's tools, in catalog order (`vibey-hosted-tools.md` §2). */
-export const HOSTED_TOOL_NAMES = ['web_search', 'x_search', 'image_generation'] as const;
+export const HOSTED_TOOL_NAMES = ['web_search', 'x_search', 'image_generate'] as const;
 export type HostedToolName = (typeof HOSTED_TOOL_NAMES)[number];
+export type HostedSearchToolName = Exclude<HostedToolName, 'image_generate'>;
 
-/** One capability record as routing reads it: `status` already folds in staleness,
- *  so a wire-stale record reads `unknown` here even though it once verified. */
-export type HostedEvidence = {
-  status: 'verified' | 'unsupported' | 'unknown';
-  /** `wire`: taken on another engine or probe shape, so it routes as unknown.
-   *  `age`: older than 30 days, so it still routes and only asks for a re-check. */
-  stale: null | 'wire' | 'age';
-  basis: null | 'probe' | 'observed';
-  observed_at: string | null;
-  detail: string | null;
-  /** When the record stops reading as it does now: an observed record's expiry,
-   *  or a probe record's 30-day re-verify mark; null when nothing is scheduled. */
-  changes_at: string | null;
+/** How a call ran: natively in the model's request, through a search executor, or on an image endpoint. */
+export type HostedExecutionMode = 'native' | 'executor' | 'direct';
+
+/** A positive record: a real response ran the tool on this (Source, model). Display only. */
+export type HostedSuccess = { source_id: string; model_id: string; mode: HostedExecutionMode; at: string };
+
+/** A current negative record: routing state until the user clears it or the wire stamp changes. */
+export type HostedRefusal = {
+  source_id: string;
+  model_id: string;
+  /** `call`: the tool itself; `replay`: earlier results sent back to it. */
+  aspect: 'call' | 'replay';
+  at: string;
+  /** The HTTP status and upstream code, never provider prose. */
+  reason: string;
+};
+
+/** What real use learned: the latest success, every pair's positive record, and the current refusals. */
+export type HostedToolRunStatus = {
+  latest_ok: HostedSuccess | null;
+  verified: HostedSuccess[];
+  refused: HostedRefusal[];
 };
 
 /** The overlay's list price for one hosted tool on a provider (`usd_per_1k` per `unit`). */
@@ -1053,57 +1064,60 @@ export type HostedToolListPrice = {
   url: string;
 };
 
-/** A cost the server states: at list price (`usd`), or included in a subscription (no `usd`). */
-export type HostedCostEstimate = { basis: 'list'; usd: number } | { basis: 'included' };
-
-export type HostedToolExecutor = { source_id: string; model_id: string };
-
-/** A (Source, model) the overlay offers the tool on, with an eligible credential
- *  and an untranslated path; Vibey's Source order first. */
-export type HostedToolCandidate = HostedToolExecutor & {
-  call: HostedEvidence;
-  /** Null for image generation, which is never replayed. */
-  replay: HostedEvidence | null;
-  billing: 'monthly' | 'metered';
-  /** Null when no list price is known, never zero (image generation has none). */
-  price: HostedToolListPrice | null;
-  /** One call probe's cost; null when unknown, which is never added as zero. */
-  probe_estimate: HostedCostEstimate | null;
-};
-
-export type HostedToolStatus = {
-  name: HostedToolName;
-  enabled: boolean;
-  /** The user's choice, or null for the first verified candidate. */
-  executor: HostedToolExecutor | null;
-  /** The executor a turn would bind now, by hop resolution's own rule; null when none is verified. */
-  bound: HostedToolExecutor | null;
-  candidates: HostedToolCandidate[];
-};
-
-export type HostedToolsStatus = {
-  tools: HostedToolStatus[];
-  reverify: { engine_upgraded: number; aged: number };
-};
-
-/** PUT /api/models/hosted-tools/<tool>: the whole setting, applied from the next turn. */
-export type HostedToolPut = { enabled: boolean; executor: HostedToolExecutor | null };
-
-/** One aspect of a probe: only verified and unsupported become evidence. */
-export type HostedProbeAspect = {
-  outcome: 'verified' | 'unsupported' | 'inconclusive' | 'transient';
-  /** The Source test's detail key, for a request that failed before completing. */
-  error: string | null;
-};
-
-/** POST /api/models/hosted-tools/<tool>/probe (`hosted-tool-probe-result.schema.json`). */
-export type HostedToolProbeResult = {
-  tool: HostedToolName;
+/** A Source that can execute a search for models that cannot run it natively, with the vendor's executor model. */
+export type HostedExecutorCandidate = {
   source_id: string;
   model_id: string;
-  call: HostedProbeAspect;
-  replay: HostedProbeAspect | null;
+  billing: 'monthly' | 'metered';
+  /** A non-official endpoint: its price is the vendor's API price, which it may not bill. */
+  relay: boolean;
+  /** Null when no list price is known, never zero. */
+  price: HostedToolListPrice | null;
 };
+
+export type HostedModelRef = { source_id: string; model_id: string };
+
+/** One image's price: the vendor's list price, or an estimate from token pricing. */
+export type HostedImagePrice = { usd: number; basis: 'list' | 'estimated' };
+
+export type HostedImageModel = HostedModelRef & { description: string; price: HostedImagePrice | null };
+
+type HostedToolBase = { enabled: boolean; status: HostedToolRunStatus };
+
+export type HostedSearchToolStatus = HostedToolBase & {
+  name: HostedSearchToolName;
+  /** The saved order; null when automatic. */
+  executor_order: string[] | null;
+  /** The order the gateway would try now. */
+  effective_order: string[];
+  /** Every eligible executor, in effective order. */
+  executor_candidates: HostedExecutorCandidate[];
+};
+
+export type HostedImageToolStatus = HostedToolBase & {
+  name: 'image_generate';
+  /** The saved default; null when default. A saved model no longer available stays, flagged. */
+  default_model: (HostedModelRef & { available: boolean }) | null;
+  effective_default: HostedModelRef | null;
+  /** Exactly the pairs `image_generate` offers now. */
+  models: HostedImageModel[];
+  /** Vendors whose overlay lists image models, for the empty state. */
+  image_offered_by: string[];
+};
+
+export type HostedToolStatus = HostedSearchToolStatus | HostedImageToolStatus;
+
+export type HostedToolsStatus = { tools: HostedToolStatus[] };
+
+/** PUT /api/models/hosted-tools/<tool>, per field: an absent field is unchanged, `null` resets it. */
+export type HostedToolPut = {
+  enabled?: boolean;
+  executor_order?: string[] | null;
+  default_model?: HostedModelRef | null;
+};
+
+/** POST /api/models/hosted-tools/<tool>/clear: one Source (one of its models), or `{}` for every Source. */
+export type HostedToolClear = { source_id: string; model_id?: string } | Record<string, never>;
 
 // ── API envelope + request shapes (api.md) ──────────────────────────────
 export type ApiOk<T> = { ok: true; contract_version: typeof CONTRACT_VERSION } & T;

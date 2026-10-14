@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any, Callable, Final, Iterable, Literal, Mappi
 
 from config import paths
 from config.atomic_io import write_atomic
-from core.agent_core.messages import HOSTED_TOOLS, PROTOCOLS
+from core.agent_core.messages import PROTOCOLS
 from core.command_runner import run_supervised_command
 from vibe.claude_model_catalog import (
     DEFAULT_CLAUDE_MODEL_ALIASES,
@@ -675,6 +675,15 @@ def bundled_catalog_wire_efforts_by_model() -> Mapping[str, tuple[str, ...]]:
 # feature is evidence. Read from the bundled file alone, never the remote copy:
 # its declarations go on the wire and must be the ones this build shipped with.
 _HOSTED_TOOL_PRICE_UNITS = ("call", "search", "post", "profile")
+# An image model is priced per image, and only an image model is.
+_IMAGE_PRICE_UNITS = ("image",)
+# The tools a chat request may declare natively. Image generation is never one (vibey-hosted-tools.md §7).
+OVERLAY_SEARCH_TOOLS: tuple[str, ...] = ("web_search", "x_search")
+IMAGE_MODEL_ENDPOINTS: tuple[str, ...] = ("images", "chat_image")
+IMAGE_MODEL_PARAMS: tuple[str, ...] = ("images", "n", "size")
+IMAGE_SIZE_FORMS: tuple[str, ...] = ("pixels", "ratio")
+# One line in every request's tool block: bounded so a catalog line cannot grow every prompt prefix.
+IMAGE_MODEL_DESCRIPTION_MAX_CHARS = 80
 _OVERLAY_TOKEN = re.compile(r"\S(?:.*\S)?")
 _OVERLAY_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 _OVERLAY_URL = re.compile(r"https://[^\s/?#]+(?:[/?#]\S*)?")
@@ -723,6 +732,32 @@ class HostedToolSpec:
 
 
 @dataclass(frozen=True)
+class ImageModelPrice:
+    """A per-image list price, for the output ``size`` and ``quality`` it applies to (None matches any)."""
+
+    price: HostedToolPrice
+    size: str | None = None
+    quality: str | None = None
+
+
+@dataclass(frozen=True)
+class ImageModelSpec:
+    """One image model a vendor offers to ``image_generate`` (capability model §4).
+
+    ``params`` and ``size_forms`` are sorted, so anything built from them is stable.
+    ``tokens_per_image`` lets the pricing module estimate a model with no per-image price.
+    """
+
+    id: str
+    description: str
+    endpoint: Literal["images", "chat_image"]
+    params: tuple[str, ...]
+    size_forms: tuple[str, ...]
+    prices: tuple[ImageModelPrice, ...] = ()
+    tokens_per_image: int | None = None
+
+
+@dataclass(frozen=True)
 class ProviderModelOverlay:
     """One model family of a provider; ``wire_efforts`` None defers to models.dev."""
 
@@ -732,9 +767,38 @@ class ProviderModelOverlay:
     hosted_tools: Mapping[str, Mapping[str, HostedToolSpec]]
 
 
-@functools.lru_cache(maxsize=1)
+@dataclass(frozen=True)
+class ProviderVendorOverlay:
+    """One vendor of the ``providers`` section: its model families, executor model and image models."""
+
+    models: tuple[ProviderModelOverlay, ...]
+    executor_model: str | None = None
+    image_models: tuple[ImageModelSpec, ...] = ()
+
+
 def bundled_provider_overlay() -> Mapping[str, tuple[ProviderModelOverlay, ...]]:
-    """Each vendor's model families from the bundled ``providers`` section.
+    """Each vendor's model families from the bundled ``providers`` section."""
+
+    return MappingProxyType({vendor: entry.models for vendor, entry in bundled_provider_vendors().items()})
+
+
+def provider_executor_model(vendor: str) -> str | None:
+    """The vendor's lightweight model that runs proxied search calls (vibey-hosted-tools.md §6)."""
+
+    entry = bundled_provider_vendors().get(vendor.strip().lower())
+    return entry.executor_model if entry is not None else None
+
+
+def provider_image_models(vendor: str) -> tuple[ImageModelSpec, ...]:
+    """The image models the vendor offers to ``image_generate``, in catalog order."""
+
+    entry = bundled_provider_vendors().get(vendor.strip().lower())
+    return entry.image_models if entry is not None else ()
+
+
+@functools.lru_cache(maxsize=1)
+def bundled_provider_vendors() -> Mapping[str, ProviderVendorOverlay]:
+    """Each vendor's entry from the bundled ``providers`` section.
 
     An invalid vendor entry is left out with a warning, and a ``providers``
     value that is not an object disables only the overlay; backend rows never
@@ -751,10 +815,10 @@ def bundled_provider_overlay() -> Mapping[str, tuple[ProviderModelOverlay, ...]]
     if not isinstance(providers, dict):
         logger.warning("Backend model catalog providers section is not an object; the provider overlay is disabled")
         return MappingProxyType({})
-    overlay: dict[str, tuple[ProviderModelOverlay, ...]] = {}
+    overlay: dict[str, ProviderVendorOverlay] = {}
     for vendor, raw_vendor in providers.items():
         try:
-            overlay[_overlay_vendor_id(vendor)] = _overlay_vendor_models(raw_vendor)
+            overlay[_overlay_vendor_id(vendor)] = _overlay_vendor(raw_vendor)
         except ValueError as exc:
             logger.warning("Provider overlay entry %r is disabled: %s", vendor, exc)
     return MappingProxyType(overlay)
@@ -766,7 +830,8 @@ def provider_overlay_entry(vendor: str, model_id: str) -> ProviderModelOverlay |
     from core.handlers.model_hub.identifiers import normalized_model_id
 
     model = normalized_model_id(model_id)
-    for entry in bundled_provider_overlay().get(vendor.strip().lower(), ()):
+    vendor_entry = bundled_provider_vendors().get(vendor.strip().lower())
+    for entry in vendor_entry.models if vendor_entry is not None else ():
         if (entry.match_kind == "id" and model == entry.match_value) or (
             entry.match_kind == "prefix" and model.startswith(entry.match_value)
         ):
@@ -795,12 +860,68 @@ def _overlay_vendor_id(vendor: str) -> str:
     return vendor
 
 
-def _overlay_vendor_models(raw: object) -> tuple[ProviderModelOverlay, ...]:
-    vendor = _overlay_object(raw, "vendor entry", required=("models",))
+def _overlay_vendor(raw: object) -> ProviderVendorOverlay:
+    vendor = _overlay_object(raw, "vendor entry", required=("models",), optional=("executor_model", "image_models"))
     models = vendor["models"]
     if not isinstance(models, list):
         raise ValueError("models must be a list")
-    return tuple(_overlay_model(item) for item in models)
+    image_models = vendor.get("image_models", [])
+    if not isinstance(image_models, list):
+        raise ValueError("image_models must be a list")
+    executor_model = vendor.get("executor_model")
+    return ProviderVendorOverlay(
+        models=tuple(_overlay_model(item) for item in models),
+        executor_model=None if executor_model is None else _overlay_token(executor_model, "executor_model"),
+        image_models=tuple(_overlay_image_model(item) for item in image_models),
+    )
+
+
+def _overlay_image_model(raw: object) -> ImageModelSpec:
+    model = _overlay_object(
+        raw,
+        "image model",
+        required=("id", "description", "endpoint", "params", "size_forms"),
+        optional=("prices", "tokens_per_image"),
+    )
+    description = model["description"]
+    if not isinstance(description, str) or not _OVERLAY_TOKEN.fullmatch(description) or (
+        len(description) > IMAGE_MODEL_DESCRIPTION_MAX_CHARS
+    ):
+        raise ValueError(f"image model description must be one line of at most {IMAGE_MODEL_DESCRIPTION_MAX_CHARS} characters")
+    endpoint = model["endpoint"]
+    if endpoint not in IMAGE_MODEL_ENDPOINTS:
+        raise ValueError("image model endpoint is not known")
+    params = _overlay_tokens(model["params"], "image model params")
+    size_forms = _overlay_tokens(model["size_forms"], "image model size_forms")
+    if set(params) - set(IMAGE_MODEL_PARAMS) or set(size_forms) - set(IMAGE_SIZE_FORMS):
+        raise ValueError("image model params or size_forms name an unknown value")
+    if ("size" in params) != bool(size_forms):
+        raise ValueError("image model size_forms are present exactly when it takes size")
+    prices = model.get("prices", [])
+    if not isinstance(prices, list):
+        raise ValueError("image model prices must be a list")
+    tokens = model.get("tokens_per_image")
+    if tokens is not None and (isinstance(tokens, bool) or not isinstance(tokens, int) or tokens <= 0):
+        raise ValueError("image model tokens_per_image must be a positive integer")
+    return ImageModelSpec(
+        id=_overlay_token(model["id"], "image model id"),
+        description=description,
+        endpoint=endpoint,
+        params=tuple(sorted(params)),
+        size_forms=tuple(sorted(size_forms)),
+        prices=tuple(_overlay_image_price(item) for item in prices),
+        tokens_per_image=tokens,
+    )
+
+
+def _overlay_image_price(raw: object) -> ImageModelPrice:
+    entry = _overlay_object(raw, "image model price", required=("price",), optional=("size", "quality"))
+    price = _overlay_price(entry["price"], "image model price", units=_IMAGE_PRICE_UNITS)
+    return ImageModelPrice(
+        price=price,
+        size=None if entry.get("size") is None else _overlay_token(entry["size"], "image model price size"),
+        quality=None if entry.get("quality") is None else _overlay_token(entry["quality"], "image model price quality"),
+    )
 
 
 def _overlay_model(raw: object) -> ProviderModelOverlay:
@@ -813,7 +934,7 @@ def _overlay_model(raw: object) -> ProviderModelOverlay:
     protocols = _overlay_object(model.get("hosted_tools", {}), "hosted_tools", optional=PROTOCOLS)
     hosted_tools: dict[str, Mapping[str, HostedToolSpec]] = {}
     for protocol, raw_tools in protocols.items():
-        tools = _overlay_object(raw_tools, f"hosted_tools.{protocol}", optional=HOSTED_TOOLS)
+        tools = _overlay_object(raw_tools, f"hosted_tools.{protocol}", optional=OVERLAY_SEARCH_TOOLS)
         hosted_tools[protocol] = MappingProxyType(
             {tool: _overlay_hosted_tool(spec, f"{protocol}.{tool}") for tool, spec in tools.items()}
         )
@@ -838,8 +959,10 @@ def _overlay_hosted_tool(raw: object, what: str) -> HostedToolSpec:
     )
 
 
-def _overlay_price(raw: object, what: str) -> HostedToolPrice:
-    price = _overlay_object(raw, what, required=("unit", "usd_per_1k", "as_of", "url"), optional=("extra",))
+def _overlay_price(raw: object, what: str, *, units: tuple[str, ...] = _HOSTED_TOOL_PRICE_UNITS) -> HostedToolPrice:
+    # Only a search tool's price has further billed units.
+    extra_allowed = ("extra",) if units == _HOSTED_TOOL_PRICE_UNITS else ()
+    price = _overlay_object(raw, what, required=("unit", "usd_per_1k", "as_of", "url"), optional=extra_allowed)
     as_of = _overlay_date(price["as_of"], f"{what}.as_of")
     url = price["url"]
     if not isinstance(url, str) or not _OVERLAY_URL.fullmatch(url):
@@ -847,7 +970,7 @@ def _overlay_price(raw: object, what: str) -> HostedToolPrice:
     extra = price.get("extra", [])
     if not isinstance(extra, list):
         raise ValueError(f"{what}.extra must be a list")
-    unit, usd_per_1k = _overlay_price_component(price, what)
+    unit, usd_per_1k = _overlay_price_component(price, what, units)
     return HostedToolPrice(
         unit=unit,
         usd_per_1k=usd_per_1k,
@@ -858,6 +981,7 @@ def _overlay_price(raw: object, what: str) -> HostedToolPrice:
                 *_overlay_price_component(
                     _overlay_object(item, f"{what}.extra", required=("unit", "usd_per_1k")),
                     f"{what}.extra",
+                    units,
                 )
             )
             for item in extra
@@ -874,10 +998,10 @@ def _overlay_date(value: object, what: str) -> date:
     raise ValueError(f"{what} must be a YYYY-MM-DD date")
 
 
-def _overlay_price_component(price: Mapping[str, Any], what: str) -> tuple[str, float]:
+def _overlay_price_component(price: Mapping[str, Any], what: str, units: tuple[str, ...]) -> tuple[str, float]:
     unit = price["unit"]
     usd_per_1k = price["usd_per_1k"]
-    if not isinstance(unit, str) or unit not in _HOSTED_TOOL_PRICE_UNITS:
+    if not isinstance(unit, str) or unit not in units:
         raise ValueError(f"{what}.unit is not a known price unit")
     if (
         not isinstance(usd_per_1k, (int, float))

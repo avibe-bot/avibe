@@ -1,6 +1,22 @@
 # Model Hub contracts
 
-Status: **contract_version 14**, 2026-10-14: opaque history is bound to the account that issued it, the Source
+Status: **contract_version 15**, 2026-10-15: hosted tools design v2 (`../vibey-hosted-tools.md`), passive and
+default-on, with no probes. This bump publishes the Model Hub side; the hop-resolution and executor changes join it
+before it ships.
+- Capability evidence is passive (`capability-evidence.schema.json`, version 2): `basis` is `observed` only; a record is
+  keyed by status, so a `verified` success (with its `mode`) and an `unsupported` refusal coexist; refusals have no
+  time limit and read as unknown once the Source identity or the `wire` stamp (engine release, Avibe release, the
+  model's rendered fields) differs; `shape` and `engine` are gone.
+- Refused efforts lose `changes_at` and their `probe` basis (`agent-chain.schema.json`, `source.schema.json`).
+- The Tools read is rewritten (`hosted-tools-status.schema.json`): per tool `enabled`, passive `status` (`latest_ok`,
+  `refused[]`, `verified[]`), the search executor order (saved and effective, with candidates), and the image models
+  with their default.
+- The probe endpoint and `hosted-tool-probe-result.schema.json` are removed. `POST /api/models/hosted-tools/<tool>/clear`
+  and `POST /api/models/sources/<source_id>/evidence/clear` clear refusals; the PUT is per field.
+- The provider overlay gains a vendor's `executor_model` and `image_models[]`, and loses the native `image_generation`
+  declaration.
+
+It builds on v14 (2026-10-14): opaque history is bound to the account that issued it, the Source
 identity, not only to the origin (#2620): a provider refuses another account's encrypted reasoning.
 - `HopResolution.source_identity` (`hop-resolution.schema.json`) names the primary hop Source's credential-free
   identity, which Vibey records on each response its own Source served and matches before replaying opaque payloads.
@@ -206,7 +222,7 @@ comparison. A gate may not report success by comparing stale input with itself.
 
 ## Version closure
 
-`contract_version` 14 must coexist in all registered version locations on the same tested head:
+`contract_version` 15 must coexist in all registered version locations on the same tested head:
 
 - `mirror-registry.json`
 - `agent-chain.schema.json`
@@ -264,8 +280,7 @@ revision; the discovering lane does not reinterpret or edit the contract in plac
 | `turn-provenance.schema.json` | Exactly attributed turn attempts and terminal outcome; no policy or mapping discriminator. The one versioned object persisted to disk, so it accepts every released version. |
 | `usage-summary.schema.json` | Metered token usage over a trailing local-day window, aggregated from proxied turns, with its list-API-price valuation. A report only: no consumer may feed it back into resolution, admission, or cooldown. |
 | `quota-summary.schema.json` | Rate-limit windows of hub-held subscriptions, parsed from each vendor's own usage report, and the API-price value of each subscription's metered usage against its monthly fee. A report only; carries no grant or raw body. |
-| `hosted-tool-probe-result.schema.json` | One user-started hosted-tool probe: per aspect, whether it verified the tool, showed it unsupported, or was inconclusive or transient (which write no evidence), with the Source test's failure detail for a request that failed. |
-| `hosted-tools-status.schema.json` | The Tools tab read: each hosted tool's toggle and chosen executor, every eligible (Source, model) the overlay offers it on with its `call` and `replay` evidence, and re-verify counts. A report only; hop resolution reads config and evidence itself. |
+| `hosted-tools-status.schema.json` | The Tools read: each hosted tool's switch, its passive status (latest success, refusals, per-pair successes), the search executor order (saved, effective, candidates with their unit rates) and the image models with their default. A report only; hop resolution reads config and evidence itself. |
 | `resolution-event.schema.json` | Pull-feed Source/resolution records and their closed reason/detail vocabulary. |
 | `oauth-flow.schema.json` | Subscription creation and re-auth presentation without secret material. |
 | `migration-scan.schema.json` | Server-owned custody-takeover scan of existing native CLI/provider configuration; not an internal contract migration. |
@@ -282,6 +297,6 @@ revision; the discovering lane does not reinterpret or edit the contract in plac
 | `hop-resolution.schema.json` | Ephemeral in-process Vibey consumer result, including gateway-only credentials, nullable capabilities, and each enabled hosted tool's mode, declaration, bound executor, and replay authorization. |
 | `hop-origin.schema.json` | Non-secret upstream origin persisted on the provenance attempt, beside its `source_id`. |
 | `served-hop.schema.json` | Exact `x-avibe-served-hop` response header value: the admitted origin plus the serving Source id. |
-| `capability-evidence.schema.json` | One persisted (Source, model, feature) evidence record: probe or observed, with its engine and probe-shape stamps and the Source identity it follows. |
+| `capability-evidence.schema.json` | One persisted (Source, model, feature, status) evidence record, observed from real traffic only: a refusal (routing state, no time limit) or a success (display history, with its mode), with the wire stamp and the Source identity it follows. |
 | `provider-overlay.schema.json` | The `providers` section of `vibe/data/backend_models.json`: per-vendor model families with wire efforts and hosted-tool declarations, includes, and list prices. |
 | `README.md` | This ownership, version-closure, and contract-index document. |

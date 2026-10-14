@@ -5180,13 +5180,29 @@ async def model_hub_hosted_tool_put(tool: str, starlette_request: FastAPIRequest
     return await _dispatch_native_ui_request(starlette_request, handler)
 
 
-@app.post("/api/models/hosted-tools/{tool}/probe", include_in_schema=False)
-async def model_hub_hosted_tool_probe(tool: str, starlette_request: FastAPIRequest):
+@app.post("/api/models/hosted-tools/{tool}/clear", include_in_schema=False)
+async def model_hub_hosted_tool_clear(tool: str, starlette_request: FastAPIRequest):
     async def handler():
         from core.handlers.model_hub import ModelHubError
 
         try:
-            result = await _model_hub_service().probe_hosted_tool(tool, _model_hub_json_object("invalid_parameter"))
+            status = await _model_hub_service().clear_hosted_refusals(tool, _model_hub_json_object("invalid_parameter"))
+            return _model_hub_success(**status)
+        except ModelHubError as exc:
+            return _model_hub_error(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.post("/api/models/sources/{source_id}/evidence/clear", include_in_schema=False)
+async def model_hub_source_evidence_clear(source_id: str, starlette_request: FastAPIRequest):
+    async def handler():
+        from core.handlers.model_hub import ModelHubError
+
+        try:
+            result = await _model_hub_service().clear_source_evidence(
+                source_id, _model_hub_json_object("invalid_parameter"),
+            )
             return _model_hub_success(**result)
         except ModelHubError as exc:
             return _model_hub_error(exc)

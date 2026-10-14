@@ -38,7 +38,6 @@ import { QuotaTab } from './QuotaTab';
 import { ToolsTab } from './ToolsTab';
 import { UsageTab } from './UsageTab';
 import { useHostedTools } from './useHostedTools';
-import type { ProbeTarget } from './hostedTools';
 import './modelHubSurface.css';
 import { agentsWithEcho, createLatestAsyncAuthority, createLatestAsyncAuthorityByKeySet, createLatestEntityAuthorityByKey, createPendingWrites, mapWithConcurrency } from './asyncLifetime';
 import { createAgentCollectionReadAuthority, createSourceCollectionReadAuthority } from './collectionReadAuthority';
@@ -1255,20 +1254,13 @@ export const SettingsModelsPage: React.FC = () => {
       ])
     : null;
   const hostedTools = useHostedTools(tab === 'tools' || selectedSource !== null, selectedSourceIdentity);
-  // A probe is a real call on exactly one Source, and a successful one verifies
-  // that Source (a pending credential check clears), so the Sources read follows it.
   // A committed Source change (a model added, removed or refetched, or its
-  // identity) changes which pairs could run a tool and what binds, so the
+  // identity) can drop that Source's evidence on the server, so the
   // hosted-tools report follows it once the Sources settle.
   const presentSourceMutationAndTools = React.useCallback<PresentSourceMutationCommit>(async (commit) => {
     await presentSourceMutation(commit);
     void hostedTools.refresh();
   }, [presentSourceMutation, hostedTools.refresh]);
-  const probeHostedTool = React.useCallback(async (target: ProbeTarget) => {
-    const result = await hostedTools.probe(target);
-    void refresh();
-    return result;
-  }, [hostedTools.probe, refresh]);
   const sourceDetailOpen = selectedSourceId !== null && subscriptionVendor === null;
   const orderAgent = agents.find((agent) => agent.backend === orderBackend && agent.mode === 'hub') ?? null;
   const menuAgent = agents.find((agent) => agent.backend === menuBackend && agent.mode === 'hub') ?? null;
@@ -1647,7 +1639,7 @@ export const SettingsModelsPage: React.FC = () => {
                         selectSource({ sourceId, returnFocus: () => opener });
                       }}
                     />
-                    : tab === 'tools' ? <ToolsTab read={hostedTools.read} sources={sources} pending={hostedTools.pending} probing={hostedTools.probing} onChange={(tool, body) => void hostedTools.save(tool, body)} onProbe={probeHostedTool} onRetry={() => void hostedTools.refresh()} />
+                    : tab === 'tools' ? <ToolsTab read={hostedTools.read} sources={sources} pending={hostedTools.pending} onSave={(tool, body) => void hostedTools.save(tool, body)} onClear={(tool, body) => void hostedTools.clear(tool, body)} onRetry={() => void hostedTools.refresh()} />
                     : tab === 'usage' ? <UsageTab usage={usageRead} windowKey={usageWindow} onWindowChange={setUsageWindow} onRetry={retryUsage} />
                     : tab === 'logs' ? <RecentSwitchesCard events={eventsRead} sources={sourcesRead} onRetry={retryEvents} loadingMore={loadingEvents} onLoadMore={loadOlderEvents} />
                     : directEmpty ? <DirectHome agents={installedNativeAgents} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onSwitch={switchToGateway} />
@@ -1795,8 +1787,9 @@ export const SettingsModelsPage: React.FC = () => {
                 source={selectedSource}
                 hostedTools={hostedTools.read}
                 onRetryHostedTools={() => void hostedTools.refresh()}
-                hostedProbing={hostedTools.probing}
-                onProbeHostedTool={probeHostedTool}
+                hostedPending={hostedTools.pending}
+                // A chip clears its own (Source, model); the answer is the hosted-tools read, which owns that evidence.
+                onClearHostedRefusal={(tool, modelId) => void hostedTools.clear(tool, { source_id: selectedSource.id, model_id: modelId })}
                 activeBackends={activeBackends}
                 headingRef={sourceDetailHeadingRef}
                 trackMutation={trackSourceMutation(selectedSource.id)}

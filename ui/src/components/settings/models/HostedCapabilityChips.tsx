@@ -1,87 +1,41 @@
-// A Source model's capability chips (`vibey-hosted-tools.md` §6.2, design.pen
-// frame FB4vC): one per hosted tool with evidence, and one per reasoning effort
-// the Source refused. No record draws nothing, because unchecked is the normal
-// state rather than a problem.
+// A Source model's capability chips (`vibey-hosted-tools.md` §8.2, design.pen
+// frame yjGXx): one per hosted tool with a record, and one per reasoning effort
+// the Source refused. No record draws nothing, because unused is the normal
+// state rather than a problem. Every chip comes from real requests; a refusal
+// chip carries the clear that lets the next request try this Source again.
 //
 // The hover/focus/tap detail follows TimeHint: a phone has no hover, so a tap
-// toggles it, and the chip's accessible name carries the same facts. The detail
-// stays open while the pointer is on it, so its check action can be reached.
+// toggles it, and the chip's accessible name carries the same facts.
 import * as React from 'react';
 import { useTranslation } from 'react-i18next';
-import { AtSign, Ban, Check, Gauge, Globe, Image as ImageIcon, Loader2, Radar, RotateCw, TriangleAlert, Waypoints } from 'lucide-react';
+import { AlertCircle, AtSign, CheckCircle2, Gauge, Globe, Image as ImageIcon } from 'lucide-react';
 
-import { Button } from '@/components/ui/button';
 import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
 import { formatDayTime, formatMonthDay, formatSentences } from './format';
-import { probeKey, type ModelCapability, type ProbeTarget } from './hostedTools';
-import type { HostedToolName, HostedToolProbeResult, RefusedEffort } from './types';
-import { ProbeAnswerNote } from './ProbeAnswerNote';
-import { useEstimateLabel } from './useEstimateLabel';
+import type { ModelCapability } from './hostedTools';
+import type { HostedToolName, RefusedEffort } from './types';
 
 const TOOL_ICON: Record<HostedToolName, React.ComponentType<{ className?: string }>> = {
   web_search: Globe,
   x_search: AtSign,
-  image_generation: ImageIcon,
-};
-
-/**
- * The chip's state. A probe record older than 30 days, either way, asks for a new
- * check. A refused tool reads "via proxy" only while the server binds a proxy
- * executor for it (`bound`); otherwise it is simply not supported here.
- */
-const chipState = ({ chip, proxied }: ModelCapability) => {
-  if (chip.kind === 'engineUpgraded') return 'engineUpgraded' as const;
-  if (chip.kind === 'native') return chip.aged ? 'reverify' as const : 'native' as const;
-  if (proxied) return chip.aged ? 'viaProxyAged' as const : 'viaProxy' as const;
-  return chip.aged ? 'unsupportedAged' as const : 'unsupported' as const;
-};
-type ChipState = ReturnType<typeof chipState>;
-
-const STATE_CLASS: Record<ChipState, string> = {
-  native: 'model-hub-status-mint',
-  reverify: 'model-hub-status-gold',
-  engineUpgraded: 'model-hub-status-gold',
-  viaProxy: 'model-hub-accent-pill--cyan',
-  viaProxyAged: 'model-hub-status-gold',
-  unsupported: 'model-hub-fill-0a border-border text-muted',
-  unsupportedAged: 'model-hub-status-gold',
-};
-
-const STATE_ICON: Record<ChipState, React.ComponentType<{ className?: string }>> = {
-  native: Check,
-  reverify: RotateCw,
-  engineUpgraded: TriangleAlert,
-  viaProxy: Waypoints,
-  viaProxyAged: RotateCw,
-  unsupported: Ban,
-  unsupportedAged: RotateCw,
+  image_generate: ImageIcon,
 };
 
 type Fact = { term: string; value: string; mono?: boolean };
 
-/** The facts every evidence record states: when and how it was learned, why, and until when. */
-const useEvidenceFacts = () => {
+/** The facts a refusal states: when it was learned, why, how long it stays, and the last success if any. */
+const useRefusalFacts = () => {
   const { t, i18n } = useTranslation();
-  return (record: { basis: 'probe' | 'observed' | null; observed_at: string | null; detail: string | null; changes_at: string | null }): Fact[] => {
-    const facts: Fact[] = [];
-    if (record.observed_at) {
-      facts.push({
-        term: t('settings.models.capability.recorded') as string,
-        value: t('settings.models.capability.recordedValue', {
-          time: formatDayTime(record.observed_at, i18n.language),
-          basis: t(`settings.models.capability.basis.${record.basis === 'observed' ? 'observed' : 'probe'}`),
-        }) as string,
-      });
-    }
-    if (record.detail) facts.push({ term: t('settings.models.capability.reason') as string, value: record.detail, mono: true });
-    if (record.changes_at) {
-      facts.push({
-        term: t('settings.models.capability.expiry') as string,
-        value: t(record.basis === 'observed' ? 'settings.models.capability.expiryObserved' : 'settings.models.capability.expiryProbe', {
-          date: formatMonthDay(record.changes_at),
-        }) as string,
-      });
+  return (refusal: { at: string; reason: string | null; lastOk?: string | null }): Fact[] => {
+    const facts: Fact[] = [{
+      term: t('settings.models.capability.recorded') as string,
+      value: t('settings.models.capability.recordedValue', { time: formatDayTime(refusal.at, i18n.language) }) as string,
+    }];
+    if (refusal.reason) facts.push({ term: t('settings.models.capability.reason') as string, value: refusal.reason, mono: true });
+    facts.push({ term: t('settings.models.capability.kept') as string, value: t('settings.models.capability.keptValue') as string });
+    if (refusal.lastOk) {
+      facts.push({ term: t('settings.models.capability.lastOk') as string, value: formatMonthDay(refusal.lastOk) });
     }
     return facts;
   };
@@ -92,11 +46,11 @@ const EvidenceChip: React.FC<{
   label: string;
   explanation: string;
   facts: Fact[];
-  className: string;
-  Icon: React.ComponentType<{ className?: string }>;
+  hint?: string;
+  tone: 'ok' | 'refused';
   TitleIcon: React.ComponentType<{ className?: string }>;
-  action?: React.ReactNode;
-}> = ({ data, label, explanation, facts, className, Icon, TitleIcon, action }) => {
+  clear?: { label: string; disabled: boolean; onClick: () => void };
+}> = ({ data, label, explanation, facts, hint, tone, TitleIcon, clear }) => {
   const { t, i18n } = useTranslation();
   const [open, setOpen] = React.useState(false);
   const detailId = React.useId();
@@ -124,64 +78,55 @@ const EvidenceChip: React.FC<{
     closing.current = window.setTimeout(() => setOpen(false), 120);
   };
   React.useEffect(() => () => { if (closing.current !== null) window.clearTimeout(closing.current); }, []);
-  // Enter or Space moves keyboard focus into the detail, where its action is; a
-  // hover or a focus that only passes by leaves focus where it is.
-  const enterDetail = React.useRef(false);
-  const focusDetail = () => {
-    enterDetail.current = false;
-    const detail = document.getElementById(detailId);
-    const target = detail?.querySelector<HTMLElement>('button, [href], [tabindex]:not([tabindex="-1"])') ?? detail;
-    if (target && !target.hasAttribute('tabindex') && target === detail) target.setAttribute('tabindex', '-1');
-    target?.focus();
-  };
+  const Icon = tone === 'ok' ? CheckCircle2 : AlertCircle;
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverAnchor asChild>
-        <button
-          ref={anchor}
-          type="button"
+        {/* Shrinks inside its column and truncates; the detail always has the whole label. */}
+        <span
           data-capability={data}
-          aria-label={accessibleName as string}
-          // It opens a detail that may hold a paid re-check: say so.
-          aria-haspopup="dialog"
-          aria-expanded={open}
-          aria-controls={open ? detailId : undefined}
-          // Shrinks inside its column and truncates; the detail always has the whole label.
-          className={cn('model-hub-pill min-w-0 max-w-full flex-initial gap-1 border', className)}
-          onPointerDown={(event) => { pointer.current = event.pointerType; }}
-          onPointerEnter={(event) => { if (event.pointerType === 'mouse') keepOpen(); }}
-          onPointerLeave={(event) => { if (event.pointerType === 'mouse') closeSoon(); }}
-          onFocus={() => { if (pointer.current === null) keepOpen(); }}
-          onBlur={() => { pointer.current = null; closeSoon(); }}
-          onKeyDown={(event) => {
-            if (event.key !== 'Enter' && event.key !== ' ') return;
-            event.preventDefault();
-            enterDetail.current = true;
-            if (open) focusDetail();
-            else keepOpen();
-          }}
-          onClick={() => {
-            if (pointer.current === 'mouse') setOpen(true);
-            else setOpen((previous) => !previous);
-          }}
+          className={cn(
+            'model-hub-pill model-hub-capability-chip min-w-0 max-w-full flex-initial border',
+            tone === 'ok' ? 'model-hub-status-mint' : 'model-hub-status-gold',
+          )}
         >
-          <Icon className="size-3 shrink-0" aria-hidden />
-          <span className="truncate">{label}</span>
-        </button>
+          <button
+            ref={anchor}
+            type="button"
+            aria-label={accessibleName as string}
+            aria-haspopup="dialog"
+            aria-expanded={open}
+            aria-controls={open ? detailId : undefined}
+            className="min-w-0"
+            onPointerDown={(event) => { pointer.current = event.pointerType; }}
+            onPointerEnter={(event) => { if (event.pointerType === 'mouse') keepOpen(); }}
+            onPointerLeave={(event) => { if (event.pointerType === 'mouse') closeSoon(); }}
+            onFocus={() => { if (pointer.current === null) keepOpen(); }}
+            onBlur={() => { pointer.current = null; closeSoon(); }}
+            onClick={() => {
+              if (pointer.current === 'mouse') setOpen(true);
+              else setOpen((previous) => !previous);
+            }}
+          >
+            <Icon className="size-3 shrink-0" aria-hidden />
+            <span className="truncate">{label}</span>
+          </button>
+          {clear && (
+            <button type="button" className="model-hub-capability-clear shrink-0" aria-label={clear.label} disabled={clear.disabled} onClick={clear.onClick}>
+              {t('settings.models.capability.clear')}
+            </button>
+          )}
+        </span>
       </PopoverAnchor>
       <PopoverContent
         id={detailId}
         side="bottom"
         align="start"
         sideOffset={6}
-        onOpenAutoFocus={(event) => {
-          event.preventDefault();
-          if (enterDetail.current) focusDetail();
-        }}
+        onOpenAutoFocus={(event) => event.preventDefault()}
         onInteractOutside={(event) => { if (anchor.current?.contains(event.target as Node)) event.preventDefault(); }}
         onPointerEnter={(event) => { if (event.pointerType === 'mouse') keepOpen(); }}
         onPointerLeave={(event) => { if (event.pointerType === 'mouse') closeSoon(); }}
-        onFocusCapture={keepOpen}
         className="model-hub-capability-detail flex w-[320px] max-w-[calc(100vw-24px)] flex-col gap-2.5 text-foreground"
       >
         <span className="flex items-center gap-1.5 font-bold"><TitleIcon className="model-hub-ink-mint size-3.5" aria-hidden />{label}</span>
@@ -193,7 +138,7 @@ const EvidenceChip: React.FC<{
             ))}
           </dl>
         )}
-        {action}
+        {hint && <span className="model-hub-capability-explain">{hint}</span>}
       </PopoverContent>
     </Popover>
   );
@@ -201,54 +146,51 @@ const EvidenceChip: React.FC<{
 
 const CapabilityChip: React.FC<{
   capability: ModelCapability;
-  probing: ReadonlySet<string>;
-  onProbe?: (target: ProbeTarget) => Promise<HostedToolProbeResult | null>;
-}> = ({ capability, probing, onProbe }) => {
+  modelId: string;
+  clearing: boolean;
+  onClear?: (tool: HostedToolName) => void;
+}> = ({ capability, modelId, clearing, onClear }) => {
   const { t } = useTranslation();
-  const facts = useEvidenceFacts()(capability.evidence);
-  const estimate = useEstimateLabel()(capability.candidate.probe_estimate);
-  const state = chipState(capability);
+  const refusalFacts = useRefusalFacts();
+  const { evidence } = capability;
   const tool = t(`settings.models.tools.tool.${capability.tool}.name`) as string;
-  const target: ProbeTarget = { tool: capability.tool, candidate: capability.candidate };
-  const running = probing.has(probeKey(target));
-  // The last answer from this chip's check, so one that became no evidence still answers here.
-  const [last, setLast] = React.useState<HostedToolProbeResult | null | undefined>(undefined);
-  const label = t(`settings.models.capability.chip.${state}`, {
-    tool,
-    date: capability.evidence.observed_at ? formatMonthDay(capability.evidence.observed_at) : '',
-  }) as string;
-  const explanation = t(`settings.models.capability.explain.${state}`, {
-    tool,
-    toolInline: t(`settings.models.tools.tool.${capability.tool}.inline`),
-  }) as string;
-  const action = onProbe
-    ? (
-        <span className="flex flex-col items-end gap-1">
-          {last !== undefined && <ProbeAnswerNote result={last} />}
-          <Button variant="outline" size="xs" disabled={running || probing.size > 0} aria-busy={running} onClick={() => void onProbe(target).then(setLast)}>
-            {running ? <Loader2 className="animate-spin" aria-hidden /> : <Radar aria-hidden />}
-            {t('settings.models.capability.recheckCost', { cost: estimate ?? t('settings.models.tools.probe.unknown') })}
-          </Button>
-        </span>
-      )
-    : undefined;
+  const toolInline = t(`settings.models.tools.tool.${capability.tool}.inline`) as string;
+  if (evidence.kind === 'ok') {
+    const date = formatMonthDay(evidence.success.at);
+    return (
+      <EvidenceChip
+        data={`${capability.tool}:ok`}
+        label={t('settings.models.capability.chip.ok', { tool, date }) as string}
+        explanation={t(`settings.models.capability.explain.${evidence.success.mode}`, { toolInline }) as string}
+        facts={[]}
+        tone="ok"
+        TitleIcon={TOOL_ICON[capability.tool]}
+      />
+    );
+  }
+  const { refusal } = evidence;
+  const state = refusal.aspect === 'call' ? 'refused' : 'replay';
   return (
     <EvidenceChip
       data={`${capability.tool}:${state}`}
-      label={label}
-      explanation={explanation}
-      facts={facts}
-      className={STATE_CLASS[state]}
-      Icon={STATE_ICON[state]}
+      label={t(`settings.models.capability.chip.${state}`, { tool }) as string}
+      explanation={t(`settings.models.capability.explain.${state}`, { toolInline }) as string}
+      facts={refusalFacts({ at: refusal.at, reason: refusal.reason, lastOk: evidence.lastOk?.at ?? null })}
+      hint={onClear ? t('settings.models.capability.clearHint') as string : undefined}
+      tone="refused"
       TitleIcon={TOOL_ICON[capability.tool]}
-      action={action}
+      clear={onClear && {
+        label: t('settings.models.capability.clearTool', { tool: toolInline, model: modelId }) as string,
+        disabled: clearing,
+        onClick: () => onClear(capability.tool),
+      }}
     />
   );
 };
 
-const EffortChip: React.FC<{ refused: RefusedEffort }> = ({ refused }) => {
+const EffortChip: React.FC<{ refused: RefusedEffort; modelId: string; clearing: boolean; onClear?: (effort: string) => void }> = ({ refused, modelId, clearing, onClear }) => {
   const { t } = useTranslation();
-  const facts = useEvidenceFacts()(refused);
+  const facts = useRefusalFacts()({ at: refused.observed_at, reason: refused.detail });
   const effort = t(`chat.picker.effortOptions.${refused.effort}`, { defaultValue: refused.effort }) as string;
   return (
     <EvidenceChip
@@ -256,21 +198,35 @@ const EffortChip: React.FC<{ refused: RefusedEffort }> = ({ refused }) => {
       label={t('settings.models.capability.effort.unsupported', { effort }) as string}
       explanation={t('settings.models.capability.effort.explain') as string}
       facts={facts}
-      className="model-hub-fill-0a border-border text-muted"
-      Icon={Ban}
+      hint={onClear ? t('settings.models.capability.clearHint') as string : undefined}
+      tone="refused"
       TitleIcon={Gauge}
+      clear={onClear && {
+        label: t('settings.models.capability.clearEffort', { effort, model: modelId }) as string,
+        disabled: clearing,
+        onClick: () => onClear(refused.effort),
+      }}
     />
   );
 };
 
 export const HostedCapabilityChips: React.FC<{
+  modelId: string;
   capabilities: readonly ModelCapability[];
   refusedEfforts?: readonly RefusedEffort[];
-  probing: ReadonlySet<string>;
-  onProbe?: (target: ProbeTarget) => Promise<HostedToolProbeResult | null>;
-}> = ({ capabilities, refusedEfforts = [], probing, onProbe }) => (
+  /** Tools with a write out: their clears wait for its answer. */
+  pendingTools: ReadonlySet<HostedToolName>;
+  /** The Source has a write out: effort clears wait for it. */
+  sourceBusy: boolean;
+  onClearTool?: (tool: HostedToolName) => void;
+  onClearEffort?: (effort: string) => void;
+}> = ({ modelId, capabilities, refusedEfforts = [], pendingTools, sourceBusy, onClearTool, onClearEffort }) => (
   <span className="flex min-w-0 flex-wrap items-center gap-1.5">
-    {capabilities.map((capability) => <CapabilityChip key={capability.tool} capability={capability} probing={probing} onProbe={onProbe} />)}
-    {refusedEfforts.map((refused) => <EffortChip key={refused.effort} refused={refused} />)}
+    {capabilities.map((capability) => (
+      <CapabilityChip key={capability.tool} capability={capability} modelId={modelId} clearing={pendingTools.has(capability.tool)} onClear={onClearTool} />
+    ))}
+    {refusedEfforts.map((refused) => (
+      <EffortChip key={refused.effort} refused={refused} modelId={modelId} clearing={sourceBusy} onClear={onClearEffort} />
+    ))}
   </span>
 );

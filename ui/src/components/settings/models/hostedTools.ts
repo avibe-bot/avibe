@@ -1,78 +1,114 @@
-// What the Tools tab and the Source chips say about hosted-tool evidence
-// (`vibey-hosted-tools.md` §6.1–§6.2). Pure projections of the Tools-tab read
-// (`hosted-tools-status.schema.json`): the server has already folded staleness
-// into `status`, so nothing here re-derives routing.
-import type {
-  HostedEvidence,
-  HostedToolCandidate,
-  HostedToolExecutor,
-  HostedToolName,
-  HostedToolProbeResult,
-  HostedToolsStatus,
-  HostedToolStatus,
-} from './types';
+// What the Tools tab and the Source chips say about hosted tools
+// (`vibey-hosted-tools.md` §8). Pure projections of the Tools-tab read
+// (`hosted-tools-status.schema.json`): positive records are display only,
+// refusals are routing state until the user clears them, and nothing here
+// decides a route.
+import type { HostedRefusal, HostedSuccess, HostedToolName, HostedToolRunStatus, HostedToolsStatus } from './types';
+
+const time = (at: string): number => Date.parse(at);
+
+/** One Source's refusals of a tool on one aspect: the models it refused, and when it last did. */
+export type RefusalGroup = { sourceId: string; aspect: HostedRefusal['aspect']; models: string[]; at: string };
+
+export type RefusalSummary = {
+  /** Sources that refused the tool itself. */
+  call: RefusalGroup[];
+  /** Sources that still run the tool but refused earlier results sent back to it. */
+  replay: RefusalGroup[];
+  /** Distinct Sources across both lines; with two or more, the clears move into Advanced. */
+  sources: number;
+  /** The Source the tool has run on since every call refusal, when that is another Source. */
+  switchedTo: string | null;
+};
 
 /**
- * One call-evidence record as a chip.
- *
- * - `native`: verified; the tool runs natively.
- * - `unsupported`: the Source refused the tool, by probe or by a real error.
- * - `engineUpgraded`: taken on another engine or probe shape. It routes as
- *   unknown, i.e. through the proxy, until the user checks again.
- *
- * `aged` marks a probe record older than 30 days, whichever way it went: it
- * still routes as recorded and only asks for a new check.
- *
- * `null` is no record: unchecked, which is the normal state and draws no chip
- * on a Source (§6.2).
+ * The refusal lines of one tool. A Source that refused the call is left out of
+ * the replay line: replay is moot where the tool is not declared natively.
  */
-export type HostedEvidenceChip = {
-  kind: 'native' | 'unsupported' | 'engineUpgraded';
-  aged: boolean;
-  at: string | null;
+export const refusalSummary = (status: HostedToolRunStatus): RefusalSummary => {
+  const groups = new Map<string, RefusalGroup>();
+  for (const refusal of status.refused) {
+    const key = `${refusal.aspect}:${refusal.source_id}`;
+    const group = groups.get(key);
+    if (!group) {
+      groups.set(key, { sourceId: refusal.source_id, aspect: refusal.aspect, models: [refusal.model_id], at: refusal.at });
+      continue;
+    }
+    if (!group.models.includes(refusal.model_id)) group.models.push(refusal.model_id);
+    if (time(refusal.at) > time(group.at)) group.at = refusal.at;
+  }
+  const call = [...groups.values()].filter((group) => group.aspect === 'call');
+  const callSources = new Set(call.map((group) => group.sourceId));
+  const replay = [...groups.values()].filter((group) => group.aspect === 'replay' && !callSources.has(group.sourceId));
+  const latest = status.latest_ok;
+  const switchedTo = latest !== null
+    && call.length > 0
+    && !callSources.has(latest.source_id)
+    && call.every((group) => time(group.at) < time(latest.at))
+    ? latest.source_id
+    : null;
+  return { call, replay, sources: call.length + replay.length, switchedTo };
 };
 
-export const evidenceChip = (evidence: HostedEvidence): HostedEvidenceChip | null => {
-  // Staleness first: a wire-stale record reads `unknown` but still has a past
-  // the user needs to see, whatever it once said.
-  if (evidence.stale === 'wire') return { kind: 'engineUpgraded', aged: false, at: evidence.observed_at };
-  const aged = evidence.stale === 'age';
-  if (evidence.status === 'verified') return { kind: 'native', aged, at: evidence.observed_at };
-  if (evidence.status === 'unsupported') return { kind: 'unsupported', aged, at: evidence.observed_at };
-  return null;
+/** One (Source, model) on a tool, as the Advanced status list and the Source chips show it. */
+export type PairEvidence =
+  | { kind: 'ok'; sourceId: string; modelId: string; success: HostedSuccess }
+  | { kind: 'refused'; sourceId: string; modelId: string; refusal: HostedRefusal; lastOk: HostedSuccess | null };
+
+const pairKey = (sourceId: string, modelId: string) => JSON.stringify([sourceId, modelId]);
+
+/**
+ * Every (Source, model) the tool has a record for, one entry each. A refusal
+ * wins over a success on the same pair, because it is routing state, and a call
+ * refusal over a replay refusal.
+ */
+export const pairEvidence = (status: HostedToolRunStatus): PairEvidence[] => {
+  const verified = new Map(status.verified.map((success) => [pairKey(success.source_id, success.model_id), success]));
+  const refused = new Map<string, HostedRefusal>();
+  for (const refusal of status.refused) {
+    const key = pairKey(refusal.source_id, refusal.model_id);
+    const held = refused.get(key);
+    if (!held || (held.aspect === 'replay' && refusal.aspect === 'call')) refused.set(key, refusal);
+  }
+  const pairs: PairEvidence[] = [];
+  for (const [key, success] of verified) {
+    if (!refused.has(key)) pairs.push({ kind: 'ok', sourceId: success.source_id, modelId: success.model_id, success });
+  }
+  for (const [key, refusal] of refused) {
+    pairs.push({ kind: 'refused', sourceId: refusal.source_id, modelId: refusal.model_id, refusal, lastOk: verified.get(key) ?? null });
+  }
+  return pairs;
 };
 
-export const sameExecutor = (left: HostedToolExecutor | null, right: HostedToolExecutor | null): boolean =>
-  left !== null && right !== null && left.source_id === right.source_id && left.model_id === right.model_id;
+export type ModelCapability = { tool: HostedToolName; evidence: PairEvidence };
 
-/** The candidates a user may pick as executor: those verified for the call now. */
-export const verifiedCandidates = (tool: HostedToolStatus): HostedToolCandidate[] =>
-  tool.candidates.filter((candidate) => candidate.call.status === 'verified');
-
-export type ModelCapability = {
-  tool: HostedToolName;
-  evidence: HostedEvidence;
-  chip: HostedEvidenceChip;
-  candidate: HostedToolCandidate;
-  /** The tool is on and a turn would bind an executor (`bound`): a model that
-   *  cannot run it natively reaches it through that proxy. */
-  proxied: boolean;
-};
-
-/** A Source model's evidence for each tool, in catalog order, for its detail chips. */
+/** A Source model's evidence for each tool, in catalog order, for its detail chips. No record draws nothing. */
 export const modelCapabilities = (status: HostedToolsStatus, sourceId: string, modelId: string): ModelCapability[] =>
   status.tools.flatMap((tool) => {
-    const candidate = tool.candidates.find((entry) => entry.source_id === sourceId && entry.model_id === modelId);
-    const chip = candidate ? evidenceChip(candidate.call) : null;
-    return candidate && chip
-      ? [{ tool: tool.name, evidence: candidate.call, chip, candidate, proxied: tool.enabled && tool.bound !== null }]
-      : [];
+    const evidence = pairEvidence(tool.status).find((pair) => pair.sourceId === sourceId && pair.modelId === modelId);
+    return evidence ? [{ tool: tool.name, evidence }] : [];
   });
 
-export type ProbeTarget = { tool: HostedToolName; candidate: HostedToolCandidate };
+/**
+ * The executor order to save after moving one shown executor. The saved order may
+ * name Sources the read does not show now (refused, or gone for a while); the
+ * server keeps those on purpose and skips them, so a move rearranges only the
+ * shown ones within the saved list and leaves every hidden id where it was. A
+ * shown executor the saved list lacks follows the list, in its new place.
+ */
+export const executorOrderAfterMove = (
+  saved: readonly string[] | null,
+  shown: readonly string[],
+  index: number,
+  direction: -1 | 1,
+): string[] => {
+  const moved = [...shown];
+  const [item] = moved.splice(index, 1);
+  moved.splice(index + direction, 0, item);
+  if (saved === null) return moved;
+  const visible = new Set(shown);
+  const next = moved[Symbol.iterator]();
+  const merged = saved.map((id) => (visible.has(id) ? next.next().value as string : id));
+  return [...merged, ...next];
+};
 
-export const probeKey = ({ tool, candidate }: ProbeTarget): string => `${tool}:${candidate.source_id}:${candidate.model_id}`;
-
-/** Whether a probe's answer became no evidence: inconclusive, transient, or a request that failed (null). */
-export const probeUnanswered = (result: HostedToolProbeResult | null): boolean =>
-  result === null || result.call.outcome === 'inconclusive' || result.call.outcome === 'transient';
