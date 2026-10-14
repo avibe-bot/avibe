@@ -270,8 +270,8 @@ The evidence store, its record and its owner are the capability model's §3. v2 
 
   `replay` is `assumed` when `native` is, the protocol replays natively (`anthropic`, `openai_responses`), and no
   current negative `replay` evidence exists.
-- **`image_generate`** gets `{models: [{source_id, model_id, description, params}], default: {source_id,
-  model_id}}`: every image model the user's Sources make available (§7.2), in the order the enum uses. The entry is
+- **`image_generate`** gets `{models: [{source_id, model_id, description, params, size_forms}], default: {source_id,
+  model_id}}` (the endpoint kind and price stay gateway-side): every image model the user's Sources make available (§7.2), in the order the enum uses. The entry is
   absent when the tool is off or no image model is available, so `models` is never empty and `default` never null.
 - **What goes away:** `mode` (Vibey decides), `executor` (the gateway resolves the chain per call), and every
   dependence on positive evidence.
@@ -735,7 +735,8 @@ under the freeze protocol (`model-hub-contracts/README.md`).
 ### 10.2 C-6 (`agent-core-contracts/model-hub-consumer.md`, both `hop-resolution.schema.json` copies)
 
 - `HopResolution.hosted_tools` entries become `{native: "assumed" | "unsupported", declaration?, include?, replay:
-  "assumed" | "unsupported"}` for search tools (§3.4), and `image_generate: {models[], default}`; `mode` and
+  "assumed" | "unsupported"}` for search tools (§3.4), and `image_generate: {models[{source_id, model_id,
+  description, params, size_forms}], default}`; `mode` and
   `executor` are removed. `declaration` and `include` are present exactly when `native` is `assumed`.
 - Admission of a pinned request reads negative evidence only: a declared native tool needs `runs_on` and no current
   negative `call` evidence; a replayed item needs no current negative `replay` evidence.
