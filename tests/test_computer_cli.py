@@ -328,6 +328,43 @@ def test_cmd_computer_run_localizes_missing_private_node(
     assert exc_info.value.code == "computer_script_unavailable"
 
 
+def test_cmd_computer_run_localizes_sdk_error_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibe.computer_script_runner import ComputerScriptRunnerError
+
+    monkeypatch.setenv("AVIBE_SESSION_ID", "ses-cli")
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
+
+    def invalid_selector(**_kwargs):
+        raise ComputerScriptRunnerError(
+            "computer.cli.error.scriptFailed",
+            code="invalid_selector",
+            params={
+                "step": "computer.app",
+                "error": "Application selector contains unknown field 'text'.",
+            },
+            structured_error={
+                "code": "invalid_selector",
+                "params": {"field": "text"},
+            },
+        )
+
+    monkeypatch.setattr(
+        "vibe.computer_script_runner.run_computer_script",
+        invalid_selector,
+    )
+    args = cli.build_parser().parse_args(["computer", "run", "./inspect.mjs"])
+
+    with pytest.raises(cli.TaskCliError) as exc_info:
+        cli.cmd_computer(args)
+
+    assert str(exc_info.value) == (
+        "Computer Use 脚本在 computer.app 失败：脚本使用了无效选择器。"
+    )
+    assert "Application selector" not in str(exc_info.value)
+
+
 def test_computer_cli_error_translations_exist_in_all_supported_languages() -> None:
     keys = {
         *_COMPUTER_ERROR_I18N_KEYS.values(),

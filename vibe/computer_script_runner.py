@@ -41,11 +41,13 @@ class ComputerScriptRunnerError(RuntimeError):
         code: str,
         params: dict[str, Any] | None = None,
         details: dict[str, Any] | None = None,
+        structured_error: dict[str, Any] | None = None,
     ) -> None:
         self.key = key
         self.code = code
         self.params = params or {}
         self.details = details or {}
+        self.structured_error = structured_error
         super().__init__(key)
 
 
@@ -311,6 +313,9 @@ def run_computer_script(
         step = str(error.get("step") or "script")
         message = str(error.get("message") or "the script failed")
         code = str(error.get("code") or "computer_script_failed")
+        error_params = error.get("params")
+        if not isinstance(error_params, dict):
+            error_params = {}
         screenshot_path = error.get("screenshot_path")
         details: dict[str, Any] = {"step": step}
         if isinstance(screenshot_path, str) and screenshot_path:
@@ -320,6 +325,7 @@ def run_computer_script(
             code=code,
             params={"step": step, "error": message},
             details=details,
+            structured_error={"code": code, "params": error_params},
         )
     finally:
         close_timeout = deadline - time.monotonic()

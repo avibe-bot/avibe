@@ -769,8 +769,15 @@ def cmd_computer(args) -> int:
                 arg_values=args.arg,
             )
         except ComputerScriptRunnerError as exc:
+            params = dict(exc.params)
+            if exc.structured_error is not None:
+                params["error"] = translate_computer_error(
+                    exc.structured_error,
+                    translate=translate,
+                    fallback=str(params.get("error") or ""),
+                )
             raise TaskCliError(
-                translate(exc.key, **exc.params),
+                translate(exc.key, **params),
                 code=exc.code,
                 details=exc.details,
                 help_command="vibe computer run --help",
@@ -19434,6 +19441,7 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("computer", "observe", "apps"): "member",
     ("computer", "observe", "windows"): "member",
     ("computer", "observe", "window"): "member",
+    ("computer", "run"): "member",
     ("computer", "zoom"): "member",
     ("computer", "click"): "member",
     ("computer", "type"): "member",
