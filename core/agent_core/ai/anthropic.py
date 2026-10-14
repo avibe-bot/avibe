@@ -873,10 +873,15 @@ class AnthropicAdapter(ProviderAdapter):
                     # The pinned Source cannot serve this content: the same request once more, in portable form and
                     # unpinned, which the gateway fails over as any other (§3.5). Never the generic retry.
                     sending = portable_request(request)
-                elif unavailable or (continued and self._gateway and PIN_SOURCE_HEADER not in wire.headers):
+                elif unavailable or (
+                    continued
+                    and self._gateway
+                    and (PIN_SOURCE_HEADER not in wire.headers or not assembler.verified_origin)
+                ):
                     # A paused response continues only on the Source that served it, pinned, so it stays one origin's
-                    # message: a continuation that Source cannot serve, or a send no pin held there, ends the response
-                    # with what it has (§4.3 as implemented).
+                    # message: a continuation that Source cannot serve, a send no pin held there, or a response whose
+                    # Source is unknown (no served-hop report, so its hosted calls could not be kept and sent back) ends
+                    # the response with what it has (§4.3 as implemented).
                     terminal = assembler.terminal(assembler.error(PAUSE_UNSERVED_MESSAGE, kind="interrupted"))
                     if terminal is not None:
                         yield terminal

@@ -204,24 +204,28 @@ async def test_a_response_paused_past_the_bound_ends_interrupted_and_keeps_every
 
 
 @pytest.mark.parametrize(
-    ("unavailable", "kept"),
-    [(2, "part 1"), (1, "part 2")],
-    ids=["continuation-pin-unavailable", "paused-unpinned-send"],
+    ("unavailable", "reported", "sends", "kept"),
+    [(2, True, 2, "part 1"), (1, True, 2, "part 2"), (None, False, 1, "part 1")],
+    ids=["continuation-pin-unavailable", "paused-unpinned-send", "paused-unverified-response"],
 )
-async def test_a_paused_response_its_source_cannot_continue_ends_interrupted_and_keeps_what_it_has(unavailable, kept):
+async def test_a_paused_response_its_source_cannot_continue_ends_interrupted_and_keeps_what_it_has(
+    unavailable, reported, sends, kept
+):
     """§4.3 as implemented: a continuation goes only to the Source that served the paused response, pinned, so the
-    response stays one origin's message. One that Source answers ``pin_unavailable``, or a pause of a send no pin held
-    there (the turn's portable resend), ends the response without another send."""
+    response stays one origin's message. It ends without another send when:
+    - that Source answers the continuation ``pin_unavailable``;
+    - the paused send carried no pin (the turn's portable resend);
+    - the paused response named no Source, so its hosted calls could not be kept to send back."""
 
     def answer(number: int) -> httpx.Response:
         if number == unavailable:
             return httpx.Response(409, json=_PIN_UNAVAILABLE)
         body = _response(_text(f"part {number}"), stop_reason="pause_turn", input_tokens=10, output_tokens=1)
-        return httpx.Response(200, headers=_served(), text=body)
+        return httpx.Response(200, headers=_served(reported=reported), text=body)
 
     sent, events = await _stream(answer)
 
-    assert len(sent) == 2
+    assert len(sent) == sends
     error = events[-1]
     assert isinstance(error, ProviderError) and error.kind == "interrupted" and error.message == PAUSE_UNSERVED_MESSAGE
     assert [block.text for block in error.partial.content if isinstance(block, TextBlock)] == [kept]
@@ -257,14 +261,14 @@ async def test_a_continuation_whose_route_refuses_the_cache_lifetime_is_sent_aga
 @pytest.mark.parametrize(
     ("first", "second"),
     [
-        ({"reported": False}, {}),
+        ({}, {"reported": False}),
         ({}, {"model": "claude-sonnet-5-5"}),
     ],
-    ids=["unverified-then-verified", "another-origin"],
+    ids=["then-unverified", "another-origin"],
 )
 async def test_a_continued_response_is_verified_only_when_every_response_in_it_was_from_one_origin(first, second):
-    """A response with no served-hop report, or one another origin served, makes the whole message unverified: no
-    signature of any part is kept, whichever response came last."""
+    """A continuation with no served-hop report, or one another origin served, makes the whole message unverified: no
+    signature of any part is kept, the paused part's included."""
 
     def answer(number: int) -> httpx.Response:
         if number == 1:
