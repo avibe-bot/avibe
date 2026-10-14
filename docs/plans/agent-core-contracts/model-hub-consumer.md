@@ -56,7 +56,8 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
    converts protocols. Opaque payloads are bound to the account that issued them, the Source identity, as well as
    the origin: a provider refuses another account's ciphertext. The serving identity is read on the final admission
    snapshot, so a key rotated mid-turn counts. A pinned request is never rewritten: one pinned to the primary hop
-   whose identity has changed since the launch answers `pin_unavailable`, and the agent renders it again portably.
+   whose identity has changed since the launch answers `pin_unavailable`, and the agent re-resolves and renders it
+   for the fresh hop, whose identity drops the old payloads.
    The identity stays in memory: it is never in the served-hop report or persisted provenance. Known limit:
    the next request targets the primary origin again, so payloads returned by a fallback origin are not replayed if a
    later request fails over to that same fallback; a provider that then rejects the call surfaces as a provider error.
