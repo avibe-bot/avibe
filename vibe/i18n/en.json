@@ -923,6 +923,12 @@
         "scriptConnectionInvalid": "The script's Controller connection is no longer valid.",
         "scriptControllerRejected": "The Controller rejected the script request.",
         "scriptRequestTooLarge": "The Computer Use script request exceeded the Controller size limit.",
+        "scriptMessageTooLarge": "The Computer Use script message exceeded the size limit.",
+        "scriptNotifyFailed": "The Computer Use notification could not be delivered.",
+        "scriptInvalidMessage": "Computer Use script messages must be non-empty text.",
+        "confirmRefused": "The owner refused the confirmation.",
+        "confirmAlreadyPending": "The script already has a confirmation waiting for an answer.",
+        "confirmApproverUnavailable": "The owner identity for this confirmation is unavailable.",
         "scriptControllerUnavailable": "The Controller is unavailable.",
         "scriptDeadlineExpired": "The script deadline expired.",
         "scriptElementNotActionable": "The matched element is not actionable.",
@@ -960,6 +966,11 @@
         "upstreamToolError": "The Computer Use driver returned an error.",
         "upstreamUnavailable": "The Computer Use driver is unavailable. Observe again before retrying.",
         "windowTargetRequired": "Input must target an exact observed window or element."
+      },
+      "confirm": {
+        "prompt": "{message}\n\nReply yes or no to continue. Only the Avibe owner who started this script can answer.",
+        "ownerOnly": "Only the Avibe owner who started this script can answer this confirmation.",
+        "invalidAnswer": "Please answer yes or no. The confirmation is still waiting."
       },
       "status": {
         "off": "off",

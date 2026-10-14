@@ -72,6 +72,14 @@ class MessageHandler(BaseHandler):
         lifecycle_snapshot: object | None = None,
     ):
         """Process regular human-originated messages and route to configured agent."""
+        interactions = getattr(
+            self.controller,
+            "computer_script_interactions",
+            None,
+        )
+        consume_answer = getattr(interactions, "consume_answer", None)
+        if callable(consume_answer) and await consume_answer(context, message):
+            return None
         await self._handle_turn(
             context,
             message,

@@ -86,6 +86,7 @@ class PendingQuestion:
     # Session info
     base_session_id: str
     thread_id: Optional[str] = None
+    expected_approver_id: Optional[str] = None
 
     # UI state
     prompt_message_id: Optional[str] = None

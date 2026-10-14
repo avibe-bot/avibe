@@ -1,0 +1,305 @@
+"""Controller-owned notify and owner-confirm interactions for Computer Use scripts."""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass
+import logging
+import secrets
+from typing import Any
+
+from core.computer_script_sessions import (
+    ComputerScriptSessionError,
+    ComputerScriptSessionManager,
+)
+from core.delivery_target import routed_delivery_context
+from modules.agents.question_ui import PendingQuestion, Question
+from modules.im import MessageContext
+from vibe.i18n import t as i18n_t
+
+logger = logging.getLogger(__name__)
+
+_MAX_MESSAGE_LENGTH = 64 * 1024
+_YES_ANSWERS = frozenset(
+    {
+        "y",
+        "yes",
+        "approve",
+        "approved",
+        "confirm",
+        "confirmed",
+        "ok",
+        "okay",
+        "是",
+        "确认",
+        "同意",
+        "可以",
+        "好",
+        "好的",
+    }
+)
+_NO_ANSWERS = frozenset(
+    {
+        "n",
+        "no",
+        "cancel",
+        "cancelled",
+        "canceled",
+        "decline",
+        "declined",
+        "拒绝",
+        "取消",
+        "否",
+        "不",
+    }
+)
+
+
+class ComputerScriptInteractionError(RuntimeError):
+    """A script-facing notify or confirm interaction failed."""
+
+    def __init__(
+        self,
+        code: str,
+        *,
+        status_code: int = 409,
+        params: dict[str, Any] | None = None,
+    ) -> None:
+        self.code = code
+        self.status_code = status_code
+        self.params = dict(params or {})
+        super().__init__(code)
+
+
+@dataclass
+class _PendingConfirm:
+    token: str
+    turn: Any
+    context: MessageContext
+    question: PendingQuestion
+    future: asyncio.Future[bool]
+
+
+class ComputerScriptInteractionManager:
+    """Own script notifications and confirms on the launching Turn's surface."""
+
+    def __init__(
+        self,
+        controller: Any,
+        script_sessions: ComputerScriptSessionManager,
+    ) -> None:
+        self._controller = controller
+        self._script_sessions = script_sessions
+        self._pending: dict[str, _PendingConfirm] = {}
+        self._pending_by_token: dict[str, str] = {}
+
+    async def notify(self, token: str, message: str) -> dict[str, Any]:
+        binding = self._admit_message(token, message)
+        context = routed_delivery_context(binding.turn.context)
+        try:
+            message_id = await self._controller.emit_agent_message(
+                context,
+                "notify",
+                message,
+            )
+        except Exception as exc:
+            logger.exception("Computer script notify delivery failed")
+            raise ComputerScriptInteractionError(
+                "computer_script_notify_failed",
+                status_code=503,
+            ) from exc
+        return {
+            "status": "confirmed",
+            "effect": "confirmed",
+            "route": "message_dispatcher",
+            "delivery": {
+                "mode": "foreground",
+                "delivered_count": 1,
+            },
+            "message_id": message_id,
+        }
+
+    async def confirm(self, token: str, message: str) -> dict[str, Any]:
+        binding = self._admit_message(token, message)
+        if token in self._pending_by_token:
+            raise ComputerScriptInteractionError("confirm_already_pending")
+
+        context = routed_delivery_context(binding.turn.context)
+        expected_approver_id = str(context.user_id or "").strip()
+        if not expected_approver_id:
+            raise ComputerScriptInteractionError(
+                "confirm_approver_unavailable",
+                status_code=409,
+            )
+        loop = asyncio.get_running_loop()
+        pending = PendingQuestion(
+            questions=[Question(question=message)],
+            prompt_text=message,
+            option_labels=[],
+            base_session_id=binding.session_id,
+            thread_id=context.thread_id,
+            expected_approver_id=expected_approver_id,
+            agent_data={"kind": "computer_script_confirm"},
+        )
+        record = _PendingConfirm(
+            token=token,
+            turn=binding.turn,
+            context=context,
+            question=pending,
+            future=loop.create_future(),
+        )
+        confirm_id = secrets.token_urlsafe(18)
+        self._pending[confirm_id] = record
+        self._pending_by_token[token] = confirm_id
+        try:
+            prompt = self._translate(
+                "computer.confirm.prompt",
+                message=message,
+            )
+            await self._controller.emit_agent_message(context, "notify", prompt)
+            approved = await record.future
+        except asyncio.CancelledError:
+            self._remove(confirm_id)
+            raise
+        finally:
+            self._remove(confirm_id)
+
+        if not approved:
+            raise ComputerScriptInteractionError("confirm_refused")
+        return {
+            "status": "confirmed",
+            "effect": "confirmed",
+            "route": "owner_confirm",
+            "delivery": {
+                "mode": "foreground",
+                "delivered_count": 1,
+            },
+        }
+
+    async def consume_answer(
+        self,
+        context: MessageContext,
+        message: str,
+    ) -> bool:
+        """Consume a message addressed to a pending confirm, if any.
+
+        A non-owner message on the same surface is consumed and refused so it
+        cannot start a competing Agent Turn or resolve the pending question.
+        """
+
+        target = routed_delivery_context(context)
+        candidate = next(
+            (
+                (confirm_id, record)
+                for confirm_id, record in self._pending.items()
+                if self._same_surface(record.context, target)
+            ),
+            None,
+        )
+        if candidate is None:
+            return False
+        confirm_id, record = candidate
+        if str(target.user_id or "").strip() != record.question.expected_approver_id:
+            await self._best_effort_notify(
+                target,
+                self._translate("computer.confirm.ownerOnly"),
+            )
+            return True
+
+        answer = _parse_answer(message)
+        if answer is None:
+            await self._best_effort_notify(
+                target,
+                self._translate("computer.confirm.invalidAnswer"),
+            )
+            return True
+        self._remove(confirm_id)
+        if not record.future.done():
+            if answer:
+                record.future.set_result(True)
+            else:
+                record.future.set_exception(
+                    ComputerScriptInteractionError("confirm_refused")
+                )
+        return True
+
+    def pending_for_token(self, token: str) -> PendingQuestion | None:
+        confirm_id = self._pending_by_token.get(token)
+        record = self._pending.get(confirm_id) if confirm_id else None
+        return record.question if record is not None else None
+
+    def invalidate_token(self, token: str, code: str) -> None:
+        confirm_id = self._pending_by_token.get(token)
+        if confirm_id is None:
+            return
+        record = self._pending.get(confirm_id)
+        if record is None:
+            self._pending_by_token.pop(token, None)
+            return
+        self._remove(confirm_id)
+        if not record.future.done():
+            record.future.set_exception(
+                ComputerScriptInteractionError(code, status_code=409)
+            )
+
+    def invalidate_turn(self, turn: Any) -> None:
+        for token, confirm_id in tuple(self._pending_by_token.items()):
+            record = self._pending.get(confirm_id)
+            if record is not None and record.turn is turn:
+                self.invalidate_token(token, "script_turn_ended")
+
+    def close_all(self) -> None:
+        for token in tuple(self._pending_by_token):
+            self.invalidate_token(token, "script_connection_invalid")
+
+    def _admit_message(self, token: str, message: str) -> Any:
+        if not isinstance(message, str) or not message.strip():
+            raise ComputerScriptInteractionError(
+                "invalid_computer_script_message",
+                status_code=400,
+            )
+        if len(message.encode("utf-8")) > _MAX_MESSAGE_LENGTH:
+            raise ComputerScriptInteractionError(
+                "computer_script_message_too_large",
+                status_code=413,
+                params={"limit_bytes": _MAX_MESSAGE_LENGTH},
+            )
+        try:
+            return self._script_sessions.admit(token)
+        except ComputerScriptSessionError:
+            raise
+
+    async def _best_effort_notify(self, context: MessageContext, message: str) -> None:
+        try:
+            await self._controller.emit_agent_message(context, "notify", message)
+        except Exception:
+            logger.debug("Could not send computer script confirm notice", exc_info=True)
+
+    def _remove(self, confirm_id: str) -> None:
+        record = self._pending.pop(confirm_id, None)
+        if record is not None:
+            self._pending_by_token.pop(record.token, None)
+
+    def _translate(self, key: str, **kwargs: Any) -> str:
+        translator = getattr(self._controller, "_t", None)
+        if callable(translator):
+            return str(translator(key, **kwargs))
+        language = getattr(getattr(self._controller, "config", None), "language", "en")
+        return str(i18n_t(key, language, **kwargs))
+
+    @staticmethod
+    def _same_surface(left: MessageContext, right: MessageContext) -> bool:
+        return (
+            left.platform == right.platform
+            and left.channel_id == right.channel_id
+            and left.thread_id == right.thread_id
+        )
+
+
+def _parse_answer(message: str) -> bool | None:
+    normalized = " ".join(str(message or "").strip().lower().split())
+    if normalized in _YES_ANSWERS:
+        return True
+    if normalized in _NO_ANSWERS:
+        return False
+    return None

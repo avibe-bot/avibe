@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import secrets
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from core.computer_cli import COMPUTER_CLI_TOOLS
 
@@ -51,6 +51,16 @@ class ComputerScriptSessionManager:
     def __init__(self, turn_manager: "SessionTurnManager") -> None:
         self._turn_manager = turn_manager
         self._bindings: dict[str, _ScriptBinding] = {}
+        self._invalidation_listeners: list[Callable[[str, str], None]] = []
+
+    def add_invalidation_listener(
+        self,
+        listener: Callable[[str, str], None],
+    ) -> None:
+        """Register one owner for state bound to a script connection."""
+
+        if listener not in self._invalidation_listeners:
+            self._invalidation_listeners.append(listener)
 
     def open(self, caller_session_id: str, timeout_seconds: float) -> dict[str, Any]:
         if (
@@ -172,6 +182,13 @@ class ComputerScriptSessionManager:
             self.close,
             token,
         )
+        for listener in tuple(self._invalidation_listeners):
+            try:
+                listener(token, code)
+            except Exception:
+                # A secondary owner must not prevent the connection itself from
+                # becoming invalid. Its own tests and logs own that failure.
+                continue
 
     @staticmethod
     def _cancel_binding_handles(binding: _ScriptBinding) -> None:

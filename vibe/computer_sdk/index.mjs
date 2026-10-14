@@ -1,6 +1,7 @@
 import {
   ControllerFault,
   callTool,
+  callScriptInteraction,
   controllerFailureAmbiguous,
   runStep,
   sleepWithinDeadline,
@@ -164,6 +165,13 @@ export class Unavailable extends ControllerError {
   }
 }
 
+export class ConfirmRefused extends ControllerError {
+  constructor(message, options = {}) {
+    super(message, { ...options, code: options.code || "confirm_refused" });
+    this.name = "ConfirmRefused";
+  }
+}
+
 function publicError(error) {
   if (error instanceof ControllerError) {
     return error;
@@ -204,6 +212,9 @@ function publicError(error) {
   ) {
     return new Unavailable(error.message, options);
   }
+  if (error.code === "confirm_refused") {
+    return new ConfirmRefused(error.message, options);
+  }
   return new ControllerError(error.message, options);
 }
 
@@ -233,6 +244,19 @@ function effectResult(result) {
     ? payload.effect
     : "unverifiable";
   return { ...payload, effect: status, status };
+}
+
+function validateInteractionMessage(message) {
+  if (typeof message !== "string" || !message.trim()) {
+    throw new ControllerError(
+      "Computer script messages must be non-empty strings.",
+      {
+        code: "invalid_computer_script_message",
+        params: { field: "message" },
+        ambiguous: false,
+      },
+    );
+  }
 }
 
 function publicObservation(result) {
@@ -968,3 +992,19 @@ class ElementExpectation {
 }
 
 export const computer = Object.freeze(new Computer());
+
+export const avibe = Object.freeze({
+  notify(message) {
+    return sdkStep("avibe.notify", async () => {
+      validateInteractionMessage(message);
+      return effectResult(await callScriptInteraction("notify", message));
+    });
+  },
+
+  confirm(message) {
+    return sdkStep("avibe.confirm", async () => {
+      validateInteractionMessage(message);
+      return effectResult(await callScriptInteraction("confirm", message));
+    });
+  },
+});
