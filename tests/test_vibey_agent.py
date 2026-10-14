@@ -1211,6 +1211,25 @@ async def test_a_failed_run_shows_localized_copy_and_a_refusal_shows_its_explana
 
 
 @pytest.mark.parametrize("language", ["en", "zh"])
+@pytest.mark.parametrize("content", [(), (ThinkingBlock("private reasoning"),), (text("unfinished answer"),)])
+async def test_output_limited_final_is_a_failed_row_with_length_cause(
+    engine, session, tmp_path, published, caplog, language, content
+) -> None:
+    message = AssistantMessage(content, ORIGIN, "length")
+    harness = _Harness(engine, tmp_path, "telegram", [[Done(message)]], language=language)
+    with caplog.at_level(logging.WARNING, logger="modules.agents.vibey.agent"):
+        await harness.agent.handle_message(harness.request("finish the task"))
+    [row] = harness.rows("error")
+    assert json.loads(row["content_json"])["model"]["message"]["stop_reason"] == "length"
+    assert not harness.rows("result")
+    assert harness.controller.terminals[-1]["is_error"] is True
+    assert len(harness.provider.requests) == 1  # No whole-task replay or hidden budget increase.
+    expected = "unfinished answer" if any(isinstance(b, TextBlock) for b in content) else i18n_t("vibeyAgent.error.outputLimit", language)
+    assert row["content_text"] == expected
+    assert "kind=length" in caplog.text
+
+
+@pytest.mark.parametrize("language", ["en", "zh"])
 async def test_a_provider_stall_is_not_shown_as_a_connection_failure(
     engine, session, tmp_path, published, language
 ) -> None:

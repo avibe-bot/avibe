@@ -121,7 +121,7 @@ logger = logging.getLogger(__name__)
 
 BACKEND = "vibey"
 # Final responses whose empty text is explained by the stop itself (loop-control.md section 2).
-_EXPLAINED_STOPS = ("refusal", "safety")
+_EXPLAINED_STOPS = ("length", "refusal", "safety")
 _COMPLETED = ("completed", "ended_by_hook")
 _JOB_PRUNE_INTERVAL_S = 3600.0
 

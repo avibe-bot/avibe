@@ -125,12 +125,12 @@ def final_outcome(message: AssistantMessage) -> FinalOutcome:
     """The Turn outcome a committed final response determines by itself.
 
     The one rule, shared by the row's type at commit and live settlement: a final
-    reply without text of its own (an unexplained refusal or safety stop, or an
-    empty answer) failed; any other final completed. It is the loop's own
-    empty-reply test (loop-control.md section 2). Failures only a live run can
-    observe after the commit are applied by the live caller.
+    reply without usable content, or explicitly stopped at its output limit,
+    failed. Partial text must not turn a provider's incomplete final into a
+    successful result. Pending-input responses are not finals. Failures only
+    a live run can observe after the commit are applied by the live caller.
     """
-    return "completed" if has_reply(message) else "failed"
+    return "completed" if has_reply(message) and message.stop_reason != "length" else "failed"
 
 
 def _response_type(message: AssistantMessage, *, final: bool, display_text: str) -> str:

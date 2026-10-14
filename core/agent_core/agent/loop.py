@@ -926,12 +926,16 @@ class Agent:
                     )
                 response, final = await self._commit_model_message(message, emit)
                 empty_reply = final and not has_reply(message)
-                if empty_reply:
+                truncated_reply = final and message.stop_reason == "length"
+                if empty_reply or truncated_reply:
                     decided = self._outcome.primary("error")
                     await self._error(
                         emit,
-                        message.stop_reason if message.stop_reason in {"refusal", "safety"} else "empty_response",
-                        message.error_message or f"Model stopped with {message.stop_reason} without a reply.",
+                        message.stop_reason if message.stop_reason in {"length", "refusal", "safety"} else "empty_response",
+                        message.error_message or (
+                            "The model reached its output limit before completing the reply."
+                            if truncated_reply else f"Model stopped with {message.stop_reason} without a reply."
+                        ),
                         "source",
                         cause=decided,
                     )
@@ -982,7 +986,7 @@ class Agent:
                 return "aborted" if message.stop_reason == "aborted" else "error"
             if not message.tool_calls:
                 await self._save_state()
-                if empty_reply:
+                if empty_reply or truncated_reply:
                     return "error"
                 if end:
                     return "ended_by_hook"

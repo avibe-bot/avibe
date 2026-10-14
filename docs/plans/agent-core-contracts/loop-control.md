@@ -46,7 +46,16 @@ commit input → loop:
 ```
 
 Finality is decided before the response row is inserted, so a final (`result` or `error`) row is always the run's last
-response. A final response with `stop_reason` `refusal` or `safety` and no text is still committed as the final
+response. A final response with `stop_reason=length` is incomplete, even when it
+contains partial text or an image: commit it as `error`, preserve usable content,
+and end with an error of kind `length`. A no-answer length stop is not an
+`empty_response`; the upstream already supplied the cause. Ordinary empty or
+reasoning-only `stop` responses still fail as `empty_response`. This does not
+add a model call, increase an output limit, or replay a task. Non-final responses
+with pending steer/follow-up keep continuing normally; truncated tool calls keep
+the existing bounded reissue path without executing their partial arguments.
+
+A final response with `stop_reason` `refusal` or `safety` and no text is still committed as the final
 response, typed `error` ([`transcript.md`](transcript.md) §1); its commit-time display text is the localized
 explanation. (That it is written in the same transaction so that re-delivery after a crash shows it is moot: Avibe
 delivers committed rows through the shared emit path and nothing re-delivers them, [`recovery.md`](recovery.md)

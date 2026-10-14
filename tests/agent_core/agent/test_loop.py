@@ -1263,12 +1263,12 @@ async def test_tool_free_final_reply_is_committed_and_empty_success_is_an_error(
         ["input"] if continuation == "final" else ["input", "pending"]
     )
     errors = [event for event in events if isinstance(event, AgentError)]
-    if shape in ("visible", "image") or continuation != "final":
+    if continuation != "final" or (shape in ("visible", "image") and stop_reason != "length"):
         assert errors == []
         assert events[-1].reason == "completed"
     else:
         assert len(errors) == 1
-        assert errors[0].kind == (stop_reason if stop_reason in {"refusal", "safety"} else "empty_response")
+        assert errors[0].kind == (stop_reason if stop_reason in {"length", "refusal", "safety"} else "empty_response")
         assert errors[0].message
         assert committed[0].seq < errors[0].seq < events[-1].seq
         assert events[-1].reason == "error"
