@@ -8799,6 +8799,73 @@ def test_explicit_runtime_ignores_unrelated_malformed_node_override(monkeypatch,
     assert result.runtime_reason != "runtime_start_node_command_invalid"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="native Windows path semantics are covered separately")
+def test_configured_node_path_with_spaces_executes_intact(monkeypatch, tmp_path):
+    node = tmp_path / "Application Support" / "node"
+    node.parent.mkdir(parents=True)
+    node.symlink_to(Path(sys.executable).resolve())
+    monkeypatch.setenv("VIBE_SHOW_RUNTIME_NODE_BIN", str(node))
+
+    command = show_runtime._resolve_node_command()
+
+    assert command == [str(node)]
+    result = subprocess.run(
+        [
+            *command,
+            "-c",
+            "import sys; print(sys.argv[1])",
+            "desktop-node-path-intact",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stdout.strip() == "desktop-node-path-intact"
+
+
+def test_invalid_configured_node_path_does_not_resolve_valid_split_prefix(
+    monkeypatch,
+    tmp_path,
+):
+    valid_prefix = tmp_path / ("node.exe" if os.name == "nt" else "node")
+    if os.name == "nt":
+        shutil.copy2(sys.executable, valid_prefix)
+    else:
+        valid_prefix.symlink_to(Path(sys.executable).resolve())
+    configured = f"{valid_prefix} missing"
+    assert not Path(configured).exists()
+    monkeypatch.setenv("VIBE_SHOW_RUNTIME_NODE_BIN", configured)
+
+    assert show_runtime._resolve_node_command() is None
+
+
+def test_configured_windows_node_path_reaches_native_path_validation_intact(
+    monkeypatch,
+):
+    configured = r"C:\Program Files\Avibe Runtime\tools\node.exe"
+    observed = []
+    monkeypatch.setenv("VIBE_SHOW_RUNTIME_NODE_BIN", configured)
+
+    def resolve(path):
+        observed.append(str(path))
+        return str(path)
+
+    monkeypatch.setattr(show_runtime, "_resolve_executable_path", resolve)
+
+    assert show_runtime._resolve_node_command() == [configured]
+    assert observed == [configured]
+
+
+def test_generic_command_resolver_preserves_command_arguments(monkeypatch):
+    monkeypatch.setattr(show_runtime.shutil, "which", lambda executable: f"/resolved/{executable}")
+
+    assert show_runtime._resolve_command("runtime-cli --port 4321") == [
+        "/resolved/runtime-cli",
+        "--port",
+        "4321",
+    ]
+
+
 def test_managed_runtime_normalizes_malformed_node_override(monkeypatch, tmp_path):
     monkeypatch.setenv("VIBE_SHOW_RUNTIME_NODE_BIN", "'unterminated")
     manager = ShowRuntimeManager(
