@@ -255,6 +255,15 @@ scenarios:
       - ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-014 (pending)
       - ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-014 (failed)
       - ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-014 (incomplete)
+  - id: MH-HOSTED-UI-015
+    name: A failure reason Avibe worded itself shows in the reader's language by its error code, on the IM line and on the Web card; a provider's reason or an unknown code shows as written, and every known code has copy in both bundles and languages
+    status: covered
+    kind: contract
+    layer: unit
+    test:
+      - tests/test_hosted_activity.py::test_the_im_line_says_a_reason_avibe_worded_in_the_readers_language
+      - tests/test_hosted_activity.py::test_every_known_hosted_error_code_has_copy_on_every_surface
+      - ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-015
   - id: MH-HOSTED-VIBEY-001
     name: Vibey declares a hop's native hosted tool verbatim with its include values and pins that request to the hop's Source; the probe builds the same request
     status: covered

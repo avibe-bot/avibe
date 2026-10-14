@@ -4776,6 +4776,17 @@
     },
     "agentActivity": {
       "hosted": {
+        "errorCode": {
+          "provider_no_reason": "供应商未说明原因。",
+          "provider_no_image": "供应商没有返回图片。",
+          "image_not_streamed": "回复结束前图片未传完。",
+          "image_not_saved": "图片未能保存。",
+          "image_no_store": "当前环境无法保存生成的图片。",
+          "executor_no_image": "代理执行者没有返回图片。",
+          "gateway_unreachable": "无法连接模型网关。",
+          "gateway_refused": "模型网关拒绝了这次调用。",
+          "gateway_no_result": "模型网关没有返回结果。"
+        },
         "mode": {
           "native": "原生 · {{provider}}",
           "proxy": "由 {{provider}} 代理"

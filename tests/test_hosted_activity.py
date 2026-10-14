@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from core.agent_core.messages import (
+    HOSTED_ERROR_CODES,
     AssistantMessage,
     HostedAction,
     HostedCost,
@@ -28,6 +29,7 @@ from core.agent_core.messages import (
     ToolCallBlock,
 )
 from core.hosted_activity import hosted_line, native_activities, proxy_activity
+from vibe.i18n import t as i18n_t
 
 FIXTURE = json.loads(
     (Path(__file__).resolve().parents[1] / "ui/src/lib/hostedActivity.fixture.json").read_text(encoding="utf-8")
@@ -155,7 +157,21 @@ def test_a_proxied_image_shows_what_its_executor_rendered_as_a_native_one_does()
     assert (activity.size, activity.quality) == ("1536x1024", "high")
 
 
-@pytest.mark.parametrize("build", [native_web_search, proxy_x_search, native_image, proxy_failed])
+def proxy_unreachable():
+    return proxy_activity(
+        _x_call("call_x5", "from:xai"),
+        HostedResult(
+            record=HostedRecord(
+                status="failed",
+                error="the gateway could not run the call (ConnectError)",
+                error_code="gateway_unreachable",
+            )
+        ),
+        source_names=NAMES,
+    )
+
+
+@pytest.mark.parametrize("build", [native_web_search, proxy_x_search, native_image, proxy_failed, proxy_unreachable])
 def test_payloads_match_the_shape_the_web_card_renders(build):
     """MH-HOSTED-UI-009: every mode and outcome the card distinguishes, from the canonical records each producer writes.
 
@@ -287,3 +303,38 @@ def test_the_im_line_escapes_the_quoted_subject_for_its_destination():
     assert hosted_line(activity, "en", escape=lambda text: text.replace("*", "\\*")).startswith(
         "🔎 X search “\\*bold\\* claim”"
     )
+
+
+@pytest.mark.parametrize(
+    ("code", "lang", "line"),
+    [
+        ("gateway_unreachable", "zh", "🔎 X 搜索 “from:xai” · 失败：无法连接模型网关"),
+        ("gateway_unreachable", "en", "🔎 X search “from:xai” · failed: couldn't reach the model gateway"),
+        # A code from a newer producer reads as its English reason, as a provider's own reason does.
+        ("gateway_overheated", "zh", "🔎 X 搜索 “from:xai” · 失败：the gateway could not run the call (ConnectError)"),
+    ],
+)
+def test_the_im_line_says_a_reason_avibe_worded_in_the_readers_language(code, lang, line):
+    """MH-HOSTED-UI-015: a coded failure reads in the reader's language; the record's ``error`` stays model-facing English."""
+
+    record = HostedRecord(status="failed", error="the gateway could not run the call (ConnectError)", error_code=code)
+    activity = proxy_activity(_x_call("call_x5", "from:xai"), HostedResult(record=record))
+    assert hosted_line(activity, lang) == line
+
+
+UI_BUNDLES = Path(__file__).resolve().parents[1] / "ui/src/i18n"
+
+
+@pytest.mark.parametrize("code", HOSTED_ERROR_CODES)
+def test_every_known_hosted_error_code_has_copy_on_every_surface(code):
+    """MH-HOSTED-UI-015: every code Avibe can set has words in both languages, for the IM line and the Web card.
+
+    A new code without them would show a raw key on the IM line and fall back to English on the Web.
+    """
+
+    for lang in ("en", "zh"):
+        key = f"hostedTools.errorCode.{code}"
+        assert i18n_t(key, lang) != key, f"vibe/i18n/{lang}.json has no {key}"
+        hosted = json.loads((UI_BUNDLES / f"{lang}.json").read_text(encoding="utf-8"))["chat"]["agentActivity"]["hosted"]
+        assert hosted.get("errorCode", {}).get(code), f"ui/src/i18n/{lang}.json has no chat.agentActivity.hosted.errorCode.{code}"
+

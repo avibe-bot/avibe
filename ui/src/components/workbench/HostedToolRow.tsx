@@ -9,6 +9,7 @@ import clsx from 'clsx';
 
 import { ChatImage } from '../ui/chat-image';
 import { apiKeyVendorPreset } from '../settings/models/apiKeyVendors';
+import { serverText } from '../settings/models/serverCopy';
 import { hostedCompleted, type HostedActivity, type HostedActivityImage, type HostedToolName } from '../../lib/hostedActivity';
 
 const TOOL_ICON: Record<HostedToolName, React.ComponentType<{ className?: string }>> = {
@@ -158,7 +159,11 @@ const HostedDetail: React.FC<{ card: HostedActivity }> = ({ card }) => {
         </div>
       )}
       {(card.status === 'failed' || card.status === 'incomplete') && card.error && (
-        <p className="px-2.5 py-2 text-[12px] text-destructive-ink">{card.error}</p>
+        <p className="px-2.5 py-2 text-[12px] text-destructive-ink">
+          {/* Avibe's own reasons in the reader's language; a provider's, or a code this
+              client does not know yet, as it was written. */}
+          {(card.error_code && serverText(t, `chat.agentActivity.hosted.errorCode.${card.error_code}`)) || card.error}
+        </p>
       )}
       {card.extra_queries && card.extra_queries.length > 0 && (
         <p className="border-b border-border px-2.5 py-1.5 text-[11px] text-muted">
