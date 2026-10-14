@@ -1,0 +1,2 @@
+# Optional SOURCE-ONLY benchmark host tools. Not a product dependency.
+harbor==0.24.0
