@@ -5959,12 +5959,14 @@ class ModelHubService:
         )
         omitted: list[str] = []
         not_on: dict[str, list[str]] = {}
+        if not hops:
+            return {"omitted": omitted, "not_on": not_on}
+        # One request carries one token to every hop it may try: the one the backend writes for the hop it builds
+        # the request on, the first. ``_effort_refused`` reads that same token from the request.
+        primary = hops[0]
         for effort in model.reasoning_efforts:
-            refusing = [
-                hop.source.id
-                for hop in hops
-                if self._refuses_effort(hop.source, hop.model_id, _sent_effort(backend, hop.source, hop.model_id, effort), now)
-            ]
+            token = _sent_effort(backend, primary.source, primary.model_id, effort)
+            refusing = [hop.source.id for hop in hops if self._refuses_effort(hop.source, hop.model_id, token, now)]
             if refusing and len(refusing) == len(hops):
                 omitted.append(effort)
             elif refusing:

@@ -401,6 +401,15 @@ MENU_CASES = [
         ["minimal", "low", "high"],
         {"omitted": ["minimal", "low"], "not_on": {}},
     ),
+    # One request carries one token to every hop: the one written for the hop it is built on. Behind an OpenAI
+    # primary, menu `minimal` reaches an Anthropic fallback as `minimal` too, so that is the evidence it is read under.
+    (
+        "the-primary-hop-decides-the-token",
+        [("src_menuhop05", "openai_responses", "gpt-6-sol"), ("src_menuhop06", "anthropic", "claude-opus-4-7")],
+        [("src_menuhop05", "minimal"), ("src_menuhop06", "minimal")],
+        ["minimal", "low"],
+        {"omitted": ["minimal"], "not_on": {}},
+    ),
     (
         "nothing-refused",
         [("src_menuhop04", "openai_responses", "gpt-6-sol")],
