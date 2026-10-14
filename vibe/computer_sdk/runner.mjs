@@ -1,4 +1,5 @@
 import { register } from "node:module";
+import * as runtime from "./runtime.mjs";
 
 const stdoutWrite = process.stdout.write.bind(process.stdout);
 let output;
@@ -9,7 +10,6 @@ try {
     data: { sdkUrl: input.sdk_url },
   });
 
-  const runtime = await import(new URL("./runtime.mjs", import.meta.url));
   runtime.configureRuntime(input);
 
   process.stdout.write = process.stderr.write.bind(process.stderr);
@@ -18,31 +18,26 @@ try {
   console.debug = console.error;
 
   try {
-    const result = await runBeforeDeadline(runtime, async () => {
+    const keepAlive = setInterval(() => {}, 1000);
+    let result;
+    try {
       const module = await import(input.script_url);
       if (typeof module.default !== "function") {
         throw new Error("Computer Use scripts must default-export a function.");
       }
-      return module.default(input.arguments);
-    });
+      result = await module.default(input.arguments);
+    } finally {
+      clearInterval(keepAlive);
+    }
     const serializedResult = JSON.stringify(result ?? null);
     if (serializedResult === undefined) {
       throw new Error("Computer Use scripts must return a JSON value.");
     }
     output = JSON.stringify({ ok: true, result: JSON.parse(serializedResult) });
   } catch (error) {
-    const context = runtime.failureContext(error);
     output = JSON.stringify({
       ok: false,
-      error: {
-        name: error?.name || "Error",
-        code: error?.code || "computer_script_failed",
-        message: error?.message || String(error),
-        params: error?.params || {},
-        step: context.step,
-        screenshot_path: context.screenshot_path,
-        ambiguous: error?.ambiguous === true,
-      },
+      error: runtime.failureEnvelope(error),
     });
   } finally {
     await runtime.closeScriptConnection().catch(() => {});
@@ -50,49 +45,15 @@ try {
 } catch (error) {
   output = JSON.stringify({
     ok: false,
-    error: {
-      name: error?.name || "Error",
-      code: error?.code || "computer_script_runtime_failed",
-      message: error?.message || String(error),
-      params: error?.params || {},
-      step: "script",
-    },
+    error: runtime.failureEnvelope(error, {
+      defaultCode: "computer_script_runtime_failed",
+    }),
   });
 }
 
 stdoutWrite(output, (error) => {
   process.exit(error ? 1 : 0);
 });
-
-async function runBeforeDeadline(runtime, operation) {
-  const remaining = runtime.remainingTimeMs();
-  if (remaining <= 0) {
-    throw new runtime.ControllerFault(
-      "script_timeout",
-      "The script deadline expired.",
-    );
-  }
-  let timer;
-  try {
-    return await Promise.race([
-      operation(),
-      new Promise((_, reject) => {
-        timer = setTimeout(
-          () =>
-            reject(
-              new runtime.ControllerFault(
-                "script_timeout",
-                "The script deadline expired.",
-              ),
-            ),
-          remaining,
-        );
-      }),
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
 
 async function readStdin() {
   const chunks = [];

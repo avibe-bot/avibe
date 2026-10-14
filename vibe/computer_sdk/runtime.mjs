@@ -4,6 +4,23 @@ import path from "node:path";
 
 const MAX_RESPONSE_BYTES = 128 * 1024 * 1024;
 
+const failureEnvelopeContract = JSON.parse(
+  fs.readFileSync(new URL("./failure-envelope.json", import.meta.url), "utf8"),
+);
+if (
+  !Array.isArray(failureEnvelopeContract.fields) ||
+  failureEnvelopeContract.fields.some(
+    (field) => typeof field !== "string" || !field,
+  ) ||
+  new Set(failureEnvelopeContract.fields).size !==
+    failureEnvelopeContract.fields.length
+) {
+  throw new Error("invalid failure envelope contract");
+}
+export const FAILURE_ENVELOPE_FIELDS = Object.freeze(
+  failureEnvelopeContract.fields,
+);
+
 let state;
 let agent;
 let currentStep = "script";
@@ -29,22 +46,18 @@ export function configureRuntime(config) {
     !config ||
     typeof config.connection_token !== "string" ||
     !config.connection_token ||
-    !Number.isInteger(config.timeout_ms) ||
-    config.timeout_ms <= 0 ||
-    typeof config.artifact_directory !== "string"
+    typeof config.artifact_directory !== "string" ||
+    typeof config.runtime_state_path !== "string"
   ) {
     throw new Error("invalid computer SDK runtime configuration");
   }
   validateEndpoint(config.endpoint);
-  const wallClockRemaining =
-    Number.isFinite(config.deadline_unix_ms) && config.deadline_unix_ms > 0
-      ? config.deadline_unix_ms - Date.now()
-      : config.timeout_ms;
   state = {
     endpoint: config.endpoint,
     connectionToken: config.connection_token,
-    deadline: performance.now() + Math.max(1, wallClockRemaining),
     artifactDirectory: config.artifact_directory,
+    runtimeStatePath: config.runtime_state_path,
+    inFlightRequests: new Set(),
   };
   agent = new http.Agent({
     keepAlive: true,
@@ -52,6 +65,7 @@ export function configureRuntime(config) {
     maxFreeSockets: 1,
     scheduling: "fifo",
   });
+  persistRuntimeState();
 }
 
 function validateEndpoint(endpoint) {
@@ -80,24 +94,16 @@ function validateEndpoint(endpoint) {
   throw new Error("invalid Controller endpoint");
 }
 
-export function remainingTimeMs() {
-  requireConfigured();
-  return Math.max(0, state.deadline - performance.now());
-}
-
 export async function sleepWithinDeadline(milliseconds) {
-  const remaining = remainingTimeMs();
-  if (remaining <= 0) {
-    throw new ControllerFault("script_timeout", "The script deadline expired.");
-  }
   await new Promise((resolve) =>
-    setTimeout(resolve, Math.min(Math.max(0, milliseconds), remaining)),
+    setTimeout(resolve, Math.max(0, milliseconds)),
   );
 }
 
 export async function runStep(label, operation) {
   currentStep = label;
   lastStep = label;
+  persistRuntimeState();
   try {
     return await operation();
   } catch (error) {
@@ -107,6 +113,7 @@ export async function runStep(label, operation) {
     throw error;
   } finally {
     currentStep = "script";
+    persistRuntimeState();
   }
 }
 
@@ -164,6 +171,7 @@ function recordScreenshot(result) {
     structured.screenshot_file_path
   ) {
     lastScreenshotPath = structured.screenshot_file_path;
+    persistRuntimeState();
     return;
   }
   const image = Array.isArray(result.content)
@@ -186,6 +194,7 @@ function recordScreenshot(result) {
     );
     fs.writeFileSync(target, Buffer.from(image.data, "base64"), { mode: 0o600 });
     lastScreenshotPath = target;
+    persistRuntimeState();
   } catch {
     // A screenshot artifact is diagnostic only; the structured observation
     // remains authoritative when the local file cannot be written.
@@ -194,16 +203,12 @@ function recordScreenshot(result) {
 
 async function postJson(requestPath, payload, requestOptions = {}) {
   requireConfigured();
-  const scriptRemaining = remainingTimeMs();
   const localTimeout =
     Number.isFinite(requestOptions.timeoutMs) && requestOptions.timeoutMs >= 0
       ? requestOptions.timeoutMs
       : undefined;
-  const localDeadlineWins =
-    localTimeout !== undefined && localTimeout < scriptRemaining;
-  const remaining = Math.min(scriptRemaining, localTimeout ?? scriptRemaining);
-  if (remaining <= 0) {
-    throw requestTimeoutFault(localDeadlineWins, false);
+  if (localTimeout !== undefined && localTimeout <= 0) {
+    throw requestTimeoutFault();
   }
   const encoded = Buffer.from(JSON.stringify(payload));
   const endpoint = state.endpoint;
@@ -233,109 +238,123 @@ async function postJson(requestPath, payload, requestOptions = {}) {
 
   return new Promise((resolve, reject) => {
     let settled = false;
-    let requestFinished = false;
     let timer;
+    const requestState = { sent: false };
+    state.inFlightRequests.add(requestState);
     const settle = (callback, value) => {
       if (settled) {
         return;
       }
       settled = true;
       clearTimeout(timer);
+      state.inFlightRequests.delete(requestState);
       callback(value);
     };
-    const request = http.request(transportOptions, (response) => {
-      if (endpoint.transport === "tcp") {
-        const actual = response.headers[endpoint.instance_header.toLowerCase()];
-        if (actual !== endpoint.instance_id) {
-          response.resume();
-          settle(
-            reject,
-            new ControllerFault(
-              "controller_unavailable",
-              "The Controller response came from a stale instance.",
-              {},
-              { ambiguous: requestFinished },
-            ),
-          );
-          return;
+    let request;
+    try {
+      request = http.request(transportOptions, (response) => {
+        if (endpoint.transport === "tcp") {
+          const actual = response.headers[endpoint.instance_header.toLowerCase()];
+          if (actual !== endpoint.instance_id) {
+            response.resume();
+            settle(
+              reject,
+              new ControllerFault(
+                "controller_unavailable",
+                "The Controller response came from a stale instance.",
+                {},
+                { ambiguous: hasAmbiguousInFlightRequest() },
+              ),
+            );
+            return;
+          }
         }
-      }
-      const chunks = [];
-      let size = 0;
-      response.on("data", (chunk) => {
-        size += chunk.length;
-        if (size > MAX_RESPONSE_BYTES) {
-          response.destroy(
-            new ControllerFault(
-              "invalid_computer_use_response",
-              "The Controller response exceeded the supported size.",
-              {},
-              { ambiguous: requestFinished },
-            ),
-          );
-          return;
-        }
-        chunks.push(chunk);
+        const chunks = [];
+        let size = 0;
+        response.on("data", (chunk) => {
+          size += chunk.length;
+          if (size > MAX_RESPONSE_BYTES) {
+            response.destroy(
+              new ControllerFault(
+                "invalid_computer_use_response",
+                "The Controller response exceeded the supported size.",
+                {},
+                { ambiguous: hasAmbiguousInFlightRequest() },
+              ),
+            );
+            return;
+          }
+          chunks.push(chunk);
+        });
+        response.on("end", () => {
+          let body;
+          try {
+            body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+          } catch {
+            settle(
+              reject,
+              new ControllerFault(
+                "invalid_computer_use_response",
+                "The Controller returned invalid JSON.",
+                {},
+                { ambiguous: hasAmbiguousInFlightRequest() },
+              ),
+            );
+            return;
+          }
+          settle(resolve, body);
+        });
+        response.on("error", (error) =>
+          settle(reject, controllerTransportFault(error)),
+        );
       });
-      response.on("end", () => {
-        let body;
-        try {
-          body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-        } catch {
-          settle(
-            reject,
-            new ControllerFault(
-              "invalid_computer_use_response",
-              "The Controller returned invalid JSON.",
-              {},
-              { ambiguous: requestFinished },
-            ),
-          );
-          return;
-        }
-        settle(resolve, body);
-      });
-      response.on("error", (error) => settle(reject, error));
-    });
-    timer = setTimeout(() => {
-      request.destroy(
-        requestTimeoutFault(localDeadlineWins, requestFinished),
-      );
-    }, remaining);
+    } catch (error) {
+      settle(reject, controllerTransportFault(error));
+      return;
+    }
+    if (localTimeout !== undefined) {
+      timer = setTimeout(() => {
+        request.destroy(requestTimeoutFault());
+      }, localTimeout);
+    }
     request.on("finish", () => {
-      requestFinished = true;
+      requestState.sent = true;
     });
     request.on("error", (error) => {
-      if (error instanceof ControllerFault) {
-        settle(reject, error);
-        return;
-      }
-      settle(
-        reject,
-        new ControllerFault(
-          "controller_unavailable",
-          `The Controller connection failed: ${error.message}`,
-          {},
-          { ambiguous: requestFinished },
-        ),
-      );
+      settle(reject, controllerTransportFault(error));
     });
     request.end(encoded);
   });
 }
 
-function requestTimeoutFault(localDeadlineWins, ambiguous) {
-  if (localDeadlineWins) {
-    return new ControllerFault(
-      "timeout",
-      "The Computer Use request exceeded the operation timeout.",
-      {},
-      { ambiguous },
-    );
+function hasAmbiguousInFlightRequest() {
+  return (
+    state?.inFlightRequests instanceof Set &&
+    [...state.inFlightRequests].some((requestState) => requestState.sent === true)
+  );
+}
+
+function controllerTransportFault(error) {
+  if (error instanceof ControllerFault) {
+    return error;
   }
+  const message =
+    error && typeof error === "object" && typeof error.message === "string"
+      ? error.message
+      : String(error);
   return new ControllerFault(
-    "script_timeout",
-    "The script deadline expired.",
+    "controller_unavailable",
+    `The Controller connection failed: ${message}`,
+    {},
+    { ambiguous: hasAmbiguousInFlightRequest() },
+  );
+}
+
+function requestTimeoutFault() {
+  const ambiguous = hasAmbiguousInFlightRequest();
+  return new ControllerFault(
+    "timeout",
+    "The Computer Use request exceeded the operation timeout.",
     {},
     { ambiguous },
   );
@@ -351,10 +370,34 @@ export async function closeScriptConnection() {
       {
         connection_token: state.connectionToken,
       },
-      { timeoutMs: Math.min(500, remainingTimeMs()) },
+      { timeoutMs: 500 },
     );
   } finally {
     agent.destroy();
+  }
+}
+
+function persistRuntimeState() {
+  if (!state?.runtimeStatePath) {
+    return;
+  }
+  const temporaryPath = `${state.runtimeStatePath}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(
+      temporaryPath,
+      JSON.stringify({
+        step: currentStep || lastStep || "script",
+        screenshot_path: lastScreenshotPath ?? null,
+      }),
+      { mode: 0o600 },
+    );
+    fs.renameSync(temporaryPath, state.runtimeStatePath);
+  } catch {
+    try {
+      fs.unlinkSync(temporaryPath);
+    } catch {
+      // Runtime state is diagnostic; script execution remains authoritative.
+    }
   }
 }
 
@@ -367,10 +410,50 @@ export function failureContext(error) {
     screenshot_path:
       error &&
       typeof error === "object" &&
-      typeof error.screenshotPath === "string"
-        ? error.screenshotPath
+      (typeof error.screenshot_path === "string" ||
+        typeof error.screenshotPath === "string")
+        ? error.screenshot_path || error.screenshotPath
         : lastScreenshotPath,
   };
+}
+
+export function failureEnvelope(error, options = {}) {
+  const context = failureContext(error);
+  const params =
+    error &&
+    typeof error === "object" &&
+    error.params &&
+    typeof error.params === "object" &&
+    !Array.isArray(error.params)
+      ? error.params
+      : {};
+  const values = {
+    name:
+      error && typeof error === "object" && typeof error.name === "string"
+        ? error.name
+        : "Error",
+    code:
+      error && typeof error === "object" && typeof error.code === "string"
+        ? error.code
+        : options.defaultCode || "computer_script_failed",
+    message:
+      error && typeof error === "object" && typeof error.message === "string"
+        ? error.message
+        : String(error),
+    params,
+    step: context.step,
+    screenshot_path: context.screenshot_path ?? null,
+    ambiguous:
+      error && typeof error === "object" && error.ambiguous === true,
+  };
+  for (const field of FAILURE_ENVELOPE_FIELDS) {
+    if (!Object.hasOwn(values, field)) {
+      throw new Error(`failure envelope field is not implemented: ${field}`);
+    }
+  }
+  return Object.fromEntries(
+    FAILURE_ENVELOPE_FIELDS.map((field) => [field, values[field]]),
+  );
 }
 
 function requireConfigured() {

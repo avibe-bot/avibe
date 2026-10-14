@@ -1,7 +1,6 @@
 import {
   ControllerFault,
   callTool,
-  remainingTimeMs,
   runStep,
   sleepWithinDeadline,
 } from "./runtime.mjs";
@@ -446,11 +445,6 @@ async function poll(label, timeoutValue, attempt) {
     if (localRemaining <= 0) {
       throw new Timeout(`${label} timed out after ${duration} ms.`, {
         params: { timeout: duration },
-      });
-    }
-    if (remainingTimeMs() <= 0) {
-      throw new Timeout("The script deadline expired.", {
-        code: "script_timeout",
       });
     }
     try {

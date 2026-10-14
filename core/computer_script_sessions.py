@@ -153,6 +153,13 @@ class ComputerScriptSessionManager:
         for token in list(self._bindings):
             self.close(token)
 
+    def invalidate_turn(self, turn: "Turn") -> None:
+        """Invalidate every script capability bound to one exact Turn."""
+
+        for token, binding in list(self._bindings.items()):
+            if binding.turn is turn:
+                self._invalidate(token, "script_turn_ended")
+
     def _invalidate(self, token: str, code: str) -> None:
         binding = self._bindings.get(token)
         if binding is None or binding.invalid_code is not None:

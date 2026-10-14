@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import signal
 import shutil
 import subprocess
 import tempfile
@@ -23,7 +24,7 @@ from vibe.internal_client import (
 
 
 DEFAULT_SCRIPT_TIMEOUT_SECONDS = 300.0
-RUNNER_EXIT_GRACE_SECONDS = 2.0
+_FAILURE_ENVELOPE_FIELDS: tuple[str, ...] | None = None
 
 _SCRIPT_OPEN_ERROR_KEYS = {
     "active_turn_required": "computer.cli.error.missingCallerTurn",
@@ -106,6 +107,99 @@ def _sdk_directory() -> Path:
     return Path(__file__).resolve().parent / "computer_sdk"
 
 
+def _failure_envelope_fields() -> tuple[str, ...]:
+    global _FAILURE_ENVELOPE_FIELDS
+    if _FAILURE_ENVELOPE_FIELDS is not None:
+        return _FAILURE_ENVELOPE_FIELDS
+    contract_path = _sdk_directory() / "failure-envelope.json"
+    try:
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        fields = contract["fields"]
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise ComputerScriptRunnerError(
+            "computer.cli.error.scriptSdkUnavailable",
+            code="computer_script_unavailable",
+        ) from exc
+    if (
+        not isinstance(fields, list)
+        or not fields
+        or any(not isinstance(field, str) or not field for field in fields)
+        or len(set(fields)) != len(fields)
+    ):
+        raise ComputerScriptRunnerError(
+            "computer.cli.error.scriptSdkUnavailable",
+            code="computer_script_unavailable",
+        )
+    _FAILURE_ENVELOPE_FIELDS = tuple(fields)
+    return _FAILURE_ENVELOPE_FIELDS
+
+
+def _failure_envelope(**values: Any) -> dict[str, Any]:
+    fields = _failure_envelope_fields()
+    if set(values) != set(fields):
+        raise RuntimeError("failure envelope implementation does not match its contract")
+    return {field: values[field] for field in fields}
+
+
+def _runtime_state(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _kill_process_group(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+    except ProcessLookupError:
+        pass
+
+
+def _run_node_process(
+    node: Path,
+    runner: Path,
+    request: dict[str, Any],
+    timeout_seconds: float,
+) -> subprocess.CompletedProcess[str]:
+    process = subprocess.Popen(
+        [str(node), str(runner)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        start_new_session=os.name == "posix",
+    )
+    command = [str(node), str(runner)]
+    try:
+        stdout, stderr = process.communicate(
+            input=json.dumps(request, ensure_ascii=False),
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        _kill_process_group(process)
+        stdout, stderr = process.communicate()
+        raise subprocess.TimeoutExpired(
+            command,
+            timeout_seconds,
+            output=stdout,
+            stderr=stderr,
+        ) from exc
+    return subprocess.CompletedProcess(
+        command,
+        process.returncode,
+        stdout,
+        stderr,
+    )
+
+
 def _decode_runner_output(
     stdout: str,
     stderr: str,
@@ -153,6 +247,25 @@ def _keeps_local_screenshot(
 
 def _display_seconds(value: float) -> int | float:
     return int(value) if float(value).is_integer() else value
+
+
+def _script_failure(error: dict[str, Any]) -> ComputerScriptRunnerError:
+    if set(error) != set(_failure_envelope_fields()):
+        return ComputerScriptRunnerError(
+            "computer.cli.error.scriptRuntimeInvalid",
+            code="computer_script_runtime_failed",
+        )
+    step = str(error.get("step") or "script")
+    message = str(error.get("message") or "the script failed")
+    code = str(error.get("code") or "computer_script_failed")
+    failure_envelope = dict(error)
+    return ComputerScriptRunnerError(
+        "computer.cli.error.scriptFailed",
+        code=code,
+        params={"step": step, "error": message},
+        details=failure_envelope,
+        structured_error=failure_envelope,
+    )
 
 
 def run_computer_script(
@@ -264,35 +377,40 @@ def run_computer_script(
                 params={"seconds": display_seconds},
                 details={"step": "script"},
             )
+        runtime_state_path = artifact_directory / "runtime-state.json"
         request = {
             "script_url": script_path.as_uri(),
             "sdk_url": index.as_uri(),
             "arguments": arguments,
             "endpoint": computer_script_endpoint_payload(endpoint),
             "connection_token": connection_token,
-            "timeout_ms": max(1, int(remaining_seconds * 1000)),
-            "deadline_unix_ms": int((time.time() + remaining_seconds) * 1000),
             "artifact_directory": str(artifact_directory),
+            "runtime_state_path": str(runtime_state_path),
         }
         try:
-            completed = subprocess.run(
-                [str(node), str(runner)],
-                input=json.dumps(request, ensure_ascii=False),
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=remaining_seconds + RUNNER_EXIT_GRACE_SECONDS,
-                check=False,
+            completed = _run_node_process(
+                node,
+                runner,
+                request,
+                remaining_seconds,
             )
+        except subprocess.TimeoutExpired as exc:
+            runtime_state = _runtime_state(runtime_state_path)
+            screenshot_path = runtime_state.get("screenshot_path")
+            if not isinstance(screenshot_path, str) or not screenshot_path:
+                screenshot_path = None
+            failure_envelope = _failure_envelope(
+                name="Timeout",
+                code="script_timeout",
+                message="The script deadline expired.",
+                params={},
+                step=str(runtime_state.get("step") or "script"),
+                screenshot_path=screenshot_path,
+                ambiguous=True,
+            )
+            payload = {"ok": False, "error": failure_envelope}
+            raise _script_failure(failure_envelope) from exc
         except (OSError, subprocess.SubprocessError) as exc:
-            if isinstance(exc, subprocess.TimeoutExpired):
-                raise ComputerScriptRunnerError(
-                    "computer.cli.error.scriptTimedOut",
-                    code="script_timeout",
-                    params={"seconds": display_seconds},
-                    details={"step": "script"},
-                ) from exc
             raise ComputerScriptRunnerError(
                 "computer.cli.error.scriptRuntime",
                 code="computer_script_runtime_failed",
@@ -310,23 +428,7 @@ def run_computer_script(
         error = payload.get("error")
         if not isinstance(error, dict):
             error = {}
-        step = str(error.get("step") or "script")
-        message = str(error.get("message") or "the script failed")
-        code = str(error.get("code") or "computer_script_failed")
-        error_params = error.get("params")
-        if not isinstance(error_params, dict):
-            error_params = {}
-        screenshot_path = error.get("screenshot_path")
-        details: dict[str, Any] = {"step": step}
-        if isinstance(screenshot_path, str) and screenshot_path:
-            details["screenshot_path"] = screenshot_path
-        raise ComputerScriptRunnerError(
-            "computer.cli.error.scriptFailed",
-            code=code,
-            params={"step": step, "error": message},
-            details=details,
-            structured_error={"code": code, "params": error_params},
-        )
+        raise _script_failure(error)
     finally:
         close_timeout = deadline - time.monotonic()
         if (

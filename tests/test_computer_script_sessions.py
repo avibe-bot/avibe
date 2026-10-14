@@ -115,6 +115,58 @@ def test_script_manager_invalidates_when_the_bound_turn_finishes() -> None:
     assert asyncio.run(exercise()) == "script_turn_ended"
 
 
+def test_script_manager_refuses_requests_while_stop_waits_for_the_backend() -> None:
+    async def exercise() -> tuple[str, dict]:
+        stop_started = asyncio.Event()
+        release_stop = asyncio.Event()
+
+        class CommandHandler:
+            async def handle_stop(self, _context: MessageContext) -> bool:
+                stop_started.set()
+                await release_stop.wait()
+                return True
+
+        controller = SimpleNamespace(
+            command_handler=CommandHandler(),
+            computer_script_sessions=None,
+            _session_id_from_context=lambda context: context.platform_specific[
+                "agent_session_id"
+            ],
+        )
+        turn_manager = session_turns.SessionTurnManager(controller)
+        task = asyncio.create_task(asyncio.sleep(60))
+        turn = session_turns.Turn(
+            task=task,
+            context=_context("turn-1"),
+            logical_turn_id="turn-1",
+        )
+        turn_manager.in_flight["ses-script"] = turn
+        manager = ComputerScriptSessionManager(turn_manager)
+        controller.computer_script_sessions = manager
+        token = manager.open("ses-script", 30)["connection_token"]
+        cancel_task = asyncio.create_task(
+            turn_manager._cancel_legacy_turn("ses-script", turn)
+        )
+        await stop_started.wait()
+        try:
+            try:
+                manager.admit(token)
+            except ComputerScriptSessionError as exc:
+                refusal = exc.code
+            else:
+                refusal = "admitted"
+        finally:
+            release_stop.set()
+        result = await cancel_task
+        manager.close_all()
+        await asyncio.gather(task, return_exceptions=True)
+        return refusal, result
+
+    refusal, result = asyncio.run(exercise())
+    assert refusal == "script_turn_ended"
+    assert result["status"] == "cancel_requested"
+
+
 def test_script_manager_enforces_one_total_deadline() -> None:
     async def exercise() -> str:
         controller = SimpleNamespace(

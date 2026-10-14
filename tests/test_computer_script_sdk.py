@@ -17,7 +17,7 @@ from unittest.mock import patch
 import httpx
 import pytest
 
-from vibe import computer_script_runner
+from vibe import cli, computer_script_runner
 from vibe.computer_script_runner import (
     ComputerScriptRunnerError,
     parse_script_arguments,
@@ -312,7 +312,6 @@ def _run_node_script(
     duplicate_within: bool = False,
     dynamic_elements_after_action: bool = False,
     response_delay_by_tool: dict[str, float] | None = None,
-    timeout_ms: int = 5000,
     windows: list[dict] | None = None,
 ) -> tuple[dict, ThreadingHTTPServer, list[dict]]:
     if NODE is None:
@@ -352,8 +351,8 @@ def _run_node_script(
                 "instance_header": "X-Avibe-Control-Instance",
             },
             "connection_token": "script-token",
-            "timeout_ms": timeout_ms,
             "artifact_directory": str(artifacts),
+            "runtime_state_path": str(artifacts / "runtime-state.json"),
         }
         started = time.monotonic()
         completed = subprocess.run(
@@ -368,6 +367,74 @@ def _run_node_script(
         server.subprocess_elapsed = time.monotonic() - started  # type: ignore[attr-defined]
         assert completed.returncode == 0, completed.stderr
         return json.loads(completed.stdout), server, requests
+
+
+def _run_python_deadline_script(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    source: str,
+    *,
+    response_delay_by_tool: dict[str, float] | None = None,
+    timeout_seconds: float = 0.25,
+) -> tuple[ComputerScriptRunnerError, list[dict], float]:
+    if NODE is None:
+        pytest.skip("Node.js is unavailable")
+    script = tmp_path / "deadline-script.mjs"
+    script.write_text(source, encoding="utf-8")
+    endpoint = object()
+
+    with _fake_controller(
+        response_delay_by_tool=response_delay_by_tool,
+    ) as (server, requests):
+        monkeypatch.setattr(
+            computer_script_runner,
+            "private_desktop_node_bin",
+            lambda: Path(NODE),
+        )
+        monkeypatch.setattr(
+            computer_script_runner,
+            "resolve_computer_script_endpoint",
+            lambda: endpoint,
+        )
+        monkeypatch.setattr(
+            computer_script_runner,
+            "computer_script_open_sync",
+            lambda **_kwargs: {
+                "body": {
+                    "ok": True,
+                    "connection_token": "script-token",
+                }
+            },
+        )
+        monkeypatch.setattr(
+            computer_script_runner,
+            "computer_script_endpoint_payload",
+            lambda value: {
+                "transport": "tcp",
+                "host": "127.0.0.1",
+                "port": server.server_address[1],
+                "headers": {"Authorization": "Bearer fixture-token"},
+                "instance_id": "fixture-instance",
+                "instance_header": "X-Avibe-Control-Instance",
+            }
+            if value is endpoint
+            else {},
+        )
+        monkeypatch.setattr(
+            computer_script_runner,
+            "computer_script_close_sync",
+            lambda **_kwargs: None,
+        )
+        started = time.monotonic()
+        with pytest.raises(ComputerScriptRunnerError) as exc_info:
+            computer_script_runner.run_computer_script(
+                caller_session_id="ses-script",
+                script_file=str(script),
+                arg_values=[],
+                timeout_seconds=timeout_seconds,
+            )
+        elapsed = time.monotonic() - started
+    return exc_info.value, requests, elapsed
 
 
 def test_sdk_injects_module_resolution_and_reobserves_one_stale_token(
@@ -454,6 +521,115 @@ export default async () => {
     assert payload["error"]["step"] == "element.click"
     screenshot = Path(payload["error"]["screenshot_path"])
     assert screenshot.read_bytes() == b"png-fixture"
+
+
+def test_failure_envelope_survives_runner_python_and_cli(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    screenshot_path = tmp_path / "failure.png"
+    screenshot_path.write_bytes(b"fixture")
+    expected = {
+        "name": "FixtureFailure",
+        "code": "invalid_selector",
+        "message": "Application selector contains unknown field 'text'.",
+        "params": {"field": "text"},
+        "step": "computer.app",
+        "screenshot_path": str(screenshot_path),
+        "ambiguous": True,
+    }
+    assert tuple(expected) == computer_script_runner._failure_envelope_fields()
+
+    payload, _server, _requests = _run_node_script(
+        tmp_path,
+        f"""
+export default async () => {{
+  const error = new Error({json.dumps(expected["message"])});
+  error.name = {json.dumps(expected["name"])};
+  error.code = {json.dumps(expected["code"])};
+  error.params = {json.dumps(expected["params"])};
+  error.step = {json.dumps(expected["step"])};
+  error.screenshotPath = {json.dumps(expected["screenshot_path"])};
+  error.ambiguous = true;
+  throw error;
+}};
+""",
+    )
+    assert payload == {"ok": False, "error": expected}
+
+    script = tmp_path / "python-hop.mjs"
+    script.write_text("export default async () => null;", encoding="utf-8")
+    endpoint = object()
+    monkeypatch.setattr(
+        computer_script_runner,
+        "private_desktop_node_bin",
+        lambda: Path("/private/node"),
+    )
+    monkeypatch.setattr(
+        computer_script_runner,
+        "resolve_computer_script_endpoint",
+        lambda: endpoint,
+    )
+    monkeypatch.setattr(
+        computer_script_runner,
+        "computer_script_open_sync",
+        lambda **_kwargs: {
+            "body": {"ok": True, "connection_token": "script-token"}
+        },
+    )
+    monkeypatch.setattr(
+        computer_script_runner,
+        "computer_script_endpoint_payload",
+        lambda value: {"endpoint": value is endpoint},
+    )
+    monkeypatch.setattr(
+        computer_script_runner,
+        "_run_node_process",
+        lambda *_args: subprocess.CompletedProcess(
+            args=["node", "runner.mjs"],
+            returncode=0,
+            stdout=json.dumps(payload),
+            stderr="",
+        ),
+    )
+    monkeypatch.setattr(
+        computer_script_runner,
+        "computer_script_close_sync",
+        lambda **_kwargs: None,
+    )
+
+    with pytest.raises(ComputerScriptRunnerError) as runner_exc_info:
+        computer_script_runner.run_computer_script(
+            caller_session_id="ses-script",
+            script_file=str(script),
+            arg_values=[],
+        )
+    runner_error = runner_exc_info.value
+    assert runner_error.details == expected
+    assert runner_error.structured_error == expected
+
+    monkeypatch.setenv("AVIBE_SESSION_ID", "ses-script")
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
+
+    def fail_script(**_kwargs):
+        raise runner_error
+
+    monkeypatch.setattr(
+        computer_script_runner,
+        "run_computer_script",
+        fail_script,
+    )
+    args = cli.build_parser().parse_args(["computer", "run", str(script)])
+    with pytest.raises(cli.TaskCliError) as cli_exc_info:
+        cli.cmd_computer(args)
+    cli_error = cli_exc_info.value
+    assert cli_error.details == expected
+    assert expected["message"] not in str(cli_error)
+
+    cli._print_task_error(cli_error)
+    rendered = json.loads(capsys.readouterr().err)
+    assert rendered["details"] == expected
 
 
 def test_sdk_maps_stable_controller_codes_to_typed_errors(tmp_path: Path) -> None:
@@ -817,23 +993,113 @@ export default async () => {
     assert server.subprocess_elapsed < 1.0  # type: ignore[attr-defined]
 
 
-def test_runner_reports_its_own_deadline_before_python_needs_to_kill_it(
-    tmp_path: Path,
-) -> None:
-    payload, server, _requests = _run_node_script(
-        tmp_path,
-        """
+@pytest.mark.parametrize(
+    ("source", "response_delay_by_tool", "expected_step", "expected_tool"),
+    [
+        (
+            """
+export default function () {
+  while (true) {}
+};
+""",
+            None,
+            "script",
+            None,
+        ),
+        (
+            """
 export default async () => {
   await new Promise(() => {});
 };
 """,
-        timeout_ms=100,
+            None,
+            "script",
+            None,
+        ),
+        (
+            """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  await computer.clipboard.write("deadline fixture");
+};
+""",
+            {"clipboard_write": 1.5},
+            "computer.clipboard.write",
+            "clipboard_write",
+        ),
+    ],
+)
+def test_python_parent_owns_the_canonical_total_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    source: str,
+    response_delay_by_tool: dict[str, float] | None,
+    expected_step: str,
+    expected_tool: str | None,
+) -> None:
+    error, requests, elapsed = _run_python_deadline_script(
+        monkeypatch,
+        tmp_path,
+        source,
+        response_delay_by_tool=response_delay_by_tool,
     )
 
-    assert payload["ok"] is False
-    assert payload["error"]["code"] == "script_timeout"
-    assert payload["error"]["step"] == "script"
-    assert server.subprocess_elapsed < 1.0  # type: ignore[attr-defined]
+    assert error.details == {
+        "name": "Timeout",
+        "code": "script_timeout",
+        "message": "The script deadline expired.",
+        "params": {},
+        "step": expected_step,
+        "screenshot_path": None,
+        "ambiguous": True,
+    }
+    tools = [
+        request["payload"].get("tool")
+        for request in requests
+        if request["path"].endswith("/request")
+    ]
+    if expected_tool is None:
+        assert tools == []
+    else:
+        assert expected_tool in tools
+    assert elapsed < 1.5
+
+
+def test_python_total_deadline_preserves_the_last_screenshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    error, requests, _elapsed = _run_python_deadline_script(
+        monkeypatch,
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  const mail = await computer.app({ bundleId: "com.apple.mail" });
+  const window = await mail.window({ labelContains: "New Message" });
+  await window.element({ role: "button", label: "Send", index: 0 }).click();
+};
+""",
+        response_delay_by_tool={"click": 2.0},
+        timeout_seconds=0.75,
+    )
+
+    screenshot_path = error.details["screenshot_path"]
+    assert isinstance(screenshot_path, str)
+    screenshot = Path(screenshot_path)
+    try:
+        assert screenshot.read_bytes() == b"png-fixture"
+        assert error.details["step"] == "element.click"
+        assert error.details["ambiguous"] is True
+        assert any(
+            request["payload"].get("tool") == "click"
+            for request in requests
+            if request["path"].endswith("/request")
+        )
+    finally:
+        shutil.rmtree(screenshot.parent, ignore_errors=True)
 
 
 @pytest.mark.parametrize(
@@ -888,6 +1154,7 @@ def test_sdk_local_timeout_aborts_an_in_flight_controller_request(
     assert payload["error"]["name"] == "Timeout"
     assert payload["error"]["code"] == "timeout"
     assert payload["error"]["step"] == expected_step
+    assert payload["error"]["ambiguous"] is True
     assert server.subprocess_elapsed < 1.0  # type: ignore[attr-defined]
     assert all(
         request["payload"].get("tool") != "click"
@@ -955,24 +1222,25 @@ def test_python_runner_uses_one_deadline_for_open_node_and_close(
         lambda value: {"endpoint": value is endpoint},
     )
 
-    def run_node(*args, **kwargs):
-        captured["subprocess_args"] = args
-        captured["subprocess_kwargs"] = kwargs
+    def run_node(node, runner, request, timeout_seconds):
+        captured["node"] = node
+        captured["runner"] = runner
+        captured["request"] = request
+        captured["timeout_seconds"] = timeout_seconds
         return subprocess.CompletedProcess(
-            args=args[0],
+            args=[str(node), str(runner)],
             returncode=0,
             stdout='{"ok":true,"result":{"done":true}}',
             stderr="",
         )
 
-    monkeypatch.setattr(computer_script_runner.subprocess, "run", run_node)
+    monkeypatch.setattr(computer_script_runner, "_run_node_process", run_node)
     monkeypatch.setattr(
         computer_script_runner,
         "computer_script_close_sync",
         lambda **kwargs: captured.update(close=kwargs),
     )
     monkeypatch.setattr(computer_script_runner.time, "monotonic", lambda: next(ticks))
-    monkeypatch.setattr(computer_script_runner.time, "time", lambda: 1000.0)
 
     assert computer_script_runner.run_computer_script(
         caller_session_id="ses-script",
@@ -987,12 +1255,12 @@ def test_python_runner_uses_one_deadline_for_open_node_and_close(
         "timeout_seconds": 20,
         "request_timeout": 10.0,
     }
-    subprocess_kwargs = captured["subprocess_kwargs"]
-    assert isinstance(subprocess_kwargs, dict)
-    assert subprocess_kwargs["timeout"] == 17.0
-    request = json.loads(subprocess_kwargs["input"])
-    assert request["timeout_ms"] == 15000
-    assert request["deadline_unix_ms"] == 1015000
+    assert captured["timeout_seconds"] == 15.0
+    request = captured["request"]
+    assert isinstance(request, dict)
+    assert "timeout_ms" not in request
+    assert "deadline_unix_ms" not in request
+    assert request["runtime_state_path"].endswith("/runtime-state.json")
     assert captured["close"] == {
         "endpoint": endpoint,
         "connection_token": "token",

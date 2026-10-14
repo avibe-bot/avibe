@@ -1,0 +1,11 @@
+{
+  "fields": [
+    "name",
+    "code",
+    "message",
+    "params",
+    "step",
+    "screenshot_path",
+    "ambiguous"
+  ]
+}

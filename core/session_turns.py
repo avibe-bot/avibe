@@ -3900,6 +3900,7 @@ class SessionTurnManager:
         ):
             return {"state": "reconciling", "reason": "prewrite_owner_changed"}
 
+        self._close_turn_computer_use_admission(projected)
         projected.cancel_settled_by = SETTLED_BY_STOPPED
         mark_prewrite_user_stop(projected.context)
         projected.task.cancel()
@@ -3959,6 +3960,8 @@ class SessionTurnManager:
             or turn.task.done()
         ):
             runtime_turn = None
+        if runtime_turn is not None:
+            self._close_turn_computer_use_admission(runtime_turn)
         stop_context = runtime_turn.context if runtime_turn is not None else None
         unavailable_reason = "runtime_owner_unavailable"
         if stop_context is None and logical_turn_id:
@@ -4521,6 +4524,13 @@ class SessionTurnManager:
             ),
             "",
         )
+
+    def _close_turn_computer_use_admission(self, turn: Turn) -> None:
+        turn.computer_use_admission_closed = True
+        script_sessions = getattr(self.controller, "computer_script_sessions", None)
+        invalidate_turn = getattr(script_sessions, "invalidate_turn", None)
+        if callable(invalidate_turn):
+            invalidate_turn(turn)
 
     def _delivery_runtime_owner_factory(
         self,
@@ -8624,6 +8634,7 @@ class SessionTurnManager:
             return {"ok": False, "code": "not_in_flight", "session_id": session_id}
         if turn.task.done():
             return {"ok": True, "session_id": session_id, "status": "already_finished"}
+        self._close_turn_computer_use_admission(turn)
         turn.cancel_settled_by = SETTLED_BY_STOPPED
         if turn.context.platform_specific is None:
             turn.context.platform_specific = {}
