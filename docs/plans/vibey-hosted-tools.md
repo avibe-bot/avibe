@@ -463,7 +463,14 @@ These rules are C-1 rows in `cross-provider.md` and per-protocol rows in `conver
   - Each candidate tried is metered on its own Source. The result's `execution` names the Source whose response the
     record came from (the last one tried when all failed), with that attempt's `executor_billing` and `cost`; earlier
     billable attempts are listed in `execution.failed_attempts: [{source_id, billing, cost?}]`, each with its own
-    billing and cost basis, so a metered failure before a subscription success keeps both. The card shows the total.
+    billing and cost basis, so a metered failure before a subscription success keeps both. A subscription attempt
+    carries `cost: {basis: "included"}`, so an absent `cost` always means unpriced.
+  - **The total is computed once**, in `core/hosted_activity`'s projected `cost`, which the Web card and the IM line
+    both render: `usd` is the sum of the known figures over the record's attempt and `failed_attempts[]`; every
+    attempt `included` gives `included`; the basis is `reported` only when every summed figure is reported, else
+    `list` (shown with ≈); an attempt without a `cost` makes the total a lower bound, shown as "at least $X" /
+    "至少 $X", never as complete. With `failed_attempts`, the card also names the attempt count ("3 attempts" /
+    "尝试 3 次").
   - The executor request is a short model request because no vendor exposes search without a model: Anthropic,
     OpenAI's public API, xAI and Google all run search inside a model call.
 - **The result is the canonical record** (v1's rules, unchanged): a `HostedRecord` with `sources[]` in the
@@ -597,8 +604,9 @@ Unchanged from v1 §7.3 (owner decision, 2026-10-13 19:14), with the producer no
   - "最近一次由 <Source> 执行 · 正常 · 10-15" from `latest_ok`. It shows a date, not a time: positive records are
     written at most hourly (§3.2);
   - refusal lines are `refused[]` grouped by `source_id`, one line per Source with the group's newest `at` (the read
-    stays per record): "<Source> 不支持，已改用 <Source>" when that newest `at` is older than `latest_ok` and
-    `latest_ok` is on another Source; "<Source> 不支持" alone otherwise;
+    stays per record), naming the refused models, since evidence is per (Source, model) and the same Source may run
+    the tool on another model: "<Source> 不支持 · <models>" (joined with `Intl.ListFormat`), with "，已改用 <Source>"
+    appended when that newest `at` is older than `latest_ok` and `latest_ok` is on another Source;
   - **clearing a refusal:** each Source's line has a "清除" action for that (Source, tool), and a card where two or
     more Sources refused also has "全部清除" for the tool (the `clear` endpoint, §3.3). A cleared Source is tried
     natively again from its next request; if it still refuses, the line comes back after that call. Refusals do not
