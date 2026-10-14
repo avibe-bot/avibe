@@ -145,9 +145,12 @@ The evidence store, its record and its owner are the capability model's §3. v2 
   - `Unsupported tool type: <type>` for a declared type → hosted tool `call`;
   - `Invalid encrypted_content in search_result block` while the request replays a web-search result → `web_search`
     `replay`;
-  - **new:** an image endpoint that refuses the model or the endpoint before producing anything (404, or a 400 naming
-    the model or endpoint as unsupported, as a relay without the vendor's image endpoint answers) → `image_generate`
-    `call` for that (Source, model). The enum drops that pair from the next turn (§7.2), and the refusal shows and
+  - **new:** an upstream image endpoint that refuses the model or the endpoint before producing anything (a 404, or a
+    400 naming the model or endpoint as unsupported, as a relay without the vendor's image endpoint answers) →
+    `image_generate` `call` for that (Source, model). Only an upstream refusal counts: the images path goes through
+    `_is_local_model_registration_failure`, and the engine's own refusals never teach, neither CPA's "only supported
+    on /v1/images/generations and /v1/images/edits" nor a route 404 that Avibe's own engine config caused. The record
+    is stamped and retired by the wire stamp like any negative. The enum drops that pair from the next turn (§7.2), and the refusal shows and
     clears on the image card like a search refusal (§8.1);
   - **new:** xAI's plain-text refusal of a replayed payload, `Could not decrypt the provided encrypted_content`,
     which carries no code. It does not say which ciphertext failed, and a stale or foreign blob draws it as well as
@@ -219,9 +222,13 @@ The evidence store, its record and its owner are the capability model's §3. v2 
     - search tools: `executor_order` (saved, null when automatic), `effective_order` (as the gateway would try now),
       and `executor_candidates: [{source_id, price}]` in effective order, every eligible executor Source (a Claude
       subscription never is) with its per-call price, so the order can be edited over the full list;
-    - `image_generate`: `default_model` (saved, null when default; a saved model no longer available stays, flagged
-      `available: false`), `effective_default`, `models: [{source_id, model_id, description, price}]`, and
-      `image_offered_by: [vendor]`, the vendors whose overlay lists image models, for the empty state.
+    - `image_generate`: `default_model` (saved, null when default; a saved model no longer available, or whose pair
+      is refused, stays saved, flagged `available: false`); `effective_default` (the saved default if available,
+      else the same `model_id` on another Source that serves it, since the user picked a model, not a relay, else
+      the first available model in catalog order); `models: [{source_id, model_id, description, price}]`, exactly
+      the enum's candidate pairs, so a refused pair leaves it and the card's refusal line says why (clearing the
+      refusal brings the pair back, and a saved default with it, with no write); and `image_offered_by: [vendor]`,
+      the vendors whose overlay lists image models, for the empty state.
   - `PUT /api/models/hosted-tools/<tool>` is per field: an absent field is unchanged, and an explicit `null` resets
     `executor_order` to automatic or `default_model` to the default. `enabled` is a boolean. It answers the same
     read.
@@ -524,7 +531,9 @@ E2E stay.
     relay without the vendor's image endpoint refuses once and is then left out), deduplicated by model id (the first Source in Vibey's order serves an id that
     two Sources offer, unless `default_model` names the other). Each entry's one-line description goes into the
     `model` description; every line stays short, because the tool block is in every request's prefix. The default is listed first and marked "(default)"; the rest follow sorted by id. So the
-    enum is a pure function of configuration and changes only on a config event, and the turn freezes it (§3.4).
+    enum is a pure function of configuration and current negative evidence, and the turn freezes it (§3.4). A
+    change (a config event, an image refusal or a clear) costs one cold prompt prefix on the next turn, as §3.5 says
+    for search.
   - **Common parameters only.** `prompt`, `size` (a size or an aspect ratio, mapped per endpoint), `images`
     (reference images for an edit) and `n`. The overlay's `params` say which of `size`, `images` and `n` each model
     takes, and `size_forms` which forms of `size` it accepts (`pixels`, `ratio`, or both); the gateway maps the given
@@ -645,6 +654,8 @@ Each model row on a Source's detail panel shows only passive state, with the det
 and no action. There is no "via proxy" chip: proxying is the tool's business, not the Source's.
 - "网页搜索 · 正常 · 10-15";
 - "X 搜索 · 不支持";
+- "图片生成 · 正常" / "图片生成 · 不支持" (image models), actionless like the search chips; image refusals clear on the
+  image card;
 - "ultra · 不支持" (efforts), whose popover has "清除" for that (Source, model, effort) record (capability model §5).
 
 Unknown shows nothing. The chips reuse `EvidenceChip`'s locale-composed spoken name and popup semantics, without the
