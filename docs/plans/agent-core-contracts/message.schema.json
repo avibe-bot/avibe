@@ -353,6 +353,11 @@
         },
         "hosted_summary": {
           "$ref": "#/definitions/HostedSummary"
+        },
+        "source_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The Source that served the message, when known (the served-hop report's `source`, or the endpoint's own Source in direct mode). Its opaque payloads go back only to that Source (`cross-provider.md`). Absent when no Source is known, as for a message written before this field: its opaque payloads then go back only to a hop that names no Source either."
         }
       },
       "if": {

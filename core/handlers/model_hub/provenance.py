@@ -73,7 +73,8 @@ class HopOrigin:
     api: str
     model: str
     # The serving Source: two Sources can share an origin. Equality stays the
-    # origin's, since opaque payloads are origin-bound, not Source-bound.
+    # origin's; opaque payloads are also bound to the Source (C-6 item 6), which
+    # the failover strip compares on its own.
     source: str = field(compare=False)
 
     def payload(self) -> dict[str, str]:

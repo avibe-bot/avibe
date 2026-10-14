@@ -566,6 +566,9 @@ class AssistantMessage:
     usage: Optional[Usage] = None
     error_message: Optional[str] = None
     hosted_summary: Optional[HostedSummary] = None
+    #: The Source that served the message, when known: its opaque payloads go back only to that Source
+    #: (``cross-provider.md``), as a hosted block's go back only to ``native.source_id``.
+    source_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         _require_blocks(self.content, (TextBlock, ThinkingBlock, ToolCallBlock, HostedToolBlock), "assistant message")
@@ -574,6 +577,7 @@ class AssistantMessage:
         _require(self.usage, Usage, "usage", optional=True)
         _require(self.error_message, str, "error_message", optional=True)
         _require(self.hosted_summary, HostedSummary, "hosted_summary", optional=True)
+        _require_text(self.source_id, "source_id", optional=True)
         hosted = any(isinstance(block, HostedToolBlock) for block in self.content)
         if hosted != (self.hosted_summary is not None):
             raise ValueError("a hosted summary is present exactly when the message has hosted tool blocks")
@@ -892,6 +896,7 @@ def message_to_dict(message: Message) -> dict[str, Any]:
             if summary.cost is not None:
                 hosted["cost"] = _cost_to_dict(summary.cost)
             out["hosted_summary"] = hosted
+        _put(out, "source_id", message.source_id)
         return out
     if isinstance(message, ToolResultMessage):
         result: dict[str, Any] = {
@@ -934,7 +939,7 @@ def message_from_dict(data: Mapping[str, Any]) -> Message:
             data,
             "assistant message",
             {"role": str, "content": list, "origin": dict, "stop_reason": str},
-            {"usage": dict, "error_message": str, "hosted_summary": dict},
+            {"usage": dict, "error_message": str, "hosted_summary": dict, "source_id": str},
         )
         summary = None
         if "hosted_summary" in f:
@@ -951,6 +956,7 @@ def message_from_dict(data: Mapping[str, Any]) -> Message:
             usage=usage_from_dict(f["usage"]) if "usage" in f else None,
             error_message=f.get("error_message"),
             hosted_summary=summary,
+            source_id=f.get("source_id"),
         )
     if role == "tool_result":
         f = _read(

@@ -342,7 +342,8 @@ async def test_google_router_gateway_failover_preserves_visible_history_and_orig
                     "source": fallback.id,
                 }
         assert service.adapter.requests[0] == signed
-        assert service.adapter.requests[1] == (signed if same_origin else plain)
+        # The fallback is another Source, so its history is plain even at the same origin (C-6 item 6).
+        assert service.adapter.requests[1] == plain
         assert all(request.protocol == "google" for request in service.adapter.requests)
         completion = router.settle_turn(
             "turn-google", settled_by=SETTLED_BY_TERMINAL_RESULT, ts="2026-10-02T08:00:00Z",

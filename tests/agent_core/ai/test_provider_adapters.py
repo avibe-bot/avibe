@@ -2915,6 +2915,8 @@ async def test_gateway_origin_sanitization_preserves_streamed_block_indexes(serv
     if not verified:
         assert all(not isinstance(block, ThinkingBlock) or block.signature is None for block in final.message.content)
     assert all(not isinstance(block, ToolCallBlock) or block.signature is None for block in final.message.content)
+    # The message names the Source that served it, which its opaque payloads go back to (cross-provider.md).
+    assert final.message.source_id == ("src_fixture01" if verified else None)
 
 
 class _Loader(MediaLoader):

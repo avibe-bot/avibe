@@ -227,12 +227,15 @@ def _signed_history(protocol):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("protocol", PROTOCOL_ENDPOINTS)
-@pytest.mark.parametrize("change", ["same_origin", "provider", "api", "model"])
-async def test_failover_strips_opaque_history_only_when_origin_changes(tmp_path, protocol, change):
-    """MH-VIBEY-005: the engine must never receive primary-signed history at another origin.
+@pytest.mark.parametrize("change", ["source", "provider", "api", "model"])
+async def test_failover_strips_opaque_history_for_another_origin_or_source(tmp_path, protocol, change):
+    """MH-VIBEY-005: the engine must never receive primary-signed history at another origin or Source.
 
     Origin-report tests alone do not inspect the outgoing history at admission.
-    Source identity alone is not origin identity; preserve ordinary tool data.
+    Opaque payloads are bound to the Source as well (an account refuses another
+    account's ciphertext), so a fallback Source of the same origin gets the
+    plain history too; ordinary tool data is preserved. A retry on the primary
+    Source keeps it (the recovery-walk test below).
     """
     primary = _source("src_primary01", "Primary", vendor="anthropic", protocol=protocol)
     fallback_protocol = "anthropic" if protocol != "anthropic" else "openai_responses"
@@ -272,7 +275,7 @@ async def test_failover_strips_opaque_history_only_when_origin_changes(tmp_path,
                 }
         assert [entry[0] for entry in service.adapter.invocations] == [primary.id, fallback.id]
         assert service.adapter.requests[0] == {**common, **original}
-        assert service.adapter.requests[1] == {**common, **(original if change == "same_origin" else plain)}
+        assert service.adapter.requests[1] == {**common, **plain}
         assert all(request.protocol == protocol for request in service.adapter.requests)
         assert all(request.headers == {
             "anthropic-beta": "fixture-beta", "user-agent": "fixture-agent",

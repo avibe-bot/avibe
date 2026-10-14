@@ -9728,8 +9728,11 @@ class ModelHubService:
                     except ServedHopHeaderTooLarge:
                         raise ModelHubError("served_hop_too_large", status=422) from None
                     # A pinned request was rendered for its pinned Source and is
-                    # never rewritten; only an unpinned one is stripped here.
-                    if pinned_hop is None and getattr(request, "primary_origin", None) != origin:
+                    # never rewritten; only an unpinned one is stripped here, for
+                    # any other Source: opaque payloads are bound to the account
+                    # that issued them, not only to the origin (C-6 item 6).
+                    primary = getattr(request, "primary_origin", None)
+                    if pinned_hop is None and (primary != origin or primary.source != origin.source):
                         attempt_request = without_opaque_history(request)
                     # Hosted content is admitted on this final snapshot, so evidence
                     # or a Source that changed while the engine was prepared counts.

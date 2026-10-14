@@ -129,6 +129,38 @@ def test_cross_provider_transform_drops_opaque_payload_and_answers_orphaned_call
     assert synthetic.is_error is True  # type: ignore[attr-defined]
 
 
+@pytest.mark.parametrize(
+    ("served_by", "hop", "bound"),
+    [
+        ("src_account0001", "src_account0001", True),
+        ("src_account0001", "src_account0002", False),
+        (None, "src_account0002", False),
+        (None, None, True),
+    ],
+    ids=["same-source", "another-source", "unknown-source", "no-source-anywhere"],
+)
+def test_opaque_payloads_go_back_only_to_the_source_that_served_them(served_by, hop, bound) -> None:
+    """cross-provider.md: another account refuses a Source's ciphertext (xAI's and OpenAI's encrypted reasoning), so a
+    message's signatures, redacted thinking and native ids go back only to a hop of the Source that served it. A
+    message no known Source served, as one written before ``source_id``, goes to a Source as a different origin's."""
+
+    origin = Origin("openai", "openai_responses", "gpt-test")
+    reasoning = ThinkingBlock("plan", '{"id": "rs_1", "encrypted_content": "account-bound"}')
+    redacted = ThinkingBlock("", "redacted-opaque", redacted=True)
+    call = ToolCallBlock("call_1", "read", {"path": "x"}, native_id="fc_1", signature="call-opaque")
+    message = AssistantMessage((reasoning, redacted, call), origin, "tool_use", source_id=served_by)
+    endpoint = ModelEndpoint("openai_responses", "http://hub.invalid/v1", "gpt-test", "token", source_id=hop)
+
+    result = transform_messages((UserMessage((TextBlock("go"),)), message), origin, endpoint=endpoint)
+
+    sent = result.messages[1]
+    assert isinstance(sent, AssistantMessage)
+    if bound:
+        assert sent.content == (reasoning, redacted, call)
+    else:
+        assert sent.content == (TextBlock("plan"), ToolCallBlock("call_1", "read", {"path": "x"}))
+
+
 def test_cross_provider_transform_drops_results_for_failed_tool_turns() -> None:
     history = (
         UserMessage((TextBlock(text="request"),)),

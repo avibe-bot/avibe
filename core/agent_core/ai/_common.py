@@ -252,9 +252,11 @@ class StreamAssembler:
 
     def set_origin(self, origin: Origin, verified_origin: bool, source_id: str | None = None) -> None:
         if self._continuing:
-            # A continued response is one message (§4.3): verified only when every response in it was, from one origin,
-            # and its usage is the latest response's, none if that reports none.
-            verified_origin = verified_origin and self.verified_origin and origin == self.origin
+            # A continued response is one message (§4.3): verified only when every response in it was, from one origin
+            # and one Source, and its usage is the latest response's, none if that reports none.
+            verified_origin = (
+                verified_origin and self.verified_origin and origin == self.origin and source_id == self.source_id
+            )
             self.usage = None
         self.origin = origin
         self.verified_origin = verified_origin
@@ -1110,6 +1112,7 @@ class StreamAssembler:
             error_message=error_message,
             verified_origin=self.verified_origin,
             hosted_summary=self._hosted_summary(final),
+            source_id=self.source_id,
         )
 
     def pause(self) -> AssistantMessage | ProviderError:
@@ -1133,6 +1136,7 @@ class StreamAssembler:
             verified_origin=self.verified_origin,
             stop_reason=stop_reason,
             hosted_summary=self._hosted_summary(content),
+            source_id=self.source_id,
         )
 
     def error(
@@ -2194,6 +2198,7 @@ def assistant_message(
     error_message: str | None = None,
     verified_origin: bool = True,
     hosted_summary: HostedSummary | None = None,
+    source_id: str | None = None,
 ) -> AssistantMessage:
     if not verified_origin:
         sanitized: list[AssistantContent] = []
@@ -2219,6 +2224,8 @@ def assistant_message(
         usage=usage,
         error_message=error_message,
         hosted_summary=hosted_summary,
+        # An unverified origin names no Source its opaque payloads could go back to; it keeps none anyway.
+        source_id=source_id if verified_origin else None,
     )
 
 
@@ -2251,6 +2258,7 @@ def partial_message(
     verified_origin: bool = True,
     stop_reason: str = "aborted",
     hosted_summary: HostedSummary | None = None,
+    source_id: str | None = None,
 ) -> AssistantMessage:
     if stop_reason in {"aborted", "error"}:
         content = [block for block in content if not isinstance(block, ToolCallBlock)]
@@ -2261,6 +2269,7 @@ def partial_message(
         usage=usage,
         verified_origin=verified_origin,
         hosted_summary=hosted_summary,
+        source_id=source_id,
     )
 
 

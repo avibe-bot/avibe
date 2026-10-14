@@ -76,8 +76,10 @@ def transform_messages(
 ) -> TransformResult:
     """Compile canonical history for one target origin.
 
-    The returned map is per request. The transcript is never mutated. ``endpoint`` is the hop the request goes to; a
-    response's hosted calls go back verbatim only to the Source that served them (``native_replay``).
+    The returned map is per request. The transcript is never mutated. ``endpoint`` is the hop the request goes to: a
+    response's opaque payloads (signatures, redacted thinking) go back only to the Source that served it, and its
+    hosted calls verbatim only to the Source that served them (``native_replay``). Without an ``endpoint``, the origin
+    alone decides.
     """
 
     target_protocol = protocol or target.api
@@ -123,7 +125,9 @@ def transform_messages(
             continue
 
         pending_tool_ids.clear()
-        same_origin = message.origin == target
+        # Opaque payloads are bound to the Source that served them: another account's ciphertext is refused (xAI,
+        # OpenAI), so a message another Source served, or one no known Source did, is sent as a different origin's.
+        same_origin = message.origin == target and (endpoint is None or message.source_id == endpoint.source_id)
         content: list[AssistantContent] = []
         turn_tool_ids: dict[str, list[str]] = {}
         in_flight = position == live
