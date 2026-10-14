@@ -1,15 +1,15 @@
-"""Hosted-tool hop resolution (``vibey-hosted-tools.md`` §3.4, §3.5; §12 items 7, 14, 19, 20).
+"""Hosted-tool facts, the executor chain, the image enum and the Tools read (``vibey-hosted-tools.md`` §3.3–§3.4, §6,
+§7.2).
 
-Native is reachable only through positive evidence on the current wire, an
-eligible credential and an untranslated path; everything else is the proxy.
-The executor is bound for every enabled tool, whatever the mode.
+Nothing is probed: a tool the overlay offers is assumed on a hop until a real
+request refuses it, and these functions are the one place that decides so.
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import pytest
 
@@ -17,43 +17,75 @@ from config.v2_config import (
     ModelHubAgentSupplyConfig,
     ModelHubConfig,
     ModelHubHostedToolConfig,
+    ModelHubImageModelChoice,
     ModelHubModelConfig,
-    ModelHubRouteHopConfig,
     ModelHubSourceConfig,
     ModelHubSourceStateConfig,
 )
+from core.handlers.model_hub import hosted_tools as hosted_tools_module
 from core.handlers.model_hub.capability_evidence import (
     CapabilityEvidenceStore,
     EvidenceFeature,
     EvidenceRecord,
     identity_digest,
 )
-from core.handlers.model_hub.hosted_tools import hosted_tools_status, resolve_hosted_tools
-from vibe.backend_model_catalog import HostedToolSpec
+from core.handlers.model_hub.hosted_tools import (
+    HostedEvidence,
+    HostedToolSettingRefused,
+    apply_hosted_tool_put,
+    executor_candidates,
+    hosted_tool_facts,
+    hosted_tools_status,
+    image_choices,
+    resolve_hosted_tools,
+)
+from vibe.backend_model_catalog import HostedToolPrice, HostedToolSpec, ImageModelPrice, ImageModelSpec
 
-NOW = datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
-ENGINE = "model-hub-engine-v8.0.23-3"
+NOW = datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc)
+ENGINE, AVIBE = "model-hub-engine-v8.0.23-3", "3.2.1"
+SEARCH_PRICE = HostedToolPrice(unit="call", usd_per_1k=5, as_of=date(2026, 10, 13), url="https://docs.x.ai/pricing")
 
 
-def _spec(declaration: dict, include: tuple[str, ...] = ()) -> HostedToolSpec:
-    return HostedToolSpec(declaration_json=json.dumps(declaration), price=None, include=include)
+def _spec(declaration: dict, include: tuple[str, ...] = (), price=None) -> HostedToolSpec:
+    return HostedToolSpec(declaration_json=json.dumps(declaration), price=price, include=include)
 
 
 SPECS = {
-    ("xai", "openai_responses", "web_search"): _spec({"type": "web_search"}),
+    ("xai", "openai_responses", "web_search"): _spec({"type": "web_search"}, price=SEARCH_PRICE),
     ("xai", "openai_responses", "x_search"): _spec({"type": "x_search"}),
     ("openai", "openai_responses", "web_search"): _spec({"type": "web_search"}, ("web_search_call.action.sources",)),
-    ("openai", "openai_responses", "image_generation"): _spec({"type": "image_generation", "partial_images": 2}),
     ("anthropic", "anthropic", "web_search"): _spec({"type": "web_search_20250305", "name": "web_search"}),
     ("google", "google", "web_search"): _spec({"type": "google_search"}),
 }
+EXECUTOR_MODELS = {"xai": "grok-fast", "openai": "gpt-mini", "anthropic": "claude-haiku"}
+
+
+def _image(model_id: str, description: str, *, price: float | None = None) -> ImageModelSpec:
+    prices = (
+        (ImageModelPrice(HostedToolPrice("image", price * 1000, date(2026, 10, 15), "https://docs.x.ai/pricing")),)
+        if price is not None
+        else ()
+    )
+    return ImageModelSpec(model_id, description, "images", ("images", "size"), ("pixels",), prices)
+
+
+IMAGE_MODELS = {
+    "openai": (_image("gpt-image-2", "OpenAI's image model"),),
+    "xai": (_image("grok-imagine-image", "Grok Imagine", price=0.02),),
+}
+
+
+@pytest.fixture(autouse=True)
+def _overlay(monkeypatch):
+    monkeypatch.setattr(hosted_tools_module, "provider_executor_model", EXECUTOR_MODELS.get)
+    monkeypatch.setattr(hosted_tools_module, "provider_image_models", lambda vendor: IMAGE_MODELS.get(vendor, ()))
 
 
 def _spec_for(vendor, protocol, model_id, tool):
     return SPECS.get((vendor, protocol, tool))
 
 
-def _source(source_id, vendor, protocol, model_id, *, kind="api_key") -> ModelHubSourceConfig:
+def _source(source_id, vendor, protocol, model_id, *, kind="api_key", base_url=None) -> ModelHubSourceConfig:
     return ModelHubSourceConfig(
         id=source_id,
         kind=kind,
@@ -65,182 +97,182 @@ def _source(source_id, vendor, protocol, model_id, *, kind="api_key") -> ModelHu
         state=ModelHubSourceStateConfig(status="standby"),
         models=[ModelHubModelConfig(id=model_id, provenance="discovered")],
         credential_ref=f"cred_{source_id}",
+        base_url=base_url,
     )
 
 
 XAI = _source("src_xai00001", "xai", "openai_responses", "grok-4.6")
-OPENAI = _source("src_oai00001", "openai", "openai_responses", "gpt-6-astra")
+OPENAI = _source("src_oai00001", "openai", "openai_responses", "gpt-6-astra", base_url="https://relay.example/v1")
 CLAUDE_SUB = _source("src_cla00001", "anthropic", "anthropic", "claude-opus-5-5", kind="subscription")
 GEMINI = _source("src_gem00001", "google", "google", "gemini-3-pro")
 ALL = [CLAUDE_SUB, XAI, OPENAI, GEMINI]
 
 
-def _config(tools: dict[str, ModelHubHostedToolConfig]) -> ModelHubConfig:
+def _config(tools: dict[str, ModelHubHostedToolConfig] | None = None, sources=ALL) -> ModelHubConfig:
     vibey = ModelHubAgentSupplyConfig.default("vibey", mode="hub")
-    vibey = replace(vibey, sources=replace(vibey.sources, order=[source.id for source in ALL]))
-    config = ModelHubConfig(sources=list(ALL), hosted_tools=tools)
+    vibey = replace(vibey, sources=replace(vibey.sources, order=[source.id for source in sources]))
+    config = ModelHubConfig(sources=list(sources), hosted_tools=tools or {})
     config.agents["vibey"] = vibey
     return config
 
 
-def _store(tmp_path, *verified, engine=ENGINE) -> CapabilityEvidenceStore:
+def _evidence(tmp_path, *refused) -> HostedEvidence:
+    """Evidence holding a current refusal for each (source, model_id, tool, aspect)."""
+
     store = CapabilityEvidenceStore(tmp_path / "evidence.json")
-    for source, tool, aspect in verified:
-        store.write(
+    evidence = HostedEvidence(store, ENGINE, AVIBE)
+    for source, model_id, tool, aspect in refused:
+        store.write_refusal(
             EvidenceRecord(
-                source_id=source.id,
-                model_id=source.models[0].id,
-                feature=EvidenceFeature.hosted(tool, aspect),
-                status="verified",
-                basis="probe",
-                observed_at=NOW,
-                engine=engine,
-                shape=1,
-                source_identity=identity_digest(source),
+                source_id=source.id, model_id=model_id, feature=EvidenceFeature.hosted(tool, aspect),
+                status="unsupported", observed_at=NOW, wire=evidence.wire_for(source, model_id),
+                source_identity=identity_digest(source), detail="400 invalid_request_error",
             ),
             live=ALL,
         )
-    return store
-
-
-def _resolve(tmp_path, tools, primary, *verified, engine=ENGINE, evidence_engine=ENGINE):
-    return resolve_hosted_tools(
-        _config(tools),
-        source=primary,
-        model_id=primary.models[0].id,
-        evidence=_store(tmp_path, *verified, engine=evidence_engine),
-        spec_for=_spec_for,
-        engine=engine,
-        now=NOW,
-    )
-
-
-ON = ModelHubHostedToolConfig(enabled=True)
-
-
-def test_only_enabled_tools_resolve(tmp_path):
-    assert _resolve(tmp_path, {}, XAI) == {}
-    assert _resolve(tmp_path, {"web_search": ModelHubHostedToolConfig(enabled=False)}, XAI) == {}
-
-
-def test_no_evidence_means_proxy_without_an_executor(tmp_path):
-    assert _resolve(tmp_path, {"web_search": ON, "image_generation": ON}, XAI) == {
-        "web_search": {"mode": "proxy", "executor": None, "replay": False},
-        "image_generation": {"mode": "proxy", "executor": None, "replay": False},
-    }
-
-
-def test_verified_call_makes_the_hop_native_and_binds_the_first_verified_executor(tmp_path):
-    resolved = _resolve(
-        tmp_path,
-        {"web_search": ON, "x_search": ON},
-        OPENAI,
-        (OPENAI, "web_search", "call"),
-        (OPENAI, "web_search", "replay"),
-        (XAI, "x_search", "call"),
-    )
-    assert resolved == {
-        "web_search": {
-            "mode": "native",
-            "declaration": {"type": "web_search"},
-            "include": ["web_search_call.action.sources"],
-            "executor": {"source_id": "src_oai00001", "model_id": "gpt-6-astra"},
-            "replay": True,
-        },
-        "x_search": {
-            "mode": "proxy",
-            "executor": {"source_id": "src_xai00001", "model_id": "grok-4.6"},
-            "replay": False,
-        },
-    }
-
-
-def test_evidence_from_another_engine_routes_as_proxy(tmp_path):
-    resolved = _resolve(
-        tmp_path,
-        {"web_search": ON},
-        XAI,
-        (XAI, "web_search", "call"),
-        (XAI, "web_search", "replay"),
-        engine="model-hub-engine-v8.0.24-1",
-    )
-    assert resolved == {"web_search": {"mode": "proxy", "executor": None, "replay": False}}
+    return evidence
 
 
 @pytest.mark.parametrize(
-    "primary",
-    [CLAUDE_SUB, GEMINI],
-    ids=["claude-subscription-is-never-eligible", "google-is-a-translated-path"],
+    "primary,tool,refused,native,replay",
+    [
+        # The overlay offers it and nothing refused it: assumed, with no evidence at all.
+        (XAI, "web_search", (), "assumed", "assumed"),
+        (XAI, "web_search", ((XAI, "grok-4.6", "web_search", "replay"),), "assumed", "unsupported"),
+        (XAI, "web_search", ((XAI, "grok-4.6", "web_search", "call"),), "unsupported", "unsupported"),
+        # OpenAI offers no X search: the function, whatever the evidence.
+        (OPENAI, "x_search", (), "unsupported", "unsupported"),
+        (CLAUDE_SUB, "web_search", (), "unsupported", "unsupported"),
+        (GEMINI, "web_search", (), "unsupported", "unsupported"),
+    ],
+    ids=["assumed", "replay-refused", "call-refused", "not-offered", "claude-subscription-never", "translated-never"],
 )
-def test_ineligible_or_translated_hops_never_go_native_or_execute(tmp_path, primary):
-    resolved = _resolve(
-        tmp_path, {"web_search": ON}, primary, (primary, "web_search", "call"), (primary, "web_search", "replay")
+def test_a_hops_facts_come_from_priors_and_refusals(tmp_path, primary, tool, refused, native, replay):
+    """MH-HOSTED-001: nothing is probed; a tool is assumed where offered until a real request refuses it."""
+    facts = hosted_tool_facts(
+        primary, primary.models[0].id, tool, evidence=_evidence(tmp_path, *refused), spec_for=_spec_for,
     )
-    assert resolved == {"web_search": {"mode": "proxy", "executor": None, "replay": False}}
+    assert (facts.native, facts.replay) == (native, replay)
+    assert (facts.declaration is not None) is (native == "assumed")
 
 
-def test_the_chosen_executor_wins_only_while_verified(tmp_path):
-    chosen = ModelHubHostedToolConfig(enabled=True, executor=ModelHubRouteHopConfig("src_xai00001", "grok-4.6"))
-    verified_both = (
-        (OPENAI, "web_search", "call"),
-        (XAI, "web_search", "call"),
+def test_the_executor_chain_follows_the_users_order_then_vibeys(tmp_path):
+    """MH-HOSTED-001: Sources whose vendor offers the tool, each on its vendor's executor model; a refused pair and
+    a Claude subscription never are candidates."""
+    evidence = _evidence(tmp_path)
+    chain = executor_candidates(_config(), "web_search", evidence=evidence, spec_for=_spec_for)
+    assert [(candidate.source.id, candidate.model_id) for candidate in chain] == [
+        ("src_xai00001", "grok-fast"), ("src_oai00001", "gpt-mini"),
+    ]
+    ordered = _config({"web_search": ModelHubHostedToolConfig(executor_order=("src_oai00001", "src_gone00001"))})
+    assert [candidate.source.id for candidate in executor_candidates(
+        ordered, "web_search", evidence=evidence, spec_for=_spec_for,
+    )] == ["src_oai00001", "src_xai00001"]
+    refused = _evidence(tmp_path / "r", (XAI, "grok-fast", "web_search", "call"))
+    assert [candidate.source.id for candidate in executor_candidates(
+        _config(), "web_search", evidence=refused, spec_for=_spec_for,
+    )] == ["src_oai00001"]
+
+
+def test_the_image_enum_is_deterministic_with_the_default_first(tmp_path):
+    """MH-HOSTED-001: a pure function of config and current refusals: the default first, the rest by id."""
+    evidence = _evidence(tmp_path)
+    choices = image_choices(_config(), evidence=evidence)
+    assert [choice.model_id for choice in choices.models] == ["grok-imagine-image", "gpt-image-2"]
+    saved = _config({"image_generate": ModelHubHostedToolConfig(
+        default_model=ModelHubImageModelChoice("src_oai00001", "gpt-image-2"),
+    )})
+    choices = image_choices(saved, evidence=evidence)
+    assert [choice.model_id for choice in choices.models] == ["gpt-image-2", "grok-imagine-image"]
+    assert choices.saved_default_available is True
+    refused = _evidence(tmp_path / "r", (OPENAI, "gpt-image-2", "image_generate", "call"))
+    choices = image_choices(saved, evidence=refused)
+    assert [choice.model_id for choice in choices.models] == ["grok-imagine-image"]
+    assert (choices.saved_default_available, choices.default.model_id) == (False, "grok-imagine-image")
+    assert image_choices(_config(sources=[CLAUDE_SUB, GEMINI]), evidence=evidence).models == ()
+
+
+def test_resolution_states_v2_facts_in_todays_hop_shape(tmp_path):
+    """MH-HOSTED-001: every tool is on unless turned off; native when assumed; the first executor binds."""
+    resolved = resolve_hosted_tools(
+        _config(), source=XAI, model_id="grok-4.6", evidence=_evidence(tmp_path), spec_for=_spec_for,
     )
-    assert _resolve(tmp_path / "a", {"web_search": chosen}, GEMINI, *verified_both)["web_search"]["executor"] == {
-        "source_id": "src_xai00001",
-        "model_id": "grok-4.6",
+    assert resolved == {
+        "web_search": {
+            "mode": "native", "declaration": {"type": "web_search"}, "include": [],
+            "executor": {"source_id": "src_xai00001", "model_id": "grok-fast"}, "replay": True,
+        },
+        "x_search": {
+            "mode": "native", "declaration": {"type": "x_search"}, "include": [],
+            "executor": {"source_id": "src_xai00001", "model_id": "grok-fast"}, "replay": True,
+        },
     }
-    assert _resolve(tmp_path / "b", {"web_search": chosen}, GEMINI, verified_both[0])["web_search"]["executor"] == {
-        "source_id": "src_oai00001",
-        "model_id": "gpt-6-astra",
-    }
+    off = _config({"x_search": ModelHubHostedToolConfig(enabled=False)})
+    assert set(resolve_hosted_tools(
+        off, source=XAI, model_id="grok-4.6", evidence=_evidence(tmp_path / "o"), spec_for=_spec_for,
+    )) == {"web_search"}
 
 
-def test_image_generation_is_never_replayed(tmp_path):
-    resolved = _resolve(tmp_path, {"image_generation": ON}, OPENAI, (OPENAI, "image_generation", "call"))
-    assert resolved["image_generation"] == {
-        "mode": "native",
-        "declaration": {"type": "image_generation", "partial_images": 2},
-        "include": [],
-        "executor": {"source_id": "src_oai00001", "model_id": "gpt-6-astra"},
-        "replay": False,
-    }
-
-
-def test_status_lists_where_each_tool_can_run_and_counts_re_verifications(tmp_path):
-    store = _store(tmp_path, (XAI, "x_search", "call"), (OPENAI, "web_search", "call"), engine="model-hub-engine-v8.0.22-1")
-    store.write(
+def test_the_tools_read_states_saved_and_effective_values_and_what_real_use_showed(tmp_path):
+    """MH-HOSTED-004: the read never resolves a saved value, and its status comes from real requests only."""
+    evidence = _evidence(tmp_path, (OPENAI, "gpt-6-astra", "web_search", "call"))
+    evidence.store.note_success(
         EvidenceRecord(
-            source_id=XAI.id,
-            model_id="grok-4.6",
-            feature=EvidenceFeature.hosted("web_search", "call"),
-            status="verified",
-            basis="probe",
-            observed_at=NOW.replace(month=8),
-            engine=ENGINE,
-            shape=1,
-            source_identity=identity_digest(XAI),
+            source_id=XAI.id, model_id="grok-fast", feature=EvidenceFeature.hosted("web_search", "call"),
+            status="verified", observed_at=NOW, wire=evidence.wire_for(XAI, "grok-fast"),
+            source_identity=identity_digest(XAI), mode="executor",
         ),
-        live=ALL,
+        live=ALL, now=NOW,
     )
-    status = hosted_tools_status(
-        _config({"x_search": ON}), evidence=store, spec_for=_spec_for, engine=ENGINE, now=NOW,
-        probe_estimate=lambda _source, _model_id, _tool: None,
-    )
+    config = _config({"web_search": ModelHubHostedToolConfig(executor_order=("src_oai00001",))})
+    status = hosted_tools_status(config, evidence=evidence, spec_for=_spec_for, image_price=lambda _source, _spec: None)
     by_name = {tool["name"]: tool for tool in status["tools"]}
-    assert [tool["name"] for tool in status["tools"]] == ["web_search", "x_search", "image_generation"]
-    assert by_name["x_search"]["enabled"] is True and by_name["web_search"]["enabled"] is False
-    assert [(c["source_id"], c["call"]["status"], c["call"]["stale"]) for c in by_name["x_search"]["candidates"]] == [
-        ("src_xai00001", "unknown", "wire")
+    assert list(by_name) == ["web_search", "x_search", "image_generate"]
+    web = by_name["web_search"]
+    assert web["enabled"] is True and by_name["x_search"]["enabled"] is True
+    assert web["executor_order"] == ["src_oai00001"]
+    assert web["effective_order"] == ["src_oai00001", "src_xai00001"]
+    assert [(c["source_id"], c["model_id"], c["relay"]) for c in web["executor_candidates"]] == [
+        ("src_oai00001", "gpt-mini", True), ("src_xai00001", "grok-fast", False),
     ]
-    assert [(c["source_id"], c["call"]["status"], c["call"]["stale"]) for c in by_name["web_search"]["candidates"]] == [
-        ("src_xai00001", "verified", "age"),
-        ("src_oai00001", "unknown", "wire"),
+    assert web["executor_candidates"][1]["price"]["unit"] == "call"
+    assert web["status"]["latest_ok"]["mode"] == "executor"
+    assert [(item["source_id"], item["aspect"]) for item in web["status"]["refused"]] == [("src_oai00001", "call")]
+    assert web["status"]["verified"] == [
+        {"source_id": "src_xai00001", "model_id": "grok-fast", "mode": "executor", "at": "2026-10-15T12:00:00Z"}
     ]
-    assert by_name["image_generation"]["candidates"][0]["replay"] is None
-    assert status["reverify"] == {"engine_upgraded": 2, "aged": 1}
-    # What a turn would bind now: the age-stale verified XAI call still routes; wire-stale ones do not.
-    assert by_name["web_search"]["bound"] == {"source_id": "src_xai00001", "model_id": "grok-4.6"}
-    assert by_name["x_search"]["bound"] is None
-    # An aged probe record has nothing left to wait for; a wire-stale one waits for the user's re-verify.
-    assert by_name["web_search"]["candidates"][0]["call"]["changes_at"] is None
-    assert by_name["x_search"]["candidates"][0]["call"]["changes_at"] is None
+    image = by_name["image_generate"]
+    assert (image["default_model"], image["effective_default"]["model_id"]) == (None, "grok-imagine-image")
+    assert image["image_offered_by"] == ["openai", "xai"]
+
+
+@pytest.mark.parametrize(
+    "tool,payload,expected",
+    [
+        ("web_search", {"enabled": False}, {"enabled": False, "executor_order": ("src_oai00001",)}),
+        ("web_search", {"executor_order": None}, {"enabled": True, "executor_order": None}),
+        ("web_search", {"executor_order": ["src_xai00001"]}, {"enabled": True, "executor_order": ("src_xai00001",)}),
+    ],
+)
+def test_a_put_changes_only_the_fields_it_names(tool, payload, expected):
+    """MH-HOSTED-004: an absent field is unchanged and null resets; a toggle never drops a saved order."""
+    config = _config({"web_search": ModelHubHostedToolConfig(executor_order=("src_oai00001",))})
+    setting = apply_hosted_tool_put(config, tool, payload)
+    assert (setting.enabled, setting.executor_order) == (expected["enabled"], expected["executor_order"])
+
+
+@pytest.mark.parametrize(
+    "tool,payload,code",
+    [
+        ("image_generation", {"enabled": True}, "hosted_tool_not_found"),
+        ("web_search", {}, "invalid_parameter"),
+        ("web_search", {"default_model": None}, "invalid_parameter"),
+        ("image_generate", {"executor_order": None}, "invalid_parameter"),
+        ("web_search", {"enabled": "yes"}, "invalid_parameter"),
+        ("web_search", {"executor_order": ["src_a00000001", "src_a00000001"]}, "invalid_parameter"),
+    ],
+)
+def test_a_put_refuses_what_the_contract_forbids(tool, payload, code):
+    with pytest.raises(HostedToolSettingRefused) as refused:
+        apply_hosted_tool_put(_config(), tool, payload)
+    assert refused.value.code == code

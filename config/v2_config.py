@@ -13,6 +13,7 @@ from dataclasses import dataclass, field, fields, replace
 from datetime import datetime
 from pathlib import Path
 from typing import (
+    Any,
     Callable,
     ClassVar,
     Iterator,
@@ -35,7 +36,6 @@ from config.platform_registry import (
     supported_platform_ids,
     supported_platform_set,
 )
-from core.agent_core.messages import HOSTED_TOOLS
 from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, AgentBackend, DEFAULT_AGENT_BACKEND
 from modules.im.base import BaseIMConfig
 from vibe.i18n import normalize_language
@@ -3033,8 +3033,10 @@ class ModelHubAgentSupplyConfig:
         return payload
 
 
-# The hosted-tool catalog names are owned by the C-1 contract.
-MODEL_HUB_HOSTED_TOOLS: tuple[str, ...] = HOSTED_TOOLS
+# Model Hub's hosted-tool catalog (vibey-hosted-tools.md §2): two search tools a hop may run natively or
+# through the executor, and the direct image tool.
+MODEL_HUB_SEARCH_TOOLS: tuple[str, ...] = ("web_search", "x_search")
+MODEL_HUB_HOSTED_TOOLS: tuple[str, ...] = (*MODEL_HUB_SEARCH_TOOLS, "image_generate")
 
 
 def _drop_vibey_client_presets(agent: "ModelHubAgentSupplyConfig") -> None:
@@ -3058,63 +3060,105 @@ def _drop_vibey_client_presets(agent: "ModelHubAgentSupplyConfig") -> None:
 
 
 @dataclass(frozen=True)
-class ModelHubHostedToolConfig:
-    """One hosted tool's user toggle (``vibey-hosted-tools.md`` §3.3).
+class ModelHubImageModelChoice:
+    """The image model a user chose as ``image_generate``'s default."""
 
-    ``executor`` is the proxy executor the user chose, or None to let hop
-    resolution pick the first verified candidate.
+    source_id: str
+    model_id: str
+
+    @classmethod
+    def from_payload(cls, payload: object, *, tool: str) -> "ModelHubImageModelChoice":
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"source_id", "model_id"}
+            or not all(isinstance(payload[key], str) and payload[key].strip() for key in ("source_id", "model_id"))
+        ):
+            raise ValueError(f"Config 'model_hub.hosted_tools.{tool}.default_model' must name a source_id and model_id")
+        return cls(source_id=payload["source_id"], model_id=payload["model_id"])
+
+    def to_payload(self) -> dict:
+        return {"source_id": self.source_id, "model_id": self.model_id}
+
+
+@dataclass(frozen=True)
+class ModelHubHostedToolConfig:
+    """One hosted tool's user settings (``vibey-hosted-tools.md`` §3.3).
+
+    ``enabled`` defaults to on. ``executor_order`` (search tools) is the Source order the user wants executors
+    tried in, None for automatic; ``default_model`` (``image_generate``) is the chosen default image model, None
+    for the catalog default. Both are saved values, never resolved ones.
     """
 
-    enabled: bool = False
-    executor: Optional[ModelHubRouteHopConfig] = None
+    enabled: bool = True
+    executor_order: Optional[tuple[str, ...]] = None
+    default_model: Optional[ModelHubImageModelChoice] = None
 
     @classmethod
     def from_payload(cls, payload: object, *, tool: str) -> "ModelHubHostedToolConfig":
-        if not isinstance(payload, dict) or set(payload) != {"enabled", "executor"}:
-            raise ValueError(f"Config 'model_hub.hosted_tools.{tool}' must contain enabled and executor")
-        if not isinstance(payload["enabled"], bool):
+        """Read one entry; fields it does not know are ignored with a warning, the ones it knows are kept."""
+
+        if not isinstance(payload, dict):
+            raise ValueError(f"Config 'model_hub.hosted_tools.{tool}' must be an object")
+        known = {"enabled"} | ({"executor_order"} if tool in MODEL_HUB_SEARCH_TOOLS else {"default_model"})
+        unknown = set(payload) - known
+        if unknown:
+            logger.warning("Config 'model_hub.hosted_tools.%s' ignores unknown fields %s", tool, sorted(unknown))
+        enabled = payload.get("enabled", True)
+        if not isinstance(enabled, bool):
             raise ValueError(f"Config 'model_hub.hosted_tools.{tool}.enabled' must be a boolean")
-        executor = payload["executor"]
+        # Only the fields this tool knows are read; another tool's field was ignored above.
+        order = payload.get("executor_order") if "executor_order" in known else None
+        if order is not None and (
+            not isinstance(order, list)
+            or not all(isinstance(item, str) and item.strip() for item in order)
+            or len(set(order)) != len(order)
+        ):
+            raise ValueError(f"Config 'model_hub.hosted_tools.{tool}.executor_order' must be distinct Source ids")
+        default = payload.get("default_model") if "default_model" in known else None
         return cls(
-            enabled=payload["enabled"],
-            executor=None if executor is None else ModelHubRouteHopConfig.from_payload(executor),
+            enabled=enabled,
+            executor_order=tuple(order) if order is not None else None,
+            default_model=ModelHubImageModelChoice.from_payload(default, tool=tool) if default is not None else None,
         )
 
     def to_payload(self) -> dict:
-        return {"enabled": self.enabled, "executor": None if self.executor is None else self.executor.to_payload()}
+        out: dict[str, Any] = {"enabled": self.enabled}
+        if self.executor_order is not None:
+            out["executor_order"] = list(self.executor_order)
+        if self.default_model is not None:
+            out["default_model"] = self.default_model.to_payload()
+        return out
 
 
-def _hosted_tools_from_payload(
-    payload: object,
-    sources: list["ModelHubSourceConfig"],
-) -> dict[str, ModelHubHostedToolConfig]:
+def _hosted_tools_from_payload(payload: object) -> dict[str, ModelHubHostedToolConfig]:
     """Read ``model_hub.hosted_tools`` as an optional feature that degrades on its own.
 
-    Absent means every tool is off. A malformed section or entry turns off only
-    what it describes, with a warning; Sources and Agents still load. An
-    executor whose Source or model no longer exists reads as None.
+    Absent means every tool takes its defaults (on). An unknown tool key, or an unknown field inside an entry, is
+    ignored with a warning, and the fields the loader knows are kept, so a user's opt-out survives. A malformed
+    entry takes its defaults, with a warning; Sources and Agents still load.
     """
 
     if payload is None:
         return {}
     if not isinstance(payload, dict):
-        logger.warning("Config 'model_hub.hosted_tools' is not an object; hosted tools are off")
+        logger.warning("Config 'model_hub.hosted_tools' is not an object; hosted tools take their defaults")
         return {}
-    models = {source.id: {model.id for model in source.models} for source in sources}
     tools: dict[str, ModelHubHostedToolConfig] = {}
     for tool, raw in payload.items():
         if tool not in MODEL_HUB_HOSTED_TOOLS:
-            logger.warning("Config 'model_hub.hosted_tools' has an unknown tool %r; it is off", tool)
+            logger.warning("Config 'model_hub.hosted_tools' ignores an unknown tool %r", tool)
             continue
         try:
-            entry = ModelHubHostedToolConfig.from_payload(raw, tool=tool)
+            tools[tool] = ModelHubHostedToolConfig.from_payload(raw, tool=tool)
         except ValueError as exc:
-            logger.warning("%s; hosted tool %r is off", exc, tool)
-            continue
-        if entry.executor is not None and entry.executor.model_id not in models.get(entry.executor.source_id, ()):
-            entry = ModelHubHostedToolConfig(enabled=entry.enabled, executor=None)
-        tools[tool] = entry
+            logger.warning("%s; hosted tool %r takes its defaults", exc, tool)
     return tools
+
+
+def hosted_tool_setting(config: "ModelHubConfig", tool: str) -> ModelHubHostedToolConfig:
+    """One tool's settings, its defaults when the config says nothing."""
+
+    return config.hosted_tools.get(tool) or ModelHubHostedToolConfig()
 
 
 @dataclass
@@ -3134,7 +3178,7 @@ class ModelHubConfig:
     # retain a pending false marker until lock-owning startup commits promotion;
     # an unrelated save must not acknowledge an upgrade it did not perform.
     runtime_default_applied: bool = True
-    # Absent on every released config: absence means every hosted tool is off.
+    # Absent on every released config: absence means every hosted tool takes its defaults (on).
     hosted_tools: dict[str, ModelHubHostedToolConfig] = field(default_factory=dict)
     # Not persisted, like ``V2Config.load_warnings``. True while the Vibey
     # entry was never supplied: a fresh install, or a file written before
@@ -3256,7 +3300,7 @@ class ModelHubConfig:
             sources=sources,
             agents=agents,
             runtime_default_applied=runtime_default_applied,
-            hosted_tools=_hosted_tools_from_payload(payload.get("hosted_tools"), sources),
+            hosted_tools=_hosted_tools_from_payload(payload.get("hosted_tools")),
         )
         _drop_vibey_client_presets(config.agents["vibey"])
         agents = config.agents

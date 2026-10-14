@@ -24,13 +24,18 @@ BUNDLED = json.loads(catalog.get_bundled_catalog_path().read_text(encoding="utf-
 BUNDLED_ROWS = catalog.load_bundled_catalog()["backends"]
 AS_OF = date(2026, 10, 13)
 _DROP = object()
+OPENAI_WEB_SEARCH = (
+    {"type": "web_search"},
+    ("web_search_call.action.sources",),
+    HostedToolPrice("call", 10.0, AS_OF, "https://developers.openai.com/api/docs/pricing"),
+)
 
 
 @pytest.fixture(autouse=True)
 def _fresh_overlay():
-    catalog.bundled_provider_overlay.cache_clear()
+    catalog.bundled_provider_vendors.cache_clear()
     yield
-    catalog.bundled_provider_overlay.cache_clear()
+    catalog.bundled_provider_vendors.cache_clear()
 
 
 def _validator() -> Draft7Validator:
@@ -65,24 +70,10 @@ def test_bundled_providers_section_satisfies_its_schema():
 @pytest.mark.parametrize(
     ("vendor", "protocol", "model", "tool", "expected"),
     [
-        (
-            "openai",
-            "openai_responses",
-            "gpt-6-astra",
-            "web_search",
-            (
-                {"type": "web_search"},
-                ("web_search_call.action.sources",),
-                HostedToolPrice("call", 10.0, AS_OF, "https://developers.openai.com/api/docs/pricing"),
-            ),
-        ),
-        (
-            "openai",
-            "openai_responses",
-            " gpt-6-astra ",
-            "image_generation",
-            ({"type": "image_generation", "partial_images": 2, "output_format": "jpeg", "output_compression": 90}, (), None),
-        ),
+        ("openai", "openai_responses", "gpt-6-astra", "web_search", OPENAI_WEB_SEARCH),
+        ("openai", "openai_responses", " gpt-6-astra ", "web_search", OPENAI_WEB_SEARCH),
+        # Image generation is never a chat declaration; image models are listed apart.
+        ("openai", "openai_responses", "gpt-6-astra", "image_generation", None),
         (
             "xai",
             "openai_responses",
@@ -182,6 +173,23 @@ def _edit(path: tuple, value: object):
     return invalid
 
 
+def _with_image(entry: dict) -> dict:
+    return {**entry, "image_models": [copy.deepcopy(_IMAGE_MODEL)]}
+
+
+def _image_edit(path: tuple, value: object):
+    edit = _edit(("image_models", 0, *path), value)
+    return lambda entry: edit(_with_image(entry))
+
+
+_IMAGE_MODEL = {
+    "id": "grok-imagine-image",
+    "description": "Grok Imagine: fast photoreal images",
+    "endpoint": "images",
+    "params": ["size", "images"],
+    "size_forms": ["ratio"],
+    "prices": [{"price": {"unit": "image", "usd_per_1k": 20, "as_of": "2026-10-15", "url": "https://docs.x.ai/developers/pricing"}}],
+}
 _FAMILY = ("models", 0)
 _X_SEARCH = (*_FAMILY, "hosted_tools", "openai_responses", "x_search")
 _PRICE = (*_X_SEARCH, "price")
@@ -215,14 +223,22 @@ _PRICE = (*_X_SEARCH, "price")
         pytest.param("xai", _edit((*_X_SEARCH, "declaration"), {"name": "x_search"}), id="declaration-untyped"),
         pytest.param("xai", _edit((*_X_SEARCH, "include"), [""]), id="include-blank"),
         pytest.param("xai", _edit(_PRICE, None), id="price-null"),
-        pytest.param("xai", _edit((*_PRICE, "unit"), "image"), id="price-unit-unknown"),
+        pytest.param("xai", _edit((*_PRICE, "unit"), "token"), id="price-unit-unknown"),
         pytest.param("xai", _edit((*_PRICE, "usd_per_1k"), -1), id="price-negative"),
         pytest.param("xai", _edit((*_PRICE, "usd_per_1k"), True), id="price-boolean"),
         pytest.param("xai", _edit((*_PRICE, "as_of"), "2026/10/13"), id="as-of-not-iso"),
         pytest.param("xai", _edit((*_PRICE, "as_of"), "2026-02-30"), id="as-of-impossible"),
         pytest.param("xai", _edit((*_PRICE, "url"), "http://docs.x.ai/developers/pricing"), id="url-not-https"),
         pytest.param("xai", _edit((*_PRICE, "url"), _DROP), id="url-missing"),
-        pytest.param("xai", _edit((*_PRICE, "extra", 0, "unit"), "image"), id="extra-unit-unknown"),
+        pytest.param("xai", _edit((*_PRICE, "extra", 0, "unit"), "token"), id="extra-unit-unknown"),
+        pytest.param("xai", _edit(("executor_model",), " "), id="executor-model-blank"),
+        pytest.param("xai", _edit(("image_models",), {}), id="image-models-not-a-list"),
+        pytest.param("xai", _image_edit(("endpoint",), "edits"), id="image-endpoint-unknown"),
+        pytest.param("xai", _image_edit(("description",), "x" * 81), id="image-description-too-long"),
+        pytest.param("xai", _image_edit(("params",), ["images", "quality"]), id="image-param-unknown"),
+        pytest.param("xai", _image_edit(("size_forms",), []), id="image-size-without-forms"),
+        pytest.param("xai", _image_edit(("prices", 0, "price", "unit"), "call"), id="image-price-not-per-image"),
+        pytest.param("xai", _image_edit(("tokens_per_image",), 0), id="image-tokens-not-positive"),
     ],
 )
 def test_an_invalid_vendor_entry_disables_only_that_vendor(monkeypatch, tmp_path, caplog, key, invalid):
@@ -241,6 +257,36 @@ def test_an_invalid_vendor_entry_disables_only_that_vendor(monkeypatch, tmp_path
     assert catalog.hosted_tool_spec("openai", "openai_responses", "gpt-6-astra", "web_search") is not None
     warnings = _overlay_warnings(caplog)
     assert len(warnings) == 1 and repr(key) in warnings[0]
+
+
+def test_an_image_model_entry_is_read_in_a_stable_form(monkeypatch, tmp_path):
+    """MH-HOSTED-005: an image model's params and size forms are sorted, so the tool block built from them is stable."""
+    providers = {**BUNDLED["providers"], "xai": _with_image(BUNDLED["providers"]["xai"])}
+    _validator().validate(providers)
+    _use_bundled(monkeypatch, tmp_path, providers)
+
+    (model,) = catalog.provider_image_models("xai")
+    assert (model.id, model.endpoint, model.params, model.size_forms) == (
+        "grok-imagine-image", "images", ("images", "size"), ("ratio",),
+    )
+    assert [(price.price.unit, price.price.usd_per_1k, price.size) for price in model.prices] == [("image", 20, None)]
+    assert catalog.provider_image_models("anthropic") == ()
+
+
+@pytest.mark.parametrize("vendor", sorted(BUNDLED["providers"]))
+def test_each_vendors_executor_model_runs_every_search_tool_the_vendor_offers(vendor):
+    """MH-HOSTED-005: an executor model the overlay does not declare a tool on would silently drop the vendor from
+    that tool's executor chain."""
+    offered = {
+        (protocol, tool)
+        for family in catalog.bundled_provider_overlay()[vendor]
+        for protocol, tools in family.hosted_tools.items()
+        for tool in tools
+    }
+    executor = catalog.provider_executor_model(vendor)
+    assert (executor is not None) is bool(offered)
+    for protocol, tool in offered:
+        assert catalog.hosted_tool_spec(vendor, protocol, executor, tool) is not None, (protocol, tool)
 
 
 @pytest.mark.parametrize("providers", [[], "openai", None])

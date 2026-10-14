@@ -27,7 +27,8 @@ from core.handlers.model_hub.capability_evidence import (
     CapabilityEvidenceStore, EvidenceFeature, EvidenceRecord, identity_digest,
 )
 from core.handlers.model_hub.hosted_admission import admits, hosted_content
-from core.handlers.model_hub.hosted_tools import HOSTED_PROBE_SHAPE, engine_stamp
+from core.handlers.model_hub.capability_evidence import wire_stamp
+from core.handlers.model_hub.hosted_tools import HostedEvidence
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 from core.run_settlement import SETTLED_BY_STOPPED, SETTLED_BY_TERMINAL_RESULT
 from modules.agents.model_hub import ModelHubRuntimeRouter
@@ -51,12 +52,17 @@ def _sources(*, primary_status="standby", primary_model="grok-4.6"):
     return primary, fallback
 
 
-def _verify(service, source, model_id, tool, aspect, *, engine=None):
-    service.capability_evidence.write(
+def _refuse(service, source, model_id, tool, aspect, *, engine=None):
+    """A refusal a narrow rule wrote; ``engine`` names the release it was learned under (this one by default)."""
+
+    service.capability_evidence.write_refusal(
         EvidenceRecord(
             source_id=source.id, model_id=model_id, feature=EvidenceFeature.hosted(tool, aspect),
-            status="verified", basis="probe", observed_at=service.now(), engine=engine or engine_stamp(),
-            shape=HOSTED_PROBE_SHAPE, source_identity=identity_digest(source),
+            status="unsupported", observed_at=service.now(),
+            wire=wire_stamp(
+                engine=engine or service.engine_stamp, avibe=service.avibe_release, source=source, model_id=model_id,
+            ),
+            source_identity=identity_digest(source), detail="400 invalid_request_error",
         ),
         live=service.store.config.sources,
     )
@@ -87,9 +93,11 @@ def _native(hop, *, history=()):
     ("source_that_neither_launched_nor_served", 409, []),
     ("failure_before_output", 409, ["src_primary01"]),
     ("request_rejected", 400, ["src_primary01"]),
-    ("no_call_evidence", 409, []),
+    # Nothing is probed: a tool the overlay offers is assumed until a real request refuses it.
+    ("no_evidence_is_assumed", 200, ["src_primary01"]),
+    ("current_refusal", 409, []),
     ("overlay_no_longer_offers_the_tool", 409, []),
-    ("evidence_from_another_engine", 409, []),
+    ("refusal_from_another_engine_no_longer_applies", 200, ["src_primary01"]),
     ("source_cooling_down", 409, []),
     ("source_not_on_route", 409, []),
     # Admission reads the snapshot the call is made on, after the engine is prepared.
@@ -116,26 +124,16 @@ async def test_a_pinned_request_is_served_only_by_its_source_or_handed_back(
         outcome, LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=fallback.id), (b"{}",)),
     ])
     service.recovery.window_seconds = 120
-    if case == "source_that_neither_launched_nor_served":
-        # Evidence is not enough: nothing this turn was rendered for that Source.
-        _verify(service, fallback, "gpt-6-astra", "web_search", "call")
-    elif case != "no_call_evidence":
-        engine = "model-hub-engine-previous" if case == "evidence_from_another_engine" else None
-        _verify(service, primary, primary_model, "x_search", "call", engine=engine)
+    if case == "current_refusal":
+        _refuse(service, primary, primary_model, "x_search", "call")
+    elif case == "refusal_from_another_engine_no_longer_applies":
+        _refuse(service, primary, primary_model, "x_search", "call", engine="model-hub-engine-previous")
     if case == "evidence_demoted_while_the_engine_is_prepared":
         prepare = service._prepare_engine_for_demand
 
         async def demoting(*args, **kwargs):
             await prepare(*args, **kwargs)
-            service.capability_evidence.write(
-                EvidenceRecord(
-                    source_id=primary.id, model_id=primary_model, feature=EvidenceFeature.hosted("x_search", "call"),
-                    status="unsupported", basis="observed", observed_at=service.now(), engine=engine_stamp(),
-                    shape=HOSTED_PROBE_SHAPE, source_identity=identity_digest(primary),
-                    detail="400 invalid_request_error",
-                ),
-                live=service.store.config.sources,
-            )
+            _refuse(service, primary, primary_model, "x_search", "call")
 
         service._prepare_engine_for_demand = demoting
     scanning_threads = []
@@ -198,8 +196,6 @@ async def test_a_pin_names_the_exact_hop_it_was_rendered_for(tmp_path, case):
         LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=primary.id), (b"{}",)),
         LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=primary.id), (b"{}",)),
     ])
-    for model_id in ("grok-4.6", "grok-4.7"):
-        _verify(service, primary, model_id, "x_search", "call")
     gateway = ModelHubTurnGateway(service)
     router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
     try:
@@ -257,7 +253,6 @@ async def test_a_continuation_stays_on_the_identity_its_response_was_served_unde
     service = _vibey_service(tmp_path, [primary, fallback], handles=[
         LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=primary.id), (b"{}",)) for _ in statuses
     ])
-    _verify(service, primary, "grok-4.6", "x_search", "call")
     gateway = ModelHubTurnGateway(service)
     router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
     answers = []
@@ -268,7 +263,6 @@ async def test_a_continuation_stays_on_the_identity_its_response_was_served_unde
         if case == "credential_rotated_and_reverified":
             live = service.store.config.sources[0]
             live.credential_ref = "cred_rotated0001"
-            _verify(service, live, "grok-4.6", "x_search", "call")
         # Client tool results after the model's X search: the in-flight response carries its native item.
         continuation = {
             "model": hop["runtime_model"], "stream": False,
@@ -295,14 +289,12 @@ async def test_a_pinned_request_rendered_for_the_launch_identity_is_handed_back_
     service = _vibey_service(tmp_path, [primary, fallback], handles=[
         LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=primary.id), (b"{}",)),
     ])
-    _verify(service, primary, "grok-4.6", "x_search", "call")
     gateway = ModelHubTurnGateway(service)
     router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
     try:
         hop = await router.resolve_hop("menu-alias", process_scope="vibey:rotated", turn_id="turn-rotated")
         live = service.store.config.sources[0]
         live.credential_ref = "cred_rotated0001"
-        _verify(service, live, "grok-4.6", "x_search", "call")
         answer = await _post(hop, _native(hop, history=[SIGNED_REASONING]), pin=primary.id)
     finally:
         await gateway.close()
@@ -322,7 +314,6 @@ async def test_overlapping_first_pinned_requests_bind_one_identity(tmp_path):
     service = _vibey_service(tmp_path, [primary, fallback], handles=[
         LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=primary.id), (b"{}",)) for _ in range(2)
     ])
-    _verify(service, primary, "grok-4.6", "x_search", "call")
     admitted, release = asyncio.Event(), asyncio.Event()
     invoke = service.adapter.invoke
 
@@ -342,7 +333,6 @@ async def test_overlapping_first_pinned_requests_bind_one_identity(tmp_path):
         await asyncio.wait_for(admitted.wait(), timeout=5)
         live = service.store.config.sources[0]
         live.credential_ref = "cred_rotated0001"
-        _verify(service, live, "grok-4.6", "x_search", "call")
         assert await _post(hop, _native(hop), pin=primary.id) == (409, PIN_UNAVAILABLE)
         release.set()
         assert (await asyncio.wait_for(first, timeout=5))[0] == 200
@@ -361,7 +351,6 @@ async def test_the_portable_resend_fails_over_and_the_turn_settles_on_it(tmp_pat
         InvokeHandle(_outcome(RawOutcomeKind.HTTP_ERROR, status=429, code="rate_limit_error")),
         LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=fallback.id), (b"{}",)),
     ])
-    _verify(service, primary, "grok-4.6", "x_search", "call")
     gateway = ModelHubTurnGateway(service)
     router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
     turn_id = "turn-resend"
@@ -397,7 +386,6 @@ async def test_an_ambiguous_pinned_failure_is_no_health_evidence_so_the_resend_m
         InvokeHandle(_outcome(RawOutcomeKind.HTTP_ERROR, status=200, code="unrecognized_fixture")),
         LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=primary.id), (b"{}",)),
     ])
-    _verify(service, primary, "grok-4.6", "x_search", "call")
     gateway = ModelHubTurnGateway(service)
     router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
     try:
@@ -426,9 +414,6 @@ async def test_unpinned_hosted_content_is_refused_before_anything_runs(tmp_path,
         LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=primary.id), (b"{}",)),
     ])
     # Evidence everywhere does not make unpinned content admissible.
-    _verify(service, primary, "grok-4.6", "web_search", "call")
-    _verify(service, primary, "grok-4.6", "web_search", "replay")
-    _verify(service, fallback, "gpt-6-astra", "web_search", "call")
     gateway = ModelHubTurnGateway(service)
     router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
     try:
@@ -453,7 +438,6 @@ async def test_a_handed_back_refusal_does_not_end_the_turn(tmp_path):
         rejection=UpstreamRejection(status=400, code="invalid_request_error", unsupported_tool_type="x_search"),
     )
     service = _vibey_service(tmp_path, [primary], handles=[InvokeHandle(refusal)])
-    _verify(service, primary, "grok-4.6", "x_search", "call")
     gateway = ModelHubTurnGateway(service)
     router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
     turn_id = "turn-withdraw"
@@ -508,7 +492,6 @@ async def test_a_refusal_naming_the_pinned_hosted_content_is_handed_back_and_lea
                                     unsupported_tool_type="x_search"),
     )
     service = _vibey_service(tmp_path, [primary, fallback], handles=[InvokeHandle(refusal)])
-    _verify(service, primary, "grok-4.6", "x_search", "call")
     gateway = ModelHubTurnGateway(service)
     router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
     try:
@@ -521,11 +504,8 @@ async def test_a_refusal_naming_the_pinned_hosted_content_is_handed_back_and_lea
     finally:
         await gateway.close()
     assert [entry[0] for entry in service.adapter.invocations] == [primary.id]
-    learned = service.capability_evidence.view(
-        primary, "grok-4.6", EvidenceFeature.hosted("x_search", "call"),
-        engine=engine_stamp(), shape=HOSTED_PROBE_SHAPE, now=service.now(),
-    )
-    assert (learned.status, learned.record.basis) == ("unsupported", "observed")
+    learned = service.hosted_evidence().refusal(primary, "grok-4.6", EvidenceFeature.hosted("x_search", "call"))
+    assert learned is not None and learned.detail.startswith("400")
 
 
 # Responses and Anthropic histories: (case, protocol, history, pinned, the tools needing replay evidence).
@@ -626,29 +606,19 @@ def test_admission_runs_a_tool_only_where_hop_resolution_would(tmp_path, case, k
     if listed != "listed":
         source.models = [ModelHubModelConfig(id=model_id if listed == "retired" else "gpt-6-other",
                                              provenance="discovered", retired=listed == "retired" or None)]
-    evidence = CapabilityEvidenceStore(tmp_path / "evidence.json")
-    evidence.write(
-        EvidenceRecord(
-            source_id=source.id, model_id=model_id, feature=EvidenceFeature.hosted("web_search", "call"),
-            status="verified", basis="probe", observed_at=NOW, engine=engine_stamp(), shape=HOSTED_PROBE_SHAPE,
-            source_identity=identity_digest(source),
-        ),
-        live=[source],
-    )
+    evidence = HostedEvidence(CapabilityEvidenceStore(tmp_path / "evidence.json"), "engine", "avibe")
     content = hosted_content({"tools": [{"type": "web_search"}]}, "openai_responses", pinned=True)
-    assert admits(
-        content, source=source, model_id=model_id, spec_for=hosted_tool_spec, evidence=evidence,
-        engine=engine_stamp(), shape=HOSTED_PROBE_SHAPE, now=NOW,
-    ) is admitted
+    assert admits(content, source=source, model_id=model_id, spec_for=hosted_tool_spec, evidence=evidence) is admitted
 
 
 def test_declarations_are_recognized_by_every_vendors_type():
     """MH-HOSTED-GATEWAY-003: a declaration counts whichever vendor offers it, never a function."""
 
+    # No chat request declares a hosted image tool any more, so its type is no declaration.
     tools = [{"type": "x_search"}, {"type": "web_search"}, {"type": "image_generation", "partial_images": 2},
              PORTABLE_X_SEARCH, {"type": "web_search_20250305", "name": "web_search"}]
     assert hosted_content({"tools": tools}, "openai_responses", pinned=True).calls == frozenset(
-        {("x_search", "x_search"), ("web_search", "web_search"), ("image_generation", "image_generation")}
+        {("x_search", "x_search"), ("web_search", "web_search")}
     )
     assert hosted_content({"tools": tools}, "anthropic", pinned=True).calls == frozenset(
         {("web_search", "web_search_20250305")}

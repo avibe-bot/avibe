@@ -54,6 +54,7 @@ from storage.db import get_cached_sqlite_engine
 from storage.models import MESSAGE_TURN_ID_SQL, agent_sessions, messages
 from vibe.backend_model_catalog import (
     HostedToolSpec,
+    ImageModelSpec,
     PROTOCOL_REASONING_EFFORT_DEFAULTS,
     builtin_display_name,
     bundled_catalog_wire_efforts_by_model,
@@ -116,7 +117,6 @@ from .events import (
     contains_credential_material,
 )
 from .capability_evidence import (
-    HOSTED_TOOL_ASPECTS,
     CapabilityEvidenceStore,
     EvidenceFeature,
     EvidenceRecord,
@@ -143,33 +143,15 @@ from .hosted_executor import (
     responses_result,
 )
 from .hosted_turn import ExecutorSlot, TurnHostedTools, freeze_turn_tools, hop_hosted_tools
-from .hosted_probe import ESTIMATED_COUNTS as ESTIMATED_PROBE_COUNTS
-from .hosted_probe import ESTIMATED_REPLAY_USAGE as ESTIMATED_REPLAY_PROBE_USAGE
-from .hosted_probe import ESTIMATED_USAGE as ESTIMATED_PROBE_USAGE
-from .hosted_probe import (
-    NATIVE_REPLAY_PROTOCOLS,
-    PROBE_MAX_OUTPUT_TOKENS,
-    PROBE_BUDGET_SECONDS,
-    PROBED_TOOLS,
-    REPLAY_MIN_SECONDS,
-    ProbeImageCheck,
-    carries_native_payload,
-    hidden_result_urls,
-)
-from .hosted_probe import call_outcome as hosted_call_outcome
-from .hosted_probe import probe_request as hosted_probe_request
-from .hosted_probe import replay_outcome as hosted_replay_outcome
-from .hosted_probe import replay_request as hosted_replay_request
-from .hosted_probe import run_probe as run_hosted_probe
 from .hosted_tools import (
-    HOSTED_PROBE_SHAPE,
     ExecutorCandidate,
+    HostedEvidence,
     HostedToolSettingRefused,
+    apply_hosted_tool_put,
+    clear_matcher,
     executor_candidates,
     engine_stamp,
-    hosted_tool_target,
     hosted_tools_status,
-    parse_hosted_tool_setting,
 )
 from .identifiers import (
     OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL,
@@ -242,7 +224,7 @@ from .usage import (
     local_usage_day,
 )
 
-CONTRACT_VERSION = 14
+CONTRACT_VERSION = 15
 
 
 def seeded_source_name(vendor: str) -> str:
@@ -365,8 +347,8 @@ def _described_as_unfit_for_agent_turns(match: Mapping[str, Any]) -> bool:
     )
 
 
-AGENT_CHAIN_CONTRACT_VERSION = 14
-PROBE_RESULT_CONTRACT_VERSION = 14
+AGENT_CHAIN_CONTRACT_VERSION = 15
+PROBE_RESULT_CONTRACT_VERSION = 15
 _SOURCE_DISCOVERY_TIMEOUT_SECONDS = 15
 _SOURCE_PROBE_TIMEOUT_SECONDS = 60
 # Background inventory refresh. The first tick doubles as the startup delay, so
@@ -1275,7 +1257,7 @@ def _runtime_payload(status: EngineStatus, *, enabled: bool) -> dict:
 
     manager = EngineRuntimeManager()
     return {
-        "contract_version": 14,
+        "contract_version": 15,
         "enabled": enabled,
         "host_platform": status.host_platform or manager.host_platform(),
         "manifest": manager.contract_manifest(),
@@ -1428,6 +1410,9 @@ class ModelHubService:
         # Bundled state that never changes while this process runs, resolved once
         # here at startup so that no request path reads a file on the loop.
         self.engine_stamp = engine_stamp()
+        from vibe import __version__ as avibe_release
+
+        self.avibe_release = avibe_release
         bundled_provider_overlay()
         bundled_client_presets_once()
         self.migration_blocked_backends: set[str] = set()
@@ -6087,50 +6072,55 @@ class ModelHubService:
                 await self._refresh_backend_catalog(backend)
             return changed
 
+    def hosted_evidence(self) -> HostedEvidence:
+        """A reader over the evidence that applies the current wire stamp; memory only. Take one per resolution."""
+
+        return HostedEvidence(self.capability_evidence, self.engine_stamp, self.avibe_release)
+
     def hosted_tools_status(self) -> dict:
-        """The Tools tab read: toggles, where each tool can run, and pending re-verifications."""
+        """Models → Tools: each tool's settings, saved and effective, and what real use showed."""
 
         return {
             "hosted_tools": hosted_tools_status(
                 self.store.load(),
-                evidence=self.capability_evidence,
+                evidence=self.hosted_evidence(),
                 spec_for=hosted_tool_spec,
-                engine=self.engine_stamp,
-                now=self.now(),
-                probe_estimate=self._probe_estimate,
+                image_price=self._image_price,
             )
         }
 
-    def _probe_estimate(self, source: ModelHubSourceConfig, model_id: str, tool: str) -> Optional[dict]:
-        """What probing ``tool`` on this Source and model is estimated to cost at most; None when unknown.
+    def _image_price(self, source: ModelHubSourceConfig, spec: ImageModelSpec) -> Optional[dict]:
+        """One image's price for the Tools card: the vendor's list price, else an estimate, else None (never zero).
 
-        Priced by the one pricing owner from each probe's nominal usage: the call
-        probe, plus the replay probe that follows a verified call where the tool's
-        payload can go back verbatim (that request uses no tool, so no tool fee).
+        The estimate values the overlay's ``tokens_per_image`` at the model's output token rate, through the one
+        pricing owner.
         """
 
-        if tool not in PROBED_TOOLS:
+        listed = next((entry.price for entry in spec.prices if entry.size is None and entry.quality is None), None)
+        if listed is None and spec.prices:
+            listed = spec.prices[0].price
+        if listed is not None:
+            return {"usd": round(listed.usd_per_1k / 1000, 6), "basis": "list"}
+        if spec.tokens_per_image is None:
             return None
-        costs = [
-            self.hosted_call_cost(
-                source, model_id, (tool,), usage=ESTIMATED_PROBE_USAGE, counts=ESTIMATED_PROBE_COUNTS[tool],
-            )
-        ]
-        if "replay" in HOSTED_TOOL_ASPECTS[tool] and source.protocol in NATIVE_REPLAY_PROTOCOLS:
-            costs.append(self.hosted_call_cost(source, model_id, (), usage=ESTIMATED_REPLAY_PROBE_USAGE, counts={}))
-        if any(cost is None for cost in costs):
+        cost = self.hosted_call_cost(
+            replace(source, billing="metered"),
+            spec.id,
+            (),
+            usage=ProtocolUsageReport.of(input_tokens=0, cached_input_tokens=0, output_tokens=spec.tokens_per_image),
+            counts={},
+        )
+        if cost is None or cost.usd is None:
             return None
-        if any(cost.usd is None for cost in costs):
-            return {"basis": "included"}
-        return {"basis": "list", "usd": round(sum(cost.usd for cost in costs), 6)}
+        return {"usd": cost.usd, "basis": "estimated"}
 
     async def set_hosted_tool(self, tool: str, payload: object) -> dict:
-        """Replace one hosted tool's toggle and chosen executor; it applies from the next turn."""
+        """Change one hosted tool's settings, field by field; it applies from the next turn."""
 
         async with self._mutation_lock:
             previous = self.store.load()
             try:
-                setting = parse_hosted_tool_setting(previous, tool, payload, spec_for=hosted_tool_spec)
+                setting = apply_hosted_tool_put(previous, tool, payload)
             except HostedToolSettingRefused as refused:
                 raise ModelHubError(refused.code, status=refused.status) from None
             if previous.hosted_tools.get(tool) != setting:
@@ -6138,6 +6128,103 @@ class ModelHubService:
                 config.hosted_tools[tool] = setting
                 await self._commit_synced(previous, config)
         return await asyncio.to_thread(self.hosted_tools_status)
+
+    async def clear_hosted_refusals(self, tool: str, payload: object) -> dict:
+        """Clear a tool's refusals on one Source (and model), or on every Source; it applies from the next request.
+
+        Persisted before it takes effect: a failed write changes nothing, so what the user is shown holds after a
+        restart.
+        """
+
+        from config.v2_config import MODEL_HUB_HOSTED_TOOLS
+
+        if tool not in MODEL_HUB_HOSTED_TOOLS:
+            raise ModelHubError("hosted_tool_not_found", status=404)
+        if not isinstance(payload, dict) or set(payload) - {"source_id", "model_id"}:
+            raise ModelHubError("invalid_parameter", status=400)
+        source_id = payload.get("source_id")
+        model_id = payload.get("model_id")
+        if (
+            (source_id is not None and (not isinstance(source_id, str) or not source_id))
+            or (model_id is not None and (not isinstance(model_id, str) or not model_id or source_id is None))
+        ):
+            raise ModelHubError("invalid_parameter", status=400)
+        await self._clear_evidence(clear_matcher(tool, source_id, model_id))
+        return await asyncio.to_thread(self.hosted_tools_status)
+
+    async def clear_source_evidence(self, source_id: str, payload: object) -> dict:
+        """Clear one effort refusal of a Source's model (capability model §5); answers the Source."""
+
+        config = self.store.load()
+        source = next((item for item in config.sources if item.id == source_id), None)
+        if source is None:
+            raise ModelHubError("source_not_found", status=404)
+        if not isinstance(payload, dict) or set(payload) != {"model_id", "feature"}:
+            raise ModelHubError("invalid_parameter", status=400)
+        model_id = payload["model_id"]
+        try:
+            feature = EvidenceFeature.from_payload(payload["feature"])
+        except (TypeError, ValueError):
+            raise ModelHubError("invalid_parameter", status=400) from None
+        if not isinstance(model_id, str) or not model_id or feature.kind != "effort":
+            raise ModelHubError("invalid_parameter", status=400)
+        await self._clear_evidence(
+            lambda record: (record.source_id, record.model_id, record.feature) == (source_id, model_id, feature)
+        )
+        return {"source": self._source_payload(source, config)}
+
+    async def _clear_evidence(self, matches: Callable[[EvidenceRecord], bool]) -> None:
+        live = self.store.load().sources
+        try:
+            await asyncio.to_thread(self.capability_evidence.clear, matches, live=live)
+        except OSError:
+            logger.warning("Model Hub could not persist an evidence clear; nothing changed", exc_info=True)
+            raise ModelHubError("state_write_failed", status=500) from None
+
+    async def record_hosted_refusals(
+        self, source: ModelHubSourceConfig, refusals: Iterable[tuple[str, EvidenceFeature, str]],
+    ) -> None:
+        """Record refusals no upstream narrow rule writes (an executor model, an image endpoint); memory first.
+
+        Each is ``(model_id, feature, detail)`` under the current wire stamp. One call writes the batch, so sibling
+        image models of one endpoint land together. A failed file write is logged; memory keeps them.
+        """
+
+        evidence = self.hosted_evidence()
+        records = [
+            EvidenceRecord(
+                source_id=source.id,
+                model_id=model_id,
+                feature=feature,
+                status="unsupported",
+                observed_at=self.now(),
+                wire=evidence.wire_for(source, model_id),
+                source_identity=identity_digest(source),
+                detail=detail[:64],
+            )
+            for model_id, feature, detail in refusals
+        ]
+        if records:
+            await asyncio.to_thread(self.capability_evidence.write_refusals, records, live=self.store.load().sources)
+
+    async def record_hosted_success(
+        self, source: ModelHubSourceConfig, model_id: str, tool: str, mode: str,
+    ) -> None:
+        """Record a real success of a hosted tool (display only): the latest projection at once, the file hourly."""
+
+        record = EvidenceRecord(
+            source_id=source.id,
+            model_id=model_id,
+            feature=EvidenceFeature.hosted(tool, "call"),
+            status="verified",
+            observed_at=self.now(),
+            wire=self.hosted_evidence().wire_for(source, model_id),
+            source_identity=identity_digest(source),
+            mode=mode,  # type: ignore[arg-type]
+        )
+        await asyncio.to_thread(
+            self.capability_evidence.note_success, record, live=self.store.load().sources, now=record.observed_at,
+        )
 
     def _effort_refused(self, source: ModelHubSourceConfig, model_id: str, request: Any) -> bool:
         """Whether this hop has negative evidence for the effort the request sends.
@@ -6161,10 +6248,7 @@ class ModelHubService:
         feature = EvidenceFeature.effort_or_none(token)
         if feature is None:
             return False
-        view = self.capability_evidence.view(
-            source, model_id, feature, engine=self.engine_stamp, shape=HOSTED_PROBE_SHAPE, now=now,
-        )
-        return view.status == "unsupported"
+        return self.hosted_evidence().unsupported(source, model_id, feature)
 
     def _effort_menu(
         self, backend: BackendName, model: ModelHubBackendModelConfig, resolution: ModelHubTurnResolution, now: datetime
@@ -6234,25 +6318,24 @@ class ModelHubService:
         if learned is None:
             return None
         try:
+            # Routing state: memory takes it before the re-render that follows, even if the file write fails.
             await asyncio.to_thread(
-                self.capability_evidence.write,
+                self.capability_evidence.write_refusal,
                 EvidenceRecord(
                     source_id=source.id,
                     model_id=model_id,
                     feature=learned.feature,
                     status="unsupported",
-                    basis="observed",
                     observed_at=self.now(),
-                    engine=self.engine_stamp,
-                    shape=HOSTED_PROBE_SHAPE,
+                    wire=self.hosted_evidence().wire_for(source, model_id),
                     source_identity=identity_digest(source),
                     detail=learned.detail,
                 ),
                 live=self.store.load().sources,
             )
-        except (OSError, ValueError):
-            # Evidence is advisory state: losing one record leaves the priors.
-            logger.warning("Model Hub could not record capability evidence", exc_info=True)
+        except ValueError:
+            # The Source changed identity while the request ran: the refusal describes nothing that exists now.
+            logger.info("Model Hub dropped capability evidence for a Source that changed identity")
         return learned
 
     def _admits_hosted(self, content: HostedContent, source: ModelHubSourceConfig, model_id: str) -> bool:
@@ -6263,10 +6346,7 @@ class ModelHubService:
             source=source,
             model_id=model_id,
             spec_for=hosted_tool_spec,
-            evidence=self.capability_evidence,
-            engine=self.engine_stamp,
-            shape=HOSTED_PROBE_SHAPE,
-            now=self.now(),
+            evidence=self.hosted_evidence(),
         )
 
     def hosted_call_cost(
@@ -7674,28 +7754,20 @@ class ModelHubService:
     def _refused_efforts(self, source: ModelHubSourceConfig, model_id: str, now: datetime) -> list[dict]:
         """The efforts this hop currently refuses, as routing reads the evidence."""
 
-        refused = []
-        for record in self.capability_evidence.for_hop(source.id, model_id):
-            if record.feature.kind != "effort":
-                continue
-            view = self.capability_evidence.view(
-                source, model_id, record.feature, engine=self.engine_stamp, shape=HOSTED_PROBE_SHAPE, now=now,
-            )
-            if view.status == "unsupported":
-                refused.append(view)
+        evidence = self.hosted_evidence()
+        refused = [
+            record
+            for record in self.capability_evidence.for_hop(source.id, model_id)
+            if record.feature.kind == "effort" and evidence.refusal(source, model_id, record.feature) is record
+        ]
         return [
             {
-                "effort": view.record.feature.name,
-                "basis": view.record.basis,
-                "observed_at": view.record.payload()["observed_at"],
-                "detail": view.record.detail,
-                "changes_at": (
-                    view.changes_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-                    if view.changes_at is not None
-                    else None
-                ),
+                "effort": record.feature.name,
+                "basis": "observed",
+                "observed_at": record.payload()["observed_at"],
+                "detail": record.detail,
             }
-            for view in sorted(refused, key=lambda item: (item.record.observed_at, item.record.feature.name))
+            for record in sorted(refused, key=lambda item: (item.observed_at, item.feature.name))
         ]
 
     def agent_chain(self, backend: str, model_id: object) -> dict:
@@ -7835,261 +7907,6 @@ class ModelHubService:
             "latency_ms": elapsed_ms,
             "error": None if succeeded else self._test_call_failure(outcome),
         }
-
-    async def probe_hosted_tool(self, tool: str, payload: object) -> dict:
-        """Run the call probe of one hosted tool on one (Source, model), and record what it shows.
-
-        A user action starts every probe; nothing calls this on its own. Every
-        request it sends is its own call pinned to the probed Source, with no
-        route and no failover. Only ``verified``
-        and ``unsupported`` are evidence; an inconclusive or transient probe
-        leaves the current record as it is (``vibey-hosted-tools.md`` §3.2).
-        """
-
-        if (
-            tool not in PROBED_TOOLS
-            or not isinstance(payload, dict)
-            or set(payload) != {"source_id", "model_id"}
-            or not isinstance(payload["source_id"], str)
-            or not payload["source_id"]
-        ):
-            raise ModelHubError("invalid_parameter", status=400)
-        # The model as routing and evidence know it: the probe sends and records exactly that identity.
-        source_id, model_id = payload["source_id"], canonical_model_id(payload["model_id"])
-        if model_id is None:
-            raise ModelHubError("invalid_parameter", status=400)
-
-        def target(config: ModelHubConfig) -> tuple[ModelHubSourceConfig, HostedToolSpec]:
-            try:
-                return hosted_tool_target(config, tool, source_id, model_id, spec_for=hosted_tool_spec)
-            except HostedToolSettingRefused as refused:
-                raise ModelHubError(refused.code, status=refused.status) from None
-
-        # Reading the config parses the whole file, so that alone runs off the controller loop. Everything after
-        # reads the snapshot in memory, and recovery state stays on the loop that owns it.
-        config = await asyncio.to_thread(self.store.load)
-        source, spec = target(config)
-        request = hosted_probe_request(
-            source, model_id, tool, spec, max_tokens=self._probe_output_budget(config, source.id, model_id),
-        )
-
-        def selected(config: ModelHubConfig) -> ModelHubSourceConfig:
-            current, current_spec = target(config)
-            # The probe was built for this protocol and declaration; it is never sent as anything else.
-            if current.protocol != source.protocol or current_spec.declaration != spec.declaration:
-                raise ModelHubError("mapping_target_unavailable", status=409)
-            return current
-
-        # The whole probe answers inside the UI's RPC wait. Each call gets as long as a turn's executor gives the
-        # tool, but never more than the probe has left.
-        deadline = time.monotonic() + PROBE_BUDGET_SECONDS
-
-        def remaining() -> float:
-            return deadline - time.monotonic()
-
-        def pinned(select: Callable[[ModelHubConfig], ModelHubSourceConfig]):
-            async def call(body: dict, read: Callable[[InvokeHandle], Awaitable[None]]):
-                return await self._user_test_call(
-                    source_id,
-                    model_id,
-                    select,
-                    lambda source: ModelHubRequest(body, protocol=source.protocol),
-                    stream=True,
-                    origin="vibey",
-                    consume=read,
-                    timeout=max(1.0, min(call_timeout(tool), remaining())),
-                )
-
-            return call
-
-        pinned_call = pinned(selected)
-
-        media_sink = ProbeImageCheck() if tool == "image_generation" else None
-        terminal, calls = await run_hosted_probe(request, pinned_call, media_sink=media_sink)
-        if not calls:
-            logger.warning("Model Hub's %s probe sent no request", tool)
-            raise ModelHubError("invalid_parameter", status=400)
-        call_last = calls[-1]
-        replays_natively = "replay" in HOSTED_TOOL_ASPECTS[tool] and source.protocol in NATIVE_REPLAY_PROTOCOLS
-
-        # Each step reads what the provider sent, which can be megabytes of results and payload, off the controller
-        # loop.
-        def judge_call() -> tuple[Optional[LearnedEvidence], str, frozenset[str]]:
-            learned = self._probe_rejection(call_last, model_id)
-            verdict = hosted_call_outcome(tool, terminal, call_last.outcome, learned)
-            # Only a result the visible answer does not show proves a replayed payload was read; with none, the
-            # replay stays unknown and turns replay synthetically, which is lossless.
-            verified = verdict == "verified" and isinstance(terminal, Done)
-            return learned, verdict, hidden_result_urls(terminal.message) if verified and replays_natively else frozenset()
-
-        call_learned, call_verdict, asked = await asyncio.to_thread(judge_call)
-        recorded_for = await self._record_probe_evidence(
-            EvidenceFeature.hosted(tool, "call"), call_verdict, call_last, call_learned, model_id,
-        )
-        replay: Optional[dict] = None
-        # The replay probe follows a call probe that verified and was recorded for the Source as it is, on a tool
-        # whose payload can go back verbatim, when the call returned a result the replay can ask about.
-        replayable = recorded_for is not None and bool(asked)
-        if replayable and remaining() < REPLAY_MIN_SECONDS:
-            # Too little of the probe's time is left for a replay that could finish: try again.
-            replay = {"outcome": "transient", "error": None}
-        elif replayable:
-            assert isinstance(terminal, Done)
-
-            def replay_selected(config: ModelHubConfig) -> ModelHubSourceConfig:
-                current = selected(config)
-                # The replay carries the call's provider-native payload, so it goes only to the Source identity that
-                # produced it and was recorded for it: never through a credential or endpoint that replaced it.
-                if identity_digest(current) != recorded_for:
-                    raise ModelHubError("mapping_target_unavailable", status=409)
-                return current
-
-            try:
-                replay_terminal, replay_calls = await run_hosted_probe(
-                    hosted_replay_request(request, tool, terminal.message), pinned(replay_selected),
-                )
-            except ModelHubError as refused:
-                # The call's result stands; the replay did not run. A Source that changed has no replay to report,
-                # and anything else (the engine went away) is worth trying again.
-                replay_terminal, replay_calls = None, []
-                if refused.code != "mapping_target_unavailable":
-                    replay = {"outcome": "transient", "error": None}
-            if replay_calls:
-                replay_last = replay_calls[-1]
-
-                def judge_replay() -> tuple[Optional[LearnedEvidence], str]:
-                    learned = self._probe_rejection(replay_last, model_id)
-                    carried = carries_native_payload(replay_last.body, terminal.message)
-                    return learned, hosted_replay_outcome(
-                        tool, replay_terminal, replay_last.outcome, learned, asked=asked, carried=carried,
-                    )
-
-                replay_learned, replay_verdict = await asyncio.to_thread(judge_replay)
-                await self._record_probe_evidence(
-                    EvidenceFeature.hosted(tool, "replay"),
-                    replay_verdict,
-                    replay_last,
-                    replay_learned,
-                    model_id,
-                    identity=recorded_for,
-                )
-                replay = self._probe_aspect(replay_verdict, replay_terminal, replay_last)
-        return {
-            "probe": {
-                "tool": tool,
-                "source_id": call_last.source.id,
-                "model_id": model_id,
-                "call": self._probe_aspect(call_verdict, terminal, call_last),
-                "replay": replay,
-            },
-            **await asyncio.to_thread(self.hosted_tools_status),
-        }
-
-    def _probe_rejection(self, call: Any, model_id: str) -> LearnedEvidence | None:
-        """The one feature a probe request's refusal names, through the narrow rules real requests learn from.
-
-        Only the request the response ended on speaks for the tool: a resend that completes outranks a refusal of
-        the request it replaced.
-        """
-
-        if call.outcome.rejection is None:
-            return None
-        return learn_from_rejection(
-            call.body,
-            call.outcome.rejection,
-            request_protocol=call.source.protocol,
-            source=call.source,
-            model_id=model_id,
-            spec_for=hosted_tool_spec,
-        )
-
-    def _probe_aspect(self, verdict: str, terminal: Any, last: Any) -> dict:
-        """One probe aspect's result, with why a request that never completed failed, as the Source test shows it."""
-
-        return {
-            "outcome": verdict,
-            "error": (
-                self._test_call_failure(last.outcome)
-                if verdict != "unsupported" and not isinstance(terminal, Done)
-                else None
-            ),
-        }
-
-    async def _record_probe_evidence(
-        self,
-        feature: EvidenceFeature,
-        verdict: str,
-        last: Any,
-        learned: LearnedEvidence | None,
-        model_id: str,
-        *,
-        identity: str | None = None,
-    ) -> str | None:
-        """Record what a probe showed for the Source as it reads now; the identity recorded for, or None.
-
-        Only ``verified`` and ``unsupported`` are evidence. A Source whose identity
-        changed during the probe (a new credential, endpoint or protocol) is one the
-        probe vouches for nothing on; verifying the credential it ran on is no such
-        change. ``identity``, when given, is the one the probe's earlier aspect was
-        recorded for: both records then describe the same Source.
-        """
-
-        current = await asyncio.to_thread(self.store.load)
-        live = next((item for item in current.sources if item.id == last.source.id), None)
-        if live is None or identity_digest(live) != identity_digest(last.source):
-            return None
-        digest = identity_digest(live)
-        if identity is not None and digest != identity:
-            return None
-        if verdict in ("verified", "unsupported"):
-            try:
-                await asyncio.to_thread(
-                    self.capability_evidence.write,
-                    EvidenceRecord(
-                        source_id=live.id,
-                        model_id=model_id,
-                        feature=feature,
-                        status=verdict,
-                        basis="probe",
-                        observed_at=self.now(),
-                        engine=self.engine_stamp,
-                        shape=HOSTED_PROBE_SHAPE,
-                        source_identity=digest,
-                        detail=learned.detail if verdict == "unsupported" and learned is not None else None,
-                    ),
-                    live=current.sources,
-                )
-            except (OSError, ValueError):
-                # Evidence is advisory state: the status read the probe returns shows what was kept.
-                logger.warning("Model Hub could not record the %s probe result", feature.name, exc_info=True)
-                return None
-        return digest
-
-    def _probe_output_budget(self, config: ModelHubConfig, source_id: str, model_id: str) -> int:
-        """The smallest output any Vibey turn on this hop would ask for, at most the probe's own ceiling.
-
-        A Vibey turn asks for its menu model's ``output_budget``, so a probe on a
-        hop several menu models route to takes the smallest of theirs, and one
-        no menu model routes to takes the budget of a model nothing describes.
-        """
-
-        from modules.agents.vibey.context import output_budget
-
-        now = self.now()
-        unavailable = self._unavailable_native_sources(config, "vibey")
-        # ``config`` is the current snapshot, so recovery reads it directly rather than loading another.
-        live_recovery = self.recovery.annotations(config)
-        budgets = [
-            output_budget(ModelCapabilities(context_window=model.context_window, max_output_tokens=model.max_output_tokens))
-            for model in config.agents["vibey"].models
-            if any(
-                hop.source_id == source_id and hop.model_id == model_id
-                for hop in resolve_model_hub_turn(
-                    config, "vibey", model.id, now=now, unavailable_source_ids=unavailable, live_recovery=live_recovery,
-                ).inspected_hops
-            )
-        ]
-        return min([PROBE_MAX_OUTPUT_TOKENS, *(budgets or [output_budget(ModelCapabilities())])])
 
     def _test_call_failure(self, outcome: RawCallOutcome) -> str:
         """A failed user test call's detail key, for display only: it blocks nothing and changes no route state."""

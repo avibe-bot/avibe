@@ -49,6 +49,7 @@
   },
   "providers": {
     "anthropic": {
+      "executor_model": "claude-haiku-5-5",
       "models": [
         {
           "match": {"prefix": "claude-"},
@@ -65,6 +66,7 @@
       ]
     },
     "openai": {
+      "executor_model": "gpt-6-luna",
       "models": [
         {
           "match": {"prefix": "gpt-"},
@@ -75,9 +77,6 @@
                 "declaration": {"type": "web_search"},
                 "include": ["web_search_call.action.sources"],
                 "price": {"unit": "call", "usd_per_1k": 10, "as_of": "2026-10-13", "url": "https://developers.openai.com/api/docs/pricing"}
-              },
-              "image_generation": {
-                "declaration": {"type": "image_generation", "partial_images": 2, "output_format": "jpeg", "output_compression": 90}
               }
             }
           }
@@ -85,6 +84,7 @@
       ]
     },
     "xai": {
+      "executor_model": "grok-4.20-0309-non-reasoning",
       "models": [
         {
           "match": {"prefix": "grok-4"},

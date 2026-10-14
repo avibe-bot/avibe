@@ -21,8 +21,6 @@ import aiohttp
 import pytest
 from aiohttp import web
 
-from core.handlers.model_hub.capability_evidence import EvidenceFeature, EvidenceRecord, identity_digest
-from core.handlers.model_hub.hosted_tools import HOSTED_PROBE_SHAPE, engine_stamp
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 from modules.agents.model_hub import ModelHubRuntimeRouter
 from tests.test_model_hub_l3 import _canonicalize_fixed_test_routes, _service, _source
@@ -140,17 +138,7 @@ async def test_every_caller_reaches_the_engine_with_exactly_its_declared_tools(
         _wire(service, tmp_path, root, {configured.id: {"plan_type": "plus"}} if subscription else {})
         pin = {}
         if backend == "vibey" and declared:
-            source = service.store.config.sources[0]
-            service.capability_evidence.write(
-                EvidenceRecord(
-                    source_id=source.id, model_id="gpt-6-astra",
-                    feature=EvidenceFeature.hosted("image_generation", "call"), status="verified", basis="probe",
-                    observed_at=service.now(), engine=engine_stamp(), shape=HOSTED_PROBE_SHAPE,
-                    source_identity=identity_digest(source),
-                ),
-                live=service.store.config.sources,
-            )
-            pin = {"x-avibe-pin-source": source.id}
+            pin = {"x-avibe-pin-source": service.store.config.sources[0].id}
         gateway = ModelHubTurnGateway(service)
         try:
             if backend == "vibey":

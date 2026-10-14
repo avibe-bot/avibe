@@ -527,6 +527,7 @@ _MEMBER_HTTP_RULES = tuple(
         ("DELETE", r"^/api/models/sources/[^/]+$"),
         ("PUT", r"^/api/models/sources/[^/]+/credential$"),
         ("POST", r"^/api/models/sources/[^/]+/(?:reauth|refresh|probe)$"),
+        ("POST", r"^/api/models/sources/[^/]+/evidence/clear$"),
         ("POST", r"^/api/models/sources/[^/]+/models$"),
         # Model IDs are path parameters and may contain vendor/model slashes.
         ("PATCH", r"^/api/models/sources/[^/]+/models/.+$"),
@@ -551,7 +552,7 @@ _MEMBER_HTTP_RULES = tuple(
         ("POST", r"^/api/models/quota/refresh$"),
         ("GET", r"^/api/models/hosted-tools$"),
         ("PUT", r"^/api/models/hosted-tools/[^/]+$"),
-        ("POST", r"^/api/models/hosted-tools/[^/]+/probe$"),
+        ("POST", r"^/api/models/hosted-tools/[^/]+/clear$"),
         ("POST", r"^/api/models/oauth/(?:start|submit|cancel)$"),
         ("GET", r"^/api/models/oauth/status/[^/]+$"),
         ("POST", r"^/api/models/migration/(?:scan|apply)$"),

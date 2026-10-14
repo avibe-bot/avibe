@@ -8,7 +8,6 @@ capability:
     - tests/test_model_hub_hosted_pinning.py
     - tests/test_model_hub_hosted_tools_resolution.py
     - tests/test_model_hub_hosted_tools_config.py
-    - tests/test_model_hub_hosted_probe.py
     - tests/test_model_hub_capability_evidence.py
     - tests/test_provider_overlay.py
     - tests/test_hosted_activity.py
@@ -167,47 +166,56 @@ scenarios:
     layer: contract
     test: tests/test_model_hub_vibey_consumer.py::test_released_config_adds_only_empty_vibey_supply
   - id: MH-HOSTED-001
-    name: Vibey hop resolution states each enabled hosted tool; native only on current-wire call evidence, an executor bound for every entry
+    name: A Vibey hop's hosted tools come from the overlay's priors and current refusals, with no probe; proxied search runs on an executor chain and image_generate names its model from a deterministic enum
     status: covered
     kind: contract
     layer: contract
     test: tests/test_model_hub_vibey_consumer.py::test_hop_resolution_states_each_enabled_hosted_tool
     related_tests:
       - tests/test_model_hub_vibey_consumer.py::test_both_hop_resolution_copies_state_the_same_contract
-      - tests/test_model_hub_hosted_tools_resolution.py::test_verified_call_makes_the_hop_native_and_binds_the_first_verified_executor
-      - tests/test_model_hub_hosted_tools_resolution.py::test_evidence_from_another_engine_routes_as_proxy
-      - tests/test_model_hub_hosted_tools_resolution.py::test_ineligible_or_translated_hops_never_go_native_or_execute
+      - tests/test_model_hub_hosted_tools_resolution.py::test_a_hops_facts_come_from_priors_and_refusals
+      - tests/test_model_hub_hosted_tools_resolution.py::test_the_executor_chain_follows_the_users_order_then_vibeys
+      - tests/test_model_hub_hosted_tools_resolution.py::test_the_image_enum_is_deterministic_with_the_default_first
+      - tests/test_model_hub_hosted_tools_resolution.py::test_resolution_states_v2_facts_in_todays_hop_shape
   - id: MH-HOSTED-002
-    name: A broken hosted-tools config entry turns off only its tool, without the whole-section Model Hub reset
+    name: Absent hosted-tools config means every tool is on; an rc-era section keeps each tool's enabled, and a broken entry takes only its own defaults without the whole-section Model Hub reset
     status: covered
     kind: compatibility
     layer: contract
-    test: tests/test_model_hub_hosted_tools_config.py::test_a_broken_hosted_tool_entry_turns_off_only_itself
+    test: tests/test_model_hub_hosted_tools_config.py::test_a_broken_hosted_tool_entry_takes_only_its_own_defaults
     related_tests:
       - tests/test_model_hub_hosted_tools_config.py::test_disk_load_with_a_broken_hosted_tools_section_keeps_model_hub
-      - tests/test_model_hub_hosted_tools_config.py::test_released_configs_load_with_every_tool_off_and_stay_without_the_section
+      - tests/test_model_hub_hosted_tools_config.py::test_released_configs_load_with_every_tool_on_and_stay_without_the_section
+      - tests/test_model_hub_hosted_tools_config.py::test_hosted_tool_settings_round_trip_in_canonical_order
   - id: MH-HOSTED-003
-    name: Capability evidence resolves for routing; hosted-tool evidence from another engine or probe shape is unknown
+    name: A refusal is routing state with no time limit that applies only under its Source identity and wire stamp; a success is display history that never replaces it; a clear is persisted before it takes effect
     status: covered
     kind: contract
     layer: contract
-    test: tests/test_model_hub_capability_evidence.py::test_evidence_resolves_for_routing
+    test: tests/test_model_hub_capability_evidence.py::test_a_refusal_holds_until_the_wire_or_the_source_changes
     related_tests:
-      - tests/test_model_hub_capability_evidence.py::test_a_changed_source_identity_reads_as_unknown_and_is_pruned
-      - tests/test_model_hub_capability_evidence.py::test_hosted_evidence_is_stamped_with_the_engines_hosted_wire
+      - tests/test_model_hub_capability_evidence.py::test_a_success_never_replaces_a_refusal_and_never_routes
+      - tests/test_model_hub_capability_evidence.py::test_successes_update_the_latest_at_once_and_the_file_at_most_hourly
+      - tests/test_model_hub_capability_evidence.py::test_a_refusal_holds_in_memory_when_its_write_fails
+      - tests/test_model_hub_capability_evidence.py::test_a_clear_is_persisted_before_it_takes_effect
+      - tests/test_model_hub_capability_evidence.py::test_a_changed_source_identity_is_pruned_at_the_next_write
       - tests/test_model_hub_capability_evidence.py::test_a_released_sources_identity_digest_is_unchanged
+      - tests/test_model_hub_capability_evidence.py::test_persisted_records_match_the_schema_and_rc_era_ones_are_pruned
       - tests/test_model_hub_unverified.py::test_a_verified_reauthentication_never_returns_the_source_to_its_earlier_identity
-      - tests/test_model_hub_capability_evidence.py::test_persisted_records_match_the_schema_and_unreadable_ones_are_unknown
+      - tests/test_model_hub_hosted_tools_config.py::test_a_clear_removes_only_the_refusals_it_names
+      - tests/test_model_hub_hosted_tools_config.py::test_a_clear_that_cannot_be_saved_changes_nothing
   - id: MH-HOSTED-004
-    name: The Tools API reads every tool's candidates and evidence and writes one toggle without touching other Model Hub state
+    name: The Tools API reads each tool's saved and effective settings and what real use showed, and writes one field of one tool without touching other Model Hub state
     status: covered
     kind: contract
     layer: contract
-    test: tests/test_model_hub_hosted_tools_config.py::test_the_tools_api_reads_and_writes_one_tool_at_a_time
+    test: tests/test_model_hub_hosted_tools_config.py::test_the_tools_api_writes_one_field_of_one_tool_at_a_time
     related_tests:
-      - tests/test_model_hub_hosted_tools_resolution.py::test_status_lists_where_each_tool_can_run_and_counts_re_verifications
+      - tests/test_model_hub_hosted_tools_resolution.py::test_the_tools_read_states_saved_and_effective_values_and_what_real_use_showed
+      - tests/test_model_hub_hosted_tools_resolution.py::test_a_put_changes_only_the_fields_it_names
+      - tests/test_model_hub_hosted_tools_resolution.py::test_a_put_refuses_what_the_contract_forbids
   - id: MH-HOSTED-005
-    name: The bundled provider overlay resolves hosted-tool declarations, includes and prices; a broken vendor entry disables only that vendor
+    name: The bundled provider overlay resolves search-tool declarations, includes and prices, each vendor's executor model and its image models; a broken vendor entry disables only that vendor
     status: covered
     kind: compatibility
     layer: contract
@@ -215,6 +223,8 @@ scenarios:
     related_tests:
       - tests/test_provider_overlay.py::test_bundled_providers_section_satisfies_its_schema
       - tests/test_provider_overlay.py::test_an_invalid_vendor_entry_disables_only_that_vendor
+      - tests/test_provider_overlay.py::test_an_image_model_entry_is_read_in_a_stable_form
+      - tests/test_provider_overlay.py::test_each_vendors_executor_model_runs_every_search_tool_the_vendor_offers
   - id: MH-HOSTED-UI-008
     name: The execution-process group draws a native and a proxied hosted call as one card, with how it ran, its known cost and its sources or image
     status: covered
@@ -322,32 +332,6 @@ scenarios:
       - tests/test_model_hub_reasoning_tiers.py::test_the_hop_declares_exactly_its_models_levels
       - tests/test_model_hub_reasoning_tiers.py::test_rows_saved_by_3_2_0_are_derived_again_once_at_startup
       - tests/test_model_hub_evidence_rules.py::test_the_picker_menu_states_which_efforts_routing_refuses_in_menu_values
-  - id: MH-HOSTED-007
-    name: A user-started probe sends Vibey's native request pinned to the probed Source, follows a verified call with the replay probe, and records only a result, a refusal naming the tool or its replayed content, or a new call
-    status: covered
-    kind: contract
-    layer: contract
-    test: tests/test_model_hub_hosted_probe.py::test_a_call_probe_sends_the_production_request_and_records_only_what_it_shows
-    related_tests:
-      - tests/test_model_hub_hosted_probe.py::test_a_probe_runs_only_on_a_target_the_tool_can_run_on
-      - tests/test_model_hub_hosted_probe.py::test_each_candidate_states_what_probing_it_would_cost
-      - tests/test_model_hub_hosted_probe.py::test_each_request_the_adapter_sends_is_its_own_pinned_call
-      - tests/test_model_hub_hosted_probe.py::test_a_probe_that_verifies_its_source_records_evidence_for_the_source_as_it_now_is
-      - tests/test_model_hub_hosted_probe.py::test_a_probe_records_no_evidence_for_a_source_reauthenticated_mid_probe
-      - tests/test_model_hub_hosted_probe.py::test_the_probe_reads_its_calls_in_the_order_the_adapter_sent_them
-      - tests/test_model_hub_hosted_probe.py::test_the_probe_asks_for_no_more_output_than_a_turn_on_its_hop_would
-      - tests/test_model_hub_hosted_probe.py::test_an_api_key_source_is_probed_on_a_passthrough_model_it_does_not_list
-      - tests/test_model_hub_hosted_probe.py::test_a_probe_that_times_out_before_its_handle_is_still_metered
-      - tests/test_model_hub_hosted_probe.py::test_a_deadline_mid_stream_ends_the_probe_as_transient
-      - tests/test_model_hub_hosted_probe.py::test_a_probe_settles_when_the_adapter_is_done_even_if_the_body_stays_open
-      - tests/test_model_hub_hosted_probe.py::test_an_image_probe_verifies_only_an_image_vibey_could_keep
-      - tests/test_model_hub_hosted_probe.py::test_a_verified_call_is_followed_by_the_replay_probe
-      - tests/test_model_hub_hosted_probe.py::test_a_replay_sends_the_results_only_in_their_native_payload
-      - tests/test_model_hub_hosted_probe.py::test_a_replay_goes_only_to_the_source_identity_the_call_was_recorded_for
-      - tests/test_model_hub_hosted_probe.py::test_a_re_probe_restores_replay_a_narrow_rule_demoted
-      - tests/test_model_hub_hosted_probe.py::test_a_replay_answer_counts_only_when_it_completed_and_names_a_hidden_result
-      - tests/test_model_hub_hosted_probe.py::test_a_replay_answer_names_a_result_by_its_exact_url
-      - tests/test_model_hub_hosted_probe.py::test_a_result_the_answer_shows_in_any_reading_is_not_hidden
   - id: MH-HOSTED-VIBEY-002
     name: Every native hosted item becomes one hosted call with a provider-neutral action and its record; citations stay on the text that cites them; the response's counters and reported cost go to its summary
     status: covered
@@ -2475,7 +2459,6 @@ scenarios:
     test: tests/test_model_hub_hosted_executor.py::test_a_proxied_search_runs_one_native_request_and_answers_its_canonical_record
     related_tests:
       - tests/test_model_hub_hosted_executor.py::test_an_anthropic_executor_is_buffered_and_keeps_the_providers_results_and_cited_text
-      - tests/test_model_hub_hosted_executor.py::test_a_proxied_image_returns_its_bytes_once_for_vibey_to_save
       - tests/test_model_hub_hosted_executor.py::test_an_excerpt_is_the_answer_text_its_citation_belongs_to
       - tests/test_model_hub_hosted_executor.py::test_a_proxied_call_carries_the_pricing_modules_cost
   - id: MH-HOSTED-GATEWAY-005
