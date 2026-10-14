@@ -562,8 +562,7 @@ display names, no protocol chatter.
   are rewritten by the engine (S3): the implementation verifies each real `openai_responses`
   Source still serves such requests and files the engine follow-up. Tools are the exception:
   with `disable-image-generation: passthrough` the engine forwards exactly the declared tools,
-  and only Codex CLI requests get the hosted image tool, from the gateway
-  (`vibey-hosted-tools.md` §7.1). A Hub-held Claude
+  and nothing adds the hosted image tool (`vibey-hosted-tools.md` §7.1). A Hub-held Claude
   subscription (OAuth credential) keeps the engine's cloaking: the vendor accepts those tokens
   only from the Claude Code identity the cloak reproduces, so rows served by a subscription
   get the reasoning-preserving path of S4, not the body-identical guarantee. The engine has one

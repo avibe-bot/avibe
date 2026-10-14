@@ -1,17 +1,17 @@
-"""MH-HOSTED-GATEWAY-001: with the engine in passthrough, only Codex CLI gets the hosted image tool.
+"""MH-HOSTED-GATEWAY-001: the engine forwards declared tools unchanged, for every caller.
 
 The engine used to add ``{"type": "image_generation", "output_format": "png"}``
-to every request its Codex executor served, for any caller. It now forwards
-declared tools unchanged, and the gateway adds the tool back for Codex CLI
-alone, under the engine's own skip conditions. Each case drives the real
-gateway and engine adapter against a loopback engine and compares the exact
-body bytes it receives with what the engine itself would have produced
-(CLIProxyAPI ``ensureImageGenerationTool`` at d318bcc3).
+to every request its Codex executor served, for any caller (CLIProxyAPI
+``ensureImageGenerationTool`` at d318bcc3). It runs with
+``disable-image-generation: passthrough``, and nothing adds the tool back:
+Codex CLI from 0.144.0 drops a hosted ``image_generation_call`` instead of
+reporting it, so an added tool only billed images nobody saw. Each case
+drives the real gateway and engine adapter against a loopback engine and
+checks the tools it receives.
 """
 
 from __future__ import annotations
 
-import base64
 import json
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -31,11 +31,9 @@ from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
 from vibe.model_hub_runtime.client import EngineClient, EngineConnection
 from vibe.model_hub_runtime.state import EngineStateStore
 
-IMAGE_TOOL = {"type": "image_generation", "output_format": "png"}
 SHELL = {"type": "function", "name": "shell", "parameters": {"type": "object", "properties": {}}}
 DECLARED_IMAGE = {"type": "image_generation", "quality": "high"}
 INPUT = [{"role": "user", "content": [{"type": "input_text", "text": "画一只猫 café"}]}]
-LITE = "ws_request_header_x_openai_internal_codex_responses_lite"
 COMPLETED = {
     "/v1/responses": (
         b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"ok"}\n\n'
@@ -52,13 +50,6 @@ COMPLETED = {
         b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
     ),
 }
-
-
-def _id_token(claims: dict) -> str:
-    def part(value: dict) -> str:
-        return base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip("=")
-
-    return f"{part({'alg': 'none'})}.{part(claims)}.signature"
 
 
 @asynccontextmanager
@@ -117,96 +108,23 @@ def _subscription(source):
     return replace(source, kind="subscription", billing="monthly")
 
 
-# (case, request fields after model/stream/input, hop model, ChatGPT grant or None for an API key,
-#  the tools the engine must receive; ABSENT when the request has no tools key and gets none)
-ABSENT = object()
-CODEX_CASES = [
-    ("no_tools", {}, "gpt-fixture", None, [IMAGE_TOOL]),
-    ("tools_null", {"tools": None}, "gpt-fixture", None, [IMAGE_TOOL]),
-    ("tools_object", {"tools": {"type": "function"}}, "gpt-fixture", None, [IMAGE_TOOL]),
-    ("other_tools", {"tools": [SHELL]}, "gpt-fixture", None, [SHELL, IMAGE_TOOL]),
-    ("image_tool_present", {"tools": [DECLARED_IMAGE, SHELL]}, "gpt-fixture", None, [DECLARED_IMAGE, SHELL]),
-    (
-        "image_gen_function",
-        {"tools": [SHELL, {"type": "function", "name": "image_gen.imagegen"}]},
-        "gpt-fixture", None,
-        [SHELL, {"type": "function", "name": "image_gen.imagegen"}],
-    ),
-    (
-        "image_gen_namespace",
-        {"tools": [{"type": "namespace", "name": "image_gen", "tools": [{"type": "function", "name": "imagegen"}]}]},
-        "gpt-fixture", None,
-        [{"type": "namespace", "name": "image_gen", "tools": [{"type": "function", "name": "imagegen"}]}],
-    ),
-    (
-        "namespace_without_imagegen",
-        {"tools": [{"type": "namespace", "name": "image_gen", "tools": [{"type": "function", "name": "edit"}]}]},
-        "gpt-fixture", None,
-        [{"type": "namespace", "name": "image_gen", "tools": [{"type": "function", "name": "edit"}]}, IMAGE_TOOL],
-    ),
-    ("spark", {"tools": [SHELL]}, "gpt-fixture-codex-spark", None, [SHELL]),
-    ("spark_with_thinking_suffix", {}, "gpt-fixture-spark(high)", None, ABSENT),
-    ("plan_free", {}, "gpt-fixture", {"plan_type": " Free "}, ABSENT),
-    ("plan_plus", {}, "gpt-fixture", {"plan_type": "plus"}, [IMAGE_TOOL]),
-    ("token_plan_free", {}, "gpt-fixture", {"id_token": _id_token({"https://api.openai.com/auth": {}})}, ABSENT),
-    (
-        "token_plan_pro",
-        {}, "gpt-fixture",
-        {"id_token": _id_token({"https://api.openai.com/auth": {"chatgpt_plan_type": "pro"}})},
-        [IMAGE_TOOL],
-    ),
-    ("token_unreadable", {}, "gpt-fixture", {"id_token": "not-a-jwt"}, ABSENT),
-    ("grant_without_plan", {}, "gpt-fixture", {}, [IMAGE_TOOL]),
-    ("lite_true", {"client_metadata": {LITE: True}}, "gpt-fixture", None, ABSENT),
-    ("lite_string", {"client_metadata": {LITE: " TRUE "}}, "gpt-fixture", None, ABSENT),
-    ("lite_false", {"client_metadata": {LITE: "false"}}, "gpt-fixture", None, [IMAGE_TOOL]),
-]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(("fields", "model", "grant", "tools"), [case[1:] for case in CODEX_CASES],
-                         ids=[case[0] for case in CODEX_CASES])
-async def test_codex_requests_reach_the_engine_with_the_engines_own_image_tool(
-    tmp_path, fields, model, grant, tools,
-):
-    """MH-HOSTED-GATEWAY-001: one row per CPA condition; the engine receives exactly CPA's bytes."""
-    configured = _source("src_codex001", "Codex", model_id=model)
-    if grant is not None:
-        configured = _subscription(configured)
-    service = _service(tmp_path, sources=[configured])
-    models = _canonicalize_fixed_test_routes(service)
-    received: list[bytes] = []
-    async with _engine(received) as root:
-        state = _wire(service, tmp_path, root, {configured.id: grant} if grant is not None else {})
-        gateway = ModelHubTurnGateway(service)
-        try:
-            base_url, token = await gateway.endpoint(
-                "codex", process_scope="/repo", turn_id="turn_image_tool",
-                requested_model_id=models["codex"], resolved_model_id=model, source_id=configured.id,
-            )
-            await _post(f"{base_url}/v1/responses", token, {"model": model, "stream": True, "input": INPUT, **fields})
-        finally:
-            await gateway.close()
-    routed = f"{state.get_source(configured.id).prefix}/{model}"
-    expected = {"model": routed, "stream": True, "input": INPUT, **fields}
-    if tools is not ABSENT:
-        expected["tools"] = tools
-    # The engine appends a missing key at the end of the object and replaces an existing one in place.
-    assert received == [json.dumps(expected).encode()]
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("declared", [False, True], ids=["undeclared", "declared"])
-@pytest.mark.parametrize(("backend", "path"), [
-    ("claude", "messages"), ("opencode", "responses"), ("vibey", "responses"),
-])
-async def test_other_callers_reach_the_engine_with_exactly_their_declared_tools(tmp_path, backend, path, declared):
-    """MH-HOSTED-GATEWAY-001: Claude, OpenCode and Vibey get no image tool they did not declare.
+@pytest.mark.parametrize(("backend", "path", "subscription"), [
+    ("codex", "responses", False), ("codex", "responses", True), ("claude", "messages", False),
+    ("opencode", "responses", False), ("vibey", "responses", False),
+], ids=["codex_api_key", "codex_subscription", "claude", "opencode", "vibey"])
+async def test_every_caller_reaches_the_engine_with_exactly_its_declared_tools(
+    tmp_path, backend, path, subscription, declared,
+):
+    """MH-HOSTED-GATEWAY-001: no caller, Codex CLI included, gets an image tool it did not declare.
 
     A Vibey request that declares it is a native declaration, so it is pinned to
     a hop verified for the tool (MH-HOSTED-GATEWAY-002).
     """
     configured = _source("src_shared001", "Responses key", model_id="gpt-6-astra" if backend == "vibey" else "shared-model")
+    if subscription:
+        configured = _subscription(configured)
     tools = [SHELL, DECLARED_IMAGE] if declared else [SHELL]
     if backend == "claude":
         tools = [{"name": "shell", "input_schema": {"type": "object"}}, *([DECLARED_IMAGE] if declared else [])]
@@ -218,7 +136,8 @@ async def test_other_callers_reach_the_engine_with_exactly_their_declared_tools(
             service = _service(tmp_path, sources=[configured])
             _canonicalize_fixed_test_routes(service)
             service.store.requested_models["opencode"] = "shared-model"
-        _wire(service, tmp_path, root, {})
+        # A ChatGPT subscription's grant on a paid plan: where the engine's skip conditions never applied.
+        _wire(service, tmp_path, root, {configured.id: {"plan_type": "plus"}} if subscription else {})
         pin = {}
         if backend == "vibey" and declared:
             source = service.store.config.sources[0]
