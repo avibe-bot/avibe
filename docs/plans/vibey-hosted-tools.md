@@ -689,9 +689,10 @@ Each has a **Re-verify** action with its cost. Unknown shows nothing.
    the same for either mode. One function renders a record to model-facing text, for proxied results and for
    synthetic replay alike. A failed record never renders as a successful empty result.
 5. Any transcript with hosted calls replays to any supported target without a history-shape error.
-6. `pause_turn` never ends a turn. Continuations are bounded, pinned to the paused response's Source, merged into
-   one message, and their usage is summed. Past the bound, the turn ends with one `interrupted` error that keeps
-   the partial.
+6. `pause_turn` never ends a turn while its Source can continue it. Continuations are bounded, pinned to the
+   paused response's Source, and merged into one message that carries the final request's usage and summed hosted
+   counters (§4.3 as implemented). Past the bound, or when that Source cannot continue it, the turn ends with one
+   `interrupted` error that keeps the partial.
 7. A generated image never enters model context or history as bytes. The model gets the text path record, and the
    user sees the image.
 8. A Codex CLI request reaches the upstream with exactly the image tool CPA would have injected. No other caller
@@ -710,7 +711,7 @@ shapes. No live upstream and no real credentials.
 | --- | --- | --- |
 | Adapter parsing | each adapter against stub SSE | the mapping rule, one case per row of §4.2's table, including `queries[]` versus the deprecated `query`, every xAI X-search variant, and an unknown item becoming `other`; `hosted_summary` with one and with several X searches (reported cost once, no per-call copies); Anthropic citations; pending `server_tool_use` at `pause_turn`; a hosted call that fails |
 | Cross-provider transform | `ai` request builders | each hosted block to each target, verified same Source versus other: native verbatim, synthetic call/result, split assistant message; citations never sent |
-| `pause_turn` | Anthropic adapter, stub returns `pause_turn`, then `end_turn` | one logical response; the bound; the merged message with summed usage; the pin header; `pin_unavailable` falls back to the in-place text form (as implemented: ends `interrupted`, §4.3) |
+| `pause_turn` | Anthropic adapter, stub returns `pause_turn`, then `end_turn` | one logical response; the bound; the merged message with the final request's usage and summed hosted counters; the pin header; `pin_unavailable` on a continuation ends `interrupted` with the partial (§4.3 as implemented) |
 | Gateway selection and pinning | real gateway + loopback fake engine | native only with evidence and an eligible credential; a pinned request is never failed over; an inadmissible pinned Source and a pre-output failure both answer `pin_unavailable`; Vibey's portable re-render is then served by failover; `x_search` to OpenAI never sent |
 | Evidence | classifier against recorded error bodies | `400 Unsupported tool type`, `invalid_value` effort and `Invalid encrypted_content` each create exactly one record; overload and 5xx create none |
 | Proxy executor | gateway endpoint, stub provider | executor choice; no effort sent; the record with excerpts; metering on the executor Source; error when no executor is verified; refusal of a Claude subscription |
