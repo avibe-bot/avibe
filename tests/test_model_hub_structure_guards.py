@@ -1278,12 +1278,14 @@ def test_machine_error_extractor_reads_only_declared_envelope_paths() -> None:
 
 
 def test_reasoning_tier_resolver_call_inventory_requires_batch_indexes() -> None:
+    # owner -> (needs the batch index, call sites)
     expected = {
-        ("service.py", "apply_tiers"): True,
-        ("service.py", "_create_oauth_source"): True,
-        ("service.py", "create_source"): True,
-        ("service.py", "_apply_reasoning_tier_ladder"): False,
-        ("migration.py", "_validated_source"): True,
+        ("service.py", "apply_tiers"): (True, 1),
+        ("service.py", "_create_oauth_source"): (True, 1),
+        ("service.py", "create_source"): (True, 1),
+        ("service.py", "_apply_reasoning_tier_ladder"): (False, 1),
+        # A fixed subscription catalog and an API key's saved manual models.
+        ("migration.py", "_validated_source"): (True, 2),
     }
     calls_by_owner: dict[tuple[str, str | None], list[ast.Call]] = {}
     for path in (SERVICE, MIGRATION):
@@ -1296,22 +1298,23 @@ def test_reasoning_tier_resolver_call_inventory_requires_batch_indexes() -> None
             calls_by_owner.setdefault(key, []).append(node)
 
     assert set(calls_by_owner) == set(expected)
-    assert all(len(calls) == 1 for calls in calls_by_owner.values())
-    for key, needs_batch_index in expected.items():
-        [call] = calls_by_owner[key]
-        injected = next(
-            (
-                keyword.value
-                for keyword in call.keywords
-                if keyword.arg == "catalog_efforts_by_model"
-            ),
-            None,
-        )
-        if needs_batch_index:
-            assert isinstance(injected, ast.Name)
-            assert injected.id == "catalog_efforts_by_model"
-        else:
-            assert injected is None
+    for key, (needs_batch_index, call_sites) in expected.items():
+        calls = calls_by_owner[key]
+        assert len(calls) == call_sites
+        for call in calls:
+            injected = next(
+                (
+                    keyword.value
+                    for keyword in call.keywords
+                    if keyword.arg == "catalog_efforts_by_model"
+                ),
+                None,
+            )
+            if needs_batch_index:
+                assert isinstance(injected, ast.Name)
+                assert injected.id == "catalog_efforts_by_model"
+            else:
+                assert injected is None
 
 
 def test_settlement_abandonment_cannot_overwrite_a_committed_terminal_fact() -> None:

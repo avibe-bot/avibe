@@ -79,6 +79,7 @@ class MigrationAdapter:
             "zhipuai": "openai_chat",
         }
         self.unproven_observation_vendor: str | None = None
+        self.fail_provision_vendor: str | None = None
         self.synced: list[tuple[object, ...]] = []
         self.fail_revoke_refs: set[str] = set()
         self.fail_sync_count = 0
@@ -159,6 +160,8 @@ class MigrationAdapter:
         base_url: str | None,
         *, on_reserved=None, auth_scheme=None,
     ) -> str:
+        if vendor == self.fail_provision_vendor:
+            raise OSError("redacted custody failure")
         credential_ref = f"cred_migration_{len(self.provisioned) + 1}"
         if on_reserved:
             on_reserved(credential_ref)
@@ -694,8 +697,8 @@ def test_mh_mig_001_api_apply_takes_over_credentials_and_cleans_native_auth(
     assert len(adapter.provisioned) == 4
     assert len(adapter.oauth_provisioned) == 2
     assert adapter.revoked == []
-    assert adapter.transient_revoked == adapter.transient_refs
-    assert len(adapter.observed) == len(adapter.transient_refs)
+    # Saved keys move as configuration; none is probed on the way.
+    assert adapter.transient_refs == [] and adapter.observed == []
     assert before != _tree_digest(native_home)
     claude_settings = json.loads(
         (native_home / ".claude" / "settings.json").read_text(encoding="utf-8")
@@ -746,7 +749,8 @@ def test_mh_mig_001_api_apply_takes_over_credentials_and_cleans_native_auth(
     codex_source = next(
         source for source in store.config.sources if source.vendor == "openai" and source.kind == "api_key"
     )
-    assert codex_source.protocol == "openai_responses"
+    # The relay's saved wire_api, not a re-detected dialect.
+    assert codex_source.protocol == "openai_chat"
     assert codex_source.base_url == "https://codex-relay.example/v1"
     openrouter_source = next(source for source in store.config.sources if source.vendor == "openrouter")
     assert openrouter_source.base_url == "https://openrouter.ai/api/v1"
@@ -1008,9 +1012,8 @@ def test_mh_mig_007_shell_startup_key_is_removed_only_on_request(
     assert bool(service.migration_journal.completed()["retained_native_ids"]) is not clean_api_keys
 
 
-@pytest.mark.parametrize("discovery", (ObservationDiscovery.SUCCEEDED, ObservationDiscovery.FAILED))
-def test_mh_mig_001_long_manual_inventory_survives_takeover_even_when_discovery_fails(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, discovery: ObservationDiscovery,
+def test_mh_mig_001_long_manual_inventory_survives_takeover_without_discovery(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     """MH-MIG-001: new manual imports share admission without rewriting native files."""
     native_home = tmp_path / "native-home"
@@ -1030,15 +1033,6 @@ def test_mh_mig_001_long_manual_inventory_survives_takeover_even_when_discovery_
     before = _tree_digest(native_home)
     service, store, adapter = _service(tmp_path)
     _assert_sources_validated_before_commit(monkeypatch, service)
-
-    async def observe(*_args):
-        return SourceObservation(
-            outcome=ObservationOutcome.OBSERVED, reachable=True, authenticated=True,
-            protocol="openai_chat", discovery=discovery,
-            models=(DiscoveredModel(id=identity + "-discovered"),) if discovery is ObservationDiscovery.SUCCEEDED else (),
-        )
-
-    adapter.observe_source = observe
     [item] = service.migration_scan()["items"]
     result = asyncio.run(service.migration_apply([item["id"]], clean_api_keys=True))
     assert result["applied"] == 1
@@ -1047,9 +1041,8 @@ def test_mh_mig_001_long_manual_inventory_survives_takeover_even_when_discovery_
     assert [(model.id, model.display_name) for model in manual] == [(identity, "Long manual")]
     assert all(model.id not in invalid for model in source.models)
     assert source.state.status == "standby"
-    # Failed discovery admits the Source on protocol evidence alone; the first
-    # successful call must still prove it.
-    assert bool(source.verification_pending) is (discovery is ObservationDiscovery.FAILED)
+    # Saved, not tested: the first successful call proves it.
+    assert source.verification_pending
     assert _tree_digest(native_home) != before
     config_payload = json.loads(
         (native_home / ".config" / "opencode" / "opencode.json").read_text(
@@ -1059,7 +1052,7 @@ def test_mh_mig_001_long_manual_inventory_survives_takeover_even_when_discovery_
     provider = config_payload["provider"]["openrouter"]
     assert "apiKey" not in provider.get("options", {})
     assert provider["models"]["  " + identity + "  "] == {"name": "Long manual"}
-    assert adapter.transient_revoked == adapter.transient_refs
+    assert adapter.observed == []
     assert "sk-fabricated-never-persist-this" not in json.dumps(result)
 
 
@@ -1486,13 +1479,13 @@ def test_failed_batch_revokes_every_provisioned_credential(
     _isolate_native_home(monkeypatch, native_home)
     service, store, adapter = _service(tmp_path)
     item_ids = [item["id"] for item in service.migration_scan()["items"]]
-    adapter.unproven_observation_vendor = "zhipuai"
+    adapter.fail_provision_vendor = "zhipuai"
 
     with pytest.raises(ModelHubError) as error:
         asyncio.run(service.migration_apply(item_ids, clean_api_keys=True))
-    assert error.value.code == "migration_item_conflict"
+    # A local custody failure, never a claim about the key upstream.
+    assert error.value.code == "engine_down"
     assert adapter.revoked == ["cred_migration_1"]
-    assert adapter.transient_revoked == adapter.transient_refs
     assert store.config.sources == []
     assert all(agent.sources.order == [] for agent in store.config.agents.values())
 

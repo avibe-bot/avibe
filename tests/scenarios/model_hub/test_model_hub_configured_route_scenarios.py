@@ -812,16 +812,7 @@ def test_mh_ac29_001_persisted_source_payload_round_trips_through_the_canonical_
 
     menu_model = fixed_model("claude")
     store = MemoryModelHubStore(config_with_sources([]))
-    adapter = ModelHubScenarioAdapter(
-        observation=SourceObservation(
-            outcome=ObservationOutcome.OBSERVED,
-            reachable=True,
-            authenticated=True,
-            protocol="anthropic",
-            discovery=ObservationDiscovery.SUCCEEDED,
-            models=(DiscoveredModel(id=menu_model),),
-        )
-    )
+    adapter = ModelHubScenarioAdapter()
     service = service_for(tmp_path, store, adapter)
     service.migration_home = native_home
 
@@ -850,9 +841,8 @@ def test_mh_ac29_001_persisted_source_payload_round_trips_through_the_canonical_
     assert menu_model not in reloaded.agents["claude"].routes
     inherited = service_for(tmp_path, MemoryModelHubStore(reloaded), adapter).agent_chain("claude", menu_model)
     assert inherited["manual_override"] is None
-    assert inherited["route_origin"] == "automatic"
-    assert {(hop["source_id"], hop["model_id"]) for hop in inherited["chain"]} == {
-        (position["source_id"], position["model_id"])
-        for position in result["added_to"]
-        if position["backend"] == "claude" and position["menu_model"] == menu_model
-    }
+    # Migration fetches no inventory, so the saved key serves the menu model
+    # by passthrough until discovery or a real call says otherwise.
+    [migrated] = reloaded.sources
+    assert inherited["route_origin"] == "passthrough"
+    assert [(hop["source_id"], hop["model_id"]) for hop in inherited["chain"]] == [(migrated.id, menu_model)]
