@@ -123,8 +123,10 @@ The evidence store, its record and its owner are the capability model's §3. v2 
     `output[*].name` and `output[*].status`; Anthropic `content_block_start.content_block.type`, `.name` and
     `.content.type`. Buffered responses take the same paths through `observe_buffered_protocol_response`.
   - **Bounded writes, off the response path.** Each write rewrites the evidence file, so a positive record is written
-    at settlement, off the loop, after the response completes, and only when the state changes (no record, or a
-    negative one) or the existing positive record is older than one hour, never on every response. It is keyed on
+    at settlement, off the loop, after the response completes, and only when there is no record or the existing
+    positive record is older than one hour, never on every response. **A positive write never replaces a negative
+    record:** a success that settles after a concurrent refusal must not re-enable native routing, so only a clear
+    or a stamp change removes a refusal. It is keyed on
     the serving Source's identity from the final admission snapshot.
   - `resolve()` reads a record by its `status`, no longer by its `basis`: today it reads every `observed` record as
     a refusal.
@@ -199,8 +201,8 @@ The evidence store, its record and its owner are the capability model's §3. v2 
   toggle echoed the resolved executor and so froze "automatic" into a saved choice.
   - `GET /api/models/hosted-tools` → `{hosted_tools: HostedToolsStatus}` (§10.3). Per tool:
     - `enabled`;
-    - `status: {latest_ok, refused[]}` (§8.1): `latest_ok` is `{source_id, model_id, mode: "native" | "executor",
-      at}` or null, the latest positive record; `refused[]` is `[{source_id, model_id, at, reason}]`, the current
+    - `status: {latest_ok, refused[]}` (§8.1): `latest_ok` is `{source_id, model_id, mode: "native" | "executor" |
+      "direct", at}` or null (`direct` for an image call), the latest positive record; `refused[]` is `[{source_id, model_id, at, reason}]`, the current
       negative records;
     - search tools: `executor_order` (saved, null when automatic), `effective_order` (as the gateway would try now),
       and `executor_candidates: [{source_id, price}]` in effective order, every eligible executor Source (a Claude
@@ -213,7 +215,9 @@ The evidence store, its record and its owner are the capability model's §3. v2 
     read.
   - `POST /api/models/hosted-tools/<tool>/clear` with `{source_id}` clears that Source's negative records for the tool
     (`call` and `replay`, every model); with `{}` it clears them for every Source of the tool. It answers the same
-    read, writes nothing else, and the next turn's hop facts assume the tool again on those Sources.
+    read, writes nothing else, and from the next request (hop facts are resolved per request, §3.4) the tool is
+    assumed again on those Sources. A request in a running turn may therefore try it again; if it still refuses, the
+    re-resolve bounds of §3.5 apply.
     - An unknown tool is 404, as for the PUT. A `source_id` that names no Source, or a Source with no records, is a
       no-op that answers the read, so a double click, two tabs or a Source removed meanwhile all succeed. Any other
       body is 400.
@@ -346,8 +350,8 @@ never dropped.
   `image_generate` call.
   - `execution` (`executor_origin`, `executor_source_id`, `executor_billing`, `cost?`) is present exactly when an
     executor or image endpoint ran. Its `mode` is `proxy` for a search executor and `direct` for an image endpoint.
-    `cost` covers every billable attempt the call made (§6), and `executor_source_id` names the Source whose
-    response the record came from.
+    `executor_source_id`, `executor_billing` and `cost` are the attempt whose response the record came from;
+    `failed_attempts[]` lists the earlier billable attempts with their own billing and cost (§6).
   - `action` is what the executor reports it did, beside the record, as today: for `image_generate`, the `generate`
     action with the `model` used, the prompt it rendered, and the resolved size.
   - `is_error` is true exactly when the record is `failed` or `incomplete`.
@@ -456,9 +460,10 @@ These rules are C-1 rows in `cross-provider.md` and per-protocol rows in `conver
   5. With no candidate, or every candidate failed, the call returns a `failed` record naming what to add ("add an
      xAI Source to use X search").
   - **One deadline for the whole chain**, the tool's call timeout (180 s for search), not one per candidate.
-  - Each candidate tried is metered on its own Source. The result's `execution.cost` is the sum over every billable
-    attempt of the call, failed ones and the all-failed case included, and `executor_source_id` names the Source
-    whose response the record came from (the last one tried when all failed).
+  - Each candidate tried is metered on its own Source. The result's `execution` names the Source whose response the
+    record came from (the last one tried when all failed), with that attempt's `executor_billing` and `cost`; earlier
+    billable attempts are listed in `execution.failed_attempts: [{source_id, billing, cost?}]`, each with its own
+    billing and cost basis, so a metered failure before a subscription success keeps both. The card shows the total.
   - The executor request is a short model request because no vendor exposes search without a model: Anthropic,
     OpenAI's public API, xAI and Google all run search inside a model call.
 - **The result is the canonical record** (v1's rules, unchanged): a `HostedRecord` with `sources[]` in the
@@ -500,7 +505,8 @@ E2E stay.
     enum is a pure function of configuration and changes only on a config event, and the turn freezes it (§3.4).
   - **Common parameters only.** `prompt`, `size` (a size or an aspect ratio, mapped per endpoint), `images`
     (reference images for an edit) and `n`. The overlay's `params` say which of `size`, `images` and `n` each model
-    takes. A call that passes one the chosen model does not take returns a `failed` record naming the argument and
+    takes, and `size_forms` which forms of `size` it accepts (`pixels`, `ratio`, or both); the gateway maps the given
+    form to the endpoint's parameter. A `size` in a form the model does not accept is an unsupported argument. A call that passes one the chosen model does not take returns a `failed` record naming the argument and
     the models that take it, before anything runs: silently dropping `images` would turn an edit into an unrelated
     generation. Vibey's tool runtime refuses it before the call, from the turn's frozen `params`, so a bad call costs
     nothing; the gateway validates again as the execution boundary.
@@ -595,7 +601,7 @@ Unchanged from v1 §7.3 (owner decision, 2026-10-13 19:14), with the producer no
     `latest_ok` is on another Source; "<Source> 不支持" alone otherwise;
   - **clearing a refusal:** each Source's line has a "清除" action for that (Source, tool), and a card where two or
     more Sources refused also has "全部清除" for the tool (the `clear` endpoint, §3.3). A cleared Source is tried
-    natively again from the next turn; if it still refuses, the line comes back after that call. Refusals do not
+    natively again from its next request; if it still refuses, the line comes back after that call. Refusals do not
     expire on their own (§3.2);
   - nothing before first use. No "unknown", "unverified" or "unchecked" wording anywhere.
 - **Search cards** show an optional **Advanced** section with the executor order over `executor_candidates`: up/down
@@ -658,8 +664,8 @@ under the freeze protocol (`model-hub-contracts/README.md`).
   `image_generation` block, with its `generate` action and `images[]`, on load only (§4.2).
 - `ToolResultMessage.hosted` keeps `{record, execution?, action?}`. `record.images[]` and `action: generate` occur
   only for `image_generate`; `generate` gains the `model` used, with `prompt` required for a `completed` record.
-- `ProxyExecution` becomes the result's `execution` with `mode: "proxy" | "direct"` (direct for an image endpoint);
-  its `cost` covers every billable attempt of the call. `core/hosted_activity` maps `direct` beside `proxy` for the
+- `ProxyExecution` becomes the result's `execution` with `mode: "proxy" | "direct"` (direct for an image endpoint)
+  and `failed_attempts[]` (`{source_id, billing, cost?}`) for the earlier billable attempts of a search chain. `core/hosted_activity` maps `direct` beside `proxy` for the
   tool card and the IM line.
 - `HOSTED_ERROR_CODES` gains `image_param_unsupported` and `image_model_unavailable` (§7.2), with UI copy for each.
 - The conversion rows drop native image replay; an `image_generate` call is an ordinary tool call everywhere.
