@@ -8613,6 +8613,8 @@ def test_failed_same_handle_hub_reauth_requires_user_action(
     assert exc_info.value.code == ("discovery_failed" if failure == "discovery" else "engine_down")
     persisted = store.config.sources[0]
     assert persisted.credential_ref == "cred_hub_reused"
+    # The material behind the reused ref may be the new grant's, so the Source leaves the earlier grant's identity.
+    assert persisted.credential_generation is not None and persisted.verification_pending == persisted.credential_generation
     assert persisted.models == []
     assert persisted.state.status == "needs_action"
     assert persisted.state.detail_key == "models.source.needs_action.oauth_expired"

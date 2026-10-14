@@ -2592,6 +2592,8 @@ class ModelHubService:
         previous = self.store.load()
         config = self._clone_config(previous)
         source = self._source(config, source_id)
+        # The material behind the ref may be the new grant's: the Source no longer has the earlier one's identity.
+        self._mark_source_unverified(source)
         source.models = [
             model
             for model in source.models

@@ -2346,6 +2346,12 @@ class ModelHubSourceConfig:
     # when OAuth reauthentication keeps the credential's handle. Absent until the first such change.
     credential_generation: Optional[str] = None
 
+    def __post_init__(self) -> None:
+        if self.credential_generation is None and self.verification_pending:
+            # A release before the generation left a pending Source with only its marker, which named the change that
+            # minted it: that marker is the change's generation, so the identity stays what it was.
+            self.credential_generation = self.verification_pending
+
     @classmethod
     def from_payload(cls, payload: dict, *, repairing: bool = False) -> "ModelHubSourceConfig":
         if not isinstance(payload, dict):

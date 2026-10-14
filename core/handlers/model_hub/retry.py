@@ -34,8 +34,9 @@ def source_identity(source: ModelHubSourceConfig) -> tuple:
 
     Every credential or endpoint change mints a new ``credential_generation``, which verification keeps, so the
     identity changes once per change and never reverts: not when the change is verified, and not when OAuth
-    reauthentication keeps the credential's handle. A verified Source no change has touched since the field existed
-    has no generation, where its identity held a ``None`` marker, so its digest is unchanged.
+    reauthentication keeps the credential's handle. Released Sources keep their digests: a verified one has no
+    generation where its identity held a ``None`` marker, and a pending one's marker becomes its generation
+    (``ModelHubSourceConfig``).
     """
 
     return (

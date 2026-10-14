@@ -1251,7 +1251,7 @@ export const SettingsModelsPage: React.FC = () => {
   const selectedSourceIdentity = selectedSource
     ? JSON.stringify([
         selectedSource.id, selectedSource.kind, selectedSource.vendor, selectedSource.protocol, selectedSource.supply_channel,
-        selectedSource.base_url ?? null, selectedSource.credential_ref ?? null, selectedSource.verification_pending ?? null,
+        selectedSource.base_url ?? null, selectedSource.credential_ref ?? null, selectedSource.credential_generation ?? null,
       ])
     : null;
   const hostedTools = useHostedTools(tab === 'tools' || selectedSource !== null, selectedSourceIdentity);
