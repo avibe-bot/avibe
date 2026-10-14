@@ -214,6 +214,21 @@ export type BackendModel = {
   routeable: boolean;
 };
 
+/**
+ * What routing would do with each of a model's efforts right now, in menu
+ * vocabulary (`model-hub-capability-model.md` §3.4). Response-only, on the model
+ * picker's catalog read: `omitted` efforts would end in `effort_unsupported` on
+ * every hop the route would try or wait for; `not_on` names, by Source id, the
+ * hops that refuse an effort the others still serve. Never written back.
+ */
+export type EffortMenu = { omitted: string[]; not_on: Record<string, string[]> };
+
+/** A catalog row as the model picker reads it. */
+export type PickerCatalogModel = BackendModel & { effort_menu?: EffortMenu };
+
+/** The model picker's read of one backend's catalog (`GET /api/models/agents/<backend>/models`). */
+export type PickerAgentCatalog = Pick<AgentSupply, 'backend' | 'mode'> & { catalog_models?: PickerCatalogModel[] | null };
+
 /** `baseline` is the last full list this caller observed; `models` is its
  *  desired replacement. The server applies the difference to the latest saved
  *  list, so a concurrent editor's unrelated row survives.

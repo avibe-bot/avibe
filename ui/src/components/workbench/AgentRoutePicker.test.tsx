@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 
@@ -15,13 +15,22 @@ import { AgentRoutePicker } from './AgentRoutePicker';
 import type { AgentRoutePatch, AgentRouteValue } from './AgentRoutePicker';
 
 vi.mock('react-i18next', () => ({
-  useTranslation: () => ({ t: (key: string) => key }),
+  // The key, plus the Source names a hint interpolates, so a test can read both.
+  useTranslation: () => ({
+    t: (key: string, options?: { sources?: string }) => (options?.sources ? `${key}:${options.sources}` : key),
+  }),
 }));
+
+// What the Sources read answers: names by id, or null when the role may not read them.
+let sourceNames: Record<string, string> | null = null;
+vi.mock('../../lib/useSourceNames', () => ({ useSourceNames: () => sourceNames }));
 
 // One client for every render, as the real context provides: the picker's
 // catalog read keys on it, so a fresh object per render would re-read on its own.
 // The Hub read answers per test; `useAddModelPath` owns what it means.
 let hubMode: 'hub' | 'direct' = 'direct';
+// Whether the next catalog read finds Model Hub unreadable (the native list, marked unread).
+let hubUnread = false;
 const API = {
   readModelHubAgentCatalogForModelPicker: (backend: string) => Promise.resolve({ backend, mode: hubMode }),
 };
@@ -34,6 +43,7 @@ vi.mock('../../context/ApiContext', async (importOriginal) => ({
 // model, so a test can say "this model has no efforts" the same way the server
 // does — and an empty default keeps the backend fallback in play.
 let catalogReasoning: Record<string, { value: string; label: string }[]> = {};
+let catalogMenus: Record<string, { omitted: string[]; not_on: Record<string, string[]> }> = {};
 // How many catalog reads were made, and whether the next ones wait to be answered.
 let catalogReads = 0;
 let deferReads = false;
@@ -50,6 +60,8 @@ vi.mock('../../lib/backendModels', async (importOriginal) => ({
       models: string[];
       modelLabels: Record<string, string>;
       reasoningOptions: Record<string, { value: string; label: string }[]>;
+      effortMenus?: Record<string, { omitted: string[]; not_on: Record<string, string[]> }>;
+      hubUnread?: true;
       catalogRefreshPending: boolean;
     }) => void,
   ) => {
@@ -58,6 +70,8 @@ vi.mock('../../lib/backendModels', async (importOriginal) => ({
       models: ['sonnet', 'opus'],
       modelLabels: {},
       reasoningOptions: catalogReasoning,
+      // As the real loader answers: only a Hub catalog carries effort menus.
+      ...(hubUnread ? { hubUnread: true as const } : hubMode === 'hub' ? { effortMenus: catalogMenus } : {}),
       catalogRefreshPending: false,
     });
     if (deferReads) pendingReads.push(answer);
@@ -65,6 +79,9 @@ vi.mock('../../lib/backendModels', async (importOriginal) => ({
     return () => {};
   },
 }));
+
+/** The open menu's effort column: the trigger also names the current effort. */
+const effortColumn = () => within(screen.getByText('chat.picker.effort').parentElement as HTMLElement);
 
 const agent = (over: Partial<VibeAgentBrief> = {}): VibeAgentBrief =>
   ({
@@ -148,13 +165,14 @@ const HubPicker: React.FC<{
   role: InstanceRole;
   surfaceActive?: boolean;
   onNavigateAway?: () => void;
-}> = ({ role, surfaceActive = true, onNavigateAway }) => (
+  onChange?: (value: AgentRouteValue) => void;
+}> = ({ role, surfaceActive = true, onNavigateAway, onChange = () => {} }) => (
   <InstanceAuthorizationContext.Provider
     value={{ remote: false, instanceKind: null, instanceRole: role, capabilities: capabilitiesFor(role) }}
   >
     <RouteSurfaceActiveContext.Provider value={surfaceActive}>
       <MemoryRouter>
-        <AgentRoutePicker value={CLAUDE_ROUTE} agents={AGENTS} onChange={() => {}} onNavigateAway={onNavigateAway} />
+        <AgentRoutePicker value={CLAUDE_ROUTE} agents={AGENTS} onChange={onChange} onNavigateAway={onNavigateAway} />
         <LocationProbe />
       </MemoryRouter>
     </RouteSurfaceActiveContext.Provider>
@@ -165,7 +183,10 @@ describe('AgentRoutePicker', () => {
   afterEach(() => {
     cleanup();
     catalogReasoning = {};
+    catalogMenus = {};
+    sourceNames = null;
     hubMode = 'direct';
+    hubUnread = false;
     catalogReads = 0;
     deferReads = false;
     pendingReads.length = 0;
@@ -229,6 +250,156 @@ describe('AgentRoutePicker', () => {
     act(() => pendingReads.shift()!());
     expect(screen.getByRole('button', { name: 'opus' })).toBeTruthy();
     expect(screen.getByText('chat.picker.effort')).toBeTruthy();
+  });
+
+  it('MH-EFFORT-MENU-002: names the Sources that refuse an effort, and says some do when it cannot read them', async () => {
+    hubMode = 'hub';
+    catalogReasoning = { sonnet: [{ value: 'low', label: 'low' }, { value: 'high', label: 'high' }] };
+    catalogMenus = { sonnet: { omitted: [], not_on: { high: ['src_relaygpt1'] } } };
+    sourceNames = { src_relaygpt1: 'relay-gpt' };
+    const user = userEvent.setup();
+    render(<HubPicker role="owner" />);
+    await openMenu(user);
+
+    expect(effortColumn().getByRole('button', { name: /chat\.picker\.effortOptions\.high/ }).textContent)
+      .toContain('chat.picker.effortNotOn:relay-gpt');
+    // An effort every hop serves carries no hint.
+    expect(effortColumn().getByRole('button', { name: /chat\.picker\.effortOptions\.low/ }).textContent)
+      .toBe('chat.picker.effortOptions.low');
+    cleanup();
+
+    // A role that may not read Sources still learns that some refuse it.
+    sourceNames = null;
+    render(<HubPicker role="owner" />);
+    await openMenu(user);
+    expect(effortColumn().getByRole('button', { name: /chat\.picker\.effortOptions\.high/ }).textContent)
+      .toContain('chat.picker.effortNotOnSome');
+  });
+
+  it('MH-EFFORT-MENU-003: keeps a saved effort routing now refuses everywhere visible as itself, and says so', async () => {
+    // The route holds `low`; Model Hub now leaves it out because every hop refuses it.
+    hubMode = 'hub';
+    catalogReasoning = { sonnet: [{ value: 'high', label: 'high' }] };
+    catalogMenus = { sonnet: { omitted: ['low'], not_on: {} } };
+    const user = userEvent.setup();
+    render(<HubPicker role="owner" />);
+    await openMenu(user);
+
+    const saved = effortColumn().getByRole('button', { name: /chat\.picker\.effortOptions\.low/ });
+    expect(saved.textContent).toContain('chat.picker.effortRefused');
+    expect(saved.className).toContain('text-cyan-ink');
+    // What routing serves is still offered, without the mark.
+    expect(effortColumn().getByRole('button', { name: /chat\.picker\.effortOptions\.high/ }).textContent)
+      .toBe('chat.picker.effortOptions.high');
+  });
+
+  it('keeps the effort column in its own grid column when the refused saved effort is its only item', async () => {
+    hubMode = 'hub';
+    catalogReasoning = { sonnet: [] };
+    catalogMenus = { sonnet: { omitted: ['low'], not_on: {} } };
+    const user = userEvent.setup();
+    render(<HubPicker role="owner" />);
+    await openMenu(user);
+
+    const column = screen.getByText('chat.picker.effort').parentElement as HTMLElement;
+    expect((column.parentElement as HTMLElement).className).toContain('sm:grid-cols-[1fr_1.35fr_0.7fr]');
+  });
+
+  it('reads a refusal only from the effort\'s own entry, never one an effort name inherits', async () => {
+    // Efforts are free-form: one named like an Object property has no entry of its own.
+    hubMode = 'hub';
+    catalogReasoning = { sonnet: [{ value: 'constructor', label: 'constructor' }, { value: 'high', label: 'high' }] };
+    catalogMenus = { sonnet: { omitted: [], not_on: { high: ['src_relaygpt1'] } } };
+    sourceNames = { src_relaygpt1: 'relay-gpt' };
+    const user = userEvent.setup();
+    render(<HubPicker role="owner" />);
+    await openMenu(user);
+
+    expect(effortColumn().getByRole('button', { name: /chat\.picker\.effortOptions\.constructor/ }).textContent)
+      .toBe('chat.picker.effortOptions.constructor');
+    expect(effortColumn().getByRole('button', { name: /chat\.picker\.effortOptions\.high/ }).textContent)
+      .toContain('chat.picker.effortNotOn:relay-gpt');
+  });
+
+  it('reads a Hub catalog again on every open, since its effort menu follows evidence any turn can change', async () => {
+    hubMode = 'hub';
+    catalogReasoning = { sonnet: [{ value: 'low', label: 'low' }, { value: 'high', label: 'high' }] };
+    const user = userEvent.setup();
+    render(<HubPicker role="owner" />);
+    await openMenu(user);
+    expect(catalogReads).toBe(1);
+    await user.keyboard('{Escape}');
+
+    // A turn recorded that every hop refuses `high`.
+    catalogReasoning = { sonnet: [{ value: 'low', label: 'low' }] };
+    catalogMenus = { sonnet: { omitted: ['high'], not_on: {} } };
+    await openMenu(user);
+    expect(catalogReads).toBe(2);
+    expect(effortColumn().queryByRole('button', { name: /chat\.picker\.effortOptions\.high/ })).toBeNull();
+  });
+
+  it('keeps the last Hub answer, and reads Hub again, when one open falls back to the native list', async () => {
+    // Hub: every hop refuses the route's `low`.
+    hubMode = 'hub';
+    catalogReasoning = { sonnet: [{ value: 'high', label: 'high' }] };
+    catalogMenus = { sonnet: { omitted: ['low'], not_on: {} } };
+    const user = userEvent.setup();
+    render(<HubPicker role="owner" />);
+    await openMenu(user);
+    await user.keyboard('{Escape}');
+
+    // This open's Hub read failed over to the native ladder, which offers `low` and
+    // says nothing about Hub routing: the Hub answer stands.
+    hubUnread = true;
+    catalogReasoning = { sonnet: [{ value: 'low', label: 'low' }, { value: 'high', label: 'high' }] };
+    await openMenu(user);
+    expect(catalogReads).toBe(2);
+    expect(effortColumn().getByRole('button', { name: /chat\.picker\.effortOptions\.low/ }).textContent)
+      .toContain('chat.picker.effortRefused');
+    await user.keyboard('{Escape}');
+
+    // Hub answers again, and the next open still asks it.
+    hubUnread = false;
+    await openMenu(user);
+    expect(catalogReads).toBe(3);
+  });
+
+  it('takes a confirmed Direct answer over an earlier Hub one', async () => {
+    hubMode = 'hub';
+    catalogReasoning = { sonnet: [{ value: 'high', label: 'high' }] };
+    catalogMenus = { sonnet: { omitted: ['low'], not_on: {} } };
+    const user = userEvent.setup();
+    render(<HubPicker role="owner" />);
+    await openMenu(user);
+    await user.keyboard('{Escape}');
+
+    // Another tab switched the backend to Direct: its native list is the answer now.
+    hubMode = 'direct';
+    catalogReasoning = { sonnet: [{ value: 'low', label: 'low' }, { value: 'high', label: 'high' }] };
+    await openMenu(user);
+    expect(effortColumn().getByRole('button', { name: /chat\.picker\.effortOptions\.low/ }).textContent)
+      .toBe('chat.picker.effortOptions.low');
+    await user.keyboard('{Escape}');
+
+    // And it is cached like any Direct list again: reopening reads nothing (a native
+    // read may start a CLI).
+    const reads = catalogReads;
+    await openMenu(user);
+    expect(catalogReads).toBe(reads);
+  });
+
+  it('keeps a refused saved effort when the current model is chosen again', async () => {
+    hubMode = 'hub';
+    catalogReasoning = { sonnet: [{ value: 'high', label: 'high' }] };
+    catalogMenus = { sonnet: { omitted: ['low'], not_on: {} } };
+    const onChange = vi.fn();
+    const user = userEvent.setup();
+    render(<HubPicker role="owner" onChange={onChange} />);
+    await openMenu(user);
+
+    await user.click(screen.getByRole('button', { name: 'sonnet' }));
+    // Nothing changed, so nothing clears the effort the route holds.
+    expect(onChange.mock.calls.map(([value]) => value.reasoning_effort)).not.toContain(null);
   });
 
   it('reads the list again for a menu left open while Settings covered it', async () => {
