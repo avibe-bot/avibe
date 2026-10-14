@@ -382,6 +382,14 @@ class CapabilityEvidenceStore:
         if identities.get(record.source_id) != record.source_identity:
             return
         with self._lock:
+            existing = self._records.get(record.key)
+            if (
+                existing is not None
+                and existing.source_identity == record.source_identity
+                and existing.observed_at >= record.observed_at
+            ):
+                # Settlements race to the lock; the newest success of an identity is kept, whatever order they land.
+                return
             updated = dict(self._records)
             updated[record.key] = record
             kept = {item.key: item for item in self._write_locked(updated, identities)}

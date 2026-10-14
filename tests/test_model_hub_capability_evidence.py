@@ -177,6 +177,18 @@ def test_successes_reach_memory_at_once_and_the_file_at_most_hourly(tmp_path, mo
     assert seen(CapabilityEvidenceStore(path), rotated) == at
 
 
+def test_the_newest_success_is_kept_whatever_order_settlements_land_in(tmp_path):
+    """MH-HOSTED-003: two successes of one key race to the lock; the older landing second does not regress it."""
+    path = tmp_path / "model_hub_capability_evidence.json"
+    source = _source()
+    store = CapabilityEvidenceStore(path)
+    later = NOW + timedelta(seconds=2)
+    store.note_success(_success(source, CALL, observed_at=later), live=[source], now=later)
+    store.note_success(_success(source, CALL), live=[source], now=later)
+    assert store.get(source.id, "grok-4.6", CALL, "verified").observed_at == later
+    assert CapabilityEvidenceStore(path).get(source.id, "grok-4.6", CALL, "verified").observed_at == later
+
+
 def test_a_refusal_holds_in_memory_when_its_write_fails(tmp_path, monkeypatch, caplog):
     """MH-HOSTED-003: a refusal is routing state; the re-render that follows must not declare the feature again."""
     from core.handlers.model_hub import capability_evidence
