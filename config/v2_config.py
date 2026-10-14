@@ -3059,6 +3059,26 @@ def _drop_vibey_client_presets(agent: "ModelHubAgentSupplyConfig") -> None:
     ]
 
 
+def is_model_hub_source_id(value: object) -> bool:
+    """A Source id as Model Hub mints it, whether or not that Source exists now."""
+
+    return isinstance(value, str) and re.fullmatch(r"src_[a-z0-9]{8,}", value) is not None
+
+
+def is_model_hub_model_id(value: object) -> bool:
+    """A model id in its canonical spelling: nonblank, without surrounding whitespace."""
+
+    return isinstance(value, str) and bool(value) and value == value.strip()
+
+
+def model_hub_executor_order(value: object, *, tool: str) -> tuple[str, ...]:
+    """A saved executor order: distinct Source ids. The one grammar the config loader and the API share."""
+
+    if not isinstance(value, list) or not all(is_model_hub_source_id(item) for item in value) or len(set(value)) != len(value):
+        raise ValueError(f"Config 'model_hub.hosted_tools.{tool}.executor_order' must be distinct Source ids")
+    return tuple(value)
+
+
 @dataclass(frozen=True)
 class ModelHubImageModelChoice:
     """The image model a user chose as ``image_generate``'s default."""
@@ -3071,10 +3091,8 @@ class ModelHubImageModelChoice:
         if (
             not isinstance(payload, dict)
             or set(payload) != {"source_id", "model_id"}
-            or not isinstance(payload["source_id"], str)
-            or re.fullmatch(r"src_[a-z0-9]{8,}", payload["source_id"]) is None
-            or not isinstance(payload["model_id"], str)
-            or not payload["model_id"].strip()
+            or not is_model_hub_source_id(payload["source_id"])
+            or not is_model_hub_model_id(payload["model_id"])
         ):
             raise ValueError(f"Config 'model_hub.hosted_tools.{tool}.default_model' must name a source_id and model_id")
         return cls(source_id=payload["source_id"], model_id=payload["model_id"])
@@ -3111,16 +3129,10 @@ class ModelHubHostedToolConfig:
             raise ValueError(f"Config 'model_hub.hosted_tools.{tool}.enabled' must be a boolean")
         # Only the fields this tool knows are read; another tool's field was ignored above.
         order = payload.get("executor_order") if "executor_order" in known else None
-        if order is not None and (
-            not isinstance(order, list)
-            or not all(isinstance(item, str) and re.fullmatch(r"src_[a-z0-9]{8,}", item) for item in order)
-            or len(set(order)) != len(order)
-        ):
-            raise ValueError(f"Config 'model_hub.hosted_tools.{tool}.executor_order' must be distinct Source ids")
         default = payload.get("default_model") if "default_model" in known else None
         return cls(
             enabled=enabled,
-            executor_order=tuple(order) if order is not None else None,
+            executor_order=model_hub_executor_order(order, tool=tool) if order is not None else None,
             default_image=ModelHubImageModelChoice.from_payload(default, tool=tool) if default is not None else None,
         )
 
@@ -3133,7 +3145,7 @@ class ModelHubHostedToolConfig:
         return out
 
 
-def _hosted_tools_from_payload(payload: object) -> dict[str, ModelHubHostedToolConfig]:
+def _hosted_tools_from_payload(section: Mapping[str, Any]) -> dict[str, ModelHubHostedToolConfig]:
     """Read ``model_hub.hosted_tools`` as an optional feature that degrades on its own.
 
     Absent means every tool takes its defaults (on). An unknown tool key, or an unknown field inside an entry, is
@@ -3142,8 +3154,10 @@ def _hosted_tools_from_payload(payload: object) -> dict[str, ModelHubHostedToolC
     turns one on. Sources and Agents still load.
     """
 
-    if payload is None:
+    if "hosted_tools" not in section:
         return {}
+    payload = section["hosted_tools"]
+    # Present but not an object, ``null`` included, is damage, never absence.
     if not isinstance(payload, dict):
         logger.warning("Config 'model_hub.hosted_tools' is not an object; hosted tools are off")
         return {tool: ModelHubHostedToolConfig(enabled=False) for tool in MODEL_HUB_HOSTED_TOOLS}
@@ -3305,7 +3319,7 @@ class ModelHubConfig:
             sources=sources,
             agents=agents,
             runtime_default_applied=runtime_default_applied,
-            hosted_tools=_hosted_tools_from_payload(payload.get("hosted_tools")),
+            hosted_tools=_hosted_tools_from_payload(payload),
         )
         _drop_vibey_client_presets(config.agents["vibey"])
         agents = config.agents

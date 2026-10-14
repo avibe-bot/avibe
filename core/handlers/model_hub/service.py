@@ -26,6 +26,7 @@ from config.v2_config import (
     ModelHubAgentSupplyConfig,
     ModelHubBackendModelConfig,
     ModelHubConfig,
+    is_model_hub_model_id,
     model_hub_fixed_menu_ids,
     ModelHubMenuConfig,
     ModelHubModelConfig,
@@ -157,7 +158,7 @@ from .hosted_tools import (
     HostedToolSettingRefused,
     admitted_image,
     apply_hosted_tool_put,
-    clear_matcher,
+    clear_request,
     engine_stamp,
     executor_candidates,
     executor_vendors,
@@ -6161,21 +6162,12 @@ class ModelHubService:
         restart.
         """
 
-        from config.v2_config import MODEL_HUB_HOSTED_TOOLS
-
-        if tool not in MODEL_HUB_HOSTED_TOOLS:
-            raise ModelHubError("hosted_tool_not_found", status=404)
-        if not isinstance(payload, dict) or set(payload) - {"source_id", "model_id"}:
-            raise ModelHubError("invalid_parameter", status=400)
-        source_id = payload.get("source_id")
-        model_id = payload.get("model_id")
-        if (
-            (source_id is not None and (not isinstance(source_id, str) or not source_id))
-            or (model_id is not None and (not isinstance(model_id, str) or not model_id or source_id is None))
-        ):
-            raise ModelHubError("invalid_parameter", status=400)
+        try:
+            matches = clear_request(tool, payload)
+        except HostedToolSettingRefused as refused:
+            raise ModelHubError(refused.code, status=refused.status) from None
         async with self._mutation_lock:
-            await self._clear_evidence(self.store.load(), clear_matcher(tool, source_id, model_id))
+            await self._clear_evidence(self.store.load(), matches)
         return await asyncio.to_thread(self.hosted_tools_status)
 
     async def clear_source_evidence(self, source_id: str, payload: object) -> dict:
@@ -6193,7 +6185,7 @@ class ModelHubService:
                 feature = EvidenceFeature.from_payload(payload["feature"])
             except (TypeError, ValueError):
                 raise ModelHubError("invalid_parameter", status=400) from None
-            if not isinstance(model_id, str) or not model_id or feature.kind != "effort":
+            if not is_model_hub_model_id(model_id) or feature.kind != "effort":
                 raise ModelHubError("invalid_parameter", status=400)
             await self._clear_evidence(
                 config,

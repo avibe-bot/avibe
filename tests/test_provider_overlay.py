@@ -225,13 +225,15 @@ _PRICE = (*_X_SEARCH, "price")
         pytest.param("xai", _edit((*_X_SEARCH, "include"), [""]), id="include-blank"),
         pytest.param("xai", _edit(_PRICE, None), id="price-null"),
         pytest.param("xai", _edit((*_PRICE, "unit"), "token"), id="price-unit-unknown"),
+        # Only an image model is priced per image.
+        pytest.param("xai", _edit((*_PRICE, "unit"), "image"), id="search-price-per-image"),
         pytest.param("xai", _edit((*_PRICE, "usd_per_1k"), -1), id="price-negative"),
         pytest.param("xai", _edit((*_PRICE, "usd_per_1k"), True), id="price-boolean"),
         pytest.param("xai", _edit((*_PRICE, "as_of"), "2026/10/13"), id="as-of-not-iso"),
         pytest.param("xai", _edit((*_PRICE, "as_of"), "2026-02-30"), id="as-of-impossible"),
         pytest.param("xai", _edit((*_PRICE, "url"), "http://docs.x.ai/developers/pricing"), id="url-not-https"),
         pytest.param("xai", _edit((*_PRICE, "url"), _DROP), id="url-missing"),
-        pytest.param("xai", _edit((*_PRICE, "extra", 0, "unit"), "token"), id="extra-unit-unknown"),
+        pytest.param("xai", _edit((*_PRICE, "extra", 0, "unit"), "image"), id="extra-unit-per-image"),
         pytest.param("xai", _edit(("executor_model",), " "), id="executor-model-blank"),
         pytest.param("xai", _edit(("image_models",), {}), id="image-models-not-a-list"),
         pytest.param("xai", _image_edit(("kinds",), ["oauth"]), id="image-kind-unknown"),
@@ -244,6 +246,9 @@ _PRICE = (*_X_SEARCH, "price")
         pytest.param("xai", _image_edit(("size_forms",), []), id="image-size-without-forms"),
         pytest.param("xai", _image_edit(("prices", 0, "price", "unit"), "call"), id="image-price-not-per-image"),
         pytest.param("xai", _image_edit(("tokens_per_image",), 0), id="image-tokens-not-positive"),
+        pytest.param(
+            "xai", _image_edit(("prices", 0, "price", "extra"), [{"unit": "image", "usd_per_1k": 1}]), id="image-price-extra",
+        ),
     ],
 )
 def test_an_invalid_vendor_entry_disables_only_that_vendor(monkeypatch, tmp_path, caplog, key, invalid):

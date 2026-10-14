@@ -277,6 +277,25 @@ def test_the_tools_read_states_saved_and_effective_values_and_what_real_use_show
     assert (web["status"]["latest_ok"], web["status"]["verified"]) == (None, [])
 
 
+def test_the_latest_success_is_the_newest_in_time_not_in_text(tmp_path):
+    """MH-HOSTED-004: a time with no fraction of a second sorts after a later one with one when read as text."""
+    from datetime import timedelta
+
+    evidence = _evidence(tmp_path)
+    for source, model_id, at in ((XAI, "grok-fast", NOW), (OPENAI, "gpt-mini", NOW + timedelta(milliseconds=500))):
+        evidence.store.note_success(
+            EvidenceRecord(
+                source_id=source.id, model_id=model_id, feature=EvidenceFeature.hosted("web_search", "call"),
+                status="verified", observed_at=at, wire=evidence.wire_for(source, model_id),
+                source_identity=identity_digest(source), mode="executor",
+            ),
+            live=ALL, now=at,
+        )
+    status = hosted_tools_status(_config(), evidence=evidence, spec_for=_spec_for, image_price=lambda _s, _m: None)
+    web = next(tool for tool in status["tools"] if tool["name"] == "web_search")
+    assert web["status"]["latest_ok"]["source_id"] == "src_oai00001"
+
+
 @pytest.mark.parametrize(
     "tool,payload,expected",
     [
@@ -304,6 +323,8 @@ def test_a_put_changes_only_the_fields_it_names(tool, payload, expected):
         ("web_search", {"enabled": None}, "invalid_parameter"),
         ("web_search", {"executor_order": ["not-a-source"]}, "invalid_parameter"),
         ("image_generate", {"default_model": {"source_id": "openai", "model_id": "gpt-image-2"}}, "invalid_parameter"),
+        # A padded id would be saved and then never match the catalog id it names.
+        ("image_generate", {"default_model": {"source_id": "src_oai00001", "model_id": " gpt-image-2 "}}, "invalid_parameter"),
         ("web_search", {"executor_order": ["src_a00000001", "src_a00000001"]}, "invalid_parameter"),
     ],
 )

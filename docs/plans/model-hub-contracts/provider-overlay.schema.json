@@ -22,8 +22,7 @@
             "call",
             "search",
             "post",
-            "profile",
-            "image"
+            "profile"
           ]
         },
         "usd_per_1k": {
@@ -65,6 +64,31 @@
           "items": {
             "$ref": "#/definitions/PriceComponent"
           }
+        }
+      }
+    },
+    "ImagePrice": {
+      "type": "object",
+      "description": "An image model's list price per 1,000 images, with the date and page it was read from.",
+      "required": [
+        "unit",
+        "usd_per_1k",
+        "as_of",
+        "url"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "unit": {
+          "const": "image"
+        },
+        "usd_per_1k": {
+          "$ref": "#/definitions/PriceComponent/properties/usd_per_1k"
+        },
+        "as_of": {
+          "$ref": "#/definitions/Price/properties/as_of"
+        },
+        "url": {
+          "$ref": "#/definitions/Price/properties/url"
         }
       }
     },
@@ -271,18 +295,7 @@
             "additionalProperties": false,
             "properties": {
               "price": {
-                "allOf": [
-                  {
-                    "$ref": "#/definitions/Price"
-                  },
-                  {
-                    "properties": {
-                      "unit": {
-                        "const": "image"
-                      }
-                    }
-                  }
-                ]
+                "$ref": "#/definitions/ImagePrice"
               },
               "size": {
                 "$ref": "#/definitions/Token"
