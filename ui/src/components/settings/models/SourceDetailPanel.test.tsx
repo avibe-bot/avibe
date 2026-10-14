@@ -11,6 +11,7 @@ import { ToastProvider } from '@/context/ToastProvider';
 import i18n from '@/i18n';
 import { classifyModelHubFailure, createPendingWrites } from './asyncLifetime';
 import { MANAGE_DESTINATION, type ManageKind } from './manage';
+import { readyRegion, unreadRegion } from './regionRead';
 import { ApiCallError, modelsApi } from './modelsApi';
 import type {
   PresentSourceMutationCommit,
@@ -29,7 +30,7 @@ import {
   NEEDS_ACTION_DETAIL_KEYS,
   SOURCE_STATUSES,
 } from './types';
-import type { Source, SourceDetailKey, SourceKind, SourceProtocol, SupplyChannel } from './types';
+import type { HostedEvidence, HostedToolCandidate, HostedToolProbeResult, HostedToolsStatus, Source, SourceDetailKey, SourceKind, SourceProtocol, SupplyChannel } from './types';
 
 const source: Source = {
   id: 'src_detail',
@@ -1378,4 +1379,144 @@ describe('SourceDetailPanel', () => {
     expect(screen.queryByText(/as soon as you start|旧的登录立即失效/i)).toBeNull();
   });
 
+});
+
+// What a Source's model rows say about hosted tools (§6.2, frame FB4vC). The
+// projection's states are `hostedTools.test.ts`'s subject; what is proved here is
+// what a Source row adds: a refused tool reads "via proxy" only while the server
+// binds a proxy for it, unchecked draws nothing, refused efforts get their own
+// chip, and the detail carries the record's facts and its check.
+describe('SourceDetailPanel hosted-tool capability chips', () => {
+  const twoModels: Source = {
+    ...source,
+    models: [
+      { id: 'model-a', display_name: null, origin: 'discovered', reasoning_efforts: [], reasoning_efforts_source: null },
+      { id: 'model-b', display_name: null, origin: 'discovered', reasoning_efforts: [], reasoning_efforts_source: null },
+    ],
+  };
+  const at = '2026-10-13T10:20:00Z';
+  const verified: HostedEvidence = {
+    status: 'verified', stale: null, basis: 'probe', observed_at: at, detail: null, changes_at: '2026-11-12T10:20:00Z',
+  };
+  const refused: HostedEvidence = {
+    status: 'unsupported', stale: null, basis: 'observed', observed_at: at, detail: '400 · unsupported_tool_type', changes_at: '2026-10-20T10:20:00Z',
+  };
+  const unknown: HostedEvidence = { status: 'unknown', stale: null, basis: null, observed_at: null, detail: null, changes_at: null };
+  const candidate = (model_id: string, call: HostedEvidence): HostedToolCandidate => ({
+    source_id: source.id, model_id, call, replay: unknown, billing: 'metered', price: null, probe_estimate: { basis: 'list', usd: 0.02 },
+  });
+  const executor = { source_id: 'src_grok0001', model_id: 'grok-4.6' };
+  const status = (xSearch: { enabled: boolean; bound: typeof executor | null }): HostedToolsStatus => ({
+    tools: [
+      { name: 'web_search', enabled: true, executor: null, bound: null, candidates: [candidate('model-a', verified), candidate('model-b', unknown)] },
+      { name: 'x_search', ...xSearch, executor: null, candidates: [candidate('model-a', refused)] },
+      { name: 'image_generation', enabled: false, executor: null, bound: null, candidates: [] },
+    ],
+    reverify: { engine_upgraded: 0, aged: 0 },
+  });
+  const renderChips = (
+    hostedTools: HostedToolsStatus,
+    { models = twoModels.models, onProbe }: { models?: Source['models']; onProbe?: React.ComponentProps<typeof SourceDetailPanel>['onProbeHostedTool'] } = {},
+  ) => render(
+    <I18nextProvider i18n={i18n}>
+      <CommittedPanel source={{ ...twoModels, models }} hostedTools={readyRegion(hostedTools)} onProbeHostedTool={onProbe} trackMutation={immediateTrack} onReauth={noReauth} />
+    </I18nextProvider>,
+  );
+  const chips = (modelId: string) => [...(screen.getByTitle(modelId).closest('.model-hub-source-table-row') as HTMLElement)
+    .querySelectorAll('[data-capability]')].map((chip) => chip.getAttribute('data-capability'));
+
+  it('MH-HOSTED-UI-006: draws evidence per model, and says "via proxy" only while a proxy is bound for the tool', () => {
+    renderChips(status({ enabled: true, bound: executor }));
+    expect(chips('model-a')).toEqual(['web_search:native', 'x_search:viaProxy']);
+    // Unchecked is the normal state, not a problem: no chip at all.
+    expect(chips('model-b')).toEqual([]);
+    cleanup();
+
+    // Off, or on with nothing bound: no call goes anywhere, so it is just unsupported here.
+    renderChips(status({ enabled: false, bound: executor }));
+    expect(chips('model-a')).toEqual(['web_search:native', 'x_search:unsupported']);
+    cleanup();
+    renderChips(status({ enabled: true, bound: null }));
+    expect(chips('model-a')).toEqual(['web_search:native', 'x_search:unsupported']);
+  });
+
+  it('MH-HOSTED-UI-017: names the record time, how it was learned, the reason, and until when it holds', async () => {
+    renderChips(status({ enabled: false, bound: null }));
+    const chip = screen.getByRole('button', { name: /X search · not supported on this Source|X 搜索 · 此供应商不支持/ });
+    // The accessible name carries the same facts as the hover detail, each with
+    // its term, composed by the locale.
+    expect(chip.getAttribute('aria-label')).toMatch(/(Reason: |原因：)400 · unsupported_tool_type/);
+    // And it says it opens a detail, which may hold a paid re-check.
+    expect(chip.getAttribute('aria-haspopup')).toBe('dialog');
+    expect(chip.getAttribute('aria-expanded')).toBe('false');
+    await userEvent.hover(chip);
+    const detail = await screen.findByRole('dialog');
+    expect(chip.getAttribute('aria-expanded')).toBe('true');
+    expect(chip.getAttribute('aria-controls')).toBe(detail.id);
+    within(detail).getByText(/a real request|一次真实请求/);
+    within(detail).getByText('400 · unsupported_tool_type');
+    within(detail).getByText(/until 10-20, then the default applies|到 10-20，过期后按默认判断/);
+  });
+
+  it('MH-HOSTED-UI-013: checks a tool again from its chip, with the cost on the action, and answers there when the check is not evidence', async () => {
+    const onProbe = vi.fn(async (): Promise<HostedToolProbeResult> => ({
+      tool: 'x_search', source_id: source.id, model_id: 'model-a', call: { outcome: 'inconclusive', error: null }, replay: null,
+    }));
+    renderChips(status({ enabled: false, bound: null }), { onProbe });
+    await userEvent.hover(screen.getByRole('button', { name: /X search · not supported on this Source|X 搜索 · 此供应商不支持/ }));
+    const detail = await screen.findByRole('dialog');
+    await userEvent.click(within(detail).getByRole('button', { name: /Check again · about \$0\.02|重新检测 · 约 \$0\.02/ }));
+    expect(onProbe).toHaveBeenCalledWith({ tool: 'x_search', candidate: expect.objectContaining({ source_id: source.id, model_id: 'model-a' }) });
+    // Nothing was recorded, so the chip still reads as before; the detail says why.
+    await within(detail).findByText(/the model didn't use the tool|模型没有调用工具/);
+  });
+
+  it('MH-HOSTED-UI-017: moves keyboard focus into the detail on Enter, so its paid re-check can be reached', async () => {
+    renderChips(status({ enabled: false, bound: null }), { onProbe: vi.fn(async () => null) });
+    const chip = screen.getByRole('button', { name: /X search · not supported on this Source|X 搜索 · 此供应商不支持/ });
+    chip.focus();
+    await userEvent.keyboard('{Enter}');
+    const detail = await screen.findByRole('dialog');
+    await waitFor(() => expect(document.activeElement).toBe(
+      within(detail).getByRole('button', { name: /Check again · about \$0\.02|重新检测 · 约 \$0\.02/ }),
+    ));
+  });
+
+  it('MH-HOSTED-UI-003: says a re-check\'s cost is unknown when no estimate is known', async () => {
+    const read = status({ enabled: false, bound: null });
+    const unpriced = { ...read, tools: read.tools.map((tool) => ({ ...tool, candidates: tool.candidates.map((candidate) => ({ ...candidate, probe_estimate: null })) })) };
+    renderChips(unpriced, { onProbe: vi.fn(async () => null) });
+    await userEvent.hover(screen.getByRole('button', { name: /X search · not supported on this Source|X 搜索 · 此供应商不支持/ }));
+    const detail = await screen.findByRole('dialog');
+    within(detail).getByRole('button', { name: /Check again · cost unknown|重新检测 · 费用未知/ });
+  });
+
+  it('MH-HOSTED-UI-006: draws a chip for each reasoning effort the Source refused, even with no tool evidence', () => {
+    const models = twoModels.models.map((model) => model.id === 'model-b'
+      ? { ...model, refused_efforts: [{ effort: 'xhigh', basis: 'observed' as const, observed_at: at, detail: '400 · unsupported reasoning effort', changes_at: null }] }
+      : model);
+    renderChips({ ...status({ enabled: false, bound: null }), tools: [] }, { models });
+    expect(chips('model-a')).toEqual([]);
+    expect(chips('model-b')).toEqual(['effort:xhigh']);
+  });
+
+  it('MH-HOSTED-UI-006: says when the capability read failed instead of drawing a Source with no evidence', async () => {
+    const retry = vi.fn();
+    render(
+      <I18nextProvider i18n={i18n}>
+        <CommittedPanel source={twoModels} hostedTools={unreadRegion()} onRetryHostedTools={retry} trackMutation={immediateTrack} onReauth={noReauth} />
+      </I18nextProvider>,
+    );
+    const line = screen.getByRole('status');
+    within(line).getByText(/Couldn't read this Source's tool capabilities|未能读取此供应商的工具能力/);
+    await userEvent.click(within(line).getByRole('button', { name: /^Retry$|^重试$/ }));
+    expect(retry).toHaveBeenCalledTimes(1);
+  });
+
+  it('MH-HOSTED-UI-006: adds no capability column when no model has evidence', () => {
+    const read = status({ enabled: true, bound: null });
+    renderChips({ ...read, tools: read.tools.map((tool) => ({ ...tool, candidates: [] })) });
+    expect(document.querySelector('.model-hub-source-table--capabilities')).toBeNull();
+    expect(document.querySelector('[data-capability]')).toBeNull();
+  });
 });

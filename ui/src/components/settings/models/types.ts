@@ -112,6 +112,18 @@ export type SuppliedModel = {
   /** Persistent retirement tombstone; retired entries stay readable but are not callable. */
   retired?: boolean;
   discovered_at?: string | null;
+  /** Server-derived, read-only: the reasoning efforts this Source model currently
+   *  refuses (capability evidence). Absent when none; never written back. */
+  refused_efforts?: RefusedEffort[];
+};
+
+/** One reasoning effort a Source model refused, as capability evidence records it. */
+export type RefusedEffort = {
+  effort: string;
+  basis: 'probe' | 'observed';
+  observed_at: string;
+  detail: string | null;
+  changes_at: string | null;
 };
 
 export type Source = {
@@ -1005,6 +1017,88 @@ export type QuotaSummary = {
   /** Sources whose read is still running past the page deadline; re-read soon. */
   pending?: string[];
   value?: QuotaValueTotals;
+};
+
+// ── hosted-tools-status.schema.json ─────────────────────────────────────
+/** The catalog's tools, in catalog order (`vibey-hosted-tools.md` §2). */
+export const HOSTED_TOOL_NAMES = ['web_search', 'x_search', 'image_generation'] as const;
+export type HostedToolName = (typeof HOSTED_TOOL_NAMES)[number];
+
+/** One capability record as routing reads it: `status` already folds in staleness,
+ *  so a wire-stale record reads `unknown` here even though it once verified. */
+export type HostedEvidence = {
+  status: 'verified' | 'unsupported' | 'unknown';
+  /** `wire`: taken on another engine or probe shape, so it routes as unknown.
+   *  `age`: older than 30 days, so it still routes and only asks for a re-check. */
+  stale: null | 'wire' | 'age';
+  basis: null | 'probe' | 'observed';
+  observed_at: string | null;
+  detail: string | null;
+  /** When the record stops reading as it does now: an observed record's expiry,
+   *  or a probe record's 30-day re-verify mark; null when nothing is scheduled. */
+  changes_at: string | null;
+};
+
+/** The overlay's list price for one hosted tool on a provider (`usd_per_1k` per `unit`). */
+export type HostedToolPriceUnit = 'call' | 'search' | 'post' | 'profile';
+export type HostedToolListPrice = {
+  unit: HostedToolPriceUnit;
+  usd_per_1k: number;
+  extra: { unit: HostedToolPriceUnit; usd_per_1k: number }[];
+  as_of: string;
+  url: string;
+};
+
+/** A cost the server states: at list price (`usd`), or included in a subscription (no `usd`). */
+export type HostedCostEstimate = { basis: 'list'; usd: number } | { basis: 'included' };
+
+export type HostedToolExecutor = { source_id: string; model_id: string };
+
+/** A (Source, model) the overlay offers the tool on, with an eligible credential
+ *  and an untranslated path; Vibey's Source order first. */
+export type HostedToolCandidate = HostedToolExecutor & {
+  call: HostedEvidence;
+  /** Null for image generation, which is never replayed. */
+  replay: HostedEvidence | null;
+  billing: 'monthly' | 'metered';
+  /** Null when no list price is known, never zero (image generation has none). */
+  price: HostedToolListPrice | null;
+  /** One call probe's cost; null when unknown, which is never added as zero. */
+  probe_estimate: HostedCostEstimate | null;
+};
+
+export type HostedToolStatus = {
+  name: HostedToolName;
+  enabled: boolean;
+  /** The user's choice, or null for the first verified candidate. */
+  executor: HostedToolExecutor | null;
+  /** The executor a turn would bind now, by hop resolution's own rule; null when none is verified. */
+  bound: HostedToolExecutor | null;
+  candidates: HostedToolCandidate[];
+};
+
+export type HostedToolsStatus = {
+  tools: HostedToolStatus[];
+  reverify: { engine_upgraded: number; aged: number };
+};
+
+/** PUT /api/models/hosted-tools/<tool>: the whole setting, applied from the next turn. */
+export type HostedToolPut = { enabled: boolean; executor: HostedToolExecutor | null };
+
+/** One aspect of a probe: only verified and unsupported become evidence. */
+export type HostedProbeAspect = {
+  outcome: 'verified' | 'unsupported' | 'inconclusive' | 'transient';
+  /** The Source test's detail key, for a request that failed before completing. */
+  error: string | null;
+};
+
+/** POST /api/models/hosted-tools/<tool>/probe (`hosted-tool-probe-result.schema.json`). */
+export type HostedToolProbeResult = {
+  tool: HostedToolName;
+  source_id: string;
+  model_id: string;
+  call: HostedProbeAspect;
+  replay: HostedProbeAspect | null;
 };
 
 // ── API envelope + request shapes (api.md) ──────────────────────────────

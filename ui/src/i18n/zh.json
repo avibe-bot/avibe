@@ -973,6 +973,7 @@
         },
         "tab": {
           "hub": "供应商与路由",
+          "tools": "工具",
           "quota": "订阅额度",
           "usage": "用量",
           "logs": "日志"
@@ -2344,6 +2345,207 @@
         "refreshed": "已更新",
         "unresolved": "仍然不可用",
         "failed": "没能处理，请重试"
+      },
+      "tools": {
+        "title": "托管工具",
+        "subtitle": "Vibey 在对话中可调用的厂商托管工具。默认关闭：开启后每次调用可能产生费用，内容会发给提供该工具的厂商。",
+        "reverify": {
+          "engineUpgraded_one": "引擎已升级 · {{count}} 项需重新检测",
+          "engineUpgraded_other": "引擎已升级 · {{count}} 项需重新检测",
+          "aged_one": "{{count}} 项检测已超过 30 天",
+          "aged_other": "{{count}} 项检测已超过 30 天",
+          "both": "<upgraded>{{engineUpgraded}}</upgraded> · {{aged}}",
+          "upgradedOnly": "<upgraded>{{engineUpgraded}}</upgraded>",
+          "agedOnly": "{{aged}}"
+        },
+        "tool": {
+          "web_search": {
+            "name": "网页搜索",
+            "inline": "网页搜索",
+            "description": "搜索网页，并在回答中注明出处。"
+          },
+          "x_search": {
+            "name": "X 搜索",
+            "inline": "X 搜索",
+            "description": "搜索 X 上的帖子，支持 from:、within_time: 等高级语法。"
+          },
+          "image_generation": {
+            "name": "图片生成",
+            "inline": "图片生成",
+            "description": "生成图片，显示在回答里并保存为文件。"
+          }
+        },
+        "state": {
+          "on": "已开启",
+          "off": "已关闭",
+          "needsCheck": "已关闭 · 需先检测",
+          "needsExecutor": "已关闭 · 需先选择代理执行者",
+          "checkUnavailable": "已关闭 · 此工具的检测将在后续更新中提供"
+        },
+        "toggle": {
+          "turnOn": "开启{{name}}",
+          "turnOff": "关闭{{name}}"
+        },
+        "col": {
+          "source": "供应商 · 模型",
+          "native": "原生运行",
+          "cost": "每次费用"
+        },
+        "chip": {
+          "unsupportedAged": "{{date}} 检测为不支持 · 需重新检测",
+          "native": "原生 · {{date}} 已验证",
+          "reverify": "{{date}} 已验证 · 需重新检测",
+          "engineUpgraded": "引擎已升级 · 需重新检测",
+          "unsupported": "此供应商不支持",
+          "unchecked": "未检测",
+          "executor": "代理执行者"
+        },
+        "cost": {
+          "included": "订阅内含",
+          "includedNote": "不另计费",
+          "imageTokens": "按图像 token 计费 · 暂无单价",
+          "list": "≈ {{price}}",
+          "perUnit": "${{usd}} / {{unit}}",
+          "unit": {
+            "call": "次",
+            "search": "次搜索",
+            "post": "条帖子",
+            "profile": "个账号"
+          },
+          "listNote": "API 标价",
+          "listNoteExtras": "API 标价 · {{extras}}",
+          "extra": "另加 {{price}}",
+          "extraSeparator": "，",
+          "unknown": "暂无标价"
+        },
+        "empty": "你的供应商都不能原生运行{{toolInline}}。添加提供该工具的供应商后，在这里检测。",
+        "noNative": "{{sources}} 上的模型没有原生{{toolInline}}。",
+        "executor": {
+          "label": "代理执行",
+          "pick": "{{name}}的代理执行者",
+          "automatic": "自动：Vibey 顺序中第一个已验证的",
+          "unavailable": "检测后可选",
+          "option": "{{source}} · {{model}}",
+          "notVerified": "{{source}} · {{model}}（未验证）",
+          "note": {
+            "off": "开启后生效。",
+            "bound": "已验证的模型直接原生调用；其他模型由 {{source}} 代为调用，费用记在 {{source}}。",
+            "unbound": "还没有已验证的供应商：在检测通过前调用会失败。"
+          },
+          "automaticBound": "自动（{{source}} · {{model}}）"
+        },
+        "footnote": "费用为每次调用的估算：API Key 按厂商 API 标价估算，中转的实际账单可能不同；订阅不另计费。Claude 订阅不能运行托管工具。",
+        "saveFailed": "{{toolInline}}设置未能保存，请重试。",
+        "probe": {
+          "check": "检测",
+          "checkCost": "检测 · {{cost}}",
+          "recheckCost": "重新检测 · {{cost}}",
+          "retryCost": "重试 · {{cost}}",
+          "recheck": "重新检测",
+          "retry": "重试",
+          "running": "检测中…",
+          "about": "约 ${{usd}}",
+          "included": "订阅内含",
+          "unknown": "费用未知",
+          "notRecorded": "结果未能记录",
+          "outcome": {
+            "inconclusive": "未能检测 · 模型没有调用工具，请重试",
+            "transient": "未能检测 · 请重试",
+            "transientReason": "未能检测 · {{reason}}"
+          }
+        },
+        "header": {
+          "pending_one": "{{count}} 项可检测",
+          "pending_other": "{{count}} 项可检测",
+          "total": "共{{cost}}",
+          "totalIncluded": "均为订阅内含",
+          "totalUnknown": "费用未知",
+          "summary": "{{pending}} · {{cost}}",
+          "none": "均已检测",
+          "action": "检测可用工具"
+        },
+        "dialog": {
+          "title": "检测可用工具",
+          "subtitle": "托管工具 · Vibey",
+          "body_one": "检测会向下面的供应商发送 {{count}} 次真实请求，确认它们能否原生运行这些工具。",
+          "body_other": "检测会向下面的供应商发送 {{count}} 次真实请求，确认它们能否原生运行这些工具。",
+          "privacy": "请求只带一条固定的测试查询，不含你的对话。检测不会开启任何工具，也不会改动路由。",
+          "listTitle": "将检测",
+          "pair": "<tool>{{tool}}</tool><muted>·</muted><source>{{source}}</source><model>{{model}}</model>",
+          "total": "合计",
+          "totalNote": "按 API 标价估算；中转的实际账单可能不同",
+          "cancel": "取消",
+          "start": "开始检测",
+          "startCost": "开始检测 · {{cost}}",
+          "running_one": "正在检测 {{done}}/{{count}}…",
+          "running_other": "正在检测 {{done}}/{{count}}…"
+        },
+        "result": {
+          "title": "检测完成",
+          "verified_one": "{{count}} 项原生可用",
+          "verified_other": "{{count}} 项原生可用",
+          "unsupported_one": "{{count}} 项不支持",
+          "unsupported_other": "{{count}} 项不支持",
+          "unverified_one": "{{count}} 项未能检测",
+          "unverified_other": "{{count}} 项未能检测",
+          "outcome": {
+            "verified": "原生可用",
+            "unsupported": "不支持",
+            "unverified": "未能检测"
+          },
+          "reason": {
+            "inconclusive": "模型没有调用工具。可重试，不会记为“不支持”。",
+            "transient": "这次未能检测。可重试，不会记为“不支持”。",
+            "transientReason": "这次未能检测（{{reason}}）。可重试，不会记为“不支持”。"
+          },
+          "note": "已验证的模型会直接原生调用；其他模型由代理执行者代为调用。工具开关在“工具”页，默认仍是关闭。",
+          "retry_one": "重试 {{count}} 项",
+          "retry_other": "重试 {{count}} 项",
+          "retryCost_one": "重试 {{count}} 项 · {{cost}}",
+          "retryCost_other": "重试 {{count}} 项 · {{cost}}",
+          "done": "完成"
+        }
+      },
+      "capability": {
+        "readFailed": "未能读取此供应商的工具能力。",
+        "col": "能力",
+        "chip": {
+          "unsupportedAged": "{{tool}} · {{date}} 检测为不支持 · 需重新检测",
+          "native": "{{tool}} · 原生 · {{date}} 已验证",
+          "reverify": "{{tool}} · {{date}} 已验证 · 需重新检测",
+          "engineUpgraded": "{{tool}} · 引擎已升级 · 需重新检测",
+          "unsupported": "{{tool}} · 此供应商不支持",
+          "viaProxy": "{{tool}} · 由代理提供",
+          "viaProxyAged": "{{tool}} · 由代理提供 · 需重新检测"
+        },
+        "explain": {
+          "unsupportedAged": "此供应商在超过 30 天前的检测中不支持{{toolInline}}，可重新检测现在是否已支持。",
+          "native": "检测通过：这个模型在此供应商上直接调用厂商自带的工具。",
+          "reverify": "检测已超过 30 天，仍按原结果原生运行，可重新检测。",
+          "engineUpgraded": "检测之后模型引擎已升级，重新检测前不再算作已验证。",
+          "unsupported": "此供应商拒绝过{{toolInline}}，之后不会再发到这里。",
+          "viaProxy": "{{tool}}已开启，但此供应商不能原生运行，调用交给代理执行者。",
+          "viaProxyAged": "{{tool}}已开启。此供应商在超过 30 天前的检测中不支持它，调用交给代理执行者；可重新检测现在是否已能原生运行。"
+        },
+        "recorded": "记录时间",
+        "recordedValue": "{{time}} · {{basis}}",
+        "basis": {
+          "probe": "一次检测",
+          "observed": "一次真实请求"
+        },
+        "reason": "失败原因",
+        "expiry": "有效期",
+        "expiryObserved": "到 {{date}}，过期后按默认判断",
+        "expiryProbe": "{{date}} 后需重新检测",
+        "recheck": "重新检测",
+        "recheckCost": "重新检测 · {{cost}}",
+        "accessibleName": "{{label}}。{{explanation}}",
+        "accessibleNameFacts": "{{label}}。{{explanation}}{{facts}}",
+        "accessibleFact": "{{term}}：{{value}}。",
+        "effort": {
+          "unsupported": "{{effort}} · 此供应商不支持",
+          "explain": "此供应商拒绝过这个推理强度，之后的请求会跳过它。"
+        }
       }
     }
   },

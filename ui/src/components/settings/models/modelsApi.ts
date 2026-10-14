@@ -28,6 +28,11 @@ import type {
   ModelCandidateModelsDev,
   ModelCandidateSupplier,
   ModelsDevMatch,
+  HostedToolExecutor,
+  HostedToolName,
+  HostedToolProbeResult,
+  HostedToolPut,
+  HostedToolsStatus,
   NativeProtocol,
   OAuthFlow,
   ProbeResult,
@@ -168,6 +173,12 @@ export type ModelsApi = {
   getQuota(): Promise<QuotaSummary>;
   /** The same report, re-read now (the service bounds how often). */
   refreshQuota(): Promise<QuotaSummary>;
+  /** The Tools tab read: each hosted tool's toggle, executor and evidence. */
+  getHostedTools(): Promise<HostedToolsStatus>;
+  /** Replace one tool's toggle and executor; answers the whole status again. */
+  putHostedTool(tool: HostedToolName, body: HostedToolPut): Promise<HostedToolsStatus>;
+  /** One user-started call probe on exactly one (Source, model); answers the status it left. */
+  probeHostedTool(tool: HostedToolName, target: HostedToolExecutor): Promise<{ probe: HostedToolProbeResult; hosted_tools: HostedToolsStatus }>;
   getRuntimeStatus(): Promise<RuntimeDependency>;
   /** Start the contract-owned client installation transaction. */
   installRuntime(): Promise<RuntimeDependency>;
@@ -675,6 +686,13 @@ export const modelsApi: ModelsApi = {
     call<{ usage: UsageReport }>(`/api/models/usage?window=${window}`).then((r) => r.usage),
   getQuota: () => call<{ quota: QuotaSummary }>('/api/models/quota').then((r) => r.quota),
   refreshQuota: () => call<{ quota: QuotaSummary }>('/api/models/quota/refresh', jsonInit('POST')).then((r) => r.quota),
+  getHostedTools: () => call<{ hosted_tools: HostedToolsStatus }>('/api/models/hosted-tools').then((r) => r.hosted_tools),
+  putHostedTool: (tool, body) => call<{ hosted_tools: HostedToolsStatus }>(
+    `/api/models/hosted-tools/${encodeURIComponent(tool)}`, jsonInit('PUT', body),
+  ).then((r) => r.hosted_tools),
+  probeHostedTool: (tool, target) => call<{ probe: HostedToolProbeResult; hosted_tools: HostedToolsStatus }>(
+    `/api/models/hosted-tools/${encodeURIComponent(tool)}/probe`, jsonInit('POST', target),
+  ),
   getRuntimeStatus: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/status').then((r) => (r.runtime ?? r) as RuntimeDependency),
   installRuntime: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/install', jsonInit('POST')).then((r) => (r.runtime ?? r) as RuntimeDependency),
   startRuntime: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/start', jsonInit('POST')).then((r) => (r.runtime ?? r) as RuntimeDependency),
