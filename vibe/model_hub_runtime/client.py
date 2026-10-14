@@ -466,6 +466,11 @@ class EngineClient:
                 endpoint += "?alt=sse"
             body.pop("model", None)
             body.pop("stream", None)
+        elif request_protocol == "openai_images":
+            # Reference images make an edit (vibey-hosted-tools.md §7.4). An images call is
+            # always buffered, and names no stream: not every images endpoint reads one.
+            endpoint = "/v1/images/edits" if "images" in body else "/v1/images/generations"
+            body["model"] = routed_model
         else:
             endpoint = _endpoint_for_protocol(request_protocol)
             body["model"] = routed_model
@@ -1351,10 +1356,18 @@ def _is_local_model_registration_failure(
         return False
     error = decoded.get("error")
     error_type, _, _ = _raw_error_fields(payload)
+    message = error.get("message") if isinstance(error, dict) else None
     return (
-        isinstance(error, dict)
-        and error_type == "invalid_request_error"
-        and error.get("message") == f"unknown provider for model {routed_model}"
+        error_type == "invalid_request_error"
+        and isinstance(message, str)
+        and (
+            message == f"unknown provider for model {routed_model}"
+            # Its images handler refuses, before any upstream, a model it does not route
+            # there (sdk/api/handlers/openai/openai_images_handlers.go at d318bcc3).
+            or message.startswith(
+                f"Model {routed_model} is not supported on /v1/images/generations or /v1/images/edits."
+            )
+        )
     )
 
 
