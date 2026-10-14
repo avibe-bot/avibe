@@ -887,7 +887,7 @@
         "sessionArgumentForbidden": "Computer Use session 已绑定调用方 Avibe Session，不能通过 --args-json 或 --arg 提供。",
         "outputArgumentConflict": "请在 --output 和 --args-json 中的 screenshot_out_file 之间二选一，不能同时提供。",
         "unsupportedCommand": "不支持的 Computer Use 命令：{command}",
-        "screenshotMissing": "窗口已隐藏或最小化，因此没有可用的截图。",
+        "screenshotMissing": "此结果没有可用的截图。窗口可能已隐藏或最小化，也可能是截图不可用。",
         "outputUnsupported": "--output 只支持 observe window 或 zoom。",
         "missingCallerSession": "Computer Use 需要 Avibe Agent 调用方 Session。",
         "missingCallerTurn": "Computer Use 要求调用方 Avibe Session 当前有活动 Turn。",

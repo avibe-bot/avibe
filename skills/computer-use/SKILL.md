@@ -36,10 +36,11 @@ that establish the exact window state required before input.
 `--json` keeps the structured driver object at `result.structuredContent`.
 The legacy `content` text block remains available for existing callers.
 
-Consecutive `vibe computer` calls in the same Avibe Session share the driver
-session. Element tokens from one observation stay valid for following calls
-until a newer observation replaces that snapshot, so a short script can
-observe once, click several times, and observe once at the end:
+During one Agent Turn, consecutive `vibe computer` calls in the same Avibe
+Session share the driver session. Element tokens from one observation stay
+valid for following calls until a newer observation replaces that snapshot, so
+a short script can observe once, click several times, and observe once at the
+end:
 
 ```text
 vibe computer observe window --arg pid=123 --arg window_id=456
@@ -49,7 +50,9 @@ vibe computer observe window --arg pid=123 --arg window_id=456
 ```
 
 Each call still passes the Controller's safety checks. A later observation
-replaces the earlier element tokens.
+replaces the earlier element tokens. At the start of every later Agent Turn,
+observe the target again before input and do not reuse tokens from the prior
+Turn.
 
 QQ, WeChat, and similar Electron applications may return only window chrome and
 menus on the first observation after launch. The driver enables the
@@ -68,9 +71,10 @@ Argument contract:
   operation's documented `x`/`y` or drag fields.
 - `observe window` and `zoom` accept the exact window fields; `zoom` also
   accepts its rectangle fields such as `x1`, `y1`, `x2`, and `y2`.
-- `type`, `key`, `hotkey`, `scroll`, `set-value`, `launch`, `quit`, and
-  clipboard write use their named driver fields, for example `text`, `key`,
-  `keys`, `direction`, `value`, `bundle_id` or `urls`, `pid`, and `text`.
+- `type`, `key`, `hotkey`, `scroll`, `set-value`, `launch`, and clipboard
+  write use their named driver fields, for example `text`, `key`, `keys`,
+  `direction`, `value`, `bundle_id` or `urls`, and `text`.
+  `vibe computer force-quit --arg pid=123` uses the target `pid`.
 - Use `--args-json` for nested values such as `keys` arrays or `urls`; repeated
   `--arg` values are parsed as JSON when valid. The exact allowlisted field
   validation remains in the Controller-owned driver boundary.

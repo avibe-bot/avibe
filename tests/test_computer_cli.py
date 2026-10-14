@@ -260,17 +260,32 @@ def test_cmd_computer_binds_the_caller_session_and_prints_structured_result(
 
 def test_computer_cli_error_translations_exist_in_all_supported_languages() -> None:
     keys = {*_COMPUTER_ERROR_I18N_KEYS.values(), "computer.cli.error.screenshotMissing"}
-    for language in ("en", "zh"):
+    for catalog_path in sorted(Path("vibe/i18n").glob("*.json")):
+        catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
         for key in keys:
-            value = i18n_t(key, language)
-            assert value and value != key, f"{language} is missing {key}"
+            value: object = catalog
+            for part in key.split("."):
+                assert isinstance(value, dict) and part in value, (
+                    f"{catalog_path.stem} is missing {key}"
+                )
+                value = value[part]
+            assert isinstance(value, str) and value.strip(), (
+                f"{catalog_path.stem} has an empty translation for {key}"
+            )
 
 
 @pytest.mark.parametrize(
     ("language", "expected"),
     [
-        ("en", "The window is hidden or minimized, so no screenshot is available."),
-        ("zh", "窗口已隐藏或最小化，因此没有可用的截图。"),
+        (
+            "en",
+            "No screenshot is available for this result. The window may be hidden or "
+            "minimized, or capture may be unavailable.",
+        ),
+        (
+            "zh",
+            "此结果没有可用的截图。窗口可能已隐藏或最小化，也可能是截图不可用。",
+        ),
     ],
 )
 def test_cmd_computer_localizes_missing_screenshot_error(
