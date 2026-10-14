@@ -384,8 +384,7 @@ def test_existing_hub_key_still_clears_legacy_auth_when_hub_config_is_unchanged(
     assert service.migration_journal.load() is None
 
 
-@pytest.mark.parametrize("accepted", [False, True])
-def test_reused_hub_key_requires_current_proof_before_native_cleanup(monkeypatch, tmp_path, accepted):
+def test_reused_hub_key_cleans_native_copy_without_current_proof(monkeypatch, tmp_path):
     home = tmp_path / "native"
     _isolate_native_home(monkeypatch, home)
     service, store, adapter = _service(tmp_path, migration_home=home)
@@ -396,22 +395,15 @@ def test_reused_hub_key_requires_current_proof_before_native_cleanup(monkeypatch
     store.config.agents["claude"].mode = "direct"
     native = home / ".claude/settings.json"
     _write(native, '{"env":{"ANTHROPIC_API_KEY":"fixture-key"},"mcp":{"keep":true}}')
-    before = native.read_bytes()
     previous = store.config.to_payload()
     observed = len(adapter.observed)
     ids = [row["id"] for row in service.migration_scan()["items"]]
-    if not accepted:
-        adapter.unproven_observation_vendor = "anthropic"
-        with pytest.raises(ModelHubError) as failure:
-            asyncio.run(service.migration_apply(ids, clean_api_keys=True))
-        assert failure.value.code == "migration_item_conflict"
-        assert native.read_bytes() == before
-        assert store.config.to_payload() == previous
-    else:
-        assert asyncio.run(service.migration_apply(ids, clean_api_keys=True))["applied"] == 1
-        assert store.config.to_payload()["sources"] == previous["sources"]
-        assert json.loads(native.read_text()) == {"env": {}, "mcp": {"keep": True}}
-    assert len(adapter.observed) == observed + 1
+    # The provider would no longer prove this key; migration does not ask.
+    adapter.unproven_observation_vendor = "anthropic"
+    assert asyncio.run(service.migration_apply(ids, clean_api_keys=True))["applied"] == 1
+    assert store.config.to_payload()["sources"] == previous["sources"]
+    assert json.loads(native.read_text()) == {"env": {}, "mcp": {"keep": True}}
+    assert len(adapter.observed) == observed
     assert len(adapter.provisioned) == 1
     assert service.migration_journal.load() is None
 

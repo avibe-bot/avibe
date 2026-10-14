@@ -1822,6 +1822,14 @@ scenarios:
     test: tests/test_model_hub_native_takeover.py::test_refused_migration_says_whether_avibe_or_an_outside_cli_holds_the_backend
     related_tests:
       - ui/src/components/settings/models/MigrationDialog.test.tsx
+  - id: MH-MIG-015
+    name: Migration saves static API keys from their native configuration without contacting the provider, so rejected keys and offline endpoints import alike
+    status: covered
+    kind: migration
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_migration_scenarios.py::test_mh_mig_015_static_keys_migrate_from_saved_configuration_without_upstream_contact
+    related_tests:
+      - tests/e2e/test_model_hub_migration.py::test_mh_mig_015_keys_migrate_over_http_without_any_upstream_request
   - id: MH-TAKEOVER-001
     name: Recoverable failures walk the configured route and exhaust only at its end
     status: covered
@@ -2208,8 +2216,8 @@ scenarios:
     layer: e2e-auto
     test: tests/e2e/test_model_hub_migration_persisted.py::test_f4_persisted_configuration_migrates_with_runtime_auth_present
     related_tests:
-      - tests/e2e/test_model_hub_migration_persisted.py::test_f4_unproven_shell_key_is_not_removed
-      - tests/e2e/test_model_hub_migration_persisted.py::test_f4_custom_api_key_refusing_bearer_is_kept_without_cleanup
+      - tests/e2e/test_model_hub_migration_persisted.py::test_f4_unproven_shell_key_is_copied_without_validation
+      - tests/e2e/test_model_hub_migration_persisted.py::test_f4_custom_api_key_refusing_bearer_is_copied_without_validation
       - tests/e2e/test_model_hub_migration_persisted.py::test_f4_explicit_dynamic_writer_refuses_http_apply_without_proof
       - tests/e2e/test_model_hub_migration_persisted.py::test_f4_replace_migrated_bearer_without_old_secret_retains_cpa_transport
       - tests/e2e/test_model_hub_migration_persisted.py::test_f4_oauth_history_fence_survives_later_api_batch_over_http

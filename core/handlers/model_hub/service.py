@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Iterable, Literal, Mapping, Optional, Protocol, cast
+from typing import Any, Awaitable, Callable, Collection, Iterable, Literal, Mapping, Optional, Protocol, cast
 
 from sqlalchemy import func, literal_column, select
 
@@ -5304,7 +5304,7 @@ class ModelHubService:
                     reasoning_efforts.append(effort)
         return suppliers, display_name, reasoning_efforts
 
-    def _models_dev_descriptions(self, model_ids: list[str]) -> dict[str, dict]:
+    def _models_dev_descriptions(self, model_ids: list[str], *, fetch_catalog: bool = True) -> dict[str, dict]:
         """Exact models.dev matches for provider candidates; empty when unknown.
 
         The description is optional: an unreadable catalog leaves every
@@ -5313,10 +5313,11 @@ class ModelHubService:
 
         if not model_ids:
             return {}
-        from vibe.models_dev_catalog import exact_models_dev_matches
+        from vibe.models_dev_catalog import cached_models_dev_catalog, exact_models_dev_matches
 
         try:
-            return exact_models_dev_matches(model_ids, dict(self.models_dev_catalog()))
+            catalog = self.models_dev_catalog() if fetch_catalog else cached_models_dev_catalog()
+            return exact_models_dev_matches(model_ids, dict(catalog))
         except Exception as exc:  # noqa: BLE001 - optional metadata never fails a read
             logger.info("Model Hub candidates have no models.dev metadata: %s", type(exc).__name__)
             return {}
@@ -5576,28 +5577,43 @@ class ModelHubService:
         self,
         config: ModelHubConfig,
         backend: BackendName,
+        *,
+        native_sources: Collection[tuple[str, str]] = (),
+        fetch_catalog: bool = True,
     ) -> None:
         """Give each Agent's model a Gateway menu row when a Source serves it.
 
-        Called as a backend enters Gateway mode. Direct mode never reads the
-        Gateway menu, so an Agent there keeps a model its CLI offered, and an
+        Called after confirmed migration or as a backend enters Gateway mode.
+        Direct mode never reads the Gateway menu, so an Agent there keeps a
+        model its CLI offered, and an
         OpenCode one spells it with its own provider (``openai/gpt-5.6-sol``).
         The row added is the one the picker adds for a provider model, only
         when a Source in this backend's default routing lists it. The Agent's
         selection itself is untouched, so switching back to Direct still runs
         it. A row the user removed stays removed, and a selection nothing
-        serves stays visible as an Agent that needs attention.
+        serves stays visible as an Agent that needs attention. During migration,
+        a static Source carried from that selection's native provider can instead
+        retain it by passthrough, without claiming an upstream inventory.
         """
 
         if self.named_agents_override is None:
             return
         agent = config.agents[backend]
+        source_by_id = {source.id: source for source in config.sources}
         carried: list[str] = []
         for _name, selected in self.named_agents_override(backend):
             selected = str(selected or "").strip()
             menu_ids = {model.id for model in agent.models}
             if not selected or self._menu_model_for_selection(agent, selected) in menu_ids:
                 continue
+            if backend == "opencode" and native_sources:
+                provider, separator, model = selected.partition("/")
+                if not separator or not model or not any(
+                    native_provider == provider for native_provider, _ in native_sources
+                ):
+                    # A same-named inventory entry from a different provider
+                    # does not consent to migrating this Direct selection.
+                    continue
             candidates = (
                 opencode_menu_model_candidates(selected)
                 if backend == "opencode"
@@ -5613,11 +5629,29 @@ class ModelHubService:
                 ),
                 None,
             )
+            if served is None and native_sources:
+                provider, separator, model = selected.partition("/")
+                native_model = model if backend == "opencode" and separator else selected
+                if (
+                    (backend != "opencode" or (provider and separator and model))
+                    and native_model not in agent.removed_model_ids
+                    and native_model not in carried
+                    and any(
+                        (backend != "opencode" or native_provider == provider)
+                        and source_id in agent.sources.order
+                        and (source := source_by_id.get(source_id)) is not None
+                        and self._eligible_for_agent(source, backend)
+                        and source_supports_passthrough(source)
+                        and not source_model_retired(source, native_model)
+                        for native_provider, source_id in native_sources
+                    )
+                ):
+                    served = native_model
             if served is not None:
                 carried.append(served)
         if not carried:
             return
-        described = self._models_dev_descriptions(carried)
+        described = self._models_dev_descriptions(carried, fetch_catalog=fetch_catalog)
         for model_id in carried:
             candidate = self._provider_candidate(
                 config,
@@ -5633,7 +5667,7 @@ class ModelHubService:
                 checked=[model.id for model in agent.models],
             )
 
-    async def _seed_vibey(self, config: ModelHubConfig) -> bool:
+    async def _seed_vibey(self, config: ModelHubConfig, *, fetch_catalog: bool = True) -> bool:
         """Give a pending Vibey entry its starting supply, in place; whether it took.
 
         Its Sources are every existing one this backend may use, placed as a
@@ -5652,10 +5686,11 @@ class ModelHubService:
         agent = config.agents["vibey"]
         if not any(self._eligible_for_agent(source, "vibey") for source in config.sources):
             return False
-        # Seeded rows keep the models.dev metadata they are written with, so a
-        # seed with no copy cached fetches one in the foreground, bounded; a
-        # foreground fetch already running (the startup warm-up) is shared.
-        await asyncio.to_thread(self._ensure_models_dev_copy)
+        # Seeded rows keep the models.dev metadata they are written with.
+        # Migration uses only the cached copy so moving a saved key never waits
+        # on optional network metadata; ordinary background backfill still runs.
+        if fetch_catalog:
+            await asyncio.to_thread(self._ensure_models_dev_copy)
         config.vibey_supply_pending = False
         for source in config.sources:
             self._apply_source_placement(config, source, ("vibey",))
@@ -5685,7 +5720,7 @@ class ModelHubService:
             )
             if served is not None and served not in model_ids:
                 model_ids.append(served)
-        described = self._models_dev_descriptions(model_ids)
+        described = self._models_dev_descriptions(model_ids, fetch_catalog=fetch_catalog)
         rows = []
         for model_id in model_ids:
             match = described.get(model_id)
@@ -5697,12 +5732,14 @@ class ModelHubService:
             if candidate is not None:
                 rows.append(candidate[0])
         if not rows:
-            starting = self._vibey_starting_model(config)
+            starting = self._vibey_starting_model(config, fetch_catalog=fetch_catalog)
             rows = [starting] if starting is not None else []
         agent.models = rows
         return True
 
-    def _vibey_starting_model(self, config: ModelHubConfig) -> ModelHubBackendModelConfig | None:
+    def _vibey_starting_model(
+        self, config: ModelHubConfig, *, fetch_catalog: bool = True,
+    ) -> ModelHubBackendModelConfig | None:
         """The one model a seed with no qualifying selection starts Vibey on, or ``None``.
 
         The first model, in Vibey's Source order and then each Source's own
@@ -5722,7 +5759,7 @@ class ModelHubService:
                 if not model.retired
             )
         )
-        described = self._models_dev_descriptions(listed)
+        described = self._models_dev_descriptions(listed, fetch_catalog=fetch_catalog)
         for model_id in listed:
             match = described.get(model_id)
             if match is None or not _described_as_fit_for_agent_turns(match):

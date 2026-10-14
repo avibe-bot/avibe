@@ -37,8 +37,15 @@ def _seed_hub(app) -> None:
     _write(path, json.dumps(payload))
 
 
-def _assert_cpa_bearer_consumption(app, upstream, key: str) -> None:
-    """Read only fixture engine output; consume it through the actual CPA."""
+def _assert_cpa_bearer_consumption(app, upstream, key: str, source_id: str) -> None:
+    """After migration, explicitly discover the fixture model and consume CPA.
+
+    Migration no longer publishes an eagerly discovered ``mock-model`` alias.
+    Direct CPA calls bypass Avibe's per-request model admission, so this transport
+    check explicitly requests the inventory it needs after migration has finished.
+    """
+    refreshed = app.client.post(f"/api/models/sources/{source_id}/refresh", {})
+    assert refreshed.status == 200, refreshed.json()
     status = app.client.get("/api/models/runtime/status").json()["runtime"]["status"]
     listening = status["listening"]
     [config_path] = list((app.avibe_home / "runtime/model-hub/state/instances").glob("*/config.yaml"))
@@ -126,11 +133,16 @@ def test_f4_persisted_configuration_migrates_with_runtime_auth_present(
         assert rows[0]["proposed_action"] == "import"
         assert rows[0]["source_paths"] == [str(source_paths[0])]
         assert KEY not in json.dumps(rows)
-        applied = app.client.post("/api/models/migration/apply", {"item_ids": [rows[0]["id"]]})
+        applied = app.client.post(
+            "/api/models/migration/apply", {"item_ids": [rows[0]["id"]], "clean_api_keys": True},
+        )
         assert applied.status == 200, applied.json()
         assert applied.json()["applied"] == 1
         [source] = applied.json()["sources"]
         assert source["supply_channel"] == "hub"
+        assert source["protocol"] == protocol
+        assert source["verification_pending"]
+        assert mock_llm_upstream.requests() == []
         assert app.env == before_env
         if shell_fixture:
             assert source_paths[0].read_bytes() == retained.encode()
@@ -145,15 +157,15 @@ def test_f4_persisted_configuration_migrates_with_runtime_auth_present(
         assert app.client.post("/api/models/migration/scan", {}).json()["scan"]["items"] == []
 
         if backend == "claude":
-            # Test the pinned engine consumer, not just direct discovery proof.
-            _assert_cpa_bearer_consumption(app, mock_llm_upstream, KEY)
+            # Only a later real model call tests the pinned engine's transport.
+            _assert_cpa_bearer_consumption(app, mock_llm_upstream, KEY, source["id"])
 
 
 @pytest.mark.parametrize("required", [None, "fixture-rejected-key"], ids=["public", "wrong-key"])
-def test_f4_unproven_shell_key_is_not_removed(
+def test_f4_unproven_shell_key_is_copied_without_validation(
     model_hub_app_factory, mock_llm_upstream, required,
 ):
-    """F4: a readable static file is not proof of credential authentication."""
+    """F4: copying persisted configuration does not require upstream acceptance."""
     _configure_protocol(mock_llm_upstream, "anthropic")
     mock_llm_upstream.configure(required_api_key=required, required_auth_scheme="bearer")
     paths = []
@@ -172,16 +184,18 @@ def test_f4_unproven_shell_key_is_not_removed(
         rows = app.client.post("/api/models/migration/scan", {}).json()["scan"]["items"]
         assert len(rows) == 1 and rows[0]["proposed_action"] == "import"
         result = app.client.post("/api/models/migration/apply", {"item_ids": [rows[0]["id"]]})
-        assert result.status == 409, result.json()
+        assert result.status == 200, result.json()
+        assert result.json()["applied"] == 1
         assert paths[0].read_bytes() == before
-        assert app.client.get("/api/models/sources").json()["sources"] == []
+        assert len(app.client.get("/api/models/sources").json()["sources"]) == 1
+        assert mock_llm_upstream.requests() == []
 
 
 @pytest.mark.parametrize("shape", ["settings", "shell"])
-def test_f4_custom_api_key_refusing_bearer_is_kept_without_cleanup(
+def test_f4_custom_api_key_refusing_bearer_is_copied_without_validation(
     model_hub_app_factory, mock_llm_upstream, shape,
 ):
-    """F4: proof uses the Bearer header the pinned engine sends to a relay."""
+    """F4: relay authentication errors belong to later use, not key migration."""
     _configure_protocol(mock_llm_upstream, "anthropic")
     mock_llm_upstream.configure(required_api_key=KEY, required_auth_scheme="protocol")
     paths = []
@@ -207,11 +221,13 @@ def test_f4_custom_api_key_refusing_bearer_is_kept_without_cleanup(
         assert response.status == 200, response.json()
         [row] = response.json()["scan"]["items"]
         assert row["selected"] is True and row["proposed_action"] == "import"
-        refused = app.client.post("/api/models/migration/apply", {"item_ids": [row["id"]]})
-        assert refused.status >= 400, refused.json()
+        migrated = app.client.post("/api/models/migration/apply", {"item_ids": [row["id"]]})
+        assert migrated.status == 200, migrated.json()
+        assert migrated.json()["applied"] == 1
         assert paths[0].read_bytes() == before
-        assert app.client.get("/api/models/sources").json()["sources"] == []
-        assert all("x-api-key" not in request["headers"] for request in mock_llm_upstream.requests())
+        [source] = app.client.get("/api/models/sources").json()["sources"]
+        assert source["verification_pending"]
+        assert mock_llm_upstream.requests() == []
 
 
 @pytest.mark.parametrize("profile,writer", [
@@ -321,7 +337,9 @@ def test_f4_shell_data_roles_allow_http_migration_without_changing_data(
         [row] = response.json()["scan"]["items"]
         assert row["selected"] is True
         assert row["proposed_action"] == "import"
-        applied = app.client.post("/api/models/migration/apply", {"item_ids": [row["id"]]})
+        applied = app.client.post(
+            "/api/models/migration/apply", {"item_ids": [row["id"]], "clean_api_keys": True},
+        )
         assert applied.status == 200, applied.json()
         assert applied.json()["applied"] == 1
         assert len(applied.json()["sources"]) == 1
@@ -351,7 +369,7 @@ def test_f4_replace_migrated_bearer_without_old_secret_retains_cpa_transport(
         assert applied.status == 200, applied.json()
         [source] = applied.json()["sources"]
         assert source["credential_ref"].startswith("cred_auth_bearer_")
-        _assert_cpa_bearer_consumption(app, mock_llm_upstream, KEY)
+        _assert_cpa_bearer_consumption(app, mock_llm_upstream, KEY, source["id"])
         config_path = app.avibe_home / "config/config.json"
         agents_before = json.loads(config_path.read_text())["model_hub"]["agents"]
         old_path = (
@@ -377,7 +395,7 @@ def test_f4_replace_migrated_bearer_without_old_secret_retains_cpa_transport(
         assert not old_path.exists()
         pending = app.avibe_home / "state/model_hub_pending_revocations.json"
         assert json.loads(pending.read_text()) == []
-        _assert_cpa_bearer_consumption(app, mock_llm_upstream, replacement)
+        _assert_cpa_bearer_consumption(app, mock_llm_upstream, replacement, source["id"])
 
 
 @pytest.mark.parametrize("history", ["marked", "legacy-unknown"])
@@ -421,7 +439,9 @@ def test_f4_oauth_history_fence_survives_later_api_batch_over_http(
         applied = app.client.post("/api/models/migration/apply", {"item_ids": [api["id"]]})
         assert applied.status == 200, applied.json()
         assert "codex" in json.loads(paths[1].read_text())["oauth_custody_backends"]
-        sources_before = app.client.get("/api/models/sources").json()["sources"]
+        # Reading the Sources page starts independent background discovery.
+        # Use the migration receipt here so this custody test does not race it.
+        sources_before = applied.json()["sources"]
         [oauth] = app.client.post("/api/models/migration/scan", {}).json()["scan"]["items"]
         assert oauth["backend"] == "codex" and oauth["proposed_action"] == "import"
         mock_llm_upstream.reset_requests()
@@ -429,5 +449,5 @@ def test_f4_oauth_history_fence_survives_later_api_batch_over_http(
         assert refused.status == 409, refused.json()
         assert refused.json()["error"] == "migration_reauthorization_required"
         assert paths[0].read_bytes() == before
-        assert app.client.get("/api/models/sources").json()["sources"] == sources_before
         assert mock_llm_upstream.requests() == []
+        assert app.client.get("/api/models/sources").json()["sources"] == sources_before
