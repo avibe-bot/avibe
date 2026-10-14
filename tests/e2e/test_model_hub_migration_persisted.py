@@ -38,7 +38,15 @@ def _seed_hub(app) -> None:
 
 
 def _assert_cpa_bearer_consumption(app, upstream, key: str) -> None:
-    """Read only fixture engine output; consume it through the actual CPA."""
+    """After migration, explicitly discover the fixture model and consume CPA.
+
+    Migration no longer publishes an eagerly discovered ``mock-model`` alias.
+    Direct CPA calls bypass Avibe's per-request model admission, so this transport
+    check explicitly requests the inventory it needs after migration has finished.
+    """
+    [source] = app.client.get("/api/models/sources").json()["sources"]
+    refreshed = app.client.post(f"/api/models/sources/{source['id']}/refresh", {})
+    assert refreshed.status == 200, refreshed.json()
     status = app.client.get("/api/models/runtime/status").json()["runtime"]["status"]
     listening = status["listening"]
     [config_path] = list((app.avibe_home / "runtime/model-hub/state/instances").glob("*/config.yaml"))
@@ -330,7 +338,9 @@ def test_f4_shell_data_roles_allow_http_migration_without_changing_data(
         [row] = response.json()["scan"]["items"]
         assert row["selected"] is True
         assert row["proposed_action"] == "import"
-        applied = app.client.post("/api/models/migration/apply", {"item_ids": [row["id"]]})
+        applied = app.client.post(
+            "/api/models/migration/apply", {"item_ids": [row["id"]], "clean_api_keys": True},
+        )
         assert applied.status == 200, applied.json()
         assert applied.json()["applied"] == 1
         assert len(applied.json()["sources"]) == 1
@@ -430,7 +440,9 @@ def test_f4_oauth_history_fence_survives_later_api_batch_over_http(
         applied = app.client.post("/api/models/migration/apply", {"item_ids": [api["id"]]})
         assert applied.status == 200, applied.json()
         assert "codex" in json.loads(paths[1].read_text())["oauth_custody_backends"]
-        sources_before = app.client.get("/api/models/sources").json()["sources"]
+        # Reading the Sources page starts independent background discovery.
+        # Use the migration receipt here so this custody test does not race it.
+        sources_before = applied.json()["sources"]
         [oauth] = app.client.post("/api/models/migration/scan", {}).json()["scan"]["items"]
         assert oauth["backend"] == "codex" and oauth["proposed_action"] == "import"
         mock_llm_upstream.reset_requests()
@@ -438,5 +450,5 @@ def test_f4_oauth_history_fence_survives_later_api_batch_over_http(
         assert refused.status == 409, refused.json()
         assert refused.json()["error"] == "migration_reauthorization_required"
         assert paths[0].read_bytes() == before
-        assert app.client.get("/api/models/sources").json()["sources"] == sources_before
         assert mock_llm_upstream.requests() == []
+        assert app.client.get("/api/models/sources").json()["sources"] == sources_before
