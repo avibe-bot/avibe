@@ -1,7 +1,7 @@
 # Model Hub capability model
 
-Status: **design**, 2026-10-13. Consumers: [`vibey-hosted-tools.md`](vibey-hosted-tools.md) and the effort menu
-(avibe-bot/avibe#2539). It extends [`model-hub-reasoning-intent.md`](model-hub-reasoning-intent.md) and
+Status: **design**, 2026-10-13; evidence made passive-only on 2026-10-15 with hosted tools design v2 (no probes).
+Consumers: [`vibey-hosted-tools.md`](vibey-hosted-tools.md) and the effort menu (avibe-bot/avibe#2539). It extends [`model-hub-reasoning-intent.md`](model-hub-reasoning-intent.md) and
 [`model-hub-reasoning-tiers.md`](model-hub-reasoning-tiers.md); it does not replace their forwarding rule.
 
 ## 1. Problem
@@ -28,16 +28,18 @@ fact apart and gives each one owner.
 | --- | --- | --- | --- | --- |
 | **Base** | (provider, model) | models.dev, cached by `vibe/models_dev_catalog.py` | context and output limits, modalities, `tool_call`, `reasoning`, `reasoning_options` (wire effort values), token prices including context tiers (§6) | anything about a specific Source or relay |
 | **Overlay** | provider model family, per protocol | Avibe. `vibe/data/backend_models.json` becomes the one overlay: its backend rows plus a new provider-neutral `providers` section (§4) | corrections and additions to the base: wire effort tiers where models.dev is wrong or late; **client presets** that never go on the wire (Codex `ultra`); **hosted tools** the provider offers for the model on that protocol; hosted-tool prices (§6) | per-Source truth; an allowlist |
-| **Evidence** | (Source, model, feature) | Model Hub state, next to Source health | the outcome of a live probe, or negative evidence learned from a real upstream error, with time, basis and scope | priors |
+| **Evidence** | (Source, model, feature) | Model Hub state, next to Source health | what real requests showed: negative evidence from a real upstream error, and positive evidence from a real response that carried the feature (display only), with time, wire stamp and scope | priors; anything learned without a real request the user's turn made |
 
 Rules:
 
 1. **Base and overlay are priors.** They decide what Avibe offers and shows before anything is known about a Source.
    They never block a request (reasoning-intent decision of 2026-09-08: capability declarations are not an
    allowlist).
-2. **Evidence decides routing.** It is the only layer that may change what a hop receives.
-3. **The #2505 rule applies to every fact.** Unknown is not negative. Only explicit negative evidence excludes, and
-   only positive evidence enables a feature whose failure is terminal.
+2. **Negative evidence decides routing.** It is the only layer that may take a feature away from a hop. Positive
+   evidence never changes routing; it only tells the user what ran (`vibey-hosted-tools.md` §8).
+3. **The #2505 rule applies to every fact.** Unknown is not negative. Only explicit negative evidence excludes.
+   Since hosted tools design v2, a hosted tool the priors offer is assumed on a hop until a real request refuses it:
+   nothing is probed, and a refusal before output costs one re-rendered request (`vibey-hosted-tools.md` §3.5).
 4. **One overlay.**
    - `backend_models.json` already overlays efforts for native backends.
    - Its backend rows gain `client_presets`, effort names a client maps before sending (Codex `ultra`). These are
@@ -64,16 +66,16 @@ is its JSON Schema. The store is `core/handlers/model_hub/capability_evidence.py
 | --- | --- |
 | `version` | `1` |
 | `source_id`, `model_id` | non-empty |
-| `feature` | `{kind: "effort", name}` or `{kind: "hosted_tool", name: "web_search" \| "x_search" \| "image_generation", aspect: "call" \| "replay"}`; `image_generation` has `call` only |
-| `status` | `verified` or `unsupported` |
-| `basis` | `probe` (a live probe the user started) or `observed` (learned from a real request's error) |
+| `feature` | `{kind: "effort", name}` or `{kind: "hosted_tool", name: "web_search" \| "x_search" \| "image_generate", aspect: "call" \| "replay"}`; `image_generate` has `call` only |
+| `status` | `verified` (a real response carried the feature; display only) or `unsupported` (a narrow rule fired) |
+| `basis` | `observed`: learned from a real request. There is no other basis (v1's `probe` is gone). |
 | `observed_at` | UTC timestamp |
-| `engine` | engine wire at that time: the shipped engine manifest's `hosted_wire` (the oldest release whose hosted passthrough is byte-identical, kept by the engine release gate), else its asset release; a change makes `probe` evidence stale (§3.3) |
-| `shape` | version of the request shape that produced the record; a change makes `probe` evidence stale |
-| `detail` | required when `basis` is `observed`: the HTTP status and upstream machine code, e.g. `400 invalid_value`, at most 64 characters, never upstream text |
+| `wire` | the wire stamp the record was observed under: the engine release plus a digest of the Source's rendered engine entry, credentials and model list excluded (§3.3) |
+| `detail` | required when `status` is `unsupported`: the HTTP status and upstream machine code, e.g. `400 invalid_value`, at most 64 characters, never upstream text |
 | `source_identity` | digest of `retry.source_identity` when the record was written |
 
-`observed` evidence is always `unsupported`.
+Records an rc build wrote with `basis: probe`, `shape` or `image_generation` do not validate, so they are pruned at
+the next write (pre-release state, no migration).
 
 Records live in the Model Hub state directory (`model_hub_capability_evidence.json`). They follow Source identity:
 `retry.source_identity` covers kind, vendor, protocol, channel, base URL, credential and credential generation.
@@ -97,49 +99,48 @@ no marker, and a pending one's marker becomes its generation.
   - `Unsupported tool type: <type>` for a type the request declared, matched to a catalog tool through the
     overlay's declaration for that Source and model → hosted tool `call`;
   - `Invalid encrypted_content in search_result block` while the request replays a web-search result → hosted
-    tool `web_search` `replay`.
+    tool `web_search` `replay`;
+  - xAI's plain-text `Could not decrypt the provided encrypted_content` (no code) while the request replays an xAI
+    payload: its status waits for the Vibey lane's xAI A/B (stale ciphertext versus unsupported). Until then it
+    writes no evidence and only turns replay off for that Source for the rest of the turn.
+- **Positive, display only.** A served response that carries the provider's own item for a hosted tool the request
+  declared natively writes `verified` for the serving (Source, model, tool, `call`); a proxy executor call and a
+  successful image call do the same for the Source that ran them. It is written only when the state changes or the
+  existing record is over an hour old, so the evidence file is not rewritten per response
+  (`vibey-hosted-tools.md` §3.2).
 - **Generic errors never create evidence.** That covers 5xx, overload, rate limit, auth, and any 400 that does not
   name the feature.
 - **What happens to the request.**
   - An effort rule match fails the request as it does today. The next request skips that hop (§3.4).
-  - A hosted-content rule match on a pinned request becomes `pin_unavailable`. Vibey re-sends the same request in
-    portable form at once (`vibey-hosted-tools.md` §3.5).
-- Negative `observed` evidence expires after 7 days. Relays change, and an expired record falls back to the priors.
-  A user's re-verify replaces it at once.
+  - A hosted-content rule match on a pinned request becomes `pin_unavailable` with a machine-readable `reason`. Vibey
+    re-resolves the hop, whose fresh facts now name that tool as unsupported, and resends with the same-named function
+    (`vibey-hosted-tools.md` §3.5).
+- Negative evidence expires after 7 days. Relays change, and an expired record falls back to the priors.
 
-### 3.3 Probes and re-verification
+### 3.3 No probes; the wire stamp
 
-- **A probe is a real upstream call.** It costs money (about $0.01–0.05; the 2026-10-13 spike measured it). It
-  runs only on an eligible credential, and a Claude subscription Source is never eligible
-  (`vibey-hosted-tools.md` §3.4). It runs only on an explicit user action:
-  - enabling a hosted tool for a Source (or choosing it as the proxy executor);
-  - the Source card's *Re-verify*;
-  - confirming one pending re-verification that the UI lists (below).
-
-  A probe never runs as a silent background job.
-- **The probe spec belongs to the feature.**
-  - Hosted tools: [`vibey-hosted-tools.md`](vibey-hosted-tools.md) §3.2.
-  - Efforts: one minimal request at that effort. Only the efforts a user actually selects are ever probed.
-- **Probe evidence becomes stale** on an engine upgrade that changes `hosted_wire`, a probe-shape change, or when it is 30 days old. A byte-identical engine upgrade keeps `hosted_wire`, so it re-probes nothing.
-  - **Current-wire staleness** (the record's `engine` or `shape` differs from the current one) matters for hosted
-    tools. Their positive evidence is needed because a native failure can be silent (§3.4). Evidence taken on another
-    wire cannot vouch for this one, and a silent drop would never trip a narrow rule. So stale hosted-tool `call` and
-    `replay` evidence counts as unknown for routing: proxy mode and synthetic replay, both lossless.
-  - **Age-only staleness** keeps routing as it did: the wire Avibe sends has not changed.
-  - **Effort evidence is unchanged.** It is negative only, and stale negative evidence still skips the hop until it
-    expires.
-  - The Source card marks stale records "re-verify", and Models lists them with one confirm action. After an engine
-    upgrade the Tools tab says why native turned into proxy (`vibey-hosted-tools.md` §6.1).
-- **Positive evidence is demoted** by a narrow negative rule (§3.2) on a later real request.
+- **Nothing probes.** Since hosted tools design v2 (2026-10-15) no component calls a provider to learn a capability:
+  not on a user action, not in the background. Efforts were never probed; hosted tools no longer are. Every record
+  comes from a real request in a turn the user started (§3.2).
+- **Negative evidence never outlives the wire it was learned on.** Each record carries `wire`: the engine release
+  plus a digest of the Source's rendered engine entry (what Avibe writes into the engine config for that Source),
+  credentials and the model list excluded. A record whose stamp differs from the current one reads as unknown, for
+  efforts and hosted tools alike. So a refusal learned under one engine or one rendered config cannot survive a
+  change that could reverse it: an engine upgrade, or a rendering change such as the `is-compat` flag for xAI
+  (#2620), which changes what xAI receives for replayed reasoning. The 7-day TTL bounds whatever the stamp does not
+  capture, such as a change on the provider's side.
+- **What goes.** v1's `shape` field, probe-shape staleness, age-based re-verification, and the `hosted_wire`
+  manifest field (never introduced; `engine_stamp()` loses its `hosted_wire` branch). Positive evidence needed them
+  because it vouched for a wire; it no longer vouches for anything.
 
 ### 3.4 How layers resolve
 
 | Consumer | Rule |
 | --- | --- |
 | Effort menu for a model on an Agent | each hop's declared tiers, then the union across hops. A hop's declared tiers follow `model-hub-reasoning-tiers.md`'s ladder: an upstream reasoning signal (the protocol's ladder, bounded by the model's catalog row when it has one), else the bundled backend row's efforts minus that row's `client_presets` (provenance `catalog`; it outranks a user list, with a visible override event), else the user's list, else models.dev `reasoning_options` when the catalog row is built. A persisted `catalog` list is also read without `client_presets`, since released builds wrote them, and Vibey's own model rows always drop them at config load (3.2.0 saved rows with Codex's `ultra`; Vibey is never the client a preset belongs to, and no provider documents `ultra` as a wire effort). A user-authored Source list is never filtered. The overlay's `wire_efforts` slots in before the backend row once a vendor needs it; no shipped entry sets it yet. A tier is omitted only if **every** hop that can serve the model has negative evidence for it: every hop the route would try or wait for, exactly the hops whose refusal ends a request in `effort_unsupported`. A tier with negative evidence on some hops is shown with "not on: <Source>". Evidence is keyed by the token a client puts on the wire, which can differ from the menu value: Vibey sends menu `minimal` to Anthropic as `low`. So Model Hub decides both in menu values, where routing decides, and the picker's own read (`GET /api/models/agents/<backend>/models`, an Editor surface) carries the result per model as the response-only `effort_menu`. Vibey's adapters map each menu value through the one function their request builders use (`registry.sent_effort`); a native CLI sends the value as the menu names it. The chain API keeps each hop's read-only `refused_efforts` (`agent-chain.schema.json`) for the evidence detail. |
-| Effort at request time | Forwarded unchanged (reasoning-intent). A hop with **negative** evidence for that effort is skipped for this request, as if it were not a candidate. If no candidate remains, the request fails before invocation with `effort_unsupported` naming the effort and the Sources, instead of a provider 400. Never clamped silently. |
-| Hosted tool mode on a hop | `native` only with positive `call` evidence taken on the current engine and probe shape, and the user's toggle on; otherwise the gateway proxy (`vibey-hosted-tools.md`). A wrong native declaration is a terminal 400 or a silent drop; the proxy is lossless. So this feature needs positive evidence, unlike efforts. |
-| Native payload replay | only to the same Source, and only while its `replay` evidence is positive and taken on the current engine and probe shape. The decision is made at every request from `HopResolution`; the transcript never stores it. |
+| Effort at request time | Forwarded unchanged (reasoning-intent). A hop with current **negative** evidence for that effort is skipped for this request, as if it were not a candidate. If no candidate remains, the request fails before invocation with `effort_unsupported` naming the effort and the Sources, instead of a provider 400. Never clamped silently. |
+| Hosted tool on a hop | `native: assumed` when the overlay offers the tool for the hop's (Source, model) on an untranslated path with an eligible credential (`runs_on`) and no current negative `call` evidence exists; otherwise `unsupported`, and Vibey declares the same-named function (`vibey-hosted-tools.md` §3.4). A refusal costs one re-rendered request; a silent drop is undetectable and accepted (`vibey-hosted-tools.md` §15). |
+| Native payload replay | `replay: assumed` under the same conditions and no current negative `replay` evidence, only to the Source and identity that minted the payload, on the same origin. Decided at every request from `HopResolution`; the transcript never stores it. |
 | Display | §5 |
 
 This fixes #2539 in three places (Phase 1 PR 1b):
@@ -185,10 +186,13 @@ Fields of one vendor entry, mirrored by
 | `models[]` | required; ordered, first match wins |
 | `match` | exactly one of `prefix` or `id`, non-empty |
 | `wire_efforts` | a list of effort names, or `null` (or absent) to defer to models.dev |
-| `hosted_tools` | optional; protocol (`anthropic`, `openai_responses`, `openai_chat`, `google`) → tool (`web_search`, `x_search`, `image_generation`) → `{declaration, price?, include?}`. `declaration` is required, has a `type`, and is sent verbatim. `price` is optional: absent means no list price is known, never zero. OpenAI prices image generation per image token, not per image, so its `image_generation` entry has none. `include` lists Responses `include` values the tool needs (OpenAI web search: `web_search_call.action.sources`). |
-| `price` | `unit` (`call`, `search`, `post`, `profile`), `usd_per_1k` ≥ 0, `as_of` (date) and `url` (https), all required; optional `extra[]` of `{unit, usd_per_1k}`. A per-image unit, whose entries would also carry `quality` and `size`, waits for a vendor that lists a per-image price. |
-- The overlay records what the **provider** offers. Whether a Source (a relay, a subscription) carries it is
-  evidence.
+| `hosted_tools` | optional; protocol (`anthropic`, `openai_responses`, `openai_chat`, `google`) → search tool (`web_search`, `x_search`) → `{declaration, price?, include?}`. `declaration` is required, has a `type`, and is sent verbatim. `price` is optional: absent means no list price is known, never zero. `include` lists Responses `include` values the tool needs (OpenAI web search: `web_search_call.action.sources`). v1's OpenAI `image_generation` entry is removed: no chat request declares a hosted image tool (`vibey-hosted-tools.md` §7). |
+| `executor_model` | new, optional per family: the vendor's lightweight model id that runs proxied search calls on this vendor's Sources (`vibey-hosted-tools.md` §6), e.g. a Haiku, mini or fast tier. A family without it is never an executor. |
+| `image_models[]` | new, optional per vendor: `{id, description, endpoint: "images" \| "chat_image", params, price?}`. `description` is the one line the `image_generate` enum shows; `endpoint` says how the gateway runs it (the engine's images endpoints, or the chat route with the image response modality); `params` lists which common parameters the model takes (`size` or `aspect_ratio`, `images`, `n`); `price` as for `hosted_tools`, with a per-image unit where the vendor lists one. Only models whose route the implementation verified through the shipped engine are listed. |
+| `price` | `unit` (`call`, `search`, `post`, `profile`, `image`), `usd_per_1k` ≥ 0, `as_of` (date) and `url` (https), all required; optional `extra[]` of `{unit, usd_per_1k}`. An `image` unit may carry `quality` and `size` when the vendor prices them apart. |
+- The overlay records what the **provider** offers, and it is the prior every hop starts from: a hosted tool is
+  assumed where the overlay offers it, until a real request refuses it. Whether a Source (a relay, a subscription)
+  actually carries it is learned passively (§3.2).
 - An invalid vendor entry disables that entry with a warning; startup never fails. A `providers` value that is not
   an object disables the whole overlay. Backend rows never depend on the section.
 - The section is read from the bundled file only, never from the remote catalog copy that refreshes backend rows:
@@ -202,16 +206,14 @@ and the existing tone vocabulary (`TimeHint` for dates):
 
 | Evidence | Chip | Example |
 | --- | --- | --- |
-| hosted tool, `call` verified | native, with date | "Web search · native · verified 10-13" |
-| hosted tool, no evidence or unsupported, while the tool is enabled | via proxy | "X search · via proxy (xAI API key)" |
-| hosted tool, `call` unsupported | not supported, with basis | "X search · not supported on this Source" |
-| effort unsupported | not supported, with basis | "ultra · not supported on this Source (400, 10-13)" |
-| probe evidence stale by age | re-verify | "Web search · verified 09-02 · re-verify" |
-| hosted-tool evidence from another engine or probe shape | via proxy, re-verify | "Web search · via proxy · engine upgraded · re-verify" |
+| hosted tool, `call` verified (seen in a real response) | normal, with the time | "网页搜索 · 正常 · 10-15" |
+| hosted tool, `call` unsupported | not supported | "X 搜索 · 不支持" |
+| effort unsupported | not supported | "ultra · 不支持" |
 
 - Unknown draws nothing. A healthy unknown is the normal case and must not look like a warning (V6 rule:
   exceptions only).
-- Each probe-backed chip has a *Re-verify* action with its cost hint ("about $0.02").
+- A chip opens a detail popover (time, basis, the refusal's HTTP status and code) and has no action: there is
+  nothing to re-check (`vibey-hosted-tools.md` §8.2).
 
 ## 6. Pricing
 
@@ -262,23 +264,20 @@ and the existing tone vocabulary (`TimeHint` for dates):
 
 ### 6.4 What hosted tools need from pricing
 
-1. **A per-call cost hint** in Models (the Tools tab and the probe confirm) and on the use-time card:
-   - native: the tool fee per call plus a token estimate;
-   - proxy: the same plus the executor model's call.
+1. **A per-call price** on the Tools tab (the overlay's list price per tool) and the real cost on the use-time card:
+   - native: the tool fee plus the response's tokens;
+   - proxy: the executor's lightweight-model call plus the tool fee;
+   - `image_generate`: the image model's per-image price where listed, else its reported usage at its token rate.
 
-   Before a probe runs, the Tools read states each candidate's `probe_estimate`: one call probe priced from its
-   nominal usage (`hosted_probe.ESTIMATED_USAGE` and one search's counters), `included` on a monthly Source, and
-   unknown rather than zero when the model has no token price.
-
-   All of it is computed by the one pricing owner, `pricing.py` (`hosted_response_cost`, reached through
+   There is no estimate before a call: nothing runs before the model calls a tool. All of it is computed by the one pricing owner, `pricing.py` (`hosted_response_cost`, reached through
    `ModelHubService.hosted_call_cost`, which reads only the price table the usage writer already holds, so pricing a
    response does no I/O). It is stored once per response: as the message's
    `hosted_summary.cost` for native calls, and as `ProxyExecution.cost` for a proxied call, which is its own executor
    response. A provider-reported figure is never copied into individual calls. Neither the
    executor nor an adapter prices anything itself.
-2. **Executor choice.** The Tools tab lists the verified executor candidates with their cost hints and billing mode.
-   The user picks one; the default is the first verified candidate in Vibey's Source order. Avibe does not
-   auto-optimize cost in Phase 1, because relay prices are unknowable.
+2. **Executor choice is automatic.** The chain is the Sources whose vendor offers the tool, in the user's optional
+   executor order, then Vibey's Source order, each on its vendor's lightweight model (`vibey-hosted-tools.md` §6).
+   Avibe does not auto-optimize cost, because relay prices are unknowable.
 3. **Usage accounting.** The proxy executor's calls are metered like any gateway call (usage ledger, provenance),
    attributed to the executor Source.
 
@@ -299,10 +298,9 @@ No new billing store, budget, or cap.
 1. A fact from models.dev or the overlay never blocks a request or removes a tier on its own. Only evidence does.
 2. Only a narrow rule creates negative evidence. The rule names the (Source, model, feature) it learned. A generic
    error creates none.
-3. No probe runs without a user action, and every probe action shows its cost before it runs.
-4. Changing a Source's identity drops its evidence. An engine upgrade that changes `hosted_wire` marks probe
-   evidence stale; it does not delete it. Stale hosted-tool evidence from another engine or probe shape never authorizes native mode or native
-   replay.
+3. Nothing probes. Every evidence record comes from a real request in a turn the user started.
+4. Changing a Source's identity drops its evidence. Negative evidence reads as unknown once its wire stamp differs
+   from the current one or it is 7 days old. Positive evidence never changes routing.
 5. #2539: a Source that rejected `ultra` shows "ultra · not supported on this Source". The next request at `ultra`
    either skips that hop or fails before invocation with `effort_unsupported`, never a provider 400.
 6. Valuation applies context tiers when a call's input tokens exceed the tier size. A model with tiers and no flat
