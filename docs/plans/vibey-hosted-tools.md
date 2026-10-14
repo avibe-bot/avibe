@@ -87,8 +87,9 @@ The user has an Anthropic API key, an xAI API key and an OpenAI API key, and has
 - **The catalog is the overlay's `providers` section** (capability model §4), bundled with the code that sends its
   declarations. For each vendor and model family, per protocol, it holds:
   - the native declaration of each search tool the vendor offers, with its `include` values and list price;
-  - new: `executor_model`, the vendor's lightweight model that runs proxied search calls (§6), e.g. Anthropic's
-    Haiku tier, OpenAI's mini tier, xAI's fast tier. The implementation PR picks the shipped ids;
+  - new, at vendor scope: `executor_model`, the vendor's lightweight model that runs proxied search calls (§6), e.g.
+    Anthropic's Haiku tier, OpenAI's mini tier, xAI's fast tier; the executor call uses the declaration of the family
+    row that model matches. The implementation PR picks the shipped ids;
   - new: `image_models`, the vendor's image models with a one-line description, the endpoint kind (§7.4), the
     parameters each supports, and a list price where one exists.
 - **What priors decide.** Which tools a hop may declare natively, which Sources can run a proxied search, and which
@@ -144,9 +145,10 @@ The evidence store, its record and its owner are the capability model's §3. v2 
   - Generic errors never create evidence: 5xx, overload, rate limit, auth, and any 400 that does not name the
     feature.
 - **Lifetime.** Negative evidence expires after 7 days (relays change). It also never outlives the wire it was
-  learned on: every record carries the wire stamp it was observed under, the engine release plus a digest of the
-  Source's rendered engine entry (credentials and the model list excluded), and a record whose stamp differs from
-  the current one reads as unknown. The stamp is computed when the engine config is rendered (`sync_sources`) and
+  learned on: every record carries the wire stamp it was observed under, the engine release, the Avibe release (which covers
+  the bundled overlay's declarations and the adapters' request shape), and a digest of the Source's rendered engine
+  entry (credentials and the model list excluded), and a record whose stamp differs from the current one reads as
+  unknown. The stamp is computed when the engine config is rendered (`sync_sources`) and
   held in memory per Source; evidence reads and writes take it from memory and never render on a request path, as
   `engine_stamp()` is never called on one. So a refusal learned under one engine or one rendered config cannot survive a
   change that could reverse it, such as the dependency lane's `is-compat` flip for xAI (#2620), which changes what
@@ -181,9 +183,10 @@ The evidence store, its record and its owner are the capability model's §3. v2 
 
   - **Absence means on.** The section is absent on every released config, so an upgrade from 3.2.0 turns every
     tool on (owner decision, §0). A tool key the loader does not know is ignored with a warning.
-  - An rc-era section is not migrated. Its `image_generation` key is an unknown tool key and is ignored; an entry
-    with v1's `executor` field is invalid, so the loader drops the whole section with one warning and the tools take
-    their defaults. That is the existing safe-degradation rule for an optional feature, with no rc-specific code.
+  - The loader ignores, with a warning, an unknown tool key and an unknown field inside an entry, and keeps the
+    fields it knows. So an rc-era section keeps each tool's `enabled`, and a user's explicit opt-out survives the
+    upgrade; its `image_generation` key and v1's `executor` field are ignored. This is one generic loader rule, not
+    rc-specific code.
   - A settings change applies from the next turn, as every runtime config change does.
 - **API.** Saved and effective values are separate fields, and the UI never writes back an effective value: v1's
   toggle echoed the resolved executor and so froze "automatic" into a saved choice.
@@ -217,8 +220,9 @@ The evidence store, its record and its owner are the capability model's §3. v2 
 
   `replay` is `assumed` when `native` is, the protocol replays natively (`anthropic`, `openai_responses`), and no
   current negative `replay` evidence exists.
-- **`image_generate`** gets `{models: [{source_id, model_id, description}], default: {source_id, model_id}}`: every
-  image model the user's Sources make available (§7.2), in the order the enum uses.
+- **`image_generate`** gets `{models: [{source_id, model_id, description, params}], default: {source_id,
+  model_id}}`: every image model the user's Sources make available (§7.2), in the order the enum uses. The entry is
+  absent when the tool is off or no image model is available, so `models` is never empty and `default` never null.
 - **What goes away:** `mode` (Vibey decides), `executor` (the gateway resolves the chain per call), and every
   dependence on positive evidence.
 - **The turn freezes the tool list.** A turn's first resolution fixes which tools the turn declares, one name per
@@ -256,8 +260,9 @@ failover, and is refused unpinned (C-6 item 7). What changes is what happens aft
   - **Bounds.** At most one re-resolve per (turn, Source, tool, aspect) for `hosted_unsupported`, and at most two
     re-resolves per turn across all reasons. When the fresh hop comes back on the same Source with the same facts,
     Vibey renders portable at once instead of resending the same request.
-  - **In-flight continuations** (Anthropic `pause_turn`, or client tool results after server tools) keep their
-    hosted items verbatim only while the fresh hop still declares that tool natively. Otherwise the items take the
+  - **In-flight content in the next request** (client tool results after server tools in the same assistant
+    message) keeps its hosted items verbatim only while the fresh hop still declares that tool natively. The
+    adapter's own `pause_turn` continuations are not re-rendered at all (§4.3). Otherwise the items take the
     in-place text form (§4.4), because a provider refuses `server_tool_use` without its declaration.
   - **A decrypt refusal** (§3.2, xAI) is mostly unpinned: xAI's encrypted reasoning (ThinkingBlock signatures,
     `rs_…`/`tco_…` items) rides ordinary requests, and only hosted content pins. The gateway passes it through as the
@@ -320,10 +325,15 @@ never dropped.
   `counts` (provider counters by name), `cited_sources[]` (the xAI X-search `url_citation`s).
 - **`TextBlock.citations`** (optional): `[{url, title?, cited_text?, start?, end?}]`, presentation only, never
   replayed, materialized at delivery by `core/citations.py`.
-- **`ToolResultMessage.hosted`** (optional): `{record, execution?}` for a proxied search call and for every
-  `image_generate` call. `execution` (`ProxyExecution`: `executor_origin`, `executor_source_id`, `executor_billing`,
-  `cost?`) is present exactly when an executor or image endpoint ran; `is_error` is true exactly when the record is
-  `failed` or `incomplete`.
+- **`ToolResultMessage.hosted`** (optional): `{record, execution?, action?}` for a proxied search call and for every
+  `image_generate` call.
+  - `execution` (`executor_origin`, `executor_source_id`, `executor_billing`, `cost?`) is present exactly when an
+    executor or image endpoint ran. Its `mode` is `proxy` for a search executor and `direct` for an image endpoint.
+    `cost` covers every billable attempt the call made (§6), and `executor_source_id` names the Source whose
+    response the record came from.
+  - `action` is what the executor reports it did, beside the record, as today: for `image_generate`, the `generate`
+    action with the `model` used, the prompt it rendered, and the resolved size.
+  - `is_error` is true exactly when the record is `failed` or `incomplete`.
 - A native hosted call always has its native payload. A proxied search or an image call is a `ToolCallBlock` plus
   `ToolResultMessage.hosted`, never a `HostedToolBlock`.
 - **Native image items are not hosted items.** Vibey never declares `image_generation` (and §7.1 keeps any caller
@@ -397,9 +407,10 @@ These rules are C-1 rows in `cross-provider.md` and per-protocol rows in `conver
   gateway resolves the chain from the caller's live turn (`x-avibe-turn-id`). A call without a live turn, or from a
   turn that no longer admits work, is 409 `turn_not_live`; a tool outside the turn's frozen tool set (§3.4) is 409
   `tool_not_enabled`. Nothing runs. v1's `executor_not_bound` is retired with the binding.
-- **The frozen tool set lives on the turn.** The turn's first resolution writes its tool set, and the
-  `image_generate` enum, once to the turn trace (`hosted_tools`, replacing the write-once `hosted_executors`), and
-  the endpoint authorizes every call against it.
+- **The frozen tool set lives on the turn.** The turn's first resolution writes its tool set, each search tool's
+  effective executor order, and the `image_generate` enum, once to the turn trace (`hosted_tools`, replacing the
+  write-once `hosted_executors`). The endpoint authorizes every call against it, and a settings or Source-order change
+  applies from the next turn, as every runtime config change does.
 - **The turn still owns the call.** The endpoint stays authorized by the live named turn (#2586's `x-avibe-turn-id`
   and closed admission); only the per-turn executor binding goes. Stopping the turn cancels the call, and it is
   still metered. A candidate whose identity changed since the chain was built is not used.
@@ -407,7 +418,9 @@ These rules are C-1 rows in `cross-provider.md` and per-protocol rows in `conver
   1. Candidates are the Sources whose vendor offers the tool natively (§3.1), with `runs_on` holding for the
      vendor's `executor_model` and no current negative `call` evidence for that pair. So a subscription that does
      not list the vendor's lightweight model is excluded when the chain is built, not found by a 404.
-  2. Order: the user's `executor_order` when set, then the remaining candidates in Vibey's Source order.
+  2. Order: the turn's frozen effective order, which is the user's `executor_order` when set, then the remaining
+     candidates in Vibey's Source order, as they stood at the turn's first resolution. A Source added mid-turn joins
+     from the next turn.
   3. The gateway admits each candidate on the final snapshot, under the mutation lock, at the moment it calls it
      (`runs_on`, identity, no negative `call` evidence), so a config change during the chain moves on instead of
      calling a removed or re-identified Source. It calls the first admitted candidate: one short native request on
@@ -426,8 +439,9 @@ These rules are C-1 rows in `cross-provider.md` and per-protocol rows in `conver
   5. With no candidate, or every candidate failed, the call returns a `failed` record naming what to add ("add an
      xAI Source to use X search").
   - **One deadline for the whole chain**, the tool's call timeout (180 s for search), not one per candidate.
-  - Each candidate tried is metered on its own Source; the result's `ProxyExecution` names the Source that served
-    it, with that call's cost.
+  - Each candidate tried is metered on its own Source. The result's `execution.cost` is the sum over every billable
+    attempt of the call, failed ones and the all-failed case included, and `executor_source_id` names the Source
+    whose response the record came from (the last one tried when all failed).
   - The executor request is a short model request because no vendor exposes search without a model: Anthropic,
     OpenAI's public API, xAI and Google all run search inside a model call.
 - **The result is the canonical record** (v1's rules, unchanged): a `HostedRecord` with `sources[]` in the
@@ -468,8 +482,10 @@ E2E stay.
     `model` description; every line stays short, because the tool block is in every request's prefix. The default is listed first and marked "(default)"; the rest follow sorted by id. So the
     enum is a pure function of configuration and changes only on a config event, and the turn freezes it (§3.4).
   - **Common parameters only.** `prompt`, `size` (a size or an aspect ratio, mapped per endpoint), `images`
-    (reference images for an edit) and `n` where the model supports more than one. A model-specific option stays
-    optional and is ignored by a model without it.
+    (reference images for an edit) and `n`. The overlay's `params` say which of `size`, `images` and `n` each model
+    takes. A call that passes one the chosen model does not take returns a `failed` record naming the argument and
+    the models that take it, before anything runs: silently dropping `images` would turn an edit into an unrelated
+    generation.
   - **No tool without a model.** With no image model available, `image_generate` is not declared at all, and the
     Tools card says what to add (§8).
 - **The default** is `model_hub.hosted_tools.image_generate.default_model` (§3.3), else the first available model in
@@ -481,8 +497,8 @@ Unchanged from v1 §7.3 (owner decision, 2026-10-13 19:14), with the producer no
 - **The model is not given the image.** The gateway returns the bytes to Vibey's tool runtime over the local hop;
   Vibey saves them through the session media sink, the only writer of session media, and builds the `HostedRecord`
   with `images[]` path records. The bytes are never in a transcript.
-- **The model gets a text path record:** path, model, size, mode and cost, rendered from the record, the `generate`
-  action (which now names the `model`) and the `ProxyExecution`, e.g.
+- **The model gets a text path record:** path, model, size, mode and cost, rendered from the record, the result's
+  `generate` action (which now names the `model`) and its `execution`, e.g.
   `[image saved: /…/image-3f2a.jpeg · 1536×1024 · gpt-image-2 (OpenAI API key) · ≈ $0.04] prompt: "…"`. It opens the
   file with `read` if it wants to look. A request asks the endpoint for JPEG where the model allows it, so a file
   fits `read`'s inline image cap; a file still over it gets a record saying it is too large to view inline.
@@ -546,9 +562,10 @@ Unchanged from v1 §7.3 (owner decision, 2026-10-13 19:14), with the producer no
   - **搜索**: 网页搜索, X 搜索;
   - **生成**: 图片生成.
 - **The subtitle says where content goes**, plainly, because tools are on by default:
-  - en: "Tools Vibey can use in a conversation. Searches send the query to the vendor that runs them, and image
-    prompts go to the image model's vendor. On metered Sources each call is billed."
-  - zh: "Vibey 在对话中可使用的工具。搜索会把查询发给执行它的厂商，图片提示词会发给图片模型的厂商；按量计费的供应商每次调用都会计费。"
+  - en: "Tools Vibey can use in a conversation. Searches send the query to the vendor that runs them; if one fails,
+    the query may be retried with another of your vendors. Image prompts go to the image model's vendor. On metered
+    Sources each call is billed."
+  - zh: "Vibey 在对话中可使用的工具。搜索会把查询发给执行它的厂商，失败时可能改由你的其他厂商重试；图片提示词会发给图片模型的厂商。按量计费的供应商每次调用都会计费。"
 - **One status line per tool, from the read's `status` (§3.3), and only after something happened:**
   - "最近一次由 <Source> 执行 · 正常 · 10-15" from `latest_ok`. It shows a date, not a time: positive records are
     written at most hourly (§3.2);
@@ -591,7 +608,7 @@ used and the cost; IM attaches the file.
   call costs money, sends queries to a third party, and needed a cost-bearing check to turn on. v2 removes the check;
   the other two remain true and are stated in the public docs:
   - a search sends the model's query to the vendor that runs it: the hop's provider natively, or the executor
-    Source's vendor via proxy;
+    Source's vendor via proxy; when an executor fails, the same query may go to the next configured vendor (§6);
   - an image prompt and any reference images go to the chosen image model's vendor;
   - on metered Sources each call costs the tool fee plus tokens (§10.4); on subscriptions it is included.
 - **No onboarding step mentions tools**, and nothing calls a provider unless the model calls a tool in a turn the
@@ -611,8 +628,10 @@ under the freeze protocol (`model-hub-contracts/README.md`).
 
 - A `HostedToolBlock` the producer writes has `tool` `web_search` | `x_search`. The reader still accepts an rc-era
   `image_generation` block, with its `generate` action and `images[]`, on load only (§4.2).
-- `ToolResultMessage.hosted.record` may carry `images[]` and the `generate` action only for `image_generate`;
-  `generate` records the `model` used, with `prompt` required for a `completed` record.
+- `ToolResultMessage.hosted` keeps `{record, execution?, action?}`. `record.images[]` and `action: generate` occur
+  only for `image_generate`; `generate` gains the `model` used, with `prompt` required for a `completed` record.
+- `ProxyExecution` becomes the result's `execution` with `mode: "proxy" | "direct"` (direct for an image endpoint);
+  its `cost` covers every billable attempt of the call.
 - The conversion rows drop native image replay; an `image_generate` call is an ordinary tool call everywhere.
 
 ### 10.2 C-6 (`agent-core-contracts/model-hub-consumer.md`, both `hop-resolution.schema.json` copies)
@@ -637,7 +656,7 @@ under the freeze protocol (`model-hub-contracts/README.md`).
   `default_model`, `effective_default`, `models[]`, `image_offered_by[]`. `reverify`, `executor`, `bound` and
   `candidates[]` (with `call`, `replay`, `probe_estimate`) go. The PUT body is per field (§3.3).
 - `hosted-tool-probe-result.schema.json` is deleted, with its `api-response.schema.json` branch and `api.md` row.
-- `provider-overlay.schema.json` gains `executor_model` per vendor family and `image_models[]`.
+- `provider-overlay.schema.json` gains `executor_model` per vendor and `image_models[]`.
 - V2 config: `model_hub.hosted_tools` as §3.3.
 
 ### 10.4 Pricing
@@ -709,7 +728,7 @@ and no real credentials.
 | Re-render | Vibey loop with a stub gateway | re-resolve after `hosted_unsupported` resends with the function, other native content still pinned; the per-key and per-turn bounds; same facts go portable; an in-flight continuation whose tool turned proxy uses the in-place form; a decrypt 400 on an unpinned request re-renders once without that identity's opaque payloads; a `pause_turn` continuation's `pin_unavailable` still ends `interrupted` |
 | Executor chain | gateway endpoint, stub providers | order from `executor_order` then Source order; failover on 5xx and on a narrow refusal; a mid-stream failure moves on and is metered; a response that never ran the tool ends the chain; a candidate removed during the chain is skipped; `model_not_found` moves on; no candidate gives a `failed` record naming the fix; metering on the executor Source; a Claude subscription is never a candidate |
 | Images | gateway endpoint + Vibey tool runtime, stub endpoints | a model outside the turn's enum is refused; generations and edits per kind; a buffered call over 120 s is not cut; reference images within the per-tool request bound; JPEG requested where allowed; a failure names the alternatives and no other model is called; bytes saved once through the media sink; the path record; no base64 in history |
-| Parsing and replay | adapters and transforms | v1's mapping and replay cases minus native images; an injected `image_generation_call` maps to `other` without decoding |
+| Parsing and replay | adapters and transforms | v1's mapping and replay cases minus native images; an injected `image_generation_call` is ignored like any undeclared item, without decoding |
 | UI | Tools tab, Source chips, tool card | default on; status lines appear only after use; executor order up/down and reset; image models and default; chips without actions; no probe UI |
 | E2E, once per release | real engine + stub upstream | a native web search, a proxied X search, and one `image_generate` per shipped image kind through the shipped engine |
 

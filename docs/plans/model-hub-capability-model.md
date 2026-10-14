@@ -70,7 +70,7 @@ is its JSON Schema. The store is `core/handlers/model_hub/capability_evidence.py
 | `status` | `verified` (a real response carried the feature; display only) or `unsupported` (a narrow rule fired) |
 | `basis` | `observed`: learned from a real request. There is no other basis (v1's `probe` is gone). |
 | `observed_at` | UTC timestamp |
-| `wire` | the wire stamp the record was observed under: the engine release plus a digest of the Source's rendered engine entry, credentials and model list excluded (§3.3) |
+| `wire` | the wire stamp the record was observed under: the engine release, the Avibe release, and a digest of the Source's rendered engine entry, credentials and model list excluded (§3.3) |
 | `detail` | required when `status` is `unsupported`: the HTTP status and upstream machine code, e.g. `400 invalid_value`, at most 64 characters, never upstream text |
 | `source_identity` | digest of `retry.source_identity` when the record was written |
 
@@ -122,9 +122,12 @@ no marker, and a pending one's marker becomes its generation.
 - **Nothing probes.** Since hosted tools design v2 (2026-10-15) no component calls a provider to learn a capability:
   not on a user action, not in the background. Efforts were never probed; hosted tools no longer are. Every record
   comes from a real request in a turn the user started (§3.2).
-- **Negative evidence never outlives the wire it was learned on.** Each record carries `wire`: the engine release
-  plus a digest of the Source's rendered engine entry (what Avibe writes into the engine config for that Source),
-  credentials and the model list excluded. A record whose stamp differs from the current one reads as unknown, for
+- **Negative evidence never outlives the wire it was learned on.** Each record carries `wire`: the engine release,
+  the Avibe release, and a digest of the Source's rendered engine entry (what Avibe writes into the engine config for
+  that Source), credentials and the model list excluded. The Avibe release covers what Avibe itself sends: the
+  bundled overlay's declarations and `include` values and the adapters' request shape, so an update that fixes a
+  rejected declaration is tried again at once. Refusals are relearned once per release, each at the cost of one
+  re-rendered request. A record whose stamp differs from the current one reads as unknown, for
   efforts and hosted tools alike. So a refusal learned under one engine or one rendered config cannot survive a
   change that could reverse it: an engine upgrade, or a rendering change such as the `is-compat` flag for xAI
   (#2620), which changes what xAI receives for replayed reasoning. The 7-day TTL bounds whatever the stamp does not
@@ -187,7 +190,7 @@ Fields of one vendor entry, mirrored by
 | `match` | exactly one of `prefix` or `id`, non-empty |
 | `wire_efforts` | a list of effort names, or `null` (or absent) to defer to models.dev |
 | `hosted_tools` | optional; protocol (`anthropic`, `openai_responses`, `openai_chat`, `google`) → search tool (`web_search`, `x_search`) → `{declaration, price?, include?}`. `declaration` is required, has a `type`, and is sent verbatim. `price` is optional: absent means no list price is known, never zero. `include` lists Responses `include` values the tool needs (OpenAI web search: `web_search_call.action.sources`). v1's OpenAI `image_generation` entry is removed: no chat request declares a hosted image tool (`vibey-hosted-tools.md` §7). |
-| `executor_model` | new, optional per family: the vendor's lightweight model id that runs proxied search calls on this vendor's Sources (`vibey-hosted-tools.md` §6), e.g. a Haiku, mini or fast tier. A family without it is never an executor. |
+| `executor_model` | new, optional, at vendor scope (beside `models[]`): the vendor's lightweight model id that runs proxied search calls on this vendor's Sources (`vibey-hosted-tools.md` §6), e.g. a Haiku, mini or fast tier. The executor call's declaration and `include` are those of the family row that model id matches, on the Source's protocol. A vendor without it is never an executor. |
 | `image_models[]` | new, optional per vendor: `{id, description, endpoint: "images" \| "chat_image", params, price?}`. `description` is the one line the `image_generate` enum shows; `endpoint` says how the gateway runs it (the engine's images endpoints, or the chat route with the image response modality); `params` lists which common parameters the model takes (`size` or `aspect_ratio`, `images`, `n`); `price` as for `hosted_tools`, with a per-image unit where the vendor lists one. Only models whose route the implementation verified through the shipped engine are listed. |
 | `price` | `unit` (`call`, `search`, `post`, `profile`, `image`), `usd_per_1k` ≥ 0, `as_of` (date) and `url` (https), all required; optional `extra[]` of `{unit, usd_per_1k}`. An `image` unit may carry `quality` and `size` when the vendor prices them apart. |
 - The overlay records what the **provider** offers, and it is the prior every hop starts from: a hosted tool is
