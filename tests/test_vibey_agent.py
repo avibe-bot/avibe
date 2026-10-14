@@ -81,6 +81,9 @@ from vibe.i18n import t as i18n_t
 
 NOW = "2026-10-02T00:00:00.000000Z"
 SESSION = "ses_vibey"
+RG_HINT = (
+    "rg (ripgrep) is available on PATH for text search; call it directly without hard-coding its installation path."
+)
 
 
 @pytest.fixture()
@@ -1742,15 +1745,30 @@ async def test_a_relative_tool_path_is_shown_under_the_runs_cwd(engine, session,
         assert shown(other_drive) == other_drive
 
 
-def test_on_windows_the_command_tool_is_powershell_with_its_own_rule() -> None:
+@pytest.mark.parametrize("finds_rg", (True, False))
+def test_on_windows_the_command_tool_is_powershell_with_its_own_rule(finds_rg) -> None:
     from modules.agents.vibey.prompt import coding_prompt
 
-    text = coding_prompt(["read", "powershell", "edit", "write"], builtin_agent=True, rg=True)
+    text = coding_prompt(["read", "powershell", "edit", "write"], builtin_agent=True, rg=finds_rg)
 
     assert "- powershell: Execute PowerShell commands (Get-ChildItem, Select-String, etc.)" in text
-    assert "Use powershell for file operations like Get-ChildItem, rg" in text
-    assert "Use rg directly for content search and `rg --files` for file discovery; it is on PATH, so do not hardcode its installation path." in text
+    assert ("Use powershell for file operations like Get-ChildItem, rg" in text) is finds_rg
+    assert ("Use powershell for file operations like Get-ChildItem, Select-String" in text) is not finds_rg
+    assert text.count(RG_HINT) == int(finds_rg)
     assert "bash" not in text
+
+
+@pytest.mark.parametrize("tool_names", ([], ["read"], ["bash", "powershell"]))
+@pytest.mark.parametrize("finds_rg", (True, False))
+def test_rg_path_hint_is_once_and_only_with_an_available_command_tool(tool_names, finds_rg) -> None:
+    """The PATH fact needs an offered shell; two shell tools must not duplicate it."""
+    from modules.agents.vibey.prompt import coding_prompt
+
+    system = coding_prompt(tool_names, builtin_agent=True, rg=finds_rg)
+    assert system.count(RG_HINT) == int(finds_rg and bool({"bash", "powershell"} & set(tool_names)))
+    # Search options and exhaustive discovery are not part of this PATH hint.
+    assert "rg --files" not in system
+    assert "hard-coding" not in system or RG_HINT in system
 
 
 async def test_the_system_prompt_lists_every_tool_the_run_offers(engine, session, tmp_path, published) -> None:
@@ -1786,7 +1804,7 @@ async def test_the_bash_rule_names_rg_only_when_the_turns_commands_find_it(
     system = harness.provider.requests[0].system
     assert ("- Use bash for file operations like ls, rg, find" in system) is finds_rg
     assert ("- Use bash for file operations like ls, grep, find" in system) is not finds_rg
-    assert ("Use rg directly for content search and `rg --files` for file discovery; it is on PATH, so do not hardcode its installation path." in system) is finds_rg
+    assert system.count(RG_HINT) == int(finds_rg)
 
 
 def _agent_store(engine):
@@ -2911,6 +2929,7 @@ async def test_a_turns_bash_runs_the_managed_rg_when_the_service_path_has_none(
     result = (await harness.context_rows())[2].message
     assert not result.is_error and "ripgrep 15.2.0" in result.content[0].text
     assert "- Use bash for file operations like ls, rg, find" in harness.provider.requests[0].system
+    assert harness.provider.requests[0].system.count(RG_HINT) == 1
 
 
 async def test_bash_runs_with_the_turns_caller_environment(engine, session, tmp_path, published) -> None:
