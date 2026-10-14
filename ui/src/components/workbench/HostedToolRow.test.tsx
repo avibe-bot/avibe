@@ -126,6 +126,21 @@ describe('hosted tool cards', () => {
     screen.getByRole('button', { name: /IM line/ });
   });
 
+  it('MH-HOSTED-UI-015: says a reason Avibe worded in the reader\'s language, and any other as it was written', () => {
+    renderGroup(['proxy_unreachable'], 'zh');
+    const card = row('call_x5');
+    fireEvent.click(within(card).getByRole('button'));
+    within(card).getByText('无法连接模型网关。');
+    expect(card.textContent).not.toContain('the gateway could not run the call');
+    cleanup();
+
+    // A code this client does not know yet reads as the record's own words.
+    renderGroup([{ ...fixture.proxy_unreachable, error_code: 'gateway_overheated' }], 'zh');
+    const unknown = row('call_x5');
+    fireEvent.click(within(unknown).getByRole('button'));
+    within(unknown).getByText('the gateway could not run the call (ConnectError)');
+  });
+
   it('reads in Chinese with the same facts', () => {
     renderGroup(['proxy_x_search'], 'zh');
     const proxy = row('call_x1');

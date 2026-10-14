@@ -4776,6 +4776,17 @@
     },
     "agentActivity": {
       "hosted": {
+        "errorCode": {
+          "provider_no_reason": "The provider gave no reason.",
+          "provider_no_image": "The provider returned no image.",
+          "image_not_streamed": "The image did not arrive before the response ended.",
+          "image_not_saved": "The image could not be saved.",
+          "image_no_store": "Nothing here can keep a generated image.",
+          "executor_no_image": "The proxy executor returned no image.",
+          "gateway_unreachable": "Couldn't reach the model gateway.",
+          "gateway_refused": "The model gateway refused the call.",
+          "gateway_no_result": "The model gateway returned no result."
+        },
         "mode": {
           "native": "Native · {{provider}}",
           "proxy": "Via {{provider}} proxy"
