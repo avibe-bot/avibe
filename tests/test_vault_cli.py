@@ -750,7 +750,7 @@ def test_rm_rejects_single_field_delete(capfd):
 
     assert code == 1
     assert payload["code"] == "vault_field_delete_forbidden"
-    assert payload["message"] == "vibe vault rm deletes whole secrets; remove single fields in the Vaults page."
+    assert payload["error"] == "vibe vault rm deletes whole secrets; remove single fields in the Vaults page."
 
 
 
