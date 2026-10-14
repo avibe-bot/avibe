@@ -495,7 +495,7 @@ index b9637489..51b62d4c 100644
 +        cua_driver_core::session::release_process_state_for_shutdown();
 +    }
      if let Err(e) = result {
-@@ -2571,2 +2598,170 @@ mod socket_tests {
+@@ -2571,2 +2598,183 @@ mod socket_tests {
 -
 +#[cfg(all(test, unix))]
 +mod parent_liveness_tests {
@@ -512,6 +512,7 @@ index b9637489..51b62d4c 100644
 +    const SOCKET_ENV: &str = "CUA_DRIVER_PARENT_LIVENESS_TEST_SOCKET";
 +    const PID_FILE_ENV: &str = "CUA_DRIVER_PARENT_LIVENESS_TEST_PID_FILE";
 +    const STARTED_ENV: &str = "CUA_DRIVER_PARENT_LIVENESS_TEST_STARTED";
++    const CURSOR_OVERLAY_ENV: &str = "CUA_DRIVER_PARENT_LIVENESS_TEST_CURSOR_OVERLAY";
 +
 +    struct BlockingTool;
 +
@@ -565,7 +566,7 @@ index b9637489..51b62d4c 100644
 +        let driver =
 +            cua_driver_sdk::CuaDriver::create_for_host(cua_driver_sdk::DriverHostOptions {
 +                cursor: cursor_overlay::CursorConfig {
-+                    enabled: true,
++                    enabled: std::env::var(CURSOR_OVERLAY_ENV).ok().as_deref() == Some("1"),
 +                    ..cursor_overlay::CursorConfig::default()
 +                },
 +                host_owns_permission_ux: true,
@@ -581,8 +582,7 @@ index b9637489..51b62d4c 100644
 +        run_serve_cmd(driver, &socket, Some(&pid_file));
 +    }
 +
-+    #[test]
-+    fn parent_liveness_exits_without_waiting_for_blocked_calls_and_unlinks_only_its_socket() {
++    fn run_parent_liveness_test(cursor_overlay: bool) {
 +        let directory = tempfile::tempdir().expect("temporary directory");
 +        let socket = directory.path().join("driver.sock");
 +        let pid_file = directory.path().join("driver.pid");
@@ -605,6 +605,7 @@ index b9637489..51b62d4c 100644
 +            .env(SOCKET_ENV, &socket)
 +            .env(PID_FILE_ENV, &pid_file)
 +            .env(STARTED_ENV, &started)
++            .env(CURSOR_OVERLAY_ENV, u8::from(cursor_overlay).to_string())
 +            .env("HOME", &home)
 +            .env("XDG_CACHE_HOME", home.join(".cache"))
 +            .env("XDG_CONFIG_HOME", home.join(".config"))
@@ -663,6 +664,18 @@ index b9637489..51b62d4c 100644
 +            std::fs::read_to_string(unrelated_state).expect("unrelated state"),
 +            "preserve\n"
 +        );
++    }
++
++    #[test]
++    fn parent_liveness_exits_without_waiting_for_blocked_calls_and_unlinks_only_its_socket() {
++        run_parent_liveness_test(false);
++    }
++
++    #[cfg(target_os = "macos")]
++    #[test]
++    #[ignore = "requires a logged-in macOS GUI session"]
++    fn parent_liveness_with_cursor_overlay_exits_after_parent_loss() {
++        run_parent_liveness_test(true);
 +    }
 +}
 +

@@ -36,7 +36,9 @@ overlay owns the main AppKit run loop. Its shutdown diagnostic is best-effort
 because parent death also closes the shell-owned stderr pipe. The terminal path
 leaves process globals intact because abandoned tasks may still reference them
 until process exit. Explicit daemon shutdown keeps the existing graceful drain
-and global teardown.
+and global teardown. The default process test keeps the cursor overlay disabled
+so ordinary `cargo test` runs remain hermetic; the overlay-enabled macOS variant
+is ignored and reserved for an explicit logged-in GUI acceptance run.
 
 The upstream investigation found no consumable maintainer-accepted contract
 with these semantics. The relevant discussions are:
