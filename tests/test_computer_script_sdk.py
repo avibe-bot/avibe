@@ -66,6 +66,7 @@ def _fake_controller(
     apps: list[dict] | None = None,
     app_responses: list[list[dict]] | None = None,
     windows: list[dict] | None = None,
+    launch_pid: int | None = 41,
 ) -> Iterator[tuple[ThreadingHTTPServer, list[dict]]]:
     requests: list[dict] = []
     observations = 0
@@ -284,6 +285,28 @@ def _fake_controller(
                                 "route": "accessibility",
                             }
                         )
+                elif tool == "double_click":
+                    body = _result(
+                        {
+                            "effect": "confirmed",
+                            "route": "accessibility",
+                        }
+                    )
+                elif tool == "kill_app":
+                    body = _result(
+                        {
+                            "effect": "confirmed",
+                            "route": "system_api",
+                        }
+                    )
+                elif tool == "launch_app":
+                    launch_payload = {
+                        "effect": "confirmed",
+                        "route": "system_api",
+                    }
+                    if launch_pid is not None:
+                        launch_payload["pid"] = launch_pid
+                    body = _result(launch_payload)
                 else:
                     body = _result(
                         {"code": "unknown_tool", "params": {"tool": tool}},
@@ -327,6 +350,7 @@ def _run_node_script(
     apps: list[dict] | None = None,
     app_responses: list[list[dict]] | None = None,
     windows: list[dict] | None = None,
+    launch_pid: int | None = 41,
 ) -> tuple[dict, ThreadingHTTPServer, list[dict]]:
     if NODE is None:
         pytest.skip("Node.js is unavailable")
@@ -353,6 +377,7 @@ def _run_node_script(
         apps=apps,
         app_responses=app_responses,
         windows=windows,
+        launch_pid=launch_pid,
     ) as (server, requests):
         request = {
             "script_url": script.resolve().as_uri(),
@@ -951,12 +976,14 @@ export default async () => {
         for request in requests
         if request["path"].endswith("/request")
     ]
-    assert tools.count("list_apps") == 2
-    assert tools.count("list_windows") == 2
+    assert tools.count("list_apps") == 1
+    assert tools.count("list_windows") == 1
     assert tools.count("get_window_state") == 1
 
 
-def test_sdk_selected_app_refreshes_by_positive_pid(tmp_path: Path) -> None:
+def test_sdk_selected_app_descriptor_keeps_the_selected_positive_pid(
+    tmp_path: Path,
+) -> None:
     apps = [
         {
             "pid": pid,
@@ -1008,9 +1035,15 @@ export default async () => {
     assert [request["payload"]["arguments"] for request in list_window_requests] == [
         {"pid": 42}
     ]
+    assert list_window_requests[0]["payload"]["descriptor"] == {
+        "kind": "app",
+        "pid": 42,
+        "bundle_id": "com.apple.mail",
+        "name": None,
+    }
 
 
-def test_sdk_app_handle_rejects_pid_reuse_by_another_bundle(
+def test_sdk_app_handle_never_refreshes_or_rebinds_before_an_action(
     tmp_path: Path,
 ) -> None:
     payload, _server, requests = _run_node_script(
@@ -1023,40 +1056,27 @@ export default async () => {
   await mail.forceQuit();
 };
 """,
-        app_responses=[
-            [
-                {
-                    "pid": 41,
-                    "name": "Mail",
-                    "bundle_id": "com.apple.mail",
-                    "running": True,
-                    "active": False,
-                }
-            ],
-            [
-                {
-                    "pid": 41,
-                    "name": "Notes",
-                    "bundle_id": "com.apple.notes",
-                    "running": True,
-                    "active": True,
-                }
-            ],
-        ],
     )
 
-    assert payload["ok"] is False
-    assert payload["error"]["code"] == "stale_app_handle"
-    assert payload["error"]["step"] == "app.forceQuit"
-    tools = [
-        request["payload"].get("tool")
+    assert payload == {"ok": True, "result": None}
+    tool_requests = [
+        request
         for request in requests
         if request["path"].endswith("/request")
     ]
-    assert tools == ["list_apps", "list_apps"]
+    assert [request["payload"]["tool"] for request in tool_requests] == [
+        "list_apps",
+        "kill_app",
+    ]
+    assert tool_requests[-1]["payload"]["descriptor"] == {
+        "kind": "app",
+        "pid": 41,
+        "bundle_id": "com.apple.mail",
+        "name": None,
+    }
 
 
-def test_sdk_app_handle_rejects_same_bundle_relaunched_with_new_pid(
+def test_sdk_window_handle_never_refreshes_or_rebinds_its_application(
     tmp_path: Path,
 ) -> None:
     payload, _server, requests = _run_node_script(
@@ -1066,22 +1086,67 @@ import { computer } from "@avibe/computer";
 
 export default async () => {
   const mail = await computer.app({ bundleId: "com.apple.mail" });
-  await mail.window({ label: "New Message" });
+  const window = await mail.window({ label: "New Message" });
+  await window.observe({ include_screenshot: false });
+};
+""",
+    )
+
+    assert payload == {"ok": True, "result": None}
+    tool_requests = [
+        request
+        for request in requests
+        if request["path"].endswith("/request")
+    ]
+    assert [request["payload"]["tool"] for request in tool_requests] == [
+        "list_apps",
+        "list_windows",
+        "get_window_state",
+    ]
+    assert tool_requests[-1]["payload"]["descriptor"] == {
+        "kind": "window",
+        "pid": 41,
+        "window_id": 9,
+        "app": {
+            "kind": "app",
+            "pid": 41,
+            "bundle_id": "com.apple.mail",
+            "name": None,
+        },
+    }
+
+
+def test_sdk_launch_with_pid_zero_resolves_one_fresh_app_descriptor(
+    tmp_path: Path,
+) -> None:
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  const target = await computer.app({ bundleId: "com.apple.mail" });
+  const launched = await target.launch();
+  return {
+    oldPid: target.pid,
+    newPid: launched.app.pid,
+    effect: launched.status,
+  };
 };
 """,
         app_responses=[
             [
                 {
-                    "pid": 41,
+                    "pid": 0,
                     "name": "Mail",
                     "bundle_id": "com.apple.mail",
-                    "running": True,
+                    "running": False,
                     "active": False,
                 }
             ],
             [
                 {
-                    "pid": 42,
+                    "pid": 57,
                     "name": "Mail",
                     "bundle_id": "com.apple.mail",
                     "running": True,
@@ -1089,17 +1154,62 @@ export default async () => {
                 }
             ],
         ],
+        launch_pid=0,
     )
 
-    assert payload["ok"] is False
-    assert payload["error"]["code"] == "stale_app_handle"
-    assert payload["error"]["step"] == "app.window"
-    tools = [
-        request["payload"].get("tool")
+    assert payload == {
+        "ok": True,
+        "result": {
+            "oldPid": None,
+            "newPid": 57,
+            "effect": "confirmed",
+        },
+    }
+    tool_requests = [
+        request
         for request in requests
         if request["path"].endswith("/request")
     ]
-    assert tools == ["list_apps", "list_apps"]
+    assert [request["payload"]["tool"] for request in tool_requests] == [
+        "list_apps",
+        "launch_app",
+        "list_apps",
+    ]
+    assert tool_requests[1]["payload"]["descriptor"] == {
+        "kind": "app",
+        "pid": None,
+        "bundle_id": "com.apple.mail",
+        "name": None,
+    }
+
+
+def test_sdk_element_double_click_uses_the_dedicated_tool(tmp_path: Path) -> None:
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  const mail = await computer.app({ bundleId: "com.apple.mail" });
+  const window = await mail.window({ label: "New Message" });
+  const effect = await window
+    .element({ role: "button", label: "Send", index: 0 })
+    .doubleClick();
+  return effect.status;
+};
+""",
+    )
+
+    assert payload == {"ok": True, "result": "confirmed"}
+    action_requests = [
+        request
+        for request in requests
+        if request["payload"].get("tool") in {"click", "double_click"}
+    ]
+    assert [request["payload"]["tool"] for request in action_requests] == [
+        "double_click",
+    ]
+    assert "count" not in action_requests[0]["payload"]["arguments"]
 
 
 def test_sdk_window_index_uses_descending_z_order(tmp_path: Path) -> None:
@@ -1389,6 +1499,37 @@ export default async () => {
             for request in requests
             if request["path"].endswith("/request")
         )
+    finally:
+        shutil.rmtree(screenshot.parent, ignore_errors=True)
+
+
+def test_python_failure_retains_only_the_referenced_screenshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    error, _requests, _elapsed = _run_python_deadline_script(
+        monkeypatch,
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  const mail = await computer.app({ bundleId: "com.apple.mail" });
+  const window = await mail.window({ labelContains: "New Message" });
+  await window.observe();
+  await window.observe();
+  await window.element({ role: "button", label: "Missing" }).click();
+};
+""",
+        timeout_seconds=5,
+    )
+
+    screenshot_path = error.details["screenshot_path"]
+    assert isinstance(screenshot_path, str)
+    screenshot = Path(screenshot_path)
+    try:
+        assert screenshot.read_bytes() == b"png-fixture"
+        assert list(screenshot.parent.iterdir()) == [screenshot]
     finally:
         shutil.rmtree(screenshot.parent, ignore_errors=True)
 

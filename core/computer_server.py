@@ -42,6 +42,12 @@ from core.computer_use import (
     effective_computer_use_status,
     read_computer_use_state,
 )
+from core.computer_script_handles import (
+    ComputerScriptHandleError,
+    bind_handle_to_request,
+    parse_handle_descriptor,
+    validate_handle_is_current,
+)
 
 _LEASE_TTL_SECONDS = 60.0
 _LEASE_HEARTBEAT_SECONDS = 10.0
@@ -54,6 +60,7 @@ _UPSTREAM_DETAIL_LIMIT = 2048
 _UPSTREAM_DIAGNOSTIC_SCAN_LIMIT = 8192
 _UPSTREAM_DIAGNOSTIC_LOG_LIMIT = 20
 _ADMISSION_RETRY_LIMIT = 1
+_NO_SCRIPT_HANDLE = object()
 _PROXY_PROCESS_ENV_KEYS = (
     "HOME",
     "LANG",
@@ -1169,6 +1176,8 @@ class ComputerUseServer:
         self,
         name: str,
         arguments: Mapping[str, Any],
+        *,
+        handle_descriptor: Any = _NO_SCRIPT_HANDLE,
     ) -> dict[str, Any]:
         session = arguments.get("session")
         if not isinstance(session, str) or not session.strip():
@@ -1181,6 +1190,13 @@ class ComputerUseServer:
             return _error_result("unknown_tool", tool=name)
         if not isinstance(arguments, dict):
             return _error_result("invalid_arguments", "Tool arguments must be an object.")
+        parsed_handle = None
+        if handle_descriptor is not _NO_SCRIPT_HANDLE:
+            try:
+                parsed_handle = parse_handle_descriptor(handle_descriptor)
+                bind_handle_to_request(parsed_handle, name, arguments)
+            except ComputerScriptHandleError as exc:
+                return _error_result(exc.code, result_params=exc.params)
 
         lock = self._session_locks.setdefault(session, asyncio.Lock())
         async with lock:
@@ -1241,6 +1257,39 @@ class ComputerUseServer:
                             explicit_start=name == "start_session",
                         ),
                     )
+                    if handle_descriptor is not _NO_SCRIPT_HANDLE:
+                        async def discover(
+                            discovery_tool: str,
+                            discovery_arguments: Mapping[str, Any],
+                        ) -> dict[str, Any]:
+                            forwarded_discovery = {
+                                **discovery_arguments,
+                                "session": session,
+                            }
+                            if discovery_tool not in self._upstream_accepts_session:
+                                forwarded_discovery.pop("session", None)
+                            return await self._upstream_call(
+                                upstream,
+                                discovery_tool,
+                                forwarded_discovery,
+                            )
+
+                        try:
+                            validation_error = await self._run_while_lease_owned(
+                                heartbeat,
+                                validate_handle_is_current(
+                                    parsed_handle,
+                                    name,
+                                    discover,
+                                ),
+                            )
+                        except ComputerScriptHandleError as exc:
+                            return _error_result(
+                                exc.code,
+                                result_params=exc.params,
+                            )
+                        if validation_error is not None:
+                            return validation_error
                     self._require_observation(name, arguments, session_state)
                     await self._run_while_lease_owned(
                         heartbeat,

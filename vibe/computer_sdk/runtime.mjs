@@ -26,6 +26,7 @@ let agent;
 let currentStep = "script";
 let lastStep = "script";
 let lastScreenshotPath;
+let lastOwnedScreenshotPath;
 let screenshotSequence = 0;
 
 export class ControllerFault extends Error {
@@ -124,6 +125,7 @@ export async function callTool(tool, argumentsValue, options = {}) {
       connection_token: state.connectionToken,
       tool,
       arguments: argumentsValue,
+      descriptor: options.descriptor ?? null,
     },
     options,
   );
@@ -170,8 +172,7 @@ function recordScreenshot(result) {
     typeof structured.screenshot_file_path === "string" &&
     structured.screenshot_file_path
   ) {
-    lastScreenshotPath = structured.screenshot_file_path;
-    persistRuntimeState();
+    replaceDiagnosticScreenshot(structured.screenshot_file_path);
     return;
   }
   const image = Array.isArray(result.content)
@@ -193,11 +194,25 @@ function recordScreenshot(result) {
       `observation-${screenshotSequence}.png`,
     );
     fs.writeFileSync(target, Buffer.from(image.data, "base64"), { mode: 0o600 });
-    lastScreenshotPath = target;
-    persistRuntimeState();
+    replaceDiagnosticScreenshot(target, { owned: true });
   } catch {
     // A screenshot artifact is diagnostic only; the structured observation
     // remains authoritative when the local file cannot be written.
+  }
+}
+
+function replaceDiagnosticScreenshot(target, options = {}) {
+  const previousOwned = lastOwnedScreenshotPath;
+  lastScreenshotPath = target;
+  lastOwnedScreenshotPath = options.owned === true ? target : undefined;
+  persistRuntimeState();
+  if (previousOwned && previousOwned !== lastOwnedScreenshotPath) {
+    try {
+      fs.unlinkSync(previousOwned);
+    } catch {
+      // The current screenshot remains valid even if an old diagnostic file
+      // was already removed or cannot be cleaned up.
+    }
   }
 }
 

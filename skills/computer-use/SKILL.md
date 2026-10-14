@@ -55,6 +55,8 @@ The runner uses Avibe's shipped Node runtime and injects `@avibe/computer`;
 never install or resolve another package with that name. The SDK keeps element
 tokens private, re-observes once when the Controller explicitly reports a stale
 observation, and stops on ambiguous action outcomes.
+App and window handles are immutable process descriptors; after an app
+relaunches, acquire fresh handles with `computer.app(...)` before continuing.
 
 Scripts that send, submit, pay, delete, or perform another irreversible action
 must follow verify -> confirm -> re-verify -> act. If the owner-confirmation

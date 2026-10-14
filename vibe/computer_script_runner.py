@@ -304,21 +304,50 @@ def _decode_runner_output(
     return payload
 
 
-def _keeps_local_screenshot(
+def _local_screenshot_path(
     payload: dict[str, Any] | None,
     artifact_directory: Path,
-) -> bool:
+) -> Path | None:
     if not isinstance(payload, dict) or not isinstance(payload.get("error"), dict):
-        return False
+        return None
     screenshot_path = payload["error"].get("screenshot_path")
     if not isinstance(screenshot_path, str) or not screenshot_path:
-        return False
+        return None
     try:
         resolved = Path(screenshot_path).resolve(strict=True)
         resolved.relative_to(artifact_directory)
     except (OSError, RuntimeError, ValueError):
-        return False
-    return resolved.is_file()
+        return None
+    return resolved if resolved.is_file() else None
+
+
+def _retain_only_screenshot(
+    artifact_directory: Path,
+    screenshot_path: Path,
+) -> None:
+    keep_directories = set(screenshot_path.parents)
+    for root, directories, files in os.walk(
+        artifact_directory,
+        topdown=False,
+        followlinks=False,
+    ):
+        root_path = Path(root)
+        for name in files:
+            candidate = root_path / name
+            try:
+                is_kept = candidate.resolve(strict=True) == screenshot_path
+            except OSError:
+                is_kept = False
+            if not is_kept:
+                candidate.unlink(missing_ok=True)
+        for name in directories:
+            candidate = root_path / name
+            if candidate in keep_directories:
+                continue
+            if candidate.is_symlink():
+                candidate.unlink(missing_ok=True)
+            else:
+                shutil.rmtree(candidate, ignore_errors=True)
 
 
 def _display_seconds(value: float) -> int | float:
@@ -537,5 +566,11 @@ def run_computer_script(
             except (InternalServerUnavailable, InternalServerTimeout):
                 pass
 
-        if not _keeps_local_screenshot(payload, artifact_directory):
+        local_screenshot = _local_screenshot_path(payload, artifact_directory)
+        if local_screenshot is None:
             shutil.rmtree(artifact_directory, ignore_errors=True)
+        else:
+            _retain_only_screenshot(
+                artifact_directory,
+                local_screenshot,
+            )

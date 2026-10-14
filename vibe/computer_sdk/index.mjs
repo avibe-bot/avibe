@@ -54,30 +54,52 @@ const ELEMENT_SELECTOR_FIELDS = new Set([
 ]);
 const windowState = new WeakMap();
 
-class AppIdentity {
-  constructor(record) {
-    this.pid =
-      Number.isInteger(record.pid) && record.pid >= 0 ? record.pid : null;
-    this.bundleId =
-      typeof record.bundle_id === "string" && record.bundle_id
-        ? record.bundle_id
-        : null;
-    this.name =
-      this.bundleId === null && typeof record.name === "string"
-        ? record.name
-        : null;
-    Object.freeze(this);
-  }
+function invalidHandleResponse(message) {
+  throw new ControllerError(message, { code: "invalid_computer_use_response" });
+}
 
-  matches(record) {
-    if (record.pid !== this.pid) {
-      return false;
-    }
-    if (this.bundleId !== null) {
-      return record.bundle_id === this.bundleId;
-    }
-    return record.name === this.name;
+function appDescriptor(record) {
+  const bundleId =
+    typeof record.bundle_id === "string" && record.bundle_id
+      ? record.bundle_id
+      : null;
+  const name =
+    bundleId === null && typeof record.name === "string" && record.name
+      ? record.name
+      : null;
+  if (bundleId === null && name === null) {
+    invalidHandleResponse(
+      "The Controller returned an application without a stable identity.",
+    );
   }
+  return Object.freeze({
+    kind: "app",
+    pid: Number.isInteger(record.pid) && record.pid > 0 ? record.pid : null,
+    bundle_id: bundleId,
+    name,
+  });
+}
+
+function windowDescriptor(app, record) {
+  const descriptor = app._descriptor;
+  if (
+    !descriptor ||
+    !Number.isInteger(descriptor.pid) ||
+    descriptor.pid <= 0 ||
+    record.pid !== descriptor.pid ||
+    !Number.isInteger(record.window_id) ||
+    record.window_id < 0
+  ) {
+    invalidHandleResponse(
+      "The Controller returned a window outside the selected application.",
+    );
+  }
+  return Object.freeze({
+    kind: "window",
+    pid: descriptor.pid,
+    window_id: record.window_id,
+    app: descriptor,
+  });
 }
 
 export class ControllerError extends Error {
@@ -490,15 +512,25 @@ async function poll(label, timeoutValue, attempt) {
   }
 }
 
-async function callToolBefore(tool, argumentsValue, deadline) {
+async function callToolBefore(tool, argumentsValue, deadline, options = {}) {
   if (deadline === undefined) {
-    return callTool(tool, argumentsValue);
+    return callTool(tool, argumentsValue, options);
   }
   const remaining = deadline - performance.now();
   if (remaining <= 0) {
     throw new Timeout("The operation deadline expired.");
   }
-  return callTool(tool, argumentsValue, { timeoutMs: remaining });
+  return callTool(tool, argumentsValue, { ...options, timeoutMs: remaining });
+}
+
+function callHandleTool(handle, tool, argumentsValue, deadline) {
+  return callToolBefore(tool, argumentsValue, deadline, {
+    descriptor: handle._descriptor,
+  });
+}
+
+function windowArguments(handle, options = {}) {
+  return { ...options, pid: handle.pid, window_id: handle.windowId };
 }
 
 class Computer {
@@ -536,47 +568,75 @@ class Computer {
       selector,
       "application",
     );
-    return new AppHandle(this, selector, record);
+    return new AppHandle(record);
   }
 }
 
 class AppHandle {
-  constructor(_owner, _selector, record) {
-    this._record = record;
-    this._identity = new AppIdentity(record);
-  }
-
-  get pid() {
-    return this._record.pid;
-  }
-
-  get name() {
-    return this._record.name;
-  }
-
-  get bundleId() {
-    return this._record.bundle_id ?? null;
+  constructor(record) {
+    const descriptor = appDescriptor(record);
+    this.pid = descriptor.pid;
+    this.name =
+      typeof record.name === "string" && record.name
+        ? record.name
+        : descriptor.name;
+    this.bundleId = descriptor.bundle_id;
+    Object.defineProperty(this, "_descriptor", { value: descriptor });
+    Object.freeze(this);
   }
 
   async launch(options = {}) {
     return sdkStep("app.launch", async () => {
+      const descriptor = this._descriptor;
       const argumentsValue = { ...options };
       if (this.bundleId) {
         argumentsValue.bundle_id = this.bundleId;
       } else {
         argumentsValue.name = this.name;
       }
-      return effectResult(await callTool("launch_app", argumentsValue));
+      const result = await callHandleTool(this, "launch_app", argumentsValue);
+      const payload = structured(result);
+      const pid =
+        Number.isInteger(payload.pid) && payload.pid > 0 ? payload.pid : null;
+      let record;
+      if (pid === null) {
+        const apps = structured(await callTool("list_apps", {})).apps;
+        const records = Array.isArray(apps) ? apps : [];
+        record = selectOne(
+          records.filter(
+            (item) =>
+              Number.isInteger(item.pid) &&
+              item.pid > 0 &&
+              (descriptor.bundle_id !== null
+                ? item.bundle_id === descriptor.bundle_id
+                : item.name === descriptor.name),
+          ),
+          {},
+          "launched application",
+        );
+      } else {
+        record = {
+          pid,
+          bundle_id: descriptor.bundle_id,
+          name:
+            typeof payload.name === "string" && payload.name
+              ? payload.name
+              : this.name,
+        };
+      }
+      return {
+        ...effectResult(result),
+        app: new AppHandle(record),
+      };
     });
   }
 
   async forceQuit() {
     return sdkStep("app.forceQuit", async () => {
-      const current = await this._current();
-      if (!Number.isInteger(current.pid) || current.pid <= 0) {
-        throw new NotFound("The application is not running.");
-      }
-      return effectResult(await callTool("kill_app", { pid: current.pid }));
+      const descriptor = this._descriptor;
+      return effectResult(
+        await callHandleTool(this, "kill_app", { pid: descriptor.pid }),
+      );
     });
   }
 
@@ -592,28 +652,11 @@ class AppHandle {
     );
   }
 
-  async _current(deadline) {
-    const apps = structured(await callToolBefore("list_apps", {}, deadline)).apps;
-    const records = Array.isArray(apps) ? apps : [];
-    const matches = records.filter((item) => this._identity.matches(item));
-    if (matches.length !== 1) {
-      throw new ControllerError(
-        "The selected application process is no longer available.",
-        { code: "stale_app_handle" },
-      );
-    }
-    this._record = matches[0];
-    return this._record;
-  }
-
   async _resolveWindow(selector, deadline) {
     validateSelector(selector, WINDOW_SELECTOR_FIELDS, "Window");
-    const app = await this._current(deadline);
-    if (!Number.isInteger(app.pid) || app.pid <= 0) {
-      throw new NotFound("The application is not running.");
-    }
+    const descriptor = this._descriptor;
     const windows = structured(
-      await callToolBefore("list_windows", { pid: app.pid }, deadline),
+      await callHandleTool(this, "list_windows", { pid: descriptor.pid }, deadline),
     ).windows;
     const records = Array.isArray(windows) ? windows : [];
     const record = selectWindow(records, selector);
@@ -622,24 +665,14 @@ class AppHandle {
 }
 
 class WindowHandle {
-  constructor(_app, _selector, record) {
-    windowState.set(this, {
-      record,
-      snapshot: undefined,
-      snapshotKey: undefined,
-    });
-  }
-
-  get pid() {
-    return windowState.get(this).record.pid;
-  }
-
-  get windowId() {
-    return windowState.get(this).record.window_id;
-  }
-
-  get title() {
-    return windowState.get(this).record.title;
+  constructor(app, _selector, record) {
+    windowState.set(this, { snapshot: undefined, snapshotKey: undefined });
+    const descriptor = windowDescriptor(app, record);
+    this.pid = descriptor.pid;
+    this.windowId = descriptor.window_id;
+    this.title = record.title;
+    Object.defineProperty(this, "_descriptor", { value: descriptor });
+    Object.freeze(this);
   }
 
   element(selector) {
@@ -703,62 +736,25 @@ class WindowHandle {
 
   async _windowAction(label, tool, options = {}) {
     return sdkStep(label, async () => {
-      const current = await currentWindow(this);
       await observeWindow(this, false);
       return effectResult(
-        await callTool(tool, {
-          ...options,
-          pid: current.pid,
-          window_id: current.window_id,
-        }),
+        await callHandleTool(this, tool, windowArguments(this, options)),
       );
     });
   }
 }
 
-async function currentWindow(handle, deadline) {
-  const state = windowState.get(handle);
-  const windows = structured(
-    await callToolBefore(
-      "list_windows",
-      { pid: state.record.pid },
-      deadline,
-    ),
-  ).windows;
-  const refreshed = Array.isArray(windows)
-    ? windows.find(
-        (item) =>
-          item.pid === state.record.pid &&
-          item.window_id === state.record.window_id,
-      )
-    : undefined;
-  if (!refreshed) {
-    throw new NotFound("The selected window is no longer available.", {
-      code: "window_not_found",
-      params: {
-        pid: state.record.pid,
-        window_id: state.record.window_id,
-      },
-    });
-  }
-  state.record = refreshed;
-  return state.record;
-}
-
 async function observeWindow(handle, force, options = {}, deadline) {
   const state = windowState.get(handle);
-  const current = await currentWindow(handle, deadline);
-  const key = `${current.pid}:${current.window_id}`;
+  const descriptor = handle._descriptor;
+  const key = `${descriptor.pid}:${descriptor.window_id}`;
   if (!force && state.snapshot && state.snapshotKey === key) {
     return state.snapshot;
   }
-  state.snapshot = await callToolBefore(
+  state.snapshot = await callHandleTool(
+    handle,
     "get_window_state",
-    {
-      ...options,
-      pid: current.pid,
-      window_id: current.window_id,
-    },
+    windowArguments(handle, options),
     deadline,
   );
   state.snapshotKey = key;
@@ -780,14 +776,15 @@ async function runElementAction(handle, selector, label, tool, options = {}) {
         code: "element_not_actionable",
       });
     }
-    const current = await currentWindow(handle);
     const invoke = () =>
-      callTool(tool, {
-        ...options,
-        pid: current.pid,
-        window_id: current.window_id,
-        element_token: element.element_token,
-      });
+      callHandleTool(
+        handle,
+        tool,
+        windowArguments(handle, {
+          ...options,
+          element_token: element.element_token,
+        }),
+      );
     try {
       return effectResult(await invoke());
     } catch (error) {
@@ -833,8 +830,8 @@ class ElementHandle {
       this._window,
       this._selector,
       "element.doubleClick",
-      "click",
-      { ...options, count: 2 },
+      "double_click",
+      options,
     );
   }
 

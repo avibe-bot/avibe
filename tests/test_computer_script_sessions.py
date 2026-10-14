@@ -201,7 +201,7 @@ def test_script_manager_enforces_one_total_deadline() -> None:
 
 
 def test_script_manager_keeps_the_cli_allowlist_and_session_binding() -> None:
-    async def exercise() -> tuple[str, str]:
+    async def exercise() -> tuple[str, str, str]:
         controller = SimpleNamespace(
             _session_id_from_context=lambda context: context.platform_specific[
                 "agent_session_id"
@@ -229,7 +229,18 @@ def test_script_manager_keeps_the_cli_allowlist_and_session_binding() -> None:
                 )
             except ComputerScriptSessionError as exc:
                 session_code = exc.code
-            return tool_code, session_code
+            prepared_session, prepared_arguments = manager.prepare_tool_request(
+                token,
+                "double_click",
+                {
+                    "pid": 41,
+                    "window_id": 9,
+                    "element_token": "el-1",
+                },
+            )
+            return tool_code, session_code, (
+                f"{prepared_session}:{prepared_arguments['element_token']}"
+            )
         finally:
             manager.close_all()
             task.cancel()
@@ -241,16 +252,81 @@ def test_script_manager_keeps_the_cli_allowlist_and_session_binding() -> None:
     assert asyncio.run(exercise()) == (
         "invalid_computer_script_tool",
         "session_argument_forbidden",
+        "ses-script:el-1",
     )
 
 
-def test_script_routes_reject_an_old_turn_before_reaching_computer_server() -> None:
-    async def exercise() -> tuple[dict, dict, list[tuple[str, dict]]]:
+def test_script_request_body_is_bounded_before_admission(
+    monkeypatch,
+) -> None:
+    async def exercise(chunked: bool) -> tuple[int, dict, list[tuple[str, dict]]]:
         calls: list[tuple[str, dict]] = []
 
         class ComputerServer:
-            async def call_tool(self, name: str, arguments: dict) -> dict:
+            async def call_tool(self, name: str, arguments: dict, **_kwargs) -> dict:
                 calls.append((name, arguments))
+                return _structured({})
+
+        controller = SimpleNamespace(
+            computer_use_server=ComputerServer(),
+            computer_script_sessions=None,
+            controller_id="controller-test",
+            _session_id_from_context=lambda _context: None,
+        )
+        app = internal_server.create_app(controller)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            if chunked:
+
+                async def chunks():
+                    yield b"{"
+                    yield b"x" * 64
+
+                response = await client.post(
+                    "/internal/computer-script/request",
+                    content=chunks(),
+                    headers={"Content-Type": "application/json"},
+                )
+            else:
+                response = await client.post(
+                    "/internal/computer-script/request",
+                    content=b"x" * 65,
+                    headers={"Content-Type": "application/json"},
+                )
+        return response.status_code, response.json(), calls
+
+    monkeypatch.setattr(
+        internal_server,
+        "_COMPUTER_SCRIPT_REQUEST_MAX_BYTES",
+        64,
+    )
+    for chunked in (False, True):
+        status, payload, calls = asyncio.run(exercise(chunked))
+        assert status == 413
+        assert payload == {
+            "ok": False,
+            "error": "computer_script_request_too_large",
+            "params": {"limit_bytes": 64},
+        }
+        assert calls == []
+
+
+def test_script_routes_reject_an_old_turn_before_reaching_computer_server() -> None:
+    async def exercise() -> tuple[dict, dict, list[tuple[str, dict, object]]]:
+        calls: list[tuple[str, dict, object]] = []
+
+        class ComputerServer:
+            async def call_tool(
+                self,
+                name: str,
+                arguments: dict,
+                *,
+                handle_descriptor=None,
+            ) -> dict:
+                calls.append((name, arguments, handle_descriptor))
                 return _structured({"windows": []})
 
         controller = SimpleNamespace(
@@ -288,7 +364,13 @@ def test_script_routes_reject_an_old_turn_before_reaching_computer_server() -> N
                     json={
                         "connection_token": token,
                         "tool": "list_windows",
-                        "arguments": {},
+                        "arguments": {"pid": 41},
+                        "descriptor": {
+                            "kind": "app",
+                            "pid": 41,
+                            "bundle_id": "com.apple.mail",
+                            "name": None,
+                        },
                     },
                 )
                 controller.session_turns.in_flight["ses-script"] = session_turns.Turn(
@@ -301,7 +383,13 @@ def test_script_routes_reject_an_old_turn_before_reaching_computer_server() -> N
                     json={
                         "connection_token": token,
                         "tool": "list_windows",
-                        "arguments": {},
+                        "arguments": {"pid": 41},
+                        "descriptor": {
+                            "kind": "app",
+                            "pid": 41,
+                            "bundle_id": "com.apple.mail",
+                            "name": None,
+                        },
                     },
                 )
             return success.json(), stale.json(), calls
@@ -318,4 +406,15 @@ def test_script_routes_reject_an_old_turn_before_reaching_computer_server() -> N
     success, stale, calls = asyncio.run(exercise())
     assert success["ok"] is True
     assert stale["error"] == "script_turn_ended"
-    assert calls == [("list_windows", {"session": "ses-script"})]
+    assert calls == [
+        (
+            "list_windows",
+            {"pid": 41, "session": "ses-script"},
+            {
+                "kind": "app",
+                "pid": 41,
+                "bundle_id": "com.apple.mail",
+                "name": None,
+            },
+        ),
+    ]

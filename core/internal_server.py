@@ -55,6 +55,11 @@ logger = logging.getLogger(__name__)
 
 _PROCESSING_RECORD_CURSOR_RE = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
 _PROCESSING_RECORD_ENTRY_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,256}\Z")
+_COMPUTER_SCRIPT_REQUEST_MAX_BYTES = 8 * 1024 * 1024
+
+
+class _RequestBodyTooLarge(RuntimeError):
+    """An internal request exceeded its route-specific hard limit."""
 
 
 def _create_controller_loop_server(config: Any) -> Any:
@@ -781,8 +786,28 @@ def create_app(
 
     @app.post("/internal/computer-script/request")
     async def _computer_script_request(request: Request) -> Any:
-        payload = await _safe_json(request)
-        if set(payload) != {"connection_token", "tool", "arguments"}:
+        try:
+            payload = await _bounded_json_object(
+                request,
+                limit=_COMPUTER_SCRIPT_REQUEST_MAX_BYTES,
+            )
+        except _RequestBodyTooLarge:
+            return JSONResponse(
+                status_code=413,
+                content={
+                    "ok": False,
+                    "error": "computer_script_request_too_large",
+                    "params": {
+                        "limit_bytes": _COMPUTER_SCRIPT_REQUEST_MAX_BYTES,
+                    },
+                },
+            )
+        if set(payload) != {
+            "connection_token",
+            "tool",
+            "arguments",
+            "descriptor",
+        }:
             return JSONResponse(
                 status_code=400,
                 content={
@@ -794,6 +819,7 @@ def create_app(
         connection_token = payload.get("connection_token")
         tool = payload.get("tool")
         arguments = payload.get("arguments")
+        descriptor = payload.get("descriptor")
         if (
             not isinstance(connection_token, str)
             or not connection_token
@@ -837,7 +863,11 @@ def create_app(
                 )
             controller.computer_use_server = computer_server
 
-        result = await computer_server.call_tool(tool, forwarded)
+        result = await computer_server.call_tool(
+            tool,
+            forwarded,
+            handle_descriptor=descriptor,
+        )
         return {
             "ok": result.get("isError") is not True,
             "tool": tool,
@@ -1716,6 +1746,32 @@ async def _safe_json(request: Request) -> dict[str, Any]:
     except Exception:
         body = {}
     return body if isinstance(body, dict) else {}
+
+
+async def _bounded_json_object(
+    request: Request,
+    *,
+    limit: int,
+) -> dict[str, Any]:
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared_length = int(content_length)
+        except ValueError:
+            declared_length = -1
+        if declared_length > limit:
+            raise _RequestBodyTooLarge
+
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > limit:
+            raise _RequestBodyTooLarge
+        body.extend(chunk)
+    try:
+        payload = await asyncio.to_thread(json.loads, bytes(body))
+    except (TypeError, ValueError, RecursionError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 async def _build_dispatch_payload(payload: dict[str, Any]) -> tuple[str, MessageContext]:

@@ -94,16 +94,20 @@ export interface WindowHandle {
 }
 
 export interface AppHandle {
-  readonly pid: number;
+  readonly pid: number | null;
   readonly name: string;
   readonly bundleId: string | null;
-  launch(options?: ActionOptions): Promise<Effect>;
+  launch(options?: ActionOptions): Promise<LaunchEffect>;
   forceQuit(): Promise<Effect>;
   window(selector?: WindowSelector): Promise<WindowHandle>;
   waitFor(
     selector?: WindowSelector,
     options?: WaitOptions | number,
   ): Promise<WindowHandle>;
+}
+
+export interface LaunchEffect extends Effect {
+  app: AppHandle;
 }
 
 export interface Computer {

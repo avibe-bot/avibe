@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 _MAX_SCRIPT_TIMEOUT_SECONDS = 3600.0
 _INVALID_BINDING_RETENTION_SECONDS = 60.0
-_SCRIPT_TOOLS = frozenset(COMPUTER_CLI_TOOLS.values())
+_SCRIPT_TOOLS = frozenset({*COMPUTER_CLI_TOOLS.values(), "double_click"})
 
 
 class ComputerScriptSessionError(RuntimeError):

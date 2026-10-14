@@ -455,6 +455,232 @@ async def test_non_ready_call_names_status_and_never_spawns_upstream(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    (
+        "descriptor",
+        "tool",
+        "arguments",
+        "apps",
+        "windows",
+        "expected_code",
+        "expected_tools",
+    ),
+    [
+        (
+            {
+                "kind": "app",
+                "pid": 41,
+                "bundle_id": "com.apple.mail",
+                "name": None,
+            },
+            "kill_app",
+            {"pid": 41, "session": "ses-script"},
+            [
+                {
+                    "pid": 41,
+                    "bundle_id": "com.apple.notes",
+                    "name": "Notes",
+                }
+            ],
+            [],
+            "stale_app_handle",
+            ["start_session", "list_apps"],
+        ),
+        (
+            {
+                "kind": "app",
+                "pid": 41,
+                "bundle_id": "com.apple.mail",
+                "name": None,
+            },
+            "list_windows",
+            {"pid": 41, "session": "ses-script"},
+            [
+                {
+                    "pid": 57,
+                    "bundle_id": "com.apple.mail",
+                    "name": "Mail",
+                }
+            ],
+            [],
+            "stale_app_handle",
+            ["start_session", "list_apps"],
+        ),
+        (
+            {
+                "kind": "window",
+                "pid": 41,
+                "window_id": 9,
+                "app": {
+                    "kind": "app",
+                    "pid": 41,
+                    "bundle_id": "com.apple.mail",
+                    "name": None,
+                },
+            },
+            "get_window_state",
+            {"pid": 41, "window_id": 9, "session": "ses-script"},
+            [
+                {
+                    "pid": 41,
+                    "bundle_id": "com.apple.mail",
+                    "name": "Mail",
+                }
+            ],
+            [
+                {
+                    "pid": 57,
+                    "window_id": 9,
+                    "app_name": "Mail",
+                }
+            ],
+            "stale_window_handle",
+            ["start_session", "list_apps", "list_windows"],
+        ),
+    ],
+)
+async def test_script_handle_descriptors_are_validated_before_the_action(
+    tmp_path: Path,
+    descriptor: dict[str, Any],
+    tool: str,
+    arguments: dict[str, Any],
+    apps: list[dict[str, Any]],
+    windows: list[dict[str, Any]],
+    expected_code: str,
+    expected_tools: list[str],
+) -> None:
+    state_path, state = _state(tmp_path)
+
+    class HandleUpstream(FakeUpstream):
+        async def request(
+            self,
+            method: str,
+            params: Mapping[str, Any],
+        ) -> dict[str, Any]:
+            assert method == "tools/call"
+            copied = json.loads(json.dumps(params))
+            self.calls.append((method, copied))
+            name = params["name"]
+            if name == "list_apps":
+                structured = {"apps": apps}
+            elif name == "list_windows":
+                structured = {"windows": windows}
+            else:
+                structured = {"effect": "confirmed", "route": "system_api"}
+            return {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "content": [],
+                    "structuredContent": structured,
+                },
+            }
+
+    upstream = HandleUpstream()
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+        lease_manager=FakeLeaseManager(),  # type: ignore[arg-type]
+    )
+
+    result = await server.call_tool(
+        tool,
+        arguments,
+        handle_descriptor=descriptor,
+    )
+
+    assert result["structuredContent"]["code"] == expected_code
+    assert [params["name"] for _method, params in upstream.calls] == expected_tools
+
+
+@pytest.mark.asyncio
+async def test_current_script_window_descriptor_is_not_forwarded_to_driver(
+    tmp_path: Path,
+) -> None:
+    state_path, state = _state(tmp_path)
+
+    class HandleUpstream(FakeUpstream):
+        async def request(
+            self,
+            method: str,
+            params: Mapping[str, Any],
+        ) -> dict[str, Any]:
+            assert method == "tools/call"
+            copied = json.loads(json.dumps(params))
+            self.calls.append((method, copied))
+            name = params["name"]
+            if name == "list_apps":
+                structured = {
+                    "apps": [
+                        {
+                            "pid": 41,
+                            "bundle_id": "com.apple.mail",
+                            "name": "Mail",
+                        }
+                    ]
+                }
+            elif name == "list_windows":
+                structured = {
+                    "windows": [
+                        {
+                            "pid": 41,
+                            "window_id": 9,
+                            "app_name": "Mail",
+                        }
+                    ]
+                }
+            else:
+                structured = {"pid": 41, "window_id": 9, "elements": []}
+            return {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "content": [],
+                    "structuredContent": structured,
+                },
+            }
+
+    upstream = HandleUpstream()
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+        lease_manager=FakeLeaseManager(),  # type: ignore[arg-type]
+    )
+    descriptor = {
+        "kind": "window",
+        "pid": 41,
+        "window_id": 9,
+        "app": {
+            "kind": "app",
+            "pid": 41,
+            "bundle_id": "com.apple.mail",
+            "name": None,
+        },
+    }
+
+    result = await server.call_tool(
+        "get_window_state",
+        {"pid": 41, "window_id": 9, "session": "ses-script"},
+        handle_descriptor=descriptor,
+    )
+
+    assert result.get("isError") is not True
+    assert [params["name"] for _method, params in upstream.calls] == [
+        "start_session",
+        "list_apps",
+        "list_windows",
+        "get_window_state",
+    ]
+    assert upstream.calls[-1][1]["arguments"] == {
+        "pid": 41,
+        "window_id": 9,
+        "session": "ses-script",
+    }
+
+
+@pytest.mark.asyncio
 async def test_daemon_generation_and_child_exit_each_replace_proxy_once(
     tmp_path: Path,
 ) -> None:
