@@ -4,6 +4,7 @@ import { FlaskConical, Info, Loader2, LogIn, MoreHorizontal, Plus, RefreshCw, Se
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
+import { useToast } from '@/context/ToastContext';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Input } from '@/components/ui/input';
 import { ResponsiveMenu } from '@/components/ui/responsive-menu';
@@ -17,7 +18,7 @@ import { Field } from './dialogFields';
 import { GuardDialog } from './GuardDialog';
 import { GuardImpact } from './GuardImpact';
 import { HostedCapabilityChips } from './HostedCapabilityChips';
-import { modelCapabilities, type ProbeTarget } from './hostedTools';
+import { modelCapabilities } from './hostedTools';
 import { confirmGuardPlan, sendAgreed, unansweredRefusal } from './guardedWrite';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { SourcePrivateValue, SourcePrivacyToggle } from './SourcePrivacy';
@@ -61,7 +62,7 @@ import { SourceTestDialog } from './SourceTestDialog';
 import { ACCENT_ICON, ACCENT_TILE, sourceVisual } from './vendorMeta';
 import type {
   AgentBackend,
-  HostedToolProbeResult,
+  HostedToolName,
   HostedToolsStatus,
   RouteHopRef,
   Source,
@@ -145,7 +146,7 @@ const GUARD_COPY_KIND: Record<GuardedAction['kind'], 'refetch' | 'removeModel'> 
 const committedPlan = (hops: RouteHopRef[], gaps: SupplyGap[]): ManageGuardPlan | null =>
   hops.length > 0 || gaps.length > 0 ? { hops, gaps } : null;
 
-const NO_PROBES: ReadonlySet<string> = new Set();
+const NO_TOOLS: ReadonlySet<HostedToolName> = new Set();
 
 type SourceReconciliation =
   | { kind: 'source'; source: Source }
@@ -173,14 +174,15 @@ export const SourceDetailPanel: React.FC<{
   headingRef?: React.Ref<HTMLHeadingElement>;
   /** Authoritative backends still using the gateway, when the Agent read is ready. */
   activeBackends?: ReadonlySet<AgentBackend>;
-  /** The hosted-tools read, for each model's capability chips (§6.2), and its retry. */
+  /** The hosted-tools read, for each model's capability chips (`vibey-hosted-tools.md` §8.2), and its retry. */
   hostedTools?: RegionRead<HostedToolsStatus>;
   onRetryHostedTools?: () => void;
-  /** Probe keys running now, and the action a chip's re-check runs. */
-  hostedProbing?: ReadonlySet<string>;
-  onProbeHostedTool?: (target: ProbeTarget) => Promise<HostedToolProbeResult | null>;
-}> = ({ source, trackMutation, onReauth, onMutationCommitted, headingRef, activeBackends, hostedTools, onRetryHostedTools, hostedProbing, onProbeHostedTool }) => {
+  /** Tools with a write out, and the clear a refusal chip runs for one of this Source's models. */
+  hostedPending?: ReadonlySet<HostedToolName>;
+  onClearHostedRefusal?: (tool: HostedToolName, modelId: string) => void;
+}> = ({ source, trackMutation, onReauth, onMutationCommitted, headingRef, activeBackends, hostedTools, onRetryHostedTools, hostedPending, onClearHostedRefusal }) => {
   const { t, i18n } = useTranslation();
+  const { showToast } = useToast();
   const detailsHidden = useSourceDetailsHidden();
   const now = useDeadlineClock(source.state.status === 'cooldown' ? source.state.retry_at : null);
   const { Icon, accent } = sourceVisual(source);
@@ -215,7 +217,7 @@ export const SourceDetailPanel: React.FC<{
     model.id,
     capabilityStatus ? modelCapabilities(capabilityStatus, source.id, model.id) : [],
   ]));
-  // The column appears only when a model has evidence: unchecked draws nothing.
+  // The column appears only when a model has evidence: an unused model draws nothing.
   const showCapabilities = [...capabilities.values()].some((list) => list.length > 0)
     || models.some((model) => (model.refused_efforts?.length ?? 0) > 0);
   // A failed read is not "nothing checked": say so where chips would be. Only a
@@ -275,6 +277,32 @@ export const SourceDetailPanel: React.FC<{
               settlement.release();
             }
           }
+        }
+      }
+    }).finally(() => setPendingAction(null));
+  };
+  /** Clear one refused effort: the next request at it tries this Source again. The answer is the Source. */
+  const clearEffort = (modelId: string, effort: string) => {
+    if (busy) return Promise.resolve();
+    setPendingAction('other');
+    return trackMutation(async (latest, settlement) => {
+      try {
+        await settlement.source(await modelsApi.clearRefusedEffort(latest.id, modelId, effort));
+      } catch (error) {
+        if (apiFailure(error)?.code === 'source_not_found') {
+          await settlement.gone(latest.id);
+          return;
+        }
+        showToast(t('settings.models.capability.clearFailed') as string, 'error');
+        // A refused clear changed nothing and a lost answer may have committed:
+        // either way the chips show what the server holds now.
+        try {
+          const inventory = await settlement.readInventory();
+          const current = inventory.sources.find((item) => item.id === latest.id);
+          if (current) await settlement.source(current);
+          else await settlement.gone(latest.id, inventory);
+        } catch {
+          settlement.release();
         }
       }
     }).finally(() => setPendingAction(null));
@@ -767,7 +795,15 @@ export const SourceDetailPanel: React.FC<{
         {models.map((model) => (
           <div key={model.id} hidden={!visibleModelIds.has(model.id)} className="model-hub-source-table-row grid gap-3 border-b border-border last:border-b-0 md:items-center md:gap-y-0">
             <span className="flex min-w-0 items-center gap-2"><span className="model-hub-source-model truncate font-mono text-foreground" title={model.id}>{model.id}</span>{model.origin !== 'discovered' && <span className="model-hub-source-pill model-hub-source-entry-pill model-hub-source-entry-pill--manual w-fit rounded-full border font-semibold">{t('settings.models.sourceDetail.entry.manual')}</span>}{result?.added.includes(model.id) && <span className="model-hub-accent-pill--mint model-hub-source-pill rounded-full border px-2 py-0.5 font-semibold">{t('settings.models.sourceDetail.refetch.added')}</span>}</span>
-            {showCapabilities && <span className="model-hub-source-capabilities min-w-0"><HostedCapabilityChips capabilities={capabilities.get(model.id) ?? []} refusedEfforts={model.refused_efforts} probing={hostedProbing ?? NO_PROBES} onProbe={onProbeHostedTool} /></span>}
+            {showCapabilities && <span className="model-hub-source-capabilities min-w-0"><HostedCapabilityChips
+              modelId={model.id}
+              capabilities={capabilities.get(model.id) ?? []}
+              refusedEfforts={model.refused_efforts}
+              pendingTools={hostedPending ?? NO_TOOLS}
+              sourceBusy={busy}
+              onClearTool={onClearHostedRefusal && ((tool) => onClearHostedRefusal(tool, model.id))}
+              onClearEffort={(effort) => void clearEffort(model.id, effort)}
+            /></span>}
             <div className="model-hub-source-row-actions flex items-center justify-end gap-1">
               {removeFailure?.modelId === model.id && <span className="model-hub-source-tier text-right text-destructive-ink">{t('settings.models.sourceDetail.fail.removeModel')} <button type="button" disabled={busy} onClick={() => {
                 if (!removeFailure.retryRead) void remove(model);

@@ -1,7 +1,9 @@
 // @vitest-environment jsdom
-// What the 工具 tab writes and claims (`vibey-hosted-tools.md` §6.1): a toggle and
-// an executor pick each replace the tool's whole setting, the picker offers only
-// what is verified, and no cost is invented where none is known.
+// What the 工具 tab writes and says (`vibey-hosted-tools.md` §8.1): every tool is
+// on by default and nothing locks it, a control writes only the field it
+// changes, status lines come from real use only, and every refusal can be
+// cleared where the line that names it says so.
+import * as React from 'react';
 import { cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { createInstance } from 'i18next';
@@ -10,16 +12,17 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import en from '../../../i18n/en.json';
 import zh from '../../../i18n/zh.json';
-import type { ProbeTarget } from './hostedTools';
 import { readyRegion } from './regionRead';
 import { ToolsTab } from './ToolsTab';
 import type {
-  HostedEvidence,
-  HostedToolCandidate,
+  HostedExecutorCandidate,
+  HostedImageToolStatus,
+  HostedRefusal,
+  HostedSearchToolStatus,
   HostedToolName,
-  HostedToolProbeResult,
+  HostedToolPut,
+  HostedToolRunStatus,
   HostedToolsStatus,
-  HostedToolStatus,
   Source,
 } from './types';
 
@@ -52,386 +55,308 @@ const RELAY = source('src_relay001', 'relay-gpt');
 const GROK = source('src_grok0001', 'Grok', { vendor: 'xai' });
 const SUBSCRIPTION = source('src_chatgpt1', 'OpenAI subscription', { kind: 'subscription', billing: 'monthly' });
 const CLAUDE = source('src_claude01', 'relay-claude', { vendor: 'anthropic', protocol: 'anthropic' });
-
-const unknown: HostedEvidence = { status: 'unknown', stale: null, basis: null, observed_at: null, detail: null, changes_at: null };
-const verified: HostedEvidence = {
-  status: 'verified', stale: null, basis: 'probe', observed_at: '2026-10-13T10:20:00Z', detail: null, changes_at: '2026-11-12T10:20:00Z',
-};
 const SOURCES = [CLAUDE, RELAY, GROK, SUBSCRIPTION];
 
-/** A candidate as the server reports it; billing follows its Source unless a test states it. */
-type CandidateInput = Pick<HostedToolCandidate, 'source_id' | 'model_id' | 'call' | 'replay'> & Partial<HostedToolCandidate>;
-const tool = (
-  name: HostedToolName,
-  over: Omit<Partial<HostedToolStatus>, 'candidates'> & { candidates?: CandidateInput[] } = {},
-): HostedToolStatus => ({
-  name,
-  enabled: false,
-  executor: null,
-  bound: null,
-  ...over,
-  candidates: (over.candidates ?? []).map((candidate) => ({
-    billing: SOURCES.find((entry) => entry.id === candidate.source_id)?.billing ?? 'metered',
-    price: null,
-    probe_estimate: null,
-    ...candidate,
-  })),
+const run = (over: Partial<HostedToolRunStatus> = {}): HostedToolRunStatus => ({ latest_ok: null, verified: [], refused: [], ...over });
+const refusal = (sourceId: string, modelId: string, at: string, aspect: HostedRefusal['aspect'] = 'call'): HostedRefusal => ({
+  source_id: sourceId, model_id: modelId, aspect, at, reason: '400 unsupported_tool_type',
 });
 
-const status = (tools: HostedToolStatus[], reverify = { engine_upgraded: 0, aged: 0 }): HostedToolsStatus => ({ tools, reverify });
+const candidate = (sourceId: string, modelId: string, over: Partial<HostedExecutorCandidate> = {}): HostedExecutorCandidate => ({
+  source_id: sourceId,
+  model_id: modelId,
+  billing: SOURCES.find((entry) => entry.id === sourceId)?.billing ?? 'metered',
+  relay: false,
+  price: null,
+  ...over,
+});
 
-type RunProbe = (target: ProbeTarget) => Promise<HostedToolProbeResult | null>;
+const search = (name: 'web_search' | 'x_search', over: Partial<HostedSearchToolStatus> = {}): HostedSearchToolStatus => ({
+  name,
+  enabled: true,
+  status: run(),
+  executor_order: null,
+  effective_order: (over.executor_candidates ?? []).map((entry) => entry.source_id),
+  executor_candidates: [],
+  ...over,
+});
+
+const image = (over: Partial<HostedImageToolStatus> = {}): HostedImageToolStatus => ({
+  name: 'image_generate',
+  enabled: true,
+  status: run(),
+  default_model: null,
+  effective_default: null,
+  models: [],
+  image_offered_by: ['openai', 'google'],
+  ...over,
+});
+
 const renderTab = (
   value: HostedToolsStatus,
-  {
-    lng = 'en',
-    pending = new Set<HostedToolName>(),
-    onProbe = vi.fn<RunProbe>(async () => null),
-  }: { lng?: 'en' | 'zh'; pending?: ReadonlySet<HostedToolName>; onProbe?: RunProbe } = {},
+  { lng = 'en', pending = new Set<HostedToolName>() }: { lng?: 'en' | 'zh'; pending?: ReadonlySet<HostedToolName> } = {},
 ) => {
-  const onChange = vi.fn();
+  const onSave = vi.fn();
+  const onClear = vi.fn();
   render(
     <I18nextProvider i18n={translator(lng)}>
-      <ToolsTab
-        read={readyRegion(value)}
-        sources={SOURCES}
-        pending={pending}
-        probing={new Set()}
-        onChange={onChange}
-        onProbe={onProbe}
-        onRetry={() => {}}
-      />
+      <ToolsTab read={readyRegion(value)} sources={SOURCES} pending={pending} onSave={onSave} onClear={onClear} onRetry={() => {}} />
     </I18nextProvider>,
   );
-  return onChange;
+  return { onSave, onClear };
 };
 
 const card = (name: string) => screen.getByRole('region', { name });
+const openAdvanced = async (user: ReturnType<typeof userEvent.setup>, name: string) => {
+  await user.click(within(card(name)).getByRole('button', { name: /^Advanced/ }));
+};
 
 afterEach(() => cleanup());
 
-describe('ToolsTab writes', () => {
-  it('MH-HOSTED-UI-001: a toggle replaces the whole setting and keeps the saved executor', async () => {
-    const executor = { source_id: GROK.id, model_id: 'grok-4.6' };
-    const onChange = renderTab(status([
-      tool('web_search', { enabled: true, executor, candidates: [{ ...executor, call: verified, replay: verified }] }),
-      tool('x_search', { bound: executor, candidates: [{ ...executor, call: verified, replay: verified }] }),
-    ]));
+describe('ToolsTab settings', () => {
+  it('MH-HOSTED-UI-018: shows every tool on by default under its capability, and never locks a switch', () => {
+    renderTab({ tools: [search('web_search'), search('x_search'), image()] });
 
-    await userEvent.click(within(card('Web search')).getByRole('switch', { name: 'Turn off Web search' }));
-    // The PUT body is total: a toggle that sent only `enabled` would drop the
-    // user's executor back to automatic.
-    expect(onChange).toHaveBeenLastCalledWith('web_search', { enabled: false, executor });
-
-    await userEvent.click(within(card('X search')).getByRole('switch', { name: 'Turn on X search' }));
-    expect(onChange).toHaveBeenLastCalledWith('x_search', { enabled: true, executor: null });
+    expect(within(screen.getByRole('region', { name: 'Search' })).getAllByRole('region').map((region) => region.getAttribute('aria-label')))
+      .toEqual(['Web search', 'X search']);
+    expect(within(screen.getByRole('region', { name: 'Generate' })).getByRole('region', { name: 'Image generation' })).toBeTruthy();
+    for (const name of ['Web search', 'X search', 'Image generation']) {
+      const toggle = within(card(name)).getByRole('switch');
+      expect(toggle.getAttribute('aria-checked')).toBe('true');
+      expect((toggle as HTMLButtonElement).disabled).toBe(false);
+    }
   });
 
-  it('MH-HOSTED-UI-018: cannot turn a tool on until a pair is verified to run it, but can always turn it off', async () => {
-    const onChange = renderTab(status([
-      tool('web_search', { candidates: [{ source_id: GROK.id, model_id: 'grok-4.6', call: unknown, replay: unknown }] }),
-      tool('x_search', { enabled: true, candidates: [{ source_id: GROK.id, model_id: 'grok-4.6', call: unknown, replay: unknown }] }),
-    ]));
+  it('MH-HOSTED-UI-001: a switch writes only whether the tool is on', async () => {
+    const user = userEvent.setup();
+    const { onSave } = renderTab({ tools: [search('web_search', { executor_order: [GROK.id] }), image({ enabled: false })] });
 
-    // On with nothing verified, every call would fail with no way to fix it here.
-    const off = within(card('Web search')).getByRole('switch', { name: 'Turn on Web search' }) as HTMLButtonElement;
-    expect(off.disabled).toBe(true);
-    within(card('Web search')).getByText('Off · check a Source first');
+    await user.click(within(card('Web search')).getByRole('switch'));
+    await user.click(within(card('Image generation')).getByRole('switch'));
 
-    await userEvent.click(within(card('X search')).getByRole('switch', { name: 'Turn off X search' }));
-    expect(onChange).toHaveBeenLastCalledWith('x_search', { enabled: false, executor: null });
+    expect(onSave.mock.calls).toEqual([['web_search', { enabled: false }], ['image_generate', { enabled: true }]]);
   });
 
-  it('MH-HOSTED-UI-018: keeps a tool off while the server binds no executor for it, and says to choose one when a verified pair exists', async () => {
-    // Verified, but outside Vibey's Source order: Automatic binds nothing (`bound: null`).
-    const onChange = renderTab(status([tool('web_search', {
-      candidates: [{ source_id: GROK.id, model_id: 'grok-4.6', call: verified, replay: verified }],
-    })]));
-    const toggle = within(card('Web search')).getByRole('switch', { name: 'Turn on Web search' }) as HTMLButtonElement;
-    expect(toggle.disabled).toBe(true);
-    within(card('Web search')).getByText('Off · choose an executor first');
-    // Picking the verified pair explicitly is how it binds.
-    await userEvent.selectOptions(within(card('Web search')).getByRole('combobox'), 'Grok · grok-4.6');
-    expect(onChange).toHaveBeenLastCalledWith('web_search', { enabled: false, executor: { source_id: GROK.id, model_id: 'grok-4.6' } });
-  });
-
-  it('MH-HOSTED-UI-001: writes a saved executor back only while the server would still accept it', async () => {
-    // The saved pair left the candidates (its model went away): resolution skips
-    // it already, and echoing it would get the whole PUT refused.
-    const onChange = renderTab(status([tool('web_search', {
-      enabled: true,
-      executor: { source_id: RELAY.id, model_id: 'gpt-6-retired' },
-      candidates: [{ source_id: GROK.id, model_id: 'grok-4.6', call: unknown, replay: unknown }],
-    })]));
-
-    await userEvent.click(within(card('Web search')).getByRole('switch', { name: 'Turn off Web search' }));
-    expect(onChange).toHaveBeenLastCalledWith('web_search', { enabled: false, executor: null });
-  });
-
-  it('MH-HOSTED-UI-001: the executor picker offers only verified pairs, and a pick keeps the toggle', async () => {
-    const onChange = renderTab(status([
-      tool('web_search', {
-        enabled: true,
-        bound: { source_id: GROK.id, model_id: 'grok-4.6' },
-        candidates: [
-          { source_id: RELAY.id, model_id: 'gpt-6-astra', call: unknown, replay: unknown },
-          { source_id: GROK.id, model_id: 'grok-4.6', call: verified, replay: verified },
-        ],
-      }),
-      tool('x_search', { candidates: [{ source_id: GROK.id, model_id: 'grok-4.6', call: unknown, replay: unknown }] }),
-    ]));
-
-    const picker = within(card('Web search')).getByRole('combobox', { name: 'Proxy executor for Web search' });
-    expect(within(picker).getAllByRole('option').map((option) => option.textContent))
-      // Automatic names what the server binds for it now.
-      .toEqual(['Automatic (Grok · grok-4.6)', 'Grok · grok-4.6']);
-    await userEvent.selectOptions(picker, 'Grok · grok-4.6');
-    expect(onChange).toHaveBeenLastCalledWith('web_search', { enabled: true, executor: { source_id: GROK.id, model_id: 'grok-4.6' } });
-    await userEvent.selectOptions(picker, 'Automatic (Grok · grok-4.6)');
-    expect(onChange).toHaveBeenLastCalledWith('web_search', { enabled: true, executor: null });
-
-    // Nothing verified: nothing to pick, and the control says why.
-    const unverified = within(card('X search')).getByRole('combobox', { name: 'Proxy executor for X search' });
-    expect((unverified as HTMLButtonElement | HTMLSelectElement).disabled).toBe(true);
-    expect((unverified as HTMLSelectElement).selectedOptions[0]?.textContent).toBe('Available after a check');
-  });
-
-  it('MH-HOSTED-UI-001: a saved executor that is no longer verified stays visible as itself', () => {
-    const executor = { source_id: GROK.id, model_id: 'grok-4.6' };
-    renderTab(status([tool('web_search', {
-      enabled: true,
-      executor,
-      // The saved choice is stale, so the server binds the first verified pair.
-      bound: { source_id: RELAY.id, model_id: 'gpt-6-astra' },
-      candidates: [
-        { source_id: RELAY.id, model_id: 'gpt-6-astra', call: verified, replay: verified },
-        { ...executor, call: { ...verified, status: 'unknown', stale: 'wire' }, replay: unknown },
+  it('MH-HOSTED-UI-001: holds a tool\'s controls while its write is out, and leaves other tools free', async () => {
+    const user = userEvent.setup();
+    const { onSave, onClear } = renderTab({
+      tools: [
+        search('web_search', {
+          status: run({ refused: [refusal(RELAY.id, 'gpt-6-astra', '2026-10-14T09:00:00Z')] }),
+          executor_candidates: [candidate(GROK.id, 'grok-fast'), candidate(CLAUDE.id, 'claude-haiku-5-5')],
+        }),
+        search('x_search'),
       ],
-    })]));
+    }, { pending: new Set<HostedToolName>(['web_search']) });
 
-    const picker = within(card('Web search')).getByRole('combobox', { name: 'Proxy executor for Web search' });
-    expect((picker as HTMLSelectElement).selectedOptions[0]?.textContent).toBe('Grok · grok-4.6 (not verified)');
-    // The badge is on what a turn binds, not on the saved choice.
-    const badge = within(card('Web search')).getByText('Proxy executor', { selector: '.model-hub-pill' });
-    expect(badge.closest('[data-candidate]')?.getAttribute('data-candidate')).toBe('src_relay001:gpt-6-astra');
-  });
-
-  it('MH-HOSTED-UI-001: keeps a saved executor visible as itself when nothing is verified any more', () => {
-    const executor = { source_id: GROK.id, model_id: 'grok-4.6' };
-    const onChange = renderTab(status([tool('x_search', {
-      enabled: true,
-      executor,
-      candidates: [{ ...executor, call: { ...verified, status: 'unknown', stale: 'wire' }, replay: unknown }],
-    })]));
-
-    const picker = within(card('X search')).getByRole('combobox', { name: 'Proxy executor for X search' }) as HTMLSelectElement;
-    expect(picker.disabled).toBe(true);
-    expect(picker.selectedOptions[0]?.textContent).toBe('Grok · grok-4.6 (not verified)');
-    expect(within(picker).queryByText('Available after a check')).toBeNull();
-    expect(onChange).not.toHaveBeenCalled();
-  });
-
-  it('MH-HOSTED-UI-001: holds a tool\'s controls while its write is in flight', () => {
-    renderTab(status([
-      tool('web_search', { candidates: [{ source_id: GROK.id, model_id: 'grok-4.6', call: verified, replay: verified }] }),
-      tool('x_search', { bound: { source_id: GROK.id, model_id: 'grok-4.6' }, candidates: [{ source_id: GROK.id, model_id: 'grok-4.6', call: verified, replay: verified }] }),
-    ]), { pending: new Set(['web_search']) });
-
-    expect((within(card('Web search')).getByRole('switch') as HTMLButtonElement | HTMLSelectElement).disabled).toBe(true);
-    expect((within(card('Web search')).getByRole('combobox') as HTMLButtonElement | HTMLSelectElement).disabled).toBe(true);
+    expect((within(card('Web search')).getByRole('switch') as HTMLButtonElement).disabled).toBe(true);
+    expect((within(card('Web search')).getByRole('button', { name: 'Clear relay-gpt\'s refusal of web search' }) as HTMLButtonElement).disabled).toBe(true);
+    await openAdvanced(user, 'Web search');
+    // The arrows stay focusable while the write is out, and do nothing.
+    const down = within(card('Web search')).getByRole('button', { name: 'Move Grok down' });
+    expect(down.getAttribute('aria-disabled')).toBe('true');
+    await user.click(down);
+    expect(onSave).not.toHaveBeenCalled();
+    expect(onClear).not.toHaveBeenCalled();
     expect((within(card('X search')).getByRole('switch') as HTMLButtonElement).disabled).toBe(false);
   });
 });
 
-describe('ToolsTab claims', () => {
-  it('MH-HOSTED-UI-018: claims routing only while the tool is on, and shows an off tool\'s executor as a saved preference', () => {
-    const executor = { source_id: GROK.id, model_id: 'grok-4.6' };
-    const candidates = [{ ...executor, call: verified, replay: verified }];
-    renderTab(status([
-      tool('web_search', { enabled: true, executor, bound: executor, candidates }),
-      tool('x_search', { enabled: false, executor, bound: executor, candidates }),
-    ]));
+describe('ToolsTab status lines', () => {
+  it('MH-HOSTED-UI-002: says nothing about a tool before its first use', () => {
+    renderTab({ tools: [search('web_search'), image()] });
 
-    const on = card('Web search');
-    within(on).getByText('Proxy executor', { selector: '.model-hub-pill' });
-    within(on).getByText(/Other models use Grok/);
-
-    // Off: resolution leaves the tool out entirely, so nothing here runs or bills.
-    const off = card('X search');
-    expect(within(off).queryByText('Proxy executor', { selector: '.model-hub-pill' })).toBeNull();
-    expect(off.textContent).not.toMatch(/Other models use|billed/);
-    within(off).getByText('Applies when the tool is on.');
-    expect((within(off).getByRole('combobox') as HTMLSelectElement).selectedOptions[0]?.textContent).toBe('Grok · grok-4.6');
+    for (const name of ['Web search', 'Image generation']) {
+      expect(within(card(name)).queryByText(/Last run|support|replay/)).toBeNull();
+      expect(within(card(name)).queryByRole('button', { name: /Clear/ })).toBeNull();
+    }
+    // The image card has no Advanced section until its clears move there.
+    expect(within(card('Image generation')).queryByRole('button', { name: /^Advanced/ })).toBeNull();
   });
 
-  it('MH-HOSTED-UI-003: states a cost only where one is known, and never prices an image', () => {
-    renderTab(status([
-      tool('web_search', { candidates: [
-        {
-          source_id: RELAY.id, model_id: 'gpt-6-astra', call: unknown, replay: unknown,
-          price: { unit: 'call', usd_per_1k: 10, extra: [], as_of: '2026-10-13', url: 'https://openai.com/api/pricing' },
-        },
-        { source_id: CLAUDE.id, model_id: 'claude-opus-5-5', call: unknown, replay: unknown },
-        { source_id: SUBSCRIPTION.id, model_id: 'gpt-6.1-sol', call: unknown, replay: unknown },
-      ] }),
-      tool('x_search', { candidates: [{
-        source_id: GROK.id, model_id: 'grok-4.6', call: unknown, replay: unknown,
-        price: { unit: 'post', usd_per_1k: 5, extra: [{ unit: 'profile', usd_per_1k: 10 }], as_of: '2026-10-13', url: 'https://docs.x.ai/pricing' },
-      }] }),
-      tool('image_generation', { candidates: [{ source_id: RELAY.id, model_id: 'gpt-6.1-sol', call: unknown, replay: null }] }),
-    ]));
+  it('MH-HOSTED-UI-002: names who ran the tool last, with the date only', () => {
+    renderTab({ tools: [search('x_search', { status: run({ latest_ok: { source_id: GROK.id, model_id: 'grok-4', mode: 'native', at: '2026-10-15T06:02:00Z' } }) })] }, { lng: 'zh' });
 
-    const row = (name: string, key: string) => card(name).querySelector(`[data-candidate="${key}"]`) as HTMLElement;
-    within(row('Web search', 'src_relay001:gpt-6-astra')).getByText('≈ $0.01 / call');
-    within(row('Web search', 'src_relay001:gpt-6-astra')).getByText('At API price');
-    // No list price for this provider: said to be unknown, never drawn as zero.
-    within(row('Web search', 'src_claude01:claude-opus-5-5')).getByText('No list price');
-    expect(row('Web search', 'src_claude01:claude-opus-5-5').textContent).not.toMatch(/\$/);
-    within(row('Web search', 'src_chatgpt1:gpt-6.1-sol')).getByText('Included in subscription');
-    within(row('X search', 'src_grok0001:grok-4.6')).getByText('≈ $0.005 / post');
-    within(row('X search', 'src_grok0001:grok-4.6')).getByText('At API price · + $0.01 / profile');
-    within(row('Image generation', 'src_relay001:gpt-6.1-sol')).getByText('Billed per image token · no per-image price yet');
-    expect(row('Image generation', 'src_relay001:gpt-6.1-sol').textContent).not.toMatch(/\$/);
+    expect(within(card('X 搜索')).getByText('最近一次由 Grok 执行 · 正常 · 10-15')).toBeTruthy();
   });
 
-  it('MH-HOSTED-UI-003: the image cost copy is the orchestrator-decided Chinese line', () => {
-    renderTab(status([tool('image_generation', { candidates: [
-      { source_id: RELAY.id, model_id: 'gpt-6.1-sol', call: unknown, replay: null },
-      { source_id: SUBSCRIPTION.id, model_id: 'gpt-6.1-sol', call: unknown, replay: null },
-    ] })]), { lng: 'zh' });
+  it('MH-HOSTED-UI-020: one refusing Source: its line names the models and where the tool runs now, and clears that Source', async () => {
+    const user = userEvent.setup();
+    const { onClear } = renderTab({
+      tools: [search('web_search', {
+        status: run({
+          latest_ok: { source_id: CLAUDE.id, model_id: 'claude-haiku-5-5', mode: 'executor', at: '2026-10-15T08:00:00Z' },
+          refused: [refusal(RELAY.id, 'gpt-6-astra', '2026-10-14T09:00:00Z'), refusal(RELAY.id, 'gpt-6-luna', '2026-10-14T10:00:00Z')],
+        }),
+      })],
+    }, { lng: 'zh' });
 
-    const image = card('图片生成');
-    within(image.querySelector('[data-candidate="src_relay001:gpt-6.1-sol"]') as HTMLElement).getByText('按图像 token 计费 · 暂无单价');
-    within(image.querySelector('[data-candidate="src_chatgpt1:gpt-6.1-sol"]') as HTMLElement).getByText('订阅内含');
+    const web = card('网页搜索');
+    expect(within(web).getByText('relay-gpt 不支持 · gpt-6-astra、gpt-6-luna，已改用 relay-claude')).toBeTruthy();
+    // That line already says where the tool runs, so no separate latest-run line repeats it.
+    expect(within(web).queryByText(/最近一次/)).toBeNull();
+    await user.click(within(web).getByRole('button', { name: '清除 relay-gpt 的网页搜索拒绝记录' }));
+    expect(onClear).toHaveBeenCalledWith('web_search', { source_id: RELAY.id });
   });
 
-  it('MH-HOSTED-UI-003: lets the locale compose a price with its extras', () => {
-    renderTab(status([tool('x_search', { candidates: [{
-      source_id: GROK.id, model_id: 'grok-4.6', call: unknown, replay: unknown,
-      price: { unit: 'post', usd_per_1k: 5, extra: [{ unit: 'profile', usd_per_1k: 10 }], as_of: '2026-10-13', url: 'https://docs.x.ai/pricing' },
-    }] })]), { lng: 'zh' });
-    within(card('X 搜索').querySelector('[data-candidate="src_grok0001:grok-4.6"]') as HTMLElement).getByText('API 标价 · 另加 $0.01 / 个账号');
+  it('MH-HOSTED-UI-020: two refusing Sources: the line names them, and the clears and Clear all sit in Advanced', async () => {
+    const user = userEvent.setup();
+    const { onClear } = renderTab({
+      tools: [search('web_search', {
+        status: run({
+          verified: [{ source_id: CLAUDE.id, model_id: 'claude-haiku-5-5', mode: 'executor', at: '2026-10-15T08:00:00Z' }],
+          refused: [refusal(RELAY.id, 'gpt-6-astra', '2026-10-14T09:00:00Z'), refusal(SUBSCRIPTION.id, 'gpt-6.1-sol', '2026-10-15T07:00:00Z')],
+        }),
+      })],
+    });
+
+    const web = card('Web search');
+    expect(within(web).getByText('Not supported on relay-gpt, OpenAI subscription')).toBeTruthy();
+    expect(within(web).queryByRole('button', { name: /^Clear/ })).toBeNull();
+    expect(within(web).getByRole('button', { name: /^Advanced/ }).textContent).toContain('Execution order: automatic · Status by Source');
+
+    await openAdvanced(user, 'Web search');
+    const rows = within(web).getAllByRole('listitem').filter((row) => row.hasAttribute('data-pair'));
+    expect(rows.map((row) => row.textContent)).toEqual([
+      'relay-claudeclaude-haiku-5-5OK · 10-15',
+      'relay-gptgpt-6-astraNot supported · 10-14400 unsupported_tool_typeClear',
+      'OpenAI subscriptiongpt-6.1-solNot supported · 10-15400 unsupported_tool_typeClear',
+    ]);
+    await user.click(within(web).getByRole('button', { name: 'Clear the web search refusal of gpt-6-astra on relay-gpt' }));
+    await user.click(within(web).getByRole('button', { name: 'Clear every refusal of web search' }));
+    expect(onClear.mock.calls).toEqual([
+      ['web_search', { source_id: RELAY.id, model_id: 'gpt-6-astra' }],
+      ['web_search', {}],
+    ]);
   });
 
-  it('MH-HOSTED-UI-004: says how many checks an engine upgrade made stale, and nothing when none did', () => {
-    renderTab(status([tool('web_search')], { engine_upgraded: 2, aged: 1 }));
-    const line = screen.getByRole('status');
-    // One sentence the locale composes, its first part marked.
-    expect(line.textContent).toBe('Engine upgraded · 2 need a new check · 1 check is over 30 days old');
-    expect(within(line).getByText('Engine upgraded · 2 need a new check').className).toContain('model-hub-ink-gold');
-    cleanup();
+  it('MH-HOSTED-UI-020: a replay refusal has its own line, and a Source that refused the call is not in it', async () => {
+    const user = userEvent.setup();
+    const { onClear } = renderTab({
+      tools: [
+        search('web_search', { status: run({ refused: [refusal(GROK.id, 'grok-4', '2026-10-14T09:00:00Z', 'replay')] }) }),
+        search('x_search', {
+          status: run({ refused: [refusal(RELAY.id, 'gpt-6-astra', '2026-10-14T09:00:00Z'), refusal(RELAY.id, 'gpt-6-luna', '2026-10-14T09:00:00Z', 'replay')] }),
+        }),
+      ],
+    });
 
-    renderTab(status([tool('web_search')]));
-    expect(screen.queryByRole('status')).toBeNull();
+    expect(within(card('Web search')).getByText('Grok can\'t replay earlier results')).toBeTruthy();
+    await user.click(within(card('Web search')).getByRole('button', { name: 'Clear Grok\'s refusal of web search' }));
+    expect(onClear).toHaveBeenCalledWith('web_search', { source_id: GROK.id });
+    expect(within(card('X search')).getByText('Not supported on relay-gpt · gpt-6-astra')).toBeTruthy();
+    expect(within(card('X search')).queryByText(/replay/)).toBeNull();
   });
 
-  it('MH-HOSTED-UI-006: names the Sources that have no native pair for a tool', () => {
-    renderTab(status([tool('x_search', { candidates: [{ source_id: GROK.id, model_id: 'grok-4.6', call: verified, replay: verified }] })]));
+  it('MH-HOSTED-UI-020: an image refusal reads and clears like a search refusal, and two move into Advanced', async () => {
+    const user = userEvent.setup();
+    const { onClear } = renderTab({
+      tools: [image({ status: run({ refused: [refusal(RELAY.id, 'gpt-image-2', '2026-10-14T09:00:00Z'), refusal(CLAUDE.id, 'gpt-image-2', '2026-10-14T09:00:00Z')] }) })],
+    });
 
-    const note = within(card('X search')).getByText(/have no native X search/);
-    // Grok offers the tool natively, so it is the one Source not named. Whether
-    // a proxy executor serves the others is not this read's to say.
-    expect(note.textContent).toMatch(/^Models on relay-claude, relay-gpt,? (and )?OpenAI subscription have no native X search\.$/);
-  });
-});
-
-describe('ToolsTab checks', () => {
-  const searchable = () => status([
-    tool('web_search', { candidates: [
-      { source_id: RELAY.id, model_id: 'gpt-6-astra', call: unknown, replay: unknown, probe_estimate: { basis: 'list', usd: 0.02 } },
-      { source_id: SUBSCRIPTION.id, model_id: 'gpt-6.1-sol', call: unknown, replay: unknown, probe_estimate: { basis: 'included' } },
-      { source_id: GROK.id, model_id: 'grok-4.6', call: verified, replay: verified, probe_estimate: { basis: 'list', usd: 0.01 } },
-    ] }),
-    tool('image_generation', { candidates: [{ source_id: RELAY.id, model_id: 'gpt-6.1-sol', call: unknown, replay: null }] }),
-  ]);
-  const result = (outcome: HostedToolProbeResult['call']['outcome'], source_id: string, model_id: string): HostedToolProbeResult => ({
-    tool: 'web_search', source_id, model_id, call: { outcome, error: null }, replay: null,
-  });
-
-  it('MH-HOSTED-UI-013: checks one row with its cost on the button, and says when the answer was not evidence', async () => {
-    const onProbe = vi.fn<RunProbe>(async () => result('inconclusive', RELAY.id, 'gpt-6-astra'));
-    renderTab(searchable(), { onProbe });
-
-    const row = card('Web search').querySelector('[data-candidate="src_relay001:gpt-6-astra"]') as HTMLElement;
-    await userEvent.click(within(row).getByRole('button', { name: 'Check · about $0.02' }));
-    expect(onProbe).toHaveBeenCalledTimes(1);
-    expect(onProbe.mock.calls[0][0]).toMatchObject({ tool: 'web_search', candidate: { source_id: RELAY.id, model_id: 'gpt-6-astra' } });
-    // The model never used the tool: not recorded as unsupported, and the row offers another try.
-    within(row).getByText("Not verified · the model didn't use the tool; try again");
-    // Another try is as paid as the first, and says so.
-    within(row).getByRole('button', { name: 'Retry · about $0.02' });
-
-    // A verified row checks again; a subscription row says the check costs nothing extra.
-    within(card('Web search').querySelector('[data-candidate="src_grok0001:grok-4.6"]') as HTMLElement).getByRole('button', { name: 'Check again · about $0.01' });
-    within(card('Web search').querySelector('[data-candidate="src_chatgpt1:gpt-6.1-sol"]') as HTMLElement)
-      .getByRole('button', { name: 'Check · included in subscription' });
-    // An image check has no list price: it says so, and never shows $0.
-    within(card('Image generation').querySelector('[data-candidate="src_relay001:gpt-6.1-sol"]') as HTMLElement)
-      .getByRole('button', { name: 'Check · cost unknown' });
-  });
-
-  it('MH-HOSTED-UI-013: offers a check one pair at a time, never all pairs at once', () => {
-    // A check is a real, paid request: with real Sources a check-all would probe hundreds of models.
-    renderTab(searchable());
-    expect(screen.queryByRole('button', { name: /Check available tools|检测可用工具/ })).toBeNull();
-    expect(screen.queryByText(/pairs? to check|项可检测/)).toBeNull();
-    // Each row still has its own check.
-    expect(within(card('Web search')).getAllByRole('button', { name: /^Check/ })).toHaveLength(3);
-  });
-
-  it('MH-HOSTED-UI-019: shows a replay that did not verify as its own result, and nothing when no replay ran', async () => {
-    const replayed = (replay: HostedToolProbeResult['replay']): HostedToolProbeResult => ({ ...result('verified', RELAY.id, 'gpt-6-astra'), replay });
-    const onProbe = vi.fn<RunProbe>()
-      .mockResolvedValueOnce(replayed({ outcome: 'transient', error: null }))
-      .mockResolvedValueOnce(replayed(null));
-    renderTab(searchable(), { onProbe });
-    const row = card('Web search').querySelector('[data-candidate="src_relay001:gpt-6-astra"]') as HTMLElement;
-
-    // The call verified; the replay after it ran out of time. That asks for another try, never reads as a failure.
-    await userEvent.click(within(row).getByRole('button', { name: 'Check · about $0.02' }));
-    within(row).getByText('Replay not verified · try again');
-    expect(row.textContent).not.toMatch(/Not verified|Couldn't verify/);
-
-    // No replay ran: nothing more to say.
-    await userEvent.click(within(row).getByRole('button', { name: /^Check/ }));
-    expect(within(row).queryByText(/Replay/)).toBeNull();
-  });
-
-  it('MH-HOSTED-UI-013: says why a failed check failed, and never shows the server\'s key as text', async () => {
-    const failed = (error: string): HostedToolProbeResult => ({ ...result('inconclusive', RELAY.id, 'gpt-6-astra'), call: { outcome: 'transient', error } });
-    const onProbe = vi.fn<RunProbe>()
-      .mockResolvedValueOnce(failed('models.source.cooldown.rate_limited'))
-      // A detail key this bundle has no copy for.
-      .mockResolvedValueOnce(failed('models.source.cooldown.network'));
-    renderTab(searchable(), { onProbe });
-    const row = card('Web search').querySelector('[data-candidate="src_relay001:gpt-6-astra"]') as HTMLElement;
-
-    await userEvent.click(within(row).getByRole('button', { name: 'Check · about $0.02' }));
-    within(row).getByText("Couldn't verify · Rate limited");
-    await userEvent.click(within(row).getByRole('button', { name: 'Retry · about $0.02' }));
-    within(row).getByText("Couldn't verify · try again");
-    expect(row.textContent).not.toContain('models.source');
-  });
-
-  it('MH-HOSTED-UI-018: keeps an image tool off until a check verifies one of its pairs, and offers that check', () => {
-    renderTab(status([tool('image_generation', { candidates: [{ source_id: RELAY.id, model_id: 'gpt-6.1-sol', call: unknown, replay: null }] })]));
-    const image = card('Image generation');
-    within(image).getByText('Off · check a Source first');
-    expect((within(image).getByRole('switch') as HTMLButtonElement).disabled).toBe(true);
-    within(image).getByRole('button', { name: 'Check · cost unknown' });
-  });
-
-  it('MH-HOSTED-UI-003: says a check\'s cost is unknown before it runs, when no estimate is known', () => {
-    renderTab(status([tool('web_search', { candidates: [{ source_id: CLAUDE.id, model_id: 'claude-opus-5-5', call: unknown, replay: unknown }] })]));
-    within(card('Web search')).getByRole('button', { name: 'Check · cost unknown' });
-  });
-
-  it('MH-HOSTED-UI-018: says an enabled tool with nothing verified fails its calls, instead of naming a proxy', () => {
-    renderTab(status([tool('x_search', {
-      enabled: true,
-      candidates: [{ source_id: GROK.id, model_id: 'grok-4.6', call: { ...verified, status: 'unknown', stale: 'wire' }, replay: unknown }],
-    })]));
-    within(card('X search')).getByText('No Source is verified, so calls to it fail until you check one.');
+    const imageCard = card('Image generation');
+    expect(within(imageCard).getByText('Not supported on relay-gpt, relay-claude')).toBeTruthy();
+    expect(within(imageCard).getByRole('button', { name: /^Advanced/ }).textContent).toContain('Status by Source');
+    await openAdvanced(user, 'Image generation');
+    // Only the clears live here: an image tool has no executor order.
+    expect(within(imageCard).queryByText('Execution order')).toBeNull();
+    await user.click(within(imageCard).getByRole('button', { name: 'Clear every refusal of image generation' }));
+    expect(onClear).toHaveBeenCalledWith('image_generate', {});
   });
 });
 
+describe('ToolsTab executor order', () => {
+  const PRICED = {
+    unit: 'call' as const,
+    usd_per_1k: 5,
+    extra: [],
+    as_of: '2026-10-01',
+    url: 'https://docs.x.ai/pricing',
+  };
+
+  it('MH-HOSTED-UI-021: lists the executors in effective order, and a move saves the whole shown order', async () => {
+    const user = userEvent.setup();
+    const { onSave } = renderTab({
+      tools: [search('web_search', {
+        executor_candidates: [candidate(GROK.id, 'grok-fast', { price: PRICED }), candidate(CLAUDE.id, 'claude-haiku-5-5', { relay: true }), candidate(SUBSCRIPTION.id, 'gpt-6-mini')],
+      })],
+    });
+
+    await openAdvanced(user, 'Web search');
+    const rows = within(card('Web search')).getAllByRole('listitem');
+    expect(rows.map((row) => row.getAttribute('data-executor'))).toEqual([GROK.id, CLAUDE.id, SUBSCRIPTION.id]);
+    expect(within(card('Web search')).queryByRole('button', { name: 'Reset to automatic' })).toBeNull();
+    expect((within(rows[0]).getByRole('button', { name: 'Move Grok up' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((within(rows[2]).getByRole('button', { name: 'Move OpenAI subscription down' }) as HTMLButtonElement).disabled).toBe(true);
+
+    await user.click(within(rows[1]).getByRole('button', { name: 'Move relay-claude up' }));
+    expect(onSave).toHaveBeenCalledWith('web_search', { executor_order: [CLAUDE.id, GROK.id, SUBSCRIPTION.id] });
+    expect(screen.getByRole('status').textContent).toBe('Moved relay-claude to position 1 of 3.');
+  });
+
+  it('MH-HOSTED-UI-021: a customized order offers Reset, which saves automatic', async () => {
+    const user = userEvent.setup();
+    const { onSave } = renderTab({
+      tools: [search('x_search', { executor_order: [GROK.id], executor_candidates: [candidate(GROK.id, 'grok-fast')] })],
+    });
+
+    expect(within(card('X search')).getByRole('button', { name: /^Advanced/ }).textContent).toContain('Execution order: customized');
+    await openAdvanced(user, 'X search');
+    await user.click(within(card('X search')).getByRole('button', { name: 'Reset to automatic' }));
+    expect(onSave).toHaveBeenCalledWith('x_search', { executor_order: null });
+  });
+
+  it('MH-HOSTED-UI-021: keeps focus on the moved row once the answer lands, on its other arrow at an end', async () => {
+    const user = userEvent.setup();
+    const Harness = () => {
+      const [order, setOrder] = React.useState([GROK.id, CLAUDE.id, RELAY.id]);
+      const value: HostedToolsStatus = {
+        tools: [search('web_search', {
+          executor_order: order,
+          executor_candidates: order.map((id) => candidate(id, `${id}-mini`)),
+        })],
+      };
+      return (
+        <I18nextProvider i18n={translator('en')}>
+          <ToolsTab
+            read={readyRegion(value)}
+            sources={SOURCES}
+            pending={new Set()}
+            onSave={(_tool, body: HostedToolPut) => { if (body.executor_order) setOrder(body.executor_order); }}
+            onClear={() => {}}
+            onRetry={() => {}}
+          />
+        </I18nextProvider>
+      );
+    };
+    render(<Harness />);
+
+    await openAdvanced(user, 'Web search');
+    await user.click(screen.getByRole('button', { name: 'Move relay-gpt up' }));
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Move relay-gpt up' }));
+    await user.click(screen.getByRole('button', { name: 'Move relay-gpt up' }));
+    expect(screen.getAllByRole('listitem').map((row) => row.getAttribute('data-executor'))).toEqual([RELAY.id, GROK.id, CLAUDE.id]);
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Move relay-gpt down' }));
+  });
+
+  it('MH-HOSTED-UI-003: prices each executor where a price is known, and never shows unknown as zero', async () => {
+    const user = userEvent.setup();
+    renderTab({
+      tools: [search('web_search', {
+        executor_candidates: [
+          candidate(GROK.id, 'grok-fast', { price: { ...PRICED, extra: [{ unit: 'post', usd_per_1k: 5 }] } }),
+          candidate(RELAY.id, 'gpt-6-mini', { relay: true }),
+          candidate(SUBSCRIPTION.id, 'gpt-6-mini', { price: PRICED }),
+        ],
+      })],
+    }, { lng: 'zh' });
+
+    await user.click(within(card('网页搜索')).getByRole('button', { name: /^高级/ }));
+    const [grok, relay, subscription] = within(card('网页搜索')).getAllByRole('listitem');
+    expect(grok.textContent).toContain('$0.005 / 次API 标价 · 另加 $0.005 / 条帖子');
+    expect(relay.textContent).toContain('暂无标价');
+    expect(relay.textContent).not.toContain('$0');
+    // A subscription is never billed per call, whatever list price its vendor has.
+    expect(subscription.textContent).toContain('订阅内含不另计费');
+  });
+});

@@ -234,9 +234,9 @@ and the existing tone vocabulary (`TimeHint` for dates):
 
 - Unknown draws nothing. A healthy unknown is the normal case and must not look like a warning (V6 rule:
   exceptions only).
-- A chip opens a detail popover (time, basis, the refusal's HTTP status and code). Every refusal chip's popover has
+- A chip opens a detail popover (time, basis, the refusal's HTTP status and code). Every refusal chip carries
   "清除" (owner-approved mockup, 2026-10-15); a hosted-tool refusal clears through the Tools `clear` endpoint
-  (`vibey-hosted-tools.md` §3.3). An effort refusal's popover has its "清除" action, which clears that (Source, model, effort) record, so the next request at that effort tries the
+  (`vibey-hosted-tools.md` §3.3). An effort refusal's "清除" clears that (Source, model, effort) record, so the next request at that effort tries the
   Source again (`POST /api/models/sources/<source_id>/evidence/clear` with `{model_id, feature}`, the same verb and
   shape as the hosted clear). An unknown `source_id` is 404; a missing record is a no-op that answers the Source;
   `feature` must be `{kind: "effort", name}`, and a hosted-tool feature is 400; the file is written first, and a
