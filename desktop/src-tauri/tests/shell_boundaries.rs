@@ -850,7 +850,7 @@ fn every_quit_boundary_reuses_one_bounded_computer_use_cleanup() {
 fn foreground_lifecycle_and_identity_inventories_are_exhaustive() {
     let shell = shipping_source("src/lib.rs");
     let native = shipping_source("src/computer_use.rs");
-    let server = read_to_string(&crate_dir().join("../../core/computer_server.py"));
+    let server = shipping_text(&read_to_string(&crate_dir().join("../../core/computer_server.py")));
 
     let exit_routes = [
         (
