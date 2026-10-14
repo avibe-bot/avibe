@@ -15,6 +15,7 @@ import gzip
 import json
 import threading
 from dataclasses import replace
+from datetime import timedelta
 
 import aiohttp
 import pytest
@@ -25,7 +26,7 @@ from core.handlers.model_hub import hosted_executor as executor_module
 from core.handlers.model_hub import service as service_module
 from core.handlers.model_hub.adapter import InvokeCancelledError, RawOutcomeKind
 from core.handlers.model_hub.capability_evidence import EvidenceFeature, EvidenceRecord, identity_digest
-from core.handlers.model_hub.hosted_executor import excerpt
+from core.handlers.model_hub.hosted_executor import ResponsesReadout, excerpt, responses_result
 from core.handlers.model_hub.hosted_tools import HOSTED_PROBE_SHAPE, engine_stamp
 from core.handlers.model_hub.pricing import PriceTable
 from core.handlers.model_hub.stream_wire import ProtocolSSEState, ProtocolUsageReport
@@ -185,7 +186,7 @@ def _hosted_result(tool, answer):
 async def test_a_proxied_search_runs_one_native_request_and_answers_its_canonical_record(
     tmp_path, tool, executor, arguments, frames, body_fields, sources,
 ):
-    """MH-HOSTED-GATEWAY-004: the bound executor only, no effort, the overlay declaration, excerpts, metering."""
+    """MH-HOSTED-GATEWAY-004: the bound executor only, no effort, the overlay declaration forced, excerpts, metering."""
 
     usage = ProtocolUsageReport.of(input_tokens=5369, cached_input_tokens=256, output_tokens=307)
     service = _vibey_service(tmp_path, _sources(), handles=[
@@ -199,9 +200,13 @@ async def test_a_proxied_search_runs_one_native_request_and_answers_its_canonica
     assert service.adapter.invocations == [(executor[0], executor[1], "vibey")]
     sent = service.adapter.requests[0]
     assert sent.protocol == "openai_responses"
-    assert "reasoning" not in sent and "tool_choice" not in sent
+    assert "reasoning" not in sent
+    # Forced, as the call probe that verified it forces it.
+    assert sent["tool_choice"] == "required"
     assert {key: sent[key] for key in body_fields} == body_fields
-    assert set(sent) - set(body_fields) == {"model", "instructions", "input", "store", "max_output_tokens"}
+    assert set(sent) - set(body_fields) == {
+        "model", "instructions", "input", "tool_choice", "store", "max_output_tokens",
+    }
     query = sent["input"][0]["content"]
     assert query.startswith(arguments["query"])
     if tool == "x_search":
@@ -505,6 +510,66 @@ async def test_an_image_the_executor_cannot_vouch_for_is_a_failed_record(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_an_image_response_that_stopped_before_its_image_is_incomplete(tmp_path):
+    """MH-HOSTED-GATEWAY-005: completion is the allow-list for images too; an early stop is incomplete, not failed."""
+
+    frames = (
+        _event({"type": "response.output_item.done", "item": {
+            "type": "image_generation_call", "id": "ig_1", "status": "generating",
+        }}),
+        _event({"type": "response.incomplete", "response": {
+            "id": "resp_1", "status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"},
+        }}),
+    )
+    service = _vibey_service(tmp_path, _sources(), handles=[
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=OPENAI), frames),
+    ])
+    _bind(service, "image_generation", (OPENAI, "gpt-6-astra"))
+    status, answer = await _call(service, "image_generation", {
+        "arguments": {"prompt": "a boat"}, "executor": {"source_id": OPENAI, "model_id": "gpt-6-astra"},
+    })
+    assert status == 200
+    assert answer["record"]["status"] == "incomplete" and "max_output_tokens" in answer["record"]["error"]
+    assert "images" not in answer
+
+
+@pytest.mark.asyncio
+async def test_a_call_is_metered_in_the_slice_it_ended_in(tmp_path):
+    """MH-HOSTED-GATEWAY-004: a slow close of the executor's stream does not move the call's usage to a later day."""
+
+    clock = [NOW]
+
+    class SlowClose(LiveInvokeHandle):
+        async def close_stream(self) -> None:
+            clock[0] = NOW + timedelta(days=2)
+            await super().close_stream()
+
+    usage = ProtocolUsageReport.of(input_tokens=10, cached_input_tokens=0, output_tokens=1)
+    service = _vibey_service(tmp_path, _sources(), handles=[
+        SlowClose(_outcome(RawOutcomeKind.SUCCESS, source_id=XAI, usage=usage), _responses(WEB_CALL, WEB_ANSWER)),
+    ])
+    service.now = lambda: clock[0]
+    _bind(service, "web_search", (XAI, "grok-4.6"))
+    status, _answer = await _call(service, "web_search", {
+        "arguments": {"query": "q"}, "executor": {"source_id": XAI, "model_id": "grok-4.6"},
+    })
+    assert status == 200
+    rows = json.loads(service.usage.path.read_text(encoding="utf-8"))
+    assert {row["day"] for row in rows} == {NOW.astimezone().date().isoformat()}
+
+
+def test_a_record_reads_a_bounded_number_of_citations():
+    """MH-HOSTED-GATEWAY-004: however many citations an answer carries, its record reads a bounded number."""
+
+    posts = [(f"Post {number}.", f"https://x.com/a/status/{number}", 0) for number in range(300)]
+    answer = {"type": "message", "role": "assistant", "content": [_cited(posts)]}
+    readout = ResponsesReadout(items=[X_CALL, answer], response={"status": "completed"})
+    record = responses_result("x_search", readout, lambda key, **_values: key).record
+    assert record["status"] == "completed"
+    assert [source["url"] for source in record["sources"]] == [url for _, url, _ in posts[:256]]
+
+
+@pytest.mark.asyncio
 async def test_one_failed_anthropic_search_fails_the_call_and_keeps_the_results_that_arrived(tmp_path):
     """MH-HOSTED-GATEWAY-005: failure precedence is the same on both protocols."""
 
@@ -575,6 +640,14 @@ INCOMPLETE = (
     }}),
 )
 DEEP = "[" * 100_000 + "]" * 100_000
+ANTHROPIC_FOUND = [{"type": "web_search_result", "url": PAGE_A, "title": "Releases"}]
+
+
+def _anthropic(stop_reason, *, use_id="srvtoolu_1", found=ANTHROPIC_FOUND) -> tuple[bytes]:
+    return (json.dumps({"type": "message", "stop_reason": stop_reason, "content": [
+        {"type": "server_tool_use", "id": use_id, "name": "web_search", "input": {"query": "q"}},
+        {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1", "content": found},
+    ]}).encode(),)
 
 
 @pytest.mark.asyncio
@@ -601,6 +674,21 @@ DEEP = "[" * 100_000 + "]" * 100_000
      "could not be read", []),
     ("anthropic_nested_too_deep", (ANTHROPIC, "claude-haiku-4-5"), (DEEP.encode(),), "failed",
      "could not be read", []),
+    # The stream's last event counts even without its trailing blank line.
+    ("responses_last_frame_unterminated", (XAI, "grok-4.6"),
+     (*_responses(WEB_CALL, WEB_ANSWER)[:-1], _responses(WEB_CALL, WEB_ANSWER)[-1].rstrip(b"\n")), "completed", None,
+     [{"url": PAGE_B, "snippet": "v8.0.27 is the latest release. It adds a streaming keepalive."}, {"url": PAGE_A}]),
+    # A provider field that is not the text it should be reads as unknown, never as a 500.
+    ("responses_status_not_text", (XAI, "grok-4.6"), (*INCOMPLETE[:1], _event({
+        "type": "response.completed", "response": {"id": "resp_1", "status": {"value": "completed"}},
+    })), "failed", "unknown", [{"url": PAGE_A}, {"url": PAGE_B}]),
+    ("anthropic_stop_reason_not_text", (ANTHROPIC, "claude-haiku-4-5"), _anthropic({"value": "end_turn"}), "failed",
+     "unknown", [{"url": PAGE_A, "title": "Releases"}]),
+    ("anthropic_search_id_not_text", (ANTHROPIC, "claude-haiku-4-5"), _anthropic("end_turn", use_id={"id": 1}),
+     "failed", "could not be read", [{"url": PAGE_A, "title": "Releases"}]),
+    # Only a list, even an empty one, is a search's results.
+    ("anthropic_results_not_a_list", (ANTHROPIC, "claude-haiku-4-5"), _anthropic("end_turn", found=None), "failed",
+     "could not be read", []),
 ])
 async def test_only_a_response_that_completed_completes_the_call(tmp_path, case, executor, chunks, status, error, sources):
     """MH-HOSTED-GATEWAY-005: completion is an allow-list on both protocols; anything unreadable fails cleanly."""
@@ -614,7 +702,7 @@ async def test_only_a_response_that_completed_completes_the_call(tmp_path, case,
     })
     assert answer_status == 200
     assert answer["record"]["status"] == status
-    assert error in answer["record"]["error"]
+    assert error in answer["record"]["error"] if error is not None else "error" not in answer["record"]
     assert answer["record"]["sources"] == sources
     assert _hosted_result("web_search", answer).record.status == status
 
@@ -693,8 +781,13 @@ async def test_items_only_the_terminal_response_carries_are_kept(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_call_cancelled_before_its_handle_is_still_metered(tmp_path):
-    """MH-HOSTED-GATEWAY-005: wire facts observed after admission are billed, so they reach the usage ledger."""
+@pytest.mark.parametrize("ended_by", ["caller", "deadline"])
+async def test_a_call_cancelled_before_its_handle_is_still_metered(tmp_path, monkeypatch, ended_by):
+    """MH-HOSTED-GATEWAY-005: wire facts observed after admission are billed, so they reach the usage ledger.
+
+    The engine reports a cancellation after admission with its own error type;
+    when the call's deadline caused it, the call is a timed-out record.
+    """
 
     service = _vibey_service(tmp_path, _sources())
     _bind(service, "web_search", (XAI, "grok-4.6"))
@@ -703,21 +796,33 @@ async def test_a_call_cancelled_before_its_handle_is_still_metered(tmp_path):
 
     async def cancelled_after_admission(source_id, model_id, request, stream, origin, *, on_admitted=None):
         on_admitted()
+        if ended_by == "deadline":
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                raise InvokeCancelledError(observed) from None
         raise InvokeCancelledError(observed)
 
+    if ended_by == "deadline":
+        monkeypatch.setattr(service_module, "call_timeout", lambda _tool: 0.05)
     service.adapter.invoke = cancelled_after_admission
     gateway = ModelHubTurnGateway(service)
     router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
     try:
         hop = await router.resolve_hop("menu-alias", process_scope="vibey:cancel", turn_id="turn-cancel")
-        with pytest.raises(asyncio.CancelledError):
-            await service.run_hosted_tool(
-                "web_search",
-                {"arguments": {"query": "q"}, "executor": {"source_id": XAI, "model_id": "grok-4.6"}},
-                bindings=gateway.correlation.hosted_executor_bindings(
-                    backend="vibey", token=hop["token"], request_metadata={"avibe_turn_id": "turn-cancel"},
-                )[1],
-            )
+        call = service.run_hosted_tool(
+            "web_search",
+            {"arguments": {"query": "q"}, "executor": {"source_id": XAI, "model_id": "grok-4.6"}},
+            bindings=gateway.correlation.hosted_executor_bindings(
+                backend="vibey", token=hop["token"], request_metadata={"avibe_turn_id": "turn-cancel"},
+            )[1],
+        )
+        if ended_by == "caller":
+            with pytest.raises(asyncio.CancelledError):
+                await call
+        else:
+            answer = await call
+            assert answer["record"]["status"] == "failed" and "timed out" in answer["record"]["error"]
     finally:
         await gateway.close()
     assert _usage_of(service, XAI)
@@ -745,14 +850,32 @@ async def test_an_encoded_proxy_call_body_is_refused(tmp_path):
     assert service.adapter.invocations == []
 
 
+class _CountedHandle(LiveInvokeHandle):
+    """A response whose chunks record when they are read."""
+
+    def __init__(self, outcome, chunks):
+        self.read: list[bytes] = []
+        super().__init__(outcome, chunks)
+
+    def _iterate(self, chunks):
+        async def iterate():
+            for chunk in chunks:
+                self.read.append(chunk)
+                yield chunk
+        return iterate()
+
+
 @pytest.mark.asyncio
 async def test_a_buffered_executor_response_is_bounded(tmp_path, monkeypatch):
-    """MH-HOSTED-GATEWAY-005: an oversized buffered body fails the call instead of growing without bound."""
+    """MH-HOSTED-GATEWAY-005: an oversized buffered body fails the call instead of growing without bound.
+
+    Once refused, the response is not read any further.
+    """
 
     monkeypatch.setattr(service_module, "EXECUTOR_RESPONSE_MAX_BYTES", 64)
-    service = _vibey_service(tmp_path, _sources(), handles=[
-        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=ANTHROPIC), (b"{" + b" " * 128 + b"}",)),
-    ])
+    oversized = b"{" + b" " * 128
+    handle = _CountedHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=ANTHROPIC), (oversized, b"}"))
+    service = _vibey_service(tmp_path, _sources(), handles=[handle])
     _bind(service, "web_search", (ANTHROPIC, "claude-haiku-4-5"))
     status, answer = await _call(service, "web_search", {
         "arguments": {"query": "q"}, "executor": {"source_id": ANTHROPIC, "model_id": "claude-haiku-4-5"},
@@ -760,6 +883,7 @@ async def test_a_buffered_executor_response_is_bounded(tmp_path, monkeypatch):
     assert status == 200
     assert answer["record"]["status"] == "failed" and "larger than allowed" in answer["record"]["error"]
     assert "execution" in answer
+    assert handle.read == [oversized]
 
 
 @pytest.mark.asyncio

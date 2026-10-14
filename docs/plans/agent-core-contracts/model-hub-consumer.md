@@ -118,8 +118,9 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
        - An executor Source whose identity changed since launch (base URL, credential) is "no longer available".
      - The gateway runs that executor and no other: one native request in the executor Source's own protocol, with
        the overlay's declaration and no reasoning effort. Search tools ask for a numbered list of results with one
-       or two cited sentences each. `image_generation` renders the prompt at the given size and requests partial
-       images.
+       or two cited sentences each. On Responses the tool is forced (`tool_choice: "required"`), as the call probe
+       that verified it forces it; Anthropic is asked in the message alone. `image_generation` renders the prompt at
+       the given size and requests partial images.
      - Every outcome of a well-formed call is a 200 with `{"record", "execution"?}`, in the
        `ToolResultMessage.hosted` encoding. `execution` is present exactly when an executor ran. A call that
        reaches none (no verified executor, or the bound Source was removed or is ineligible) has a `failed` record.
@@ -127,11 +128,12 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
        `status: completed`; Anthropic `end_turn` or `stop_sequence`) and nothing failed. A response that stopped
        early (Responses `incomplete`; Anthropic `max_tokens` or `pause_turn`) is `incomplete`. Any reported failure
        (a failed call or outcome, an Anthropic search error), or any other or missing ending, is `failed`. Both keep
-       any partial sources. An unreadable response, including one nested past the decoder's limit, is `failed`. The
-       record's `error` is in the user's language.
+       any partial sources. An unreadable response, including one nested past the decoder's limit or one whose
+       fields are not of their kind, is `failed`. The record's `error` is in the user's language.
      - The record's search `sources` keep the executor's order. A snippet is the answer text its citation belongs
        to: the list item when that item cites only that source, else its sentence, with the citation markers
-       removed. An Anthropic result keeps its `cited_text`. X search lists the cited posts.
+       removed. An Anthropic result keeps its `cited_text`. X search lists the cited posts. A response's first 256
+       citations are read.
      - For `image_generation`, the record has no `images` key. `generation` carries the resolved `revised_prompt`,
        `size` and `quality`, and `images` carries `[{mime, data}]` in base64. Vibey saves the bytes through its
        session media sink and adds the path records itself. The image must decode, within 24 MiB. The stream may
