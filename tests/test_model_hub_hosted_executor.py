@@ -10,24 +10,20 @@ answer must be the canonical record and execution, in the C-1 encoding of
 from __future__ import annotations
 
 import asyncio
-import base64
 import gzip
 import json
-import threading
 from dataclasses import replace
 from datetime import timedelta
 
 import aiohttp
 import pytest
 
-from config.v2_config import ModelHubHostedToolConfig, ModelHubRouteHopConfig
+from config.v2_config import ModelHubHostedToolConfig
 from core.agent_core.messages import HostedCost, message_from_dict
-from core.handlers.model_hub import hosted_executor as executor_module
 from core.handlers.model_hub import service as service_module
 from core.handlers.model_hub.adapter import InvokeCancelledError, RawOutcomeKind
-from core.handlers.model_hub.capability_evidence import EvidenceFeature, EvidenceRecord, identity_digest
 from core.handlers.model_hub.hosted_executor import ResponsesReadout, anthropic_result, excerpt, responses_result
-from core.handlers.model_hub.hosted_tools import HOSTED_PROBE_SHAPE, engine_stamp
+from core.handlers.model_hub import hosted_tools as hosted_tools_module
 from core.handlers.model_hub.pricing import PriceTable
 from core.handlers.model_hub.stream_wire import ProtocolSSEState, ProtocolUsageReport
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
@@ -107,24 +103,27 @@ def _sources(*extra):
     return [xai, openai, anthropic, *extra]
 
 
+# The vendors' executor models these tests run with, in place of the bundled overlay's (vibey-hosted-tools.md §6).
+_EXECUTOR_MODELS: dict[str, str] = {}
+
+
+@pytest.fixture(autouse=True)
+def _executor_models(monkeypatch):
+    _EXECUTOR_MODELS.clear()
+    monkeypatch.setattr(hosted_tools_module, "provider_executor_model", _EXECUTOR_MODELS.get)
+
+
 def _bind(service, tool, executor):
-    """Turn the tool on with this executor verified, so the turn's resolution binds it."""
+    """Turn the tool on with this Source first in its executor chain, on this executor model; None for no chain."""
 
     config = service.store.config
     config.hosted_tools[tool] = ModelHubHostedToolConfig(
-        enabled=True, executor=ModelHubRouteHopConfig(*executor) if executor else None,
+        enabled=True, executor_order=(executor[0],) if executor else None,
     )
     if executor is None:
         return
     source = next(item for item in config.sources if item.id == executor[0])
-    service.capability_evidence.write(
-        EvidenceRecord(
-            source_id=source.id, model_id=executor[1], feature=EvidenceFeature.hosted(tool, "call"),
-            status="verified", basis="probe", observed_at=service.now(), engine=engine_stamp(),
-            shape=HOSTED_PROBE_SHAPE, source_identity=identity_digest(source),
-        ),
-        live=config.sources,
-    )
+    _EXECUTOR_MODELS[source.vendor] = executor[1]
 
 
 async def _call(service, tool, body, *, token=None, after_launch=None, language="en"):
@@ -327,54 +326,6 @@ async def test_a_proxied_call_carries_the_pricing_modules_cost(tmp_path, tool, e
     assert _hosted_result(tool, answer).execution.cost == (HostedCost(**cost) if cost else None)
 
 
-@pytest.mark.asyncio
-async def test_a_proxied_image_returns_its_bytes_once_for_vibey_to_save(tmp_path, monkeypatch):
-    """MH-HOSTED-GATEWAY-004: the image comes back once, with the resolved prompt, size and quality.
-
-    The final image is over Vibey's default 8 MiB SSE line, so the image stream's
-    32 MiB line cap is what accepts it. Partials are previews and are dropped;
-    the duplicate in ``response.completed`` is not returned.
-    """
-
-    image = b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * (7 * 1024 * 4)
-    encoded = base64.b64encode(image).decode()
-    assert len(encoded) > 9 * 1024 * 1024
-    call = {"type": "image_generation_call", "id": "ig_1", "status": "completed", "output_format": "png",
-            "quality": "low", "size": "1536x1024", "revised_prompt": "A small red paper boat", "result": encoded}
-    partial = _event({"type": "response.image_generation_call.partial_image", "partial_image_index": 0,
-                      "partial_image_b64": base64.b64encode(b"preview").decode()})
-    frames = _responses(call)
-    service = _vibey_service(tmp_path, _sources(), handles=[
-        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=OPENAI), (frames[0], partial, *frames[1:])),
-    ])
-    _bind(service, "image_generation", (OPENAI, "gpt-6-astra"))
-    encoding_threads = []
-    dumps = json.dumps
-
-    def recorded(value, *args, **kwargs):
-        if isinstance(value, dict) and "images" in value:
-            encoding_threads.append(threading.current_thread())
-        return dumps(value, *args, **kwargs)
-
-    monkeypatch.setattr(json, "dumps", recorded)
-    status, answer = await _call(service, "image_generation", {
-        "arguments": {"prompt": "a small red paper boat", "size": "1024x1024"},
-        "executor": {"source_id": OPENAI, "model_id": "gpt-6-astra"},
-    })
-    assert status == 200
-    # Megabytes of base64 are never encoded on the controller loop.
-    assert encoding_threads and threading.main_thread() not in encoding_threads
-    sent = service.adapter.requests[0]
-    assert sent["tools"] == [{
-        "type": "image_generation", "partial_images": 2, "output_format": "jpeg", "output_compression": 90,
-        "size": "1024x1024",
-    }]
-    assert sent["tool_choice"] == {"type": "image_generation"}
-    assert "reasoning" not in sent
-    assert answer["record"] == {"status": "completed", "sources": []}
-    assert answer["generation"] == {"revised_prompt": "A small red paper boat", "size": "1536x1024", "quality": "low"}
-    assert [(item["mime"], base64.b64decode(item["data"])) for item in answer["images"]] == [("image/png", image)]
-    _hosted_result("image_generation", answer)
 
 
 FAILED_WITH_PARTIAL = {**WEB_CALL, "status": "failed"}
@@ -472,65 +423,8 @@ async def test_only_the_executor_the_live_turn_bound_may_run(tmp_path, case):
     assert service.adapter.invocations == []
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(("case", "call", "error"), [
-    ("unreadable_base64", {"result": "not base64!"}, "could not be used"),
-    ("one_of_two_calls_failed", None, "image_generation call failed"),
-    ("too_many_images", None, "larger than allowed"),
-    ("partials_over_the_byte_budget", None, "larger than allowed"),
-])
-async def test_an_image_the_executor_cannot_vouch_for_is_a_failed_record(tmp_path, monkeypatch, case, call, error):
-    """MH-HOSTED-GATEWAY-005: an undecodable image, more image events, or more image bytes than allowed fail.
-
-    Partials count toward the decoded-byte budget though they are never returned.
-    """
-
-    if case == "partials_over_the_byte_budget":
-        monkeypatch.setattr(executor_module, "_IMAGES_TOTAL_MAX_BYTES", 64)
-
-    final = {"type": "image_generation_call", "id": "ig_1", "status": "completed", "output_format": "png",
-             "result": base64.b64encode(b"\x89PNG fixture").decode(), **(call or {})}
-    partial = _event({"type": "response.image_generation_call.partial_image", "partial_image_index": 0,
-                      "partial_image_b64": base64.b64encode(b"preview" * 8).decode()})
-    frames = _responses(final) if case != "one_of_two_calls_failed" else _responses(
-        {"type": "image_generation_call", "id": "ig_0", "status": "failed"}, final,
-    )
-    # Two partials were asked for; six are more than the final and the margin allow.
-    stream = (frames[0], *([partial] * (6 if case == "too_many_images" else 1)), *frames[1:])
-    service = _vibey_service(tmp_path, _sources(), handles=[
-        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=OPENAI), stream),
-    ])
-    _bind(service, "image_generation", (OPENAI, "gpt-6-astra"))
-    status, answer = await _call(service, "image_generation", {
-        "arguments": {"prompt": "a boat"}, "executor": {"source_id": OPENAI, "model_id": "gpt-6-astra"},
-    })
-    assert status == 200
-    assert answer["record"]["status"] == "failed" and error in answer["record"]["error"]
-    assert "images" not in answer and "execution" in answer
 
 
-@pytest.mark.asyncio
-async def test_an_image_response_that_stopped_before_its_image_is_incomplete(tmp_path):
-    """MH-HOSTED-GATEWAY-005: completion is the allow-list for images too; an early stop is incomplete, not failed."""
-
-    frames = (
-        _event({"type": "response.output_item.done", "item": {
-            "type": "image_generation_call", "id": "ig_1", "status": "generating",
-        }}),
-        _event({"type": "response.incomplete", "response": {
-            "id": "resp_1", "status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"},
-        }}),
-    )
-    service = _vibey_service(tmp_path, _sources(), handles=[
-        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=OPENAI), frames),
-    ])
-    _bind(service, "image_generation", (OPENAI, "gpt-6-astra"))
-    status, answer = await _call(service, "image_generation", {
-        "arguments": {"prompt": "a boat"}, "executor": {"source_id": OPENAI, "model_id": "gpt-6-astra"},
-    })
-    assert status == 200
-    assert answer["record"]["status"] == "incomplete" and "max_output_tokens" in answer["record"]["error"]
-    assert "images" not in answer
 
 
 @pytest.mark.asyncio
@@ -728,6 +622,7 @@ async def test_a_turn_keeps_its_hosted_binding_until_the_next_turn(tmp_path):
         LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=XAI), _responses(WEB_CALL, WEB_ANSWER)),
     ])
     _bind(service, "web_search", (XAI, "grok-4.6"))
+    service.store.config.hosted_tools["x_search"] = ModelHubHostedToolConfig(enabled=False)
     gateway = ModelHubTurnGateway(service)
     router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
     try:
@@ -769,28 +664,6 @@ async def test_a_proxy_call_body_is_bounded(tmp_path):
     assert service.adapter.invocations == []
 
 
-@pytest.mark.asyncio
-async def test_items_only_the_terminal_response_carries_are_kept(tmp_path):
-    """MH-HOSTED-GATEWAY-004: a relay that streams some items but not others still yields the terminal list's."""
-
-    reasoning = {"type": "reasoning", "id": "rs_1", "summary": []}
-    image = {"type": "image_generation_call", "id": "ig_1", "status": "completed", "output_format": "png",
-             "result": base64.b64encode(b"\x89PNG fixture").decode(), "revised_prompt": "a boat"}
-    frames = (
-        _event({"type": "response.output_item.done", "item": reasoning}),
-        _event({"type": "response.completed", "response": {
-            "id": "resp_1", "status": "completed", "output": [reasoning, image]}}),
-    )
-    service = _vibey_service(tmp_path, _sources(), handles=[
-        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=OPENAI), frames),
-    ])
-    _bind(service, "image_generation", (OPENAI, "gpt-6-astra"))
-    status, answer = await _call(service, "image_generation", {
-        "arguments": {"prompt": "a boat"}, "executor": {"source_id": OPENAI, "model_id": "gpt-6-astra"},
-    })
-    assert status == 200
-    assert answer["record"]["status"] == "completed"
-    assert [base64.b64decode(item["data"]) for item in answer["images"]] == [b"\x89PNG fixture"]
 
 
 @pytest.mark.asyncio

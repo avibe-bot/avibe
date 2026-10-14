@@ -454,7 +454,7 @@ export const apiFailure = (
 // backstop for a server that never answers, so it must outlast that controlled
 // failure. The margin covers CSRF acquisition, both transits (including a
 // tunnel), one fast CSRF-rejected attempt and replay, handler dispatch, and body
-// decoding. Keep the ceiling aligned with core/handlers/model_hub/hosted_probe.py:MODEL_HUB_RPC_TIMEOUT_SECONDS.
+// decoding. Keep the ceiling aligned with vibe/model_hub_client.py:MODEL_HUB_RPC_TIMEOUT_SECONDS.
 export const MODEL_HUB_RPC_CEILING_MS = 300_000;
 const TRANSPORT_MARGIN_MS = 30_000;
 export const MODEL_HUB_REQUEST_DEADLINE_MS =

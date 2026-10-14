@@ -2,108 +2,81 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/hosted-tools-status.schema.json",
   "title": "HostedToolsStatus",
-  "description": "The Tools tab read (vibey-hosted-tools.md §6.1): each catalog tool's toggle and chosen executor, where it can run with that evidence, and how many hosted-tool probe records need a re-verify. A report only: hop resolution reads config and evidence itself.",
+  "description": "The Models → Tools read (vibey-hosted-tools.md §3.3, §8): each tool's settings, saved and effective, and what real use showed. A report only: hop resolution reads config and evidence itself. Saved values are never resolved ones, so a client never writes back an effective value.",
   "type": "object",
-  "required": ["tools", "reverify"],
+  "required": ["tools"],
   "additionalProperties": false,
   "properties": {
     "tools": {
       "type": "array",
       "description": "Every catalog tool, in catalog order.",
       "items": {
-        "type": "object",
-        "required": ["name", "enabled", "executor", "bound", "candidates"],
-        "additionalProperties": false,
-        "properties": {
-          "name": { "enum": ["web_search", "x_search", "image_generation"] },
-          "enabled": { "type": "boolean" },
-          "executor": {
-            "description": "The executor the user chose, or null for the first verified candidate.",
-            "oneOf": [
-              { "type": "null" },
-              {
-                "type": "object",
-                "required": ["source_id", "model_id"],
-                "additionalProperties": false,
-                "properties": {
-                  "source_id": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
-                  "model_id": { "type": "string", "minLength": 1 }
-                }
-              }
-            ]
-          },
-          "bound": {
-            "description": "The executor a turn would bind now, by the same rule hop resolution uses: the chosen executor if verified, else the first verified candidate in Vibey's Source order; null when none is verified.",
-            "oneOf": [
-              { "type": "null" },
-              {
-                "type": "object",
-                "required": ["source_id", "model_id"],
-                "additionalProperties": false,
-                "properties": {
-                  "source_id": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
-                  "model_id": { "type": "string", "minLength": 1 }
-                }
-              }
-            ]
-          },
-          "candidates": {
-            "type": "array",
-            "description": "Every (Source, model) the overlay offers the tool on, with an eligible credential and an untranslated path; Vibey's Source order first.",
-            "items": {
+        "oneOf": [
+          { "$ref": "#/definitions/SearchTool" },
+          { "$ref": "#/definitions/ImageTool" }
+        ]
+      }
+    }
+  },
+  "definitions": {
+    "SourceId": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
+    "Moment": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$" },
+    "Status": {
+      "type": "object",
+      "description": "Passive evidence for the tool. latest_ok is the latest real success (an in-memory projection, current even while file writes are throttled); refused lists the current refusals; verified lists the persisted successes, one per (Source, model), from which Source chips derive.",
+      "required": ["latest_ok", "refused", "verified"],
+      "additionalProperties": false,
+      "properties": {
+        "latest_ok": {
+          "oneOf": [
+            { "type": "null" },
+            {
               "type": "object",
-              "required": ["source_id", "model_id", "call", "replay", "billing", "price", "probe_estimate"],
+              "required": ["source_id", "model_id", "mode", "at"],
               "additionalProperties": false,
               "properties": {
-                "source_id": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
+                "source_id": { "$ref": "#/definitions/SourceId" },
                 "model_id": { "type": "string", "minLength": 1 },
-                "call": { "$ref": "#/definitions/Evidence" },
-                "replay": {
-                  "description": "Null for image_generation, which is never replayed.",
-                  "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/Evidence" }]
-                },
-                "billing": { "enum": ["monthly", "metered"], "description": "The Source's billing: monthly shows \"included in subscription\", metered shows the list price \"at API price\"." },
-                "price": {
-                  "description": "The overlay's list price for this tool on this provider, or null when no list price is known (never zero). OpenAI lists no per-image price, so image_generation has none.",
-                  "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/ListPrice" }]
-                },
-                "probe_estimate": {
-                  "description": "What probing here is estimated to cost at most before it runs, in the shape of hosted_summary.cost: the call probe (its tool fee plus a nominal token estimate) and, for a tool with a replay aspect on a protocol that replays natively, the replay probe that may follow (tokens only). list, included on a monthly Source, or null when unknown (never zero), which is always so for image_generation (no list price).",
-                  "oneOf": [
-                    { "type": "null" },
-                    {
-                      "type": "object",
-                      "required": ["basis", "usd"],
-                      "additionalProperties": false,
-                      "properties": { "basis": { "const": "list" }, "usd": { "type": "number", "minimum": 0 } }
-                    },
-                    {
-                      "type": "object",
-                      "required": ["basis"],
-                      "additionalProperties": false,
-                      "properties": { "basis": { "const": "included" } }
-                    }
-                  ]
-                }
+                "mode": { "enum": ["native", "executor", "direct"] },
+                "at": { "$ref": "#/definitions/Moment" }
               }
+            }
+          ]
+        },
+        "refused": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["source_id", "model_id", "aspect", "at", "reason"],
+            "additionalProperties": false,
+            "properties": {
+              "source_id": { "$ref": "#/definitions/SourceId" },
+              "model_id": { "type": "string", "minLength": 1 },
+              "aspect": { "enum": ["call", "replay"] },
+              "at": { "$ref": "#/definitions/Moment" },
+              "reason": { "type": "string", "minLength": 1, "maxLength": 64, "description": "The record's detail: HTTP status and upstream machine code, never provider prose." }
+            }
+          }
+        },
+        "verified": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["source_id", "model_id", "mode", "at"],
+            "additionalProperties": false,
+            "properties": {
+              "source_id": { "$ref": "#/definitions/SourceId" },
+              "model_id": { "type": "string", "minLength": 1 },
+              "mode": { "enum": ["native", "executor", "direct"] },
+              "at": { "$ref": "#/definitions/Moment" }
             }
           }
         }
       }
     },
-    "reverify": {
-      "type": "object",
-      "required": ["engine_upgraded", "aged"],
-      "additionalProperties": false,
-      "properties": {
-        "engine_upgraded": { "type": "integer", "minimum": 0, "description": "Probe records taken on another engine or probe shape; they route as unknown." },
-        "aged": { "type": "integer", "minimum": 0, "description": "Probe records older than 30 days; they still route." }
-      }
-    }
-  },
-  "definitions": {
     "ListPrice": {
       "type": "object",
+      "description": "An overlay list price for a hosted tool call, with its date and source.",
       "required": ["unit", "usd_per_1k", "extra", "as_of", "url"],
       "additionalProperties": false,
       "properties": {
@@ -121,21 +94,104 @@
             }
           }
         },
-        "as_of": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "as_of": { "type": "string", "format": "date" },
         "url": { "type": "string", "pattern": "^https://" }
       }
     },
-    "Evidence": {
+    "SearchTool": {
       "type": "object",
-      "required": ["status", "stale", "basis", "observed_at", "detail", "changes_at"],
+      "required": ["name", "enabled", "status", "executor_order", "effective_order", "executor_candidates"],
       "additionalProperties": false,
       "properties": {
-        "status": { "enum": ["verified", "unsupported", "unknown"], "description": "As routing reads it." },
-        "stale": { "enum": [null, "wire", "age"] },
-        "basis": { "enum": [null, "probe", "observed"] },
-        "observed_at": { "type": ["string", "null"] },
-        "detail": { "type": ["string", "null"], "maxLength": 64 },
-        "changes_at": { "type": ["string", "null"], "description": "When this record stops reading as it does now: an observed record's expiry or a probe record's re-verify mark; null when nothing is scheduled." }
+        "name": { "enum": ["web_search", "x_search"] },
+        "enabled": { "type": "boolean" },
+        "status": { "$ref": "#/definitions/Status" },
+        "executor_order": {
+          "description": "The saved executor order, or null for automatic. Saved as given: an id that names no Source now is kept and skipped.",
+          "oneOf": [{ "type": "null" }, { "type": "array", "items": { "$ref": "#/definitions/SourceId" } }]
+        },
+        "effective_order": { "type": "array", "items": { "$ref": "#/definitions/SourceId" }, "description": "The order the executor chain would try now." },
+        "executor_candidates": {
+          "type": "array",
+          "description": "Every eligible executor Source for the tool, in effective order, with its vendor's executor model; a Claude subscription never is one.",
+          "items": {
+            "type": "object",
+            "required": ["source_id", "model_id", "billing", "relay", "price"],
+            "additionalProperties": false,
+            "properties": {
+              "source_id": { "$ref": "#/definitions/SourceId" },
+              "model_id": { "type": "string", "minLength": 1 },
+              "billing": { "enum": ["monthly", "metered"] },
+              "relay": { "type": "boolean", "description": "An API-key Source on an endpoint other than its vendor's own: its price is labelled \"at API price\"." },
+              "price": { "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/ListPrice" }] }
+            }
+          }
+        }
+      }
+    },
+    "ImageTool": {
+      "type": "object",
+      "required": ["name", "enabled", "status", "default_model", "effective_default", "models", "image_offered_by"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "const": "image_generate" },
+        "enabled": { "type": "boolean" },
+        "status": { "$ref": "#/definitions/Status" },
+        "default_model": {
+          "description": "The saved default, or null for the catalog default. A saved model that is not available now (removed, or its pair refused) stays saved with available false.",
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "required": ["source_id", "model_id", "available"],
+              "additionalProperties": false,
+              "properties": {
+                "source_id": { "type": "string", "minLength": 1 },
+                "model_id": { "type": "string", "minLength": 1 },
+                "available": { "type": "boolean" }
+              }
+            }
+          ]
+        },
+        "effective_default": {
+          "description": "The default a turn would use now: the saved one if available, else the same model id on another Source, else the first available model in catalog order; null when no image model is available.",
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "required": ["source_id", "model_id"],
+              "additionalProperties": false,
+              "properties": { "source_id": { "$ref": "#/definitions/SourceId" }, "model_id": { "type": "string", "minLength": 1 } }
+            }
+          ]
+        },
+        "models": {
+          "type": "array",
+          "description": "Exactly the image_generate enum's candidate pairs, the default first; a refused pair is left out.",
+          "items": {
+            "type": "object",
+            "required": ["source_id", "model_id", "description", "price"],
+            "additionalProperties": false,
+            "properties": {
+              "source_id": { "$ref": "#/definitions/SourceId" },
+              "model_id": { "type": "string", "minLength": 1 },
+              "description": { "type": "string", "minLength": 1, "maxLength": 80 },
+              "price": {
+                "description": "One image: the vendor's list price, or an estimate from the image's tokens at the model's output rate; null when neither is known (shown as no unit price), never zero.",
+                "oneOf": [
+                  { "type": "null" },
+                  {
+                    "type": "object",
+                    "required": ["usd", "basis"],
+                    "additionalProperties": false,
+                    "properties": { "usd": { "type": "number", "minimum": 0 }, "basis": { "enum": ["list", "estimated"] } }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "image_offered_by": { "type": "array", "items": { "type": "string", "minLength": 1 }, "description": "The vendors of the user's Sources whose overlay lists image models, for the empty state." }
       }
     }
   }

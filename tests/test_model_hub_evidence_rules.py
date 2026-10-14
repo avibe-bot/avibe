@@ -9,7 +9,6 @@ refused effort gets instead of another provider 400.
 from __future__ import annotations
 
 import json
-from datetime import timedelta
 
 import pytest
 from aiohttp import web
@@ -116,7 +115,7 @@ async def test_an_upstream_400_teaches_only_the_feature_it_names(
         return
     [record] = records
     assert (record.source_id, record.model_id, record.feature) == ("src_evidence1", "shared-model", feature)
-    assert (record.status, record.basis, record.detail) == ("unsupported", "observed", detail)
+    assert (record.status, record.detail) == ("unsupported", detail)
 
 
 @pytest.mark.asyncio
@@ -160,7 +159,6 @@ async def test_a_refused_effort_skips_its_hop_instead_of_another_provider_400(tm
             "basis": "observed",
             "observed_at": record.payload()["observed_at"],
             "detail": "400 invalid_request_error",
-            "changes_at": (record.observed_at + timedelta(days=7)).isoformat().replace("+00:00", "Z"),
         }
         chain = service.agent_chain("codex", models["codex"])
         _assert_valid("agent-chain.schema.json", chain)
@@ -241,7 +239,6 @@ async def test_a_refused_effort_still_waits_for_a_capable_hop_that_is_cooling_do
     from datetime import timedelta
 
     from core.handlers.model_hub.capability_evidence import EvidenceRecord, identity_digest
-    from core.handlers.model_hub.hosted_tools import HOSTED_PROBE_SHAPE, engine_stamp
     from tests.test_model_hub_l3 import NOW, _canonicalize_fixed_test_routes, _service
 
     refusing = _source("src_refuses01", "Refuses ultra")
@@ -250,16 +247,14 @@ async def test_a_refused_effort_still_waits_for_a_capable_hop_that_is_cooling_do
     )
     service = _service(tmp_path, sources=[refusing, cooling])
     model = _canonicalize_fixed_test_routes(service)["codex"]
-    service.capability_evidence.write(
+    service.capability_evidence.write_refusal(
         EvidenceRecord(
             source_id=refusing.id,
             model_id="shared-model",
             feature=EvidenceFeature.effort("ultra"),
             status="unsupported",
-            basis="observed",
             observed_at=service.now(),
-            engine=engine_stamp(),
-            shape=HOSTED_PROBE_SHAPE,
+            wire=service.hosted_evidence().wire_for(refusing, "shared-model"),
             source_identity=identity_digest(refusing),
             detail="400 invalid_request_error",
         ),
@@ -335,7 +330,6 @@ async def test_a_refusing_runnable_hop_never_makes_recovery_spin(tmp_path):
 
     from core.handlers.model_hub.adapter import RawOutcomeKind
     from core.handlers.model_hub.capability_evidence import EvidenceRecord, identity_digest
-    from core.handlers.model_hub.hosted_tools import HOSTED_PROBE_SHAPE
     from tests.test_model_hub_l3 import NOW, _canonicalize_fixed_test_routes, _outcome
     from tests.test_model_hub_retry_policy import clock_service
 
@@ -347,16 +341,14 @@ async def test_a_refusing_runnable_hop_never_makes_recovery_spin(tmp_path):
         outcomes=[_outcome(RawOutcomeKind.SUCCESS, status=200, source_id=cooling.id)],
     )
     model = _canonicalize_fixed_test_routes(service)["codex"]
-    service.capability_evidence.write(
+    service.capability_evidence.write_refusal(
         EvidenceRecord(
             source_id=refusing.id,
             model_id="shared-model",
             feature=EvidenceFeature.effort("ultra"),
             status="unsupported",
-            basis="observed",
             observed_at=service.now(),
-            engine=service.engine_stamp,
-            shape=HOSTED_PROBE_SHAPE,
+            wire=service.hosted_evidence().wire_for(refusing, "shared-model"),
             source_identity=identity_digest(refusing),
             detail="400 invalid_request_error",
         ),
@@ -426,7 +418,6 @@ def test_the_picker_menu_states_which_efforts_routing_refuses_in_menu_values(tmp
     some refuse, in the values the menu offers, mapped to each hop's wire token by Vibey's own adapters."""
     from config.v2_config import ModelHubBackendModelConfig
     from core.handlers.model_hub.capability_evidence import EvidenceRecord, identity_digest
-    from core.handlers.model_hub.hosted_tools import HOSTED_PROBE_SHAPE
     from tests.test_model_hub_vibey_consumer import _vibey_service
 
     sources = [_source(source_id, source_id, vendor=protocol.split("_")[0], protocol=protocol, model_id=model)
@@ -437,16 +428,14 @@ def test_the_picker_menu_states_which_efforts_routing_refuses_in_menu_values(tmp
     by_id = {source.id: source for source in live}
     for source_id, token in refused:
         source = by_id[source_id]
-        service.capability_evidence.write(
+        service.capability_evidence.write_refusal(
             EvidenceRecord(
                 source_id=source_id,
                 model_id=source.models[0].id,
                 feature=EvidenceFeature.effort(token),
                 status="unsupported",
-                basis="observed",
                 observed_at=service.now(),
-                engine=service.engine_stamp,
-                shape=HOSTED_PROBE_SHAPE,
+                wire=service.hosted_evidence().wire_for(source, source.models[0].id),
                 source_identity=identity_digest(source),
                 detail="400 invalid_request_error",
             ),

@@ -168,15 +168,15 @@ The evidence store, its record and its owner are the capability model's §3. v2 
   efforts alike (capability model §3.2), has no time limit. It stays until
   one of these clears it:
   - the user clears it in Models → Tools, for one (Source, tool) or for every Source of a tool (§8.1);
-  - its wire stamp no longer matches, which happens on its own when the Source's config or the engine release
-    changes.
+  - its Source identity or wire stamp no longer matches, which happens on its own when the Source's config, the engine
+    release or the Avibe release changes.
 
-  Every record carries the wire stamp it was observed under, the engine release, the Avibe release (which covers
-  the bundled overlay's declarations and the adapters' request shape), and a digest of the Source's rendered engine
-  entry (credentials and the model list excluded), and a record whose stamp differs from the current one reads as
-  unknown. The stamp is computed when the engine config is rendered (`sync_sources`) and
-  held in memory per Source; evidence reads and writes take it from memory and never render on a request path, as
-  `engine_stamp()` is never called on one. So a refusal learned under one engine or one rendered config cannot survive a
+  With `source_identity`, every record carries the wire stamp it was observed under: the engine release, the Avibe
+  release (which covers the bundled overlay's declarations, the adapters' request shape and vendor-wide engine
+  flags), and the model's rendered fields the identity does not cover. A record whose identity or stamp differs from
+  the current one reads as unknown. Capability model §3.3 lists every renderer input and what covers it. The stamp is
+  computed from the config held in memory, never from the engine state on a request path, as `engine_stamp()` is
+  never called on one. So a refusal learned under one engine or one rendered config cannot survive a
   change that could reverse it, such as the dependency lane's `is-compat` flip for xAI (#2620), which changes what
   xAI receives for replayed reasoning. A change on the provider's side that the stamp cannot see (a relay that starts
   supporting a tool) waits for the user's clear. A Source identity change drops the Source's evidence as before.
@@ -226,7 +226,8 @@ The evidence store, its record and its owner are the capability model's §3. v2 
       the clears answer; the Source read keeps effort evidence);
     - `latest_ok` is the in-memory latest-execution projection (§3.2), not the newest file record;
     - search tools: `executor_order` (saved, null when automatic), `effective_order` (as the gateway would try now),
-      and `executor_candidates: [{source_id, billing, relay, price}]` in effective order (`relay` true for a Source on a
+      and `executor_candidates: [{source_id, model_id, billing, relay, price}]` in effective order (`model_id` the
+      vendor's executor model; `price` the overlay's list price with its units, or null) (`relay` true for a Source on a
       non-official endpoint, labelled "at API price"), every eligible executor Source (a Claude
       subscription never is) with its per-call price, so the order can be edited over the full list;
     - `image_generate`: `default_model` (saved, null when default; a saved model no longer available, or whose pair
@@ -322,7 +323,8 @@ failover, and is refused unpinned (C-6 item 7). What changes is what happens aft
     and native hosted payloads, since the refusal does not say which one failed. Once per (turn, identity); no
     evidence is written (§3.2).
 - **The cost is one cold prompt prefix.** Dropping a native declaration changes the tools block, so the resend and
-  the next turns start a new cache prefix: once per (Source, tool), when the refusal is first learned, and again only
+  the next turns start a new cache prefix: once per (Source, model, tool), since evidence is per model (another
+  model of the same Source may run the tool), when the refusal is first learned, and again only
   after the record is cleared (by the user or a stamp change) and the tool is tried natively once more. The upstream is not called twice
   for nothing: a refusal before output costs no output tokens.
 - **The gateway never rewrites hosted content.** Vibey renders every request from its canonical records; the gateway
@@ -489,8 +491,9 @@ These rules are C-1 rows in `cross-provider.md` and per-protocol rows in `conver
      returned, and the partial call is still metered on its Source. A completed response that never ran the tool
      (the model chose not to; Anthropic is asked in the message alone) ends the chain with a `failed` record: it is
      a model choice, not a Source failure, and moving on would double the cost. Any other outcome ends the chain.
-  5. With no candidate, or every candidate failed, the call returns a `failed` record naming what to add ("add an
-     xAI Source to use X search").
+  5. With no candidate, the call returns a `failed` record naming what to add ("add an xAI Source to use X search").
+     With candidates that were all tried and failed, it returns the last failure's reason and names the Sources
+     tried, so the user sees that retrying, or those Sources, is the issue.
   - **One deadline for the whole chain**, the tool's call timeout (180 s for search), not one per candidate.
   - Each candidate tried is metered on its own Source. The result's `execution` names the Source whose response the
     record came from (the last one tried when all failed), with that attempt's `executor_billing` and `cost`; earlier
@@ -606,7 +609,9 @@ Unchanged from v1 §7.3 (owner decision, 2026-10-13 19:14), with the producer no
   offered and the UI never needs an "unverified" tag.
 - **Authorized by the turn's enum.** The gateway resolves the Source from the turn's frozen `image_generate` enum
   (§3.4): a model outside it is 409 `tool_not_enabled`, and the chosen (Source, model) is admitted on the final
-  snapshot (`runs_on` and identity). So a caller cannot bill an image model or Source the turn was not offered.
+  snapshot (`runs_on`, identity, and no current refusal: a pair refused earlier in the turn fails locally with
+  `image_model_unavailable` while the declared enum stays frozen). So a caller cannot bill an image model or Source
+  the turn was not offered.
 - **Bounds.** The endpoint's 1 MiB request bound becomes per tool: `image_generate` allows its reference images,
   at most 4, each within `read`'s inline limit, plus 1 MiB; the size check stays before parsing and the JSON parse
   stays off the loop. `n` is at most 4, and decoded bytes are capped per image and per call as the executor caps
@@ -656,7 +661,8 @@ Unchanged from v1 §7.3 (owner decision, 2026-10-13 19:14), with the producer no
 - **Search cards** show an optional **Advanced** section (which also holds the clear actions when two or more
   Sources refused) with the executor order over `executor_candidates`: up/down
   buttons (keyboard- and screen-reader-accessible, the route chain editor's pattern), each row with its Source's
-  per-call price ("at API price" for a relay), collapsed and fully automatic until touched, with "Reset to
+  executor model and its unit rates as the overlay lists them ("$5 / 1k posts + $10 / 1k profiles", "at API price"
+  for a relay), never a single per-call figure where the count is unknown before the call, collapsed and fully automatic until touched, with "Reset to
   automatic" (a `null` PUT). The price shows per row because it depends on who runs the search.
 - **The image card** lists the available image models with their one-line descriptions and a per-image price
   (owner-approved mockup): the vendor's list price where it has one (Grok Imagine "$0.02"); an estimate from token
@@ -751,14 +757,15 @@ under the freeze protocol (`model-hub-contracts/README.md`).
   `unsupported`; `shape` is removed and `engine` becomes `wire`, the stamp of §3.2; `feature.name` is `web_search`
   | `x_search` | `image_generate`, and `image_generate` has `call` only.
 - `hosted-tools-status.schema.json` is rewritten for §3.3's read: per tool `enabled` and `status {latest_ok,
-  refused[]}`; search tools `executor_order`, `effective_order`, `executor_candidates[]`; `image_generate`
+  refused[], verified[]}`; search tools `executor_order`, `effective_order`, `executor_candidates[]`; `image_generate`
   `default_model`, `effective_default`, `models[]`, `image_offered_by[]`. `reverify`, `executor`, `bound` and
   `candidates[]` (with `call`, `replay`, `probe_estimate`) go. The PUT body is per field (§3.3).
 - `hosted-tool-probe-result.schema.json` is deleted, with its `api-response.schema.json` branch and `api.md` row.
 - `refused_efforts[].changes_at` (`agent-chain.schema.json`, `source.schema.json`) loses its meaning, since nothing
   expires by age: it is removed with its UI expiry hint (`capability.expiryProbe` and the observed-expiry copy); the
   hosted-tools read already drops it (§3.3).
-- `api.md` gains `POST /api/models/hosted-tools/<tool>/clear` (`{source_id?}` → the read, §3.3) and
+- `api.md` gains `POST /api/models/hosted-tools/<tool>/clear` (`{source_id?, model_id?}`, `model_id` only with
+  `source_id`, → the read, §3.3) and
   `POST /api/models/sources/<source_id>/evidence/clear` (`{model_id, feature}` with an effort feature → the Source,
   for an effort refusal; capability model §5), each with its `api-response.schema.json` branch.
 - `provider-overlay.schema.json` gains `executor_model` per vendor and `image_models[]`.
@@ -849,7 +856,7 @@ and no real credentials.
 1. **Silent drops are invisible.** A Source that accepts a native declaration but never runs the tool looks like a
    model that chose not to search, and one that accepts a replayed payload but drops it loses the results' page
    content. Passive learning cannot see either. The status line simply never shows that Source executing.
-2. **The first refusal costs one request and one cold prefix** per (Source, tool), and again after the record is
+2. **The first refusal costs one request and one cold prefix** per (Source, model, tool), and again after the record is
    cleared (§3.5).
 3. **A refusal stays until cleared.** A relay that later starts supporting a tool or an effort keeps getting the
    proxy function, or keeps being skipped at that effort, until the user clears the refusal, or its config or the

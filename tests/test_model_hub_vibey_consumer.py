@@ -33,8 +33,6 @@ from config.v2_config import (
     ModelHubSourceStateConfig,
 )
 from core.handlers.model_hub.adapter import RawOutcomeKind
-from core.handlers.model_hub.capability_evidence import EvidenceFeature, EvidenceRecord, identity_digest
-from core.handlers.model_hub.hosted_tools import HOSTED_PROBE_SHAPE, engine_stamp
 from core.handlers.model_hub.provenance import BoundedProvenanceStore, SERVED_HOP_HEADER
 from core.handlers.model_hub.request import ModelHubRequest
 from core.handlers.model_hub.service import ModelHubError
@@ -107,7 +105,6 @@ def _validate(schema_name, value):
 # Each enabled hosted tool's promised fields, for a native and a proxied entry.
 HOSTED_TOOL_MANDATORY_FIELDS = {
     ("hosted_tools", "web_search"): ("mode", "executor", "replay", "declaration", "include"),
-    ("hosted_tools", "image_generation"): ("mode", "executor", "replay"),
 }
 
 
@@ -606,8 +603,9 @@ async def test_a_finished_turns_request_is_never_credited_to_the_next_turn_on_it
         ), ()),
         LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=primary.id), (b"{}",)),
     ])
-    # On, with no executor: a call its live Turn owns answers a failed record; any other call is not bound.
-    service.store.config.hosted_tools["web_search"] = ModelHubHostedToolConfig(enabled=True, executor=None)
+    # On, with no executor (no Source's vendor offers X search here): a call its live Turn owns answers a failed
+    # record; any other call is not bound.
+    service.store.config.hosted_tools["x_search"] = ModelHubHostedToolConfig(enabled=True)
     gateway = ModelHubTurnGateway(service)
     router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
 
@@ -632,9 +630,9 @@ async def test_a_finished_turns_request_is_never_credited_to_the_next_turn_on_it
             assert live["token"] == finished["token"]
             stale = finished["request_headers"]
             assert (await post(client, live, stale, "messages", message))[0] == 400
-            status, answer = await post(client, live, stale, "hosted-tools/web_search", search)
+            status, answer = await post(client, live, stale, "hosted-tools/x_search", search)
             assert (status, answer["error"]["code"]) == (409, "executor_not_bound")
-            status, answer = await post(client, live, live["request_headers"], "hosted-tools/web_search", search)
+            status, answer = await post(client, live, live["request_headers"], "hosted-tools/x_search", search)
             assert status == 200 and answer["record"]["status"] == "failed"
             assert (await post(client, live, live["request_headers"], "messages", message))[0] == 200
         completion = router.settle_turn("turn-live", settled_by=SETTLED_BY_TERMINAL_RESULT, ts=NOW.isoformat())
@@ -1071,29 +1069,11 @@ def test_native_cli_and_direct_are_not_vibey_channels(tmp_path):
 
 @pytest.mark.asyncio
 async def test_hop_resolution_states_each_enabled_hosted_tool(tmp_path):
-    """MH-HOSTED-001: native only on current-wire call evidence; every enabled tool binds an executor."""
+    """MH-HOSTED-001: a tool the overlay offers is native with no evidence (nothing is probed); every enabled tool
+    binds the first executor of its chain, the vendor's lightweight model."""
     primary = _source("src_primary01", "Primary", protocol="openai_responses", model_id="gpt-6-astra")
     service = _vibey_service(tmp_path, [primary])
-    service.store.config.hosted_tools = {
-        "web_search": ModelHubHostedToolConfig(enabled=True),
-        "x_search": ModelHubHostedToolConfig(enabled=False),
-        "image_generation": ModelHubHostedToolConfig(enabled=True),
-    }
-    for aspect in ("call", "replay"):
-        service.capability_evidence.write(
-            EvidenceRecord(
-                source_id=primary.id,
-                model_id="gpt-6-astra",
-                feature=EvidenceFeature.hosted("web_search", aspect),
-                status="verified",
-                basis="probe",
-                observed_at=service.now(),
-                engine=engine_stamp(),
-                shape=HOSTED_PROBE_SHAPE,
-                source_identity=identity_digest(primary),
-            ),
-            live=[primary],
-        )
+    service.store.config.hosted_tools = {"x_search": ModelHubHostedToolConfig(enabled=False)}
     resolving_threads = []
     resolve_on_worker = service.hosted_tools_for_hop
 
@@ -1114,10 +1094,9 @@ async def test_hop_resolution_states_each_enabled_hosted_tool(tmp_path):
                 "mode": "native",
                 "declaration": {"type": "web_search"},
                 "include": ["web_search_call.action.sources"],
-                "executor": {"source_id": "src_primary01", "model_id": "gpt-6-astra"},
+                "executor": {"source_id": "src_primary01", "model_id": "gpt-6-luna"},
                 "replay": True,
             },
-            "image_generation": {"mode": "proxy", "executor": None, "replay": False},
         }
         _assert_mandatory_fields("hop-resolution.schema.json", hop, HOSTED_TOOL_MANDATORY_FIELDS)
         for broken in (
