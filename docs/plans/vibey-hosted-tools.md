@@ -683,7 +683,8 @@ Unchanged from v1 §7.3 (owner decision, 2026-10-13 19:14), with the producer no
   rearranges the shown executors within the saved order: an id the saved order names but the read does not show (a
   refused or absent Source) keeps its place, and a shown executor the order lacks follows it.
 - **The image card** lists the available image models with their one-line descriptions and a per-image price
-  (owner-approved mockup): the vendor's list price where it has one (Grok Imagine "$0.02"); an estimate from token
+  (owner-approved mockup): the vendor's unqualified list price where it has one (Grok Imagine "$0.02"; a price for
+  one size or quality is not shown as every image's); an estimate from token
   pricing, marked "≈", where the image's tokens are known: the pricing module values the overlay's
   `tokens_per_image` at the model's output token rate (Nano Banana "≈$0.067"); "暂无单价" / "no unit price" where
   neither is (gpt-image-2, which OpenAI prices per image token at a varying count). It has a default-model picker over `default_model` / `effective_default`; a saved default that is no longer available
@@ -765,8 +766,9 @@ under the freeze protocol (`model-hub-contracts/README.md`).
   "assumed" | "unsupported"}` for search tools (§3.4), and `image_generate: {models[{source_id, model_id,
   description, params, size_forms}], default}`; `mode` and
   `executor` are removed. `declaration` and `include` are present exactly when `native` is `assumed`.
-- Admission of a pinned request reads negative evidence only: a declared native tool needs `runs_on` and no current
-  negative `call` evidence; a replayed item needs no current negative `replay` evidence.
+- Admission of a pinned request reads negative evidence only, through the hop's own facts (`hosted_tool_facts`): a
+  declared native tool needs `native` assumed and the overlay's declaration type; a replayed item needs `replay`
+  assumed, which a current `call` refusal withdraws as well as a `replay` one.
 - The `pin_unavailable` envelope gains `reason` (§3.5).
 - The executor body is `{"arguments"}` only; the gateway resolves the chain from the live turn (§6). The endpoint
   keeps turn ownership; it authorizes each call against the turn's frozen tool set and, for `image_generate`, its

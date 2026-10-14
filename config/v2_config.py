@@ -3066,9 +3066,11 @@ def is_model_hub_source_id(value: object) -> bool:
 
 
 def is_model_hub_model_id(value: object) -> bool:
-    """A model id in its canonical spelling: nonblank, without surrounding whitespace."""
+    """A model id already in its canonical spelling, by the one admission rule (``canonical_model_id``)."""
 
-    return isinstance(value, str) and bool(value) and value == value.strip()
+    from core.handlers.model_hub.identifiers import canonical_model_id
+
+    return isinstance(value, str) and canonical_model_id(value) == value
 
 
 def model_hub_executor_order(value: object, *, tool: str) -> tuple[str, ...]:

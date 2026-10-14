@@ -6094,13 +6094,12 @@ class ModelHubService:
     def _image_price(self, source: ModelHubSourceConfig, spec: ImageModelSpec) -> Optional[dict]:
         """One image's price for the Tools card: the vendor's list price, else an estimate, else None (never zero).
 
-        The estimate values the overlay's ``tokens_per_image`` at the model's output token rate, through the one
-        pricing owner.
+        Only an unqualified list price is one: a price for one size or quality would read as every image's, and the
+        card names neither. The estimate values the overlay's ``tokens_per_image`` at the model's output token rate,
+        through the one pricing owner.
         """
 
         listed = next((entry.price for entry in spec.prices if entry.size is None and entry.quality is None), None)
-        if listed is None and spec.prices:
-            listed = spec.prices[0].price
         if listed is not None:
             return {"usd": round(listed.usd_per_1k / 1000, 6), "basis": "list"}
         if spec.tokens_per_image is None:
