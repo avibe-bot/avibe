@@ -96,10 +96,28 @@ The first delivery PR stages this amendment behind the existing change-size
 guard: it ships the bounded foreground contract for already-visible targets,
 then follows immediately with native reveal and hidden/minimized restoration.
 The staged delivery does not change the approved end-state contract.
-For that visible-target first PR, restoring the exact prior frontmost window is
-the only Space restoration action: it does not call private Space APIs and
-verifies the affected display's active Space against the recorded value in the
-same fresh observation.
+For that visible-target first PR, the finite restoration contract contains
+three components: the prior exact frontmost window, the hardware pointer, and
+the active Space recorded separately for the prior frontmost window's display
+and the target window's display. Space restoration happens only by
+re-activating the prior exact frontmost window; the shell does not call private
+Space APIs or switch Spaces, and one fresh observation verifies both recorded
+per-display Space values.
+
+On 2026-10-14, the owner selected Option A for the transaction lifecycle. The
+Controller owns one short, non-cancellable foreground transaction from
+admission through the terminal result. Native stop paths close admission for
+new foreground calls, then wait up to five seconds for the transaction to
+reach terminal. They do not send cancel, interrupt, or join messages into the
+transaction. If the bound expires, the stop proceeds and reports incomplete
+restoration through the native attention state and any result that remains
+deliverable. The transaction owner is the Python Computer Use server; the
+native shell provides consent, the active indicator, the macOS restoration
+primitive, terminal acknowledgement, and bounded stop handling.
+
+Known limitation: if the owner stops during the sub-second transaction, the
+click can complete before the stop takes effect; if a platform call hangs past
+the bound, restoration may be incomplete and is reported as such.
 
 Route B inherits the existing documented same-user local trust boundary. This
 record does not introduce a second authority model for same-user processes.
@@ -116,7 +134,8 @@ implementation records exactly:
 1. the prior frontmost application and its frontmost native window, including
    identities that distinguish the current process and native window;
 2. the hardware pointer position;
-3. the active Space of the affected display; and
+3. the active Space of every involved display, recorded separately for the
+   prior frontmost window's display and the target window's display; and
 4. the target's original hidden or minimized state.
 
 The target must be one freshly observed application window in the same Session
@@ -142,16 +161,19 @@ caller to distinguish an unattempted call, an attempted call with an
 unverifiable effect, and a call whose effect occurred but whose restoration
 failed.
 
-Native Computer Use stop expires consent and cancels the current foreground
-call. Restoration and reporting remain the terminal obligation before normal
-daemon teardown; if the call cannot restore and verify, it stops and reports.
-Stop cannot claim to undo an input that was already posted.
+Native Computer Use stop expires consent only after the current foreground
+transaction reaches terminal or the five-second stop bound expires. It does
+not cancel an in-flight foreground call. Restoration and reporting remain the
+terminal obligation before normal daemon teardown; if the call cannot restore
+and verify, it stops and reports. Stop cannot claim to undo an input that was
+already posted.
 
 Any other window-system state is not restored in v1 and may differ after the
 call. This includes the target's `z_index` and z-order relative to
 non-frontmost windows, focus or selection inside windows, IME state, and
 fullscreen or tiling arrangements. The target's hidden/minimized state is
-restored because it is now part of the finite v1 contract.
+restored in the approved reveal follow-up; it is outside the visible-target
+first PR's three-component contract.
 
 Owner-input quarantine, suppression, capture, and replay during the
 focus-changing interval are explicitly out of scope for this record. The

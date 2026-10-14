@@ -697,7 +697,7 @@ class _ForegroundContract:
     target_label: dict[str, str]
     prior_frontmost: _WindowIdentity
     pointer: dict[str, float]
-    active_space_id: int
+    active_spaces: dict[str, int]
 
     @property
     def target(self) -> dict[str, Any]:
@@ -746,7 +746,7 @@ class _ForegroundRestoration:
             ),
             pointer=_RestorationComponent(recorded=deepcopy(contract.pointer)),
             active_space=_RestorationComponent(
-                recorded=contract.active_space_id
+                recorded=deepcopy(contract.active_spaces)
             ),
         )
 
@@ -864,6 +864,7 @@ def _frontmost_window(payload: Mapping[str, Any]) -> dict[str, Any] | None:
         "window_id": int(window["window_id"]),
         "app_name": str(window.get("app_name") or ""),
         "title": str(window.get("title") or ""),
+        "current_space_id": window.get("current_space_id"),
     }
 
 
@@ -960,6 +961,13 @@ def _float_value(value: Any) -> float | None:
     return float(value)
 
 
+def _space_id(window: Mapping[str, Any]) -> int | None:
+    value = window.get("current_space_id")
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return int(value)
+
+
 def _foreground_error(
     code: str,
     message: str,
@@ -1003,25 +1011,6 @@ def _with_foreground_outcome(
     enriched["content"] = content
     enriched["structuredContent"] = payload
     return enriched
-
-
-async def _settle_without_cancelling(
-    operation: Awaitable[Any],
-) -> tuple[Any | None, BaseException | None, asyncio.CancelledError | None]:
-    """Finish one terminal operation while deferring caller cancellation."""
-
-    task = asyncio.ensure_future(operation)
-    cancellation: asyncio.CancelledError | None = None
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError as exc:
-            if cancellation is None:
-                cancellation = exc
-    try:
-        return task.result(), None, cancellation
-    except BaseException as exc:
-        return None, exc, cancellation
 
 
 def _load_snapshot(state_path: Path) -> tuple[list[dict[str, Any]], set[str]]:
@@ -1542,6 +1531,7 @@ class ComputerUseServer:
         self._upstream_lock = asyncio.Lock()
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._sessions: dict[str, _SessionState] = {}
+        self._foreground_transaction: asyncio.Task[dict[str, Any]] | None = None
         self._foreground_control = foreground_control or UnixForegroundControl(
             _foreground_control_socket_path(self._state_path)
         )
@@ -1903,11 +1893,11 @@ class ComputerUseServer:
                 "target_not_admissible",
                 "Hidden and minimized targets require the Route B reveal follow-up.",
             )
-        active_space_id = target.get("current_space_id")
-        if isinstance(active_space_id, bool) or not isinstance(active_space_id, int):
+        target_space_id = _space_id(target)
+        if target_space_id is None:
             raise ComputerServerError(
                 "target_not_admissible",
-                "The target active Space could not be verified.",
+                "The target display's active Space could not be verified.",
             )
         prior_frontmost = _frontmost_window(windows_payload)
         if prior_frontmost is None:
@@ -1924,6 +1914,12 @@ class ComputerUseServer:
                 "target_not_admissible",
                 "The prior frontmost window identity could not be verified.",
             )
+        prior_space_id = _space_id(prior_frontmost)
+        if prior_space_id is None:
+            raise ComputerServerError(
+                "target_not_admissible",
+                "The prior frontmost display's active Space could not be verified.",
+            )
         prior_window = _window_by_identity(
             windows_payload,
             prior_identity,
@@ -1931,12 +1927,12 @@ class ComputerUseServer:
         )
         if (
             prior_window is None
-            or prior_window.get("current_space_id") != active_space_id
+            or _space_id(prior_window) != prior_space_id
             or prior_window.get("on_current_space") is not True
         ):
             raise ComputerServerError(
                 "target_not_admissible",
-                "The prior frontmost window is not on the target's active Space.",
+                "The prior frontmost window is not on its active Space.",
             )
         pointer_result = await self._run_while_lease_owned(
             heartbeat,
@@ -1968,7 +1964,10 @@ class ComputerUseServer:
             },
             prior_frontmost=prior_identity,
             pointer={"x": pointer_x, "y": pointer_y},
-            active_space_id=int(active_space_id),
+            active_spaces={
+                "prior_frontmost_display": prior_space_id,
+                "target_display": target_space_id,
+            },
         )
 
     async def _restore_and_verify_foreground(
@@ -1978,7 +1977,6 @@ class ComputerUseServer:
         *,
         session: str,
         title: str,
-        heartbeat: asyncio.Task[None],
     ) -> _ForegroundRestoration:
         restoration = _ForegroundRestoration.from_contract(contract)
         try:
@@ -1999,13 +1997,10 @@ class ComputerUseServer:
         windows_payload: dict[str, Any] | None = None
         windows_failure: str | None = None
         try:
-            windows_result = await self._run_while_lease_owned(
-                heartbeat,
-                self._upstream_call(
-                    upstream,
-                    "list_windows",
-                    {"session": session},
-                ),
+            windows_result = await self._upstream_call(
+                upstream,
+                "list_windows",
+                {"session": session},
             )
             if windows_result.get("isError"):
                 windows_failure = "fresh window observation failed"
@@ -2024,13 +2019,10 @@ class ComputerUseServer:
         pointer_payload: dict[str, Any] | None = None
         pointer_failure: str | None = None
         try:
-            pointer_result = await self._run_while_lease_owned(
-                heartbeat,
-                self._upstream_call(
-                    upstream,
-                    "get_cursor_position",
-                    {"session": session},
-                ),
+            pointer_result = await self._upstream_call(
+                upstream,
+                "get_cursor_position",
+                {"session": session},
             )
             if pointer_result.get("isError"):
                 pointer_failure = "fresh pointer observation failed"
@@ -2079,16 +2071,31 @@ class ComputerUseServer:
                 contract.prior_frontmost,
                 self._process_start_stamp_reader,
             )
+            target_window = _window_by_identity(
+                windows_payload,
+                contract.target_identity,
+                self._process_start_stamp_reader,
+            )
+            observed_spaces = {
+                "prior_frontmost_display": (
+                    _space_id(prior_window) if prior_window is not None else None
+                ),
+                "target_display": (
+                    _space_id(target_window) if target_window is not None else None
+                ),
+            }
             if (
                 prior_window is not None
-                and prior_window.get("current_space_id")
-                == contract.active_space_id
                 and prior_window.get("on_current_space") is True
+                and observed_spaces["prior_frontmost_display"]
+                == contract.active_spaces["prior_frontmost_display"]
+                and observed_spaces["target_display"]
+                == contract.active_spaces["target_display"]
             ):
                 restoration.active_space.verified = True
             else:
                 restoration.active_space.fail(
-                    "affected display active Space was not restored"
+                    "one or more involved display active Spaces were not restored"
                 )
 
         if pointer_failure is not None:
@@ -2114,41 +2121,18 @@ class ComputerUseServer:
                 )
         return restoration
 
-    async def _finish_foreground_transaction(
+    async def _terminal_foreground_transaction(
         self,
-        upstream: Upstream,
         contract: _ForegroundContract,
+        restoration: _ForegroundRestoration,
         *,
         session: str,
         title: str,
-        heartbeat: asyncio.Task[None],
         reason: str,
-    ) -> tuple[_ForegroundRestoration, str | None]:
-        async def attention(restoration: _ForegroundRestoration) -> None:
-            with suppress(Exception):
-                await self._foreground_control.request(
-                    "attention",
-                    session=session,
-                    title=title,
-                    target=contract.target,
-                    restoration=restoration.as_dict(),
-                    reason=reason,
-                )
-
-        restoration = await self._restore_and_verify_foreground(
-            upstream,
-            contract,
-            session=session,
-            title=title,
-            heartbeat=heartbeat,
-        )
-        if not restoration.restoration_ok:
-            await attention(restoration)
-            return restoration, None
-
+    ) -> str | None:
         try:
-            cleared = await self._foreground_control.request(
-                "clear",
+            terminal = await self._foreground_control.request(
+                "terminal",
                 session=session,
                 title=title,
                 target=contract.target,
@@ -2156,18 +2140,44 @@ class ComputerUseServer:
                 reason=reason,
             )
         except Exception as exc:
-            clear_error = (
+            return (
                 _bounded_diagnostic(str(exc))
-                or "the active foreground indicator could not be cleared"
+                or "the foreground transaction could not reach terminal"
             )
-            return restoration, clear_error
-        if cleared.get("ok") is not True:
-            clear_error = str(
-                cleared.get("error")
-                or "the active foreground indicator could not be cleared"
+        if terminal.get("ok") is not True:
+            return str(
+                terminal.get("error")
+                or "the foreground transaction could not reach terminal"
             )
-            return restoration, clear_error
-        return restoration, None
+        return None
+
+    async def _run_foreground_transaction(
+        self,
+        upstream: Upstream,
+        name: str,
+        arguments: Mapping[str, Any],
+        *,
+        session: str,
+        title: str,
+        heartbeat: asyncio.Task[None],
+        expected_target_identity: _WindowIdentity | None,
+    ) -> dict[str, Any]:
+        try:
+            return await self._call_foreground(
+                upstream,
+                name,
+                arguments,
+                session=session,
+                title=title,
+                heartbeat=heartbeat,
+                expected_target_identity=expected_target_identity,
+            )
+        finally:
+            heartbeat.cancel()
+            with suppress(BaseException):
+                await heartbeat
+            if self._foreground_transaction is asyncio.current_task():
+                self._foreground_transaction = None
 
     async def _call_foreground(
         self,
@@ -2218,8 +2228,8 @@ class ComputerUseServer:
                 session_title=title,
             )
 
-        active, active_error, cancellation = await _settle_without_cancelling(
-            self._foreground_control.request(
+        try:
+            active = await self._foreground_control.request(
                 "set_active",
                 session=session,
                 title=title,
@@ -2228,45 +2238,18 @@ class ComputerUseServer:
                     contract
                 ).as_dict(),
             )
-        )
-        if active_error is not None:
-            if cancellation is not None:
-                raise cancellation
-            exc = active_error
+        except Exception as exc:
             return _foreground_error(
                 "foreground_shell_unavailable",
                 "The native shell could not prepare foreground control.",
                 detail=_bounded_diagnostic(str(exc)),
             )
-        assert isinstance(active, dict)
         if active.get("ok") is not True:
-            if cancellation is not None:
-                raise cancellation
             return _foreground_error(
                 "foreground_shell_unavailable",
                 "The native shell could not mark foreground control active.",
                 shell_error=str(active.get("error") or "unknown"),
             )
-        if cancellation is not None:
-            _result, finish_error, finish_cancellation = (
-                await _settle_without_cancelling(
-                    self._finish_foreground_transaction(
-                        upstream,
-                        contract,
-                        session=session,
-                        title=title,
-                        heartbeat=heartbeat,
-                        reason="cancelled",
-                    )
-                )
-            )
-            if finish_error is not None:
-                logger.warning(
-                    "foreground cancellation cleanup failed: %s",
-                    _bounded_diagnostic(str(finish_error))
-                    or type(finish_error).__name__,
-                )
-            raise finish_cancellation or cancellation
 
         forwarded = dict(arguments)
         if name == "click":
@@ -2277,55 +2260,47 @@ class ComputerUseServer:
         if name not in self._upstream_accepts_session:
             forwarded.pop("session", None)
         effect = None
-        operation_cancellation: asyncio.CancelledError | None = None
         try:
-            result = await self._run_while_lease_owned(
-                heartbeat,
-                self._upstream_call(upstream, name, forwarded),
-            )
+            result = await self._upstream_call(upstream, name, forwarded)
             payload = _structured_content(result)
             if isinstance(payload, dict):
                 effect = payload.get("effect")
-        except asyncio.CancelledError as exc:
-            operation_cancellation = exc
-            result = _error_result(
-                "upstream_unavailable",
-                "The foreground Computer Use call was cancelled after activation.",
-            )
-        except Exception:
+        except Exception as exc:
             result = _error_result(
                 "upstream_unavailable",
                 "The foreground Computer Use call could not be completed.",
+                detail=_bounded_diagnostic(str(exc)),
             )
 
-        finish_result, finish_error, finish_cancellation = (
-            await _settle_without_cancelling(
-                self._finish_foreground_transaction(
-                    upstream,
-                    contract,
-                    session=session,
-                    title=title,
-                    heartbeat=heartbeat,
-                    reason=(
-                        "cancelled"
-                        if operation_cancellation is not None
-                        else "completed"
-                    ),
-                )
-            )
+        restoration = await self._restore_and_verify_foreground(
+            upstream,
+            contract,
+            session=session,
+            title=title,
         )
-        if finish_error is not None:
-            restoration = _ForegroundRestoration.from_contract(contract)
-            restoration.fail_all(
-                _bounded_diagnostic(str(finish_error))
-                or "restoration could not be completed"
+        terminal_error = await self._terminal_foreground_transaction(
+            contract,
+            restoration,
+            session=session,
+            title=title,
+            reason="completed",
+        )
+        if terminal_error is not None:
+            outcome = (
+                "effect_occurred_restore_failed"
+                if effect == "confirmed" and not restoration.restoration_ok
+                else "attempted_effect_unverifiable"
             )
-            indicator_error = None
-        else:
-            assert isinstance(finish_result, tuple)
-            restoration, indicator_error = finish_result
-        if operation_cancellation is not None or finish_cancellation is not None:
-            raise finish_cancellation or operation_cancellation
+            return _error_result(
+                "foreground_shell_unavailable",
+                "Foreground control reached its terminal result, but the native shell could not receive it.",
+                result_params={
+                    "foreground_outcome": outcome,
+                    "restoration": restoration.as_dict(),
+                    "effect": effect or "unverifiable",
+                    "shell_error": terminal_error,
+                },
+            )
 
         if not restoration.restoration_ok:
             if effect == "confirmed":
@@ -2347,17 +2322,6 @@ class ComputerUseServer:
             if effect != "confirmed"
             else "effect_occurred_restore_verified"
         )
-        if indicator_error is not None:
-            return _error_result(
-                "foreground_shell_unavailable",
-                "Foreground control restored the desktop, but the native indicator could not be cleared.",
-                result_params={
-                    "foreground_outcome": outcome,
-                    "restoration": restoration.as_dict(),
-                    "effect": effect or "unverifiable",
-                    "shell_error": indicator_error,
-                },
-            )
 
         if result.get("isError"):
             return _with_foreground_outcome(
@@ -2431,6 +2395,7 @@ class ComputerUseServer:
                 acquisition: LeaseAcquisition | None = None
                 upstream: Upstream | None = None
                 heartbeat: asyncio.Task[None] | None = None
+                foreground_heartbeat_owned = False
                 pre_forward = True
                 try:
                     status = await asyncio.to_thread(self._status_reader)
@@ -2549,15 +2514,29 @@ class ComputerUseServer:
                     pre_forward = False
 
                     if arguments.get("delivery_mode") == "foreground":
-                        result = await self._call_foreground(
-                            upstream,
-                            name,
-                            arguments,
-                            session=session,
-                            title=session_title or session,
-                            heartbeat=heartbeat,
-                            expected_target_identity=foreground_target_identity,
+                        existing = self._foreground_transaction
+                        if existing is not None and not existing.done():
+                            return _foreground_error(
+                                "foreground_transaction_active",
+                                "Another foreground Computer Use call is still in flight.",
+                            )
+                        foreground_task = asyncio.create_task(
+                            self._run_foreground_transaction(
+                                upstream,
+                                name,
+                                arguments,
+                                session=session,
+                                title=session_title or session,
+                                heartbeat=heartbeat,
+                                expected_target_identity=foreground_target_identity,
+                            ),
+                            name=f"computer-use-foreground-{session}",
                         )
+                        self._foreground_transaction = foreground_task
+                        foreground_heartbeat_owned = True
+                        result = await asyncio.shield(foreground_task)
+                        if self._foreground_transaction is foreground_task:
+                            self._foreground_transaction = None
                     else:
                         forwarded = dict(arguments)
                         forwarded["session"] = session
@@ -2721,7 +2700,7 @@ class ComputerUseServer:
                         error_type=type(exc).__name__,
                     )
                 finally:
-                    if heartbeat is not None:
+                    if heartbeat is not None and not foreground_heartbeat_owned:
                         heartbeat.cancel()
                         with suppress(BaseException):
                             await heartbeat

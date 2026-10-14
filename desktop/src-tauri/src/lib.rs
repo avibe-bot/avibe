@@ -2545,7 +2545,7 @@ mod tests {
                         "active_space": {
                             "attempted": true,
                             "verified": false,
-                            "failure_detail": "affected display active Space was not restored"
+                            "failure_detail": "one or more involved display active Spaces were not restored"
                         }
                     },
                     "restoration_ok": false

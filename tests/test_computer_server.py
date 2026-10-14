@@ -361,17 +361,18 @@ class ForegroundUpstream(FakeUpstream):
         return await super().request(method, params)
 
 
-class CancellableForegroundUpstream(ForegroundUpstream):
+class NonCancellableForegroundUpstream(ForegroundUpstream):
     def __init__(self) -> None:
         super().__init__()
         self.click_started = asyncio.Event()
+        self.release_click = asyncio.Event()
 
     async def request(self, method: str, params: Mapping[str, Any]) -> dict[str, Any]:
         if params.get("name") == "click":
             self.calls.append((method, json.loads(json.dumps(params))))
             self.click_started.set()
-            await asyncio.Event().wait()
-            raise AssertionError("cancelled foreground click unexpectedly resumed")
+            await self.release_click.wait()
+            return await super().request(method, params)
         return await super().request(method, params)
 
 
@@ -2019,7 +2020,7 @@ async def test_foreground_click_on_visible_target_verifies_restore(
         "request_consent",
         "set_active",
         "restore",
-        "clear",
+        "terminal",
     ]
     click_calls = [
         params["arguments"]
@@ -2061,7 +2062,10 @@ async def test_foreground_click_on_visible_target_verifies_restore(
                 "failure_detail": None,
             },
             "active_space": {
-                "recorded": 1,
+                "recorded": {
+                    "prior_frontmost_display": 1,
+                    "target_display": 1,
+                },
                 "attempted": False,
                 "verified": False,
                 "failure_detail": None,
@@ -2072,11 +2076,11 @@ async def test_foreground_click_on_visible_target_verifies_restore(
 
 
 @pytest.mark.asyncio
-async def test_foreground_cancellation_waits_for_restore_before_propagating(
+async def test_foreground_caller_cancellation_does_not_cancel_transaction(
     tmp_path: Path,
 ) -> None:
     state_path, state = _state(tmp_path)
-    upstream = CancellableForegroundUpstream()
+    upstream = NonCancellableForegroundUpstream()
     control = FakeForegroundControl()
     server = _foreground_server(state_path, state, upstream, control)
     observed = await server.call_tool(
@@ -2104,12 +2108,29 @@ async def test_foreground_cancellation_waits_for_restore_before_propagating(
 
     with pytest.raises(asyncio.CancelledError):
         await call
+
+    assert [name for name, _ in control.calls] == [
+        "request_consent",
+        "set_active",
+    ]
+
+    upstream.release_click.set()
+    for _ in range(100):
+        if server._foreground_transaction is None:
+            break
+        await asyncio.sleep(0)
+    else:
+        pytest.fail("foreground transaction did not reach terminal")
+
     assert [name for name, _ in control.calls] == [
         "request_consent",
         "set_active",
         "restore",
-        "clear",
+        "terminal",
     ]
+    assert not any(
+        name in {"cancel", "interrupt", "join"} for name, _ in control.calls
+    )
 
 
 @pytest.mark.asyncio
@@ -2143,7 +2164,53 @@ async def test_foreground_restore_ignores_mutable_window_titles(
 
 
 @pytest.mark.asyncio
-async def test_foreground_restore_does_not_require_the_target_after_the_effect(
+async def test_foreground_restoration_records_each_involved_display_space(
+    tmp_path: Path,
+) -> None:
+    state_path, state = _state(tmp_path)
+    upstream = ForegroundUpstream(
+        target={
+            "pid": 7,
+            "window_id": 9,
+            "app_name": "Target",
+            "title": "Target Window",
+            "is_on_screen": True,
+            "minimized": False,
+            "on_current_space": True,
+            "current_space_id": 2,
+            "z_index": 10,
+        }
+    )
+    control = FakeForegroundControl()
+    server = _foreground_server(state_path, state, upstream, control)
+    await server.call_tool(
+        "get_window_state",
+        {"session": "ses-a", "pid": 7, "window_id": 9},
+    )
+
+    result = await server.call_tool(
+        "click",
+        {
+            "session": "ses-a",
+            "pid": 7,
+            "window_id": 9,
+            "x": 1,
+            "y": 2,
+            "capture_id": "capture-7-9",
+            "delivery_mode": "foreground",
+        },
+    )
+
+    restoration = result["structuredContent"]["restoration"]
+    assert restoration["restoration_ok"] is True
+    assert restoration["components"]["active_space"]["recorded"] == {
+        "prior_frontmost_display": 1,
+        "target_display": 2,
+    }
+
+
+@pytest.mark.asyncio
+async def test_foreground_restore_reports_missing_target_display_space(
     tmp_path: Path,
 ) -> None:
     state_path, state = _state(tmp_path)
@@ -2168,8 +2235,10 @@ async def test_foreground_restore_does_not_require_the_target_after_the_effect(
         },
     )
 
-    assert not result.get("isError")
-    assert result["structuredContent"]["restoration"]["restoration_ok"] is True
+    assert result["structuredContent"]["code"] == "foreground_restore_failed"
+    restoration = result["structuredContent"]["params"]["restoration"]
+    assert restoration["restoration_ok"] is False
+    assert restoration["components"]["active_space"]["verified"] is False
 
 
 @pytest.mark.asyncio
@@ -2306,7 +2375,7 @@ async def test_foreground_restore_rejects_reused_prior_frontmost_process(
         "request_consent",
         "set_active",
         "restore",
-        "attention",
+        "terminal",
     ]
 
 
@@ -2444,7 +2513,7 @@ async def test_foreground_restore_failure_reports_effect_without_retry(
         "request_consent",
         "set_active",
         "restore",
-        "attention",
+        "terminal",
     ]
     assert len(
         [
@@ -2486,14 +2555,14 @@ async def test_unexpected_restore_failure_leaves_native_attention(
         "request_consent",
         "set_active",
         "restore",
-        "attention",
+        "terminal",
     ]
-    attention = control.calls[-1][1]["restoration"]
-    assert attention == result["structuredContent"]["params"]["restoration"]
-    assert attention["restoration_ok"] is False
+    terminal = control.calls[-1][1]["restoration"]
+    assert terminal == result["structuredContent"]["params"]["restoration"]
+    assert terminal["restoration_ok"] is False
     assert all(
         component["failure_detail"] == "unexpected native restore failure"
-        for component in attention["components"].values()
+        for component in terminal["components"].values()
     )
 
 
@@ -2562,10 +2631,13 @@ async def test_foreground_restoration_verifies_space_via_prior_window(
     assert restoration["components"]["prior_frontmost"]["verified"] is True
     assert restoration["components"]["pointer"]["verified"] is True
     assert restoration["components"]["active_space"] == {
-        "recorded": 1,
+        "recorded": {
+            "prior_frontmost_display": 1,
+            "target_display": 1,
+        },
         "attempted": True,
         "verified": False,
-        "failure_detail": "affected display active Space was not restored",
+        "failure_detail": "one or more involved display active Spaces were not restored",
     }
 
 

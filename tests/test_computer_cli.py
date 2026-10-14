@@ -414,7 +414,10 @@ def test_human_restore_failure_renders_structured_component_details() -> None:
                 "failure_detail": None,
             },
             "active_space": {
-                "recorded": 1,
+                "recorded": {
+                    "prior_frontmost_display": 1,
+                    "target_display": 1,
+                },
                 "attempted": True,
                 "verified": False,
                 "failure_detail": "active Space was not restored",
@@ -462,7 +465,10 @@ def test_json_restore_failure_keeps_the_complete_restoration_result(
                 "failure_detail": None,
             },
             "active_space": {
-                "recorded": 1,
+                "recorded": {
+                    "prior_frontmost_display": 1,
+                    "target_display": 1,
+                },
                 "attempted": True,
                 "verified": False,
                 "failure_detail": "active Space was not restored",

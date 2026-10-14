@@ -856,7 +856,7 @@ fn foreground_lifecycle_and_identity_inventories_are_exhaustive() {
         (
             "toggle off",
             source_slice(&native, "async fn toggle(&mut self)", "async fn runtime_ready"),
-            &["ForegroundExitReason::ToggleOff", "defer_foreground_finish("][..],
+            &["ForegroundExitReason::ToggleOff", "await_foreground_stop("][..],
         ),
         (
             "Computer Use stop",
@@ -864,7 +864,7 @@ fn foreground_lifecycle_and_identity_inventories_are_exhaustive() {
             &[
                 "ForegroundExitReason::ComputerUseStop",
                 "set_runtime_lost(",
-                "defer_foreground_finish(",
+                "await_foreground_stop(",
             ][..],
         ),
         (
@@ -872,23 +872,23 @@ fn foreground_lifecycle_and_identity_inventories_are_exhaustive() {
             source_slice(
                 &native,
                 "async fn dispatch_foreground_control",
-                "fn defer_foreground_finish",
+                "fn await_foreground_stop",
             ),
-            &["ForegroundExitReason::SessionEndOrArchive", "defer_foreground_finish("][..],
+            &["ForegroundExitReason::SessionEndOrArchive", "await_foreground_stop("][..],
         ),
         (
             "consent revoke",
             source_slice(&native, "fn toggle_foreground_consent", "fn refresh_granted_view"),
-            &["ForegroundExitReason::ConsentRevoke", "defer_foreground_finish("][..],
+            &["ForegroundExitReason::ConsentRevoke", "await_foreground_stop("][..],
         ),
         (
-            "cancellation",
-            source_slice(&server, "async def _call_foreground", "    async def call_tool"),
-            &[
-                "_finish_foreground_transaction(",
-                "reason=\"cancelled\"",
-                "_settle_without_cancelling(",
-            ][..],
+            "caller cancellation",
+            source_slice(
+                &server,
+                "    async def _run_foreground_transaction",
+                "    async def _call_foreground",
+            ),
+            &["asyncio.current_task()", "heartbeat.cancel()"][..],
         ),
         (
             "app quit",
@@ -913,25 +913,13 @@ fn foreground_lifecycle_and_identity_inventories_are_exhaustive() {
             &[
                 "finish_and_await_terminal(",
                 "ForegroundExitReason::ControllerDisconnect",
-                "complete_foreground_finish(",
+                "complete_foreground_stop(",
             ][..],
         ),
         (
             "driver disconnect",
             source_slice(&native, "async fn runtime_lost", "async fn runtime_stopped"),
             &["ForegroundExitReason::DriverDisconnect", "set_runtime_lost("][..],
-        ),
-        (
-            "foreground watchdog",
-            source_slice(
-                &native,
-                "fn start_foreground_controller_watchdog",
-                "async fn complete_foreground_finish",
-            ),
-            &[
-                "finish_and_await_terminal(",
-                "ForegroundFinishTrigger::ControllerWatchdog",
-            ][..],
         ),
         (
             "runtime stop before daemon teardown",
@@ -973,7 +961,7 @@ fn foreground_lifecycle_and_identity_inventories_are_exhaustive() {
             source_slice(
                 &server,
                 "    async def _restore_and_verify_foreground",
-                "    async def _finish_foreground_transaction",
+                "    async def _terminal_foreground_transaction",
             ),
             &["_verify_window_identity(", "_window_by_identity("][..],
         ),
@@ -987,7 +975,7 @@ fn foreground_lifecycle_and_identity_inventories_are_exhaustive() {
             &[
                 "parse_window_identity(",
                 "verify_process_identity(",
-                "ForegroundTransaction::new(",
+                "ForegroundActivity::new(",
             ][..],
         ),
         (
@@ -1005,6 +993,21 @@ fn foreground_lifecycle_and_identity_inventories_are_exhaustive() {
         for marker in markers {
             assert!(body.contains(marker), "{label} site is missing {marker}");
         }
+    }
+
+    for forbidden in [
+        "ForegroundFinish",
+        "defer_foreground_finish(",
+        "_finish_foreground_transaction(",
+        "_settle_without_cancelling(",
+        "ForegroundFinishTrigger",
+        "start_foreground_controller_watchdog",
+        "reason=\"cancelled\"",
+    ] {
+        assert!(
+            !native.contains(forbidden) && !server.contains(forbidden),
+            "removed foreground cancellation machinery remains: {forbidden}"
+        );
     }
 }
 
