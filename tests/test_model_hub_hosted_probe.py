@@ -729,6 +729,9 @@ async def test_a_verified_call_is_followed_by_the_replay_probe(tmp_path, source,
     call, replay = sent
     # The native declaration is still present, nothing is forced, and the call's own items go back verbatim.
     assert replay["tools"] == call["tools"] and "tool_choice" not in replay
+    # Its instructions ask for an answer from the results it holds, never for the call the question rules out.
+    system = "instructions" if source.protocol == "openai_responses" else "system"
+    assert replay[system] != call[system] and "without using any tool" in json.dumps(replay[system])
     native = SEARCH if source.protocol == "openai_responses" else {"type": "web_search_tool_result"}
     assert json.dumps(native["type"]) in json.dumps(replay)
     assert "other results you found" in json.dumps(replay)

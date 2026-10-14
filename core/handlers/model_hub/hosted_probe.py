@@ -78,6 +78,8 @@ _REPLAY_MESSAGE = (
     "Without using any tool again, list the URLs of the other results you found, beyond the one you already gave."
 )
 _SYSTEM = "You check that a tool works: use it, then answer in one line."
+# The replay's own instructions: the call's would ask for the very call the replay checks the model does not need.
+_REPLAY_SYSTEM = "You check that a tool's earlier results can be read back: answer from them in one line, without using any tool."
 # Room for a reasoning model to think, call the tool and answer in one line; a hop whose Vibey turns ask for less
 # gets that instead.
 PROBE_MAX_OUTPUT_TOKENS = 4096
@@ -152,6 +154,7 @@ def replay_request(call: ModelRequest, tool: str, answered: AssistantMessage) ->
         endpoint=replace(
             call.endpoint, hosted_tools={tool: HostedToolRoute("native", None, True, route.declaration, route.include)}
         ),
+        system=_REPLAY_SYSTEM,
         messages=(*call.messages, answered, UserMessage(content=(TextBlock(text=_REPLAY_MESSAGE),))),
         # A forced choice would ask for the very call the replay checks the model does not need.
         tool_choice=None,
