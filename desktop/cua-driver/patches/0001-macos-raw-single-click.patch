@@ -472,7 +472,7 @@ index b9637489..51b62d4c 100644
 -) -> anyhow::Result<()> {
 +) -> anyhow::Result<ServeShutdown> {
      anyhow::bail!("cua-driver serve is not supported on this platform");
-@@ -2285,5 +2304,12 @@ pub fn run_serve_cmd(
+@@ -2285,5 +2304,15 @@ pub fn run_serve_cmd(
      let result = rt.block_on(run_serve(sdk, &socket_path, pid_file_path.as_deref()));
 -    rt.shutdown_timeout(std::time::Duration::from_secs(30));
 -    cua_driver_core::session_authorization::release_configured_registry_for_shutdown();
@@ -482,6 +482,9 @@ index b9637489..51b62d4c 100644
 +        // globals. The owning host is gone, so abandon the runtime and let
 +        // process exit reclaim those globals instead of clearing them first.
 +        rt.shutdown_background();
++        // AppKit's cursor overlay may own the main thread's run loop, so
++        // returning from serve is not sufficient to terminate this process.
++        std::process::exit(0);
 +    } else {
 +        rt.shutdown_timeout(std::time::Duration::from_secs(30));
 +        cua_driver_core::session_authorization::release_configured_registry_for_shutdown();
@@ -558,7 +561,7 @@ index b9637489..51b62d4c 100644
 +        let driver =
 +            cua_driver_sdk::CuaDriver::create_for_host(cua_driver_sdk::DriverHostOptions {
 +                cursor: cursor_overlay::CursorConfig {
-+                    enabled: false,
++                    enabled: true,
 +                    ..cursor_overlay::CursorConfig::default()
 +                },
 +                host_owns_permission_ux: true,
