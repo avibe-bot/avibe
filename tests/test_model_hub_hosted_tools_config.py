@@ -321,8 +321,8 @@ def test_an_image_models_card_price_is_only_an_unqualified_list_price(tmp_path, 
     from vibe.backend_model_catalog import HostedToolPrice, ImageModelPrice, ImageModelSpec
 
     spec = ImageModelSpec(
-        "gpt-image-2", "OpenAI image model", "images", ("images", "size"), ("pixels",),
-        tuple(
+        "gpt-image-2", "OpenAI image model", ("images", "size"), ("pixels",),
+        prices=tuple(
             ImageModelPrice(HostedToolPrice("image", usd, date(2026, 10, 15), "https://openai.com/api/pricing"), size, quality)
             for size, quality, usd in prices
         ),
