@@ -336,10 +336,11 @@ describe('ToolsTab checks', () => {
     expect(onProbe.mock.calls[0][0]).toMatchObject({ tool: 'web_search', candidate: { source_id: RELAY.id, model_id: 'gpt-6-astra' } });
     // The model never used the tool: not recorded as unsupported, and the row offers another try.
     within(row).getByText("Not verified · the model didn't use the tool; try again");
-    within(row).getByRole('button', { name: 'Retry' });
+    // Another try is as paid as the first, and says so.
+    within(row).getByRole('button', { name: 'Retry · about $0.02' });
 
     // A verified row checks again; a subscription row says the check costs nothing extra.
-    within(card('Web search').querySelector('[data-candidate="src_grok0001:grok-4.6"]') as HTMLElement).getByRole('button', { name: 'Check again' });
+    within(card('Web search').querySelector('[data-candidate="src_grok0001:grok-4.6"]') as HTMLElement).getByRole('button', { name: 'Check again · about $0.01' });
     within(card('Web search').querySelector('[data-candidate="src_chatgpt1:gpt-6.1-sol"]') as HTMLElement)
       .getByRole('button', { name: 'Check · included in subscription' });
     // Images cannot be checked yet, so their rows offer nothing to run.
@@ -366,7 +367,7 @@ describe('ToolsTab checks', () => {
     within(dialog).getByText('Couldn\'t verify this time. Try again; this is not recorded as unsupported.');
 
     // Retrying runs only the pair that got no answer.
-    await userEvent.click(within(dialog).getByRole('button', { name: 'Retry 1' }));
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Retry 1 · included in subscription' }));
     await within(dialog).findByText('Check finished');
     expect(onProbe).toHaveBeenCalledTimes(3);
     expect(onProbe.mock.calls[2][0]).toMatchObject({ candidate: { source_id: SUBSCRIPTION.id } });
@@ -383,7 +384,7 @@ describe('ToolsTab checks', () => {
 
     await userEvent.click(within(row).getByRole('button', { name: 'Check · about $0.02' }));
     within(row).getByText("Couldn't verify · Rate limited");
-    await userEvent.click(within(row).getByRole('button', { name: 'Retry' }));
+    await userEvent.click(within(row).getByRole('button', { name: 'Retry · about $0.02' }));
     within(row).getByText("Couldn't verify · try again");
     expect(row.textContent).not.toContain('models.source');
   });

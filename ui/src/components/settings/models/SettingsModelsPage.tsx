@@ -38,6 +38,7 @@ import { QuotaTab } from './QuotaTab';
 import { ToolsTab } from './ToolsTab';
 import { UsageTab } from './UsageTab';
 import { useHostedTools } from './useHostedTools';
+import type { ProbeTarget } from './hostedTools';
 import './modelHubSurface.css';
 import { agentsWithEcho, createLatestAsyncAuthority, createLatestAsyncAuthorityByKeySet, createLatestEntityAuthorityByKey, createPendingWrites, mapWithConcurrency } from './asyncLifetime';
 import { createAgentCollectionReadAuthority, createSourceCollectionReadAuthority } from './collectionReadAuthority';
@@ -1247,6 +1248,13 @@ export const SettingsModelsPage: React.FC = () => {
   // chips, and again when that Source changes: an edit can change its identity,
   // which drops its evidence on the server.
   const hostedTools = useHostedTools(tab === 'tools' || selectedSource !== null, selectedSource ? JSON.stringify(selectedSource) : null);
+  // A probe is a real call on exactly one Source, and a successful one verifies
+  // that Source (a pending credential check clears), so the Sources read follows it.
+  const probeHostedTool = React.useCallback(async (target: ProbeTarget) => {
+    const result = await hostedTools.probe(target);
+    void refresh();
+    return result;
+  }, [hostedTools.probe, refresh]);
   const sourceDetailOpen = selectedSourceId !== null && subscriptionVendor === null;
   const orderAgent = agents.find((agent) => agent.backend === orderBackend && agent.mode === 'hub') ?? null;
   const menuAgent = agents.find((agent) => agent.backend === menuBackend && agent.mode === 'hub') ?? null;
@@ -1625,7 +1633,7 @@ export const SettingsModelsPage: React.FC = () => {
                         selectSource({ sourceId, returnFocus: () => opener });
                       }}
                     />
-                    : tab === 'tools' ? <ToolsTab read={hostedTools.read} sources={sources} pending={hostedTools.pending} probing={hostedTools.probing} onChange={(tool, body) => void hostedTools.save(tool, body)} onProbe={hostedTools.probe} onRetry={() => void hostedTools.refresh()} />
+                    : tab === 'tools' ? <ToolsTab read={hostedTools.read} sources={sources} pending={hostedTools.pending} probing={hostedTools.probing} onChange={(tool, body) => void hostedTools.save(tool, body)} onProbe={probeHostedTool} onRetry={() => void hostedTools.refresh()} />
                     : tab === 'usage' ? <UsageTab usage={usageRead} windowKey={usageWindow} onWindowChange={setUsageWindow} onRetry={retryUsage} />
                     : tab === 'logs' ? <RecentSwitchesCard events={eventsRead} sources={sourcesRead} onRetry={retryEvents} loadingMore={loadingEvents} onLoadMore={loadOlderEvents} />
                     : directEmpty ? <DirectHome agents={installedNativeAgents} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onSwitch={switchToGateway} />
@@ -1774,7 +1782,7 @@ export const SettingsModelsPage: React.FC = () => {
                 hostedTools={hostedTools.read}
                 onRetryHostedTools={() => void hostedTools.refresh()}
                 hostedProbing={hostedTools.probing}
-                onProbeHostedTool={hostedTools.probe}
+                onProbeHostedTool={probeHostedTool}
                 activeBackends={activeBackends}
                 headingRef={sourceDetailHeadingRef}
                 trackMutation={trackSourceMutation(selectedSource.id)}

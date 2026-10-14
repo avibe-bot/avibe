@@ -146,4 +146,28 @@ describe('useHostedTools ordering', () => {
     // The read that follows failed; what the probe answered still stands.
     await waitFor(() => expect(shown(result.current.read)).toBe(true));
   });
+
+  it('reads the record before calling a probe unanswered when its answer was lost', async () => {
+    const before = { status: 'unknown' as const, stale: null, basis: null, observed_at: null, detail: null, changes_at: null };
+    const candidate = {
+      source_id: 'src_relay001', model_id: 'gpt-6-astra', billing: 'metered' as const, price: null, probe_estimate: null, call: before, replay: null,
+    };
+    const recorded: HostedToolsStatus = {
+      tools: [{
+        name: 'web_search', enabled: false, executor: null, bound: null,
+        candidates: [{ ...candidate, call: { ...before, status: 'verified', basis: 'probe', observed_at: '2026-10-14T07:00:00Z' } }],
+      }],
+      reverify: { engine_upgraded: 0, aged: 0 },
+    };
+    vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValueOnce(status(false)).mockResolvedValue(recorded);
+    // The probe ran and recorded its evidence, but its answer never arrived.
+    vi.spyOn(modelsApi, 'probeHostedTool').mockRejectedValue(new Error('connection reset'));
+    const { result } = renderHook(() => useHostedTools(true), { wrapper });
+    await waitFor(() => expect(shown(result.current.read)).toBe(false));
+
+    let outcome: Awaited<ReturnType<typeof result.current.probe>> = null;
+    await act(async () => { outcome = await result.current.probe({ tool: 'web_search', candidate }); });
+    // Verified, not "no answer", so nothing invites a second paid request.
+    expect(outcome).toMatchObject({ call: { outcome: 'verified' } });
+  });
 });

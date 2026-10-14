@@ -2431,6 +2431,8 @@
         "probe": {
           "check": "检测",
           "checkCost": "检测 · {{cost}}",
+          "recheckCost": "重新检测 · {{cost}}",
+          "retryCost": "重试 · {{cost}}",
           "recheck": "重新检测",
           "retry": "重试",
           "running": "检测中…",
@@ -2487,6 +2489,8 @@
           "note": "已验证的模型会直接原生调用；其他模型由代理执行者代为调用。工具开关在“工具”页，默认仍是关闭。",
           "retry_one": "重试 {{count}} 项",
           "retry_other": "重试 {{count}} 项",
+          "retryCost_one": "重试 {{count}} 项 · {{cost}}",
+          "retryCost_other": "重试 {{count}} 项 · {{cost}}",
           "done": "完成"
         }
       },

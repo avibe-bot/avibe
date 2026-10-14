@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { useToast } from '@/context/ToastContext';
 import { modelsApi } from './modelsApi';
 import { beginRegionRead, loadingRegion, readRegion, readyRegion, settleRegionRead, type RegionRead } from './regionRead';
-import { probeKey, type ProbeTarget } from './hostedTools';
+import { probeKey, sameExecutor, type ProbeTarget } from './hostedTools';
 import type { HostedToolName, HostedToolProbeResult, HostedToolPut, HostedToolsStatus } from './types';
 
 /**
@@ -96,6 +96,7 @@ export function useHostedTools(active: boolean, revision: string | null = null) 
     const key = probeKey(target);
     const clock = order.current;
     const writesAtStart = clock.writes;
+    const recordBefore = target.candidate.call.observed_at;
     setProbing((previous) => new Set(previous).add(key));
     try {
       const { probe: result, hosted_tools: status } = await modelsApi.probeHostedTool(target.tool, {
@@ -109,7 +110,10 @@ export function useHostedTools(active: boolean, revision: string | null = null) 
       }
       return result;
     } catch {
-      return null;
+      // The request may have run and recorded its evidence though its answer was
+      // lost: read the record before calling it unanswered, and keep the check
+      // running until then, so no second paid request starts meanwhile.
+      return lostProbeOutcome(target, recordBefore);
     } finally {
       if (alive.current) {
         setProbing((previous) => {
@@ -123,4 +127,30 @@ export function useHostedTools(active: boolean, revision: string | null = null) 
   }, [refresh]);
 
   return { read, pending, probing, refresh, save, probe };
+}
+
+/**
+ * What a probe whose answer was lost left behind: a new probe record for its
+ * pair (one the read did not have before it) is its outcome; anything else is
+ * no answer (null).
+ */
+async function lostProbeOutcome(target: ProbeTarget, recordBefore: string | null): Promise<HostedToolProbeResult | null> {
+  try {
+    const status = await modelsApi.getHostedTools();
+    const call = status.tools
+      .find((tool) => tool.name === target.tool)?.candidates
+      .find((candidate) => sameExecutor(candidate, target.candidate))?.call;
+    if (call && call.basis === 'probe' && call.observed_at !== recordBefore && call.status !== 'unknown') {
+      return {
+        tool: target.tool,
+        source_id: target.candidate.source_id,
+        model_id: target.candidate.model_id,
+        call: { outcome: call.status, error: null },
+        replay: null,
+      };
+    }
+  } catch {
+    // Unread: still no answer.
+  }
+  return null;
 }

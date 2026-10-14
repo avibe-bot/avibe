@@ -2431,6 +2431,8 @@
         "probe": {
           "check": "Check",
           "checkCost": "Check · {{cost}}",
+          "recheckCost": "Check again · {{cost}}",
+          "retryCost": "Retry · {{cost}}",
           "recheck": "Check again",
           "retry": "Retry",
           "running": "Checking…",
@@ -2487,6 +2489,8 @@
           "note": "Verified models call the tool natively; other models use the proxy executor. Tools stay off until you turn them on.",
           "retry_one": "Retry {{count}}",
           "retry_other": "Retry {{count}}",
+          "retryCost_one": "Retry {{count}} · {{cost}}",
+          "retryCost_other": "Retry {{count}} · {{cost}}",
           "done": "Done"
         }
       },

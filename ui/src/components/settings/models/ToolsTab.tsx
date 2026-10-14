@@ -114,15 +114,13 @@ const ProbeCell: React.FC<{
   const estimate = useEstimateLabel()(target.candidate.probe_estimate);
   const checked = target.candidate.call.basis !== null;
   const unanswered = last !== undefined && probeUnanswered(last);
+  // Every action that starts a paid request says what it is estimated to cost.
+  const action = unanswered ? 'retry' : checked ? 'recheck' : 'check';
   const label = running
     ? t('settings.models.tools.probe.running')
-    : unanswered
-      ? t('settings.models.tools.probe.retry')
-      : checked
-        ? t('settings.models.tools.probe.recheck')
-        : estimate
-          ? t('settings.models.tools.probe.checkCost', { cost: estimate })
-          : t('settings.models.tools.probe.check');
+    : estimate
+      ? t(`settings.models.tools.probe.${action}Cost`, { cost: estimate })
+      : t(`settings.models.tools.probe.${action}`);
   return (
     <span className="flex min-w-0 flex-col items-start gap-1 md:items-end">
       <Button

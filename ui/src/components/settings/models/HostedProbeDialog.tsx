@@ -101,6 +101,8 @@ export const HostedProbeDialog: React.FC<{
   const outcomes = planned.map((target) => outcomeOf(results.get(probeKey(target)) ?? null));
   const unverified = planned.filter((target) => results.has(probeKey(target)) && probeUnanswered(results.get(probeKey(target)) ?? null));
   const count = (wanted: (outcome: Outcome) => boolean) => outcomes.filter(wanted).length;
+  // A retry is as paid as the first run, so it says its cost the same way.
+  const retryLabel = estimateLabel(probeTotal(unverified));
   const done = results.size;
 
   return (
@@ -191,7 +193,10 @@ export const HostedProbeDialog: React.FC<{
                   setResults(new Map());
                   void run(unverified);
                 }}>
-                  <RotateCw className="size-3.5" aria-hidden />{t('settings.models.tools.result.retry', { count: unverified.length })}
+                  <RotateCw className="size-3.5" aria-hidden />
+                  {retryLabel
+                    ? t('settings.models.tools.result.retryCost', { count: unverified.length, cost: retryLabel })
+                    : t('settings.models.tools.result.retry', { count: unverified.length })}
                 </Button>
               )}
               <Button size="sm" onClick={onClose}>{t('settings.models.tools.result.done')}</Button>

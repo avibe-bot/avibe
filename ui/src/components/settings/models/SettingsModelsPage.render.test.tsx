@@ -2861,4 +2861,28 @@ describe('SettingsModelsPage tools region', () => {
     await userEvent.click(screen.getByRole('tab', { name: /^Tools$|^工具$/ }));
     await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
   });
+
+  it('reads the Sources again after a check, since a probe can verify its Source', async () => {
+    const unknown = { status: 'unknown' as const, stale: null, basis: null, observed_at: null, detail: null, changes_at: null };
+    const withCandidate: HostedToolsStatus = {
+      ...hostedToolsStatus,
+      tools: hostedToolsStatus.tools.map((tool) => tool.name === 'web_search'
+        ? { ...tool, candidates: [{ source_id: retainedSource.id, model_id: 'claude-opus-5-5', call: unknown, replay: unknown, billing: 'metered' as const, price: null, probe_estimate: null }] }
+        : tool),
+    };
+    renderPage([retainedSource]);
+    vi.mocked(modelsApi.getHostedTools).mockResolvedValue(withCandidate);
+    const probe = vi.spyOn(modelsApi, 'probeHostedTool').mockResolvedValue({
+      probe: { tool: 'web_search', source_id: retainedSource.id, model_id: 'claude-opus-5-5', call: { outcome: 'verified', error: null }, replay: null },
+      hosted_tools: withCandidate,
+    });
+    await screen.findByText('Retained source');
+    await userEvent.click(screen.getByRole('tab', { name: /^Tools$|^工具$/ }));
+    const card = await screen.findByRole('region', { name: /^Web search$|^网页搜索$/ });
+    const sourceReads = vi.mocked(modelsApi.listSources).mock.calls.length;
+
+    await userEvent.click(within(card).getByRole('button', { name: /^Check$|^检测$/ }));
+    expect(probe).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(vi.mocked(modelsApi.listSources).mock.calls.length).toBeGreaterThan(sourceReads));
+  });
 });
