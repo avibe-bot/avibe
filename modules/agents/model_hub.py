@@ -1339,6 +1339,7 @@ class ModelHubRuntimeRouter:
                 if self.turn_gateway is not None and backend == "codex"
                 else target_model
             )
+            identity = identity_digest(source) if backend == "vibey" else None
             # A turn's first resolution binds its hosted tools and executors;
             # later attempts of the turn keep that binding (settings apply from
             # the next turn) and recompute only what belongs to their hop.
@@ -1368,8 +1369,8 @@ class ModelHubRuntimeRouter:
                 gateway_request_model_id=runtime_model,
                 # The origin and the identity come from one snapshot of the Source.
                 primary_origin=(
-                    HopOrigin(source.vendor, source.protocol, target_model, source.id, identity_digest(source))
-                    if backend == "vibey" else None
+                    HopOrigin(source.vendor, source.protocol, target_model, source.id, identity)
+                    if identity is not None else None
                 ),
                 # The proxy endpoint runs only the executor this launch bound per
                 # tool, and only while its Source keeps the identity it had now.
@@ -1417,7 +1418,7 @@ class ModelHubRuntimeRouter:
                     else None
                 ),
                 hosted_tools=hosted_tools,
-                source_identity=identity_digest(source) if backend == "vibey" else None,
+                source_identity=identity,
             )
         self._emit_transition(launch, config)
         return launch

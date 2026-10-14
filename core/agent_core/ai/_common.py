@@ -1649,12 +1649,13 @@ def _pin_unavailable(body: str) -> bool:
 
 
 def portable_request(request: ModelRequest) -> ModelRequest:
-    """The same request in portable form (§3.5): no Source to pin to, and every hosted tool as its function, so it
-    carries no native declaration and replays no native payload."""
+    """The same request in portable form (§3.5): never pinned, and every hosted tool as its function, so it carries no
+    native declaration and replays no native payload. The hop's Source and identity stay for attribution: a response
+    that Source serves is still its own, and its opaque payloads are bound to that identity."""
 
     endpoint = request.endpoint
     routes = {name: HostedToolRoute("proxy", route.executor, False) for name, route in endpoint.hosted_tools.items()}
-    return replace(request, endpoint=replace(endpoint, source_id=None, hosted_tools=routes))
+    return replace(request, endpoint=replace(endpoint, portable=True, hosted_tools=routes))
 
 
 @dataclass(frozen=True)
@@ -1698,7 +1699,9 @@ def hosted_pin(request: ModelRequest, messages: tuple[Any, ...] = ()) -> dict[st
     def replays(message: Any) -> bool:
         return isinstance(message, AssistantMessage) and any(isinstance(b, HostedToolBlock) for b in message.content)
 
-    if not native_hosted_tools(request) and not any(replays(message) for message in messages):
+    if request.endpoint.portable or (
+        not native_hosted_tools(request) and not any(replays(message) for message in messages)
+    ):
         return {}
     if not request.endpoint.source_id:
         raise ValueError("native hosted content needs the Source the request is pinned to")

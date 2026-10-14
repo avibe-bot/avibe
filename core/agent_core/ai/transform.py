@@ -271,7 +271,10 @@ def native_replay(
     """
 
     blocks = [block for block in message.content if isinstance(block, HostedToolBlock)]
-    if not blocks or endpoint is None or not endpoint.source_id or message.origin != target:
+    if not blocks or endpoint is None or not endpoint.source_id or endpoint.portable or message.origin != target:
+        return False
+    # A native payload is opaque provider content too: it goes back only to the account that issued it.
+    if message.source_identity != endpoint.source_identity:
         return False
     if protocol not in ("anthropic", "openai_responses"):
         return False

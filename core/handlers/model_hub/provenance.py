@@ -775,6 +775,10 @@ class PreparedGatewayRoute:
     source_id: str
     gateway_request_model_id: str
     primary_origin: HopOrigin | None = None
+    # Vibey only: the primary Source's identity at launch. ``HopOrigin`` compares
+    # without it, but a route under another identity is another route, so its
+    # credential carries the launch identity the gateway compares against.
+    primary_identity: str = ""
     # Vibey only: the proxy executor bound for each enabled hosted tool, as
     # ``HopResolution.hosted_tools`` states it, with the executor Source's
     # identity digest at launch: (tool, (source_id, model_id, identity) | None).
@@ -1708,6 +1712,7 @@ class TurnCorrelationRegistry:
                 source_id=source_id,
                 gateway_request_model_id=request_model_id,
                 primary_origin=primary_origin,
+                primary_identity=primary_origin.identity if primary_origin is not None else "",
                 hosted_executors=hosted_executors,
             )
 

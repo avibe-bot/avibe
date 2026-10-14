@@ -37,6 +37,7 @@ from core.agent_core.tools.hosted import hosted_tool_spec
 
 SOURCE = "src_served00001"
 OTHER = "src_other000001"
+IDENTITY = "sha256:served-account"
 WEB = hosted_tool_spec("web_search")
 CALL_ITEM = {
     "id": "ws_1",
@@ -73,11 +74,14 @@ def _endpoint(protocol: str, *, replay: bool, native: bool = True, source_id: st
         "hub-token",
         provider=provider,
         source_id=source_id,
+        source_identity=IDENTITY,
         hosted_tools={"web_search": route},
     )
 
 
-def _searched(protocol: str, *, served_by: str = SOURCE, stop_reason: str = "stop", extra=()) -> AssistantMessage:
+def _searched(
+    protocol: str, *, served_by: str = SOURCE, stop_reason: str = "stop", extra=(), identity: str = IDENTITY
+) -> AssistantMessage:
     provider, model = MODELS[protocol]
     call = HostedToolBlock(
         id="ws_1" if protocol == "openai_responses" else "srvtoolu_1",
@@ -87,7 +91,11 @@ def _searched(protocol: str, *, served_by: str = SOURCE, stop_reason: str = "sto
         native=HostedNative(source_id=served_by, payload=PAYLOADS[protocol]),
     )
     return AssistantMessage(
-        (call, TextBlock(text="found it"), *extra), Origin(provider, protocol, model), stop_reason, hosted_summary=HostedSummary()
+        (call, TextBlock(text="found it"), *extra),
+        Origin(provider, protocol, model),
+        stop_reason,
+        hosted_summary=HostedSummary(),
+        source_identity=identity,
     )
 
 
@@ -115,16 +123,22 @@ def _verbatim(protocol: str, body: dict[str, Any]) -> bool:
 
 @pytest.mark.parametrize("protocol", ["openai_responses", "anthropic"])
 @pytest.mark.parametrize(
-    ("replay", "served_by", "verbatim"),
-    [(True, SOURCE, True), (False, SOURCE, False), (True, OTHER, False)],
-    ids=["same-source-with-replay-evidence", "no-replay-evidence", "another-source"],
+    ("replay", "served_by", "identity", "verbatim"),
+    [
+        (True, SOURCE, IDENTITY, True),
+        (False, SOURCE, IDENTITY, False),
+        (True, OTHER, IDENTITY, False),
+        # The same Source after its key changed is another account, whose native payload it cannot read.
+        (True, SOURCE, "sha256:previous-account", False),
+    ],
+    ids=["same-source-with-replay-evidence", "no-replay-evidence", "another-source", "another-identity"],
 )
 async def test_a_hosted_call_goes_back_verbatim_and_pinned_only_to_its_own_source_with_replay_evidence(
-    protocol, replay, served_by, verbatim
+    protocol, replay, served_by, identity, verbatim
 ):
     request = _request(
         _endpoint(protocol, replay=replay, native=False),
-        _searched(protocol, served_by=served_by),
+        _searched(protocol, served_by=served_by, identity=identity),
         UserMessage((TextBlock("and then?"),)),
     )
 
@@ -225,17 +239,22 @@ def _tool_name(tool: dict[str, Any]) -> str:
 
 
 @pytest.mark.parametrize("protocol", ["openai_responses", "anthropic", "openai_chat"])
-@pytest.mark.parametrize("second", ["served", "pin_unavailable"])
-async def test_pin_unavailable_gets_exactly_one_portable_resend_and_never_the_generic_retry(protocol, second):
+@pytest.mark.parametrize(
+    ("second", "served_by"),
+    [("served", OTHER), ("served", SOURCE), ("pin_unavailable", OTHER)],
+    ids=["served-by-another-source", "served-by-its-source", "pin_unavailable"],
+)
+async def test_pin_unavailable_gets_exactly_one_portable_resend_and_never_the_generic_retry(protocol, second, served_by):
     """MH-HOSTED-VIBEY-005: the pinned request carries a native declaration and, where the protocol replays one, a
-    verbatim payload. Its one resend carries neither and no pin; that resend's own answer is what the loop sees."""
+    verbatim payload. Its one resend carries neither and no pin; that resend's own answer is what the loop sees. A
+    resend the hop's own Source serves is still its own: the answer keeps that Source's identity."""
 
     replayed = protocol in PAYLOADS
     history = (_searched(protocol), UserMessage((TextBlock("and then?"),))) if replayed else ()
     endpoint = _endpoint(protocol, replay=True)
     request = _request(endpoint, *history)
     provider, model = MODELS[protocol]
-    served = json.dumps({"provider": provider, "api": protocol, "model": model, "source": OTHER}, separators=(",", ":"))
+    served = json.dumps({"provider": provider, "api": protocol, "model": model, "source": served_by}, separators=(",", ":"))
     sent: list[httpx.Request] = []
 
     def gateway(wire: httpx.Request) -> httpx.Response:
@@ -259,6 +278,7 @@ async def test_pin_unavailable_gets_exactly_one_portable_resend_and_never_the_ge
         assert _verbatim(protocol, pinned) and not _verbatim(protocol, portable)
     if second == "served":
         assert isinstance(events[-1], Done)
+        assert events[-1].message.source_identity == (IDENTITY if served_by == SOURCE else None)
     else:
         # A 409 to an unpinned request is an ordinary error: there is no second portable resend.
         assert isinstance(events[-1], ProviderError) and events[-1].status == 409

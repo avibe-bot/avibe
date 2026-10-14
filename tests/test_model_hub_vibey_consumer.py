@@ -331,6 +331,39 @@ async def test_opaque_history_uses_launch_snapshot_without_requiring_turn_attrib
 
 
 @pytest.mark.asyncio
+async def test_a_later_turn_after_a_key_rotation_gets_a_route_under_the_new_identity(tmp_path):
+    """MH-VIBEY-005: a route credential carries the launch identity the gateway compares against, so a turn launched
+    after the key changed gets a route under the new identity. Its own Source's signed history, rendered for that
+    identity, is kept; the earlier route still answers for the identity it was launched under."""
+
+    primary = _source("src_primary01", "Primary", vendor="anthropic", protocol="anthropic")
+    service = _vibey_service(tmp_path, [primary], handles=[
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS), (b"{}",)),
+    ])
+    signed, _plain = _signed_history("anthropic")
+    gateway = ModelHubTurnGateway(service)
+    router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+    try:
+        before = await router.resolve_hop("menu-alias", process_scope="vibey:rotation", turn_id="turn-before")
+        completion = router.settle_turn("turn-before", settled_by=SETTLED_BY_TERMINAL_RESULT, ts="2026-10-02T08:00:00Z")
+        if completion:
+            await completion
+        service.store.config.sources[0].credential_ref = "cred_rotated0001"
+        after = await router.resolve_hop("menu-alias", process_scope="vibey:rotation", turn_id="turn-after")
+        async with aiohttp.ClientSession() as client:
+            async with client.post(
+                f'{after["base_url"]}/messages',
+                headers={"Authorization": f'Bearer {after["token"]}', **after["request_headers"]},
+                json={"model": after["runtime_model"], **signed},
+            ) as response:
+                assert response.status == 200
+    finally:
+        await gateway.close()
+    assert after["source_identity"] != before["source_identity"] and after["token"] != before["token"]
+    assert service.adapter.requests[0]["messages"] == signed["messages"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("recovered_hop", ["primary", "fallback"])
 async def test_opaque_history_origin_survives_recovery_walks(tmp_path, recovered_hop):
     """MH-VIBEY-005: retries keep the launch origin and never mutate signed input.
