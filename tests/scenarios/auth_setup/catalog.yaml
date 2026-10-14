@@ -342,7 +342,7 @@ scenarios:
     backend: shared
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_quota_card_reauth_reaches_a_fresh_quota_reading
   - id: AUTH-SETUP-910
-    name: Model Hub native subscription create reaches the CLI login while the backend is Hub-owned
+    name: Hub-owned native subscription creation preserves verified login through opaque Keychain observation
     status: covered
     kind: historical_regression
     layer: scenario
@@ -351,6 +351,8 @@ scenarios:
     supporting_tests:
       - tests/test_native_writer_custody.py::test_hub_backend_admits_creating_the_empty_native_subscription_slot
       - tests/test_model_hub_api.py::test_native_oauth_custody_refusal_is_not_reported_as_engine_down
+      - tests/test_settings_disk_fallback.py::test_get_claude_auth_reads_native_store_without_launching_cli
+      - ui/src/components/onboarding/BackendConnection.test.tsx
   - id: AUTH-SETUP-911
     name: Web Claude OAuth launches the same CLI as normal Agent turns for padded paths and the desktop default selector
     status: covered

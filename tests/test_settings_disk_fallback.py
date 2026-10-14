@@ -22,7 +22,6 @@ The fixes:
 from __future__ import annotations
 
 import json
-import subprocess
 import threading
 from pathlib import Path
 
@@ -41,8 +40,12 @@ def _direct_config(**kwargs):
 
 
 @pytest.fixture(autouse=True)
-def direct_native_auth():
+def direct_native_auth(monkeypatch):
+    from vibe import native_oauth_store
+
     _direct_config().save()
+    monkeypatch.setattr(native_oauth_store, "_KEYCHAIN_STORE", native_oauth_store._FixtureKeychainStore())
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
 
 
 def test_codex_reads_base_url_from_user_titlecase_provider(tmp_path: Path) -> None:
@@ -152,7 +155,6 @@ def claude_restart_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
         return {"ok": True, "message": "refreshed"}
 
     monkeypatch.setattr("vibe.api.restart_backend", restart_backend)
-    monkeypatch.setattr("vibe.api._read_claude_cli_oauth_signed_in", lambda *a, **kw: None)
     return calls
 
 
@@ -181,240 +183,88 @@ def test_claude_oauth_state_reads_current_dot_credentials_file(tmp_path: Path) -
     assert read_claude_oauth_signed_in(home=tmp_path) is True
 
 
-def test_get_claude_auth_prefers_cli_oauth_status(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "store,metadata,credential,expected_mode,uncertain,has_oauth",
+    [
+        ("missing", "not_found", None, "none", False, False),
+        ("oauth", "not_found", None, "oauth", False, True),
+        ("invalid", "not_found", None, "none", True, False),
+        ("mcp", "not_found", None, "none", False, False),
+        ("oauth", "found", None, "none", True, False),
+        ("oauth", "permission_needed", None, "none", True, False),
+        ("missing", "found", "api_key", "api_key", False, False),
+        ("oauth", "not_found", "api_key", "api_key", False, True),
+        ("missing", "found", "setup_token", "oauth", False, True),
+        ("missing", "found", "legacy_env_key", "api_key", False, False),
+        ("missing", "found", "masked_env_key", "none", True, False),
+    ],
+)
+def test_get_claude_auth_reads_native_store_without_launching_cli(
+    tmp_path, monkeypatch, store, metadata, credential, expected_mode, uncertain, has_oauth,
 ) -> None:
-    """The Settings page should trust Claude Code's own auth status first.
+    """GET observes real fixture files/metadata, never refreshes or mutates.
 
-    This covers keychain-backed installs and avoids depending solely on the
-    exact credentials filename used by a specific Claude Code release.
+    The old getter launches auth status even for a file-backed login; trapping
+    every process entry point catches that regression at the public boundary.
+    Keychain metadata is deliberately identical for OAuth and MCP-only items.
     """
-    _write_claude_settings(tmp_path, {})
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
-    monkeypatch.setattr("config.paths._home", lambda: tmp_path, raising=False)
+    import asyncio
+    import subprocess
+    from types import SimpleNamespace
+    from unittest.mock import Mock
 
-    class _FakeAgent:
-        auth_mode = "oauth"
-        api_key = None
-        base_url = None
-        cli_path = "claude"
-
-    class _FakeAgents:
-        claude = _FakeAgent()
-
-    class _FakeRuntime:
-        default_cwd = str(tmp_path / "runtime")
-
-    class _FakeConfig:
-        agents = _FakeAgents()
-        runtime = _FakeRuntime()
-
-    monkeypatch.setenv("PATH", "/fake/bin")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-stale-shell")
-    monkeypatch.setattr("vibe.api.resolve_cli_path", lambda _binary: None)
-
-    def fake_run(cmd, **kwargs):
-        assert cmd == ["claude", "auth", "status", "--json"]
-        env = kwargs.get("env") or {}
-        assert env.get("PATH") == "/fake/bin"
-        assert "ANTHROPIC_API_KEY" not in env
-        assert kwargs.get("cwd") == str(tmp_path / "runtime")
-        return subprocess.CompletedProcess(
-            cmd,
-            0,
-            stdout='{"loggedIn": true, "authMethod": "claude.ai"}',
-            stderr="",
-        )
-
-    monkeypatch.setattr("vibe.api.load_config", lambda: _FakeConfig())
-    monkeypatch.setattr("vibe.api.subprocess.run", fake_run)
-
+    from vibe import native_oauth_store
     from vibe.api import get_claude_auth
+    from vibe.claude_config import get_claude_credentials_path, get_claude_settings_path
 
-    state = get_claude_auth()
-
-    assert state["has_oauth_credentials"] is True
-    assert state["active_auth_mode"] == "oauth"
-    assert (tmp_path / "runtime").is_dir()
-
-
-def test_get_claude_auth_resolves_default_claude_cli_before_status_probe(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _write_claude_settings(tmp_path, {})
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
-    monkeypatch.setattr("config.paths._home", lambda: tmp_path, raising=False)
-
-    resolved_cli = tmp_path / ".claude" / "local" / "claude"
-    resolved_cli.parent.mkdir(parents=True)
-    resolved_cli.write_text("#!/bin/sh\n", encoding="utf-8")
-    resolved_cli.chmod(0o755)
-
-    class _FakeAgent:
-        auth_mode = "oauth"
-        api_key = None
-        base_url = None
-        cli_path = "claude"
-
-    class _FakeAgents:
-        claude = _FakeAgent()
-
-    class _FakeConfig:
-        agents = _FakeAgents()
-
-    def fake_run(cmd, **_kwargs):
-        assert cmd == [str(resolved_cli), "auth", "status", "--json"]
-        return subprocess.CompletedProcess(
-            cmd,
-            0,
-            stdout='{"loggedIn": true, "authMethod": "claude.ai"}',
-            stderr="",
-        )
-
-    monkeypatch.setattr("vibe.api.Path.home", lambda: tmp_path)
-    monkeypatch.setattr("vibe.api.shutil.which", lambda _binary: None)
-    monkeypatch.setattr("vibe.api.load_config", lambda: _FakeConfig())
-    monkeypatch.setattr("vibe.api.subprocess.run", fake_run)
-
-    from vibe.api import get_claude_auth
-
-    state = get_claude_auth()
-
-    assert state["has_oauth_credentials"] is True
-    assert state["active_auth_mode"] == "oauth"
-
-
-def test_get_claude_auth_ignores_cli_api_key_status_for_oauth(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _write_claude_settings(tmp_path, {})
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
-    monkeypatch.setattr("config.paths._home", lambda: tmp_path, raising=False)
-
-    class _FakeAgent:
-        auth_mode = "oauth"
-        api_key = None
-        base_url = None
-        cli_path = "claude"
-
-    class _FakeAgents:
-        claude = _FakeAgent()
-
-    class _FakeConfig:
-        agents = _FakeAgents()
-
-    def fake_run(cmd, **_kwargs):
-        return subprocess.CompletedProcess(
-            cmd,
-            0,
-            stdout='{"loggedIn": true, "authMethod": "api-key"}',
-            stderr="",
-        )
-
-    monkeypatch.setattr("vibe.api.load_config", lambda: _FakeConfig())
-    monkeypatch.setattr("vibe.api.subprocess.run", fake_run)
-
-    from vibe.api import get_claude_auth
-
-    state = get_claude_auth()
-
-    assert state["has_oauth_credentials"] is False
-    assert state["active_auth_mode"] == "none"
-
-
-def test_get_claude_auth_suppresses_stale_disk_oauth_for_concrete_non_oauth_status(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _write_claude_settings(tmp_path, {})
-    claude_dir = tmp_path / ".claude"
-    (claude_dir / ".credentials.json").write_text(
-        json.dumps(
-            {
-                "claudeAiOauth": {
-                    "accessToken": "stale-oauth",
-                    "refreshToken": "stale-refresh",
-                    "expiresAt": 4_102_444_800_000,
-                    "scopes": ["user:inference"],
-                }
-            }
-        ),
-        encoding="utf-8",
+    for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_SECURESTORAGE_CONFIG_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    config = _direct_config()
+    unused_cwd = tmp_path / "must-not-create-workdir"
+    config.runtime.default_cwd = str(unused_cwd)
+    config.agents.claude.auth_mode_set = credential == "masked_env_key"
+    config.save()
+    settings = get_claude_settings_path()
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps({"env": {"ANTHROPIC_API_KEY": "fixture-key-secret"}
+                                         if credential == "api_key" else {}}))
+    path = get_claude_credentials_path()
+    if store != "missing":
+        path.write_text({
+            "oauth": json.dumps({"claudeAiOauth": {"accessToken": "fixture-oauth-secret"}}),
+            "invalid": "{broken-json",
+            "mcp": json.dumps({"mcpOAuth": {"fixture": {"accessToken": "fixture-mcp-secret"}}}),
+        }[store])
+    if credential == "setup_token":
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "fixture-setup-secret")
+    elif credential in {"legacy_env_key", "masked_env_key"}:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "fixture-key-secret")
+    before = {p: p.read_bytes() for p in settings.parent.iterdir() if p.is_file()}
+    forbidden = Mock(side_effect=AssertionError("auth observation must not spawn or access Keychain values"))
+    keychain = SimpleNamespace(
+        metadata=Mock(return_value=native_oauth_store._KeychainMetadata(metadata, "fixture-revision")),
+        read=forbidden, write=forbidden, delete=forbidden,
     )
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_dir))
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
-    monkeypatch.setattr("config.paths._home", lambda: tmp_path, raising=False)
-
-    class _FakeAgent:
-        auth_mode = "oauth"
-        api_key = None
-        base_url = None
-        cli_path = "claude"
-
-    class _FakeAgents:
-        claude = _FakeAgent()
-
-    class _FakeConfig:
-        agents = _FakeAgents()
-
-    def fake_run(cmd, **_kwargs):
-        return subprocess.CompletedProcess(
-            cmd,
-            0,
-            stdout='{"loggedIn": true, "authMethod": "third_party"}',
-            stderr="",
-        )
-
-    monkeypatch.setattr("vibe.api.load_config", lambda: _FakeConfig())
-    monkeypatch.setattr("vibe.api.subprocess.run", fake_run)
-
-    from vibe.api import get_claude_auth
+    monkeypatch.setattr(native_oauth_store, "_KEYCHAIN_STORE", keychain)
+    monkeypatch.setattr(native_oauth_store, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(native_oauth_store.getpass, "getuser", lambda: "fixture-user")
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(subprocess.Popen, "__init__", forbidden)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden)
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", forbidden)
 
     state = get_claude_auth()
 
-    assert state["has_oauth_credentials"] is False
-    assert state["active_auth_mode"] == "none"
-
-
-def test_get_claude_auth_treats_setup_token_status_as_oauth(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _write_claude_settings(tmp_path, {})
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
-    monkeypatch.setattr("config.paths._home", lambda: tmp_path, raising=False)
-
-    class _FakeAgent:
-        auth_mode = "oauth"
-        api_key = None
-        base_url = None
-        cli_path = "claude"
-
-    class _FakeAgents:
-        claude = _FakeAgent()
-
-    class _FakeConfig:
-        agents = _FakeAgents()
-
-    def fake_run(cmd, **_kwargs):
-        return subprocess.CompletedProcess(
-            cmd,
-            0,
-            stdout='{"loggedIn": true, "authMethod": "oauth_token"}',
-            stderr="",
-        )
-
-    monkeypatch.setattr("vibe.api.load_config", lambda: _FakeConfig())
-    monkeypatch.setattr("vibe.api.subprocess.run", fake_run)
-
-    from vibe.api import get_claude_auth
-
-    state = get_claude_auth()
-
-    assert state["has_oauth_credentials"] is True
-    assert state["active_auth_mode"] == "oauth"
+    forbidden.assert_not_called()
+    assert state["active_auth_mode"] == expected_mode
+    assert state["auth_mode_uncertain"] is uncertain
+    assert state["has_oauth_credentials"] is has_oauth
+    assert state["has_api_key"] is (credential == "api_key")
+    assert {p: p.read_bytes() for p in settings.parent.iterdir() if p.is_file()} == before
+    assert not unused_cwd.exists()
+    public = json.dumps(state)
+    for secret in ("fixture-key-secret", "fixture-oauth-secret", "fixture-mcp-secret", "fixture-setup-secret"):
+        assert secret not in public
 
 
 def test_claude_settings_json_auth_token_surfaces_in_get_claude_auth(
@@ -438,7 +288,6 @@ def test_claude_settings_json_auth_token_surfaces_in_get_claude_auth(
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     monkeypatch.setattr("config.paths._home", lambda: tmp_path, raising=False)
-    monkeypatch.setattr("vibe.api._read_claude_cli_oauth_signed_in", lambda _path, **_kwargs: None)
 
     from vibe.api import get_claude_auth
 
@@ -488,7 +337,6 @@ def test_claude_api_key_mode_wins_over_stale_oauth_credentials(
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_dir))
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     monkeypatch.setattr("config.paths._home", lambda: tmp_path, raising=False)
-    monkeypatch.setattr("vibe.api._read_claude_cli_oauth_signed_in", lambda _path, **_kwargs: None)
 
     class _FakeAgent:
         auth_mode = "api_key"
@@ -525,7 +373,6 @@ def test_claude_settings_json_takes_precedence_over_legacy_v2config(
     )
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
     monkeypatch.setattr("config.paths._home", lambda: tmp_path, raising=False)
-    monkeypatch.setattr("vibe.api._read_claude_cli_oauth_signed_in", lambda _path, **_kwargs: None)
 
     # Inject a V2Config with a fresh key by patching load_config.
     class _FakeAgent:
@@ -612,7 +459,6 @@ def test_save_claude_explicit_auth_token_clears_v2_secret(
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     monkeypatch.setattr("config.paths._home", lambda: tmp_path, raising=False)
-    monkeypatch.setattr("vibe.api._read_claude_cli_oauth_signed_in", lambda _path, **_kwargs: None)
     cleanup_calls: list[bool] = []
     monkeypatch.setattr(
         "vibe.api._clear_claude_oauth_credentials_after_api_key_save",
@@ -678,7 +524,6 @@ def test_save_claude_auth_reports_partial_when_oauth_cleanup_fails(
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     monkeypatch.setattr("config.paths._home", lambda: tmp_path, raising=False)
-    monkeypatch.setattr("vibe.api._read_claude_cli_oauth_signed_in", lambda _path, **_kwargs: None)
     monkeypatch.setattr(
         "vibe.api._clear_claude_oauth_credentials_after_api_key_save",
         lambda _service=None, **_ownership: {
@@ -728,7 +573,6 @@ def test_save_claude_auth_restores_pending_oauth_backup_before_writing_new_key(
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     monkeypatch.setattr("config.paths._home", lambda: tmp_path, raising=False)
-    monkeypatch.setattr("vibe.api._read_claude_cli_oauth_signed_in", lambda _path, **_kwargs: None)
 
     from config.v2_config import AgentsConfig, RuntimeConfig, SlackConfig, V2Config
     from vibe.api import save_claude_auth

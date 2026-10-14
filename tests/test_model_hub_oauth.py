@@ -247,6 +247,7 @@ def test_native_status_does_not_override_explicit_claude_api_key_mode():
         {
             "active_auth_mode": "api_key",
             "has_oauth_credentials": True,
+            "auth_mode_uncertain": True,
         },
     )
     assert _signed_in("claude", {"has_oauth_credentials": True})

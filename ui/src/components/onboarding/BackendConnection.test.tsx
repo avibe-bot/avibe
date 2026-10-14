@@ -305,6 +305,33 @@ describe('shared Settings and onboarding connection owner', () => {
     await waitFor(() => expect(done).toHaveBeenCalledOnce());
     expect(mock.api.startOAuthWeb).toHaveBeenCalledOnce(); expect(mock.api.saveCodexAuth).not.toHaveBeenCalled();
   });
+  it.each(['success', 'failed', 'competing-key'] as const)('Claude opaque observation preserves only verified OAuth completion (%s)', async (outcome) => {
+    const opaque = { ...native(), auth_mode: 'oauth' as const, active_auth_mode: 'none' as const,
+      has_api_key: false, has_oauth_credentials: false, auth_mode_uncertain: true };
+    mock.api.getClaudeAuth.mockResolvedValue(opaque);
+    mock.api.getBackendConnection.mockResolvedValue(connection({ auth: 'unknown', ready: false, entry_eligible: false }));
+    const done = vi.fn();
+    render(wrap(<BackendConnectionForm backend="claude" compact onConnected={done} />));
+    await screen.findByText(en.onboarding.connection.uncertain);
+    expect(done).not.toHaveBeenCalled(); // Ordinary unknown never acknowledges a login.
+    const start = screen.getByRole('button', { name: en.onboarding.connection.claudeSignIn });
+    await waitFor(() => expect(start.hasAttribute('disabled')).toBe(false));
+    mock.api.startOAuthWeb.mockResolvedValue({ ok: true, flow_id: 'opaque-login',
+      state: outcome === 'failed' ? 'failed' : 'success', error: outcome === 'failed' ? 'fixture login failed' : undefined });
+    if (outcome === 'competing-key') mock.api.getClaudeAuth.mockResolvedValue({ ...opaque, active_auth_mode: 'api_key', has_api_key: true });
+    fireEvent.click(start);
+    if (outcome === 'success') {
+      await waitFor(() => expect(done).toHaveBeenCalledOnce());
+      expect(mock.api.cancelOAuthWeb).not.toHaveBeenCalled();
+      expect(screen.queryByRole('alert')).toBeNull();
+    } else {
+      await screen.findAllByRole('alert');
+      expect(done).not.toHaveBeenCalled();
+    }
+    expect(screen.queryByText(en.onboarding.connection.connected)).toBeNull();
+    expect(screen.queryByText(en.onboarding.connection.savedSubscription)).toBeNull();
+    expect(screen.getByText(en.onboarding.connection.uncertain)).toBeTruthy();
+  });
   it('cancelling Settings OAuth during confirmation discards its late native observation', async () => {
     mock.api.getCodexAuth.mockResolvedValue(codexNative({ active_auth_mode: 'none', has_api_key: false, has_chatgpt_tokens: false }));
     mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'codex', auth: 'none', ready: false, entry_eligible: false }));

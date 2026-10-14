@@ -1392,7 +1392,6 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
                 side_effect=clear_oauth,
             ),
             patch("vibe.api.restart_backend", side_effect=restart_backend),
-            patch("vibe.api._read_claude_cli_oauth_signed_in", return_value=None),
         ):
             config = V2Config(
                 mode="self_host",
@@ -1533,7 +1532,6 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
                 side_effect=clear_oauth,
             ),
             patch("vibe.api.restart_backend", side_effect=restart_backend),
-            patch("vibe.api._read_claude_cli_oauth_signed_in", return_value=None),
             patch("core.agent_auth_service.ClaudeSDKClient", FakeClaudeSDKClient),
         ):
             config = V2Config(
@@ -2024,11 +2022,16 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         The CLI finishes and releases its credential lease before any status
         read commits the Source. Until then the native slot still looks empty,
         so a second start in that window must not open another login over the
-        credential this one just wrote.
+        credential this one just wrote. A metadata-only Keychain observation
+        cannot undo the explicit flow's already verified OAuth success.
         """
         state_dir = tempfile.TemporaryDirectory()
         self.addCleanup(state_dir.cleanup)
         harness = CustodiedNativeOAuthScenarioHarness(Path(state_dir.name))
+        harness.account = {
+            "active_auth_mode": "none", "auth_mode_uncertain": True,
+            "email": "owner@example.com",
+        }
         start = {"vendor": "anthropic", "channel": "native_cli"}
 
         started = await harness.service.oauth_start(dict(start))
@@ -2068,6 +2071,11 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(completed["flow"]["state"], "success")
         self.assertEqual(completed["source"]["id"], source.id)
+        harness.agent_auth._verify_login.assert_awaited_once()
+        self.assertTrue(harness.agent_auth.get_web_flow_status(flow_id)["source_status"]["signed_in"])
+        # Completion metadata is scoped to this flow, not ordinary readiness.
+        self.assertEqual(harness.account["active_auth_mode"], "none")
+        self.assertTrue(harness.account["auth_mode_uncertain"])
 
     async def test_hub_reauth_requires_acknowledgement_and_reaches_consistent_terminal(self):
         """Scenario: AUTH-SETUP-109.
@@ -4294,7 +4302,6 @@ def test_instance_manager_backend_credentials_round_trip(monkeypatch, tmp_path, 
         _recover_interrupted_claude_oauth_settings_backup=Mock(),
     ))
     monkeypatch.setattr(api, "_clear_claude_oauth_credentials_after_api_key_save", lambda service, **kw: {"ok": True})
-    monkeypatch.setattr(api, "_read_claude_cli_oauth_signed_in", lambda *a, **kw: False)
     monkeypatch.setattr(claude_config, "read_claude_oauth_signed_in", lambda: False)
     refreshed = []
     monkeypatch.setattr(api, "restart_backend", lambda name, **kw: refreshed.append(name) or {"ok": True})

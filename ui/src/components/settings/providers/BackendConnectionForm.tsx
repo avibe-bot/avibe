@@ -194,8 +194,8 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
   }, [api, backend, provider?.id, t]);
   // Native persistence and controller application are independent observations.
   // A failed IPC read must not discard a successful post-commit credential read.
-  const observe = useCallback(async ({ expected, receiptError = '' }: {
-    expected?: Submission; receiptError?: string;
+  const observe = useCallback(async ({ expected, receiptError = '', verifiedOAuth = false }: {
+    expected?: Submission; receiptError?: string; verifiedOAuth?: boolean;
   } = {}) => {
     const token = ++observation.current;
     const current = () => lifetime.current.mounted && token === observation.current;
@@ -250,7 +250,12 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
       const uncertain = fresh.native && 'auth_mode_uncertain' in fresh.native && fresh.native.auth_mode_uncertain;
       hasAuth = ['oauth', 'api_key'].includes(effective) && !uncertain;
       keylessSettings = !compact && Boolean(fresh.provider?.custom && fresh.provider.configured && effective === 'none');
-      if (expected && ((!keylessSettings && effective !== expected.method) || uncertain)) messages.push(t('onboarding.connection.unconfirmed'));
+      // Claude's completed login already verified consent. A read-only,
+      // opaque Keychain observation cannot undo it, but does not prove current
+      // readiness either: hasAuth/connected deliberately stay false here.
+      const opaqueAfterConsent = backend === 'claude' && verifiedOAuth && uncertain
+        && effective === 'none' && !fresh.native?.has_api_key;
+      if (expected && !opaqueAfterConsent && ((!keylessSettings && effective !== expected.method) || uncertain)) messages.push(t('onboarding.connection.unconfirmed'));
       // Claude's two credential types are one method. `active_auth_mode` reads
       // `api_key` for a token exactly as it does for a key, so the method above
       // cannot tell a token write that landed from one that did not — only the
@@ -308,9 +313,9 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
       return settled.drafts;
     });
   };
-  const confirm = async (submission: Submission, receiptError = '') => {
+  const confirm = async (submission: Submission, receiptError = '', verifiedOAuth = false) => {
     pendingConfirmation.current = submission;
-    if (!await observe({ expected: submission, receiptError })) return false;
+    if (!await observe({ expected: submission, receiptError, verifiedOAuth })) return false;
     pendingConfirmation.current = null;
     consume(submission);
     await onConnectedRef.current?.();
@@ -320,7 +325,7 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
   // typing, and not an address they were part-way through changing either.
   const OAUTH: Submission = { method: 'oauth', baseUrl: null, credential: null, sent: null };
   const confirmOAuth = async () => {
-    if (!await confirm(OAUTH)) throw new Error(t('onboarding.connection.applyPending'));
+    if (!await confirm(OAUTH, '', true)) throw new Error(t('onboarding.connection.applyPending'));
   };
   const observeOAuthFailure = async (receiptError: string) => {
     pendingConfirmation.current = OAUTH;

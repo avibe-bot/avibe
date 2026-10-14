@@ -14,8 +14,9 @@ This module owns the narrow settings.json mutation surface:
 
 OAuth tokens minted by ``claude login`` may live in an OS keychain or in
 Claude Code's own credential file depending on platform/version. The Settings
-UI prefers ``claude auth status --json`` and uses the on-disk credential file
-as a fallback signal.
+UI reads the selected native store without launching Claude or reading Keychain
+values. File-backed OAuth presence is observable; opaque Keychain metadata is
+reported as uncertain rather than as signed out or ready.
 """
 
 from __future__ import annotations

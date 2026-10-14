@@ -2094,6 +2094,8 @@ export type ClaudeAuthState = {
   // is actively using API-key mode, so UI "signed in" indicators should use
   // active_auth_mode instead.
   has_oauth_credentials: boolean;
+  // Opaque/unreadable native storage is not proof of logout.
+  auth_mode_uncertain?: boolean;
   base_url: string | null;
   settings_path: string | null;
   settings_exists: boolean;

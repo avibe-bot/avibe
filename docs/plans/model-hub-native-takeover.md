@@ -326,12 +326,15 @@ application/drain, backend enablement, installation and OpenCode permission
 gates remain effective. This is connection readiness, not an inference probe
 or a promise that every selected model is available.
 
-Direct Claude retains its existing bounded `auth status --json` observation
-for Keychain-backed sign-in; opaque Keychain metadata cannot distinguish an
-OAuth grant from an unrelated MCP-only container. The native credential lease
-covers that query and its thread completion, with custody checked before
-launch. This is not a login, refresh or inference request. Hub connection
-observation never launches this query or borrows an unrelated native login.
+Direct Claude observes the selected native store with `allow_secret=False`;
+Settings and connection reads never launch Claude or refresh credentials.
+Opaque Keychain metadata cannot distinguish an OAuth grant from an unrelated
+MCP-only container, so readiness stays unknown. The existing native credential
+lease covers the Direct snapshot and its thread completion, with custody checked
+before reading. An explicit OAuth flow's verified success may be acknowledged
+by its completion consumers despite later opaque metadata; it is not a cached
+readiness assertion. Hub connection observation never borrows an unrelated
+native login. See `claude-auth-read-only-observation.md`.
 
 Only Sources referenced by the backend's effective source order or explicit
 route hops participate. Eligibility reuses the existing backend and

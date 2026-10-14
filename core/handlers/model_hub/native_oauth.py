@@ -102,6 +102,12 @@ def _signed_in(backend: str, status: Mapping[str, Any]) -> bool:
     if active_auth_mode not in {None, "none"}:
         return False
     if backend == "claude":
+        # This reader is used only after AgentAuthService has verified and
+        # committed this OAuth flow. Opaque Keychain metadata cannot refute
+        # that completion receipt. It is not a general readiness assertion;
+        # a concrete competing API-key selection above still wins.
+        if status.get("auth_mode_uncertain") is True:
+            return True
         if active_auth_mode == "none":
             return False
         return status.get("has_oauth_credentials") is True
