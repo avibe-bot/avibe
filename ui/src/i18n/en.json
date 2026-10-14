@@ -2379,7 +2379,8 @@
           "on": "On",
           "off": "Off",
           "needsCheck": "Off · check a Source first",
-          "needsExecutor": "Off · choose an executor first"
+          "needsExecutor": "Off · choose an executor first",
+          "checkUnavailable": "Off · checks for this tool come in a later update"
         },
         "toggle": {
           "turnOn": "Turn on {{name}}",

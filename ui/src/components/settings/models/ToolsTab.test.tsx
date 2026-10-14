@@ -413,6 +413,14 @@ describe('ToolsTab checks', () => {
     expect(row.textContent).not.toContain('models.source');
   });
 
+  it('says plainly when a tool cannot be checked yet, instead of asking for a check it cannot run', () => {
+    renderTab(status([tool('image_generation', { candidates: [{ source_id: RELAY.id, model_id: 'gpt-6.1-sol', call: unknown, replay: null }] })]));
+    const image = card('Image generation');
+    within(image).getByText('Off · checks for this tool come in a later update');
+    expect((within(image).getByRole('switch') as HTMLButtonElement).disabled).toBe(true);
+    expect(within(image).queryByRole('button', { name: /Check/ })).toBeNull();
+  });
+
   it('says a check\'s cost is unknown before it runs, when no estimate is known', () => {
     renderTab(status([tool('web_search', { candidates: [{ source_id: CLAUDE.id, model_id: 'claude-opus-5-5', call: unknown, replay: unknown }] })]));
     within(card('Web search')).getByRole('button', { name: 'Check · cost unknown' });

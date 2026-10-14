@@ -1471,6 +1471,17 @@ describe('SourceDetailPanel hosted-tool capability chips', () => {
     await within(detail).findByText(/the model didn't use the tool|模型没有调用工具/);
   });
 
+  it('moves keyboard focus into the detail on Enter, so its paid re-check can be reached', async () => {
+    renderChips(status({ enabled: false, bound: null }), { onProbe: vi.fn(async () => null) });
+    const chip = screen.getByRole('button', { name: /X search · not supported on this Source|X 搜索 · 此供应商不支持/ });
+    chip.focus();
+    await userEvent.keyboard('{Enter}');
+    const detail = await screen.findByRole('dialog');
+    await waitFor(() => expect(document.activeElement).toBe(
+      within(detail).getByRole('button', { name: /Check again · about \$0\.02|重新检测 · 约 \$0\.02/ }),
+    ));
+  });
+
   it('says a re-check\'s cost is unknown when no estimate is known', async () => {
     const read = status({ enabled: false, bound: null });
     const unpriced = { ...read, tools: read.tools.map((tool) => ({ ...tool, candidates: tool.candidates.map((candidate) => ({ ...candidate, probe_estimate: null })) })) };

@@ -2379,7 +2379,8 @@
           "on": "已开启",
           "off": "已关闭",
           "needsCheck": "已关闭 · 需先检测",
-          "needsExecutor": "已关闭 · 需先选择代理执行者"
+          "needsExecutor": "已关闭 · 需先选择代理执行者",
+          "checkUnavailable": "已关闭 · 此工具的检测将在后续更新中提供"
         },
         "toggle": {
           "turnOn": "开启{{name}}",

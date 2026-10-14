@@ -124,6 +124,16 @@ const EvidenceChip: React.FC<{
     closing.current = window.setTimeout(() => setOpen(false), 120);
   };
   React.useEffect(() => () => { if (closing.current !== null) window.clearTimeout(closing.current); }, []);
+  // Enter or Space moves keyboard focus into the detail, where its action is; a
+  // hover or a focus that only passes by leaves focus where it is.
+  const enterDetail = React.useRef(false);
+  const focusDetail = () => {
+    enterDetail.current = false;
+    const detail = document.getElementById(detailId);
+    const target = detail?.querySelector<HTMLElement>('button, [href], [tabindex]:not([tabindex="-1"])') ?? detail;
+    if (target && !target.hasAttribute('tabindex') && target === detail) target.setAttribute('tabindex', '-1');
+    target?.focus();
+  };
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverAnchor asChild>
@@ -143,6 +153,13 @@ const EvidenceChip: React.FC<{
           onPointerLeave={(event) => { if (event.pointerType === 'mouse') closeSoon(); }}
           onFocus={() => { if (pointer.current === null) keepOpen(); }}
           onBlur={() => { pointer.current = null; closeSoon(); }}
+          onKeyDown={(event) => {
+            if (event.key !== 'Enter' && event.key !== ' ') return;
+            event.preventDefault();
+            enterDetail.current = true;
+            if (open) focusDetail();
+            else keepOpen();
+          }}
           onClick={() => {
             if (pointer.current === 'mouse') setOpen(true);
             else setOpen((previous) => !previous);
@@ -157,7 +174,10 @@ const EvidenceChip: React.FC<{
         side="bottom"
         align="start"
         sideOffset={6}
-        onOpenAutoFocus={(event) => event.preventDefault()}
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          if (enterDetail.current) focusDetail();
+        }}
         onInteractOutside={(event) => { if (anchor.current?.contains(event.target as Node)) event.preventDefault(); }}
         onPointerEnter={(event) => { if (event.pointerType === 'mouse') keepOpen(); }}
         onPointerLeave={(event) => { if (event.pointerType === 'mouse') closeSoon(); }}

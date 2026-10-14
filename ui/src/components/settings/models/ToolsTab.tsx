@@ -230,7 +230,9 @@ const ToolCard: React.FC<{
             ? 'settings.models.tools.state.on'
             : !locked
               ? 'settings.models.tools.state.off'
-              : pickable ? 'settings.models.tools.state.needsExecutor' : 'settings.models.tools.state.needsCheck')}</span>
+              : pickable
+                ? 'settings.models.tools.state.needsExecutor'
+                : probeableTool(tool.name) ? 'settings.models.tools.state.needsCheck' : 'settings.models.tools.state.checkUnavailable')}</span>
           <ToggleSwitch
             enabled={tool.enabled}
             disabled={pending || locked}
