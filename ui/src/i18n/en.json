@@ -2422,6 +2422,29 @@
           "refused": "Not supported · {{date}}",
           "replay": "No replay · {{date}}"
         },
+        "image": {
+          "title": "Available image models",
+          "noUnitPrice": "No unit price",
+          "perImage": "${{usd}} / image",
+          "perImageEstimated": "≈ ${{usd}} / image",
+          "pair": "{{model}} · {{source}}",
+          "defaultBadge": "Default",
+          "defaultLabel": "Default model",
+          "defaultPick": "Default image model",
+          "automatic": "Automatic",
+          "automaticNamed": "Automatic ({{pair}})",
+          "unavailable": "{{pair}} (unavailable)",
+          "defaultNote": "Used when Vibey doesn't name a model. Vibey can also pick another model from the list when it needs to.",
+          "unavailableNote": "The saved default isn't available now, so {{pair}} is used.",
+          "unavailableNoteNone": "The saved default isn't available now.",
+          "empty": "Image generation needs an API key from {{vendors}}.",
+          "emptyNoVendor": "None of your Sources offers an image model yet.",
+          "vendor": {
+            "openai": "OpenAI",
+            "gemini": "Google",
+            "xai": "xAI"
+          }
+        },
         "cost": {
           "included": "Included in subscription",
           "includedNote": "No extra charge",

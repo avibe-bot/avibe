@@ -681,7 +681,9 @@ Unchanged from v1 §7.3 (owner decision, 2026-10-13 19:14), with the producer no
   pricing, marked "≈", where the image's tokens are known: the pricing module values the overlay's
   `tokens_per_image` at the model's output token rate (Nano Banana "≈$0.067"); "暂无单价" / "no unit price" where
   neither is (gpt-image-2, which OpenAI prices per image token at a varying count). It has a default-model picker over `default_model` / `effective_default`; a saved default that is no longer available
-  shows as itself, "(unavailable)". Image-endpoint refusals (§3.2) show and clear like search refusals; the image card
+  shows as itself, "(unavailable)", with a note naming the model in use (`effective_default`); the picker's
+  "Automatic" option names what automatic resolves to and saves `null`. Each model's line is the overlay's
+  `description`, shown as written in every locale, like a model id. Image-endpoint refusals (§3.2) show and clear like search refusals; the image card
   gets an Advanced section only when its clears move there (two or more Sources refused), holding only those; any other
   failed image call shows only on its tool card in chat, since passive evidence keeps no other image failures. With no image model available, the card names the vendors from
   `image_offered_by` ("Add an OpenAI or Google API key").

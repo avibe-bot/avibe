@@ -10,6 +10,7 @@ import { useTranslation } from 'react-i18next';
 import { AlertCircle, ArrowDown, ArrowUp, AtSign, CheckCircle2, ChevronRight, Eraser, Globe, Image as ImageIcon, Info, RotateCcw } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
+import { Select } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 import { ToggleSwitch } from '../SettingsPrimitives';
 import { formatMonthDay, formatNameList, formatSmallUsd } from './format';
@@ -18,6 +19,9 @@ import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
 import { ACCENT_ICON, ACCENT_PILL, ACCENT_TILE, sourceVisual } from './vendorMeta';
 import type {
   HostedExecutorCandidate,
+  HostedImagePrice,
+  HostedImageToolStatus,
+  HostedModelRef,
   HostedSearchToolStatus,
   HostedToolClear,
   HostedToolName,
@@ -377,6 +381,102 @@ const Advanced: React.FC<{ tool: HostedToolStatus; summary: RefusalSummary; look
   );
 };
 
+/** One image's price: the vendor's list price, an estimate from token pricing (≈), or none known. */
+const ImagePrice: React.FC<{ price: HostedImagePrice | null }> = ({ price }) => {
+  const { t } = useTranslation();
+  if (!price) return <span className="model-hub-tool-cost-note">{t('settings.models.tools.image.noUnitPrice')}</span>;
+  const usd = formatSmallUsd(price.usd);
+  return (
+    <span className="flex flex-col">
+      <span className="font-semibold text-foreground">{t(price.basis === 'list' ? 'settings.models.tools.image.perImage' : 'settings.models.tools.image.perImageEstimated', { usd })}</span>
+      <span className="model-hub-tool-cost-note">{t('settings.models.tools.cost.listNote')}</span>
+    </span>
+  );
+};
+
+const pairValue = (pair: HostedModelRef) => JSON.stringify([pair.source_id, pair.model_id]);
+const samePair = (left: HostedModelRef | null, right: HostedModelRef | null) =>
+  left !== null && right !== null && left.source_id === right.source_id && left.model_id === right.model_id;
+const AUTOMATIC = '';
+
+/**
+ * The image models `image_generate` offers now, with the default Vibey names when
+ * it does not pick one. The saved default is shown as saved, even when it is no
+ * longer offered; the default in use is the server's `effective_default`.
+ */
+const ImageModels: React.FC<{ tool: HostedImageToolStatus; lookup: SourceLookup; pending: boolean; onSave: Save }> = ({ tool, lookup, pending, onSave }) => {
+  const { t, i18n } = useTranslation();
+  const pairLabel = (pair: HostedModelRef) => t('settings.models.tools.image.pair', { model: pair.model_id, source: lookup.name(pair.source_id) }) as string;
+  if (tool.models.length === 0) {
+    const vendors = tool.image_offered_by.map((vendor) => t(`settings.models.tools.image.vendor.${vendor}`, { defaultValue: vendor }) as string);
+    return (
+      <p className="model-hub-tool-status flex items-start gap-2 border-t border-border text-muted">
+        <Info className="mt-0.5 size-[14px] shrink-0" aria-hidden />
+        <span>{vendors.length > 0
+          ? t('settings.models.tools.image.empty', { vendors: new Intl.ListFormat(i18n.language, { style: 'long', type: 'disjunction' }).format(vendors) })
+          : t('settings.models.tools.image.emptyNoVendor')}</span>
+      </p>
+    );
+  }
+  const saved = tool.default_model;
+  const inUse = tool.effective_default;
+  return (
+    <div className="model-hub-tool-image flex flex-col gap-3 border-t border-border">
+      <div className="flex flex-col gap-1.5">
+        <h4 className="font-semibold text-foreground">{t('settings.models.tools.image.title')}</h4>
+        <ul className="flex flex-col gap-1.5">
+          {tool.models.map((model) => {
+            const source = lookup.source(model.source_id);
+            const name = lookup.name(model.source_id);
+            return (
+              <li key={pairValue(model)} className="model-hub-tool-image-row grid items-center rounded-lg border border-border bg-background" data-image-model={`${model.source_id}:${model.model_id}`}>
+                <span className="flex min-w-0 flex-col gap-0.5">
+                  <span className="flex min-w-0 flex-wrap items-center gap-2">
+                    <span className="truncate font-mono font-semibold text-foreground" title={model.model_id}>{model.model_id}</span>
+                    {samePair(model, inUse) && <span className="model-hub-pill model-hub-status-mint border">{t('settings.models.tools.image.defaultBadge')}</span>}
+                  </span>
+                  <span className="model-hub-tool-note">{model.description}</span>
+                </span>
+                <span className="flex min-w-0 items-center gap-2">
+                  <SourceGlyph source={source} />
+                  <span className="truncate font-semibold text-foreground" title={name}>{name}</span>
+                  {source && <span className={cn('model-hub-pill border', ACCENT_PILL[source.kind === 'api_key' ? 'cyan' : sourceVisual(source).accent])}>{t(`settings.models.upstream.kind.${source.kind === 'subscription' ? 'subscription' : 'apiKey'}`)}</span>}
+                </span>
+                <ImagePrice price={model.price} />
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+        <span className="shrink-0 font-semibold text-foreground">{t('settings.models.tools.image.defaultLabel')}</span>
+        <Select
+          wrapperClassName="sm:w-[300px] shrink-0"
+          className="h-8 text-[12px]"
+          aria-label={t('settings.models.tools.image.defaultPick') as string}
+          disabled={pending}
+          value={saved ? pairValue(saved) : AUTOMATIC}
+          onChange={(event) => {
+            const picked = tool.models.find((model) => pairValue(model) === event.target.value);
+            onSave(tool.name, { default_model: picked ? { source_id: picked.source_id, model_id: picked.model_id } : null });
+          }}
+        >
+          <option value={AUTOMATIC}>{inUse && !saved ? t('settings.models.tools.image.automaticNamed', { pair: pairLabel(inUse) }) : t('settings.models.tools.image.automatic')}</option>
+          {saved && !saved.available && <option value={pairValue(saved)}>{t('settings.models.tools.image.unavailable', { pair: pairLabel(saved) })}</option>}
+          {tool.models.map((model) => <option key={pairValue(model)} value={pairValue(model)}>{pairLabel(model)}</option>)}
+        </Select>
+        <span className="model-hub-tool-note">
+          {saved && !saved.available
+            ? inUse
+              ? t('settings.models.tools.image.unavailableNote', { pair: pairLabel(inUse) })
+              : t('settings.models.tools.image.unavailableNoteNone')
+            : t('settings.models.tools.image.defaultNote')}
+        </span>
+      </div>
+    </div>
+  );
+};
+
 const ToolCard: React.FC<{ tool: HostedToolStatus; lookup: SourceLookup; pending: boolean; onSave: Save; onClear: Clear }> = ({ tool, lookup, pending, onSave, onClear }) => {
   const { t } = useTranslation();
   const Icon = TOOL_ICON[tool.name];
@@ -404,6 +504,7 @@ const ToolCard: React.FC<{ tool: HostedToolStatus; lookup: SourceLookup; pending
         </span>
       </header>
       <StatusLines tool={tool} summary={summary} lookup={lookup} pending={pending} onClear={onClear} />
+      {tool.name === 'image_generate' && <ImageModels tool={tool} lookup={lookup} pending={pending} onSave={onSave} />}
       <Advanced tool={tool} summary={summary} lookup={lookup} pending={pending} onSave={onSave} onClear={onClear} />
     </section>
   );

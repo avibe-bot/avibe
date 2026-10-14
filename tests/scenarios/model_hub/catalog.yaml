@@ -511,6 +511,16 @@ scenarios:
       - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-021: a customized order offers Reset, which saves automatic'
       - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-021: announces a move and moves focus only once the server order shows it, and drops one that did not land'
       - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-021: keeps focus on the moved row once the answer lands, on its other arrow at an end'
+  - id: MH-HOSTED-UI-022
+    name: The image card lists each offered image model with its Source and per-image price, marks the default in use, saves a default pick or automatic, shows an unavailable saved default as itself, and names the vendors to add when none is offered
+    status: covered
+    kind: contract
+    layer: unit
+    test:
+      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-022: lists each offered model with its Source and per-image price, and marks the default in use'
+      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-022: the default picker names what automatic uses, and saves a pick or automatic'
+      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-022: shows a saved default that is no longer offered as itself, and names the one in use'
+      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-022: with no image model offered, names the vendors whose key would add one'
   - id: MH-VIBEY-007
     name: Vibey starts once with the user's Sources and built-in Agent models, seeded when its first Source exists
     status: covered

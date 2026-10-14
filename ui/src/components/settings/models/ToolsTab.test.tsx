@@ -88,7 +88,7 @@ const image = (over: Partial<HostedImageToolStatus> = {}): HostedImageToolStatus
   default_model: null,
   effective_default: null,
   models: [],
-  image_offered_by: ['openai', 'google'],
+  image_offered_by: ['openai', 'gemini'],
   ...over,
 });
 
@@ -418,3 +418,60 @@ describe('ToolsTab executor order', () => {
     expect(subscription.textContent).toContain('订阅内含不另计费');
   });
 });
+
+describe('ToolsTab image card', () => {
+  const GOOGLE = source('src_google01', 'Google AI Studio', { vendor: 'gemini', protocol: 'google' });
+  const models = [
+    { source_id: RELAY.id, model_id: 'gpt-image-2', description: 'GPT Image 2: precise prompts, legible text, edits', price: null },
+    { source_id: GROK.id, model_id: 'grok-imagine-image', description: 'Grok Imagine: fast drafts', price: { usd: 0.02, basis: 'list' as const } },
+    { source_id: GOOGLE.id, model_id: 'gemini-2.5-flash-image', description: 'Nano Banana: fast generation', price: { usd: 0.067, basis: 'estimated' as const } },
+  ];
+  const renderImage = (over: Partial<HostedImageToolStatus>, lng: 'en' | 'zh' = 'en') => {
+    const onSave = vi.fn();
+    render(
+      <I18nextProvider i18n={translator(lng)}>
+        <ToolsTab read={readyRegion({ tools: [image(over)] })} sources={[...SOURCES, GOOGLE]} pending={new Set()} onSave={onSave} onClear={() => {}} onRetry={() => {}} />
+      </I18nextProvider>,
+    );
+    return onSave;
+  };
+
+  it('MH-HOSTED-UI-022: lists each offered model with its Source and per-image price, and marks the default in use', () => {
+    renderImage({ models, effective_default: { source_id: RELAY.id, model_id: 'gpt-image-2' } }, 'zh');
+    const [gpt, grok, banana] = within(card('图片生成')).getAllByRole('listitem');
+    expect(gpt.textContent).toBe('gpt-image-2默认GPT Image 2: precise prompts, legible text, editsrelay-gptAPI Key暂无单价');
+    expect(grok.textContent).toContain('$0.02 / 张API 标价');
+    expect(banana.textContent).toContain('≈ $0.067 / 张API 标价');
+    expect(within(grok).queryByText('默认')).toBeNull();
+  });
+
+  it('MH-HOSTED-UI-022: the default picker names what automatic uses, and saves a pick or automatic', async () => {
+    const user = userEvent.setup();
+    const onSave = renderImage({ models, effective_default: { source_id: RELAY.id, model_id: 'gpt-image-2' } });
+    const picker = within(card('Image generation')).getByRole('combobox', { name: 'Default image model' }) as HTMLSelectElement;
+    expect(picker.selectedOptions[0].textContent).toBe('Automatic (gpt-image-2 · relay-gpt)');
+
+    await user.selectOptions(picker, 'grok-imagine-image · Grok');
+    expect(onSave).toHaveBeenLastCalledWith('image_generate', { default_model: { source_id: GROK.id, model_id: 'grok-imagine-image' } });
+    await user.selectOptions(picker, 'Automatic (gpt-image-2 · relay-gpt)');
+    expect(onSave).toHaveBeenLastCalledWith('image_generate', { default_model: null });
+  });
+
+  it('MH-HOSTED-UI-022: shows a saved default that is no longer offered as itself, and names the one in use', () => {
+    renderImage({
+      models: models.slice(1),
+      default_model: { source_id: RELAY.id, model_id: 'gpt-image-2', available: false },
+      effective_default: { source_id: GROK.id, model_id: 'grok-imagine-image' },
+    });
+    const picker = within(card('Image generation')).getByRole('combobox', { name: 'Default image model' }) as HTMLSelectElement;
+    expect(picker.selectedOptions[0].textContent).toBe('gpt-image-2 · relay-gpt (unavailable)');
+    expect(within(card('Image generation')).getByText('The saved default isn\'t available now, so grok-imagine-image · Grok is used.')).toBeTruthy();
+  });
+
+  it('MH-HOSTED-UI-022: with no image model offered, names the vendors whose key would add one', () => {
+    renderImage({ models: [], image_offered_by: ['openai', 'gemini'] });
+    expect(within(card('Image generation')).getByText('Image generation needs an API key from OpenAI or Google.')).toBeTruthy();
+    expect(within(card('Image generation')).queryByRole('combobox')).toBeNull();
+  });
+});
+

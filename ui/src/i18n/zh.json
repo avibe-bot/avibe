@@ -2422,6 +2422,29 @@
           "refused": "不支持 · {{date}}",
           "replay": "不支持回放 · {{date}}"
         },
+        "image": {
+          "title": "可用的图片模型",
+          "noUnitPrice": "暂无单价",
+          "perImage": "${{usd}} / 张",
+          "perImageEstimated": "≈ ${{usd}} / 张",
+          "pair": "{{model}} · {{source}}",
+          "defaultBadge": "默认",
+          "defaultLabel": "默认模型",
+          "defaultPick": "默认图片模型",
+          "automatic": "自动",
+          "automaticNamed": "自动（{{pair}}）",
+          "unavailable": "{{pair}}（不可用）",
+          "defaultNote": "Vibey 没有指定模型时使用。Vibey 也可以按需改用列表里的其他模型。",
+          "unavailableNote": "已保存的默认模型暂不可用，当前使用 {{pair}}。",
+          "unavailableNoteNone": "已保存的默认模型暂不可用。",
+          "empty": "图片生成需要 {{vendors}} 的 API Key。",
+          "emptyNoVendor": "你的供应商目前都没有图片模型。",
+          "vendor": {
+            "openai": "OpenAI",
+            "gemini": "Google",
+            "xai": "xAI"
+          }
+        },
         "cost": {
           "included": "订阅内含",
           "includedNote": "不另计费",
