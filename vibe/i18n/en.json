@@ -939,6 +939,23 @@
         "foregroundConsentRequired": "Foreground control needs approval from the native Avibe desktop menu.",
         "foregroundRestoreFailed": "Foreground control ran, but Avibe could not restore and verify the prior desktop state. Details: {detail}",
         "restorationDetailUnavailable": "restoration details were unavailable",
+        "restoration": {
+          "priorFrontmost": {
+            "notAttempted": "the prior frontmost exact window restoration was not attempted",
+            "notVerified": "the prior frontmost exact window restoration could not be verified",
+            "failed": "the prior frontmost exact window restoration failed"
+          },
+          "pointer": {
+            "notAttempted": "the hardware pointer restoration was not attempted",
+            "notVerified": "the hardware pointer restoration could not be verified",
+            "failed": "the hardware pointer restoration failed"
+          },
+          "activeSpace": {
+            "notAttempted": "the active Space restoration was not attempted",
+            "notVerified": "the active Space restoration could not be verified",
+            "failed": "the active Space restoration failed"
+          }
+        },
         "foregroundShellUnavailable": "The native Avibe desktop shell is unavailable for foreground control.",
         "genericDriverError": "The Computer Use driver returned an error.",
         "invalidDriverArguments": "The Computer Use arguments are invalid.",

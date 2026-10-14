@@ -891,6 +891,18 @@ fn foreground_lifecycle_and_identity_inventories_are_exhaustive() {
             &["asyncio.current_task()", "heartbeat.cancel()"][..],
         ),
         (
+            "Controller shutdown",
+            source_slice(&server, "    async def handle(", "\n\n\nasync def _serve_stdio"),
+            &[
+                "self._foreground_admission_open = False",
+                "foreground_task = self._foreground_transaction",
+                "asyncio.wait_for(",
+                "asyncio.shield(foreground_task)",
+                "timeout=_FOREGROUND_STOP_TIMEOUT_SECONDS",
+                "await upstream.close()",
+            ][..],
+        ),
+        (
             "app quit",
             source_slice(&shell, "fn exit_shell", "fn claim_exit_cleanup"),
             &["shutdown_computer_use(&app).await"][..],
@@ -932,6 +944,20 @@ fn foreground_lifecycle_and_identity_inventories_are_exhaustive() {
             assert!(body.contains(marker), "{label} route is missing {marker}");
         }
     }
+    let foreground_call = source_slice(
+        &server,
+        "    async def call_tool",
+        "    async def end_session_if_active",
+    );
+    let controller_shutdown = source_slice(&server, "    async def handle(", "\n\n\nasync def _serve_stdio");
+    assert_eq!(server.matches("asyncio.shield(").count(), 2);
+    assert_eq!(foreground_call.matches("asyncio.shield(").count(), 1);
+    assert_eq!(controller_shutdown.matches("asyncio.shield(").count(), 1);
+    assert_eq!(foreground_call.matches("self._run_foreground_transaction(").count(), 1);
+    assert!(
+        controller_shutdown.find("asyncio.wait_for(") < controller_shutdown.find("await upstream.close()"),
+        "Controller shutdown must finish its bounded foreground wait before closing upstream"
+    );
 
     let identity_sites = [
         (

@@ -939,6 +939,23 @@
         "foregroundConsentRequired": "前台控制需要通过 Avibe 原生桌面菜单授权。",
         "foregroundRestoreFailed": "前台控制已执行，但 Avibe 无法恢复并验证操作前的桌面状态。详情：{detail}",
         "restorationDetailUnavailable": "恢复详情不可用",
+        "restoration": {
+          "priorFrontmost": {
+            "notAttempted": "操作前的前台精确窗口未执行恢复",
+            "notVerified": "操作前的前台精确窗口恢复无法验证",
+            "failed": "操作前的前台精确窗口恢复失败"
+          },
+          "pointer": {
+            "notAttempted": "硬件指针未执行恢复",
+            "notVerified": "硬件指针恢复无法验证",
+            "failed": "硬件指针恢复失败"
+          },
+          "activeSpace": {
+            "notAttempted": "活动 Space 未执行恢复",
+            "notVerified": "活动 Space 恢复无法验证",
+            "failed": "活动 Space 恢复失败"
+          }
+        },
         "foregroundShellUnavailable": "Avibe 原生桌面应用当前不可用于前台控制。",
         "genericDriverError": "Computer Use driver 返回了错误。",
         "invalidDriverArguments": "Computer Use 参数无效。",

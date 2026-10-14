@@ -18,6 +18,7 @@ import pytest
 from core import internal_server, session_turns
 from core.computer_cli import (
     _COMPUTER_ERROR_I18N_KEYS,
+    _RESTORATION_FAILURE_I18N_KEYS,
     COMPUTER_CLI_TOOLS,
     build_driver_arguments,
     format_human_result,
@@ -368,6 +369,11 @@ def test_cmd_computer_run_localizes_sdk_error_details(
 def test_computer_cli_error_translations_exist_in_all_supported_languages() -> None:
     keys = {
         *_COMPUTER_ERROR_I18N_KEYS.values(),
+        *(
+            key
+            for states in _RESTORATION_FAILURE_I18N_KEYS.values()
+            for key in states.values()
+        ),
         "computer.cli.error.screenshotMissing",
         "computer.cli.error.scriptArgNameValue",
         "computer.cli.error.scriptArgDuplicate",
@@ -440,8 +446,10 @@ def test_human_restore_failure_renders_structured_component_details() -> None:
         translate=lambda key, **kwargs: i18n_t(key, "zh", **kwargs),
     )
 
-    assert "prior exact window was not restored" in output
-    assert "active Space was not restored" in output
+    assert "操作前的前台精确窗口恢复无法验证" in output
+    assert "活动 Space 恢复无法验证" in output
+    assert "prior exact window was not restored" not in output
+    assert "active Space was not restored" not in output
     assert "恢复详情不可用" not in output
 
 

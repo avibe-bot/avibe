@@ -254,20 +254,50 @@ _COMPUTER_REASON_I18N_KEYS = {
 }
 
 
-def _restoration_failure_details(restoration: Any) -> list[str]:
+_RESTORATION_FAILURE_I18N_KEYS = {
+    "prior_frontmost": {
+        "not_attempted": "computer.cli.error.restoration.priorFrontmost.notAttempted",
+        "not_verified": "computer.cli.error.restoration.priorFrontmost.notVerified",
+        "failed": "computer.cli.error.restoration.priorFrontmost.failed",
+    },
+    "pointer": {
+        "not_attempted": "computer.cli.error.restoration.pointer.notAttempted",
+        "not_verified": "computer.cli.error.restoration.pointer.notVerified",
+        "failed": "computer.cli.error.restoration.pointer.failed",
+    },
+    "active_space": {
+        "not_attempted": "computer.cli.error.restoration.activeSpace.notAttempted",
+        "not_verified": "computer.cli.error.restoration.activeSpace.notVerified",
+        "failed": "computer.cli.error.restoration.activeSpace.failed",
+    },
+}
+
+
+def _restoration_failure_details(
+    restoration: Any,
+    *,
+    translate: Callable[..., str],
+) -> list[str]:
     if not isinstance(restoration, Mapping):
         return []
     components = restoration.get("components")
     if not isinstance(components, Mapping):
         return []
     details: list[str] = []
-    for name in ("prior_frontmost", "pointer", "active_space"):
+    for name, state_keys in _RESTORATION_FAILURE_I18N_KEYS.items():
         component = components.get(name)
         if not isinstance(component, Mapping):
             continue
-        detail = component.get("failure_detail")
-        if isinstance(detail, str) and detail.strip() and detail not in details:
-            details.append(detail.strip())
+        if component.get("attempted") is not True:
+            state = "not_attempted"
+        elif component.get("verified") is not True:
+            state = "not_verified"
+        else:
+            detail = component.get("failure_detail")
+            if not isinstance(detail, str) or not detail.strip():
+                continue
+            state = "failed"
+        details.append(translate(state_keys[state]))
     return details
 
 
@@ -316,7 +346,10 @@ def translate_computer_error(
             reason=translate(reason_key, code=reason_code),
         )
     if code == "foreground_restore_failed" and isinstance(params, Mapping):
-        details = _restoration_failure_details(params.get("restoration"))
+        details = _restoration_failure_details(
+            params.get("restoration"),
+            translate=translate,
+        )
         detail = "; ".join(details) if details else translate(
             "computer.cli.error.restorationDetailUnavailable"
         )

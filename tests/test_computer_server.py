@@ -1808,6 +1808,7 @@ async def test_window_input_requires_observation_and_rejects_focus_routes(
         upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
         lease_manager=FakeLeaseManager(),  # type: ignore[arg-type]
         platform="darwin",
+        process_start_stamp_reader=lambda _pid: None,
     )
 
     first = await server.call_tool(
@@ -2131,6 +2132,118 @@ async def test_foreground_caller_cancellation_does_not_cancel_transaction(
     assert not any(
         name in {"cancel", "interrupt", "join"} for name, _ in control.calls
     )
+
+
+@pytest.mark.asyncio
+async def test_close_closes_admission_and_waits_for_exact_foreground_task(
+    tmp_path: Path,
+) -> None:
+    state_path, state = _state(tmp_path)
+    upstream = NonCancellableForegroundUpstream()
+    control = FakeForegroundControl()
+    server = _foreground_server(state_path, state, upstream, control)
+    observed = await server.call_tool(
+        "get_window_state",
+        {"session": "ses-a", "pid": 7, "window_id": 9},
+    )
+    assert not observed.get("isError")
+
+    call = asyncio.create_task(
+        server.call_tool(
+            "click",
+            {
+                "session": "ses-a",
+                "pid": 7,
+                "window_id": 9,
+                "x": 1,
+                "y": 2,
+                "capture_id": "capture-7-9",
+                "delivery_mode": "foreground",
+            },
+        )
+    )
+    await upstream.click_started.wait()
+    foreground_task = server._foreground_transaction
+    assert foreground_task is not None
+
+    close = asyncio.create_task(server.close())
+    await asyncio.sleep(0)
+    assert not close.done()
+    assert upstream.close_calls == 0
+    assert server._foreground_admission_open is False
+
+    refused = await server.call_tool(
+        "click",
+        {
+            "session": "ses-b",
+            "pid": 7,
+            "window_id": 9,
+            "x": 1,
+            "y": 2,
+            "capture_id": "capture-7-9",
+            "delivery_mode": "foreground",
+        },
+    )
+    assert refused["structuredContent"]["code"] == "computer_use_unavailable"
+    assert server._foreground_transaction is foreground_task
+
+    upstream.release_click.set()
+    await asyncio.wait_for(close, timeout=1)
+    result = await asyncio.wait_for(call, timeout=1)
+
+    assert not result.get("isError")
+    assert foreground_task.done()
+    assert upstream.close_calls == 1
+    assert [name for name, _payload in control.calls][-2:] == [
+        "restore",
+        "terminal",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_close_bounds_foreground_wait_before_closing_upstream(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("ERROR", logger="core.computer_server")
+    monkeypatch.setattr(
+        "core.computer_server._FOREGROUND_STOP_TIMEOUT_SECONDS",
+        0.01,
+    )
+    state_path, state = _state(tmp_path)
+    upstream = NonCancellableForegroundUpstream()
+    control = FakeForegroundControl()
+    server = _foreground_server(state_path, state, upstream, control)
+    await server.call_tool(
+        "get_window_state",
+        {"session": "ses-a", "pid": 7, "window_id": 9},
+    )
+    call = asyncio.create_task(
+        server.call_tool(
+            "click",
+            {
+                "session": "ses-a",
+                "pid": 7,
+                "window_id": 9,
+                "x": 1,
+                "y": 2,
+                "capture_id": "capture-7-9",
+                "delivery_mode": "foreground",
+            },
+        )
+    )
+    await upstream.click_started.wait()
+    foreground_task = server._foreground_transaction
+    assert foreground_task is not None
+
+    await asyncio.wait_for(server.close(), timeout=1)
+
+    assert upstream.close_calls == 1
+    assert not foreground_task.done()
+    assert "foreground restoration incomplete" in caplog.text
+    upstream.release_click.set()
+    await asyncio.wait_for(call, timeout=1)
 
 
 @pytest.mark.asyncio

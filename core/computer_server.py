@@ -66,6 +66,7 @@ _NO_SCRIPT_HANDLE = object()
 _FOREGROUND_CONTROL_SOCKET = "foreground-control.sock"
 _SOCKET_FLAVOR_HEX_BYTES = 12
 _FOREGROUND_POINTER_TOLERANCE = 0.01
+_FOREGROUND_STOP_TIMEOUT_SECONDS = 5.0
 _PROXY_PROCESS_ENV_KEYS = (
     "HOME",
     "LANG",
@@ -1531,6 +1532,8 @@ class ComputerUseServer:
         self._upstream_lock = asyncio.Lock()
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._sessions: dict[str, _SessionState] = {}
+        self._foreground_transaction_lock = asyncio.Lock()
+        self._foreground_admission_open = True
         self._foreground_transaction: asyncio.Task[dict[str, Any]] | None = None
         self._foreground_control = foreground_control or UnixForegroundControl(
             _foreground_control_socket_path(self._state_path)
@@ -1789,14 +1792,20 @@ class ComputerUseServer:
         )
 
     @staticmethod
-    def _require_foreground_observation(
+    def _foreground_observation(
         arguments: Mapping[str, Any],
         session_state: _SessionState,
-    ) -> _WindowIdentity | None:
+    ) -> _WindowObservation | None:
         key = _window_key(arguments)
         if key is None or key[0] is None:
             return None
-        observation = session_state.window_observations.get((key[0], key[1]))
+        return session_state.window_observations.get((key[0], key[1]))
+
+    @staticmethod
+    def _require_foreground_observation(
+        arguments: Mapping[str, Any],
+        observation: _WindowObservation | None,
+    ) -> _WindowIdentity:
         if observation is None:
             raise ComputerServerError(
                 "target_not_admissible",
@@ -1830,7 +1839,8 @@ class ComputerUseServer:
         session: str,
         title: str,
         heartbeat: asyncio.Task[None],
-        expected_target_identity: _WindowIdentity | None,
+        target_observation: _WindowObservation | None,
+        require_target_observation: bool,
     ) -> _ForegroundContract:
         key = _window_key(arguments)
         if key is None or key[0] is None:
@@ -1859,6 +1869,11 @@ class ComputerUseServer:
                 "target_missing",
                 "The exact target window is no longer present.",
             )
+        expected_target_identity = (
+            self._require_foreground_observation(arguments, target_observation)
+            if require_target_observation
+            else None
+        )
         if expected_target_identity is None:
             target_identity = _record_window_identity(
                 target,
@@ -2160,7 +2175,7 @@ class ComputerUseServer:
         session: str,
         title: str,
         heartbeat: asyncio.Task[None],
-        expected_target_identity: _WindowIdentity | None,
+        target_observation: _WindowObservation | None,
     ) -> dict[str, Any]:
         try:
             return await self._call_foreground(
@@ -2170,7 +2185,7 @@ class ComputerUseServer:
                 session=session,
                 title=title,
                 heartbeat=heartbeat,
-                expected_target_identity=expected_target_identity,
+                target_observation=target_observation,
             )
         finally:
             heartbeat.cancel()
@@ -2188,7 +2203,7 @@ class ComputerUseServer:
         session: str,
         title: str,
         heartbeat: asyncio.Task[None],
-        expected_target_identity: _WindowIdentity | None,
+        target_observation: _WindowObservation | None,
     ) -> dict[str, Any]:
         try:
             contract = await self._foreground_contract(
@@ -2197,7 +2212,8 @@ class ComputerUseServer:
                 session=session,
                 title=title,
                 heartbeat=heartbeat,
-                expected_target_identity=expected_target_identity,
+                target_observation=target_observation,
+                require_target_observation=name == "click",
             )
         except ComputerServerError as exc:
             return _foreground_error(exc.code, str(exc))
@@ -2391,6 +2407,14 @@ class ComputerUseServer:
                     )
                 return _error_result(exc.code, str(exc), dispatched=False)
 
+            if arguments.get("delivery_mode") == "foreground":
+                async with self._foreground_transaction_lock:
+                    if not self._foreground_admission_open:
+                        return _foreground_error(
+                            "computer_use_unavailable",
+                            "Computer Use is shutting down.",
+                        )
+
             for admission_attempt in range(_ADMISSION_RETRY_LIMIT + 1):
                 acquisition: LeaseAcquisition | None = None
                 upstream: Upstream | None = None
@@ -2480,16 +2504,14 @@ class ComputerUseServer:
                         if validation_error is not None:
                             return _not_dispatched_error_result(validation_error)
                     self._require_observation(name, arguments, session_state)
-                    foreground_target_identity: _WindowIdentity | None = None
+                    foreground_observation: _WindowObservation | None = None
                     if (
                         arguments.get("delivery_mode") == "foreground"
                         and name == "click"
                     ):
-                        foreground_target_identity = (
-                            self._require_foreground_observation(
-                                arguments,
-                                session_state,
-                            )
+                        foreground_observation = self._foreground_observation(
+                            arguments,
+                            session_state,
                         )
                     observation_identity_before: _WindowIdentity | None = None
                     if name in _OBSERVE_TOOLS:
@@ -2514,25 +2536,31 @@ class ComputerUseServer:
                     pre_forward = False
 
                     if arguments.get("delivery_mode") == "foreground":
-                        existing = self._foreground_transaction
-                        if existing is not None and not existing.done():
-                            return _foreground_error(
-                                "foreground_transaction_active",
-                                "Another foreground Computer Use call is still in flight.",
+                        async with self._foreground_transaction_lock:
+                            if not self._foreground_admission_open:
+                                return _foreground_error(
+                                    "computer_use_unavailable",
+                                    "Computer Use is shutting down.",
+                                )
+                            existing = self._foreground_transaction
+                            if existing is not None and not existing.done():
+                                return _foreground_error(
+                                    "foreground_transaction_active",
+                                    "Another foreground Computer Use call is still in flight.",
+                                )
+                            foreground_task = asyncio.create_task(
+                                self._run_foreground_transaction(
+                                    upstream,
+                                    name,
+                                    arguments,
+                                    session=session,
+                                    title=session_title or session,
+                                    heartbeat=heartbeat,
+                                    target_observation=foreground_observation,
+                                ),
+                                name=f"computer-use-foreground-{session}",
                             )
-                        foreground_task = asyncio.create_task(
-                            self._run_foreground_transaction(
-                                upstream,
-                                name,
-                                arguments,
-                                session=session,
-                                title=session_title or session,
-                                heartbeat=heartbeat,
-                                expected_target_identity=foreground_target_identity,
-                            ),
-                            name=f"computer-use-foreground-{session}",
-                        )
-                        self._foreground_transaction = foreground_task
+                            self._foreground_transaction = foreground_task
                         foreground_heartbeat_owned = True
                         result = await asyncio.shield(foreground_task)
                         if self._foreground_transaction is foreground_task:
@@ -2819,6 +2847,25 @@ class ComputerUseServer:
         }
 
     async def close(self) -> None:
+        async with self._foreground_transaction_lock:
+            self._foreground_admission_open = False
+            foreground_task = self._foreground_transaction
+        if foreground_task is not None and not foreground_task.done():
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(foreground_task),
+                    timeout=_FOREGROUND_STOP_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                logger.error(
+                    "foreground restoration incomplete during Computer Use server shutdown; "
+                    "closing the upstream will surface native driver-disconnect attention"
+                )
+            except Exception:
+                logger.exception(
+                    "foreground transaction failed while Computer Use server shutdown "
+                    "waited for terminal"
+                )
         async with self._upstream_lock:
             upstream = self._upstream
             self._upstream = None
