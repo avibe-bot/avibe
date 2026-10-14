@@ -1443,10 +1443,16 @@ describe('SourceDetailPanel hosted-tool capability chips', () => {
   it('names the record time, how it was learned, the reason, and until when it holds', async () => {
     renderChips(status({ enabled: false, bound: null }));
     const chip = screen.getByRole('button', { name: /X search · not supported on this Source|X 搜索 · 此供应商不支持/ });
-    // The accessible name carries the same facts as the hover detail.
-    expect(chip.getAttribute('aria-label')).toMatch(/400 · unsupported_tool_type/);
+    // The accessible name carries the same facts as the hover detail, each with
+    // its term, composed by the locale.
+    expect(chip.getAttribute('aria-label')).toMatch(/(Reason: |原因：)400 · unsupported_tool_type/);
+    // And it says it opens a detail, which may hold a paid re-check.
+    expect(chip.getAttribute('aria-haspopup')).toBe('dialog');
+    expect(chip.getAttribute('aria-expanded')).toBe('false');
     await userEvent.hover(chip);
     const detail = await screen.findByRole('dialog');
+    expect(chip.getAttribute('aria-expanded')).toBe('true');
+    expect(chip.getAttribute('aria-controls')).toBe(detail.id);
     within(detail).getByText(/a real request|一次真实请求/);
     within(detail).getByText('400 · unsupported_tool_type');
     within(detail).getByText(/until 10-20, then the default applies|到 10-20，过期后按默认判断/);

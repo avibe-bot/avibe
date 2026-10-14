@@ -2533,6 +2533,9 @@
         "expiryProbe": "{{date}} 后需重新检测",
         "recheck": "重新检测",
         "recheckCost": "重新检测 · {{cost}}",
+        "accessibleName": "{{label}}。{{explanation}}",
+        "accessibleNameFacts": "{{label}}。{{explanation}}{{facts}}",
+        "accessibleFact": "{{term}}：{{value}}。",
         "effort": {
           "unsupported": "{{effort}} · 此供应商不支持",
           "explain": "此供应商拒绝过这个推理强度，之后的请求会跳过它。"

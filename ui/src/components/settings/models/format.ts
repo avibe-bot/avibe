@@ -16,6 +16,14 @@ export function formatNameList(names: readonly string[], locale: string): string
 }
 
 /**
+ * Sentences read one after another, joined as the locale joins them: a space
+ * in English, nothing in Chinese. `Intl` owns the joiner, as it does above.
+ */
+export function formatSentences(sentences: readonly string[], locale: string): string {
+  return new Intl.ListFormat(locale, { style: 'narrow', type: 'unit' }).format(sentences);
+}
+
+/**
  * A counted quantity in the reader's own grouping — 「2,968,500」.
  *
  * Grouped rather than compacted (「3M」) because a usage report is read to be

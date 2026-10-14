@@ -13,7 +13,7 @@ import { AtSign, Ban, Check, Gauge, Globe, Image as ImageIcon, Loader2, Radar, R
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
-import { formatDayTime, formatMonthDay } from './format';
+import { formatDayTime, formatMonthDay, formatSentences } from './format';
 import { probeableTool, probeKey, type ModelCapability, type ProbeTarget } from './hostedTools';
 import type { HostedToolName, HostedToolProbeResult, RefusedEffort } from './types';
 import { ProbeAnswerNote } from './HostedProbeDialog';
@@ -97,7 +97,20 @@ const EvidenceChip: React.FC<{
   TitleIcon: React.ComponentType<{ className?: string }>;
   action?: React.ReactNode;
 }> = ({ data, label, explanation, facts, className, Icon, TitleIcon, action }) => {
+  const { t, i18n } = useTranslation();
   const [open, setOpen] = React.useState(false);
+  const detailId = React.useId();
+  // The whole spoken name is the locale's composition, as the detail shows it.
+  const accessibleName = facts.length === 0
+    ? t('settings.models.capability.accessibleName', { label, explanation })
+    : t('settings.models.capability.accessibleNameFacts', {
+        label,
+        explanation,
+        facts: formatSentences(
+          facts.map((fact) => t('settings.models.capability.accessibleFact', { term: fact.term, value: fact.value }) as string),
+          i18n.language,
+        ),
+      });
   const anchor = React.useRef<HTMLButtonElement>(null);
   const pointer = React.useRef<string | null>(null);
   const closing = React.useRef<number | null>(null);
@@ -118,7 +131,11 @@ const EvidenceChip: React.FC<{
           ref={anchor}
           type="button"
           data-capability={data}
-          aria-label={[label, explanation, ...facts.map((fact) => fact.value)].join('. ')}
+          aria-label={accessibleName as string}
+          // It opens a detail that may hold a paid re-check: say so.
+          aria-haspopup="dialog"
+          aria-expanded={open}
+          aria-controls={open ? detailId : undefined}
           // Shrinks inside its column and truncates; the detail always has the whole label.
           className={cn('model-hub-pill min-w-0 max-w-full flex-initial gap-1 border', className)}
           onPointerDown={(event) => { pointer.current = event.pointerType; }}
@@ -136,6 +153,7 @@ const EvidenceChip: React.FC<{
         </button>
       </PopoverAnchor>
       <PopoverContent
+        id={detailId}
         side="bottom"
         align="start"
         sideOffset={6}

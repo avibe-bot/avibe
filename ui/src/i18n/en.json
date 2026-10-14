@@ -2533,6 +2533,9 @@
         "expiryProbe": "check again after {{date}}",
         "recheck": "Check again",
         "recheckCost": "Check again · {{cost}}",
+        "accessibleName": "{{label}}. {{explanation}}",
+        "accessibleNameFacts": "{{label}}. {{explanation}} {{facts}}",
+        "accessibleFact": "{{term}}: {{value}}.",
         "effort": {
           "unsupported": "{{effort}} · not supported on this Source",
           "explain": "This Source refused this reasoning effort, so requests at it skip this Source."
