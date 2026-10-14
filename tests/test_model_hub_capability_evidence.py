@@ -17,6 +17,7 @@ from referencing import Registry, Resource
 
 from config.v2_config import ModelHubModelConfig, ModelHubSourceConfig, ModelHubSourceStateConfig
 from core.handlers.model_hub.capability_evidence import (
+    UNKNOWN_ENGINE_STAMP,
     CapabilityEvidenceStore,
     EvidenceFeature,
     EvidenceRecord,
@@ -98,6 +99,29 @@ def test_evidence_resolves_for_routing(feature, changes, engine, shape, age, sta
         assert view.changes_at == record.observed_at + timedelta(days=7)
     else:
         assert view.changes_at == (record.observed_at + timedelta(days=30) if stale is None else None)
+
+
+@pytest.mark.parametrize(
+    "manifest,stamp",
+    [
+        # A byte-identical engine upgrade carries the oldest such release forward: evidence stays current.
+        ({"hosted_wire": "model-hub-engine-v8.0.23-3", "asset_release_tag": "model-hub-engine-v8.0.28-1"}, "model-hub-engine-v8.0.23-3"),
+        # A manifest from before the field: its asset release, the value the release gate first carries forward.
+        ({"asset_release_tag": "model-hub-engine-v8.0.23-3"}, "model-hub-engine-v8.0.23-3"),
+        # A missing or malformed field never fails: the asset release stands in.
+        ({"hosted_wire": "", "asset_release_tag": "model-hub-engine-v8.0.28-1"}, "model-hub-engine-v8.0.28-1"),
+        ({"hosted_wire": 7, "asset_release_tag": "model-hub-engine-v8.0.28-1"}, "model-hub-engine-v8.0.28-1"),
+        ({}, UNKNOWN_ENGINE_STAMP),
+    ],
+)
+def test_hosted_evidence_is_stamped_with_the_engines_hosted_wire(tmp_path, monkeypatch, manifest, stamp):
+    """MH-HOSTED-003: evidence goes stale when the hosted wire changes, not on every engine release."""
+    from core.handlers.model_hub.hosted_tools import engine_stamp
+
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH", str(path))
+    assert engine_stamp() == stamp
 
 
 def test_a_changed_source_identity_reads_as_unknown_and_is_pruned(tmp_path):

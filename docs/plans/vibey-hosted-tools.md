@@ -125,8 +125,9 @@ verified for X search.
     minute left is not sent and reads as transient: try again.
 - **Cost and when probes run.** A probe pair costs about $0.02–0.15 (spike: xAI $0.01–0.11 per call, Anthropic $0.01
   per search plus tokens). The Tools tab shows the estimate before running.
-- **What changes probe results** (capability model §3.3). A Source identity change drops them. An engine upgrade or
-  a probe-shape change makes them **current-wire stale**: they no longer describe the request being sent, so for
+- **What changes probe results** (capability model §3.3). A Source identity change drops them. A change of the engine
+  manifest's `hosted_wire` (an engine upgrade whose hosted passthrough is not byte-identical) or a probe-shape change
+  makes them **current-wire stale**: they no longer describe the request being sent, so for
   routing they count as unknown (proxy and synthetic replay) until the user re-verifies. Age alone (30 days) only
   marks them for re-verification and keeps routing.
 - **Failures in real use demote evidence** through the narrow rules in capability model §3.2.
