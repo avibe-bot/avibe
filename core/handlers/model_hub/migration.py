@@ -138,7 +138,7 @@ class MigrationHost(Protocol):
 
     async def _ensure_runtime_dependency(self) -> Any: ...
 
-    def _save_config(self, config: ModelHubConfig) -> ModelHubConfig: ...
+    async def _save_config(self, config: ModelHubConfig) -> ModelHubConfig: ...
 
     async def _seed_vibey(self, config: ModelHubConfig, *, fetch_catalog: bool = True) -> bool: ...
 
@@ -1959,7 +1959,7 @@ async def _revert_takeover(host: MigrationHost, record: dict[str, Any]) -> None:
     if current.to_payload() not in (previous.to_payload(), updated.to_payload()):
         raise MigrationConflictError
     if current.to_payload() == updated.to_payload():
-        host._save_config(previous)
+        await host._save_config(previous)
         host._engine_synced = False
     for raw in reversed(record["files"]):
         edit = NativeFileEdit.from_payload(raw)
@@ -2069,7 +2069,7 @@ async def _resume_takeover(
             await _verify_clean_native_stores(host, record)
             # Save the decision without projecting staged grants into CPA.
             # sync_sources is a runtime write, not a config-only operation.
-            host._save_config(updated)
+            await host._save_config(updated)
             if previous.vibey_supply_pending and not updated.vibey_supply_pending:
                 await host._announce_vibey_seed()
             host._engine_synced = False
@@ -2113,7 +2113,7 @@ async def _resume_takeover(
         if terminal:
             # Every terminal path binds kept keys before its receipt.
             await _record_retained_store_revisions(host, record)
-            return _finish_rejected_takeover(host, record)
+            return await _finish_rejected_takeover(host, record)
         for credential in record["credentials"]:
             if credential["kind"] == "oauth":
                 await host._engine_call(host.adapter.activate_oauth_credential(credential["credential_ref"]))
@@ -2162,7 +2162,7 @@ async def _resume_takeover(
                 "config": terminal_config.to_payload(),
             }
             host.migration_journal.save(record)
-            return _finish_rejected_takeover(host, record)
+            return await _finish_rejected_takeover(host, record)
         host._reconcile_native_auth(tuple(record["backends"]))
         await _record_retained_store_revisions(host, record)
         host.migration_journal.complete(record)
@@ -2176,10 +2176,10 @@ async def _resume_takeover(
         raise
 
 
-def _finish_rejected_takeover(
+async def _finish_rejected_takeover(
     host: MigrationHost, record: dict[str, Any],
 ) -> tuple[int, list[dict]]:
-    host._save_config(ModelHubConfig.from_payload(record["terminal"]["config"]))
+    await host._save_config(ModelHubConfig.from_payload(record["terminal"]["config"]))
     host._reconcile_native_auth(tuple(record["backends"]))
     host.migration_journal.complete(record)
     host.migration_blocked_backends.difference_update(record["backends"])

@@ -1647,8 +1647,31 @@ class ModelHubService:
         if self.migration_reconcile_auth is not None:
             self.migration_reconcile_auth(snapshot)
 
-    def _save_config(self, config: ModelHubConfig) -> ModelHubConfig:
-        canonical = ModelHubConfig.from_payload(config.to_payload())
+    async def _save_config(self, config: ModelHubConfig) -> ModelHubConfig:
+        """Persist the Model Hub section; the one door every config write goes through.
+
+        The file work (the migration journal check, the cross-process config
+        lock, the rewrite of the whole config file) runs on a worker thread, so
+        the controller loop never waits on another process's lock or a slow
+        disk. Callers hold ``_mutation_lock`` from the load they changed to this
+        save, so writes stay serialized. The recovery reconcile and its waiters'
+        wake-up are loop state and stay on the loop.
+        """
+
+        canonical = await asyncio.to_thread(self._persist_config, config.to_payload())
+        return self._publish_saved(canonical)
+
+    def _publish_saved(self, canonical: ModelHubConfig) -> ModelHubConfig:
+        """The loop-side half of a save: recovery follows the saved Sources and its waiters wake."""
+
+        self.recovery.reconcile(canonical)
+        self.recovery.notify()
+        return canonical
+
+    def _persist_config(self, payload: dict) -> ModelHubConfig:
+        """``_save_config``'s blocking half, run off the loop: canonicalize and write."""
+
+        canonical = ModelHubConfig.from_payload(payload)
         try:
             pending = self.migration_journal.load()
         except (TakeoverStateError, OSError):
@@ -1675,11 +1698,9 @@ class ModelHubService:
             )
         else:
             self.store.save(canonical)
-        self.recovery.reconcile(canonical)
-        self.recovery.notify()
         return canonical
 
-    def _save_projection_neutral(
+    async def _save_projection_neutral(
         self,
         previous: ModelHubConfig,
         updated: ModelHubConfig,
@@ -1688,9 +1709,21 @@ class ModelHubService:
 
         if self._bindings(previous) != self._bindings(updated):
             raise AssertionError("projection-neutral mutation changed engine bindings")
-        return self._save_config(updated)
+        return await self._save_config(updated)
 
-    def _save_runtime_config(
+    def _save_projection_neutral_blocking(self, previous: ModelHubConfig, updated: ModelHubConfig) -> ModelHubConfig:
+        """``_save_projection_neutral`` for a synchronous hook; it blocks the loop for the write.
+
+        Only native reauth's irreversible-start hook uses it: that hook's contract (``AgentAuthService``'s
+        ``on_irreversible_start``) is synchronous, and it writes once per user-started reauth. Everything else
+        saves through ``_save_config``.
+        """
+
+        if self._bindings(previous) != self._bindings(updated):
+            raise AssertionError("projection-neutral mutation changed engine bindings")
+        return self._publish_saved(self._persist_config(updated.to_payload()))
+
+    async def _save_runtime_config(
         self,
         previous: ModelHubConfig,
         updated: ModelHubConfig,
@@ -1698,7 +1731,7 @@ class ModelHubService:
         """Best-effort persistence for runtime state during config recovery."""
 
         try:
-            self._save_projection_neutral(previous, updated)
+            await self._save_projection_neutral(previous, updated)
         except ValueError as exc:
             if "recovery warnings" not in str(exc):
                 raise
@@ -1885,10 +1918,10 @@ class ModelHubService:
         # Route target order is not part of this projection, so a pure chain reorder
         # compares equal and does not touch the engine.
         if previous_bindings == updated_bindings:
-            self._save_config(updated)
+            await self._save_config(updated)
             return
         self._engine_synced = False
-        self._save_config(updated)
+        await self._save_config(updated)
         try:
             await self._sync_sources(updated, force_empty=bool(previous_bindings))
         except asyncio.CancelledError:
@@ -1899,7 +1932,7 @@ class ModelHubService:
         except Exception:
             if not rollback_on_sync_failure:
                 raise
-            self._save_config(previous)
+            await self._save_config(previous)
             try:
                 await self._sync_sources(previous, force_empty=bool(updated_bindings))
             except ModelHubError:
@@ -4606,7 +4639,7 @@ class ModelHubService:
             except ModelHubError:
                 restored = False
                 try:
-                    self._save_config(previous)
+                    await self._save_config(previous)
                     restored = True
                     self._engine_synced = False
                     await self._sync_sources(previous)
@@ -8009,7 +8042,7 @@ class ModelHubService:
             )
         return "models.source.error.unclassified", "unclassified_error"
 
-    def _write_source_blocker_locked(
+    async def _write_source_blocker_locked(
         self,
         config: ModelHubConfig,
         source: ModelHubSourceConfig,
@@ -8036,7 +8069,7 @@ class ModelHubService:
             status=status,
             detail_key=detail_key,
         )
-        persisted = self._save_runtime_config(previous, config)
+        persisted = await self._save_runtime_config(previous, config)
         if persisted:
             # A blocked grant must not keep reporting the windows it had while usable.
             self.quota.forget(source.id)
@@ -8412,10 +8445,10 @@ class ModelHubService:
                         status="needs_action",
                         detail_key="models.source.needs_action.oauth_expired",
                     )
-                self._save_projection_neutral(previous, config)
+                self._save_projection_neutral_blocking(previous, config)
 
                 def restore_after_spawn_failure() -> None:
-                    self._save_projection_neutral(config, previous)
+                    self._save_projection_neutral_blocking(config, previous)
 
                 return restore_after_spawn_failure
 
@@ -8812,7 +8845,7 @@ class ModelHubService:
                 updated = self._clone_config(previous)
                 updated.enabled = True
                 updated.runtime_default_applied = True
-                self._save_projection_neutral(previous, updated)
+                await self._save_projection_neutral(previous, updated)
                 # A start renders the persisted projection, whose text-only
                 # marks come from the catalog copy of its last sync. Syncing
                 # here gives an explicit start the current copy's marks.
@@ -8847,7 +8880,7 @@ class ModelHubService:
                 updated = self._clone_config(previous)
                 updated.enabled = False
                 updated.runtime_default_applied = True
-                self._save_projection_neutral(previous, updated)
+                await self._save_projection_neutral(previous, updated)
                 return _runtime_payload(status, enabled=False)
 
     def migration_scan(self) -> dict:
@@ -8965,7 +8998,7 @@ class ModelHubService:
                 previous = self._clone_config(config)
                 source.state = ModelHubSourceStateConfig(status="standby")
                 try:
-                    self._save_runtime_config(previous, config)
+                    await self._save_runtime_config(previous, config)
                 except OSError:
                     # Inference is authoritative; the policy remembers exactly
                     # which stale persisted cooldown must not be imported again.
@@ -8983,7 +9016,7 @@ class ModelHubService:
         # actual streaming output is read separately from the handle observer.
         return outcome.kind is RawOutcomeKind.SUCCESS and outcome.recovery_verified
 
-    def _write_cooldown_locked(
+    async def _write_cooldown_locked(
         self,
         config: ModelHubConfig,
         source: ModelHubSourceConfig,
@@ -9010,7 +9043,7 @@ class ModelHubService:
             detail_key=detail_key or f"models.source.cooldown.{decision.reason}",
         )
         try:
-            persisted = self._save_runtime_config(previous, config)
+            persisted = await self._save_runtime_config(previous, config)
         except OSError:
             # HTTP recovery already owns the live deadline. Failed telemetry
             # cannot replace the upstream result or erase temporary eligibility.
@@ -9099,7 +9132,7 @@ class ModelHubService:
                             from_label=current.display_name, now=self.now(),
                         )
                     return event_reason, False
-                persisted = self._write_cooldown_locked(
+                persisted = await self._write_cooldown_locked(
                     config,
                     current,
                     decision,
@@ -9117,7 +9150,7 @@ class ModelHubService:
                     "account_banned": "models.source.needs_action.account_banned",
                     "unclassified_error": "models.source.error.unclassified",
                 }[event_reason]
-                persisted = self._write_source_blocker_locked(
+                persisted = await self._write_source_blocker_locked(
                     config,
                     current,
                     backend=backend,
@@ -9309,7 +9342,7 @@ class ModelHubService:
 
         try:
             async with self._mutation_lock:
-                self.store.mutate(clear_current)
+                await asyncio.to_thread(self.store.mutate, clear_current)
             return
         except ValueError as exc:
             if "recovery warnings" not in str(exc):

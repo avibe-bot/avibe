@@ -10727,3 +10727,29 @@ def test_quota_endpoints_serve_hub_subscriptions_and_rate_limit_forced_refresh(m
     _assert_valid("quota-summary.schema.json", refreshed.get_json()["quota"])
     # Inside the forced-refresh interval the cached snapshot answers.
     assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_config_save_never_holds_the_controller_loop(tmp_path):
+    """A save waits on the cross-process config lock and a full config rewrite (#2639); the controller loop runs
+    every session's turns and the gateway, so it keeps running while a save is held."""
+    import threading
+
+    service, store, _adapter = _service(tmp_path)
+    entered, release = threading.Event(), threading.Event()
+    released_in_time = []
+    save = store.save
+
+    def held_save(config):
+        entered.set()
+        # Another process holds the config lock until the loop, still free, lets it go.
+        released_in_time.append(release.wait(2))
+        save(config)
+
+    store.save = held_save
+    writing = asyncio.create_task(service.set_hosted_tool("web_search", {"enabled": False}))
+    assert await asyncio.to_thread(entered.wait, 5)
+    release.set()
+    await writing
+    assert released_in_time == [True]
+    assert store.config.hosted_tools["web_search"].enabled is False
