@@ -1687,6 +1687,7 @@ class Controller:
         from core.services import sessions as workbench_sessions_service
         from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
         from storage.db import create_sqlite_engine
+        from storage.workbench_sessions_service import MAIN_SESSION_ID
 
         if (
             not isinstance(raw_session_id, str)
@@ -1694,7 +1695,10 @@ class Controller:
             or raw_session_id != raw_session_id.strip()
         ):
             raise ValueError("invalid Workbench session ID")
-        if raw_session_id == WORKSPACE_NOTICE_SESSION_ID:
+        if raw_session_id in {
+            WORKSPACE_NOTICE_SESSION_ID,
+            MAIN_SESSION_ID,
+        }:
             raise workbench_sessions_service.ReservedSessionError(raw_session_id)
 
         async def retire_computer_use_session() -> None:

@@ -628,7 +628,10 @@ const SessionPicker: React.FC<{ onPick: (sessionId: string) => void; onBack?: ()
     setVibeyPending(true);
     setVibeyError(null);
     api.getMainSession().then((result) => {
-      if (!result.session) throw new ApiError('main session unavailable', result.status, null);
+      if (!result.session) {
+        if (mounted.current) setVibeyError(t('pet.vibeyUnavailable'));
+        return;
+      }
       if (mounted.current) onPick(result.session.id);
     }, (error: unknown) => {
       if (mounted.current) setVibeyError(error instanceof ApiError && error.code === 'no_chat_project' ? t('pet.noChatProject') : t('pet.vibeyUnavailable'));

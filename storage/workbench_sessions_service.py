@@ -463,6 +463,7 @@ def create_session(
     metadata: Optional[dict[str, Any]] = None,
     authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
     user_context: Any = None,
+    workdir_prepared: bool = False,
 ) -> dict[str, Any]:
     """Create a session in a Scope or as a standalone session.
 
@@ -617,8 +618,10 @@ def create_session(
 
     session_id = str(session_id or new_session_id(conn))
     if scope_id is None:
-        workdir = normalize_workdir(workdir) or str(paths.get_show_page_dir(session_id))
-        Path(workdir).mkdir(parents=True, exist_ok=True)
+        provided_workdir = normalize_workdir(workdir)
+        workdir = provided_workdir or str(paths.get_show_page_dir(session_id))
+        if provided_workdir is None or not workdir_prepared:
+            Path(workdir).mkdir(parents=True, exist_ok=True)
     else:
         workdir = scope_row.get("workdir") or os.getcwd()
     create_agent_session_row(
@@ -648,6 +651,25 @@ MAIN_SESSION_METADATA_VALUE = "main"
 MAIN_SESSION_WORKDIR_DIRNAME = "main"
 
 
+class MainSessionArchivedError(PermissionError):
+    """Raised when the fixed main-session row is already archived."""
+
+    code = "main_session_archived"
+
+    def __init__(self) -> None:
+        super().__init__(self.code)
+
+
+class MainSessionInvariantError(RuntimeError):
+    """Raised when the fixed main-session row no longer has its built-in shape."""
+
+    code = "main_session_invalid"
+
+    def __init__(self, reason: str) -> None:
+        self.reason = str(reason)
+        super().__init__(self.code)
+
+
 def _safe_main_principal_component(principal: str) -> str:
     """Map the authorization principal to one safe, stable directory component."""
 
@@ -660,11 +682,57 @@ def main_session_workdir(principal: str) -> str:
     """Return the caller-owned main-session workdir without leaving Avibe home."""
 
     root = (paths.get_vibe_remote_dir() / MAIN_SESSION_WORKDIR_DIRNAME).resolve()
-    root.mkdir(parents=True, exist_ok=True)
     candidate = (root / _safe_main_principal_component(principal)).resolve()
     if candidate.parent != root:
         raise ValueError("unsafe main session principal path")
     return str(candidate)
+
+
+def _main_builtin_agent(conn: Connection, agent_name: str) -> dict[str, Any]:
+    from core.vibe_agents import VibeAgentStore, is_builtin_default_agent
+
+    row = conn.execute(
+        select(agents)
+        .where(
+            agents.c.name == str(agent_name or "").strip(),
+            agents.c.backend == "vibey",
+            agents.c.enabled == 1,
+            agents.c.archived_at.is_(None),
+            agents.c.source == "builtin",
+        )
+        .limit(1)
+    ).mappings().first()
+    if row is None or not is_builtin_default_agent(VibeAgentStore._from_row(row)):
+        raise MainSessionInvariantError("built-in Vibey Agent is unavailable")
+    return dict(row)
+
+
+def _validate_main_session_row(
+    row: Mapping[str, Any],
+    *,
+    agent: Mapping[str, Any],
+    workdir: str,
+) -> None:
+    if row.get("status") == "archived":
+        raise MainSessionArchivedError()
+    metadata = _load_metadata(row.get("metadata_json"))
+    expected = {
+        "id": MAIN_SESSION_ID,
+        "scope_id": None,
+        "agent_id": agent["id"],
+        "agent_name": agent["name"],
+        "agent_backend": "vibey",
+        "agent_variant": "vibey",
+        "session_anchor": MAIN_SESSION_ID,
+        "workdir": workdir,
+        "status": "active",
+        "visibility": "foreground",
+    }
+    for field, value in expected.items():
+        if row.get(field) != value:
+            raise MainSessionInvariantError(f"{field} does not match the built-in main session")
+    if metadata.get(MAIN_SESSION_METADATA_KEY) != MAIN_SESSION_METADATA_VALUE:
+        raise MainSessionInvariantError("metadata.kind does not identify the main session")
 
 
 def ensure_main_session(
@@ -676,36 +744,30 @@ def ensure_main_session(
 ) -> dict[str, Any]:
     """Resolve the stable built-in main session, creating it on first use."""
 
-    context = require_instance_role(authorization_context, "editor")
+    context = require_instance_role(authorization_context, "owner")
     principal = desktop_mini_owner_key(context)
     if principal is None:
         raise ProjectAccessDeniedError
-
+    workdir = main_session_workdir(principal)
     row = conn.execute(
-        select(agent_sessions.c.status).where(agent_sessions.c.id == MAIN_SESSION_ID)
-    ).scalar_one_or_none()
-    if row is not None and row != "archived":
+        select(agent_sessions).where(agent_sessions.c.id == MAIN_SESSION_ID)
+    ).mappings().first()
+    if row is not None and row.get("status") == "archived":
+        raise MainSessionArchivedError()
+    builtin_agent = _main_builtin_agent(conn, agent_name)
+    if row is not None:
+        _validate_main_session_row(row, agent=builtin_agent, workdir=workdir)
         return get_session(conn, MAIN_SESSION_ID, authorization_context=context)
 
+    Path(workdir).mkdir(parents=True, exist_ok=True)
     # The fixed primary key makes deletion idempotent, while the write lock closes
     # the read/insert race when two first turns arrive together.
     reserve_write_lock(conn)
     row = conn.execute(
-        select(agent_sessions.c.status).where(agent_sessions.c.id == MAIN_SESSION_ID)
-    ).scalar_one_or_none()
+        select(agent_sessions).where(agent_sessions.c.id == MAIN_SESSION_ID)
+    ).mappings().first()
     if row is not None:
-        if row == "archived":
-            conn.execute(
-                update(agent_sessions)
-                .where(agent_sessions.c.id == MAIN_SESSION_ID)
-                .values(
-                    status="active",
-                    visibility="foreground",
-                    session_anchor=MAIN_SESSION_ID,
-                    agent_status="idle",
-                    updated_at=_utc_now_iso(),
-                )
-            )
+        _validate_main_session_row(row, agent=builtin_agent, workdir=workdir)
         return get_session(conn, MAIN_SESSION_ID, authorization_context=context)
 
     return create_session(
@@ -715,9 +777,10 @@ def ensure_main_session(
         agent_backend="",
         agent_name=agent_name,
         title=title,
-        workdir=main_session_workdir(principal),
+        workdir=workdir,
         metadata={MAIN_SESSION_METADATA_KEY: MAIN_SESSION_METADATA_VALUE},
         authorization_context=context,
+        workdir_prepared=True,
     )
 
 
@@ -957,7 +1020,7 @@ def update_session(
     ``visibility`` branch below.
     """
     authorization = require_instance_role(authorization_context, "editor")
-    if str(session_id) == WORKSPACE_NOTICE_SESSION_ID:
+    if str(session_id) in {WORKSPACE_NOTICE_SESSION_ID, MAIN_SESSION_ID}:
         raise ReservedSessionError(str(session_id))
     reserve_write_lock(conn)
     existing = conn.execute(
@@ -1740,7 +1803,7 @@ def archive_session(
     Checked BEFORE the existence lookup so the answer is the same on every install,
     whether or not the lazily-created row exists yet.
     """
-    if str(session_id) == WORKSPACE_NOTICE_SESSION_ID:
+    if str(session_id) in {WORKSPACE_NOTICE_SESSION_ID, MAIN_SESSION_ID}:
         raise ReservedSessionError(str(session_id))
     context = require_instance_role(authorization_context, "editor")
     existing = conn.execute(

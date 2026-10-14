@@ -1732,7 +1732,10 @@
   "desktopMini": {
     "sessionTitle": "Vibey · Desktop mini",
     "noChatProject": "Create a project in Avibe first, so the desktop mini has a place for its conversation.",
-    "builtinAgentUnavailable": "The built-in Agent is not available, so the desktop mini has no one to talk to."
+    "builtinAgentUnavailable": "The built-in Agent is not available, so the desktop mini has no one to talk to.",
+    "mainSessionArchived": "The desktop mini's main session is archived and cannot be reopened.",
+    "mainSessionInvalid": "The desktop mini's main session is invalid and cannot be opened.",
+    "mainSessionProtected": "The desktop mini's main session is managed by Avibe and cannot be archived or edited."
   },
   "hostedTools": {
     "errorCode": {

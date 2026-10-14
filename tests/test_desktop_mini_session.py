@@ -176,6 +176,125 @@ def test_main_session_is_created_reused_and_recreated_without_a_project(state):
     assert rebuilt["workdir"] == first["workdir"]
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("scope_id", "avibe::project::proj_invalid"),
+        ("agent_id", "agent_invalid"),
+        ("agent_name", "agent_invalid"),
+        ("agent_backend", "claude"),
+        ("agent_variant", "claude"),
+        ("session_anchor", "ses_other"),
+        ("workdir", "/tmp/not-the-main-workdir"),
+        ("visibility", "background"),
+        ("metadata_json", '{"kind":"other"}'),
+    ],
+)
+def test_existing_main_session_must_keep_all_built_in_invariants(state, field, value):
+    from sqlalchemy import update
+
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions
+    from storage.workbench_sessions_service import MainSessionInvariantError
+
+    tmp_path, vibey = state
+    first = _ensure_main("local", vibey.name)
+    if field == "scope_id":
+        value = _project(tmp_path, "invariant-scope")["scope_id"]
+    with create_sqlite_engine().begin() as conn:
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == first["id"])
+            .values(**{field: value})
+        )
+
+    with pytest.raises(MainSessionInvariantError) as exc:
+        _ensure_main("local", vibey.name)
+    assert exc.value.code == "main_session_invalid"
+
+
+def test_archived_main_session_is_terminal_and_cannot_be_reopened(state):
+    from sqlalchemy import select, update
+
+    from core.services import sessions as workbench_sessions_service
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions
+    from storage.workbench_sessions_service import MainSessionArchivedError
+
+    _tmp_path, vibey = state
+    first = _ensure_main("local", vibey.name)
+    with create_sqlite_engine().begin() as conn:
+        with pytest.raises(workbench_sessions_service.ReservedSessionError):
+            workbench_sessions_service.update_session(
+                conn,
+                first["id"],
+                visibility="background",
+            )
+
+    with create_sqlite_engine().begin() as conn:
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == first["id"])
+            .values(status="archived")
+        )
+
+    with pytest.raises(MainSessionArchivedError):
+        _ensure_main("local", vibey.name)
+    with create_sqlite_engine().connect() as conn:
+        assert conn.execute(
+            select(agent_sessions.c.status).where(agent_sessions.c.id == first["id"])
+        ).scalar_one() == "archived"
+
+    response = app.test_client().get("/api/sessions/main")
+    assert response.status_code == 409
+    assert response.get_json()["error"]["code"] == "main_session_archived"
+
+    with create_sqlite_engine().begin() as conn:
+        with pytest.raises(workbench_sessions_service.ReservedSessionError):
+            workbench_sessions_service.archive_session(conn, first["id"])
+
+
+def test_main_session_is_owner_only(state):
+    from vibe.authorization import AuthorizationContext, InstanceAuthorizationError
+    from storage.db import create_sqlite_engine
+    from storage.workbench_sessions_service import ensure_main_session
+
+    _tmp_path, vibey = state
+    with create_sqlite_engine().begin() as conn:
+        with pytest.raises(InstanceAuthorizationError):
+            ensure_main_session(
+                conn,
+                agent_name=vibey.name,
+                authorization_context=AuthorizationContext(
+                    instance_role="editor",
+                    is_remote=True,
+                    subject="member",
+                ),
+            )
+
+
+def test_main_workdir_is_prepared_before_writer_lock(state, monkeypatch):
+    from storage import workbench_sessions_service
+
+    _tmp_path, vibey = state
+    lock_acquired = False
+    original_reserve = workbench_sessions_service.reserve_write_lock
+    original_mkdir = Path.mkdir
+
+    def reserve(conn):
+        nonlocal lock_acquired
+        original_reserve(conn)
+        lock_acquired = True
+
+    def mkdir(path, *args, **kwargs):
+        assert not lock_acquired
+        return original_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(workbench_sessions_service, "reserve_write_lock", reserve)
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+    _ensure_main("local", vibey.name)
+
+
 def test_main_route_returns_the_stable_session_and_can_chat_without_a_project(state):
     from storage.workbench_sessions_service import MAIN_SESSION_ID
 

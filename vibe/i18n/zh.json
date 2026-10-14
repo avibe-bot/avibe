@@ -1732,7 +1732,10 @@
   "desktopMini": {
     "sessionTitle": "歪比 · 桌宠",
     "noChatProject": "先在 Avibe 里建一个项目，桌宠的对话需要放在项目里。",
-    "builtinAgentUnavailable": "内置 Agent 当前不可用，桌宠暂时没有对话对象。"
+    "builtinAgentUnavailable": "内置 Agent 当前不可用，桌宠暂时没有对话对象。",
+    "mainSessionArchived": "桌宠主会话已归档，无法重新打开。",
+    "mainSessionInvalid": "桌宠主会话状态无效，暂时无法打开。",
+    "mainSessionProtected": "桌宠主会话由 Avibe 管理，不能归档或编辑。"
   },
   "hostedTools": {
     "errorCode": {

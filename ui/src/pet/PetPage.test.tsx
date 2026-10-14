@@ -368,6 +368,14 @@ describe('PetPage Vibey conversation', () => {
     await waitFor(() => expect(devBinding().binding).toBe('V'));
   });
 
+  it('shows an error when the main-session endpoint resolves without a session', async () => {
+    api.getMainSession.mockResolvedValue({ status: 409, session: null });
+    render(<PetPage />);
+    summon('show');
+    await userEvent.click(await screen.findByText('pet.talkToVibey'));
+    expect(await screen.findByText('pet.vibeyUnavailable')).toBeTruthy();
+  });
+
   it('does not offer Vibey to someone who cannot chat', async () => {
     canChat = false;
     switcherSessions = [session('B', { title: 'Another session' })];

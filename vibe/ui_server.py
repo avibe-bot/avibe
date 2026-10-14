@@ -9619,7 +9619,12 @@ def sessions_main():
 
     from core.services import sessions as workbench_sessions_service
     from core.vibe_agents import VibeAgentAccessError, VibeAgentStore
-    from storage.workbench_sessions_service import ensure_main_session
+    from vibe.authorization import InstanceAuthorizationError
+    from storage.workbench_sessions_service import (
+        MainSessionArchivedError,
+        MainSessionInvariantError,
+        ensure_main_session,
+    )
 
     store = VibeAgentStore()
     try:
@@ -9640,8 +9645,24 @@ def sessions_main():
                 title=t("desktopMini.sessionTitle", lang),
                 authorization_context=authorization_context,
             )
+    except InstanceAuthorizationError:
+        return jsonify(
+            {"ok": False, "error": "instance_access_forbidden", "required_role": "owner"}
+        ), 403
     except (VibeAgentAccessError, workbench_sessions_service.ProjectAccessDeniedError):
         return _coded_error_response("project_access_denied", t("error.projectAccessDenied", lang), 403)
+    except MainSessionArchivedError:
+        return _coded_error_response(
+            MainSessionArchivedError.code,
+            t("desktopMini.mainSessionArchived", lang),
+            409,
+        )
+    except MainSessionInvariantError:
+        return _coded_error_response(
+            MainSessionInvariantError.code,
+            t("desktopMini.mainSessionInvalid", lang),
+            409,
+        )
     return jsonify(
         {
             "session": session,
@@ -10065,6 +10086,7 @@ def _session_archived_response():
 #: The archive/edit refusal's copy: the row exists to receive notices and cannot be
 #: torn down or re-labelled. Used by the DELETE and PATCH guards.
 RESERVED_SESSION_PROTECTED_I18N_KEY = "harness.notice.workspaceSessionProtected"
+MAIN_SESSION_PROTECTED_I18N_KEY = "desktopMini.mainSessionProtected"
 #: The send refusal's copy. A SEPARATE key on purpose: "cannot be archived or modified"
 #: is not an answer to "why did my message not send", and the composer's own inert-state
 #: notice has to say the same thing this body says.
@@ -10172,6 +10194,7 @@ def _publish_session_update_activity(
 @app.route("/api/sessions/<session_id>", methods=["PATCH"])
 async def sessions_update(session_id: str):
     from core.services import sessions as workbench_sessions_service
+    from storage.workbench_sessions_service import MAIN_SESSION_ID
     from vibe import internal_client
     from vibe.sse_broker import broker
 
@@ -10301,7 +10324,9 @@ async def sessions_update(session_id: str):
         # un-project the system surface until the next heal. Mirror the DELETE
         # route's 403 + localized copy so the two guards read as one contract.
         return _reserved_session_response(
-            RESERVED_SESSION_PROTECTED_I18N_KEY,
+            MAIN_SESSION_PROTECTED_I18N_KEY
+            if str(session_id) == MAIN_SESSION_ID
+            else RESERVED_SESSION_PROTECTED_I18N_KEY,
             code=getattr(err, "code", "reserved_session"),
         )
     except ValueError as err:
@@ -10490,6 +10515,7 @@ async def sessions_archive(session_id: str):
     from core.show_pages import ShowPageError, require_show_page_management
     from sqlalchemy import select
     from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
+    from storage.workbench_sessions_service import MAIN_SESSION_ID
     from storage.models import show_pages
     from vibe.sse_broker import broker
 
@@ -10497,6 +10523,11 @@ async def sessions_archive(session_id: str):
     if str(session_id) == WORKSPACE_NOTICE_SESSION_ID:
         return _reserved_session_response(
             RESERVED_SESSION_PROTECTED_I18N_KEY,
+            code="reserved_session",
+        )
+    if str(session_id) == MAIN_SESSION_ID:
+        return _reserved_session_response(
+            MAIN_SESSION_PROTECTED_I18N_KEY,
             code="reserved_session",
         )
     try:
@@ -10535,7 +10566,9 @@ async def sessions_archive(session_id: str):
             code = getattr(err, "code", "forbidden")
             if code == "reserved_session":
                 return _reserved_session_response(
-                    RESERVED_SESSION_PROTECTED_I18N_KEY,
+                    MAIN_SESSION_PROTECTED_I18N_KEY
+                    if str(session_id) == MAIN_SESSION_ID
+                    else RESERVED_SESSION_PROTECTED_I18N_KEY,
                     code=code,
                 )
             return _coded_error_response(code, str(err), 403)
@@ -10564,7 +10597,9 @@ async def sessions_archive(session_id: str):
             return jsonify({"error": f"Session not found: {session_id}"}), 404
         if status_code == 403 and body.get("error") == "reserved_session":
             return _reserved_session_response(
-                RESERVED_SESSION_PROTECTED_I18N_KEY,
+                MAIN_SESSION_PROTECTED_I18N_KEY
+                if str(session_id) == MAIN_SESSION_ID
+                else RESERVED_SESSION_PROTECTED_I18N_KEY,
                 code="reserved_session",
             )
         candidate = body.get("session")
