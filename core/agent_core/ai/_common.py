@@ -1699,10 +1699,15 @@ def required_only_tool(tools: list[Any]) -> str:
 async def iter_sse_events(
     response: httpx.Response,
     cancel: CancelToken,
+    *,
+    max_line_size: int | None = None,
 ) -> AsyncIterator[SSEEvent]:
-    """Yield SSE events while allowing a CancelToken to interrupt a stalled read."""
+    """Yield SSE events while allowing a CancelToken to interrupt a stalled read. ``max_line_size`` overrides the
+    parser's default line cap; a stream allowed lines that long (a generated image's) is parsed off the controller
+    loop, because one event can be many MiB."""
 
-    parser = SSEParser()
+    parser = SSEParser(max_line_size=max_line_size)
+    offload = max_line_size is not None
     iterator = response.aiter_bytes().__aiter__()
     while True:
         if cancel.cancelled:
@@ -1717,9 +1722,9 @@ async def iter_sse_events(
             break
         if chunk is None:
             return
-        for event in parser.feed(chunk):
+        for event in await asyncio.to_thread(parser.feed, chunk) if offload else parser.feed(chunk):
             yield event
-    for event in parser.finish():
+    for event in await asyncio.to_thread(parser.finish) if offload else parser.finish():
         yield event
 
 
@@ -1736,6 +1741,7 @@ async def drive_sse_stream(
     resolver: ServedHopResolver | None,
     gateway: bool,
     translate: WireTranslator,
+    max_line_size: int | None = None,
 ) -> AsyncIterator[Any]:
     """Own the complete request/stream/terminal/cleanup lifecycle.
 
@@ -1812,7 +1818,7 @@ async def drive_sse_stream(
                         candidate = assembler.aborted(cancel.reason)
                     else:
                         assembler.set_origin(resolved_origin.origin, resolved_origin.verified, resolved_origin.source_id)
-                        async for item in translate(iter_sse_events(response, cancel)):
+                        async for item in translate(iter_sse_events(response, cancel, max_line_size=max_line_size)):
                             if isinstance(item, (Done, ProviderError)):
                                 candidate = item
                                 break

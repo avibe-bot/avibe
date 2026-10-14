@@ -23,12 +23,15 @@ from core.agent_core.messages import (
     Citation,
     HostedAction,
     HostedCost,
+    HostedImage,
     HostedNative,
     HostedRecord,
     HostedSource,
     HostedToolBlock,
     ToolCallBlock,
 )
+from core.agent_core.tools.read import MAX_INLINE_IMAGE_BYTES
+from core.agent_core.tools.truncate import format_size
 
 #: xAI reports a response's cost in ticks of 1e-10 USD (``usage.cost_in_usd_ticks``).
 _USD_PER_TICK = 1e-10
@@ -75,18 +78,29 @@ def responses_hosted_tool(item: Mapping[str, Any]) -> Optional[str]:
     kind = item.get("type")
     if kind == "web_search_call":
         return "web_search"
+    if kind == "image_generation_call":
+        return "image_generation"
     if kind == "custom_tool_call" and str(item.get("name") or "").startswith("x_"):
         return "x_search"
     return None
 
 
 def responses_hosted_block(
-    item: Mapping[str, Any], *, source_id: str, call_id: str, finished: bool = True
+    item: Mapping[str, Any],
+    *,
+    source_id: str,
+    call_id: str,
+    finished: bool = True,
+    image: HostedImage | None = None,
+    image_error: str | None = None,
 ) -> HostedToolBlock:
-    """One Responses hosted-call item (a ``web_search_call``, or xAI's X-search ``custom_tool_call``) as its block.
+    """One Responses hosted-call item (a ``web_search_call``, an ``image_generation_call``, or xAI's X-search
+    ``custom_tool_call``) as its block.
 
     ``call_id`` names the block when the item carries no id of its own. An item that has only been added
-    (``finished`` false) holds the call's place in the output order as a pending call.
+    (``finished`` false) holds the call's place in the output order as a pending call. A generated image is the file
+    the adapter saved, ``image``: the item's base64 ``result`` is never kept (§7.3), and a finished call that saved no
+    image failed, for ``image_error`` when the adapter knows why.
     """
 
     tool = responses_hosted_tool(item)
@@ -103,7 +117,17 @@ def responses_hosted_block(
     else:
         record_status = "pending"
     error = _item_error(item, record_status) if record_status in ("failed", "incomplete") else None
-    if tool == "web_search":
+    images: tuple[HostedImage, ...] | None = None
+    if tool == "image_generation":
+        if record_status == "completed" and image is None:
+            record_status, error = "failed", bounded_error(image_error or "the provider returned no image")
+        images = (image,) if image is not None and record_status == "completed" else ()
+        action, sources = generate_action(item), ()
+        # The transcript's copy names the saved file in place of the base64 image.
+        item = {key: value for key, value in item.items() if key != "result"}
+        if images:
+            item["result"] = images[0].path
+    elif tool == "web_search":
         action, sources = _web_search_action(item)
     else:
         action, sources = _x_search_action(item), ()
@@ -111,9 +135,31 @@ def responses_hosted_block(
         id=_text(item.get("id")) or _text(item.get("call_id")) or call_id,
         tool=tool,  # type: ignore[arg-type]
         action=action,
-        record=HostedRecord(status=record_status, error=error, sources=sources),  # type: ignore[arg-type]
+        record=HostedRecord(status=record_status, error=error, sources=sources, images=images),  # type: ignore[arg-type]
         native=HostedNative(source_id=source_id, payload=_payload(item)),
     )
+
+
+def generate_action(item: Mapping[str, Any]) -> HostedAction:
+    """An image generation as it ran: the prompt the provider rendered (its revision of the model's), and the output's
+    resolved size and quality, which pricing reads (§7.3, item 22). ``item`` is a native ``image_generation_call`` or
+    a proxy executor's ``generation`` facts, which carry the same names."""
+
+    return HostedAction(
+        "generate",
+        prompt=_text(item.get("revised_prompt")),
+        size=_text(item.get("size")),
+        quality=_text(item.get("quality")),
+    )
+
+
+def image_dimensions(size: Any) -> tuple[int | None, int | None]:
+    """An output's ``WIDTHxHEIGHT`` size as two numbers, or nothing for ``auto`` or a size that is not one."""
+
+    width, separator, height = str(size or "").partition("x")
+    if separator and width.isdigit() and height.isdigit() and int(width) > 0 and int(height) > 0:
+        return int(width), int(height)
+    return None, None
 
 
 def _web_search_action(item: Mapping[str, Any]) -> tuple[HostedAction, tuple[HostedSource, ...]]:
@@ -287,12 +333,30 @@ def record_text(
         lines.append("Also searched: " + "; ".join(json.dumps(item, ensure_ascii=False) for item in further_queries))
     lines.extend(notes)
     lines.extend(_numbered(record.sources))
+    for image in record.images or ():
+        lines.extend(_image_lines(image))
     if cited:
         lines.append("Posts cited in the answer:")
         lines.extend(_numbered(cited))
-    if record.status == "completed" and not record.sources and not cited and not notes:
+    if record.status == "completed" and not record.sources and not record.images and not cited and not notes:
         lines.append("No results were returned.")
     return "\n".join(lines)
+
+
+def _image_lines(image: HostedImage) -> list[str]:
+    """A generated image as the model sees it: where it is saved and what it is, never the image itself (§7.3). The
+    model opens the file with ``read`` to look at it, unless it is over ``read``'s inline limit."""
+
+    facts = [f"{image.width}×{image.height}" if image.width and image.height else None, image.mime]
+    if image.bytes is not None:
+        facts.append(format_size(image.bytes))
+    lines = [f"Image saved: {image.path} ({', '.join(fact for fact in facts if fact)})"]
+    if image.bytes is not None and image.bytes > MAX_INLINE_IMAGE_BYTES:
+        lines.append(
+            f"   It is over the {format_size(MAX_INLINE_IMAGE_BYTES)} inline image limit, so read cannot show it. "
+            "The user sees it."
+        )
+    return lines
 
 
 def _numbered(sources: Sequence[HostedSource]) -> list[str]:

@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Literal, Mapping, Optional, Protocol, Union
 
 from core.agent_core.cancel import CancelToken
-from core.agent_core.messages import AssistantMessage, Message, ProtocolName
+from core.agent_core.messages import AssistantMessage, HostedImage, Message, ProtocolName
 from core.agent_core.tools.base import ToolSpec
 
 ErrorKind = Literal[
@@ -115,6 +115,19 @@ class MediaLoader(Protocol):
 
     async def load(self, media_token: str) -> tuple[bytes, str]:
         """Return the bytes and their mime type."""
+        ...
+
+
+class MediaSink(Protocol):
+    """Supplied by the adapter layer; keeps a generated image as a local file (``vibey-hosted-tools.md`` §7.3).
+
+    The image never enters a message or the model's context: only its path, in the call's record.
+    """
+
+    async def save_image(self, encoded: str) -> HostedImage:
+        """Decode base64 ``encoded``, store it, and return its record: the file's absolute path, its type as its
+        bytes show it, and its size. Raises ``ValueError`` when ``encoded`` is not a supported image in base64, and
+        ``OSError`` when it cannot be stored."""
         ...
 
 

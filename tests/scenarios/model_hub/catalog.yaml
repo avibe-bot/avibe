@@ -16,6 +16,7 @@ capability:
     - tests/agent_core/ai/test_hosted_parsing.py
     - tests/agent_core/ai/test_hosted_transform.py
     - tests/agent_core/ai/test_hosted_replay.py
+    - tests/agent_core/ai/test_hosted_images.py
     - tests/test_vibey_agent.py
     - tests/test_model_hub_evidence_rules.py
     - tests/test_model_hub_config.py
@@ -321,6 +322,17 @@ scenarios:
     related_tests:
       - tests/agent_core/ai/test_hosted_replay.py::test_a_hosted_call_goes_back_verbatim_and_pinned_only_to_its_own_source_with_replay_evidence
       - tests/agent_core/ai/test_hosted_replay.py::test_a_continuation_goes_back_verbatim_only_to_the_hop_that_served_it
+  - id: MH-HOSTED-VIBEY-007
+    name: A native generated image is saved to a file as its done item is parsed and its record names that file; no base64 enters history, partial and terminal copies are never decoded, and an image over read's inline limit says so
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/agent_core/ai/test_hosted_images.py::test_a_native_image_is_saved_once_from_its_done_item_and_history_holds_only_its_path
+    related_tests:
+      - tests/agent_core/ai/test_hosted_images.py::test_an_image_that_was_not_saved_is_a_failed_call_never_a_completed_one
+      - tests/agent_core/ai/test_hosted_images.py::test_a_six_megabyte_image_streams_under_the_image_line_cap_and_its_record_says_read_cannot_show_it
+      - tests/agent_core/ai/test_hosted_images.py::test_a_response_that_streams_images_past_its_budget_ends_as_an_error
+      - tests/test_vibey_agent.py::test_a_generated_image_is_kept_as_an_immutable_file_its_bytes_name_and_type
   - id: MH-VIBEY-007
     name: Vibey starts once with the user's Sources and built-in Agent models, seeded when its first Source exists
     status: covered

@@ -139,6 +139,8 @@ def _image_payload(image: HostedImage) -> dict[str, Any]:
         out["width"] = image.width
     if image.height is not None:
         out["height"] = image.height
+    if image.bytes is not None:
+        out["bytes"] = image.bytes
     return out
 
 
@@ -228,6 +230,9 @@ def proxy_activity(
     )
     size = arguments.get("size") if isinstance(arguments.get("size"), str) else None
     execution = result.execution
+    # What the executor reports it did (an image's rendered prompt and resolved size and quality), read as a native
+    # call's block action is.
+    ran = result.action if result.action is not None and result.action.type == "generate" else None
     return HostedActivity(
         call_id=call.id,
         tool=call.name,
@@ -243,9 +248,9 @@ def proxy_activity(
         model=execution.executor_origin.model if execution is not None else None,
         sources=tuple(result.record.sources),
         images=tuple(result.record.images or ()),
-        size=size,
-        quality=None,
-        revised_prompt=None,
+        size=(ran.size if ran is not None and ran.size else size),
+        quality=ran.quality if ran is not None else None,
+        revised_prompt=ran.prompt if ran is not None else None,
         cost=execution.cost if execution is not None else None,
         cost_calls=1,
         duration_ms=duration_ms,

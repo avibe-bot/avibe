@@ -208,21 +208,24 @@ class HubModelRouter:
                 logger.warning("Vibey could not close its %s provider adapter", protocol, exc_info=True)
 
 
-def registry_providers(*, media_loader: Any, client: Any = None) -> ProviderFactory:
+def registry_providers(*, media_loader: Any, media_sink: Any = None, client: Any = None) -> ProviderFactory:
     """Provider adapters from the ``ai`` registry, speaking to the Model Hub gateway.
 
     In gateway mode each adapter reads the served origin from ``x-avibe-served-hop``
-    with the engine's own resolver, the one owner of that C-6 rule.
+    with the engine's own resolver, the one owner of that C-6 rule. ``media_sink``
+    keeps the images a Responses hop generates natively, the only protocol that does.
     """
 
     def create(protocol: ProtocolName) -> ProviderAdapter:
         from core.agent_core.ai.registry import create_adapter
 
+        images = {"media_sink": media_sink} if protocol == "openai_responses" else {}
         return create_adapter(
             protocol,
             client=client,
             media_loader=media_loader,
             gateway=True,
+            **images,
         )
 
     return create

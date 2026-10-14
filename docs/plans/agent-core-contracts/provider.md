@@ -40,6 +40,10 @@ class MediaLoader(Protocol):   # supplied by the adapter; reads media_objects
     async def load(self, media_token: str) -> tuple[bytes, str]: ...   # bytes, mime type
 
 
+class MediaSink(Protocol):     # supplied by the adapter; keeps a generated image as a local file
+    async def save_image(self, encoded: str) -> HostedImage: ...       # base64 in; path, sniffed mime, size out
+
+
 @dataclass(frozen=True)
 class ModelRequest:
     endpoint: ModelEndpoint
@@ -82,7 +86,9 @@ defined effect, including when it is unknown:
 | `supports_images` | images sent | placeholders | placeholders |
 | `supports_reasoning` | `reasoning_effort` sent if it is one of `reasoning_efforts` | `reasoning_effort = None` | `reasoning_effort = None` | Adapters are constructed with a
 `MediaLoader` and resolve each `ImageBlock`'s bytes at request time; the canonical message never carries bytes. The
-token names an immutable snapshot (`message.schema.json`), so the bytes never change for a committed block.
+token names an immutable snapshot (`message.schema.json`), so the bytes never change for a committed block. The
+Responses adapter also takes a `MediaSink`. It saves each image a native `image_generation` call returns as it parses
+the call's done item, and the call's record names the file (`vibey-hosted-tools.md` §7.3).
 
 `stream` yields `ProviderEvent`s (`provider-event.schema.json`) and always ends with exactly one `done` or one
 `error`. `done.message` is the complete canonical `AssistantMessage`; its `origin` comes from the served-hop report
