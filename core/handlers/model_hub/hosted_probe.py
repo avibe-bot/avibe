@@ -474,7 +474,8 @@ def replay_outcome(
         message = terminal.message
         if any(isinstance(block, HostedToolBlock) and block.tool == tool for block in message.content):
             return "unsupported"
-        if message.stop_reason == "refusal":
+        if message.stop_reason in ("refusal", "safety"):
+            # A refused or blocked answer proves nothing, whatever it quotes.
             return "inconclusive"
         named = written_urls(message) & {_same_url(url) for url in asked}
         return "verified" if named else "inconclusive"
@@ -489,7 +490,12 @@ def _same_url(url: str) -> str:
     """A URL as a comparison key: whole, fragment included, without the punctuation a sentence leaves on it, its
     scheme and host in lower case, and no trailing slash on its path."""
 
-    parts = urlsplit(url.rstrip(".,;:!?"))
+    url = url.rstrip(".,;:!?")
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        # Provider text that is not a well-formed URL still compares, exactly as written.
+        return url
     return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"), parts.query, parts.fragment))
 
 

@@ -782,3 +782,59 @@ async def test_a_replay_the_probe_has_no_time_left_for_reports_try_again(tmp_pat
     assert len(sent) == 1
     assert result["probe"]["replay"] == {"outcome": "transient", "error": None}
     assert _records(service, REPLAY) == []
+
+
+@pytest.mark.asyncio
+async def test_a_replay_goes_only_to_the_source_identity_the_call_was_recorded_for(tmp_path, monkeypatch):
+    """MH-HOSTED-007: the replay carries the call's provider-native payload, so a Source whose endpoint or credential
+    changed after the call never receives it; the call's result stands and no replay is reported."""
+    from core.handlers.model_hub import service as service_module
+
+    service, _clock, _models = configured_service(tmp_path, sources=[XAI])
+    sent = []
+    build_replay = service_module.hosted_replay_request
+
+    def replaced_endpoint_first(*args, **kwargs):
+        config = service.store.load()
+        config.sources[0].base_url = "https://relay.invalid/v1"
+        service.store.save(config)
+        return build_replay(*args, **kwargs)
+
+    monkeypatch.setattr(service_module, "hosted_replay_request", replaced_endpoint_first)
+
+    async def respond(request):
+        sent.append(await request.json())
+        return _stream(_responses(SEARCH, ANSWER) if len(sent) == 1 else _replay_reply("openai_responses", sent[-1]))
+
+    async with loopback_engine(tmp_path, service, respond):
+        result = await service.probe_hosted_tool("web_search", {"source_id": XAI.id, "model_id": "grok-4.6"})
+
+    assert len(sent) == 1
+    assert (result["probe"]["call"]["outcome"], result["probe"]["replay"]) == ("verified", None)
+    assert [record.status for record in _records(service, CALL)] == ["verified"]
+    assert _records(service, REPLAY) == []
+
+
+@pytest.mark.parametrize(
+    "stop_reason,text,outcome",
+    [
+        ("stop", HIDDEN, "verified"),
+        ("safety", HIDDEN, "inconclusive"),
+        ("refusal", HIDDEN, "inconclusive"),
+        # Provider text that is not a well-formed URL compares as written and never fails the probe.
+        ("stop", "https://[invalid", "inconclusive"),
+    ],
+)
+def test_a_replay_answer_counts_only_when_it_completed_and_names_a_hidden_result(stop_reason, text, outcome):
+    """MH-HOSTED-007: a blocked or refused answer proves nothing, whatever it quotes, and a malformed URL is just text."""
+    from core.agent_core.ai.provider import Done
+    from core.agent_core.messages import AssistantMessage, Origin, TextBlock
+    from core.handlers.model_hub.adapter import RawCallOutcome, RawOutcomeKind
+    from core.handlers.model_hub.hosted_probe import replay_outcome
+
+    answer = AssistantMessage(
+        content=(TextBlock(text=text),), origin=Origin("xai", "openai_responses", "grok-4.6"), stop_reason=stop_reason,
+    )
+    ok = RawCallOutcome(RawOutcomeKind.SUCCESS, 200, None, None, True, "grok-4.6", XAI.id)
+    asked = frozenset({HIDDEN, "https://[also-invalid"})
+    assert replay_outcome("web_search", Done(answer), ok, None, asked=asked, carried=True) == outcome

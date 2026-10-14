@@ -7707,17 +7707,22 @@ class ModelHubService:
         def remaining() -> float:
             return deadline - time.monotonic()
 
-        async def pinned_call(body: dict, read: Callable[[InvokeHandle], Awaitable[None]]):
-            return await self._user_test_call(
-                source_id,
-                model_id,
-                selected,
-                lambda source: ModelHubRequest(body, protocol=source.protocol),
-                stream=True,
-                origin="vibey",
-                consume=read,
-                timeout=max(1.0, min(call_timeout(tool), remaining())),
-            )
+        def pinned(select: Callable[[ModelHubConfig], ModelHubSourceConfig]):
+            async def call(body: dict, read: Callable[[InvokeHandle], Awaitable[None]]):
+                return await self._user_test_call(
+                    source_id,
+                    model_id,
+                    select,
+                    lambda source: ModelHubRequest(body, protocol=source.protocol),
+                    stream=True,
+                    origin="vibey",
+                    consume=read,
+                    timeout=max(1.0, min(call_timeout(tool), remaining())),
+                )
+
+            return call
+
+        pinned_call = pinned(selected)
 
         media_sink = ProbeImageCheck() if tool == "image_generation" else None
         terminal, calls = await run_hosted_probe(request, pinned_call, media_sink=media_sink)
@@ -7748,9 +7753,25 @@ class ModelHubService:
             replay = {"outcome": "transient", "error": None}
         elif replayable:
             assert isinstance(terminal, Done)
-            replay_terminal, replay_calls = await run_hosted_probe(
-                hosted_replay_request(request, tool, terminal.message), pinned_call,
-            )
+
+            def replay_selected(config: ModelHubConfig) -> ModelHubSourceConfig:
+                current = selected(config)
+                # The replay carries the call's provider-native payload, so it goes only to the Source identity that
+                # produced it and was recorded for it: never through a credential or endpoint that replaced it.
+                if identity_digest(current) != recorded_for:
+                    raise ModelHubError("mapping_target_unavailable", status=409)
+                return current
+
+            try:
+                replay_terminal, replay_calls = await run_hosted_probe(
+                    hosted_replay_request(request, tool, terminal.message), pinned(replay_selected),
+                )
+            except ModelHubError as refused:
+                # The call's result stands; the replay did not run. A Source that changed has no replay to report,
+                # and anything else (the engine went away) is worth trying again.
+                replay_terminal, replay_calls = None, []
+                if refused.code != "mapping_target_unavailable":
+                    replay = {"outcome": "transient", "error": None}
             if replay_calls:
                 replay_last = replay_calls[-1]
                 replay_learned = self._probe_rejection(replay_last, model_id)
