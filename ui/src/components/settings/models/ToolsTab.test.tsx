@@ -370,38 +370,13 @@ describe('ToolsTab checks', () => {
       .getByRole('button', { name: 'Check · cost unknown' });
   });
 
-  it('MH-HOSTED-UI-013: runs the header check only after the dialog shows what it sends and costs', async () => {
-    const onProbe = vi.fn<RunProbe>(async (target) => target.tool === 'web_search' && target.candidate.source_id === RELAY.id
-      ? result('verified', target.candidate.source_id, target.candidate.model_id)
-      : { ...result('transient', target.candidate.source_id, target.candidate.model_id), call: { outcome: 'transient', error: 'models.source.cooldown.rate_limited' } });
-    renderTab(searchable(), { onProbe });
-
-    // Three unchecked pairs (the verified one is not offered): the priced one is summed,
-    // the included and the unpriced image are counted, and nothing is added as $0.
-    screen.getByText('3 pairs to check · about $0.02 + 1 included + 1 without a price in total');
-    await userEvent.click(screen.getByRole('button', { name: 'Check available tools' }));
-    const dialog = await screen.findByRole('dialog');
-    within(dialog).getByText('This sends 3 real requests to the Sources below to confirm they can run these tools natively.');
-    expect(onProbe).not.toHaveBeenCalled();
-
-    await userEvent.click(within(dialog).getByRole('button', { name: 'Start check · about $0.02 + 1 included + 1 without a price' }));
-    await within(dialog).findByText('Check finished');
-    expect(onProbe).toHaveBeenCalledTimes(3);
-    within(dialog).getByText('1 runs natively');
-    within(dialog).getByText('2 not verified');
-    // The reason sits where the locale puts it in the sentence.
-    expect(within(dialog).getAllByText('Couldn\'t verify this time (Rate limited). Try again; this is not recorded as unsupported.')).toHaveLength(2);
-
-    // Retrying runs only the pairs that got no answer, with their cost said the same way.
-    await userEvent.click(within(dialog).getByRole('button', { name: 'Retry 2 · included in subscription + 1 without a price' }));
-    await within(dialog).findByText('Check finished');
-    expect(onProbe).toHaveBeenCalledTimes(5);
-    expect(onProbe.mock.calls.slice(3).map(([target]) => target.candidate.source_id).sort()).toEqual([RELAY.id, SUBSCRIPTION.id].sort());
-  });
-
-  it('MH-HOSTED-UI-003: lets the locale compose a set\'s cost with its unpriced checks', () => {
-    renderTab(searchable(), { lng: 'zh' });
-    screen.getByText('3 项可检测 · 共约 $0.02，另 1 项订阅内含，另 1 项暂无单价');
+  it('MH-HOSTED-UI-013: offers a check one pair at a time, never all pairs at once', () => {
+    // A check is a real, paid request: with real Sources a check-all would probe hundreds of models.
+    renderTab(searchable());
+    expect(screen.queryByRole('button', { name: /Check available tools|检测可用工具/ })).toBeNull();
+    expect(screen.queryByText(/pairs? to check|项可检测/)).toBeNull();
+    // Each row still has its own check.
+    expect(within(card('Web search')).getAllByRole('button', { name: /^Check/ })).toHaveLength(3);
   });
 
   it('MH-HOSTED-UI-019: shows a replay that did not verify as its own result, and nothing when no replay ran', async () => {

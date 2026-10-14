@@ -15,12 +15,10 @@ import { Select } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 import { ToggleSwitch } from '../SettingsPrimitives';
 import { formatMonthDay, formatNameList, formatSmallUsd } from './format';
-import { HostedProbeDialog, ProbeAnswerNote } from './HostedProbeDialog';
+import { ProbeAnswerNote } from './ProbeAnswerNote';
 import {
   evidenceChip,
-  pendingChecks,
   probeKey,
-  probeCostSummary,
   probeUnanswered,
   sameExecutor,
   verifiedCandidates,
@@ -39,7 +37,7 @@ import type {
   HostedToolStatus,
   Source,
 } from './types';
-import { useCostSummaryLabel, useEstimateLabel } from './useEstimateLabel';
+import { useEstimateLabel } from './useEstimateLabel';
 
 type RunProbe = (target: ProbeTarget) => Promise<HostedToolProbeResult | null>;
 
@@ -328,11 +326,9 @@ export const ToolsTab: React.FC<{
   onRetry: () => void;
 }> = ({ read, sources, pending, probing, onChange, onProbe, onRetry }) => {
   const { t } = useTranslation();
-  const costSummaryLabel = useCostSummaryLabel();
   // A row's last answer that did not become evidence (inconclusive, transient, a
   // failed request) shows where it was asked, until that row is checked again.
   const [lastProbes, setLastProbes] = React.useState<ReadonlyMap<string, HostedToolProbeResult | null>>(() => new Map());
-  const [checking, setChecking] = React.useState<readonly ProbeTarget[] | null>(null);
   const runProbe = React.useCallback<RunProbe>(async (target) => {
     const result = await onProbe(target);
     setLastProbes((previous) => new Map(previous).set(probeKey(target), result));
@@ -347,15 +343,6 @@ export const ToolsTab: React.FC<{
   const byId = React.useMemo(() => new Map(sources.map((source) => [source.id, source])), [sources]);
   const hubSources = React.useMemo(() => sources.filter((source) => source.supply_channel === 'hub'), [sources]);
   const reverify = status?.reverify;
-  const toCheck = status ? pendingChecks(status) : [];
-  // 「全部已检测」 holds only where there is something a check could run on.
-  const checkable = status?.tools.some((tool) => tool.candidates.length > 0) ?? false;
-  const toCheckSummary = probeCostSummary(toCheck);
-  const toCheckCost = toCheckSummary.priced === 0 && toCheckSummary.included === 0
-    ? t('settings.models.tools.header.totalUnknown')
-    : toCheckSummary.priced === 0 && toCheckSummary.unpriced === 0
-      ? t('settings.models.tools.header.totalIncluded')
-      : t('settings.models.tools.header.total', { cost: costSummaryLabel(toCheckSummary) });
   return (
     <section className="model-hub-tools flex flex-col" aria-label={t('settings.models.tools.title') as string}>
       <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
@@ -364,23 +351,6 @@ export const ToolsTab: React.FC<{
           <p className="model-hub-tools-subtitle">{t('settings.models.tools.subtitle')}</p>
         </div>
         <div className="flex shrink-0 flex-col items-start gap-1.5 sm:items-end">
-          <span className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-            {checkable && (
-              <span className="model-hub-tools-reverify">
-                {toCheck.length > 0
-                  ? t('settings.models.tools.header.summary', { pending: t('settings.models.tools.header.pending', { count: toCheck.length }), cost: toCheckCost })
-                  : t('settings.models.tools.header.none')}
-              </span>
-            )}
-            <Button
-              size="sm"
-              variant={toCheck.length > 0 ? 'default' : 'outline'}
-              disabled={!status || toCheck.length === 0 || probing.size > 0}
-              onClick={() => setChecking(toCheck)}
-            >
-              <Radar aria-hidden />{t('settings.models.tools.header.action')}
-            </Button>
-          </span>
           {reverify && (reverify.engine_upgraded > 0 || reverify.aged > 0) && (
             <p className="model-hub-tools-reverify flex flex-wrap items-center gap-x-2" role="status">
               {/* Both counts read as one sentence the locale composes. */}
@@ -422,7 +392,6 @@ export const ToolsTab: React.FC<{
             ))}
             <p className="model-hub-tools-foot">{t('settings.models.tools.footnote')}</p>
           </>}
-      {checking && <HostedProbeDialog targets={checking} sources={byId} onRun={runProbe} onClose={() => setChecking(null)} />}
     </section>
   );
 };
