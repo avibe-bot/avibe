@@ -71,6 +71,12 @@ An independent redesign of per-turn native-Source admission is out of scope.
   failure must not erase the authorization fact. Preserve cleanup, cancellation,
   leases, timeouts and flow retention; do not introduce another lifecycle.
 - Publish the receipt on start/status responses where that flow is serialized.
+- A committed Claude authorization can materialize its Source even if that
+  operation's runtime-application hook fails. Project the authorization as
+  success with optional `application_failed: true`, and use the existing
+  exactly-once Source materialization. Do not poll/retry application as a side
+  effect of status reads. UI reports the application warning independently;
+  runtime readiness still belongs to its existing application owner.
 - Model Hub Claude completion uses verification captured by that owning flow
   (existing `source_signed_in` / `source_status` may carry it). Do not call
   `get_claude_auth` or launch a second status process to re-decide completion.
@@ -95,6 +101,10 @@ An independent redesign of per-turn native-Source admission is out of scope.
   universal sign-out. Use the existing scoped cleanup endpoint; do not inspect,
   remove or pretend to revoke environment/project tokens. Its success copy states
   the scope instead of promising no future authentication source exists.
+  Standalone cleanup reconciles the runtime under the existing native lease;
+  a writer that lends its lease (API-key save) owns its existing reconciliation.
+  File cleanup delegates to the native inventory locator and existing compare /
+  write / readback helpers, preserving unrelated native/MCP entries.
 - Async reads/receipts must be invalidated on method changes, new auth actions,
   removal, cancellation and unmount; late responses cannot consume newer drafts
   or close onboarding. Reuse the existing observation/receipt owner, not a new

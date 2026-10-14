@@ -4448,9 +4448,22 @@ class AgentAuthService:
     ) -> dict[str, Any]:
         owned = lease is None
         lease = self._acquire_native_lease("claude") if owned else lease
+        async def cleanup_and_reconcile() -> dict[str, Any]:
+            result = await self._clear_claude_oauth_credentials_owned()
+            # Standalone cleanup owns its runtime reconciliation. API-key saves
+            # borrow a lease and already reconcile once at their outer writer.
+            if owned:
+                try:
+                    await self._invoke_post_web_success_hook("claude", persist=False)
+                    result["restart"] = {"ok": True, "message": ""}
+                except Exception as err:  # noqa: BLE001
+                    logger.warning("Claude cleanup completed but runtime application failed")
+                    result["restart"] = {"ok": False, "message": sanitize_process_output(str(err))}
+            return result
+
         try:
             lease.assert_auth_custody("claude")
-            return await finish_native_operation(self._clear_claude_oauth_credentials_owned())
+            return await finish_native_operation(cleanup_and_reconcile())
         finally:
             if owned:
                 lease.release()

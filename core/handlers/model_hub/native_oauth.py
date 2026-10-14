@@ -207,7 +207,12 @@ class AgentAuthNativeOAuthAdapter:
 
     def completed_source_status(self, flow_id: str) -> NativeOAuthSourceStatus:
         payload = self._agent_auth_service.get_web_flow_status(flow_id)
-        if payload.get("ok") is not True or payload.get("state") != "success":
+        committed_claude = (
+            payload.get("vendor") == "anthropic"
+            and payload.get("state") == "failed"
+            and payload.get("authorization_completed") is True
+        )
+        if payload.get("ok") is not True or (payload.get("state") != "success" and not committed_claude):
             raise KeyError(flow_id)
         status = payload.get("source_status")
         if not isinstance(status, Mapping):
@@ -217,6 +222,7 @@ class AgentAuthNativeOAuthAdapter:
         return NativeOAuthSourceStatus(
             signed_in=signed_in,
             account_label=account_label if isinstance(account_label, str) else None,
+            application_failed=committed_claude,
         )
 
     @staticmethod
@@ -255,6 +261,15 @@ class AgentAuthNativeOAuthAdapter:
             "failed": "failed",
             "cancelled": "cancelled",
         }.get(str(payload.get("state")), "failed")
+        application_failed = (
+            vendor == "anthropic" and state == "failed"
+            and payload.get("authorization_completed") is True
+        )
+        if application_failed:
+            # Source configuration belongs to the committed authorization, not
+            # to the controller's application result. Materialize it once using
+            # the same receipt, without another login or a polling side effect.
+            state = "success"
         source_status = payload.get("source_status")
         if (
             state == "success"
@@ -279,10 +294,7 @@ class AgentAuthNativeOAuthAdapter:
         error_key = None
         error_detail = None
         if state == "failed":
-            error_key = (
-                "settings.models.oauth.error.nativeApply" if payload.get("authorization_completed") is True
-                else _TIMEOUT_ERROR_KEY if payload.get("error") == "timed_out" else _GENERIC_ERROR_KEY
-            )
+            error_key = _TIMEOUT_ERROR_KEY if payload.get("error") == "timed_out" else _GENERIC_ERROR_KEY
             if error_key != _TIMEOUT_ERROR_KEY:
                 error_detail = oauth_failure_detail(payload.get("error"))
         elif state == "cancelled":
@@ -308,6 +320,7 @@ class AgentAuthNativeOAuthAdapter:
             retained_material_disposition=RetainedMaterialDisposition.NONE,
             retained_credential_ref=None,
             error_detail=error_detail,
+            application_failed=application_failed,
         )
 
     async def _read_source_status(self, backend: str) -> NativeOAuthSourceStatus:

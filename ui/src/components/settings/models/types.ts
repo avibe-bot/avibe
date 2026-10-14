@@ -763,6 +763,8 @@ export type OAuthFlow = {
   /** A failed flow's own reason (provider, engine, or CLI), verbatim on one
    *  bounded line; shown behind the copyable details control. */
   error_detail?: string;
+  /** Native authorization committed, but its runtime-application attempt failed. */
+  application_failed?: boolean;
   expires_at?: string | null;
 };
 

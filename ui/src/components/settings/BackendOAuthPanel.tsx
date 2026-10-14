@@ -146,7 +146,9 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
       const observed = await onRemoved?.(result);
       if (!removalOwner.current.mounted) return;
       if (result.restart?.ok === false) {
-        setError(result.restart.message || t('onboarding.connection.applyFailed'));
+        // The connection owner reports application failure separately from
+        // authorization; do not turn cleanup into a second sign-in error.
+        if (!onRemoved) setError(result.restart.message || t('onboarding.connection.applyFailed'));
       } else if (!result.partial && observed !== false) {
         showToast(t(backend === 'claude' ? 'settings.backends.claudeNativeCredentialsCleared' : 'settings.backends.oauthRemoved'), 'success');
       }

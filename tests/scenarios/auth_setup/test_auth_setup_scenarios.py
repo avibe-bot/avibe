@@ -2102,12 +2102,22 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
                 receipt = harness.agent_auth.get_web_flow_status(flow_id)
                 self.assertEqual(receipt["authorization_completed"], case != "commit_failure")
                 completed = await harness.service.oauth_status(flow_id)
-                if case in {"apply_failure", "commit_failure"}:
+                if case == "commit_failure":
                     self.assertEqual(completed["flow"]["state"], "failed")
-                    self.assertEqual(completed["flow"]["error_key"],
-                                     "settings.models.oauth.error.nativeApply" if case == "apply_failure"
-                                     else "settings.models.oauth.error.generic")
                     self.assertEqual(V2Config.load().model_hub.sources, [])
+                elif case == "apply_failure":
+                    self.assertEqual(completed["flow"]["state"], "success")
+                    self.assertTrue(completed["flow"]["application_failed"])
+                    self.assertEqual(completed["source"]["state"]["status"], "standby")
+                    (source,) = V2Config.load().model_hub.sources
+                    # Runtime application is retried explicitly, not by polling
+                    # this receipt and not by creating another authorization.
+                    harness.agent_auth._refresh_backend_runtime.side_effect = None
+                    await harness.agent_auth._invoke_post_web_success_hook("claude", persist=False)
+                    replayed = await harness.service.oauth_status(flow_id)
+                    self.assertEqual(replayed["source"]["id"], source.id)
+                    self.assertTrue(replayed["flow"]["application_failed"])
+                    self.assertEqual(len(V2Config.load().model_hub.sources), 1)
                 else:
                     self.assertFalse(receipt["source_status"]["signed_in"])
                     self.assertEqual(completed["source"]["state"]["status"], "needs_action")

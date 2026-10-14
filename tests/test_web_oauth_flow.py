@@ -1448,7 +1448,7 @@ def test_clear_claude_oauth_for_api_key_mode_restores_key_settings(
 
     result = _run(service.clear_claude_oauth_for_api_key_mode())
 
-    assert result == {"ok": True}
+    assert result == {"ok": True, "restart": {"ok": True, "message": ""}}
     run_cmd.assert_awaited_once()
     args = run_cmd.call_args.args
     kwargs = run_cmd.call_args.kwargs
@@ -1476,9 +1476,12 @@ def test_clear_claude_oauth_credentials_only_preserves_api_key_config(
     run_cmd = AsyncMock(return_value=(True, None))
     monkeypatch.setattr(service, "_run_utility_command", run_cmd)
 
+    refresh = AsyncMock()
+    monkeypatch.setattr(service, "_refresh_backend_runtime", refresh)
     result = _run(service.clear_claude_oauth_credentials_only())
 
-    assert result == {"ok": True}
+    assert result == {"ok": True, "restart": {"ok": True, "message": ""}}
+    refresh.assert_awaited_once_with("claude")
     assert read_claude_settings_env() == {
         "ANTHROPIC_API_KEY": "sk-active",
         "ANTHROPIC_BASE_URL": "https://relay.example.invalid",
@@ -1501,6 +1504,90 @@ def test_clear_claude_oauth_credentials_files_removes_known_token_files(
     assert str(legacy) in removed
     assert not current.exists()
     assert not legacy.exists()
+
+
+@pytest.mark.parametrize("failure", [None, "write", "apply"])
+def test_claude_cleanup_uses_inventory_locator_preserves_other_grants_and_reconciles(
+    service, monkeypatch, tmp_path, failure,
+):
+    from vibe import native_oauth_store
+    from vibe.claude_config import get_claude_settings_path
+
+    secure = tmp_path / "独立账号存储"
+    secure.mkdir()
+    selected = secure / ".credentials.json"
+    selected.write_text(json.dumps({"claudeAiOauth": {"accessToken": "fixture-claude"},
+                                    "mcpOAuth": {"fixture": {"accessToken": "fixture-mcp"}}}))
+    unrelated = get_claude_credentials_path()
+    unrelated.write_text('{"claudeAiOauth":{"accessToken":"fixture-other-store"}}')
+    before_unrelated = unrelated.read_bytes()
+    monkeypatch.setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", str(secure))
+    monkeypatch.setattr(native_oauth_store, "_KEYCHAIN_STORE", native_oauth_store._FixtureKeychainStore())
+    restore_claude_settings_env({"ANTHROPIC_API_KEY": "fixture-api-key"})
+    before_config = get_claude_settings_path().read_bytes()
+    monkeypatch.setattr(service, "_run_utility_command", AsyncMock(return_value=(True, None)))
+    refresh = AsyncMock(side_effect=RuntimeError("fixture apply failed") if failure == "apply" else None)
+    monkeypatch.setattr(service, "_refresh_backend_runtime", refresh)
+    if failure == "write":
+        monkeypatch.setattr(native_oauth_store, "_apply_file_state", lambda *_args: None)
+
+    assert native_oauth_store.read_native_oauth("claude").exportable
+    result = _run(service.clear_claude_oauth_credentials_only())
+
+    refresh.assert_awaited_once_with("claude")
+    assert unrelated.read_bytes() == before_unrelated
+    assert json.loads(get_claude_settings_path().read_text()) == json.loads(before_config)
+    assert json.loads(selected.read_text())["mcpOAuth"]["fixture"]["accessToken"] == "fixture-mcp"
+    if failure == "write":
+        assert result["partial"] and native_oauth_store.read_native_oauth("claude").exportable
+    else:
+        assert native_oauth_store.read_native_oauth("claude") is None
+        assert not result.get("partial")
+    assert result["restart"]["ok"] is (failure != "apply")
+    assert "fixture-claude" not in json.dumps(result)
+
+
+def test_borrowed_cleanup_does_not_duplicate_its_writers_runtime_reconciliation(service, monkeypatch):
+    from core.backend_restart import NativeCredentialLease
+
+    monkeypatch.setattr(service, "_run_utility_command", AsyncMock(return_value=(True, None)))
+    refresh = AsyncMock()
+    monkeypatch.setattr(service, "_refresh_backend_runtime", refresh)
+    with NativeCredentialLease(("claude",)) as lease:
+        result = _run(service.clear_claude_oauth_credentials_only(lease=lease))
+    assert result == {"ok": True}
+    refresh.assert_not_awaited()
+
+
+def test_cleanup_cancellation_keeps_ownership_through_runtime_reconciliation(service, monkeypatch):
+    from core.backend_restart import NativeCredentialLease, NativeMigrationBlockedError
+
+    monkeypatch.setattr(service, "_clear_claude_oauth_credentials_owned", AsyncMock(return_value={"ok": True}))
+
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def reconcile(_backend):
+            entered.set()
+            await release.wait()
+
+        refresh = AsyncMock(side_effect=reconcile)
+        monkeypatch.setattr(service, "_refresh_backend_runtime", refresh)
+        task = asyncio.create_task(service.clear_claude_oauth_credentials_only())
+        await entered.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        with pytest.raises(NativeMigrationBlockedError):
+            NativeCredentialLease(("claude",)).acquire()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        refresh.assert_awaited_once_with("claude")
+        with NativeCredentialLease(("claude",)):
+            pass
+
+    asyncio.run(run())
 
 
 def test_test_web_auth_rejects_unsupported_backend(service: AgentAuthService) -> None:

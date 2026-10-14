@@ -94,6 +94,7 @@ class NativeOAuthSourceStatus:
 
     signed_in: bool
     account_label: str | None
+    application_failed: bool = False
 
 
 class NativeOAuthAdapter(OAuthAdapter, Protocol):

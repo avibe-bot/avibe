@@ -129,17 +129,10 @@ def get_claude_credentials_path(home: Path | None = None) -> Path:
 
 
 def clear_claude_oauth_credentials_files(home: Path | None = None) -> list[str]:
-    """Remove known file-backed Claude Code OAuth credential stores."""
-    removed: list[str] = []
-    for path in get_claude_credentials_paths(home):
-        try:
-            path.unlink()
-            removed.append(str(path))
-        except FileNotFoundError:
-            continue
-        except OSError as exc:
-            raise OSError(f"Failed to remove Claude OAuth credentials file {path}: {exc}") from exc
-    return removed
+    """Clear the inventory-selected native OAuth files, preserving other data."""
+    from vibe.native_oauth_store import clear_claude_native_oauth_files
+
+    return clear_claude_native_oauth_files(home)
 
 
 def get_claude_oauth_settings_backup_path(home: Path | None = None) -> Path:
