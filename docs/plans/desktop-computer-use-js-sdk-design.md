@@ -68,11 +68,18 @@ export default async ({ to, subject, body }) => {
   const mail = await computer.app({ bundleId: "com.apple.mail" });
   const window = await mail.window({ role: "AXWindow", index: 0 });
   await window.element({ role: "button", label: "Compose" }).click();
-  await window.element({ role: "textbox", label: "To" }).fill(to);
-  await window.element({ role: "textbox", label: "Subject" }).fill(subject);
-  await window.element({ role: "textbox", label: "Message" }).fill(body);
+  const draft = await mail.window({
+    role: "AXWindow",
+    labelContains: "New Message",
+  });
+  await draft.element({ role: "textbox", label: "To" }).fill(to);
+  await draft.element({ role: "textbox", label: "Subject" }).fill(subject);
+  await draft.element({ role: "textbox", label: "Message" }).fill(body);
+  await draft.expect({ role: "textbox", label: "To" }).toHaveValue(to);
+  await draft.expect({ role: "textbox", label: "Subject" }).toHaveValue(subject);
+  await draft.expect({ role: "textbox", label: "Message" }).toHaveValue(body);
   await avibe.confirm(`Send email to ${to}?`);
-  const effect = await window.element({ role: "button", label: "Send" }).click();
+  const effect = await draft.element({ role: "button", label: "Send" }).click();
   await avibe.notify(`Mail send effect: ${effect.status}`);
   return { to, subject, effect };
 };
