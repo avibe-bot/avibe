@@ -596,10 +596,18 @@ Each has a **Re-verify** action with its cost. Unknown shows nothing.
     still over the cap gets a record saying it is too large to view inline.
   - Known limitation: no transparent backgrounds in Phase 1. A later per-call format choice (an
     `output_format`/`background` argument on the tool) restores them.
-  - Known limitation (orchestrator decision, 2026-10-14): a file is saved before the row that names it commits. A
-    cancel, crash or kill in between leaves a file no row references. Such files are content-addressed, so they never
-    duplicate, and the per-response image budget bounds them. A startup sweep of the agent media root removes them
-    (#2588, before the 3.2.1 RC).
+  - A file is saved before the row that names it commits, and a cancel, crash or kill in between leaves a file no
+    row references (orchestrator decision, 2026-10-14). One owner covers every such window (#2588):
+    - the committed row registers each image it names in `media_objects`, in its own transaction, as an input
+      snapshot is registered;
+    - once per process, off the loop, Vibey's first recovery pass sweeps the agent media root;
+    - the sweep removes a content-addressed file that no row registers, and a leftover temporary file, once either is
+      older than 24 hours, longer than any Turn holds an uncommitted save;
+    - each file costs one indexed lookup, and links and foreign names are never touched;
+    - a save that reuses an old file makes it new again, so the sweep never takes a file a save is about to register.
+
+    Generated images that pre-release builds committed without registering them are not kept (owner directive: no
+    compatibility for pre-release states).
   - Avibe-authored failure reasons in a record's `error` are English model-facing text. Each carries a stable
     `error_code` (C-1 `HostedRecord.error_code`, one of `HOSTED_ERROR_CODES`), by which the display boundary localizes
     it; a provider's own reason carries none and shows as it is (#2589).

@@ -6,6 +6,12 @@ context - an input attachment or a file ``read`` attaches - is first copied to a
 content-addressed file ``<state>/agent_core/media/<sha256>.<ext>`` and registered
 there, so a later edit or deletion of the original file cannot change what a
 transcript replays. Loading re-checks the digest.
+
+A generated image is saved to the same root before the row that names it
+commits, and that row registers it (``storage.agent_transcript``). A file no row
+registers is left by an interruption in between; ``sweep`` removes it once it is
+older than any Turn holds a save it has not committed (``vibey-hosted-tools.md``
+§7.3).
 """
 
 from __future__ import annotations
@@ -15,8 +21,10 @@ import base64
 import binascii
 import hashlib
 import os
+import re
 import secrets
 import stat
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -28,8 +36,12 @@ from core.agent_core.tools.read import detect_supported_image_mime_type
 from storage import media_service
 from storage.models import agent_sessions
 
-MEDIA_SOURCE = "agent_context"
 _EXTENSIONS = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp"}
+#: How old a file no row registers must be before ``sweep`` removes it: longer than any Turn holds a save it has not
+#: committed. A file in use is kept younger than half of it (``_store``).
+SWEEP_GRACE_S = 24 * 3600.0
+_STORED_NAME = re.compile(r"[0-9a-f]{64}\.(?:png|jpg|gif|webp)")
+_TEMP_NAME = re.compile(r"\.[0-9a-f]{64}\.[0-9a-f]{8}\.tmp")
 
 
 class MediaUnavailable(RuntimeError):
@@ -104,11 +116,15 @@ class MediaSnapshots:
         """The content-addressed file holding ``data``. An entry already at that name is reused only while it is a
         regular file that still holds those bytes: history reads these paths directly, and their owner can change
         them. Anything else is replaced by one atomic rename, which never follows the entry it replaces, so nothing is
-        repaired in place and a link's target is never touched."""
+        repaired in place and a link's target is never touched. A reused file older than half the sweep's grace is
+        made new again, so ``sweep`` never takes a file a save is about to register."""
         digest = hashlib.sha256(data).hexdigest()
         path = self._root / f"{digest}.{_EXTENSIONS[mime_type]}"
         try:
-            if stat.S_ISREG(os.lstat(path).st_mode) and hashlib.sha256(path.read_bytes()).hexdigest() == digest:
+            info = os.lstat(path)
+            if stat.S_ISREG(info.st_mode) and hashlib.sha256(path.read_bytes()).hexdigest() == digest:
+                if info.st_mtime < time.time() - SWEEP_GRACE_S / 2:
+                    os.utime(path, follow_symlinks=False)
                 return path
         except OSError:
             pass  # missing or unreadable: written below
@@ -121,6 +137,54 @@ class MediaSnapshots:
             tmp.unlink(missing_ok=True)
             raise
         return path
+
+    # --- sweep -----------------------------------------------------------------
+
+    def sweep(self, grace_s: float = SWEEP_GRACE_S) -> tuple[int, int]:
+        """Remove each file of the root that no ``media_objects`` row registers and that is older than ``grace_s``,
+        and each leftover temporary file that old; return how many files and bytes went (#2588). Run off the loop.
+
+        Only the root's own names are considered, and only regular files: a link, a directory, or a file someone else
+        put there is never touched. Each file is checked with one indexed lookup, under both its path and its resolved
+        path, the two forms a row registers.
+        """
+
+        cutoff = time.time() - grace_s
+        removed = freed = 0
+        try:
+            entries = list(os.scandir(self._root))
+        except FileNotFoundError:
+            return 0, 0
+        with self._engine.connect() as conn:
+            for entry in entries:
+                temporary = _TEMP_NAME.fullmatch(entry.name) is not None
+                if not temporary and not _STORED_NAME.fullmatch(entry.name):
+                    continue
+                path = Path(entry.path)
+                if self._stale(path, cutoff) is None:
+                    continue
+                if not temporary and media_service.is_registered_path(conn, {str(path), str(path.resolve())}):
+                    continue
+                # Looked at again just before it goes: a save that reused it since has made it new (``_store``).
+                size = self._stale(path, cutoff)
+                if size is None:
+                    continue
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    continue
+                removed, freed = removed + 1, freed + size
+        return removed, freed
+
+    @staticmethod
+    def _stale(path: Path, cutoff: float) -> Optional[int]:
+        """The size of ``path`` when it is a regular file last written before ``cutoff``, else None."""
+
+        try:
+            info = os.lstat(path)
+        except OSError:
+            return None
+        return info.st_size if stat.S_ISREG(info.st_mode) and info.st_mtime < cutoff else None
 
     def _snapshot(self, data: bytes, mime_type: str, session_id: str, name: Optional[str]) -> str:
         if mime_type not in IMAGE_MIME_TYPES:
@@ -135,7 +199,7 @@ class MediaSnapshots:
                 scope_id=scope_id,
                 session_id=session_id,
                 kind="image",
-                source=MEDIA_SOURCE,
+                source=media_service.AGENT_CONTEXT_SOURCE,
                 local_path=str(path),
                 file_name=name or path.name,
                 content_type=mime_type,
