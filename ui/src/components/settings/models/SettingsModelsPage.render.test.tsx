@@ -2862,7 +2862,7 @@ describe('SettingsModelsPage tools region', () => {
     await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
   });
 
-  it('reads the hosted-tools report again after a committed Source change, since its models decide which pairs could run a tool', async () => {
+  it('MH-HOSTED-UI-016: reads the hosted-tools report again after a committed Source change, since its models decide which pairs could run a tool', async () => {
     renderPage([retainedSource]);
     const updatedSource = { ...retainedSource, display_name: 'Updated source' };
     vi.spyOn(modelsApi, 'patchSource').mockResolvedValueOnce({ source: updatedSource, removed_hops: [], interrupted: [] });

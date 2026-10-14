@@ -1440,7 +1440,7 @@ describe('SourceDetailPanel hosted-tool capability chips', () => {
     expect(chips('model-a')).toEqual(['web_search:native', 'x_search:unsupported']);
   });
 
-  it('names the record time, how it was learned, the reason, and until when it holds', async () => {
+  it('MH-HOSTED-UI-017: names the record time, how it was learned, the reason, and until when it holds', async () => {
     renderChips(status({ enabled: false, bound: null }));
     const chip = screen.getByRole('button', { name: /X search · not supported on this Source|X 搜索 · 此供应商不支持/ });
     // The accessible name carries the same facts as the hover detail, each with
@@ -1458,7 +1458,7 @@ describe('SourceDetailPanel hosted-tool capability chips', () => {
     within(detail).getByText(/until 10-20, then the default applies|到 10-20，过期后按默认判断/);
   });
 
-  it('checks a tool again from its chip, with the cost on the action, and answers there when the check is not evidence', async () => {
+  it('MH-HOSTED-UI-013: checks a tool again from its chip, with the cost on the action, and answers there when the check is not evidence', async () => {
     const onProbe = vi.fn(async (): Promise<HostedToolProbeResult> => ({
       tool: 'x_search', source_id: source.id, model_id: 'model-a', call: { outcome: 'inconclusive', error: null }, replay: null,
     }));
@@ -1471,7 +1471,7 @@ describe('SourceDetailPanel hosted-tool capability chips', () => {
     await within(detail).findByText(/the model didn't use the tool|模型没有调用工具/);
   });
 
-  it('moves keyboard focus into the detail on Enter, so its paid re-check can be reached', async () => {
+  it('MH-HOSTED-UI-017: moves keyboard focus into the detail on Enter, so its paid re-check can be reached', async () => {
     renderChips(status({ enabled: false, bound: null }), { onProbe: vi.fn(async () => null) });
     const chip = screen.getByRole('button', { name: /X search · not supported on this Source|X 搜索 · 此供应商不支持/ });
     chip.focus();
@@ -1482,7 +1482,7 @@ describe('SourceDetailPanel hosted-tool capability chips', () => {
     ));
   });
 
-  it('says a re-check\'s cost is unknown when no estimate is known', async () => {
+  it('MH-HOSTED-UI-003: says a re-check\'s cost is unknown when no estimate is known', async () => {
     const read = status({ enabled: false, bound: null });
     const unpriced = { ...read, tools: read.tools.map((tool) => ({ ...tool, candidates: tool.candidates.map((candidate) => ({ ...candidate, probe_estimate: null })) })) };
     renderChips(unpriced, { onProbe: vi.fn(async () => null) });
@@ -1491,7 +1491,7 @@ describe('SourceDetailPanel hosted-tool capability chips', () => {
     within(detail).getByRole('button', { name: /Check again · cost unknown|重新检测 · 费用未知/ });
   });
 
-  it('draws a chip for each reasoning effort the Source refused, even with no tool evidence', () => {
+  it('MH-HOSTED-UI-006: draws a chip for each reasoning effort the Source refused, even with no tool evidence', () => {
     const models = twoModels.models.map((model) => model.id === 'model-b'
       ? { ...model, refused_efforts: [{ effort: 'xhigh', basis: 'observed' as const, observed_at: at, detail: '400 · unsupported reasoning effort', changes_at: null }] }
       : model);
@@ -1500,7 +1500,7 @@ describe('SourceDetailPanel hosted-tool capability chips', () => {
     expect(chips('model-b')).toEqual(['effort:xhigh']);
   });
 
-  it('says when the capability read failed instead of drawing a Source with no evidence', async () => {
+  it('MH-HOSTED-UI-006: says when the capability read failed instead of drawing a Source with no evidence', async () => {
     const retry = vi.fn();
     render(
       <I18nextProvider i18n={i18n}>
@@ -1513,7 +1513,7 @@ describe('SourceDetailPanel hosted-tool capability chips', () => {
     expect(retry).toHaveBeenCalledTimes(1);
   });
 
-  it('adds no capability column when no model has evidence', () => {
+  it('MH-HOSTED-UI-006: adds no capability column when no model has evidence', () => {
     const read = status({ enabled: true, bound: null });
     renderChips({ ...read, tools: read.tools.map((tool) => ({ ...tool, candidates: [] })) });
     expect(document.querySelector('.model-hub-source-table--capabilities')).toBeNull();

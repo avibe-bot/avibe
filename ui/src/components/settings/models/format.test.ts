@@ -121,7 +121,7 @@ describe('formatCost', () => {
 });
 
 describe('formatSmallUsd', () => {
-  it('keeps the first significant digits of a per-call price, and never shows a nonzero price as zero', () => {
+  it('MH-HOSTED-UI-003: keeps the first significant digits of a per-call price, and never shows a nonzero price as zero', () => {
     expect(formatSmallUsd(0.5)).toBe('0.50');
     expect(formatSmallUsd(0.005)).toBe('0.005');
     expect(formatSmallUsd(0.00005)).toBe('0.00005');

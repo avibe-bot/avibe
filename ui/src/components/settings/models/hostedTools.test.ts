@@ -45,7 +45,7 @@ describe('hosted-tool evidence projection', () => {
     for (const [name, call, chip] of cases) expect(evidenceChip(call), name).toEqual(chip);
   });
 
-  it('totals a check only from what the server estimates, and never counts unknown as zero', () => {
+  it('MH-HOSTED-UI-003: totals a check only from what the server estimates, and never counts unknown as zero', () => {
     const at = (estimate: HostedToolCandidate['probe_estimate']): ProbeTarget => ({
       tool: 'web_search',
       candidate: { ...candidate('src_relay001', 'gpt-6-astra', evidence({})), probe_estimate: estimate },
@@ -59,7 +59,7 @@ describe('hosted-tool evidence projection', () => {
     expect(probeTotal([at({ basis: 'included' })])).toEqual({ basis: 'included' });
   });
 
-  it('offers to check every pair with no current answer, and never an image', () => {
+  it('MH-HOSTED-UI-013: offers to check every pair with no current answer, and never an image', () => {
     const verified = evidence({ status: 'verified', basis: 'probe', observed_at: AT });
     const status = {
       tools: [
@@ -78,7 +78,7 @@ describe('hosted-tool evidence projection', () => {
       .toEqual(['web_search:gpt-6-astra', 'web_search:gpt-6-luna', 'web_search:gpt-6-terra']);
   });
 
-  it('gives a Source model one capability per tool with evidence, in catalog order', () => {
+  it('MH-HOSTED-UI-006: gives a Source model one capability per tool with evidence, in catalog order', () => {
     const verified = evidence({ status: 'verified', basis: 'probe', observed_at: AT });
     const refused = evidence({ status: 'unsupported', basis: 'observed', observed_at: AT, detail: '400 · unsupported_tool_type' });
     const status = {

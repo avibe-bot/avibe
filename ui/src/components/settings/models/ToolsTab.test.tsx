@@ -127,7 +127,7 @@ describe('ToolsTab writes', () => {
     expect(onChange).toHaveBeenLastCalledWith('x_search', { enabled: true, executor: null });
   });
 
-  it('cannot turn a tool on until a pair is verified to run it, but can always turn it off', async () => {
+  it('MH-HOSTED-UI-018: cannot turn a tool on until a pair is verified to run it, but can always turn it off', async () => {
     const onChange = renderTab(status([
       tool('web_search', { candidates: [{ source_id: GROK.id, model_id: 'grok-4.6', call: unknown, replay: unknown }] }),
       tool('x_search', { enabled: true, candidates: [{ source_id: GROK.id, model_id: 'grok-4.6', call: unknown, replay: unknown }] }),
@@ -142,7 +142,7 @@ describe('ToolsTab writes', () => {
     expect(onChange).toHaveBeenLastCalledWith('x_search', { enabled: false, executor: null });
   });
 
-  it('keeps a tool off while the server binds no executor for it, and says to choose one when a verified pair exists', async () => {
+  it('MH-HOSTED-UI-018: keeps a tool off while the server binds no executor for it, and says to choose one when a verified pair exists', async () => {
     // Verified, but outside Vibey's Source order: Automatic binds nothing (`bound: null`).
     const onChange = renderTab(status([tool('web_search', {
       candidates: [{ source_id: GROK.id, model_id: 'grok-4.6', call: verified, replay: verified }],
@@ -155,7 +155,7 @@ describe('ToolsTab writes', () => {
     expect(onChange).toHaveBeenLastCalledWith('web_search', { enabled: false, executor: { source_id: GROK.id, model_id: 'grok-4.6' } });
   });
 
-  it('writes a saved executor back only while the server would still accept it', async () => {
+  it('MH-HOSTED-UI-001: writes a saved executor back only while the server would still accept it', async () => {
     // The saved pair left the candidates (its model went away): resolution skips
     // it already, and echoing it would get the whole PUT refused.
     const onChange = renderTab(status([tool('web_search', {
@@ -168,7 +168,7 @@ describe('ToolsTab writes', () => {
     expect(onChange).toHaveBeenLastCalledWith('web_search', { enabled: false, executor: null });
   });
 
-  it('the executor picker offers only verified pairs, and a pick keeps the toggle', async () => {
+  it('MH-HOSTED-UI-001: the executor picker offers only verified pairs, and a pick keeps the toggle', async () => {
     const onChange = renderTab(status([
       tool('web_search', {
         enabled: true,
@@ -196,7 +196,7 @@ describe('ToolsTab writes', () => {
     expect((unverified as HTMLSelectElement).selectedOptions[0]?.textContent).toBe('Available after a check');
   });
 
-  it('a saved executor that is no longer verified stays visible as itself', () => {
+  it('MH-HOSTED-UI-001: a saved executor that is no longer verified stays visible as itself', () => {
     const executor = { source_id: GROK.id, model_id: 'grok-4.6' };
     renderTab(status([tool('web_search', {
       enabled: true,
@@ -216,7 +216,7 @@ describe('ToolsTab writes', () => {
     expect(badge.closest('[data-candidate]')?.getAttribute('data-candidate')).toBe('src_relay001:gpt-6-astra');
   });
 
-  it('keeps a saved executor visible as itself when nothing is verified any more', () => {
+  it('MH-HOSTED-UI-001: keeps a saved executor visible as itself when nothing is verified any more', () => {
     const executor = { source_id: GROK.id, model_id: 'grok-4.6' };
     const onChange = renderTab(status([tool('x_search', {
       enabled: true,
@@ -231,7 +231,7 @@ describe('ToolsTab writes', () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
-  it('holds a tool\'s controls while its write is in flight', () => {
+  it('MH-HOSTED-UI-001: holds a tool\'s controls while its write is in flight', () => {
     renderTab(status([
       tool('web_search', { candidates: [{ source_id: GROK.id, model_id: 'grok-4.6', call: verified, replay: verified }] }),
       tool('x_search', { bound: { source_id: GROK.id, model_id: 'grok-4.6' }, candidates: [{ source_id: GROK.id, model_id: 'grok-4.6', call: verified, replay: verified }] }),
@@ -244,7 +244,7 @@ describe('ToolsTab writes', () => {
 });
 
 describe('ToolsTab claims', () => {
-  it('claims routing only while the tool is on, and shows an off tool\'s executor as a saved preference', () => {
+  it('MH-HOSTED-UI-018: claims routing only while the tool is on, and shows an off tool\'s executor as a saved preference', () => {
     const executor = { source_id: GROK.id, model_id: 'grok-4.6' };
     const candidates = [{ ...executor, call: verified, replay: verified }];
     renderTab(status([
@@ -294,7 +294,7 @@ describe('ToolsTab claims', () => {
     expect(row('Image generation', 'src_relay001:gpt-6.1-sol').textContent).not.toMatch(/\$/);
   });
 
-  it('the image cost copy is the orchestrator-decided Chinese line', () => {
+  it('MH-HOSTED-UI-003: the image cost copy is the orchestrator-decided Chinese line', () => {
     renderTab(status([tool('image_generation', { candidates: [
       { source_id: RELAY.id, model_id: 'gpt-6.1-sol', call: unknown, replay: null },
       { source_id: SUBSCRIPTION.id, model_id: 'gpt-6.1-sol', call: unknown, replay: null },
@@ -305,7 +305,7 @@ describe('ToolsTab claims', () => {
     within(image.querySelector('[data-candidate="src_chatgpt1:gpt-6.1-sol"]') as HTMLElement).getByText('订阅内含');
   });
 
-  it('lets the locale compose a price with its extras', () => {
+  it('MH-HOSTED-UI-003: lets the locale compose a price with its extras', () => {
     renderTab(status([tool('x_search', { candidates: [{
       source_id: GROK.id, model_id: 'grok-4.6', call: unknown, replay: unknown,
       price: { unit: 'post', usd_per_1k: 5, extra: [{ unit: 'profile', usd_per_1k: 10 }], as_of: '2026-10-13', url: 'https://docs.x.ai/pricing' },
@@ -325,7 +325,7 @@ describe('ToolsTab claims', () => {
     expect(screen.queryByRole('status')).toBeNull();
   });
 
-  it('names the Sources that have no native pair for a tool', () => {
+  it('MH-HOSTED-UI-006: names the Sources that have no native pair for a tool', () => {
     renderTab(status([tool('x_search', { candidates: [{ source_id: GROK.id, model_id: 'grok-4.6', call: verified, replay: verified }] })]));
 
     const note = within(card('X search')).getByText(/have no native X search/);
@@ -369,7 +369,7 @@ describe('ToolsTab checks', () => {
     expect(within(card('Image generation')).queryByRole('button', { name: /Check/ })).toBeNull();
   });
 
-  it('runs the header check only after the dialog shows what it sends and costs', async () => {
+  it('MH-HOSTED-UI-013: runs the header check only after the dialog shows what it sends and costs', async () => {
     const onProbe = vi.fn<RunProbe>(async (target) => target.candidate.source_id === RELAY.id
       ? result('verified', target.candidate.source_id, target.candidate.model_id)
       : { ...result('transient', target.candidate.source_id, target.candidate.model_id), call: { outcome: 'transient', error: 'models.source.cooldown.rate_limited' } });
@@ -397,7 +397,7 @@ describe('ToolsTab checks', () => {
     expect(onProbe.mock.calls[2][0]).toMatchObject({ candidate: { source_id: SUBSCRIPTION.id } });
   });
 
-  it('says why a failed check failed, and never shows the server\'s key as text', async () => {
+  it('MH-HOSTED-UI-013: says why a failed check failed, and never shows the server\'s key as text', async () => {
     const failed = (error: string): HostedToolProbeResult => ({ ...result('inconclusive', RELAY.id, 'gpt-6-astra'), call: { outcome: 'transient', error } });
     const onProbe = vi.fn<RunProbe>()
       .mockResolvedValueOnce(failed('models.source.cooldown.rate_limited'))
@@ -413,7 +413,7 @@ describe('ToolsTab checks', () => {
     expect(row.textContent).not.toContain('models.source');
   });
 
-  it('says plainly when a tool cannot be checked yet, instead of asking for a check it cannot run', () => {
+  it('MH-HOSTED-UI-018: says plainly when a tool cannot be checked yet, instead of asking for a check it cannot run', () => {
     renderTab(status([tool('image_generation', { candidates: [{ source_id: RELAY.id, model_id: 'gpt-6.1-sol', call: unknown, replay: null }] })]));
     const image = card('Image generation');
     within(image).getByText('Off · checks for this tool come in a later update');
@@ -421,12 +421,12 @@ describe('ToolsTab checks', () => {
     expect(within(image).queryByRole('button', { name: /Check/ })).toBeNull();
   });
 
-  it('says a check\'s cost is unknown before it runs, when no estimate is known', () => {
+  it('MH-HOSTED-UI-003: says a check\'s cost is unknown before it runs, when no estimate is known', () => {
     renderTab(status([tool('web_search', { candidates: [{ source_id: CLAUDE.id, model_id: 'claude-opus-5-5', call: unknown, replay: unknown }] })]));
     within(card('Web search')).getByRole('button', { name: 'Check · cost unknown' });
   });
 
-  it('says an enabled tool with nothing verified fails its calls, instead of naming a proxy', () => {
+  it('MH-HOSTED-UI-018: says an enabled tool with nothing verified fails its calls, instead of naming a proxy', () => {
     renderTab(status([tool('x_search', {
       enabled: true,
       candidates: [{ source_id: GROK.id, model_id: 'grok-4.6', call: { ...verified, status: 'unknown', stale: 'wire' }, replay: unknown }],

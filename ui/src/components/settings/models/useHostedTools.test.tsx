@@ -64,7 +64,7 @@ describe('useHostedTools ordering', () => {
     expect(shown(result.current.read)).toBe(true);
   });
 
-  it('runs writes one at a time, so each answer lands in the order the server committed them', async () => {
+  it('MH-HOSTED-UI-007: runs writes one at a time, so each answer lands in the order the server committed them', async () => {
     vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValue(status(false));
     const first = deferred<HostedToolsStatus>();
     const second = deferred<HostedToolsStatus>();
@@ -89,7 +89,7 @@ describe('useHostedTools ordering', () => {
     expect(shown(result.current.read)).toBe(false);
   });
 
-  it('drops a read that was already out when a write started', async () => {
+  it('MH-HOSTED-UI-007: drops a read that was already out when a write started', async () => {
     const first = deferred<HostedToolsStatus>();
     vi.spyOn(modelsApi, 'getHostedTools').mockReturnValueOnce(first.promise);
     vi.spyOn(modelsApi, 'putHostedTool').mockResolvedValue(status(true));
@@ -102,7 +102,7 @@ describe('useHostedTools ordering', () => {
     expect(shown(result.current.read)).toBe(true);
   });
 
-  it('re-reads after the newest write fails, because a lost answer may have committed', async () => {
+  it('MH-HOSTED-UI-007: re-reads after the newest write fails, because a lost answer may have committed', async () => {
     const get = vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValue(status(false));
     vi.spyOn(modelsApi, 'putHostedTool').mockRejectedValue(new Error('offline'));
     const { result } = renderHook(() => useHostedTools(true), { wrapper });
@@ -114,7 +114,7 @@ describe('useHostedTools ordering', () => {
     expect(shown(result.current.read)).toBe(true);
   });
 
-  it('re-reads when the open Source changes, since an edit can drop its evidence', async () => {
+  it('MH-HOSTED-UI-007: re-reads when the open Source changes, since an edit can drop its evidence', async () => {
     const get = vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValue(status(false));
     const { rerender } = renderHook(({ revision }) => useHostedTools(true, revision), {
       wrapper,
@@ -125,7 +125,7 @@ describe('useHostedTools ordering', () => {
     await waitFor(() => expect(get).toHaveBeenCalledTimes(2));
   });
 
-  it('keeps the status a probe answered with when the read after it fails', async () => {
+  it('MH-HOSTED-UI-007: keeps the status a probe answered with when the read after it fails', async () => {
     // Before: unchecked (shown here as off). The probe's answer: the tool's state after it.
     vi.spyOn(modelsApi, 'getHostedTools')
       .mockResolvedValueOnce(status(false))
@@ -147,7 +147,7 @@ describe('useHostedTools ordering', () => {
     await waitFor(() => expect(shown(result.current.read)).toBe(true));
   });
 
-  it('reads the record before calling a probe unanswered when its answer was lost', async () => {
+  it('MH-HOSTED-UI-013: reads the record before calling a probe unanswered when its answer was lost', async () => {
     const before = { status: 'unknown' as const, stale: null, basis: null, observed_at: null, detail: null, changes_at: null };
     const candidate = {
       source_id: 'src_relay001', model_id: 'gpt-6-astra', billing: 'metered' as const, price: null, probe_estimate: null, call: before, replay: null,
@@ -171,7 +171,7 @@ describe('useHostedTools ordering', () => {
     expect(outcome).toMatchObject({ call: { outcome: 'verified' } });
   });
 
-  it('lands the status read for a lost probe answer, even when the read after it fails', async () => {
+  it('MH-HOSTED-UI-007: lands the status read for a lost probe answer, even when the read after it fails', async () => {
     const before = { status: 'unknown' as const, stale: null, basis: null, observed_at: null, detail: null, changes_at: null };
     const candidate = {
       source_id: 'src_relay001', model_id: 'gpt-6-astra', billing: 'metered' as const, price: null, probe_estimate: null, call: before, replay: null,
@@ -196,7 +196,7 @@ describe('useHostedTools ordering', () => {
     await waitFor(() => expect(shown(result.current.read)).toBe(true));
   });
 
-  it('shows no status of the previous Source identity while the new identity\'s read fails', async () => {
+  it('MH-HOSTED-UI-007: shows no status of the previous Source identity while the new identity\'s read fails', async () => {
     vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValueOnce(status(true)).mockRejectedValue(new Error('offline'));
     const { result, rerender } = renderHook(({ revision }) => useHostedTools(true, revision), {
       wrapper,
@@ -210,7 +210,7 @@ describe('useHostedTools ordering', () => {
     expect(shown(result.current.read)).toBeNull();
   });
 
-  it('keeps a tool pending until the read reconciling its lost write lands', async () => {
+  it('MH-HOSTED-UI-007: keeps a tool pending until the read reconciling its lost write lands', async () => {
     const reconcile = deferred<HostedToolsStatus>();
     vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValueOnce(status(false)).mockReturnValueOnce(reconcile.promise);
     vi.spyOn(modelsApi, 'putHostedTool').mockRejectedValue(new Error('connection reset'));
@@ -228,7 +228,7 @@ describe('useHostedTools ordering', () => {
     expect(shown(result.current.read)).toBe(true);
   });
 
-  it('drops a write answer asked under another Source identity', async () => {
+  it('MH-HOSTED-UI-007: drops a write answer asked under another Source identity', async () => {
     const put = deferred<HostedToolsStatus>();
     vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValueOnce(status(false)).mockRejectedValue(new Error('offline'));
     vi.spyOn(modelsApi, 'putHostedTool').mockReturnValue(put.promise);
@@ -247,7 +247,7 @@ describe('useHostedTools ordering', () => {
     expect(shown(result.current.read)).toBeNull();
   });
 
-  it('reads a verdict the status does not carry as not verified, with why', async () => {
+  it('MH-HOSTED-UI-013: reads a verdict the status does not carry as not verified, with why', async () => {
     const unknown = { status: 'unknown' as const, stale: null, basis: null, observed_at: null, detail: null, changes_at: null };
     const candidate = {
       source_id: 'src_relay001', model_id: 'gpt-6-astra', billing: 'metered' as const, price: null, probe_estimate: null, call: unknown, replay: null,
