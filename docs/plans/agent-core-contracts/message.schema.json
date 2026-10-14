@@ -846,7 +846,7 @@
         "mime"
       ],
       "additionalProperties": false,
-      "description": "A generated image saved as a local file. Image bytes are never stored in a message.",
+      "description": "A generated image saved as a local file. Image bytes are never stored in a message; `bytes` is the file's size.",
       "properties": {
         "path": {
           "type": "string",
@@ -865,6 +865,10 @@
           "minimum": 1
         },
         "height": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "bytes": {
           "type": "integer",
           "minimum": 1
         }

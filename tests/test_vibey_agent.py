@@ -20,6 +20,7 @@ dispatcher), with a scripted provider and test-owned tools:
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -58,12 +59,14 @@ from core.agent_core.messages import (
     ToolResultMessage,
     UserMessage,
     text,
+    message_to_dict,
 )
 from core.agent_core.tools.base import CallInstance, JobStatus, ToolResult
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.services.agent_steering import ActiveSteerTarget, SteerOutcome, SteerRequest
 from modules.agents.vibey import VibeyAgent
 from modules.agents.vibey.errors import _KIND_KEYS, error_key
+from modules.agents.vibey.media import MediaSnapshots
 from modules.agents.vibey.tools import ToolSuite, local_tool_suite
 from modules.agents.base import AgentRequest
 from modules.agents.model_hub import ModelHubLaunch
@@ -2622,6 +2625,69 @@ async def test_a_proxied_hosted_call_runs_on_the_bound_executor_and_keeps_its_re
     assert sent["type"] == "tool_result" and seen in json.dumps(sent)
 
 
+async def test_a_proxied_image_is_saved_through_the_media_sink_and_its_record_names_the_file(
+    engine, session, tmp_path, published
+) -> None:
+    """MH-HOSTED-VIBEY-007 (vibey-hosted-tools.md §7.3, item 27): the executor answers a proxied image's bytes beside
+    its record; Vibey saves them through the same sink as a native image, the record lists the file, and no base64
+    reaches the transcript or the model."""
+    import httpx
+
+    from modules.agents.vibey.models import registry_providers
+
+    served = json.dumps(
+        {"provider": "anthropic", "api": "anthropic", "model": "claude-opus-5-5", "source": "src_upstream01"},
+        separators=(",", ":"),
+    )
+    call = '{"type":"tool_use","id":"toolu_1","name":"image_generation","input":{"prompt":"a lighthouse"}}'
+    replies = [
+        _anthropic_reply(call, stop_reason="tool_use"),
+        _anthropic_reply('{"type":"text","text":"here it is"}', stop_reason="end_turn"),
+    ]
+    jpeg = b"\xff\xd8\xff\xe0" + bytes(range(256)) * 8
+    encoded = base64.b64encode(jpeg).decode()
+    answer = {
+        "record": {"status": "completed", "sources": []},
+        "execution": {
+            "mode": "proxy",
+            "executor_origin": {"provider": "openai", "api": "openai_responses", "model": "gpt-image"},
+            "executor_source_id": "src_executor01",
+            "executor_billing": "metered",
+        },
+        "generation": {"revised_prompt": "A lighthouse at dusk", "size": "1536x1024", "quality": "high"},
+        "images": [{"mime": "image/jpeg", "data": encoded}],
+    }
+    models: list[dict] = []
+
+    def gateway(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/vibey/v1/hosted-tools/image_generation":
+            return httpx.Response(200, json=answer)
+        models.append(json.loads(request.content))
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream", "x-avibe-served-hop": served}, text=replies.pop(0)
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        harness = _Harness(
+            engine,
+            tmp_path,
+            "telegram",
+            [],
+            providers=registry_providers(media_loader=None, client=client),
+            gateway_client=client,
+        )
+        harness.controller.hub_hosted_tools = {"image_generation": _PROXY_IMAGE}
+        await harness.agent.handle_message(harness.request("paint a lighthouse"))
+
+    result = next(row.message for row in await harness.context_rows() if isinstance(row.message, ToolResultMessage))
+    (image,) = result.hosted.record.images
+    assert not result.is_error and result.hosted.record.status == "completed"
+    assert Path(image.path).read_bytes() == jpeg
+    assert (image.mime, image.width, image.height, image.bytes) == ("image/jpeg", 1536, 1024, len(jpeg))
+    assert f"Image saved: {image.path}" in result.content[0].text
+    assert encoded not in json.dumps(models) and encoded not in json.dumps(message_to_dict(result))
+
+
 _NATIVE_SEARCH = {"mode": "native", "declaration": {"type": "web_search"}, "include": [], "executor": None, "replay": False}
 _PROXY_IMAGE = {"mode": "proxy", "executor": {"source_id": "src_executor01", "model_id": "gpt-image"}, "replay": False}
 
@@ -2911,6 +2977,36 @@ async def test_images_read_together_reach_the_model_with_their_own_calls_in_call
         (image,) = [block for block in message.content if isinstance(block, ImageBlock)]
         assert image.name == f"{name}.png"
         assert (await harness.agent.media.load(image.media_token))[0] == pictures[name]
+
+
+async def test_a_generated_image_is_kept_as_an_immutable_file_its_bytes_name_and_type(tmp_path):
+    """MH-HOSTED-VIBEY-007, §7.3: the media sink keeps a generated image as a content-addressed file, typed by what its
+    bytes are, reused only while it still holds them, and refuses anything that is not a supported image."""
+
+    media = MediaSnapshots(None, tmp_path / "media")  # type: ignore[arg-type]
+    jpeg = b"\xff\xd8\xff\xe0" + bytes(range(256)) * 8
+
+    image = await media.save_image(base64.b64encode(jpeg).decode())
+    again = await media.save_image(base64.b64encode(jpeg).decode())
+
+    assert image == again and image.mime == "image/jpeg" and image.bytes == len(jpeg)
+    path = Path(image.path)
+    assert path.is_absolute() and path.parent == tmp_path / "media" and path.read_bytes() == jpeg
+    # Its owner can change it: a changed file is written again, never reused.
+    path.write_bytes(b"changed by an agent's shell")
+    assert await media.save_image(base64.b64encode(jpeg).decode()) == image and path.read_bytes() == jpeg
+    # A link put in its place is replaced by one rename, never followed: its target keeps its bytes and its mode.
+    secret = tmp_path / "secret.key"
+    secret.write_bytes(b"key")
+    os.chmod(secret, 0o600)
+    path.unlink()
+    path.symlink_to(secret)
+    assert await media.save_image(base64.b64encode(jpeg).decode()) == image
+    assert not path.is_symlink() and path.read_bytes() == jpeg
+    assert secret.read_bytes() == b"key" and secret.stat().st_mode & 0o777 == 0o600
+    for encoded in ("@@@ not base64 @@@", base64.b64encode(b"plain text, not an image").decode()):
+        with pytest.raises(ValueError):
+            await media.save_image(encoded)
 
 
 @pytest.mark.parametrize("state", ["exited", "running"])

@@ -59,7 +59,7 @@
     "size": "1536x1024",
     "quality": "medium",
     "sources": [],
-    "images": [{ "path": "/media/3f2a.png", "mime": "image/png", "width": 1536, "height": 1024 }]
+    "images": [{ "path": "/media/3f2a.png", "mime": "image/png", "width": 1536, "height": 1024, "bytes": 1993000 }]
   },
   "proxy_failed": {
     "version": 1,

@@ -139,6 +139,8 @@ def _image_payload(image: HostedImage) -> dict[str, Any]:
         out["width"] = image.width
     if image.height is not None:
         out["height"] = image.height
+    if image.bytes is not None:
+        out["bytes"] = image.bytes
     return out
 
 

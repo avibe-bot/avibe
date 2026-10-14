@@ -649,8 +649,9 @@ far:
 
 - **Requests.** A hosted tool's canonical spec is sent as the native declaration on a hop whose route is native, with
   its Responses `include` values and the pin header on that request.
-- **Parsing** for `web_search` and `x_search`: native results become `HostedToolBlock`s, text citations become
-  `TextBlock.citations`, and response-level facts go to `hosted_summary`.
+- **Parsing** for `web_search`, `x_search` and `image_generation`: native results become `HostedToolBlock`s, text
+  citations become `TextBlock.citations`, and response-level facts go to `hosted_summary`. A generated image is saved
+  to a file through the adapter's `MediaSink` as its done item is parsed (Images row).
 - **Portable history.** A finished response's hosted calls become synthetic same-named calls and results, split around
   the assistant message. There is one call per hosted block, and nothing folds. Each result shows its status line
   first and then every line attached to it. A response its
@@ -674,9 +675,11 @@ far:
   request reaches the loop as usual.
 
 - **Proxy.** A hosted tool that a hop does not run natively is its canonical function, and a call to it runs on the
-  gateway's executor bound for the Turn. The result keeps the record on `ToolResultMessage.hosted`.
+  gateway's executor bound for the Turn. The result keeps the record on `ToolResultMessage.hosted`. A proxied image's
+  base64 comes back beside its record and is saved through the same `MediaSink` as a native one; the record lists the
+  file.
 
-Still to come: `pause_turn` and images.
+Still to come: `pause_turn`.
 Until `pause_turn` lands, the Anthropic stop table above still maps it to `stop`. An Anthropic citation covers its
 whole text block, so it carries no range.
 
@@ -688,7 +691,7 @@ whole text block, so it carries no range.
 | Response-level facts → `AssistantMessage.hosted_summary` | `usage.server_tool_use` counts | xAI `cost_in_usd_ticks` (reported once per response), `server_side_tool_usage_details` counts, and the X-search `url_citation`s as `cited_sources` | — |
 | Citations → `TextBlock.citations` | text-block `citations[]` (`web_search_result_location`: `url`, `title`, `cited_text`) | `output_text.annotations[]` of type `url_citation` (`url`, `title`, `start_index`, `end_index`) | — |
 | Same-Source replay (target hop is `native.source_id`, same origin, and `hosted_tools[tool].replay` is true now) | `native.payload` blocks verbatim, in place; citations not sent | `native.payload` items verbatim, in place; annotations not sent; never for `image_generation` | — |
-| Images | — | `image_generation_call` → file; history and model context hold the text path record (path, revised prompt, size, mode, cost); `result` base64 never stored; duplicate `result` in `response.completed` not decoded; the image-declaring stream gets a 32 MiB line cap | — |
+| Images | — | `image_generation_call` → a file saved through the `MediaSink` from its `output_item.done`. The record lists it as a `HostedImage`: absolute path, mime type sniffed from its bytes, the item's size as width and height, and the file's byte count. The action is `generate` with the revised prompt and the resolved size and quality. `native.payload` holds the path in place of `result`, so no base64 is ever stored. `partial_image` previews are skipped before parsing. The duplicate `result` in the terminal response is never decoded, and a call that saved no image is `failed`. The model reads the path record, and a file over `read`'s inline limit says so. A stream that declares `image_generation` gets the 32 MiB event cap as its line cap; others keep 8 MiB. | — |
 | Other-origin replay | assistant `tool_use(name=<tool>, input=<per-action arguments>)` + user `tool_result(record as text)`, splitting the assistant message; a `failed`/`incomplete` record sets `is_error: true` | `function_call(name=<tool>, arguments)` + `function_call_output(record as text)`; a failed record's text starts `[<tool> failed: <error>]` | assistant `tool_calls` + `tool` message, failure as in Responses |
 | Pinning (any protocol) | a request with a native declaration or a verbatim `native.payload` carries `x-avibe-pin-source: <hop source_id>`. A continuation whose calls go back verbatim also carries `x-avibe-pin-model: <its served model>`, the hop's own model. A `409` `model_hub_pin_unavailable` / `pin_unavailable` answer is not shown: the same request is rendered again in portable form (proxy declarations, synthetic history, in-place text) and sent unpinned, exactly once. | same | — |
 | Citations at delivery | `TextBlock.citations` → `core/citations.py` builder → Markdown links + Web sidecar | same | — |

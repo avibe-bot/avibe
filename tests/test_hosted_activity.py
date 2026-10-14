@@ -113,7 +113,7 @@ def native_image():
                 action=HostedAction(type="generate", prompt=PROMPT, size="1536x1024", quality="medium"),
                 record=HostedRecord(
                     status="completed",
-                    images=(HostedImage(path="/media/3f2a.png", mime="image/png", width=1536, height=1024),),
+                    images=(HostedImage(path="/media/3f2a.png", mime="image/png", width=1536, height=1024, bytes=1993000),),
                 ),
                 native=_native("src_relaygpt1"),
             ),

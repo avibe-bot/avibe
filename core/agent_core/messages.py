@@ -301,19 +301,20 @@ class HostedSource:
 
 @dataclass(frozen=True)
 class HostedImage:
-    """A generated image saved as a local file; the model sees only this record."""
+    """A generated image saved as a local file; the model sees only this record. ``bytes`` is the file's size."""
 
     path: str
     mime: str
     width: Optional[int] = None
     height: Optional[int] = None
+    bytes: Optional[int] = None
 
     def __post_init__(self) -> None:
         _require_text(self.path, "image path")
         _require(self.mime, str, "image mime")
         if self.mime not in IMAGE_MIME_TYPES:
             raise ValueError(f"unsupported image type: {self.mime}")
-        for name in ("width", "height"):
+        for name in ("width", "height", "bytes"):
             value = getattr(self, name)
             _require(value, int, f"image {name}", optional=True)
             if value is not None and value < 1:
@@ -673,6 +674,7 @@ def _record_to_dict(record: HostedRecord) -> dict[str, Any]:
             item: dict[str, Any] = {"path": image.path, "mime": image.mime}
             _put(item, "width", image.width)
             _put(item, "height", image.height)
+            _put(item, "bytes", image.bytes)
             images.append(item)
         out["images"] = images
     return out
@@ -683,7 +685,9 @@ def _record_from_dict(data: Any) -> HostedRecord:
     images = None
     if "images" in f:
         images = tuple(
-            HostedImage(**_read(item, "hosted image", {"path": str, "mime": str}, {"width": int, "height": int}))
+            HostedImage(
+                **_read(item, "hosted image", {"path": str, "mime": str}, {"width": int, "height": int, "bytes": int})
+            )
             for item in f["images"]
         )
     return HostedRecord(
