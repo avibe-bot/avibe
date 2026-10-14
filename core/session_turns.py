@@ -552,6 +552,8 @@ class ComputerUseAdmission:
     """One Computer Use request admitted for one live Avibe Session."""
 
     session_id: str
+    turn: Turn = field(repr=False, compare=False)
+    logical_turn_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -4514,6 +4516,8 @@ class SessionTurnManager:
         return (
             ComputerUseAdmission(
                 session_id=normalized_session_id,
+                turn=turn,
+                logical_turn_id=turn.logical_turn_id,
             ),
             "",
         )

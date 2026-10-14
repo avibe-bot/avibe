@@ -189,6 +189,16 @@ def create_app(
         controller.session_turns = manager
     manager.bind_context(_build_session_context)
 
+    from core.computer_script_sessions import (
+        ComputerScriptSessionError,
+        ComputerScriptSessionManager,
+    )
+
+    computer_script_sessions = getattr(controller, "computer_script_sessions", None)
+    if not isinstance(computer_script_sessions, ComputerScriptSessionManager):
+        computer_script_sessions = ComputerScriptSessionManager(manager)
+        controller.computer_script_sessions = computer_script_sessions
+
     # The turn registry (``session_id -> Turn``) is owned by the manager and tests
     # inspect it via ``app.state``. Flush intents live on each ``Turn`` (set by
     # ``manager.cancel`` / ``manager.send_now``), not in side sets here.
@@ -726,6 +736,134 @@ def create_app(
             "tool": tool,
             "session_id": caller_session_id,
             "result": result,
+        }
+
+    def _computer_script_error(exc: ComputerScriptSessionError) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "ok": False,
+                "error": exc.code,
+                "params": {},
+            },
+        )
+
+    @app.post("/internal/computer-script/open")
+    async def _computer_script_open(request: Request) -> Any:
+        payload = await _safe_json(request)
+        if set(payload) != {"caller_session_id", "timeout_seconds"}:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "invalid_computer_script_open_request",
+                    "params": {},
+                },
+            )
+        caller_session_id = payload.get("caller_session_id")
+        if not isinstance(caller_session_id, str) or not caller_session_id.strip():
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "invalid_computer_script_open_request",
+                    "params": {},
+                },
+            )
+        try:
+            opened = computer_script_sessions.open(
+                caller_session_id.strip(),
+                payload.get("timeout_seconds"),
+            )
+        except ComputerScriptSessionError as exc:
+            return _computer_script_error(exc)
+        return {"ok": True, **opened}
+
+    @app.post("/internal/computer-script/request")
+    async def _computer_script_request(request: Request) -> Any:
+        payload = await _safe_json(request)
+        if set(payload) != {"connection_token", "tool", "arguments"}:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "invalid_computer_script_request",
+                    "params": {},
+                },
+            )
+        connection_token = payload.get("connection_token")
+        tool = payload.get("tool")
+        arguments = payload.get("arguments")
+        if (
+            not isinstance(connection_token, str)
+            or not connection_token
+            or not isinstance(tool, str)
+            or not isinstance(arguments, dict)
+        ):
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "invalid_computer_script_request",
+                    "params": {},
+                },
+            )
+        try:
+            caller_session_id, forwarded = (
+                computer_script_sessions.prepare_tool_request(
+                    connection_token,
+                    tool,
+                    arguments,
+                )
+            )
+        except ComputerScriptSessionError as exc:
+            return _computer_script_error(exc)
+
+        computer_server = getattr(controller, "computer_use_server", None)
+        if computer_server is None:
+            from core.computer_server import ComputerUseServer
+
+            try:
+                computer_server = ComputerUseServer()
+            except Exception:
+                logger.exception("Computer Use server initialization failed")
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "ok": False,
+                        "error": "computer_use_unavailable",
+                        "params": {},
+                    },
+                )
+            controller.computer_use_server = computer_server
+
+        result = await computer_server.call_tool(tool, forwarded)
+        return {
+            "ok": result.get("isError") is not True,
+            "tool": tool,
+            "session_id": caller_session_id,
+            "result": result,
+        }
+
+    @app.post("/internal/computer-script/close")
+    async def _computer_script_close(request: Request) -> Any:
+        payload = await _safe_json(request)
+        connection_token = payload.get("connection_token")
+        if set(payload) != {"connection_token"} or not isinstance(
+            connection_token,
+            str,
+        ):
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "invalid_computer_script_close_request",
+                    "params": {},
+                },
+            )
+        return {
+            "ok": True,
+            "closed": computer_script_sessions.close(connection_token),
         }
 
     @app.post("/internal/show-access/settings-read")

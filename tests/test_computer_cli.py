@@ -58,6 +58,7 @@ def _bind_socket(path: Path) -> socket.socket:
 
 def test_parser_covers_the_allowlisted_driver_operations_without_session_id() -> None:
     commands = [
+        (["computer", "run", "./script.mjs"], ("run",)),
         (["computer", "observe", "apps"], ("observe", "apps")),
         (["computer", "observe", "windows"], ("observe", "windows")),
         (["computer", "observe", "window"], ("observe", "window")),
@@ -85,7 +86,8 @@ def test_parser_covers_the_allowlisted_driver_operations_without_session_id() ->
         else:
             command_path = (args.computer_command,)
         assert command_path == path
-        assert tool_for_command(path)
+        if path != ("run",):
+            assert tool_for_command(path)
 
     with pytest.raises(SystemExit):
         parser.parse_args(["computer", "click", "--session-id", "manual"])
@@ -117,6 +119,9 @@ def test_packaged_skill_examples_parse_and_match_the_pinned_driver_schema() -> N
         argv = shlex.split(command)
         assert argv[:2] == ["vibe", "computer"]
         args = parser.parse_args(argv[1:])
+        if args.computer_command == "run":
+            assert args.file.endswith(".mjs")
+            continue
         if args.computer_command == "observe":
             path = ("observe", args.computer_observe_command)
         elif args.computer_command == "clipboard":
@@ -258,8 +263,89 @@ def test_cmd_computer_binds_the_caller_session_and_prints_structured_result(
     assert payload["result"]["content"][0]["type"] == "text"
 
 
+def test_cmd_computer_run_passes_string_arguments_and_prints_json(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    monkeypatch.setenv("AVIBE_SESSION_ID", "ses-cli")
+    captured: dict = {}
+
+    def fake_run_computer_script(**kwargs):
+        captured.update(kwargs)
+        return {"mailbox": "Inbox", "count": "01"}
+
+    monkeypatch.setattr(
+        "vibe.computer_script_runner.run_computer_script",
+        fake_run_computer_script,
+    )
+    args = cli.build_parser().parse_args(
+        [
+            "computer",
+            "run",
+            "./inspect.mjs",
+            "--arg",
+            "mailbox=Inbox",
+            "--arg",
+            "count=01",
+        ]
+    )
+    assert cli.cmd_computer(args) == 0
+    assert captured == {
+        "caller_session_id": "ses-cli",
+        "script_file": "./inspect.mjs",
+        "arg_values": ["mailbox=Inbox", "count=01"],
+    }
+    assert json.loads(capsys.readouterr().out) == {
+        "count": "01",
+        "mailbox": "Inbox",
+    }
+
+
+def test_cmd_computer_run_localizes_missing_private_node(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibe.computer_script_runner import ComputerScriptRunnerError
+
+    monkeypatch.setenv("AVIBE_SESSION_ID", "ses-cli")
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
+
+    def unavailable(**_kwargs):
+        raise ComputerScriptRunnerError(
+            "computer.cli.error.scriptNodeUnavailable",
+            code="computer_script_unavailable",
+        )
+
+    monkeypatch.setattr(
+        "vibe.computer_script_runner.run_computer_script",
+        unavailable,
+    )
+    args = cli.build_parser().parse_args(["computer", "run", "./inspect.mjs"])
+    with pytest.raises(
+        cli.TaskCliError,
+        match="Avibe 桌面应用随附的 Node runtime",
+    ) as exc_info:
+        cli.cmd_computer(args)
+    assert exc_info.value.code == "computer_script_unavailable"
+
+
 def test_computer_cli_error_translations_exist_in_all_supported_languages() -> None:
-    keys = {*_COMPUTER_ERROR_I18N_KEYS.values(), "computer.cli.error.screenshotMissing"}
+    keys = {
+        *_COMPUTER_ERROR_I18N_KEYS.values(),
+        "computer.cli.error.screenshotMissing",
+        "computer.cli.error.scriptArgNameValue",
+        "computer.cli.error.scriptArgDuplicate",
+        "computer.cli.error.scriptArgFile",
+        "computer.cli.error.scriptFile",
+        "computer.cli.error.scriptFileType",
+        "computer.cli.error.scriptNodeUnavailable",
+        "computer.cli.error.scriptSdkUnavailable",
+        "computer.cli.error.scriptOpenRejected",
+        "computer.cli.error.scriptRuntime",
+        "computer.cli.error.scriptRuntimeExit",
+        "computer.cli.error.scriptRuntimeInvalid",
+        "computer.cli.error.scriptTimedOut",
+        "computer.cli.error.scriptFailed",
+    }
     for catalog_path in sorted(Path("vibe/i18n").glob("*.json")):
         catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
         for key in keys:

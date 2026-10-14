@@ -1,0 +1,1111 @@
+from __future__ import annotations
+
+import base64
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+from pathlib import Path
+import shutil
+import socket
+import subprocess
+import tempfile
+import threading
+import time
+from typing import Iterator
+from unittest.mock import patch
+
+import httpx
+import pytest
+
+from vibe import computer_script_runner
+from vibe.computer_script_runner import (
+    ComputerScriptRunnerError,
+    parse_script_arguments,
+)
+from vibe.internal_client import (
+    computer_script_close_sync,
+    computer_script_endpoint_payload,
+    computer_script_open_sync,
+    resolve_computer_script_endpoint,
+)
+
+
+NODE = shutil.which("node")
+SDK_DIRECTORY = Path("vibe/computer_sdk").resolve()
+
+
+def _result(payload: dict, *, is_error: bool = False, image: bool = False) -> dict:
+    content: list[dict] = [
+        {"type": "text", "text": "Structured content:\n" + json.dumps(payload)}
+    ]
+    if image:
+        content.append(
+            {
+                "type": "image",
+                "data": base64.b64encode(b"png-fixture").decode("ascii"),
+                "mimeType": "image/png",
+            }
+        )
+    return {
+        "ok": not is_error,
+        "result": {
+            "isError": is_error,
+            "structuredContent": payload,
+            "content": content,
+        },
+    }
+
+
+@contextmanager
+def _fake_controller(
+    *,
+    click_error: str | None = None,
+    duplicate_within: bool = False,
+    dynamic_elements_after_action: bool = False,
+    response_delay_by_tool: dict[str, float] | None = None,
+    windows: list[dict] | None = None,
+) -> Iterator[tuple[ThreadingHTTPServer, list[dict]]]:
+    requests: list[dict] = []
+    observations = 0
+    clicks = 0
+    connection_ids: set[int] = set()
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self) -> None:  # noqa: N802
+            nonlocal observations, clicks
+            length = int(self.headers.get("Content-Length", "0"))
+            payload = json.loads(self.rfile.read(length))
+            connection_ids.add(id(self.connection))
+            requests.append(
+                {
+                    "path": self.path,
+                    "payload": payload,
+                    "authorization": self.headers.get("Authorization"),
+                }
+            )
+            if self.path == "/internal/computer-script/close":
+                body = {"ok": True, "closed": True}
+            else:
+                tool = payload["tool"]
+                delay = (response_delay_by_tool or {}).get(tool, 0)
+                if delay:
+                    time.sleep(delay)
+                if tool == "list_apps":
+                    body = _result(
+                        {
+                            "apps": [
+                                {
+                                    "pid": 41,
+                                    "name": "Mail",
+                                    "bundle_id": "com.apple.mail",
+                                    "running": True,
+                                    "active": False,
+                                }
+                            ]
+                        }
+                    )
+                elif tool == "list_windows":
+                    body = _result(
+                        {
+                            "windows": windows
+                            or [
+                                {
+                                    "pid": 41,
+                                    "window_id": 9,
+                                    "app_name": "Mail",
+                                    "title": "New Message",
+                                    "bounds": {
+                                        "x": 0,
+                                        "y": 0,
+                                        "width": 800,
+                                        "height": 600,
+                                    },
+                                    "is_on_screen": True,
+                                    "z_index": 1,
+                                }
+                            ],
+                        }
+                    )
+                elif tool == "get_window_state":
+                    observations += 1
+                    elements = [
+                        {
+                            "element_index": 1,
+                            "element_token": f"group-{observations}",
+                            "role": "AXGroup",
+                            "label": "Composer",
+                            "value": None,
+                            "parent_index": None,
+                            "depth": 0,
+                        },
+                        {
+                            "element_index": 2,
+                            "element_token": f"send-{observations}",
+                            "role": "AXButton",
+                            "label": "Send",
+                            "value": None,
+                            "parent_index": 1,
+                            "depth": 1,
+                        },
+                        {
+                            "element_index": 3,
+                            "element_token": f"subject-{observations}",
+                            "role": "AXTextField",
+                            "label": "Subject",
+                            "value": "Quarterly report",
+                            "parent_index": 1,
+                            "depth": 1,
+                        },
+                        {
+                            "element_index": 4,
+                            "element_token": f"send-alt-{observations}",
+                            "role": "AXButton",
+                            "label": "Send",
+                            "value": None,
+                            "parent_index": 1,
+                            "depth": 1,
+                        },
+                    ]
+                    if dynamic_elements_after_action:
+                        elements = [
+                            {
+                                "element_index": 1,
+                                "element_token": f"group-{observations}",
+                                "role": "AXGroup",
+                                "label": "Items",
+                                "value": None,
+                                "parent_index": None,
+                                "depth": 0,
+                            },
+                            {
+                                "element_index": 2,
+                                "element_token": f"add-{observations}",
+                                "role": "AXButton",
+                                "label": "Add",
+                                "value": None,
+                                "parent_index": 1,
+                                "depth": 1,
+                            },
+                            {
+                                "element_index": 3,
+                                "element_token": f"delete-a-{observations}",
+                                "role": "AXButton",
+                                "label": "Delete",
+                                "value": None,
+                                "parent_index": 1,
+                                "depth": 1,
+                            },
+                        ]
+                        if clicks >= 2:
+                            elements.append(
+                                {
+                                    "element_index": 4,
+                                    "element_token": f"delete-b-{observations}",
+                                    "role": "AXButton",
+                                    "label": "Delete",
+                                    "value": None,
+                                    "parent_index": 1,
+                                    "depth": 1,
+                                }
+                            )
+                    if duplicate_within:
+                        elements = [
+                            {
+                                "element_index": 1,
+                                "element_token": f"group-a-{observations}",
+                                "role": "AXGroup",
+                                "label": "Composer",
+                                "value": None,
+                                "parent_index": None,
+                                "depth": 0,
+                            },
+                            {
+                                "element_index": 2,
+                                "element_token": f"group-b-{observations}",
+                                "role": "AXGroup",
+                                "label": "Composer",
+                                "value": None,
+                                "parent_index": None,
+                                "depth": 0,
+                            },
+                            {
+                                "element_index": 3,
+                                "element_token": f"send-{observations}",
+                                "role": "AXButton",
+                                "label": "Send",
+                                "value": None,
+                                "parent_index": 1,
+                                "depth": 1,
+                            },
+                        ]
+                    if (
+                        payload["arguments"].get("include_accessibility_tree")
+                        is False
+                    ):
+                        elements = None
+                    body = _result(
+                        {
+                            "pid": 41,
+                            "window_id": 9,
+                            **({"elements": elements} if elements is not None else {}),
+                        },
+                        image=True,
+                    )
+                elif tool == "click":
+                    clicks += 1
+                    if click_error is not None:
+                        body = _result(
+                            {"code": click_error, "params": {}},
+                            is_error=True,
+                        )
+                    elif clicks == 1:
+                        body = _result(
+                            {"code": "observe_first", "params": {}},
+                            is_error=True,
+                        )
+                    else:
+                        body = _result(
+                            {
+                                "effect": "confirmed",
+                                "route": "accessibility",
+                            }
+                        )
+                else:
+                    body = _result(
+                        {"code": "unknown_tool", "params": {"tool": tool}},
+                        is_error=True,
+                    )
+            encoded = json.dumps(body).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.send_header("X-Avibe-Control-Instance", "fixture-instance")
+            self.end_headers()
+            try:
+                self.wfile.write(encoded)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def log_message(self, _format: str, *_args) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    server.connection_ids = connection_ids  # type: ignore[attr-defined]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server, requests
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def _run_node_script(
+    tmp_path: Path,
+    source: str,
+    *,
+    click_error: str | None = None,
+    duplicate_within: bool = False,
+    dynamic_elements_after_action: bool = False,
+    response_delay_by_tool: dict[str, float] | None = None,
+    timeout_ms: int = 5000,
+    windows: list[dict] | None = None,
+) -> tuple[dict, ThreadingHTTPServer, list[dict]]:
+    if NODE is None:
+        pytest.skip("Node.js is unavailable")
+    script = tmp_path / "script.mjs"
+    script.write_text(source, encoding="utf-8")
+    shadow = tmp_path / "node_modules" / "@avibe" / "computer"
+    shadow.mkdir(parents=True)
+    (shadow / "package.json").write_text(
+        '{"name":"@avibe/computer","type":"module","exports":"./index.mjs"}',
+        encoding="utf-8",
+    )
+    (shadow / "index.mjs").write_text(
+        'throw new Error("project-local shadow loaded");',
+        encoding="utf-8",
+    )
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+
+    with _fake_controller(
+        click_error=click_error,
+        duplicate_within=duplicate_within,
+        dynamic_elements_after_action=dynamic_elements_after_action,
+        response_delay_by_tool=response_delay_by_tool,
+        windows=windows,
+    ) as (server, requests):
+        request = {
+            "script_url": script.resolve().as_uri(),
+            "sdk_url": (SDK_DIRECTORY / "index.mjs").as_uri(),
+            "arguments": {"subject": "Quarterly report"},
+            "endpoint": {
+                "transport": "tcp",
+                "host": "127.0.0.1",
+                "port": server.server_address[1],
+                "headers": {"Authorization": "Bearer fixture-token"},
+                "instance_id": "fixture-instance",
+                "instance_header": "X-Avibe-Control-Instance",
+            },
+            "connection_token": "script-token",
+            "timeout_ms": timeout_ms,
+            "artifact_directory": str(artifacts),
+        }
+        started = time.monotonic()
+        completed = subprocess.run(
+            [NODE, str(SDK_DIRECTORY / "runner.mjs")],
+            input=json.dumps(request),
+            capture_output=True,
+            text=True,
+            cwd=tmp_path,
+            timeout=10,
+            check=False,
+        )
+        server.subprocess_elapsed = time.monotonic() - started  # type: ignore[attr-defined]
+        assert completed.returncode == 0, completed.stderr
+        return json.loads(completed.stdout), server, requests
+
+
+def test_sdk_injects_module_resolution_and_reobserves_one_stale_token(
+    tmp_path: Path,
+) -> None:
+    payload, server, requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async ({ subject }) => {
+  const mail = await computer.app({ bundleId: "com.apple.mail" });
+  const window = await mail.waitFor(
+    { role: "AXWindow", labelContains: "New Message" },
+    { timeout: 500 },
+  );
+  const observation = await window.observe();
+  const send = window.element({
+    role: "button",
+    label: "Send",
+    within: { role: "group", label: "Composer" },
+    index: 0,
+  });
+  const effect = await send.click();
+  await window.expect({ role: "textbox", label: "Subject" }).toHaveValue(
+    subject,
+    { timeout: 500 },
+  );
+  return {
+    effect: effect.status,
+    title: window.title,
+    tokenHidden: !Object.hasOwn(observation.elements[0], "element_token"),
+  };
+};
+""",
+    )
+
+    assert payload == {
+        "ok": True,
+        "result": {
+            "effect": "confirmed",
+            "title": "New Message",
+            "tokenHidden": True,
+        },
+    }
+    tools = [
+        request["payload"].get("tool")
+        for request in requests
+        if request["path"].endswith("/request")
+    ]
+    assert tools.count("click") == 2
+    assert tools.count("get_window_state") >= 3
+    click_tokens = [
+        request["payload"]["arguments"]["element_token"]
+        for request in requests
+        if request["payload"].get("tool") == "click"
+    ]
+    assert click_tokens == ["send-2", "send-3"]
+    assert requests[-1]["path"] == "/internal/computer-script/close"
+    assert all(
+        request["authorization"] == "Bearer fixture-token" for request in requests
+    )
+    assert len(server.connection_ids) == 1  # type: ignore[attr-defined]
+
+
+def test_sdk_failure_reports_step_and_last_screenshot(tmp_path: Path) -> None:
+    payload, _server, _requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  const mail = await computer.app({ bundleId: "com.apple.mail" });
+  const window = await mail.window({ labelContains: "New Message" });
+  await window.element({ role: "button", label: "Missing" }).click();
+  return {};
+};
+""",
+    )
+
+    assert payload["ok"] is False
+    assert payload["error"]["name"] == "NotFound"
+    assert payload["error"]["code"] == "not_found"
+    assert payload["error"]["step"] == "element.click"
+    screenshot = Path(payload["error"]["screenshot_path"])
+    assert screenshot.read_bytes() == b"png-fixture"
+
+
+def test_sdk_maps_stable_controller_codes_to_typed_errors(tmp_path: Path) -> None:
+    payload, _server, _requests = _run_node_script(
+        tmp_path,
+        """
+import { computer, DesktopBusy } from "@avibe/computer";
+
+export default async () => {
+  const mail = await computer.app({ bundleId: "com.apple.mail" });
+  const window = await mail.window({ labelContains: "New Message" });
+  try {
+    await window
+      .element({ role: "button", label: "Send", index: 0 })
+      .click();
+  } catch (error) {
+    return { typed: error instanceof DesktopBusy, code: error.code };
+  }
+  throw new Error("desktop_busy was not raised");
+};
+""",
+        click_error="desktop_busy",
+    )
+
+    assert payload == {
+        "ok": True,
+        "result": {"typed": True, "code": "desktop_busy"},
+    }
+
+
+@pytest.mark.parametrize(
+    ("controller_code", "error_class"),
+    [
+        ("element_not_found", "NotFound"),
+        ("foreground_forbidden", "ForegroundConsentRequired"),
+        ("computer_use_unavailable", "Unavailable"),
+    ],
+)
+def test_sdk_maps_controller_error_families(
+    tmp_path: Path,
+    controller_code: str,
+    error_class: str,
+) -> None:
+    payload, _server, _requests = _run_node_script(
+        tmp_path,
+        f"""
+import {{
+  computer,
+  NotFound,
+  ForegroundConsentRequired,
+  Unavailable,
+}} from "@avibe/computer";
+
+export default async () => {{
+  const types = {{ NotFound, ForegroundConsentRequired, Unavailable }};
+  const mail = await computer.app({{ bundleId: "com.apple.mail" }});
+  const window = await mail.window({{ labelContains: "New Message" }});
+  try {{
+    await window
+      .element({{ role: "button", label: "Send", index: 0 }})
+      .click();
+  }} catch (error) {{
+    return {{ typed: error instanceof types.{error_class}, code: error.code }};
+  }}
+  throw new Error("typed Controller error was not raised");
+}};
+""",
+        click_error=controller_code,
+    )
+
+    assert payload == {
+        "ok": True,
+        "result": {"typed": True, "code": controller_code},
+    }
+
+
+def test_sdk_rejects_an_ambiguous_within_boundary(tmp_path: Path) -> None:
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  const mail = await computer.app({ bundleId: "com.apple.mail" });
+  const window = await mail.window({ labelContains: "New Message" });
+  await window
+    .element({
+      role: "button",
+      label: "Send",
+      within: { role: "group", label: "Composer" },
+    })
+    .click();
+  return {};
+};
+""",
+        duplicate_within=True,
+    )
+
+    assert payload["ok"] is False
+    assert payload["error"]["name"] == "Ambiguous"
+    assert payload["error"]["step"] == "element.click"
+    assert all(
+        request["payload"].get("tool") != "click"
+        for request in requests
+        if request["path"].endswith("/request")
+    )
+
+
+def test_sdk_reobserves_before_each_action_and_rejects_new_ambiguity(
+    tmp_path: Path,
+) -> None:
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  const mail = await computer.app({ bundleId: "com.apple.mail" });
+  const window = await mail.window({ labelContains: "New Message" });
+  await window.element({ role: "button", label: "Add" }).click();
+  await window.element({ role: "button", label: "Delete" }).click();
+  return {};
+};
+""",
+        dynamic_elements_after_action=True,
+    )
+
+    assert payload["ok"] is False
+    assert payload["error"]["name"] == "Ambiguous"
+    assert payload["error"]["step"] == "element.click"
+    click_requests = [
+        request
+        for request in requests
+        if request["payload"].get("tool") == "click"
+    ]
+    assert len(click_requests) == 2
+    assert {
+        request["payload"]["arguments"]["element_token"]
+        for request in click_requests
+    } == {"add-1", "add-2"}
+
+
+def test_sdk_action_ignores_a_cached_screenshot_only_observation(
+    tmp_path: Path,
+) -> None:
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  const mail = await computer.app({ bundleId: "com.apple.mail" });
+  const window = await mail.window({ labelContains: "New Message" });
+  await window.observe({ include_accessibility_tree: false });
+  const effect = await window
+    .element({ role: "button", label: "Send", index: 0 })
+    .click();
+  return { effect: effect.status };
+};
+""",
+    )
+
+    assert payload == {
+        "ok": True,
+        "result": {"effect": "confirmed"},
+    }
+    observations = [
+        request
+        for request in requests
+        if request["payload"].get("tool") == "get_window_state"
+    ]
+    assert observations[0]["payload"]["arguments"][
+        "include_accessibility_tree"
+    ] is False
+    assert len(observations) == 3
+
+
+@pytest.mark.parametrize(
+    ("source", "expected_step"),
+    [
+        (
+            """
+import { computer } from "@avibe/computer";
+export default async () => {
+  await computer.app({ bundleId: "com.apple.mail", text: "Mail" });
+};
+""",
+            "computer.app",
+        ),
+        (
+            """
+import { computer } from "@avibe/computer";
+export default async () => {
+  const mail = await computer.app({ bundleId: "com.apple.mail" });
+  await mail.window({ labelContains: "New Message", name: "New Message" });
+};
+""",
+            "app.window",
+        ),
+        (
+            """
+import { computer } from "@avibe/computer";
+export default async () => {
+  const mail = await computer.app({ bundleId: "com.apple.mail" });
+  const window = await mail.window({ labelContains: "New Message" });
+  await window.element({ role: "button", name: "Send" }).click();
+};
+""",
+            "element.click",
+        ),
+    ],
+)
+def test_sdk_rejects_unknown_selector_fields_without_acting(
+    tmp_path: Path,
+    source: str,
+    expected_step: str,
+) -> None:
+    payload, _server, requests = _run_node_script(tmp_path, source)
+
+    assert payload["ok"] is False
+    assert payload["error"]["name"] == "ControllerError"
+    assert payload["error"]["code"] == "invalid_selector"
+    assert payload["error"]["step"] == expected_step
+    assert all(
+        request["payload"].get("tool") != "click"
+        for request in requests
+        if request["path"].endswith("/request")
+    )
+
+
+def test_sdk_wait_does_not_turn_an_invalid_selector_into_a_timeout(
+    tmp_path: Path,
+) -> None:
+    payload, _server, _requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  await computer.waitFor(
+    { bundleId: "com.apple.mail", text: "Mail" },
+    { timeout: 1000 },
+  );
+};
+""",
+    )
+
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "invalid_selector"
+    assert payload["error"]["step"] == "computer.waitFor"
+
+
+def test_sdk_expect_does_not_turn_an_invalid_index_into_a_timeout(
+    tmp_path: Path,
+) -> None:
+    payload, _server, _requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  const mail = await computer.app({ bundleId: "com.apple.mail" });
+  const window = await mail.window({ labelContains: "New Message" });
+  await window
+    .expect({ role: "button", index: -1 })
+    .toExist({ timeout: 1000 });
+};
+""",
+    )
+
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "invalid_selector"
+    assert payload["error"]["step"] == "expect.toExist"
+
+
+def test_sdk_window_index_uses_descending_z_order(tmp_path: Path) -> None:
+    windows = [
+        {
+            "pid": 41,
+            "window_id": 9,
+            "app_name": "Mail",
+            "title": "Back",
+            "bounds": {"x": 0, "y": 0, "width": 800, "height": 600},
+            "is_on_screen": True,
+            "z_index": 1,
+        },
+        {
+            "pid": 41,
+            "window_id": 10,
+            "app_name": "Mail",
+            "title": "Front",
+            "bounds": {"x": 10, "y": 10, "width": 800, "height": 600},
+            "is_on_screen": True,
+            "z_index": 5,
+        },
+    ]
+    payload, _server, _requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  const mail = await computer.app({ bundleId: "com.apple.mail" });
+  const window = await mail.window({ role: "window", index: 0 });
+  return { id: window.windowId, title: window.title };
+};
+""",
+        windows=windows,
+    )
+
+    assert payload == {
+        "ok": True,
+        "result": {"id": 10, "title": "Front"},
+    }
+
+
+def test_sdk_window_index_refuses_unobservable_order(tmp_path: Path) -> None:
+    windows = [
+        {
+            "pid": 41,
+            "window_id": window_id,
+            "app_name": "Mail",
+            "title": title,
+            "bounds": {"x": 0, "y": 0, "width": 800, "height": 600},
+            "is_on_screen": True,
+            "z_index": z_index,
+        }
+        for window_id, title, z_index in [(9, "One", None), (10, "Two", 5)]
+    ]
+    payload, _server, _requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  const mail = await computer.app({ bundleId: "com.apple.mail" });
+  await mail.window({ role: "window", index: 0 });
+};
+""",
+        windows=windows,
+    )
+
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "window_order_unavailable"
+    assert payload["error"]["step"] == "app.window"
+
+
+def test_runner_returns_null_and_exits_with_user_timers_still_open(
+    tmp_path: Path,
+) -> None:
+    payload, server, _requests = _run_node_script(
+        tmp_path,
+        """
+export default async () => {
+  setInterval(() => {}, 1000);
+};
+""",
+    )
+
+    assert payload == {"ok": True, "result": None}
+    assert server.subprocess_elapsed < 1.0  # type: ignore[attr-defined]
+
+
+def test_runner_reports_its_own_deadline_before_python_needs_to_kill_it(
+    tmp_path: Path,
+) -> None:
+    payload, server, _requests = _run_node_script(
+        tmp_path,
+        """
+export default async () => {
+  await new Promise(() => {});
+};
+""",
+        timeout_ms=100,
+    )
+
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "script_timeout"
+    assert payload["error"]["step"] == "script"
+    assert server.subprocess_elapsed < 1.0  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    ("source", "delayed_tool", "expected_step"),
+    [
+        (
+            """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  await computer.waitFor(
+    { bundleId: "com.apple.mail" },
+    { timeout: 100 },
+  );
+  return {};
+};
+""",
+            "list_apps",
+            "computer.waitFor",
+        ),
+        (
+            """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  const mail = await computer.app({ bundleId: "com.apple.mail" });
+  const window = await mail.window({ labelContains: "New Message" });
+  await window
+    .expect({ role: "textfield", label: "Subject" })
+    .toHaveValue("Quarterly report", { timeout: 100 });
+  return {};
+};
+""",
+            "get_window_state",
+            "expect.toHaveValue",
+        ),
+    ],
+)
+def test_sdk_local_timeout_aborts_an_in_flight_controller_request(
+    tmp_path: Path,
+    source: str,
+    delayed_tool: str,
+    expected_step: str,
+) -> None:
+    payload, server, requests = _run_node_script(
+        tmp_path,
+        source,
+        response_delay_by_tool={delayed_tool: 1.5},
+    )
+
+    assert payload["ok"] is False
+    assert payload["error"]["name"] == "Timeout"
+    assert payload["error"]["code"] == "timeout"
+    assert payload["error"]["step"] == expected_step
+    assert server.subprocess_elapsed < 1.0  # type: ignore[attr-defined]
+    assert all(
+        request["payload"].get("tool") != "click"
+        for request in requests
+        if request["path"].endswith("/request")
+    )
+
+
+def test_script_arguments_keep_strings_and_load_utf8_files(tmp_path: Path) -> None:
+    source = tmp_path / "body.txt"
+    source.write_text("hello\n世界\n", encoding="utf-8")
+    assert parse_script_arguments(
+        [" count =01", f"body=@{source}", "json={\"x\":1}"]
+    ) == {
+        "count": "01",
+        "body": "hello\n世界\n",
+        "json": '{"x":1}',
+    }
+
+
+def test_script_arguments_reject_duplicate_names() -> None:
+    with pytest.raises(ComputerScriptRunnerError) as exc_info:
+        parse_script_arguments(["name=first", "name=second"])
+    assert exc_info.value.code == "duplicate_computer_script_argument"
+
+
+def test_python_runner_uses_one_deadline_for_open_node_and_close(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "script.mjs"
+    script.write_text("export default async () => ({ ok: true });", encoding="utf-8")
+    endpoint = object()
+    captured: dict[str, object] = {}
+    ticks = iter([100.0, 102.0, 105.0, 106.0])
+
+    monkeypatch.setattr(
+        computer_script_runner,
+        "private_desktop_node_bin",
+        lambda: Path("/private/node"),
+    )
+    monkeypatch.setattr(
+        computer_script_runner,
+        "resolve_computer_script_endpoint",
+        lambda: endpoint,
+    )
+
+    def open_connection(**kwargs):
+        captured["open"] = kwargs
+        return {
+            "body": {
+                "ok": True,
+                "connection_token": "token",
+            }
+        }
+
+    monkeypatch.setattr(
+        computer_script_runner,
+        "computer_script_open_sync",
+        open_connection,
+    )
+    monkeypatch.setattr(
+        computer_script_runner,
+        "computer_script_endpoint_payload",
+        lambda value: {"endpoint": value is endpoint},
+    )
+
+    def run_node(*args, **kwargs):
+        captured["subprocess_args"] = args
+        captured["subprocess_kwargs"] = kwargs
+        return subprocess.CompletedProcess(
+            args=args[0],
+            returncode=0,
+            stdout='{"ok":true,"result":{"done":true}}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(computer_script_runner.subprocess, "run", run_node)
+    monkeypatch.setattr(
+        computer_script_runner,
+        "computer_script_close_sync",
+        lambda **kwargs: captured.update(close=kwargs),
+    )
+    monkeypatch.setattr(computer_script_runner.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(computer_script_runner.time, "time", lambda: 1000.0)
+
+    assert computer_script_runner.run_computer_script(
+        caller_session_id="ses-script",
+        script_file=str(script),
+        arg_values=[],
+        timeout_seconds=20,
+    ) == {"done": True}
+
+    assert captured["open"] == {
+        "endpoint": endpoint,
+        "caller_session_id": "ses-script",
+        "timeout_seconds": 20,
+        "request_timeout": 10.0,
+    }
+    subprocess_kwargs = captured["subprocess_kwargs"]
+    assert isinstance(subprocess_kwargs, dict)
+    assert subprocess_kwargs["timeout"] == 17.0
+    request = json.loads(subprocess_kwargs["input"])
+    assert request["timeout_ms"] == 15000
+    assert request["deadline_unix_ms"] == 1015000
+    assert captured["close"] == {
+        "endpoint": endpoint,
+        "connection_token": "token",
+        "timeout": 1.0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("code", "key"),
+    [
+        ("active_turn_required", "computer.cli.error.missingCallerTurn"),
+        ("session_archived", "computer.cli.error.sessionArchived"),
+        ("other_rejection", "computer.cli.error.scriptOpenRejected"),
+    ],
+)
+def test_python_runner_localizes_known_open_rejections(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    code: str,
+    key: str,
+) -> None:
+    script = tmp_path / "script.mjs"
+    script.write_text("export default async () => null;", encoding="utf-8")
+    monkeypatch.setattr(
+        computer_script_runner,
+        "private_desktop_node_bin",
+        lambda: Path("/private/node"),
+    )
+    monkeypatch.setattr(
+        computer_script_runner,
+        "resolve_computer_script_endpoint",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        computer_script_runner,
+        "computer_script_open_sync",
+        lambda **_kwargs: {"body": {"ok": False, "error": code}},
+    )
+
+    with pytest.raises(ComputerScriptRunnerError) as exc_info:
+        computer_script_runner.run_computer_script(
+            caller_session_id="ses-script",
+            script_file=str(script),
+            arg_values=[],
+        )
+
+    assert exc_info.value.code == code
+    assert exc_info.value.key == key
+    assert exc_info.value.params == (
+        {"code": code} if code == "other_rejection" else {}
+    )
+
+
+def test_python_runner_formats_integral_timeout_without_decimal() -> None:
+    assert computer_script_runner._display_seconds(300.0) == 300
+    assert computer_script_runner._display_seconds(0.25) == 0.25
+
+
+def test_python_runner_uses_the_verified_controller_endpoint_for_open_and_close() -> None:
+    with tempfile.TemporaryDirectory(prefix="avibe-script-uds-", dir="/tmp") as directory:
+        socket_path = Path(directory) / "dispatch.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(socket_path))
+        listener.listen(1)
+        socket_path.chmod(0o600)
+        captured: list[tuple[str, dict]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            payload = json.loads(request.content)
+            captured.append((request.url.path, payload))
+            if request.url.path.endswith("/open"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "ok": True,
+                        "connection_token": "token",
+                        "session_id": "ses-script",
+                        "timeout_ms": 30000,
+                    },
+                )
+            return httpx.Response(200, json={"ok": True, "closed": True})
+
+        try:
+            with patch(
+                "vibe.internal_client.httpx.HTTPTransport",
+                return_value=httpx.MockTransport(handler),
+            ):
+                endpoint = resolve_computer_script_endpoint(socket_path)
+                opened = computer_script_open_sync(
+                    endpoint=endpoint,
+                    caller_session_id="ses-script",
+                    timeout_seconds=30,
+                )
+                closed = computer_script_close_sync(
+                    endpoint=endpoint,
+                    connection_token="token",
+                )
+        finally:
+            listener.close()
+
+    assert computer_script_endpoint_payload(endpoint) == {
+        "transport": "unix",
+        "socket_path": str(socket_path),
+    }
+    assert opened["body"]["connection_token"] == "token"
+    assert closed["body"]["closed"] is True
+    assert captured == [
+        (
+            "/internal/computer-script/open",
+            {"caller_session_id": "ses-script", "timeout_seconds": 30},
+        ),
+        (
+            "/internal/computer-script/close",
+            {"connection_token": "token"},
+        ),
+    ]

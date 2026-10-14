@@ -264,6 +264,7 @@ class Controller:
         # Keep the driver proxy lazy so an enabled desktop toggle does not
         # create a driver process until an active Turn requests it.
         self.computer_use_server = None
+        self.computer_script_sessions = None
         self.runtime_ownership = RuntimeOwnershipProvider(
             self.session_turns._sqlite_engine()
         )
@@ -2567,6 +2568,10 @@ class Controller:
             self._internal_server_task = None
 
         async def _close_computer_use_server() -> None:
+            script_sessions = getattr(self, "computer_script_sessions", None)
+            self.computer_script_sessions = None
+            if script_sessions is not None:
+                script_sessions.close_all()
             server = getattr(self, "computer_use_server", None)
             self.computer_use_server = None
             if server is not None:
