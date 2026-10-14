@@ -394,13 +394,8 @@ def _status(
             )
         else:
             successes.append((record.observed_at, record.source_id, record.model_id, record.mode))
-    # The projection is current between the throttled file writes; either kind counts only under its Source's
-    # current identity.
-    latest = evidence.store.latest_success(tool)
-    candidates = list(successes)
-    if latest is not None and latest.source_id in live and latest.source_identity == identity_digest(live[latest.source_id]):
-        candidates.append((latest.at, latest.source_id, latest.model_id, latest.mode))
-    newest = max(candidates, key=lambda item: item[0], default=None)
+    # Memory holds every success at once, so the newest identity-valid one is the latest.
+    newest = max(successes, key=lambda item: item[0], default=None)
     verified = [
         {"source_id": source_id, "model_id": model_id, "mode": mode, "at": utc_text(at)}
         for at, source_id, model_id, mode in successes

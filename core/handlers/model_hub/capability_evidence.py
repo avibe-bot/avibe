@@ -88,9 +88,14 @@ class EvidenceFeature:
 
     @classmethod
     def from_payload(cls, payload: object) -> "EvidenceFeature":
-        if not isinstance(payload, Mapping) or set(payload) - {"kind", "name", "aspect"}:
+        """The exact shape ``payload()`` writes: ``{kind, name}`` for an effort, ``{kind, name, aspect}`` for a tool."""
+
+        if not isinstance(payload, Mapping):
             raise ValueError("invalid evidence feature")
-        return cls(payload.get("kind"), payload.get("name"), payload.get("aspect"))
+        keys = {"kind", "name", "aspect"} if payload.get("kind") == "hosted_tool" else {"kind", "name"}
+        if set(payload) != keys:
+            raise ValueError("invalid evidence feature")
+        return cls(payload["kind"], payload["name"], payload.get("aspect"))
 
     def payload(self) -> dict[str, str]:
         out = {"kind": self.kind, "name": self.name}
@@ -222,20 +227,6 @@ def wire_stamp(*, engine: str, avibe: str, source: ModelHubSourceConfig, model_i
     return "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-@dataclass(frozen=True)
-class LatestSuccess:
-    """The latest real success of one hosted tool, for its status line."""
-
-    source_id: str
-    model_id: str
-    mode: ExecutionMode
-    at: datetime
-    source_identity: str
-
-    def payload(self) -> dict[str, str]:
-        return {"source_id": self.source_id, "model_id": self.model_id, "mode": self.mode, "at": utc_text(self.at)}
-
-
 class CapabilityEvidenceStore:
     """The evidence records, held in memory and persisted to one small file.
 
@@ -251,7 +242,10 @@ class CapabilityEvidenceStore:
       follows cannot declare the refused feature again, and a failed file write
       is logged rather than raised;
     * a clear is what the user is shown: the file takes it first, and a failed
-      write raises with nothing changed, so it never comes back after a restart.
+      write raises with nothing changed, so it never comes back after a restart;
+    * a success is display history: memory takes every one at once, so every
+      read is current, and the file at most hourly per key. Memory is the one
+      source of success history; nothing projects it separately.
     """
 
     def __init__(self, path: Path, *, max_records: int = MAX_RECORDS):
@@ -260,11 +254,12 @@ class CapabilityEvidenceStore:
         self._lock = threading.RLock()
         self._records: dict[tuple, EvidenceRecord] = {}
         self._by_hop: dict[tuple[str, str], list[EvidenceRecord]] = {}
-        self._latest: dict[str, LatestSuccess] = {}
         records = self._read_file()
+        # When each success key last reached the file, which throttles its next write.
+        self._persisted: dict[tuple, datetime] = {
+            key: record.observed_at for key, record in records.items() if record.status == "verified"
+        }
         self._remember(records)
-        for record in records.values():
-            self._note_latest_locked(record)
 
     def _read_file(self) -> dict[tuple, EvidenceRecord]:
         try:
@@ -290,18 +285,6 @@ class CapabilityEvidenceStore:
         self._by_hop = by_hop
         self._records = records
 
-    def _note_latest_locked(self, record: EvidenceRecord) -> None:
-        if record.status != "verified" or record.feature.kind != "hosted_tool" or record.mode is None:
-            return
-        current = self._latest.get(record.feature.name)
-        if current is None or record.observed_at > current.at:
-            self._latest = {
-                **self._latest,
-                record.feature.name: LatestSuccess(
-                    record.source_id, record.model_id, record.mode, record.observed_at, record.source_identity
-                ),
-            }
-
     def get(
         self, source_id: str, model_id: str, feature: EvidenceFeature, status: EvidenceStatus
     ) -> Optional[EvidenceRecord]:
@@ -324,9 +307,6 @@ class CapabilityEvidenceStore:
         """Every record of one (Source, model), without scanning the others."""
 
         return list(self._by_hop.get((source_id, model_id), ()))
-
-    def latest_success(self, tool: str) -> Optional[LatestSuccess]:
-        return self._latest.get(tool)
 
     def _write_locked(self, records: dict[tuple, EvidenceRecord], identities: Mapping[str, str]) -> list[EvidenceRecord]:
         """The records to keep: current identities only, within the bound, successes evicted before refusals.
@@ -351,6 +331,13 @@ class CapabilityEvidenceStore:
         successes = by_age(record for record in kept if record.status == "verified")[-room:] if room else []
         return by_age([*refusals, *successes])
 
+    def _persist_locked(self, kept: Iterable[EvidenceRecord]) -> None:
+        """Write the kept records to the file; raises OSError. Every writer goes through here."""
+
+        kept = list(kept)
+        write_state_document(self.path, [item.payload() for item in kept])
+        self._persisted = {item.key: item.observed_at for item in kept if item.status == "verified"}
+
     def write_refusal(self, record: EvidenceRecord, *, live: Iterable[ModelHubSourceConfig]) -> None:
         """Record a refusal: memory first, then the file; a failed write is logged, not raised."""
 
@@ -371,7 +358,7 @@ class CapabilityEvidenceStore:
             kept = self._write_locked(updated, identities)
             self._remember({item.key: item for item in kept})
             try:
-                write_state_document(self.path, [item.payload() for item in kept])
+                self._persist_locked(kept)
             except OSError:
                 # Routing state: memory keeps the refusal even when the file does not.
                 logger.warning("Model Hub could not persist capability evidence; it holds until restart")
@@ -383,7 +370,7 @@ class CapabilityEvidenceStore:
         live: Iterable[ModelHubSourceConfig],
         now: datetime,
     ) -> None:
-        """Record a real success: the latest projection at once, the file at most hourly per key.
+        """Record a real success: memory at once, the file at most hourly per key.
 
         A success never replaces a refusal (they are separate keys), so a late
         success cannot re-enable what a concurrent refusal took away.
@@ -395,19 +382,17 @@ class CapabilityEvidenceStore:
         if identities.get(record.source_id) != record.source_identity:
             return
         with self._lock:
-            self._note_latest_locked(record)
-            existing = self._records.get(record.key)
-            if existing is not None and (now - existing.observed_at) < timedelta(seconds=POSITIVE_REFRESH_SECONDS):
-                return
             updated = dict(self._records)
             updated[record.key] = record
-            kept = self._write_locked(updated, identities)
+            kept = {item.key: item for item in self._write_locked(updated, identities)}
+            self._remember(kept)
+            persisted = self._persisted.get(record.key)
+            if persisted is not None and (now - persisted) < timedelta(seconds=POSITIVE_REFRESH_SECONDS):
+                return
             try:
-                write_state_document(self.path, [item.payload() for item in kept])
+                self._persist_locked(kept.values())
             except OSError:
                 logger.warning("Model Hub could not persist a hosted-tool success")
-                return
-            self._remember({item.key: item for item in kept})
 
     def clear(
         self,
@@ -429,6 +414,6 @@ class CapabilityEvidenceStore:
                 return 0
             updated = {key: record for key, record in self._records.items() if key not in set(removed)}
             kept = self._write_locked(updated, identities)
-            write_state_document(self.path, [item.payload() for item in kept])
+            self._persist_locked(kept)
             self._remember({item.key: item for item in kept})
             return len(removed)
