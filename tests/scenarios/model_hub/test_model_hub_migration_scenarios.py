@@ -1361,19 +1361,21 @@ def test_opencode_native_provider_without_stable_identifier_is_visible_blocker(
 
 
 @pytest.mark.parametrize("removed", [False, True])
+@pytest.mark.parametrize("initial_mode", ["direct", "hub"])
 def test_mh_switch_001_migration_carries_agent_models_into_the_switched_menu(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     removed: bool,
+    initial_mode: str,
 ) -> None:
-    """MH-SWITCH-001: accepting migration carries each Agent's Direct selection
-    into the menu it switches, served by the Sources that migration imported."""
+    """MH-SWITCH-001: migration carries saved Direct selections into the
+    Gateway menu whether mode was switched earlier or by this import."""
 
     native_home = tmp_path / "native-home"
     _write_opencode(native_home)
     _isolate_native_home(monkeypatch, native_home)
     service, store, _ = _service(tmp_path)
-    store.config.agents["opencode"].mode = "direct"
+    store.config.agents["opencode"].mode = initial_mode
     if removed:
         store.config.agents["opencode"].removed_model_ids = ["openrouter-model"]
     service.named_agents_override = lambda backend: [

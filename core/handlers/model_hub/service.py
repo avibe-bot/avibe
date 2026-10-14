@@ -5583,8 +5583,9 @@ class ModelHubService:
     ) -> None:
         """Give each Agent's model a Gateway menu row when a Source serves it.
 
-        Called as a backend enters Gateway mode. Direct mode never reads the
-        Gateway menu, so an Agent there keeps a model its CLI offered, and an
+        Called after confirmed migration or as a backend enters Gateway mode.
+        Direct mode never reads the Gateway menu, so an Agent there keeps a
+        model its CLI offered, and an
         OpenCode one spells it with its own provider (``openai/gpt-5.6-sol``).
         The row added is the one the picker adds for a provider model, only
         when a Source in this backend's default routing lists it. The Agent's

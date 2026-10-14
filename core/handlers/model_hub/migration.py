@@ -1891,11 +1891,12 @@ async def _prepare_takeover(
         }
         updated.enabled = True
         for backend in backends:
-            if updated.agents[backend].mode != "hub":
-                updated.agents[backend].mode = "hub"
-                host._carry_agent_selections(
-                    updated, backend, native_sources=native_sources.get(backend, ()), fetch_catalog=False,
-                )
+            updated.agents[backend].mode = "hub"
+            # Source import owns this reconciliation, not the mode transition:
+            # a user may have switched to Hub before accepting migration.
+            host._carry_agent_selections(
+                updated, backend, native_sources=native_sources.get(backend, ()), fetch_catalog=False,
+            )
         updated = ModelHubConfig.from_payload(updated.to_payload())
         for edit in edits:
             edit.check()

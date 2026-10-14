@@ -62,6 +62,23 @@ rejects all requests; assert all keys import and no credential-bearing observati
 or discovery request was made during migration. Verify replay and native copy/
 cleanup in the disposable local Incus worktree, never on a live tenant.
 
+## Review root-cause decision
+
+Reviews of `312018cb` and `988bfea49` exposed the same incomplete boundary:
+selection reconciliation was inherited from a mode-switch helper rather than
+owned by the confirmed migration. Provider membership must be checked before
+both inventory and passthrough admission, and the reconciliation must run whether
+the user entered through a Direct-to-Hub switch or imported keys after already
+switching to Hub. The owner decision is to reconcile every migrated backend after
+its Sources are staged, independently of whether its mode changed. Existing menu
+rows, user removals, Source health and ordinary non-migration switching retain
+ownership; identical receipt replay does not become a new catalog edit.
+
+The regression matrix covers both initial modes and removed-model intent, with
+an unimported provider whose selected model suffix collides with a migrated
+manual model. This closes the whole entrypoint/admission class, not only the
+latest symptom. No new state, routing system or upstream verification is needed.
+
 ## Validation and delivery
 
 - MH-MIG-015 protects local transfer, saved protocols, neutral pending markers,
