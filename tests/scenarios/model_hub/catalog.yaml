@@ -302,6 +302,11 @@ scenarios:
       - tests/test_model_hub_hosted_probe.py::test_a_probe_settles_when_the_adapter_is_done_even_if_the_body_stays_open
       - tests/test_model_hub_hosted_probe.py::test_an_image_probe_verifies_only_an_image_vibey_could_keep
       - tests/test_model_hub_hosted_probe.py::test_a_verified_call_is_followed_by_the_replay_probe
+      - tests/test_model_hub_hosted_probe.py::test_a_replay_goes_only_to_the_source_identity_the_call_was_recorded_for
+      - tests/test_model_hub_hosted_probe.py::test_a_re_probe_restores_replay_a_narrow_rule_demoted
+      - tests/test_model_hub_hosted_probe.py::test_a_replay_answer_counts_only_when_it_completed_and_names_a_hidden_result
+      - tests/test_model_hub_hosted_probe.py::test_a_replay_answer_names_a_result_by_its_exact_url
+      - tests/test_model_hub_hosted_probe.py::test_a_result_the_answer_shows_in_any_reading_is_not_hidden
   - id: MH-HOSTED-VIBEY-002
     name: Every native hosted item becomes one hosted call with a provider-neutral action and its record; citations stay on the text that cites them; the response's counters and reported cost go to its summary
     status: covered

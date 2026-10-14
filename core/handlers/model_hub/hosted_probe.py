@@ -166,23 +166,26 @@ def hidden_result_urls(message: AssistantMessage) -> frozenset[str]:
 
     returned = {source.url for block in message.content if isinstance(block, HostedToolBlock) for source in block.record.sources}
     shown = written_urls(message)
-    return frozenset(url for url in returned if url and _same_url(url) not in shown)
+    # Read generously: a result the answer shows but the probe takes for hidden is what could verify a replay falsely.
+    return frozenset(url for url in returned if url and not _readings(url) & shown)
 
 
 def written_urls(message: AssistantMessage) -> frozenset[str]:
-    """Every URL a response's answer shows, as comparison keys: those its text writes and those it cites."""
+    """Every URL a response's answer shows, as comparison keys: each reading of a URL its text writes
+    (``_readings``) and each URL it cites, as given."""
 
     text = " ".join(block.text for block in message.content if isinstance(block, TextBlock) and block.text)
-    urls = set(_URL.findall(text))
-    urls.update(
+    keys = {key for url in _URL.findall(text) for key in _readings(url)}
+    cited = [
         citation.url
         for block in message.content
         if isinstance(block, TextBlock) and block.citations
         for citation in block.citations
-    )
+    ]
     if message.hosted_summary is not None:
-        urls.update(source.url for source in message.hosted_summary.cited_sources)
-    return frozenset(_same_url(url) for url in urls if url)
+        cited.extend(source.url for source in message.hosted_summary.cited_sources)
+    keys.update(_same_url(url) for url in cited if url)
+    return frozenset(keys)
 
 
 def carries_native_payload(body: Any, message: AssistantMessage) -> bool:
@@ -482,15 +485,28 @@ def replay_outcome(
     return _failure(terminal, outcome)
 
 
-# A URL as an answer writes it: up to the whitespace or bracket that ends it.
-_URL = re.compile(r"https?://[^\s<>()\[\]{}\"'`]+")
+# A URL as an answer writes it: up to the whitespace, quote or bracket that ends it. Parentheses stay, since a URL
+# may hold them; one that closes the prose around it is trailing text.
+_URL = re.compile(r"https?://[^\s<>\[\]{}\"'`]+")
+# What prose and Markdown can leave right after a URL, and a URL can also end in.
+_TRAILING = ".,;:!?)*_"
+
+
+def _readings(written: str) -> frozenset[str]:
+    """The comparison keys a URL written in prose can stand for: as written, and without each run of the trailing
+    text a sentence may leave on it. A provider's URL is exact; only where prose ends a URL is ambiguous."""
+
+    readings = {_same_url(written)}
+    while written and written[-1] in _TRAILING:
+        written = written[:-1]
+        readings.add(_same_url(written))
+    return frozenset(readings)
 
 
 def _same_url(url: str) -> str:
-    """A URL as a comparison key: whole, fragment included, without the punctuation a sentence leaves on it, its
-    scheme and host in lower case, and no trailing slash on its path."""
+    """A URL as a comparison key: whole, fragment included, its scheme and host in lower case, and no trailing slash
+    on its path."""
 
-    url = url.rstrip(".,;:!?")
     try:
         parts = urlsplit(url)
     except ValueError:

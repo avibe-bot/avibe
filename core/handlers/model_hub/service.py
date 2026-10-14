@@ -7740,14 +7740,16 @@ class ModelHubService:
         # whose payload can go back verbatim, when the call returned a result the replay can ask about.
         # Only a result the visible answer does not show proves the replayed payload was read; with none, the
         # replay stays unknown and turns replay synthetically, which is lossless.
-        asked = hidden_result_urls(terminal.message) if isinstance(terminal, Done) else frozenset()
         replayable = (
             call_verdict == "verified"
+            and isinstance(terminal, Done)
             and recorded_for is not None
             and "replay" in HOSTED_TOOL_ASPECTS[tool]
             and source.protocol in NATIVE_REPLAY_PROTOCOLS
-            and bool(asked)
         )
+        # A search can return many results: read them off the controller loop.
+        asked = await asyncio.to_thread(hidden_result_urls, terminal.message) if replayable else frozenset()
+        replayable = replayable and bool(asked)
         if replayable and remaining() < REPLAY_MIN_SECONDS:
             # Too little of the probe's time is left for a replay that could finish: try again.
             replay = {"outcome": "transient", "error": None}

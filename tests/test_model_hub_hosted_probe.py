@@ -790,7 +790,8 @@ async def test_a_replay_goes_only_to_the_source_identity_the_call_was_recorded_f
     changed after the call never receives it; the call's result stands and no replay is reported."""
     from core.handlers.model_hub import service as service_module
 
-    service, _clock, _models = configured_service(tmp_path, sources=[XAI])
+    # The fixture store keeps the Source object it is given, and this test edits it.
+    service, _clock, _models = configured_service(tmp_path, sources=[replace(XAI)])
     sent = []
     build_replay = service_module.hosted_replay_request
 
@@ -827,6 +828,57 @@ async def test_a_replay_goes_only_to_the_source_identity_the_call_was_recorded_f
 )
 def test_a_replay_answer_counts_only_when_it_completed_and_names_a_hidden_result(stop_reason, text, outcome):
     """MH-HOSTED-007: a blocked or refused answer proves nothing, whatever it quotes, and a malformed URL is just text."""
+    assert _replay_verdict(text, {HIDDEN, "https://[also-invalid"}, stop_reason=stop_reason) == outcome
+
+
+WIKI = "https://en.wikipedia.org/wiki/Search_(computing)"
+
+
+@pytest.mark.parametrize(
+    "asked,text,outcome",
+    [
+        # Prose and Markdown around a URL do not change it.
+        (HIDDEN, f"See [the docs]({HIDDEN}).", "verified"),
+        (HIDDEN, f"**{HIDDEN}**", "verified"),
+        (WIKI, f"It is {WIKI}.", "verified"),
+        (WIKI, f"(see {WIKI})", "verified"),
+        # A result's own URL is exact: an answer without the punctuation it ends in names another URL.
+        (HIDDEN + "!", f"It is {HIDDEN}, I think.", "inconclusive"),
+        (HIDDEN + "!", f"It is {HIDDEN}!.", "verified"),
+        (WIKI, "https://en.wikipedia.org/wiki/Search_", "inconclusive"),
+    ],
+)
+def test_a_replay_answer_names_a_result_by_its_exact_url(asked, text, outcome):
+    """MH-HOSTED-007: only where prose ends a written URL is ambiguous; the result's URL is never trimmed."""
+    assert _replay_verdict(text, {asked}) == outcome
+
+
+def test_a_result_the_answer_shows_in_any_reading_is_not_hidden():
+    """MH-HOSTED-007: a shown result taken for hidden could verify a replay that only restated the visible answer."""
+    from core.agent_core.messages import (
+        AssistantMessage, HostedAction, HostedNative, HostedRecord, HostedSource, HostedSummary, HostedToolBlock, Origin,
+        TextBlock,
+    )
+    from core.handlers.model_hub.hosted_probe import hidden_result_urls
+
+    call = HostedToolBlock(
+        id="ws_1",
+        tool="web_search",
+        action=HostedAction(type="search", queries=("avibe",)),
+        record=HostedRecord(status="completed", sources=(HostedSource(url=HIDDEN + "."), HostedSource(url=WIKI))),
+        native=HostedNative(source_id=XAI.id, payload=({"type": "web_search_call", "id": "ws_1"},)),
+    )
+    for text, hidden in [(f"Read {HIDDEN}", {WIKI}), (f"Read {WIKI}.", {HIDDEN + "."}), ("Read none", {HIDDEN + ".", WIKI})]:
+        answer = AssistantMessage(
+            content=(call, TextBlock(text=text)),
+            origin=Origin("xai", "openai_responses", "grok-4.6"),
+            stop_reason="stop",
+            hosted_summary=HostedSummary(),
+        )
+        assert hidden_result_urls(answer) == hidden
+
+
+def _replay_verdict(text, asked, *, stop_reason="stop"):
     from core.agent_core.ai.provider import Done
     from core.agent_core.messages import AssistantMessage, Origin, TextBlock
     from core.handlers.model_hub.adapter import RawCallOutcome, RawOutcomeKind
@@ -836,5 +888,40 @@ def test_a_replay_answer_counts_only_when_it_completed_and_names_a_hidden_result
         content=(TextBlock(text=text),), origin=Origin("xai", "openai_responses", "grok-4.6"), stop_reason=stop_reason,
     )
     ok = RawCallOutcome(RawOutcomeKind.SUCCESS, 200, None, None, True, "grok-4.6", XAI.id)
-    asked = frozenset({HIDDEN, "https://[also-invalid"})
-    assert replay_outcome("web_search", Done(answer), ok, None, asked=asked, carried=True) == outcome
+    return replay_outcome("web_search", Done(answer), ok, None, asked=frozenset(asked), carried=True)
+
+
+@pytest.mark.asyncio
+async def test_a_re_probe_restores_replay_a_narrow_rule_demoted(tmp_path):
+    """MH-HOSTED-007: a 400 on a replayed payload teaches 'replay unsupported' for this Source, also when the payload
+    was minted under an identity it had before (a wrong attribution: it refuses a foreign blob, not replay). That
+    record expires on its own and never outlives a user's re-probe, which replaces it."""
+    service, clock, _models = configured_service(tmp_path, sources=[XAI])
+    sent = []
+
+    async def respond(request):
+        sent.append(await request.json())
+        return _stream(_responses(SEARCH, ANSWER) if len(sent) == 1 else _replay_reply("openai_responses", sent[-1]))
+
+    async with loopback_engine(tmp_path, service, respond):
+        [live] = service.store.load().sources
+        service.capability_evidence.write(
+            EvidenceRecord(
+                source_id=XAI.id,
+                model_id="grok-4.6",
+                feature=REPLAY,
+                status="unsupported",
+                basis="observed",
+                observed_at=clock.now(),
+                engine=service.engine_stamp,
+                shape=HOSTED_PROBE_SHAPE,
+                source_identity=identity_digest(live),
+                detail="400 invalid_request_error",
+            ),
+            live=[live],
+        )
+        result = await service.probe_hosted_tool("web_search", {"source_id": XAI.id, "model_id": "grok-4.6"})
+
+    assert result["probe"]["replay"]["outcome"] == "verified"
+    [record] = _records(service, REPLAY)
+    assert (record.status, record.basis) == ("verified", "probe")
