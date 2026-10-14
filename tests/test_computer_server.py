@@ -446,6 +446,7 @@ async def test_non_ready_call_names_status_and_never_spawns_upstream(
     payload = json.loads(result["content"][0]["text"])
     assert payload == {
         "code": "computer_use_unavailable",
+        "dispatched": False,
         "params": {
             "reason": reason,
             "status": status,
@@ -777,6 +778,29 @@ def test_result_folding_preserves_driver_error_code_params_and_detail() -> None:
     assert result["structuredContent"] == payload
 
 
+def test_result_folding_marks_consent_refusal_not_dispatched() -> None:
+    result = _fold_tool_result(
+        {
+            "result": {
+                "content": [],
+                "structuredContent": {
+                    "code": "foreground_consent_required",
+                    "params": {},
+                },
+                "isError": True,
+            }
+        }
+    )
+
+    payload = json.loads(result["content"][0]["text"])
+    assert payload == {
+        "code": "foreground_consent_required",
+        "dispatched": False,
+        "params": {},
+    }
+    assert result["structuredContent"] == payload
+
+
 def test_result_folding_preserves_bounded_detail_inside_driver_params() -> None:
     result = _fold_tool_result(
         {
@@ -1067,9 +1091,34 @@ async def test_call_tool_preserves_upstream_unavailable_detail_and_logs(
     assert payload == {
         "code": "upstream_unavailable",
         "detail": "transport failed",
+        "dispatched": False,
         "params": {},
     }
     assert "transport failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_post_forward_upstream_failure_does_not_claim_not_dispatched(
+    tmp_path: Path,
+) -> None:
+    state_path, state = _state(tmp_path)
+    upstream = FakeUpstream()
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+        lease_manager=FakeLeaseManager(),  # type: ignore[arg-type]
+    )
+
+    started = await server.call_tool("start_session", {"session": "ses-a"})
+    assert started.get("isError") is not True
+
+    upstream.fail_transport = True
+    result = await server.call_tool("list_apps", {"session": "ses-a"})
+    payload = result["structuredContent"]
+
+    assert payload["code"] == "upstream_unavailable"
+    assert "dispatched" not in payload
 
 
 @pytest.mark.asyncio

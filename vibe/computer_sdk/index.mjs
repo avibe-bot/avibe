@@ -1,6 +1,7 @@
 import {
   ControllerFault,
   callTool,
+  controllerFailureAmbiguous,
   runStep,
   sleepWithinDeadline,
 } from "./runtime.mjs";
@@ -55,7 +56,10 @@ const ELEMENT_SELECTOR_FIELDS = new Set([
 const windowState = new WeakMap();
 
 function invalidHandleResponse(message) {
-  throw new ControllerError(message, { code: "invalid_computer_use_response" });
+  throw new ControllerError(message, {
+    code: "invalid_computer_use_response",
+    ambiguous: controllerFailureAmbiguous(true),
+  });
 }
 
 function appDescriptor(record) {

@@ -743,14 +743,21 @@ def create_app(
             "result": result,
         }
 
-    def _computer_script_error(exc: ComputerScriptSessionError) -> JSONResponse:
+    def _computer_script_error(
+        exc: ComputerScriptSessionError,
+        *,
+        dispatched: bool | None = None,
+    ) -> JSONResponse:
+        content: dict[str, Any] = {
+            "ok": False,
+            "error": exc.code,
+            "params": {},
+        }
+        if dispatched is False:
+            content["dispatched"] = False
         return JSONResponse(
             status_code=exc.status_code,
-            content={
-                "ok": False,
-                "error": exc.code,
-                "params": {},
-            },
+            content=content,
         )
 
     @app.post("/internal/computer-script/open")
@@ -800,6 +807,7 @@ def create_app(
                     "params": {
                         "limit_bytes": _COMPUTER_SCRIPT_REQUEST_MAX_BYTES,
                     },
+                    "dispatched": False,
                 },
             )
         if set(payload) != {
@@ -814,6 +822,7 @@ def create_app(
                     "ok": False,
                     "error": "invalid_computer_script_request",
                     "params": {},
+                    "dispatched": False,
                 },
             )
         connection_token = payload.get("connection_token")
@@ -832,6 +841,7 @@ def create_app(
                     "ok": False,
                     "error": "invalid_computer_script_request",
                     "params": {},
+                    "dispatched": False,
                 },
             )
         try:
@@ -843,7 +853,7 @@ def create_app(
                 )
             )
         except ComputerScriptSessionError as exc:
-            return _computer_script_error(exc)
+            return _computer_script_error(exc, dispatched=False)
 
         computer_server = getattr(controller, "computer_use_server", None)
         if computer_server is None:
@@ -859,6 +869,7 @@ def create_app(
                         "ok": False,
                         "error": "computer_use_unavailable",
                         "params": {},
+                        "dispatched": False,
                     },
                 )
             controller.computer_use_server = computer_server

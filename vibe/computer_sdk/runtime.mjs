@@ -44,6 +44,34 @@ export class ControllerFault extends Error {
   }
 }
 
+export function controllerFailureAmbiguous(
+  requestWasSent,
+  controllerPayload,
+) {
+  return (
+    requestWasSent === true &&
+    !(
+      controllerPayload &&
+      typeof controllerPayload === "object" &&
+      controllerPayload.dispatched === false
+    )
+  );
+}
+
+function controllerFault(
+  code,
+  message,
+  params = {},
+  { requestWasSent = false, controllerPayload } = {},
+) {
+  return new ControllerFault(code, message, params, {
+    ambiguous: controllerFailureAmbiguous(
+      requestWasSent,
+      controllerPayload,
+    ),
+  });
+}
+
 export function configureRuntime(config) {
   if (state !== undefined) {
     throw new Error("computer SDK runtime is already configured");
@@ -63,7 +91,6 @@ export function configureRuntime(config) {
     connectionToken: config.connection_token,
     artifactDirectory: config.artifact_directory,
     runtimeStatePath: config.runtime_state_path,
-    inFlightRequests: new Set(),
   };
   agent = new http.Agent({
     keepAlive: true,
@@ -148,18 +175,26 @@ export async function callTool(tool, argumentsValue, options = {}) {
         structured && structured.params && typeof structured.params === "object"
           ? structured.params
           : {};
-      throw new ControllerFault(code, controllerMessage(code, structured), params);
+      throw controllerFault(code, controllerMessage(code, structured), params, {
+        requestWasSent: true,
+        controllerPayload: structured,
+      });
     }
     return result;
   }
   if (body?.ok === false) {
     const code =
       typeof body.error === "string" ? body.error : "computer_script_request_failed";
-    throw new ControllerFault(code, controllerMessage(code, body), body.params);
+    throw controllerFault(code, controllerMessage(code, body), body.params, {
+      requestWasSent: true,
+      controllerPayload: body,
+    });
   }
-  throw new ControllerFault(
+  throw controllerFault(
     "invalid_computer_use_response",
     "The Controller returned an invalid Computer Use response.",
+    {},
+    { requestWasSent: true },
   );
 }
 
@@ -229,7 +264,7 @@ async function postJson(requestPath, payload, requestOptions = {}) {
       ? requestOptions.timeoutMs
       : undefined;
   if (localTimeout !== undefined && localTimeout <= 0) {
-    throw requestTimeoutFault();
+    throw requestTimeoutFault(false);
   }
   const encoded = Buffer.from(JSON.stringify(payload));
   const endpoint = state.endpoint;
@@ -261,14 +296,12 @@ async function postJson(requestPath, payload, requestOptions = {}) {
     let settled = false;
     let timer;
     const requestState = { sent: false };
-    state.inFlightRequests.add(requestState);
     const settle = (callback, value) => {
       if (settled) {
         return;
       }
       settled = true;
       clearTimeout(timer);
-      state.inFlightRequests.delete(requestState);
       callback(value);
     };
     let request;
@@ -280,11 +313,11 @@ async function postJson(requestPath, payload, requestOptions = {}) {
             response.resume();
             settle(
               reject,
-              new ControllerFault(
+              controllerFault(
                 "controller_unavailable",
                 "The Controller response came from a stale instance.",
                 {},
-                { ambiguous: hasAmbiguousInFlightRequest() },
+                { requestWasSent: requestState.sent },
               ),
             );
             return;
@@ -296,11 +329,11 @@ async function postJson(requestPath, payload, requestOptions = {}) {
           size += chunk.length;
           if (size > MAX_RESPONSE_BYTES) {
             response.destroy(
-              new ControllerFault(
+              controllerFault(
                 "invalid_computer_use_response",
                 "The Controller response exceeded the supported size.",
                 {},
-                { ambiguous: hasAmbiguousInFlightRequest() },
+                { requestWasSent: requestState.sent },
               ),
             );
             return;
@@ -314,11 +347,11 @@ async function postJson(requestPath, payload, requestOptions = {}) {
           } catch {
             settle(
               reject,
-              new ControllerFault(
+              controllerFault(
                 "invalid_computer_use_response",
                 "The Controller returned invalid JSON.",
                 {},
-                { ambiguous: hasAmbiguousInFlightRequest() },
+                { requestWasSent: requestState.sent },
               ),
             );
             return;
@@ -326,36 +359,32 @@ async function postJson(requestPath, payload, requestOptions = {}) {
           settle(resolve, body);
         });
         response.on("error", (error) =>
-          settle(reject, controllerTransportFault(error)),
+          settle(
+            reject,
+            controllerTransportFault(error, requestState.sent),
+          ),
         );
       });
     } catch (error) {
-      settle(reject, controllerTransportFault(error));
+      settle(reject, controllerTransportFault(error, requestState.sent));
       return;
     }
     if (localTimeout !== undefined) {
       timer = setTimeout(() => {
-        request.destroy(requestTimeoutFault());
+        request.destroy(requestTimeoutFault(requestState.sent));
       }, localTimeout);
     }
     request.on("finish", () => {
       requestState.sent = true;
     });
     request.on("error", (error) => {
-      settle(reject, controllerTransportFault(error));
+      settle(reject, controllerTransportFault(error, requestState.sent));
     });
     request.end(encoded);
   });
 }
 
-function hasAmbiguousInFlightRequest() {
-  return (
-    state?.inFlightRequests instanceof Set &&
-    [...state.inFlightRequests].some((requestState) => requestState.sent === true)
-  );
-}
-
-function controllerTransportFault(error) {
+function controllerTransportFault(error, requestWasSent) {
   if (error instanceof ControllerFault) {
     return error;
   }
@@ -363,21 +392,20 @@ function controllerTransportFault(error) {
     error && typeof error === "object" && typeof error.message === "string"
       ? error.message
       : String(error);
-  return new ControllerFault(
+  return controllerFault(
     "controller_unavailable",
     `The Controller connection failed: ${message}`,
     {},
-    { ambiguous: hasAmbiguousInFlightRequest() },
+    { requestWasSent },
   );
 }
 
-function requestTimeoutFault() {
-  const ambiguous = hasAmbiguousInFlightRequest();
-  return new ControllerFault(
+function requestTimeoutFault(requestWasSent) {
+  return controllerFault(
     "timeout",
     "The Computer Use request exceeded the operation timeout.",
     {},
-    { ambiguous },
+    { requestWasSent },
   );
 }
 

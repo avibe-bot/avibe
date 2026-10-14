@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import json
 import os
@@ -10,6 +11,7 @@ import signal
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from typing import Any, Iterable
 
@@ -59,6 +61,10 @@ class ComputerScriptRunnerError(RuntimeError):
         self.details = details or {}
         self.structured_error = structured_error
         super().__init__(key)
+
+
+class _SupervisorTerminated(RuntimeError):
+    """The script supervisor received SIGTERM while owning a child."""
 
 
 @dataclass(frozen=True)
@@ -194,16 +200,39 @@ def _read_capped_json(path: Path, limit: int) -> _CappedJsonRead:
         return _CappedJsonRead(error="invalid_json")
 
 
-def _kill_process_group(process: subprocess.Popen[Any]) -> None:
-    if process.poll() is not None:
-        return
+def _terminate_and_reap_process_group(process: subprocess.Popen[Any]) -> None:
     try:
         if os.name == "posix":
             os.killpg(process.pid, signal.SIGKILL)
-        else:
+        elif process.poll() is None:
             process.kill()
     except ProcessLookupError:
         pass
+    try:
+        process.wait(timeout=_PROCESS_REAP_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+@contextmanager
+def _sigterm_as_supervisor_exception():
+    if (
+        os.name != "posix"
+        or threading.current_thread() is not threading.main_thread()
+    ):
+        yield
+        return
+
+    previous_handler = signal.getsignal(signal.SIGTERM)
+
+    def terminate(_signum, _frame) -> None:
+        raise _SupervisorTerminated("computer script supervisor terminated")
+
+    signal.signal(signal.SIGTERM, terminate)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous_handler)
 
 
 def _run_node_process(
@@ -234,27 +263,30 @@ def _run_node_process(
         child_environment = os.environ.copy()
         child_environment[_SCRIPT_RESULT_PATH_ENV] = str(result_path)
 
-        with request_path.open("r", encoding="utf-8") as request_input:
-            process = subprocess.Popen(
-                command,
-                stdin=request_input,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                env=child_environment,
-                start_new_session=os.name == "posix",
-            )
+        with (
+            _sigterm_as_supervisor_exception(),
+            request_path.open("r", encoding="utf-8") as request_input,
+        ):
+            process: subprocess.Popen[Any] | None = None
             try:
-                returncode = process.wait(timeout=timeout_seconds)
-            except subprocess.TimeoutExpired as exc:
-                _kill_process_group(process)
-                try:
-                    process.wait(timeout=_PROCESS_REAP_TIMEOUT_SECONDS)
-                except subprocess.TimeoutExpired:
-                    pass
-                raise subprocess.TimeoutExpired(
+                process = subprocess.Popen(
                     command,
-                    timeout_seconds,
-                ) from exc
+                    stdin=request_input,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    env=child_environment,
+                    start_new_session=os.name == "posix",
+                )
+                try:
+                    returncode = process.wait(timeout=timeout_seconds)
+                except subprocess.TimeoutExpired as exc:
+                    raise subprocess.TimeoutExpired(
+                        command,
+                        timeout_seconds,
+                    ) from exc
+            finally:
+                if process is not None:
+                    _terminate_and_reap_process_group(process)
 
         return subprocess.CompletedProcess(
             command,

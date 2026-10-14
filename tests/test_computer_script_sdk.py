@@ -6,9 +6,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import signal
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -485,6 +487,169 @@ def _run_python_deadline_script(
     return exc_info.value, requests, elapsed
 
 
+def _pid_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _wait_for_pid_exit(pid: int, *, timeout: float = 3.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _pid_exists(pid):
+            return
+        time.sleep(0.02)
+    pytest.fail(f"process {pid} survived the script supervisor")
+
+
+def _blocking_node_runner(tmp_path: Path) -> tuple[Path, Path]:
+    pid_path = tmp_path / "node.pid"
+    runner = tmp_path / "blocking-runner.mjs"
+    runner.write_text(
+        (
+            'import fs from "node:fs";\n'
+            f"fs.writeFileSync({json.dumps(str(pid_path))}, String(process.pid));\n"
+            "while (true) {}\n"
+        ),
+        encoding="utf-8",
+    )
+    return runner, pid_path
+
+
+def _assert_supervisor_wait_failure_kills_node(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure: BaseException,
+) -> None:
+    if NODE is None:
+        pytest.skip("Node.js is unavailable")
+    if os.name != "posix":
+        pytest.skip("process-group supervision is POSIX-only")
+
+    runner, pid_path = _blocking_node_runner(tmp_path)
+    real_popen = subprocess.Popen
+    captured: dict[str, subprocess.Popen] = {}
+
+    class FailingWaitProcess:
+        def __init__(self, *args, **kwargs) -> None:
+            self._process = real_popen(*args, **kwargs)
+            self.pid = self._process.pid
+            self._failed = False
+            captured["process"] = self._process
+
+        def wait(self, timeout=None):
+            if not self._failed:
+                self._failed = True
+                deadline = time.monotonic() + 3
+                while not pid_path.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                assert pid_path.exists()
+                raise failure
+            return self._process.wait(timeout=timeout)
+
+        def poll(self):
+            return self._process.poll()
+
+        def kill(self) -> None:
+            self._process.kill()
+
+    monkeypatch.setattr(
+        computer_script_runner.subprocess,
+        "Popen",
+        FailingWaitProcess,
+    )
+    request = {"result_path": str(tmp_path / "result.json")}
+
+    with pytest.raises(type(failure)):
+        computer_script_runner._run_node_process(
+            Path(NODE),
+            runner,
+            request,
+            30,
+        )
+
+    node_pid = int(pid_path.read_text(encoding="utf-8"))
+    assert captured["process"].poll() is not None
+    _wait_for_pid_exit(node_pid)
+
+
+def test_keyboard_interrupt_during_wait_kills_the_node_process(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _assert_supervisor_wait_failure_kills_node(
+        monkeypatch,
+        tmp_path,
+        KeyboardInterrupt(),
+    )
+
+
+def test_supervisor_exception_during_wait_kills_the_node_process(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _assert_supervisor_wait_failure_kills_node(
+        monkeypatch,
+        tmp_path,
+        RuntimeError("supervisor failed"),
+    )
+
+
+def test_sigterm_to_the_supervisor_kills_the_node_process(tmp_path: Path) -> None:
+    if NODE is None:
+        pytest.skip("Node.js is unavailable")
+    if os.name != "posix":
+        pytest.skip("SIGTERM supervision is POSIX-only")
+
+    runner, pid_path = _blocking_node_runner(tmp_path)
+    supervisor = tmp_path / "supervisor.py"
+    supervisor.write_text(
+        "\n".join(
+            [
+                "from pathlib import Path",
+                "from vibe.computer_script_runner import _run_node_process",
+                (
+                    f"_run_node_process(Path({str(NODE)!r}), "
+                    f"Path({str(runner)!r}), "
+                    f"{{'result_path': {str(tmp_path / 'result.json')!r}}}, 30)"
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(Path.cwd()), environment.get("PYTHONPATH", "")])
+    )
+    process = subprocess.Popen(
+        [sys.executable, str(supervisor)],
+        cwd=Path.cwd(),
+        env=environment,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    node_pid: int | None = None
+    try:
+        deadline = time.monotonic() + 5
+        while not pid_path.exists() and time.monotonic() < deadline:
+            assert process.poll() is None
+            time.sleep(0.02)
+        assert pid_path.exists()
+        node_pid = int(pid_path.read_text(encoding="utf-8"))
+
+        os.kill(process.pid, signal.SIGTERM)
+        assert process.wait(timeout=5) != 0
+        _wait_for_pid_exit(node_pid)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=3)
+        if node_pid is not None and _pid_exists(node_pid):
+            os.kill(node_pid, signal.SIGKILL)
+
+
 def test_sdk_injects_module_resolution_and_reobserves_one_stale_token(
     tmp_path: Path,
 ) -> None:
@@ -695,6 +860,182 @@ export default async () => {{
     cli._print_task_error(cli_error)
     rendered = json.loads(capsys.readouterr().err)
     assert rendered["details"] == expected
+
+
+def test_sdk_controller_error_ambiguity_table(tmp_path: Path) -> None:
+    if NODE is None:
+        pytest.skip("Node.js is unavailable")
+
+    not_dispatched_codes = [
+        "computer_script_request_too_large",
+        "invalid_computer_script_request",
+        "active_turn_required",
+        "session_archived",
+        "script_connection_invalid",
+        "script_timeout",
+        "script_turn_ended",
+        "invalid_computer_script_tool",
+        "session_argument_forbidden",
+        "computer_use_unavailable",
+        "session_required",
+        "unknown_tool",
+        "invalid_arguments",
+        "invalid_computer_script_descriptor",
+        "computer_script_descriptor_required",
+        "stale_app_handle",
+        "stale_window_handle",
+        "desktop_busy",
+        "platform_unsupported",
+        "foreground_forbidden",
+        "focus_shortcut_forbidden",
+        "foreground_consent_required",
+        "window_target_required",
+        "observe_first",
+        "desktop_lease_lost",
+        "session_unavailable",
+    ]
+    post_send_codes = [
+        "upstream_unavailable",
+        "upstream_error",
+        "upstream_protocol_error",
+        "upstream_tool_error",
+        "computer_use_error",
+        "application_not_found",
+        "element_not_found",
+        "snapshot_not_found",
+        "window_id_not_found",
+        "window_not_found",
+        "stale_element_token",
+        "capture_failed",
+        "tool_invocation_failed",
+        "controller_unavailable",
+        "timeout",
+        "invalid_computer_use_response",
+    ]
+    cases = [
+        *[
+            {
+                "code": code,
+                "requestWasSent": True,
+                "controllerPayload": {"dispatched": False},
+                "expected": False,
+            }
+            for code in not_dispatched_codes
+        ],
+        *[
+            {
+                "code": code,
+                "requestWasSent": True,
+                "controllerPayload": {},
+                "expected": True,
+            }
+            for code in post_send_codes
+        ],
+        {
+            "code": "timeout",
+            "requestWasSent": False,
+            "controllerPayload": {},
+            "expected": False,
+        },
+        {
+            "code": "controller_unavailable",
+            "requestWasSent": False,
+            "controllerPayload": {},
+            "expected": False,
+        },
+    ]
+    script = tmp_path / "ambiguity-table.mjs"
+    script.write_text(
+        (
+            "import { controllerFailureAmbiguous } from "
+            f"{json.dumps((SDK_DIRECTORY / 'runtime.mjs').as_uri())};\n"
+            f"const cases = {json.dumps(cases)};\n"
+            "const actual = cases.map((item) => ({\n"
+            "  code: item.code,\n"
+            "  expected: item.expected,\n"
+            "  actual: controllerFailureAmbiguous(\n"
+            "    item.requestWasSent,\n"
+            "    item.controllerPayload,\n"
+            "  ),\n"
+            "}));\n"
+            "process.stdout.write(JSON.stringify(actual));\n"
+        ),
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [NODE, str(script)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    actual = json.loads(completed.stdout)
+    assert all(row["actual"] == row["expected"] for row in actual), actual
+
+    runtime_source = (SDK_DIRECTORY / "runtime.mjs").read_text(encoding="utf-8")
+    assert runtime_source.count("new ControllerFault(") == 1
+    assert "hasAmbiguousInFlightRequest" not in runtime_source
+
+
+def test_sdk_marks_post_forward_upstream_failure_as_ambiguous(
+    tmp_path: Path,
+) -> None:
+    payload, _server, _requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  const mail = await computer.app({ bundleId: "com.apple.mail" });
+  const window = await mail.window({ labelContains: "New Message" });
+  try {
+    await window
+      .element({ role: "button", label: "Send", index: 0 })
+      .click();
+  } catch (error) {
+    return { code: error.code, ambiguous: error.ambiguous };
+  }
+  throw new Error("upstream_unavailable was not raised");
+};
+""",
+        click_error="upstream_unavailable",
+    )
+
+    assert payload == {
+        "ok": True,
+        "result": {
+            "code": "upstream_unavailable",
+            "ambiguous": True,
+        },
+    }
+
+
+def test_sdk_marks_post_send_response_decode_failure_as_ambiguous(
+    tmp_path: Path,
+) -> None:
+    payload, _server, _requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  await computer.app({ index: 0 });
+};
+""",
+        apps=[
+            {
+                "pid": 41,
+                "name": "",
+                "bundle_id": "",
+                "running": True,
+                "active": False,
+            }
+        ],
+    )
+
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "invalid_computer_use_response"
+    assert payload["error"]["ambiguous"] is True
 
 
 def test_sdk_maps_stable_controller_codes_to_typed_errors(tmp_path: Path) -> None:

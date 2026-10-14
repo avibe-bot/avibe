@@ -310,6 +310,7 @@ def test_script_request_body_is_bounded_before_admission(
             "ok": False,
             "error": "computer_script_request_too_large",
             "params": {"limit_bytes": 64},
+            "dispatched": False,
         }
         assert calls == []
 
@@ -406,6 +407,7 @@ def test_script_routes_reject_an_old_turn_before_reaching_computer_server() -> N
     success, stale, calls = asyncio.run(exercise())
     assert success["ok"] is True
     assert stale["error"] == "script_turn_ended"
+    assert stale["dispatched"] is False
     assert calls == [
         (
             "list_windows",
