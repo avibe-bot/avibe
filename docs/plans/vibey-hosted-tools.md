@@ -131,8 +131,9 @@ The evidence store, its record and its owner are the capability model's §3. v2 
   - `Invalid encrypted_content in search_result block` while the request replays a web-search result → `web_search`
     `replay`;
   - **new:** xAI's plain-text refusal of a replayed payload, `Could not decrypt the provided encrypted_content`,
-    which carries no code. Its evidence status waits for the Vibey lane's xAI A/B (stale ciphertext versus
-    unsupported, §3.5). Until that settles, it writes no evidence and only turns replay off for the rest of the turn.
+    which carries no code. It does not say which ciphertext failed, and a stale or foreign blob draws it as well as
+    an unsupported replay, so it writes no evidence unless the Vibey lane's xAI A/B shows that xAI refuses fresh
+    ciphertext from the same account. Vibey handles it per turn (§3.5).
   - Generic errors never create evidence: 5xx, overload, rate limit, auth, and any 400 that does not name the
     feature.
 - **Lifetime.** Negative evidence expires after 7 days (relays change). It also never outlives the wire it was
@@ -226,7 +227,8 @@ failover, and is refused unpinned (C-6 item 7). What changes is what happens aft
 - **Vibey re-resolves; it does not render everything portable.**
   - The adapter surfaces `pin_unavailable` as a terminal error with no partial and no output. The loop then
     resolves a fresh hop, as it already does per model attempt (C-6 item 3), and renders that request normally for
-    it. The fresh evidence turns exactly the refused tool into the proxy function or synthetic replay; other native
+    it. Re-resolving applies only to a request whose response has produced no output, so it never discards streamed
+    content: a `pause_turn` continuation answered `pin_unavailable` still ends `interrupted` with its partial (§4.3). The fresh evidence turns exactly the refused tool into the proxy function or synthetic replay; other native
     content stays native and pinned.
   - This applies to every `pin_unavailable`, not only `hosted_unsupported`: a new identity drops the old payloads,
     a Source in cooldown yields another hop with the in-place form. Fully portable rendering stays only as the last
@@ -237,8 +239,12 @@ failover, and is refused unpinned (C-6 item 7). What changes is what happens aft
   - **In-flight continuations** (Anthropic `pause_turn`, or client tool results after server tools) keep their
     hosted items verbatim only while the fresh hop still declares that tool natively. Otherwise the items take the
     in-place text form (§4.4), because a provider refuses `server_tool_use` without its declaration.
-  - **A replay decrypt refusal** (§3.2, xAI) turns replay off for that Source for the rest of the turn, without
-    evidence, so the re-resolved request carries synthetic replay.
+  - **A decrypt refusal** (§3.2, xAI) is mostly unpinned: xAI's encrypted reasoning (ThinkingBlock signatures,
+    `rs_…`/`tco_…` items) rides ordinary requests, and only hosted content pins. So Vibey's adapter classifies that
+    400, before any output, as an opaque-payload refusal on either path, and the loop re-resolves and renders with
+    **every** opaque payload of that Source identity dropped for the rest of the turn: signatures, encrypted reasoning
+    and native hosted payloads, since the refusal does not say which one failed. Once per (turn, identity); no
+    evidence is written (§3.2).
 - **The cost is one cold prompt prefix.** Dropping a native declaration changes the tools block, so the resend and
   the next turns start a new cache prefix: once per (Source, tool), when the refusal is first learned, and again only
   after the negative evidence expires and the tool is tried natively once more. The upstream is not called twice
@@ -299,10 +305,14 @@ never dropped.
   `failed` or `incomplete`.
 - A native hosted call always has its native payload. A proxied search or an image call is a `ToolCallBlock` plus
   `ToolResultMessage.hosted`, never a `HostedToolBlock`.
-- **Native image items are no longer mapped.** Vibey never declares `image_generation`, so an
-  `image_generation_call` can only appear if an upstream injects it; it then maps to `other` and its bytes are never
-  decoded. The #2589 codes `image_not_streamed` and `provider_no_image` lose their producers and stay in
-  `HOSTED_ERROR_CODES` for records already written.
+- **Native image items are not hosted items.** Vibey never declares `image_generation` (and §7.1 keeps any caller
+  from receiving it), so an `image_generation_call` is ignored like any undeclared item, and a line over 8 MiB fails
+  the stream like any oversized line. The #2589 codes `image_not_streamed` and `provider_no_image` lose their
+  producers and stay in `HOSTED_ERROR_CODES` for records already written.
+- **rc-era transcripts still load.** An rc session may hold an assistant row with a native `image_generation`
+  `HostedToolBlock`. The reader keeps accepting `tool: image_generation` on load only (the producer never writes it),
+  and replay renders it in the in-place text form from its record, whose path record names the file. Otherwise the
+  whole session's context would fail to load, including the owner's own rc sessions.
 - **Per adapter notes.** xAI's X-search `reasoning` items (`tco_…`) stay ThinkingBlocks. The `custom_tool_call`
   becomes the HostedToolBlock, never a local tool call. Anthropic's `encrypted_content` is kept only in
   `native.payload`. Hosted payloads count against the 32 MiB `StreamAssembler` budget; search events measured at
@@ -423,7 +433,7 @@ E2E stay.
   - **The enum is the image models actually available**: the overlay's `image_models` (§3.1) for each Source where
     `runs_on` holds for that model, deduplicated by model id (the first Source in Vibey's order serves an id that
     two Sources offer, unless `default_model` names the other). Each entry's one-line description goes into the
-    `model` description. The default is listed first and marked "(default)"; the rest follow sorted by id. So the
+    `model` description; every line stays short, because the tool block is in every request's prefix. The default is listed first and marked "(default)"; the rest follow sorted by id. So the
     enum is a pure function of configuration and changes only on a config event, and the turn freezes it (§3.4).
   - **Common parameters only.** `prompt`, `size` (a size or an aspect ratio, mapped per endpoint), `images`
     (reference images for an edit) and `n` where the model supports more than one. A model-specific option stays
@@ -439,7 +449,8 @@ Unchanged from v1 §7.3 (owner decision, 2026-10-13 19:14), with the producer no
 - **The model is not given the image.** The gateway returns the bytes to Vibey's tool runtime over the local hop;
   Vibey saves them through the session media sink, the only writer of session media, and builds the `HostedRecord`
   with `images[]` path records. The bytes are never in a transcript.
-- **The model gets a text path record:** path, model, size, mode and cost, e.g.
+- **The model gets a text path record:** path, model, size, mode and cost, rendered from the record, the `generate`
+  action (which now names the `model`) and the `ProxyExecution`, e.g.
   `[image saved: /…/image-3f2a.jpeg · 1536×1024 · gpt-image-2 (OpenAI API key) · ≈ $0.04] prompt: "…"`. It opens the
   file with `read` if it wants to look. A request asks the endpoint for JPEG where the model allows it, so a file
   fits `read`'s inline image cap; a file still over it gets a record saying it is too large to view inline.
@@ -454,8 +465,10 @@ Unchanged from v1 §7.3 (owner decision, 2026-10-13 19:14), with the producer no
 - **Never through a chat model.** Vibey never declares a hosted image tool on a chat request; v1's native
   `image_generation` declaration, its partial images and its 32 MiB line cap are removed (§11).
 - **Endpoint:** the same executor endpoint, `POST {base_url}/hosted-tools/image_generate`, with `{"arguments":
-  {model, prompt, size?, images?, n?}}`. Vibey reads each reference image itself, through the same checks as `read`
-  (a supported image type, within `read`'s inline limit), and sends the bytes base64 in `images`.
+  {model, prompt, size?, images?, n?}}`. Vibey reads each reference image itself, exactly as `read` resolves a path
+  (relative to the session's cwd, under the same file permissions) and with its checks (a supported image type,
+  within `read`'s inline limit), and sends the bytes base64 in `images`. A path the agent could not `read` is
+  refused before any call, with a `failed` record whose error names the path.
 - **Per model kind** (the overlay entry says which):
   - **OpenAI gpt-image family** (an OpenAI API key, or the Codex subscription backend) and **xAI grok-imagine**:
     the engine's `/v1/images/generations`, or `/v1/images/edits` when `images` is present.
@@ -544,8 +557,8 @@ under the freeze protocol (`model-hub-contracts/README.md`).
 
 ### 10.1 C-1 (`agent-core-contracts/message.schema.json`, `cross-provider.md`, `conversion-tables.md`)
 
-- `HostedToolName` for `HostedToolBlock` is `web_search` | `x_search`; the `generate` action and `images[]` are no
-  longer valid on a `HostedToolBlock`.
+- A `HostedToolBlock` the producer writes has `tool` `web_search` | `x_search`. The reader still accepts an rc-era
+  `image_generation` block, with its `generate` action and `images[]`, on load only (§4.2).
 - `ToolResultMessage.hosted.record` may carry `images[]` and the `generate` action only for `image_generate`;
   `generate` records the `model` used, with `prompt` required for a `completed` record.
 - The conversion rows drop native image replay; an `image_generate` call is an ordinary tool call everywhere.
@@ -585,7 +598,7 @@ under the freeze protocol (`model-hub-contracts/README.md`).
 | --- | --- |
 | Model Hub | `core/handlers/model_hub/hosted_probe.py`; `ModelHubService.probe_hosted_tool`, `_record_probe_evidence`, `_probe_estimate`, `_probe_rejection`, `_probe_aspect`; the RPC and UI-server routes for `POST /api/models/hosted-tools/<tool>/probe`; `MODEL_HUB_RPC_TIMEOUT_SECONDS`' probe dependency (it moves back to `vibe/model_hub_client.py`); `HOSTED_PROBE_SHAPE` and every `shape` parameter; the evidence `probe` basis and probe staleness; `engine_stamp()`'s `hosted_wire` branch (#2623); the per-turn executor binding and `_executor`; `UserTestCall`'s probe-only callers |
 | Gateway | `stream_wire`'s `response.image_generation_call.partial_image` model-output envelope; the executor's native image path (`ResponsesStreamReader(partial_images=…)`, the 32 MiB image line cap, the image event and byte budget, `_image_result`, the `_IMAGE_*` constants, the 300 s image `call_timeout`), replaced by what the images endpoint needs; the OpenAI `image_generation` overlay declaration (#2580's JPEG q90 becomes the images-endpoint request parameters); `executor` in the proxy body; the `hosted_tools_status` candidates and bound-executor projection. Kept: `disable-image-generation: passthrough`; `hosted_admission`'s "image calls are never replayed" rule until no transcript can carry a native image call; #2616's per-turn identity binding and #2586's turn id. |
-| Vibey | the native `image_generation` declaration, its parsing (`responses_hosted_tool`'s `image_generation_call` mapping, `image=`/`image_error=` in `responses_hosted_block`), `_ImageBudget`, `_saved_image`, `_PARTIAL_IMAGE_EVENT`, `IMAGE_STREAM_LINE_BYTES`, the large-event JSON offload, `drive_sse_stream`'s `max_line_size` and `iter_sse_events`' offload (every stream returns to 8 MiB); `ModelRequest.tool_choice` and `_common.forced_tool`; `registry.build_wire_request` (its tests move to each adapter's `wire_request`); the adapters' probe-only `media_sink` parameter. `HostedRecord.images`, `HostedImage`, `generate_action` and the `generate` action stay, on `ToolResultMessage.hosted` only. |
+| Vibey | the native `image_generation` declaration, its parsing (`responses_hosted_tool`'s `image_generation_call` mapping, `image=`/`image_error=` in `responses_hosted_block`), `_ImageBudget`, `_saved_image`, `_PARTIAL_IMAGE_EVENT`, `IMAGE_STREAM_LINE_BYTES`, the large-event JSON offload, `drive_sse_stream`'s `max_line_size` and `iter_sse_events`' offload (every stream returns to 8 MiB); `ModelRequest.tool_choice` and `_common.forced_tool`; `registry.build_wire_request` (its tests move to each adapter's `wire_request`); the adapters' probe-only `media_sink` parameter and the `media_sink` argument of `registry_providers(media_loader=…, media_sink=…)`; `HostedTool`'s `executor` field and its `executor` body; the agent's `_with_hosted_images` / `_emit_orphan_images` path for native images (`agent.py`), kept for `image_generate` results. `HostedRecord.images`, `HostedImage`, `generate_action` and the `generate` action stay, on `ToolResultMessage.hosted` only. |
 | UI | `ProbeAnswerNote.tsx` (with `ReplayNote`); in `ToolsTab.tsx` `ProbeCell`, the executor picker and its notes, the `needsCheck`/`needsExecutor` states, the "unchecked" chip and the probe column; in `HostedCapabilityChips.tsx` the recheck action, the keyboard focus-into-detail, and the reverify, engineUpgraded and unsupportedAged states; `useEstimateLabel.ts`; the `probeHostedTool` wiring and the Sources re-read after a probe in `SettingsModelsPage.tsx`; in `useHostedTools` `probe`, `probing`, `lostProbeOutcome`, `recordedOutcome` and `PROBE_NOT_RECORDED` (the serialized writes, identity fencing and re-read after Source mutations stay); in `hostedTools.ts` `ProbeTarget`, `probeKey`, `probeUnanswered`, `verifiedCandidates`, `sameExecutor` and the `aged`/`engineUpgraded` branches of `evidenceChip`; `modelsApi.probeHostedTool`; the types `HostedToolProbeResult`, `HostedProbeAspect`, `HostedCostEstimate`, `probe_estimate`, and `executor` in `HostedToolPut`. Check-all is removed by the UI lane's pending PR. |
 | i18n (`settings.models`) | `tools.probe.*`; `tools.state.needsCheck` and `needsExecutor`; `tools.executor.*`; `tools.chip.unchecked`, `reverify`, `engineUpgraded`, `unsupportedAged`; `tools.reverify.*`; `capability.recheck`, `recheckCost`; `capability.chip.*` and `capability.explain.*` for reverify, engineUpgraded, viaProxyAged and unsupportedAged; `capability.expiryProbe` |
 | Tests and scenarios | `tests/test_model_hub_hosted_probe.py`; the probe and executor-binding cases in `test_model_hub_hosted_tools_resolution.py`, `test_model_hub_hosted_executor.py`, `test_model_hub_hosted_pinning.py` and `test_model_hub_evidence_rules.py`; the native image cases in the Responses adapter tests; UI `ToolsTab.test` MH-HOSTED-UI-013 and 019, the executor cases of 001 and the probe parts of 003 and 018, `useHostedTools.test` 013 and parts of 007, `hostedTools.test` 013, `SourceDetailPanel.test` 013 and 017, `SettingsModelsPage.render` 016; catalog rows MH-HOSTED-007 (probe), UI-013, UI-016 and UI-019 retire, and the rows they share shrink |
@@ -638,7 +651,7 @@ and no real credentials.
 | Hop facts | `hosted_tools` resolution | `assumed` from priors with no evidence; `unsupported` with a current negative; a Claude subscription never `assumed`; a translated path never `assumed`; the image enum and default, deterministic |
 | Config | `ModelHubConfig` loader | a 3.2.0 config without the section has every tool on; an rc-era section is dropped with one warning; `executor_order` and `default_model` round-trip |
 | Gateway refusal | real gateway + loopback fake engine | a pinned native request refused with `Unsupported tool type` answers 409 with `reason`, and the evidence is written first; admission refuses a declared tool with current negative evidence |
-| Re-render | Vibey loop with a stub gateway | re-resolve after `hosted_unsupported` resends with the function, other native content still pinned; the per-key and per-turn bounds; same facts go portable; an in-flight continuation whose tool turned proxy uses the in-place form |
+| Re-render | Vibey loop with a stub gateway | re-resolve after `hosted_unsupported` resends with the function, other native content still pinned; the per-key and per-turn bounds; same facts go portable; an in-flight continuation whose tool turned proxy uses the in-place form; a decrypt 400 on an unpinned request re-renders once without that identity's opaque payloads; a `pause_turn` continuation's `pin_unavailable` still ends `interrupted` |
 | Executor chain | gateway endpoint, stub providers | order from `executor_order` then Source order; failover on 5xx and on a narrow refusal; `model_not_found` moves on; no candidate gives a `failed` record naming the fix; metering on the executor Source; a Claude subscription is never a candidate |
 | Images | gateway endpoint + Vibey tool runtime, stub endpoints | generations and edits per kind; JPEG requested where allowed; a failure names the alternatives and no other model is called; bytes saved once through the media sink; the path record; no base64 in history |
 | Parsing and replay | adapters and transforms | v1's mapping and replay cases minus native images; an injected `image_generation_call` maps to `other` without decoding |
@@ -654,5 +667,7 @@ and no real credentials.
    evidence expires (§3.5).
 3. **The executor's lightweight model is a catalog choice.** A Source that does not serve it moves the chain on; the
    user cannot pick a different executor model in v2.
-4. **rc-era state is dropped**: probe evidence reads as `basis: probe`, which v2's loader does not accept, so those
+4. **A decrypt refusal drops a whole identity's opaque payloads for the turn**, reasoning included, because xAI's
+   refusal does not say which ciphertext failed (§3.5). The turn continues with portable history for that Source.
+5. **rc-era state is dropped**: probe evidence reads as `basis: probe`, which v2's loader does not accept, so those
    records are pruned; an rc-era `hosted_tools` section resets to the defaults.
