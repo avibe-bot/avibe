@@ -11362,6 +11362,7 @@ def get_claude_auth(*, connection_observation: bool = False) -> dict:
         build_claude_subprocess_env,
         read_claude_auth_state,
         read_claude_settings_env,
+        read_claude_settings_oauth_token,
     )
     from vibe.native_oauth_store import read_native_oauth
 
@@ -11395,7 +11396,9 @@ def get_claude_auth(*, connection_observation: bool = False) -> dict:
         return {"ok": True, "active_auth_mode": "api_key"}
 
     oauth_signed_in: bool | None
-    if launch_env.get("CLAUDE_CODE_OAUTH_TOKEN"):
+    settings_oauth_token = read_claude_settings_oauth_token()
+    oauth_token = settings_oauth_token if settings_oauth_token is not None else launch_env.get("CLAUDE_CODE_OAUTH_TOKEN")
+    if oauth_token:
         oauth_signed_in = True
     else:
         try:

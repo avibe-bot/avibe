@@ -197,6 +197,10 @@ def test_claude_oauth_state_reads_current_dot_credentials_file(tmp_path: Path) -
         ("missing", "found", "setup_token", "oauth", False, True),
         ("missing", "found", "legacy_env_key", "api_key", False, False),
         ("missing", "found", "masked_env_key", "none", True, False),
+        ("missing", "not_found", "settings_token", "oauth", False, True),
+        ("missing", "found", "settings_token", "oauth", False, True),
+        ("missing", "not_found", "blank_settings_token", "none", False, False),
+        ("missing", "found", "settings_key_token", "api_key", False, True),
     ],
 )
 def test_get_claude_auth_reads_native_store_without_launching_cli(
@@ -226,8 +230,11 @@ def test_get_claude_auth_reads_native_store_without_launching_cli(
     config.save()
     settings = get_claude_settings_path()
     settings.parent.mkdir(parents=True, exist_ok=True)
-    settings.write_text(json.dumps({"env": {"ANTHROPIC_API_KEY": "fixture-key-secret"}
-                                         if credential == "api_key" else {}}))
+    has_key = credential in {"api_key", "settings_key_token"}
+    settings_env = {"ANTHROPIC_API_KEY": "fixture-key-secret"} if has_key else {}
+    if credential in {"settings_token", "settings_key_token", "blank_settings_token"}:
+        settings_env["CLAUDE_CODE_OAUTH_TOKEN"] = "" if credential == "blank_settings_token" else "fixture-setup-secret"
+    settings.write_text(json.dumps({"env": settings_env}))
     path = get_claude_credentials_path()
     if store != "missing":
         path.write_text({
@@ -235,7 +242,7 @@ def test_get_claude_auth_reads_native_store_without_launching_cli(
             "invalid": "{broken-json",
             "mcp": json.dumps({"mcpOAuth": {"fixture": {"accessToken": "fixture-mcp-secret"}}}),
         }[store])
-    if credential == "setup_token":
+    if credential in {"setup_token", "blank_settings_token"}:
         monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "fixture-setup-secret")
     elif credential in {"legacy_env_key", "masked_env_key"}:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "fixture-key-secret")
@@ -254,12 +261,15 @@ def test_get_claude_auth_reads_native_store_without_launching_cli(
     monkeypatch.setattr(asyncio, "create_subprocess_shell", forbidden)
 
     state = get_claude_auth()
+    connection = get_claude_auth(connection_observation=True)
 
     forbidden.assert_not_called()
+    assert connection == ({"ok": True, "auth_mode_uncertain": True} if uncertain
+                          else {"ok": True, "active_auth_mode": expected_mode})
     assert state["active_auth_mode"] == expected_mode
     assert state["auth_mode_uncertain"] is uncertain
     assert state["has_oauth_credentials"] is has_oauth
-    assert state["has_api_key"] is (credential == "api_key")
+    assert state["has_api_key"] is has_key
     assert {p: p.read_bytes() for p in settings.parent.iterdir() if p.is_file()} == before
     assert not unused_cwd.exists()
     public = json.dumps(state)
@@ -920,6 +930,7 @@ def test_apply_claude_auth_oauth_removes_auth_env_but_keeps_managed_defaults(
             "ANTHROPIC_BASE_URL": "https://stale-relay.example.invalid",
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "0",
             "CLAUDE_CODE_ATTRIBUTION_HEADER": "1",
+            "CLAUDE_CODE_OAUTH_TOKEN": "fixture-settings-token",
             "CUSTOM_FLAG": "keep-me",
         },
     )
@@ -932,6 +943,7 @@ def test_apply_claude_auth_oauth_removes_auth_env_but_keeps_managed_defaults(
     assert "ANTHROPIC_API_KEY" not in settings["env"]
     assert "ANTHROPIC_BASE_URL" not in settings["env"]
     assert settings["env"]["CUSTOM_FLAG"] == "keep-me"
+    assert settings["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == "fixture-settings-token"
     _assert_claude_managed_env(settings["env"])
 
 

@@ -14,6 +14,10 @@ Preserve existing launch credential precedence using `build_claude_subprocess_en
 A configured API key wins for the active connection. Local OAuth material proves
 presence, not remote validity; missing means absent, opaque/denied/invalid means
 unknown. Unknown must not overwrite a working API-key state or mean logout.
+Read `CLAUDE_CODE_OAUTH_TOKEN` from the selected user settings file as well as
+launch env; a settings value overrides inherited env, including an empty-string
+mask. This read is separate from the Anthropic mutation/backup key list so the
+Claude-owned token remains untouched by existing auth saves.
 
 Claude's explicit OAuth flow already verifies the login and commits it under its
 owner. The existing Model Hub adapter consumes only successful flows and stores

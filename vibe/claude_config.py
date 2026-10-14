@@ -336,6 +336,18 @@ def read_claude_settings_env(home: Path | None = None) -> Dict[str, str]:
     return out
 
 
+def read_claude_settings_oauth_token(home: Path | None = None) -> str | None:
+    """Read the user-settings setup token for observation, never mutation.
+
+    ``None`` means no settings override; an empty string masks an inherited
+    token. Keep this separate from RELEVANT_ENV_KEYS: auth saves/backups must
+    continue preserving this Claude-owned field rather than clearing it.
+    """
+    env_block = _load_settings(get_claude_settings_path(home)).get("env")
+    raw = env_block.get("CLAUDE_CODE_OAUTH_TOKEN") if isinstance(env_block, dict) else None
+    return raw.strip() if isinstance(raw, str) else None
+
+
 def restore_claude_settings_env(env_values: Dict[str, str], home: Path | None = None) -> None:
     """Restore Anthropic-relevant Claude settings env values exactly.
 
