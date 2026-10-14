@@ -183,7 +183,6 @@ it('ignores an older refetch when a newer authoritative read finishes first', as
   const newer = deferred<{ ok: boolean; secrets: VaultSecret[] }>();
   api.listVaultSecrets.mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise);
   renderEditor();
-  const olderShape = { ...secret, default_field: 'old', fields: ['old', 'username'], updated_at: 'version-2' };
   const newerShape = { ...secret, default_field: 'new', fields: ['new', 'username'], updated_at: 'version-3' };
   await act(async () => {
     eventHandlers?.onVaultsUpdated?.({ scope: 'secret', secret_name: 'LOGIN' });
@@ -451,6 +450,76 @@ it('surfaces an extra-field record conflict without retrying under a changed def
   await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy());
   expect(api.updateVaultSecretField).toHaveBeenCalledOnce();
   expect(sealBlindBox).toHaveBeenCalledOnce();
+});
+
+it('retries a record mismatch with the superseded read entry', async () => {
+  const retryRead = deferred<{ ok: boolean; secrets: VaultSecret[] }>();
+  const propRead = deferred<{ ok: boolean; secrets: VaultSecret[] }>();
+  const renamed = { ...secret, default_field: 'credential', fields: ['credential', 'username'], updated_at: 'version-2' };
+  api.updateVaultSecretField
+    .mockResolvedValueOnce({ ok: false, code: 'record_mismatch', message: 'stale record' })
+    .mockResolvedValueOnce({ ok: true, secret: { ...renamed, updated_at: 'version-3' } });
+  api.listVaultSecrets.mockReturnValueOnce(retryRead.promise).mockReturnValueOnce(propRead.promise);
+  const rendered = renderEditor();
+  change('Value for password', 'replacement');
+  fireEvent.click(screen.getByRole('button', { name: 'Save password' }));
+  await waitFor(() => expect(api.listVaultSecrets).toHaveBeenCalledTimes(1));
+  rendered.rerender(
+    <I18nextProvider i18n={i18n}>
+      <VaultSecretFieldsEditor secret={{ ...secret, updated_at: 'version-2' }} disabled={false} onBusyChange={vi.fn()} />
+    </I18nextProvider>,
+  );
+  await waitFor(() => expect(api.listVaultSecrets).toHaveBeenCalledTimes(2));
+  await act(async () => {
+    propRead.resolve({ ok: true, secrets: [renamed] });
+    retryRead.resolve({ ok: true, secrets: [renamed] });
+    await Promise.all([propRead.promise, retryRead.promise]);
+  });
+  await waitFor(() => expect(api.updateVaultSecretField).toHaveBeenCalledTimes(2));
+  expect(api.updateVaultSecretField.mock.calls[1][2].expected_updated_at).toBe('version-2');
+});
+
+it('keeps a secret conflict after its refresh is superseded', async () => {
+  const conflictRead = deferred<{ ok: boolean; secrets: VaultSecret[] }>();
+  const propRead = deferred<{ ok: boolean; secrets: VaultSecret[] }>();
+  api.updateVaultSecretField.mockResolvedValueOnce({ ok: false, code: 'secret_conflict' });
+  api.listVaultSecrets.mockReturnValueOnce(conflictRead.promise).mockReturnValueOnce(propRead.promise);
+  const rendered = renderEditor();
+  change('Value for username', 'replacement');
+  fireEvent.click(screen.getByRole('button', { name: 'Save username' }));
+  await waitFor(() => expect(api.listVaultSecrets).toHaveBeenCalledTimes(1));
+  rendered.rerender(
+    <I18nextProvider i18n={i18n}>
+      <VaultSecretFieldsEditor secret={{ ...secret, updated_at: 'version-2' }} disabled={false} onBusyChange={vi.fn()} />
+    </I18nextProvider>,
+  );
+  await waitFor(() => expect(api.listVaultSecrets).toHaveBeenCalledTimes(2));
+  await act(async () => {
+    propRead.resolve({ ok: true, secrets: [secret] });
+    conflictRead.resolve({ ok: true, secrets: [secret] });
+    await Promise.all([propRead.promise, conflictRead.promise]);
+  });
+  expect((await screen.findByRole('alert')).textContent).toBe(en.vaults.fields.secretConflict);
+});
+
+it('shows a missing-secret error when a conflict refresh finds no secret', async () => {
+  api.updateVaultSecretField.mockResolvedValueOnce({ ok: false, code: 'secret_conflict' });
+  api.listVaultSecrets.mockResolvedValueOnce({ ok: true, secrets: [] });
+  renderEditor();
+  change('Value for username', 'replacement');
+  fireEvent.click(screen.getByRole('button', { name: 'Save username' }));
+  expect((await screen.findByRole('alert')).textContent).toBe(en.errors.secret_not_found);
+});
+
+it('does not report a dropped draft when its field is cleared before own removal', async () => {
+  api.deleteVaultSecretField.mockResolvedValueOnce({ ok: true, secret: { ...secret, fields: ['password'], updated_at: 'version-2' } });
+  renderEditor();
+  change('Value for username', 'temporary');
+  change('Value for username', '');
+  fireEvent.click(screen.getByRole('button', { name: 'Remove username' }));
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.delete }));
+  await waitFor(() => expect(screen.queryByLabelText('Value for username')).toBeNull());
+  expect(screen.queryByText(en.vaults.fields.draftsDropped.replace('{{fields}}', 'username'))).toBeNull();
 });
 
 it('retries once when the API client throws ApiError for record_mismatch', async () => {

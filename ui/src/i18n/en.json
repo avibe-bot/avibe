@@ -2528,6 +2528,7 @@
     "fields_not_supported": "Signing keys do not support named fields or default-field renaming.",
     "record_mismatch": "This field changed while you were saving. Refresh the secret and try again.",
     "secret_conflict": "This secret changed elsewhere. Review the refreshed fields and try again; your change was not saved.",
+    "secret_not_found": "This secret no longer exists. Refresh the vault and choose another secret.",
     "retry_not_available": "This notice cannot be retried. Send a message to continue.",
     "retry_stale": "Newer work has already started. Send a message if you want to continue.",
     "retry_busy": "The previous turn is still settling. Try again after it stops.",

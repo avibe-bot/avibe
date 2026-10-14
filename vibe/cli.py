@@ -10234,7 +10234,7 @@ def _vault_provision_success_usage(engine, name: str) -> str:
             metadata = vault_service.get_secret_meta(conn, name)
     except vault_service.SecretNotFoundError:
         return " — check `vibe vault list` for its current availability."
-    if len(metadata.get("fields") or []) > 1:
+    if vault_service.has_named_field_shape(metadata):
         return vault_service.provision_field_hint(metadata)
     return f" — use it via: vibe vault run --env {name} -- <command>"
 

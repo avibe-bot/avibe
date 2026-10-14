@@ -13,7 +13,7 @@ import shutil
 import threading
 import time
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 from sqlalchemy import select
@@ -399,6 +399,41 @@ def test_edit_metadata_json_rejects_secret_material(capfd):
     assert code == 1
     payload = json.loads(capfd.readouterr().err)
     assert payload["code"] == "secret_material_rejected"
+
+
+@pytest.mark.parametrize(
+    ("metadata", "field_hint"),
+    [
+        ({"name": "LOGIN", "kind": "static", "default_field": "value", "fields": ["value"]}, False),
+        ({"name": "LOGIN", "kind": "static", "default_field": "password", "fields": ["password"]}, True),
+        ({"name": "LOGIN", "kind": "static", "default_field": "password", "fields": ["password", "username"]}, True),
+        ({"name": "LOGIN", "kind": "static", "default_field": "value", "fields": ["value"], "fields_state": "corrupt"}, True),
+        ({"name": "SIGNING", "kind": "keypair", "default_field": "value", "fields": ["value"]}, False),
+    ],
+)
+def test_provision_field_hint_predicate_is_shared_across_callback_and_sync(metadata, field_hint, monkeypatch):
+    from vibe import cli
+
+    assert vault_service.has_named_field_shape(metadata) is field_hint
+    row = {
+        "id": "vrq_hint",
+        "request_type": "provision",
+        "status": "fulfilled",
+        "secret_name": metadata["name"],
+        "requester": json.dumps({}),
+        "delivery": json.dumps({}),
+        "provision_secret": metadata,
+    }
+    callback = vault_service._build_request_callback_message(row)
+    engine = MagicMock()
+    monkeypatch.setattr(vault_service, "get_secret_meta", lambda conn, name: metadata)
+    sync = cli._vault_provision_success_usage(engine, metadata["name"])
+    if field_hint:
+        assert "Current fields:" in callback and f"{metadata['name']}.{metadata['default_field']}" in callback
+        assert "Current fields:" in sync and f"{metadata['name']}.{metadata['default_field']}" in sync
+    else:
+        assert f"--env {metadata['name']} --" in callback and ".value" not in callback
+        assert f"--env {metadata['name']} --" in sync and ".value" not in sync
 
 
 def test_find_reports_value_free_capabilities(tmp_path, capfd, monkeypatch):

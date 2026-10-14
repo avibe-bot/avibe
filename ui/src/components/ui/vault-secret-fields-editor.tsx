@@ -31,8 +31,9 @@ function reconcileDrafts(previous: VaultSecret, next: VaultSecret, drafts: Reado
   const removed: string[] = [];
   for (const name of reconciled.keys()) {
     if (!names.has(name)) {
+      const value = reconciled.get(name);
       reconciled.delete(name);
-      removed.push(name);
+      if (value) removed.push(name);
     }
   }
   return { drafts: reconciled, removed };
@@ -98,6 +99,8 @@ export function VaultSecretFieldsEditor({
     updateDrafts(reconciled.drafts);
     if (reconciled.removed.length > 0) {
       setDraftNotice(t('vaults.fields.draftsDropped', { fields: reconciled.removed.join(', ') }));
+    } else {
+      setDraftNotice(null);
     }
   }, [t, updateDrafts]);
 
@@ -105,20 +108,28 @@ export function VaultSecretFieldsEditor({
   const invalidatePendingRefetches = useCallback(() => {
     refetchSequenceRef.current += 1;
   }, []);
-  const refetch = useCallback(async (): Promise<VaultSecret | null> => {
+  type RefetchResult = {
+    status: 'applied' | 'superseded' | 'missing';
+    entry: VaultSecret | null;
+  };
+  const refetch = useCallback(async (): Promise<RefetchResult> => {
     const sequence = ++refetchSequenceRef.current;
     try {
       const result = await api.listVaultSecrets({ cache: false });
-      if (sequence !== refetchSequenceRef.current) return null;
-      const next = result.secrets.find((entry) => entry.name === currentRef.current.name);
-      if (!next) throw conflict();
+      const next = result.secrets.find((entry) => entry.name === currentRef.current.name) ?? null;
+      if (sequence !== refetchSequenceRef.current) return { status: 'superseded', entry: next };
+      if (!next) return { status: 'missing', entry: null };
       applyTruth(next);
-      return next;
+      return { status: 'applied', entry: next };
     } catch (refetchError) {
-      if (sequence !== refetchSequenceRef.current) return null;
+      if (sequence !== refetchSequenceRef.current) return { status: 'superseded', entry: null };
       throw refetchError;
     }
-  }, [api, applyTruth, t]);
+  }, [api, applyTruth]);
+
+  const handleRefetchResult = useCallback((result: RefetchResult) => {
+    if (result.status === 'missing') setError(t('errors.secret_not_found'));
+  }, [t]);
 
   const surfaceRefetchError = useCallback((refetchError: unknown) => {
     setError(vaultErrorMessage(t, refetchError, t('vaults.dialog.errors.updateFailed')));
@@ -126,7 +137,7 @@ export function VaultSecretFieldsEditor({
 
   useEffect(() => {
     const refreshFromEvent = () => {
-      void refetch().catch(surfaceRefetchError);
+      void refetch().then(handleRefetchResult).catch(surfaceRefetchError);
     };
     const disconnect = api.connectWorkbenchEvents({
       onConnected: refreshFromEvent,
@@ -135,7 +146,7 @@ export function VaultSecretFieldsEditor({
       },
     });
     return () => disconnect?.();
-  }, [api, refetch, surfaceRefetchError]);
+  }, [api, refetch, handleRefetchResult, surfaceRefetchError]);
 
   useEffect(() => {
     if (secret === initialSecretRef.current) return;
@@ -143,8 +154,8 @@ export function VaultSecretFieldsEditor({
     // Parent updates are only a signal to read server truth; the mounted editor
     // never adopts the prop directly.
     if (secret.name !== currentRef.current.name) return;
-    void refetch().catch(surfaceRefetchError);
-  }, [secret, refetch, surfaceRefetchError]);
+    void refetch().then(handleRefetchResult).catch(surfaceRefetchError);
+  }, [secret, refetch, handleRefetchResult, surfaceRefetchError]);
 
   useEffect(() => () => {
     refetchSequenceRef.current += 1;
@@ -162,6 +173,7 @@ export function VaultSecretFieldsEditor({
     onBusyChange(true);
     setError(null);
     setSaved(false);
+    setDraftNotice(null);
     try {
       const result = await operation();
       if (!result.ok || !result.secret) {
@@ -177,7 +189,10 @@ export function VaultSecretFieldsEditor({
       setSaved(true);
       if (needsCatchup) {
         try {
-          await refetch();
+          const refreshed = await refetch();
+          if (refreshed.status === 'missing') {
+            setError(t('errors.secret_not_found'));
+          }
         } catch (catchupError) {
           surfaceRefetchError(catchupError);
         }
@@ -185,8 +200,12 @@ export function VaultSecretFieldsEditor({
     } catch (err) {
       if (hasErrorCode(err, 'secret_conflict')) {
         try {
-          if (!await refetch()) throw conflict();
-          setError(t('vaults.fields.secretConflict'));
+          const refreshed = await refetch();
+          if (refreshed.status === 'missing') {
+            setError(t('errors.secret_not_found'));
+          } else {
+            setError(t('vaults.fields.secretConflict'));
+          }
         } catch (refreshError) {
           setError(vaultErrorMessage(t, refreshError, t('vaults.dialog.errors.updateFailed')));
         }
@@ -249,10 +268,13 @@ export function VaultSecretFieldsEditor({
         let result = await sealAndWrite(current, field, wasDefault);
         if (hasErrorCode(result, 'record_mismatch')) {
           refetchedForRetry = true;
-          const next = await refetch();
-          if (!next) throw conflict();
-          savedField = wasDefault ? vaultDefaultField(next) : field;
-          result = await sealAndWrite(next, savedField, wasDefault);
+          const refreshed = await refetch();
+          if (!refreshed.entry) {
+            setError(t('errors.secret_not_found'));
+            return { ok: false, code: 'secret_not_found' };
+          }
+          savedField = wasDefault ? vaultDefaultField(refreshed.entry) : field;
+          result = await sealAndWrite(refreshed.entry, savedField, wasDefault);
           if (hasErrorCode(result, 'record_mismatch')) throw conflict();
         }
         if (result.ok && result.secret) {

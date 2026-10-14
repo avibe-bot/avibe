@@ -1678,6 +1678,15 @@ def _request_callback_disabled(row: dict[str, Any]) -> bool:
     return bool(isinstance(requester, dict) and requester.get("callback_disabled"))
 
 
+def has_named_field_shape(metadata: dict[str, Any]) -> bool:
+    """Whether provision guidance needs a field-aware hint instead of legacy NAME."""
+    if str(metadata.get("kind") or "static") == "keypair":
+        return False
+    default_field = str(metadata.get("default_field") or "value")
+    fields = list(metadata.get("fields") or [default_field])
+    return metadata.get("fields_state") == "corrupt" or fields != ["value"] or default_field != "value"
+
+
 def provision_field_hint(metadata: dict[str, Any]) -> str:
     """Value-free current-field usage shared by synchronous and async provision replies."""
     name = str(metadata["name"])
@@ -1710,7 +1719,7 @@ def _build_request_callback_message(row: dict[str, Any]) -> str:
         if request_type == "provision":
             usage = f" You can use it, e.g. `vibe vault run --env {name} -- <command>`." if name else ""
             current = row.get("provision_secret")
-            if name and isinstance(current, dict) and current.get("fields"):
+            if name and isinstance(current, dict) and has_named_field_shape(current):
                 usage = provision_field_hint(current)
             return f"The user provided your {subject}; the secret is now available.{usage} Continue the task."
         if request_type == "access":
