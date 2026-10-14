@@ -162,27 +162,50 @@ const ExecutorOrder: React.FC<{ tool: HostedSearchToolStatus; lookup: SourceLook
   const toolInline = t(`settings.models.tools.tool.${tool.name}.inline`) as string;
   const candidates = tool.executor_candidates;
   const custom = tool.executor_order !== null;
-  const [moved, setMoved] = React.useState<{ sourceId: string; position: number; count: number } | null>(null);
-  // A move re-renders the list from the answer; focus follows the moved row,
-  // to the other arrow once the one pressed is at its end.
+  // A move is announced, and focus follows the moved row, only once the server's
+  // order shows it. One that did not land (refused, or lost and reconciled to
+  // another order) is dropped once its write has been out and settled, without
+  // a word.
+  const [requested, setRequested] = React.useState<{
+    sourceId: string;
+    direction: -1 | 1;
+    expected: string;
+    position: number;
+    count: number;
+    /** Its write has been seen out, so the tool no longer pending means it settled. */
+    sent: boolean;
+  } | null>(null);
+  const shownOrder = candidates.map((candidate) => candidate.source_id).join('\n');
+  const landed = requested !== null && shownOrder === requested.expected;
+  if (requested !== null && !landed) {
+    if (pending && !requested.sent) setRequested({ ...requested, sent: true });
+    else if (!pending && requested.sent) setRequested(null);
+  }
+  const list = React.useRef<HTMLOListElement>(null);
   const buttons = React.useRef(new Map<string, HTMLButtonElement>());
-  const refocus = React.useRef<{ sourceId: string; direction: -1 | 1 } | null>(null);
+  const focusedFor = React.useRef<typeof requested>(null);
   React.useEffect(() => {
-    const target = refocus.current;
-    if (!target) return;
-    const index = candidates.findIndex((candidate) => candidate.source_id === target.sourceId);
-    if (index < 0) return;
-    refocus.current = null;
-    const atEnd = target.direction === -1 ? index === 0 : index === candidates.length - 1;
-    const direction = atEnd ? -target.direction : target.direction;
-    buttons.current.get(`${target.sourceId}:${direction}`)?.focus();
-  }, [candidates]);
+    if (!landed || requested === null || focusedFor.current === requested) return;
+    focusedFor.current = requested;
+    // Only where focus still is the list: a user who has moved on is not pulled back.
+    const active = document.activeElement;
+    if (active !== null && active !== document.body && !list.current?.contains(active)) return;
+    const index = candidates.findIndex((candidate) => candidate.source_id === requested.sourceId);
+    const atEnd = requested.direction === -1 ? index === 0 : index === candidates.length - 1;
+    const direction = atEnd ? -requested.direction : requested.direction;
+    buttons.current.get(`${requested.sourceId}:${direction}`)?.focus();
+  }, [candidates, landed, requested]);
   const move = (index: number, direction: -1 | 1) => {
     if (pending) return;
     const shown = candidates.map((candidate) => candidate.source_id);
-    const sourceId = shown[index];
-    refocus.current = { sourceId, direction };
-    setMoved({ sourceId, position: index + direction + 1, count: shown.length });
+    setRequested({
+      sourceId: shown[index],
+      direction,
+      expected: executorOrderAfterMove(null, shown, index, direction).join('\n'),
+      position: index + direction + 1,
+      count: shown.length,
+      sent: false,
+    });
     onSave(tool.name, { executor_order: executorOrderAfterMove(tool.executor_order, shown, index, direction) });
   };
   return (
@@ -193,7 +216,7 @@ const ExecutorOrder: React.FC<{ tool: HostedSearchToolStatus; lookup: SourceLook
           <p className="model-hub-tool-note">{t(custom ? 'settings.models.tools.order.captionCustom' : 'settings.models.tools.order.caption')}</p>
         </div>
         {custom && (
-          <Button variant="outline" size="xs" disabled={pending} onClick={() => onSave(tool.name, { executor_order: null })}>
+          <Button variant="outline" size="xs" disabled={pending} onClick={() => { setRequested(null); onSave(tool.name, { executor_order: null }); }}>
             <RotateCcw aria-hidden />{t('settings.models.tools.order.reset')}
           </Button>
         )}
@@ -201,7 +224,7 @@ const ExecutorOrder: React.FC<{ tool: HostedSearchToolStatus; lookup: SourceLook
       {candidates.length === 0
         ? <p className="model-hub-tool-note flex items-start gap-2"><Info className="mt-px size-[13px] shrink-0" aria-hidden />{t('settings.models.tools.order.empty', { toolInline })}</p>
         : (
-            <ol className="flex flex-col gap-1.5" aria-label={t('settings.models.tools.order.title') as string}>
+            <ol ref={list} className="flex flex-col gap-1.5" aria-label={t('settings.models.tools.order.title') as string}>
               {candidates.map((candidate, index) => {
                 const source = lookup.source(candidate.source_id);
                 const name = lookup.name(candidate.source_id);
@@ -245,7 +268,7 @@ const ExecutorOrder: React.FC<{ tool: HostedSearchToolStatus; lookup: SourceLook
               })}
             </ol>
           )}
-      <span role="status" className="sr-only">{moved && t('settings.models.tools.order.moved', { source: lookup.name(moved.sourceId), position: moved.position, count: moved.count })}</span>
+      <span role="status" className="sr-only">{landed && t('settings.models.tools.order.moved', { source: lookup.name(requested.sourceId), position: requested.position, count: requested.count })}</span>
     </div>
   );
 };
