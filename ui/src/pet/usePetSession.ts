@@ -126,7 +126,7 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
 
   const sources = useMemo(() => ({
     session: new FencedSource<string, WorkbenchSessionReadResult>({
-      read: () => api.getMainSession(),
+      read: (key) => api.getSessionResult(key),
       apply: (key, { status, session: row, capabilities }) => {
         // A binding is valid only while S is writable: missing, archived and
         // Runtime-owned sessions all clear it.
