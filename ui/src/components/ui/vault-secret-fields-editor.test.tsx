@@ -144,6 +144,10 @@ it('renames the default field and then saves its typed value under the new name'
   expect(screen.getAllByRole('textbox').filter((input) => input.getAttribute('aria-label') === 'Default field name')).toHaveLength(1);
   expect(screen.getByTitle(en.vaults.fields.extraNotRenamable).textContent).toBe('username');
   expect(screen.queryByRole('button', { name: 'Save password' })).toBeNull();
+  // A pending rename onto a sibling names the sibling it collides with, not the saved label.
+  change('Default field name', 'username');
+  expect(screen.getByText("There's already a username field")).toBeTruthy();
+  expect((screen.getByRole('button', { name: 'Save password' }) as HTMLButtonElement).disabled).toBe(true);
   change('Value for password', 'typed-default');
   change('Default field name', 'credential');
   fireEvent.click(screen.getByRole('button', { name: 'Save password' }));

@@ -259,6 +259,10 @@ it('reports field problems on the offending row', () => {
   const totpValue = screen.getByLabelText('Value for totp');
   fireEvent.blur(totpValue);
   expect(document.getElementById(totpValue.getAttribute('aria-describedby')!)!.textContent).toBe(en.vaults.fields.valueRequired);
+  // A value problem marks the value input, not the valid name beside it.
+  expect(totpValue.getAttribute('aria-invalid')).toBe('true');
+  expect(added.hasAttribute('aria-invalid')).toBe(false);
+  expect(added.hasAttribute('aria-describedby')).toBe(false);
   expect(submitButton().disabled).toBe(true);
 });
 

@@ -103,16 +103,20 @@ export function VaultFieldRow({
   disabled?: boolean;
 }) {
   const { t } = useTranslation();
+  // A name issue concerns the name as typed (a pending rename may differ from `field`), and
+  // each issue marks only the input it is about.
+  const typedName = name.editable ? name.value : field;
   const error = issue === 'nameRequired' ? t('vaults.fields.nameRequired')
     : issue === 'nameInvalid' ? t('vaults.fields.nameInvalid')
-      : issue === 'nameTaken' ? t('vaults.fields.nameTaken', { field })
+      : issue === 'nameTaken' ? t('vaults.fields.nameTaken', { field: typedName })
         : issue === 'valueRequired' ? t('vaults.fields.valueRequired')
           : null;
   const errorId = useId();
   const [confirming, setConfirming] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  const describedBy = error ? errorId : undefined;
+  const nameInvalid = Boolean(issue) && issue !== 'valueRequired';
+  const valueInvalid = issue === 'valueRequired';
   const canSetDefault = !isDefault && Boolean(onSetDefault);
 
   const requestRemove = () => {
@@ -134,7 +138,7 @@ export function VaultFieldRow({
   if (confirming && remove?.confirm) {
     return (
       <div className="flex flex-wrap items-center gap-2 bg-destructive/[0.06] px-3 py-2.5">
-        <span className="min-w-0 text-[13px] text-destructive-ink">{remove.confirm}</span>
+        <span className="min-w-0 text-[13px] text-destructive-ink wrap-anywhere">{remove.confirm}</span>
         <span className="ml-auto flex gap-1">
           <Button type="button" variant="ghost" size="xs" autoFocus disabled={removing} onClick={() => setConfirming(false)}>
             {t('vaults.dialog.cancel')}
@@ -160,8 +164,8 @@ export function VaultFieldRow({
               onBlur={name.onBlur}
               autoFocus={name.autoFocus}
               aria-label={name.label}
-              aria-invalid={error ? true : undefined}
-              aria-describedby={describedBy}
+              aria-invalid={nameInvalid || undefined}
+              aria-describedby={nameInvalid ? errorId : undefined}
               placeholder={t('vaults.fields.namePlaceholder')}
               maxLength={64}
               spellCheck={false}
@@ -169,7 +173,7 @@ export function VaultFieldRow({
               disabled={disabled}
               className={cn(
                 'h-8 min-w-0 flex-1 rounded-md border border-transparent px-2 font-mono text-[13px] transition-colors hover:border-input focus:bg-background focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring',
-                error && 'border-destructive/50 hover:border-destructive/50',
+                nameInvalid && 'border-destructive/50 hover:border-destructive/50',
               )}
             />
           ) : (
@@ -224,7 +228,8 @@ export function VaultFieldRow({
           ) : null}
         </div>
         <div className="flex min-w-0 flex-1 items-center gap-1.5">
-          <VaultFieldValueInput field={field} {...value} disabled={disabled} describedBy={describedBy} />
+          <VaultFieldValueInput field={field} {...value} disabled={disabled} invalid={valueInvalid}
+            describedBy={valueInvalid ? errorId : undefined} />
           {action}
           {remove ? (
             <Button
@@ -250,14 +255,14 @@ export function VaultFieldRow({
           )}
         </div>
       </div>
-      {error ? <p id={errorId} className="mt-1 px-2 text-xs text-destructive-ink">{error}</p> : null}
+      {error ? <p id={errorId} className="mt-1 px-2 text-xs text-destructive-ink wrap-anywhere">{error}</p> : null}
     </div>
   );
 }
 
 function VaultFieldValueInput({
-  field, value, label, placeholder, onChange, onBlur, autoFocus, disabled, describedBy,
-}: FieldValueSpec & { field: string; disabled?: boolean; describedBy?: string }) {
+  field, value, label, placeholder, onChange, onBlur, autoFocus, disabled, invalid, describedBy,
+}: FieldValueSpec & { field: string; disabled?: boolean; invalid?: boolean; describedBy?: string }) {
   const { t } = useTranslation();
   // Unset until the user toggles, so a row renamed to `username` follows its new name.
   const [reveal, setReveal] = useState<boolean | null>(null);
@@ -271,12 +276,13 @@ function VaultFieldValueInput({
         onBlur={onBlur}
         autoFocus={autoFocus}
         aria-label={label}
+        aria-invalid={invalid || undefined}
         aria-describedby={describedBy}
         placeholder={placeholder}
         autoComplete="off"
         spellCheck={false}
         disabled={disabled}
-        className="pr-9"
+        className={cn('pr-9', invalid && 'border-destructive/50')}
       />
       <Button
         type="button"
@@ -310,7 +316,7 @@ export function VaultFieldReferences({ secretName, fields, defaultField }: {
           <code
             key={field}
             className={cn(
-              'rounded-md px-1.5 py-0.5 font-mono text-[11px] ring-1',
+              'min-w-0 rounded-md px-1.5 py-0.5 font-mono text-[11px] ring-1 wrap-anywhere',
               field === defaultField ? 'bg-mint-soft text-mint-ink ring-mint/30' : 'bg-card text-foreground ring-border',
             )}
           >
@@ -319,7 +325,7 @@ export function VaultFieldReferences({ secretName, fields, defaultField }: {
         ))}
       </div>
       {fields.includes(defaultField) ? (
-        <span>
+        <span className="wrap-anywhere">
           <Trans
             i18nKey="vaults.fields.referenceDefault"
             components={{
