@@ -701,6 +701,8 @@
       "oauthStarting": "正在启动 OAuth 流程…",
       "oauthVerifying": "正在验证凭据…",
       "oauthSuccess": "登录成功。",
+      "claudeAuthorizationCompleted": "授权已完成并保存。运行时配置是否应用是另一项状态。",
+      "claudeNativeCredentialsCleared": "已清理本机保存的账号凭据。环境变量和项目中的认证设置未被修改。",
       "oauthFailed": "OAuth 失败：{{detail}}",
       "oauthPollTimedOut": "登录在允许时间内未完成，请重试。",
       "oauthUrlCopied": "链接已复制到剪贴板。",
@@ -1970,7 +1972,7 @@
           "native": {
             "label": "由 Agent 管理",
             "desc": {
-              "claude": "Claude Code 直接用这个订阅，凭据只留在本机。"
+              "claude": "本机 Claude Code 管理这份原生登录，凭据保存在它自己的存储中。"
             }
           },
           "hub": {
@@ -2040,6 +2042,7 @@
           "timeout": "授权超时，请重新连接",
           "generic": "连接失败，请重试",
           "finalize": "已完成授权，但创建模型供应商失败，请重试",
+          "nativeApply": "授权和模型供应商配置已保存，但本次未能应用后端配置。请在后端设置中检查并重试应用。",
           "finalizeReauth": "已重新登录，但这个供应商还是不可用，请重试",
           "details": {
             "show": "查看详情",
@@ -5690,6 +5693,8 @@
       "api_key": "API Key",
       "subscriptionConnected": "订阅已连接",
       "api_keyConnected": "API Key 已连接",
+      "externalConnected": "可以启动",
+      "externalConnectedHint": "执行时由 Claude Code 管理认证；此状态不表示已验证登录。",
       "claudeGuide": "通过 Claude 登录或填入 API Key",
       "codexGuide": "通过 ChatGPT 登录，或使用 OpenAI API Key",
       "opencodeGuide": "选择一种方式连接即可",
@@ -5754,6 +5759,13 @@
       "showKey": "显示凭据",
       "hideKey": "隐藏凭据",
       "connected": "已连接",
+      "nativeReady": "可以启动 · 认证由 Claude Code 管理",
+      "claudeManagedAuth": "这里显示已保存的本机配置，不预测会话将选用哪种凭据。执行时由 Claude Code 管理认证。",
+      "nativeStore": {
+        "present": "检测到本机 OAuth 材料，但未验证账号或令牌是否有效。",
+        "absent": "未观察到本机 OAuth 材料；Claude Code 仍可能使用其他认证来源。",
+        "unknown": "无法确认原生凭据存储的内容，这不代表已经退出登录。"
+      },
       "savedSubscription": "已检测到订阅凭据",
       "savedDisabled": "凭据已保存。此助手当前未启用。",
       "readFailed": "无法读取连接状态，请重试",

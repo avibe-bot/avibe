@@ -1009,7 +1009,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
             connection={hubRoute
               ? 'hub'
               : mode === 'direct' && !connectionErrors[name] && connections[name]?.ready
-                ? (connections[name]?.auth === 'subscription' ? 'subscription' : 'api_key')
+                ? (connections[name]?.auth === 'external' ? 'external' : connections[name]?.auth === 'subscription' ? 'subscription' : 'api_key')
                 : undefined}
             hubManaged={hubRoute}
             enabled={agent.enabled}

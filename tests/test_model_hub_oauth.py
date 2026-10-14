@@ -249,7 +249,7 @@ def test_native_status_does_not_override_explicit_claude_api_key_mode():
             "has_oauth_credentials": True,
         },
     )
-    assert _signed_in("claude", {"has_oauth_credentials": True})
+    assert not _signed_in("claude", {"has_oauth_credentials": True})
 
 
 def test_revocation_journal_round_trips_final_entries_across_instances(tmp_path):

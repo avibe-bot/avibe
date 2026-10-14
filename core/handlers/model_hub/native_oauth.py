@@ -101,10 +101,6 @@ def _signed_in(backend: str, status: Mapping[str, Any]) -> bool:
         return True
     if active_auth_mode not in {None, "none"}:
         return False
-    if backend == "claude":
-        if active_auth_mode == "none":
-            return False
-        return status.get("has_oauth_credentials") is True
     if backend == "codex":
         # AgentAuthService reports success only after its own Codex CLI probe.
         # The Settings status reader cannot see tokens in the default keyring,
@@ -211,18 +207,22 @@ class AgentAuthNativeOAuthAdapter:
 
     def completed_source_status(self, flow_id: str) -> NativeOAuthSourceStatus:
         payload = self._agent_auth_service.get_web_flow_status(flow_id)
-        if payload.get("ok") is not True or payload.get("state") != "success":
+        committed_claude = (
+            payload.get("vendor") == "anthropic"
+            and payload.get("state") == "failed"
+            and payload.get("authorization_completed") is True
+        )
+        if payload.get("ok") is not True or (payload.get("state") != "success" and not committed_claude):
             raise KeyError(flow_id)
         status = payload.get("source_status")
         if not isinstance(status, Mapping):
             raise KeyError(flow_id)
-        signed_in = status.get("signed_in")
-        if not isinstance(signed_in, bool):
-            signed_in = True
+        signed_in = status.get("signed_in") is True
         account_label = status.get("account_label")
         return NativeOAuthSourceStatus(
             signed_in=signed_in,
             account_label=account_label if isinstance(account_label, str) else None,
+            application_failed=committed_claude,
         )
 
     @staticmethod
@@ -234,6 +234,7 @@ class AgentAuthNativeOAuthAdapter:
             "url": getattr(flow, "url", None),
             "device_code": getattr(flow, "device_code", None),
             "error": getattr(flow, "error", None),
+            "authorization_completed": getattr(flow, "authorization_completed", False),
             "source_id": getattr(flow, "source_id", None),
             "vendor": getattr(flow, "vendor", None),
             "expires_at_iso": getattr(flow, "expires_at_iso", None),
@@ -260,6 +261,15 @@ class AgentAuthNativeOAuthAdapter:
             "failed": "failed",
             "cancelled": "cancelled",
         }.get(str(payload.get("state")), "failed")
+        application_failed = (
+            vendor == "anthropic" and state == "failed"
+            and payload.get("authorization_completed") is True
+        )
+        if application_failed:
+            # Source configuration belongs to the committed authorization, not
+            # to the controller's application result. Materialize it once using
+            # the same receipt, without another login or a polling side effect.
+            state = "success"
         source_status = payload.get("source_status")
         if (
             state == "success"
@@ -268,7 +278,14 @@ class AgentAuthNativeOAuthAdapter:
                 or not isinstance(source_status.get("signed_in"), bool)
             )
         ):
-            resolved = await self._read_source_status(_VENDOR_BACKENDS[vendor])
+            backend = _VENDOR_BACKENDS[vendor]
+            # A Claude flow carries its own verification. One without it
+            # proved nothing, and a Settings read cannot decide it afterwards.
+            resolved = (
+                NativeOAuthSourceStatus(signed_in=False, account_label=None)
+                if backend == "claude"
+                else await self._read_source_status(backend)
+            )
             self._agent_auth_service.set_flow_source_status(
                 flow_id,
                 signed_in=resolved.signed_in,
@@ -278,7 +295,7 @@ class AgentAuthNativeOAuthAdapter:
         error_detail = None
         if state == "failed":
             error_key = _TIMEOUT_ERROR_KEY if payload.get("error") == "timed_out" else _GENERIC_ERROR_KEY
-            if error_key == _GENERIC_ERROR_KEY:
+            if error_key != _TIMEOUT_ERROR_KEY:
                 error_detail = oauth_failure_detail(payload.get("error"))
         elif state == "cancelled":
             error_key = _GENERIC_ERROR_KEY
@@ -303,6 +320,7 @@ class AgentAuthNativeOAuthAdapter:
             retained_material_disposition=RetainedMaterialDisposition.NONE,
             retained_credential_ref=None,
             error_detail=error_detail,
+            application_failed=application_failed,
         )
 
     async def _read_source_status(self, backend: str) -> NativeOAuthSourceStatus:
@@ -324,8 +342,6 @@ def create_native_oauth_adapter() -> AgentAuthNativeOAuthAdapter:
     from vibe import api
 
     def read_auth_status(backend: str) -> Mapping[str, Any]:
-        if backend == "claude":
-            return api.get_claude_auth()
         if backend == "codex":
             return api.get_codex_auth()
         raise NativeOAuthUnavailableError

@@ -1217,6 +1217,8 @@ def _oauth_payload(
         payload["client_nonce"] = client_nonce
     if flow.state == "failed" and flow.error_detail:
         payload["error_detail"] = flow.error_detail
+    if getattr(flow, "application_failed", False) is True:
+        payload["application_failed"] = True
     return payload
 
 
@@ -3261,6 +3263,15 @@ class ModelHubService:
             except (KeyError, OSError):
                 pass
         failed = binding.intent == "create" and source.state.status == "error"
+        application_failed = False
+        if binding.channel == "native_cli" and binding.vendor == "anthropic" and not failed:
+            try:
+                # The existing flow retains this historical receipt for its
+                # normal TTL. No status CLI or new persistence is involved.
+                receipt = self.native_oauth_adapter.completed_source_status(flow_id)
+                application_failed = getattr(receipt, "application_failed", False) is True
+            except (KeyError, NativeOAuthUnavailableError):
+                pass  # An expired receipt does not undo a saved Source.
         return OAuthFlowState(
             flow_id=flow_id,
             source_id=source.id,
@@ -3292,6 +3303,7 @@ class ModelHubService:
                 if binding.channel == "hub"
                 else None
             ),
+            application_failed=application_failed,
         )
 
     def _completed_reauth_result(

@@ -352,21 +352,26 @@ export const OAuthConnectDialog: React.FC<{
         // report. An absent tail is the only arrival with no verdict to speak for
         // it, and 「连接成功」 is what it has always said.
         const toast = verdict ? REPAIR_TOAST[verdict.kind] : null;
+        const applicationFailed = result.flow.application_failed === true;
+        const warnApplication = applicationFailed && (!toast || toast.tone === 'success');
         showToast(
-          t(toast?.key ?? 'settings.models.oauth.status.success') as string,
-          toast?.tone ?? 'success',
+          t(warnApplication ? 'settings.models.oauth.error.nativeApply' : toast?.key ?? 'settings.models.oauth.status.success') as string,
+          warnApplication ? 'warning' : toast?.tone ?? 'success',
         );
         // The toast is the whole report of a clean repair, so the journey ends
         // with it: 「nothing was stranded」 is a field the server sends, and only a
         // verdict that leaves something to read keeps the dialog on screen. An
         // absent tail says nothing to read either, so it closes too.
-        if (!verdict || repairSettles(verdict)) onCloseRef.current();
+        if (!applicationFailed && (!verdict || repairSettles(verdict))) onCloseRef.current();
       } else if (step.action === 'succeed') {
         // The Source already exists. The status/submit call that first reports
         // success materializes it server-side and consumes the flow binding doing
         // it — there is nothing left to finalize, and a POST /sources afterwards
         // is refused as `flow_not_found` on a connect that in fact succeeded.
-        showToast(t('settings.models.oauth.status.success') as string, 'success');
+        showToast(
+          t(result.flow.application_failed ? 'settings.models.oauth.error.nativeApply' : 'settings.models.oauth.status.success') as string,
+          result.flow.application_failed ? 'warning' : 'success',
+        );
         if (created) onConnectedRef.current(created.source, created);
       }
       // Both branches above end with the same fact about the page behind them, and
@@ -909,6 +914,7 @@ export const OAuthConnectDialog: React.FC<{
             </DialogTitle>
           </DialogHeader>
 
+          {flow?.application_failed && <p role="status" className="text-sm text-muted">{t('settings.models.oauth.error.nativeApply')}</p>}
           {failureClass && (
             <div className="flex flex-col gap-2">
               <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/[0.08] px-4 py-3 text-[13px] text-destructive-ink">

@@ -432,6 +432,10 @@ class OAuthFlowState:
     # verbatim on one bounded line, for display beside ``error_key``. Null in
     # every other state and whenever there is nothing to add to the key.
     error_detail: str | None = None
+    # Native authorization/config commit succeeded, but this attempt's runtime
+    # application failed. This does not undo Source materialization or assert
+    # the runtime's current health.
+    application_failed: bool = False
 
 
 class InvokeHandle(Protocol):

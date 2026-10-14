@@ -1392,7 +1392,6 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
                 side_effect=clear_oauth,
             ),
             patch("vibe.api.restart_backend", side_effect=restart_backend),
-            patch("vibe.api._read_claude_cli_oauth_signed_in", return_value=None),
         ):
             config = V2Config(
                 mode="self_host",
@@ -1406,13 +1405,16 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
             save_direct_auth_config(config)
 
             await runner.run(
-                ScenarioStep("confirm_oauth_is_active", capture_oauth_state),
+                ScenarioStep("confirm_native_material_is_observed", capture_oauth_state),
                 ScenarioStep("save_auth_token", save_auth_token),
                 ScenarioStep("launch_next_turn", capture_next_turn_env),
             )
 
-        self.assertEqual(harness.before_switch["active_auth_mode"], "oauth")
-        self.assertEqual(harness.save_result["active_auth_mode"], "api_key")
+        self.assertEqual(harness.before_switch["oauth_store_state"], "present")
+        self.assertEqual(harness.before_switch["active_auth_mode"], "none")
+        self.assertTrue(harness.before_switch["auth_mode_uncertain"])
+        self.assertEqual(harness.save_result["auth_mode"], "api_key")
+        self.assertTrue(harness.save_result["has_api_key"])
         self.assertEqual(harness.save_result["credential_type"], "auth_token")
         self.assertEqual(
             harness.save_result["settings_env_key_var"],
@@ -1440,7 +1442,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         )
         ScenarioExpect.step_history(
             runner,
-            ["confirm_oauth_is_active", "save_auth_token", "launch_next_turn"],
+            ["confirm_native_material_is_observed", "save_auth_token", "launch_next_turn"],
         )
 
     async def test_claude_oauth_to_api_key_probe_drops_stale_auth_token(self):
@@ -1533,7 +1535,6 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
                 side_effect=clear_oauth,
             ),
             patch("vibe.api.restart_backend", side_effect=restart_backend),
-            patch("vibe.api._read_claude_cli_oauth_signed_in", return_value=None),
             patch("core.agent_auth_service.ClaudeSDKClient", FakeClaudeSDKClient),
         ):
             config = V2Config(
@@ -1549,14 +1550,17 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
             save_direct_auth_config(config)
 
             await runner.run(
-                ScenarioStep("confirm_oauth_is_active", capture_oauth_state),
+                ScenarioStep("confirm_native_material_is_observed", capture_oauth_state),
                 ScenarioStep("save_api_key", save_api_key),
                 ScenarioStep("test_connection", run_connection_probe),
             )
             harness.saved_settings_env = read_claude_settings_env()
 
-        self.assertEqual(harness.before_switch["active_auth_mode"], "oauth")
-        self.assertEqual(harness.save_result["active_auth_mode"], "api_key")
+        self.assertEqual(harness.before_switch["oauth_store_state"], "present")
+        self.assertEqual(harness.before_switch["active_auth_mode"], "none")
+        self.assertTrue(harness.before_switch["auth_mode_uncertain"])
+        self.assertEqual(harness.save_result["auth_mode"], "api_key")
+        self.assertTrue(harness.save_result["has_api_key"])
         self.assertEqual(harness.save_result["credential_type"], "api_key")
         self.assertEqual(
             harness.save_result["settings_env_key_var"],
@@ -1594,7 +1598,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         )
         ScenarioExpect.step_history(
             runner,
-            ["confirm_oauth_is_active", "save_api_key", "test_connection"],
+            ["confirm_native_material_is_observed", "save_api_key", "test_connection"],
         )
 
     async def test_codex_connection_probe_reuses_persistent_app_server(self):
@@ -2060,7 +2064,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(source.id, flow["source_id"])
         self.assertEqual(
             (source.vendor, source.supply_channel, source.account_label),
-            ("anthropic", "native_cli", "owner@example.com"),
+            ("anthropic", "native_cli", None),
         )
         self.assertEqual(source.state.status, "standby")
 
@@ -2068,6 +2072,57 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(completed["flow"]["state"], "success")
         self.assertEqual(completed["source"]["id"], source.id)
+        receipt = harness.agent_auth.get_web_flow_status(flow_id)
+        self.assertTrue(receipt["authorization_completed"])
+        self.assertTrue(receipt["source_status"]["signed_in"])
+        harness.agent_auth._verify_login.assert_awaited_once()
+        harness.auth_status_reader.assert_not_called()
+
+    async def test_claude_receipt_separates_verification_commit_and_application(self):
+        """Scenario: AUTH-SETUP-910 — one flow, not inventory, owns each fact."""
+        for case in ("apply_failure", "commit_failure", "non_oauth", "unknown_method"):
+            with self.subTest(case=case):
+                state_dir = tempfile.TemporaryDirectory()
+                self.addCleanup(state_dir.cleanup)
+                harness = CustodiedNativeOAuthScenarioHarness(Path(state_dir.name))
+                if case == "apply_failure":
+                    harness.agent_auth._refresh_backend_runtime.side_effect = RuntimeError("fixture apply failed")
+                elif case == "commit_failure":
+                    harness.agent_auth._persist_backend_auth_mode = AsyncMock(side_effect=OSError("fixture commit failed"))
+                else:
+                    detail = {"loggedIn": True}
+                    if case == "non_oauth":
+                        detail["authMethod"] = "api-key"
+                    harness.agent_auth._verify_login.return_value = (True, json.dumps(detail))
+                started = await harness.service.oauth_start({"vendor": "anthropic", "channel": "native_cli"})
+                flow_id = started["flow"]["flow_id"]
+                await harness.service.oauth_submit({"flow_id": flow_id, "value": "auth-code#oauth-state"})
+                await harness.login_settled(flow_id)
+
+                receipt = harness.agent_auth.get_web_flow_status(flow_id)
+                self.assertEqual(receipt["authorization_completed"], case != "commit_failure")
+                completed = await harness.service.oauth_status(flow_id)
+                if case == "commit_failure":
+                    self.assertEqual(completed["flow"]["state"], "failed")
+                    self.assertEqual(V2Config.load().model_hub.sources, [])
+                elif case == "apply_failure":
+                    self.assertEqual(completed["flow"]["state"], "success")
+                    self.assertTrue(completed["flow"]["application_failed"])
+                    self.assertEqual(completed["source"]["state"]["status"], "standby")
+                    (source,) = V2Config.load().model_hub.sources
+                    # Runtime application is retried explicitly, not by polling
+                    # this receipt and not by creating another authorization.
+                    harness.agent_auth._refresh_backend_runtime.side_effect = None
+                    await harness.agent_auth._invoke_post_web_success_hook("claude", persist=False)
+                    replayed = await harness.service.oauth_status(flow_id)
+                    self.assertEqual(replayed["source"]["id"], source.id)
+                    self.assertTrue(replayed["flow"]["application_failed"])
+                    self.assertEqual(len(V2Config.load().model_hub.sources), 1)
+                else:
+                    self.assertFalse(receipt["source_status"]["signed_in"])
+                    self.assertEqual(completed["source"]["state"]["status"], "needs_action")
+                harness.agent_auth._verify_login.assert_awaited_once()
+                harness.auth_status_reader.assert_not_called()
 
     async def test_hub_reauth_requires_acknowledgement_and_reaches_consistent_terminal(self):
         """Scenario: AUTH-SETUP-109.
@@ -4294,8 +4349,6 @@ def test_instance_manager_backend_credentials_round_trip(monkeypatch, tmp_path, 
         _recover_interrupted_claude_oauth_settings_backup=Mock(),
     ))
     monkeypatch.setattr(api, "_clear_claude_oauth_credentials_after_api_key_save", lambda service, **kw: {"ok": True})
-    monkeypatch.setattr(api, "_read_claude_cli_oauth_signed_in", lambda *a, **kw: False)
-    monkeypatch.setattr(claude_config, "read_claude_oauth_signed_in", lambda: False)
     refreshed = []
     monkeypatch.setattr(api, "restart_backend", lambda name, **kw: refreshed.append(name) or {"ok": True})
     response = request("POST", "/api/backend/claude/auth", payload={

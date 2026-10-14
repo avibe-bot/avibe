@@ -305,6 +305,43 @@ def sanitize_process_output(text: str) -> str:
     return cleaned.strip()
 
 
+_CLAUDE_FIRST_PARTY_OAUTH_METHODS = frozenset({
+    "claude.ai",
+    "claude-ai",
+    "oauth",
+    "oauth-token",
+    "setup-token",
+    "claude-code-oauth-token",
+    "subscription",
+    "claude-subscription",
+})
+
+
+def claude_status_proves_first_party_oauth(text: str) -> bool:
+    """Interpret the explicit login verifier's ``claude auth status --json`` output.
+
+    Only a logged-in first-party Claude OAuth method is proof of an account
+    login. A concrete API-key/helper or other-provider method is not, and
+    neither is an unrecognised or unparseable response.
+    """
+    try:
+        payload = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict) or payload.get("loggedIn") is not True:
+        return False
+    for key in ("authMethod", "authProvider", "source", "provider"):
+        raw = payload.get(key)
+        if not isinstance(raw, str):
+            continue
+        normalized = re.sub(r"[\s_]+", "-", raw.strip().lower())
+        if normalized:
+            # A concrete primary method cannot be overruled by a secondary
+            # provider hint. Unknown methods do not prove first-party OAuth.
+            return normalized in _CLAUDE_FIRST_PARTY_OAUTH_METHODS
+    return False
+
+
 def verify_opencode_auth_list_output(text: str, provider: str | None = None) -> bool:
     """Return True when `opencode auth list` shows credentials for the target provider."""
     normalized_lines = []
@@ -440,6 +477,10 @@ class WebAuthFlow:
     expires_at_iso: str | None = None
     source_signed_in: bool | None = None
     source_account_label: str | None = None
+    # Operation-owned receipt: this flow's consent was verified and its
+    # native/config commit landed. Set before runtime application, which may
+    # still fail; it is not a claim about any later credential selection.
+    authorization_completed: bool = False
     native_cli: bool = False
     native_lease: NativeCredentialLease | None = field(default=None, repr=False)
     # The controller-owned OpenCode generation one OpenCode login runs on.
@@ -2113,6 +2154,7 @@ class AgentAuthService:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             env=self._build_claude_full_subprocess_env(force_oauth=force_oauth),
+            cwd=await _native_auth_thread(self._resolve_backend_probe_cwd, "claude", prepare=True),
         )
         stdout, _ = await self._communicate_native_auth_probe(process)
         text = stdout.decode("utf-8", errors="replace").strip()
@@ -2122,7 +2164,7 @@ class AgentAuthService:
             if force_oauth and flow.claude_oauth_attempt is None:
                 await self._restore_transient_claude_oauth_probe_backup(settings_backup)
             return False, text
-        logged_in = bool(payload.get("loggedIn"))
+        logged_in = isinstance(payload, dict) and payload.get("loggedIn") is True
         if force_oauth and not logged_in and flow.claude_oauth_attempt is None:
             await self._restore_transient_claude_oauth_probe_backup(settings_backup)
         return (logged_in, text)
@@ -2857,6 +2899,7 @@ class AgentAuthService:
             "device_code": flow.device_code,
             "awaiting_code": flow.awaiting_code,
             "error": flow.error,
+            "authorization_completed": getattr(flow, "authorization_completed", False),
         }
         if flow.callback_kind is not None:
             result["callback_kind"] = flow.callback_kind
@@ -4006,6 +4049,9 @@ class AgentAuthService:
                 claude_oauth_attempt=flow.claude_oauth_attempt,
             )
             if ok:
+                # Model Hub completion consumes this flow's own verification;
+                # no later Settings read or status process re-decides it.
+                flow.source_signed_in = claude_status_proves_first_party_oauth(detail)
                 await self._commit_web_login(flow)
                 flow.state = "success"
             else:
@@ -4074,6 +4120,9 @@ class AgentAuthService:
             else:
                 await self._persist_backend_auth_mode(flow.backend, "oauth", strict=True)
             await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=True)
+            # Authorization is complete once committed. A later application
+            # failure fails the flow but must not erase this receipt.
+            flow.authorization_completed = True
             await self._invoke_post_web_success_hook(flow.backend, persist=False)
 
         task = asyncio.create_task(commit())
@@ -4399,9 +4448,22 @@ class AgentAuthService:
     ) -> dict[str, Any]:
         owned = lease is None
         lease = self._acquire_native_lease("claude") if owned else lease
+        async def cleanup_and_reconcile() -> dict[str, Any]:
+            result = await self._clear_claude_oauth_credentials_owned()
+            # Standalone cleanup owns its runtime reconciliation. API-key saves
+            # borrow a lease and already reconcile once at their outer writer.
+            if owned:
+                try:
+                    await self._invoke_post_web_success_hook("claude", persist=False)
+                    result["restart"] = {"ok": True, "message": ""}
+                except Exception as err:  # noqa: BLE001
+                    logger.warning("Claude cleanup completed but runtime application failed")
+                    result["restart"] = {"ok": False, "message": sanitize_process_output(str(err))}
+            return result
+
         try:
             lease.assert_auth_custody("claude")
-            return await finish_native_operation(self._clear_claude_oauth_credentials_owned())
+            return await finish_native_operation(cleanup_and_reconcile())
         finally:
             if owned:
                 lease.release()
