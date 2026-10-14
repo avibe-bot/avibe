@@ -1360,9 +1360,11 @@ def test_opencode_native_provider_without_stable_identifier_is_visible_blocker(
     assert item.selected is False
 
 
+@pytest.mark.parametrize("removed", [False, True])
 def test_mh_switch_001_migration_carries_agent_models_into_the_switched_menu(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    removed: bool,
 ) -> None:
     """MH-SWITCH-001: accepting migration carries each Agent's Direct selection
     into the menu it switches, served by the Sources that migration imported."""
@@ -1372,6 +1374,8 @@ def test_mh_switch_001_migration_carries_agent_models_into_the_switched_menu(
     _isolate_native_home(monkeypatch, native_home)
     service, store, _ = _service(tmp_path)
     store.config.agents["opencode"].mode = "direct"
+    if removed:
+        store.config.agents["opencode"].removed_model_ids = ["openrouter-model"]
     service.named_agents_override = lambda backend: [
         ("opencode", "openrouter/openrouter-model"),
         ("zhipu", "zhipuai/zhipuai-model"),
@@ -1383,18 +1387,27 @@ def test_mh_switch_001_migration_carries_agent_models_into_the_switched_menu(
 
     agent = _assert_canonical_round_trip(store.config).agents["opencode"]
     assert agent.mode == "hub"
-    assert [(model.id, model.origin, model.native_protocol) for model in agent.models] == [
-        ("openrouter-model", "provider", "openai_responses"),
-        ("zhipuai-model", "provider", "openai_responses"),
-    ]
+    expected = [("zhipuai-model", "provider", "openai_responses")]
+    if not removed:
+        expected.insert(0, ("openrouter-model", "provider", "openai_responses"))
+    assert [(model.id, model.origin, model.native_protocol) for model in agent.models] == expected
     assert {
         row["name"]: (row["effective_model_id"], row["route_reason"])
         for row in service.get_agent_sources("opencode")["named_agents"]
     } == {
-        "opencode": ("openrouter-model", None),
+        "opencode": (
+            ("openrouter/openrouter-model", "route_unconfigured") if removed
+            else ("openrouter-model", None)
+        ),
         "zhipu": ("zhipuai-model", None),
         "stranger": ("openai/not-served", "route_unconfigured"),
     }
+    # Carrying a saved selection creates a menu row, not a made-up discovered
+    # Source inventory. The old provider prefix stays on the named Agent.
+    assert all(
+        model.id not in {"openrouter-model", "zhipuai-model"}
+        for source in store.config.sources for model in source.models
+    )
 
 
 def test_scan_keeps_invalid_endpoint_visible_while_valid_backend_items_remain_usable(

@@ -144,7 +144,9 @@ class MigrationHost(Protocol):
 
     async def _announce_vibey_seed(self) -> None: ...
 
-    def _carry_agent_selections(self, config: ModelHubConfig, backend: Any) -> None: ...
+    def _carry_agent_selections(
+        self, config: ModelHubConfig, backend: Any, *, native_sources: Collection[tuple[str, str]] = (),
+    ) -> None: ...
 
     def _reconcile_native_auth(self, backends: tuple[str, ...]) -> None: ...
 
@@ -1726,6 +1728,7 @@ async def _prepare_takeover(
     provisioned: list[dict[str, str]] = []
     source_ids: list[str] = list(retained_source_ids or ())
     item_sources: dict[str, dict[str, str]] = {}
+    native_sources: dict[str, list[tuple[str, str]]] = {}
     catalog = bundled_catalog_wire_efforts_by_model()
     handoff_attempted = False
     try:
@@ -1764,6 +1767,9 @@ async def _prepare_takeover(
                         # existing Source's inventory, evidence or health.
                         reused = True
                         _ensure_takeover_placement(updated, candidate, item.backend)
+                        native_sources.setdefault(item.backend, []).append((
+                            item.native_provider_id or item.vendor, candidate.id,
+                        ))
                         source_ids.append(candidate.id)
                         item_sources[_retained_key_identity(item)] = {
                             "source_id": candidate.id, "credential_ref": candidate.credential_ref,
@@ -1845,6 +1851,9 @@ async def _prepare_takeover(
                 host._apply_source_placement(updated, source)
             source_ids.append(source.id)
             if item.kind != "oauth_native":
+                native_sources.setdefault(item.backend, []).append((
+                    item.native_provider_id or item.vendor, source.id,
+                ))
                 item_sources[_retained_key_identity(item)] = {
                     "source_id": source.id, "credential_ref": source.credential_ref,
                     "key_fingerprint": _retained_key_fingerprint(item),
@@ -1883,7 +1892,7 @@ async def _prepare_takeover(
         for backend in backends:
             if updated.agents[backend].mode != "hub":
                 updated.agents[backend].mode = "hub"
-                host._carry_agent_selections(updated, backend)
+                host._carry_agent_selections(updated, backend, native_sources=native_sources.get(backend, ()))
         updated = ModelHubConfig.from_payload(updated.to_payload())
         for edit in edits:
             edit.check()

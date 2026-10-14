@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Iterable, Literal, Mapping, Optional, Protocol, cast
+from typing import Any, Awaitable, Callable, Collection, Iterable, Literal, Mapping, Optional, Protocol, cast
 
 from sqlalchemy import func, literal_column, select
 
@@ -5576,6 +5576,8 @@ class ModelHubService:
         self,
         config: ModelHubConfig,
         backend: BackendName,
+        *,
+        native_sources: Collection[tuple[str, str]] = (),
     ) -> None:
         """Give each Agent's model a Gateway menu row when a Source serves it.
 
@@ -5586,12 +5588,15 @@ class ModelHubService:
         when a Source in this backend's default routing lists it. The Agent's
         selection itself is untouched, so switching back to Direct still runs
         it. A row the user removed stays removed, and a selection nothing
-        serves stays visible as an Agent that needs attention.
+        serves stays visible as an Agent that needs attention. During migration,
+        a static Source carried from that selection's native provider can instead
+        retain it by passthrough, without claiming an upstream inventory.
         """
 
         if self.named_agents_override is None:
             return
         agent = config.agents[backend]
+        source_by_id = {source.id: source for source in config.sources}
         carried: list[str] = []
         for _name, selected in self.named_agents_override(backend):
             selected = str(selected or "").strip()
@@ -5613,6 +5618,24 @@ class ModelHubService:
                 ),
                 None,
             )
+            if served is None and native_sources:
+                provider, separator, model = selected.partition("/")
+                native_model = model if backend == "opencode" and separator else selected
+                if (
+                    (backend != "opencode" or (provider and separator and model))
+                    and native_model not in agent.removed_model_ids
+                    and native_model not in carried
+                    and any(
+                        (backend != "opencode" or native_provider == provider)
+                        and source_id in agent.sources.order
+                        and (source := source_by_id.get(source_id)) is not None
+                        and self._eligible_for_agent(source, backend)
+                        and source_supports_passthrough(source)
+                        and not source_model_retired(source, native_model)
+                        for native_provider, source_id in native_sources
+                    )
+                ):
+                    served = native_model
             if served is not None:
                 carried.append(served)
         if not carried:
