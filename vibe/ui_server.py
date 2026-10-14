@@ -5180,6 +5180,20 @@ async def model_hub_hosted_tool_put(tool: str, starlette_request: FastAPIRequest
     return await _dispatch_native_ui_request(starlette_request, handler)
 
 
+@app.post("/api/models/hosted-tools/{tool}/probe", include_in_schema=False)
+async def model_hub_hosted_tool_probe(tool: str, starlette_request: FastAPIRequest):
+    async def handler():
+        from core.handlers.model_hub import ModelHubError
+
+        try:
+            result = await _model_hub_service().probe_hosted_tool(tool, _model_hub_json_object("invalid_parameter"))
+            return _model_hub_success(**result)
+        except ModelHubError as exc:
+            return _model_hub_error(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
 @app.route("/api/models/agents/<backend>/chains", methods=["GET"])
 def model_hub_agent_chains_get(backend):
     from core.handlers.model_hub import ModelHubError

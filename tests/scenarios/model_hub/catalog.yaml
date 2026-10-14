@@ -8,6 +8,7 @@ capability:
     - tests/test_model_hub_hosted_pinning.py
     - tests/test_model_hub_hosted_tools_resolution.py
     - tests/test_model_hub_hosted_tools_config.py
+    - tests/test_model_hub_hosted_probe.py
     - tests/test_model_hub_capability_evidence.py
     - tests/test_provider_overlay.py
     - tests/test_hosted_activity.py
@@ -280,6 +281,24 @@ scenarios:
       - tests/test_model_hub_reasoning_tiers.py::test_the_hop_declares_exactly_its_models_levels
       - tests/test_model_hub_reasoning_tiers.py::test_rows_saved_by_3_2_0_are_derived_again_once_at_startup
       - tests/test_model_hub_evidence_rules.py::test_the_picker_menu_states_which_efforts_routing_refuses_in_menu_values
+  - id: MH-HOSTED-007
+    name: A user-started call probe sends Vibey's native request pinned to the probed Source, and records only a result or a refusal naming the tool
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/test_model_hub_hosted_probe.py::test_a_call_probe_sends_the_production_request_and_records_only_what_it_shows
+    related_tests:
+      - tests/test_model_hub_hosted_probe.py::test_a_probe_runs_only_on_a_target_the_tool_can_run_on
+      - tests/test_model_hub_hosted_probe.py::test_each_candidate_states_what_probing_it_would_cost
+      - tests/test_model_hub_hosted_probe.py::test_each_request_the_adapter_sends_is_its_own_pinned_call
+      - tests/test_model_hub_hosted_probe.py::test_a_probe_that_verifies_its_source_records_evidence_for_the_source_as_it_now_is
+      - tests/test_model_hub_hosted_probe.py::test_a_probe_records_no_evidence_for_a_grant_that_replaced_its_own_mid_probe
+      - tests/test_model_hub_hosted_probe.py::test_the_probe_reads_its_calls_in_the_order_the_adapter_sent_them
+      - tests/test_model_hub_hosted_probe.py::test_the_probe_asks_for_no_more_output_than_a_turn_on_its_hop_would
+      - tests/test_model_hub_hosted_probe.py::test_an_api_key_source_is_probed_on_a_passthrough_model_it_does_not_list
+      - tests/test_model_hub_hosted_probe.py::test_a_probe_that_times_out_before_its_handle_is_still_metered
+      - tests/test_model_hub_hosted_probe.py::test_a_probe_attributes_nothing_when_another_grant_retired_the_marker
+      - tests/test_model_hub_hosted_probe.py::test_a_deadline_mid_stream_ends_the_probe_as_transient
   - id: MH-HOSTED-VIBEY-002
     name: Every native hosted item becomes one hosted call with a provider-neutral action and its record; citations stay on the text that cites them; the response's counters and reported cost go to its summary
     status: covered

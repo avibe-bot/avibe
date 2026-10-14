@@ -79,10 +79,15 @@ verified for X search.
   So a probe cannot pass or fail for a shape that production never sends.
 - **A probe has its own resolution.** Normal resolution gives native mode only after `call: verified` (§3.5), so a
   first verification could never send a native declaration. Model Hub therefore builds a probe resolution, and only
-  for the user's probe action. It pins the probed (Source, model) with `x-avibe-pin-source`, carries the overlay's
-  native declaration whatever the current evidence, and allows no failover. Normal turns never receive it.
-- **The `call` probe.** The fixed message is "search for 'Avibe local-first agent OS' and reply with the first
-  result's URL".
+  for the user's probe action. It names the probed (Source, model) and carries the overlay's native declaration
+  whatever the current evidence, with the endpoint built as the Vibey launch builds it (the Source's vendor as its
+  provider). Vibey's adapter runs unchanged, and Model Hub serves every request it sends with its own invocation
+  of exactly that Source, never the turn gateway, so there is no route and no failover. A resend the adapter makes
+  for a field the endpoint refused before answering (Anthropic's one-hour cache lifetime) is one more such call;
+  a probe sends at most two, and only one runs the model. A result is recognized only as the hosted call a real
+  turn would keep. Normal turns never receive a probe resolution.
+- **The `call` probe.** The fixed message is "search the web for 'Avibe local-first agent OS' and reply with the
+  first result's URL" (X search: "search X for posts about …, and reply with the first post's URL").
   - **`verified`:** the response completes and carries the provider's own result item for that tool (§4.2).
   - **`unsupported`:** only an HTTP 400 that names the tool type (observed: `Unsupported tool type: x_search`).
   - **Inconclusive, not evidence:** a completed response without that item. The model may simply not have used the
@@ -91,6 +96,10 @@ verified for X search.
       paths are never native anyway (§3.5).
   - **Not evidence:** a transient failure (overload, 5xx, timeout). The UI reports "couldn't verify, try again"
     (observed: every OpenAI-relay web search ended with an in-stream "servers overloaded").
+- **Delivery order.** The `call` probe for `web_search` and `x_search` ships first
+  (`POST /api/models/hosted-tools/<tool>/probe`). The `replay` probe follows Vibey's verbatim native replay, and the
+  `image_generation` call probe follows Vibey's parsing of image results. Until then a probe reports `replay: null`
+  and the API refuses an image probe, because no response could show its result.
 - **The `replay` probe.** A second production request with the native declaration still present. Its history is
   the call probe's turn, with the native payload verbatim, followed by "give the URL of the second result you found,
   without searching again".
