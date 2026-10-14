@@ -28,7 +28,6 @@ import json
 import re
 from dataclasses import dataclass, replace
 from typing import Any, AsyncIterator, Awaitable, Callable, Final, Literal, Optional, Protocol
-from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
@@ -165,9 +164,10 @@ def hidden_result_urls(message: AssistantMessage) -> frozenset[str]:
     """
 
     returned = {source.url for block in message.content if isinstance(block, HostedToolBlock) for source in block.record.sources}
-    shown = written_urls(message)
-    # Read generously: a result the answer shows but the probe takes for hidden is what could verify a replay falsely.
-    return frozenset(url for url in returned if url and not _readings(url) & shown)
+    # Read generously, a trailing slash aside: a result the answer shows but the probe takes for hidden is what could
+    # verify a replay falsely.
+    shown = {key.rstrip("/") for key in written_urls(message)}
+    return frozenset(url for url in returned if url and not {key.rstrip("/") for key in _readings(url)} & shown)
 
 
 def written_urls(message: AssistantMessage) -> frozenset[str]:
@@ -487,7 +487,7 @@ def replay_outcome(
 
 # A URL as an answer writes it: up to the whitespace, quote or bracket that ends it. Parentheses stay, since a URL
 # may hold them; one that closes the prose around it is trailing text.
-_URL = re.compile(r"https?://[^\s<>\[\]{}\"'`]+")
+_URL = re.compile(r"https?://[^\s<>\[\]{}\"'`]+", re.IGNORECASE)
 # What prose and Markdown can leave right after a URL, and a URL can also end in.
 _TRAILING = ".,;:!?)*_"
 
@@ -504,15 +504,20 @@ def _readings(written: str) -> frozenset[str]:
 
 
 def _same_url(url: str) -> str:
-    """A URL as a comparison key: whole, fragment included, its scheme and host in lower case, and no trailing slash
-    on its path."""
+    """A URL as a comparison key: exactly as given but for what RFC 3986 makes equivalent, the case of its scheme and
+    host and an empty path, which is ``/``. Anything else, such as a trailing slash or the case of its user
+    information, names another URL."""
 
-    try:
-        parts = urlsplit(url)
-    except ValueError:
-        # Provider text that is not a well-formed URL still compares, exactly as written.
+    scheme, separator, rest = url.partition("://")
+    if not separator:
         return url
-    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"), parts.query, parts.fragment))
+    authority = _AUTHORITY.match(rest)[0]
+    path = rest[len(authority):]
+    userinfo, at, host = authority.rpartition("@")
+    return f"{scheme.lower()}://{userinfo}{at}{host.lower()}{path if path.startswith('/') else '/' + path}"
+
+
+_AUTHORITY = re.compile(r"[^/?#]*")
 
 
 def _failure(terminal: ProviderError | None, outcome: RawCallOutcome) -> ProbeOutcome:

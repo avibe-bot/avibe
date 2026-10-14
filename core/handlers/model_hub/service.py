@@ -7730,26 +7730,26 @@ class ModelHubService:
             logger.warning("Model Hub's %s probe sent no request", tool)
             raise ModelHubError("invalid_parameter", status=400)
         call_last = calls[-1]
-        call_learned = self._probe_rejection(call_last, model_id)
-        call_verdict = hosted_call_outcome(tool, terminal, call_last.outcome, call_learned)
+        replays_natively = "replay" in HOSTED_TOOL_ASPECTS[tool] and source.protocol in NATIVE_REPLAY_PROTOCOLS
+
+        # Each step reads what the provider sent, which can be megabytes of results and payload, off the controller
+        # loop.
+        def judge_call() -> tuple[Optional[LearnedEvidence], str, frozenset[str]]:
+            learned = self._probe_rejection(call_last, model_id)
+            verdict = hosted_call_outcome(tool, terminal, call_last.outcome, learned)
+            # Only a result the visible answer does not show proves a replayed payload was read; with none, the
+            # replay stays unknown and turns replay synthetically, which is lossless.
+            verified = verdict == "verified" and isinstance(terminal, Done)
+            return learned, verdict, hidden_result_urls(terminal.message) if verified and replays_natively else frozenset()
+
+        call_learned, call_verdict, asked = await asyncio.to_thread(judge_call)
         recorded_for = await self._record_probe_evidence(
             EvidenceFeature.hosted(tool, "call"), call_verdict, call_last, call_learned, model_id,
         )
         replay: Optional[dict] = None
         # The replay probe follows a call probe that verified and was recorded for the Source as it is, on a tool
         # whose payload can go back verbatim, when the call returned a result the replay can ask about.
-        # Only a result the visible answer does not show proves the replayed payload was read; with none, the
-        # replay stays unknown and turns replay synthetically, which is lossless.
-        replayable = (
-            call_verdict == "verified"
-            and isinstance(terminal, Done)
-            and recorded_for is not None
-            and "replay" in HOSTED_TOOL_ASPECTS[tool]
-            and source.protocol in NATIVE_REPLAY_PROTOCOLS
-        )
-        # A search can return many results: read them off the controller loop.
-        asked = await asyncio.to_thread(hidden_result_urls, terminal.message) if replayable else frozenset()
-        replayable = replayable and bool(asked)
+        replayable = recorded_for is not None and bool(asked)
         if replayable and remaining() < REPLAY_MIN_SECONDS:
             # Too little of the probe's time is left for a replay that could finish: try again.
             replay = {"outcome": "transient", "error": None}
@@ -7776,16 +7776,15 @@ class ModelHubService:
                     replay = {"outcome": "transient", "error": None}
             if replay_calls:
                 replay_last = replay_calls[-1]
-                replay_learned = self._probe_rejection(replay_last, model_id)
-                replay_verdict = hosted_replay_outcome(
-                    tool,
-                    replay_terminal,
-                    replay_last.outcome,
-                    replay_learned,
-                    asked=asked,
-                    # The payload can be megabytes of provider items: compare it off the controller loop.
-                    carried=await asyncio.to_thread(carries_native_payload, replay_last.body, terminal.message),
-                )
+
+                def judge_replay() -> tuple[Optional[LearnedEvidence], str]:
+                    learned = self._probe_rejection(replay_last, model_id)
+                    carried = carries_native_payload(replay_last.body, terminal.message)
+                    return learned, hosted_replay_outcome(
+                        tool, replay_terminal, replay_last.outcome, learned, asked=asked, carried=carried,
+                    )
+
+                replay_learned, replay_verdict = await asyncio.to_thread(judge_replay)
                 await self._record_probe_evidence(
                     EvidenceFeature.hosted(tool, "replay"),
                     replay_verdict,

@@ -687,7 +687,7 @@ REPLAY_CASES = [
     # A refusal is inconclusive, even one that quotes the result.
     ("refuses-quoting-the-result", XAI, _responses(SEARCH, ANSWER), REFUSAL, "inconclusive", None),
     # The way a sentence ends a URL does not change it.
-    ("names-it-in-a-sentence", XAI, _responses(SEARCH, ANSWER), _responses_text(f"The other one was {HIDDEN}/."), "verified", "verified"),
+    ("names-it-in-a-sentence", XAI, _responses(SEARCH, ANSWER), _responses_text(f"The other one was {HIDDEN}."), "verified", "verified"),
     # Searching again instead of using the results it holds is what a dropped replay looks like.
     ("searches-again", XAI, _responses(SEARCH, ANSWER), _responses(SEARCH, ANSWER), "unsupported", "unsupported"),
     ("names-no-result", XAI, _responses(SEARCH, ANSWER), _responses_text("I can't tell."), "inconclusive", None),
@@ -846,6 +846,10 @@ WIKI = "https://en.wikipedia.org/wiki/Search_(computing)"
         (HIDDEN + "!", f"It is {HIDDEN}, I think.", "inconclusive"),
         (HIDDEN + "!", f"It is {HIDDEN}!.", "verified"),
         (WIKI, "https://en.wikipedia.org/wiki/Search_", "inconclusive"),
+        # Only the scheme and host are case-insensitive; a trailing slash or another user name is another URL.
+        ("https://Example.COM/result", "HTTPS://example.com/result", "verified"),
+        ("https://Alice:Secret@example.com/result", "https://alice:secret@example.com/result", "inconclusive"),
+        (HIDDEN, f"It is {HIDDEN}/", "inconclusive"),
     ],
 )
 def test_a_replay_answer_names_a_result_by_its_exact_url(asked, text, outcome):
@@ -868,7 +872,12 @@ def test_a_result_the_answer_shows_in_any_reading_is_not_hidden():
         record=HostedRecord(status="completed", sources=(HostedSource(url=HIDDEN + "."), HostedSource(url=WIKI))),
         native=HostedNative(source_id=XAI.id, payload=({"type": "web_search_call", "id": "ws_1"},)),
     )
-    for text, hidden in [(f"Read {HIDDEN}", {WIKI}), (f"Read {WIKI}.", {HIDDEN + "."}), ("Read none", {HIDDEN + ".", WIKI})]:
+    for text, hidden in [
+        (f"Read {HIDDEN}", {WIKI}),
+        (f"Read {WIKI}.", {HIDDEN + "."}),
+        (f"Read {WIKI}/", {HIDDEN + "."}),
+        ("Read none", {HIDDEN + ".", WIKI}),
+    ]:
         answer = AssistantMessage(
             content=(call, TextBlock(text=text)),
             origin=Origin("xai", "openai_responses", "grok-4.6"),
