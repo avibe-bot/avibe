@@ -253,6 +253,19 @@ def official_models_dev_provider(vendor: str, base_url: str | None) -> str | Non
     return entry.models_dev_provider
 
 
+def is_official_api_key_endpoint(vendor: str, base_url: str) -> bool:
+    """Whether a base URL is its vendor's official endpoint, by the engine's endpoint identity.
+
+    Spellings that differ only by host case, a default port, or the implied ``/v1`` root are the same endpoint.
+    """
+
+    official = official_api_key_base_url(vendor)
+    if official is None:
+        return False
+    identity = _endpoint_identity(base_url)
+    return identity is not None and identity == _endpoint_identity(official)
+
+
 def official_api_key_base_urls() -> dict[str, str]:
     return {
         **{entry.id: entry.official_base_url for entry in api_key_vendor_catalog()},

@@ -356,11 +356,11 @@ def _price_payload(price: Any) -> dict[str, Any] | None:
 def is_relay(source: ModelHubSourceConfig) -> bool:
     """Whether an API-key Source talks to an endpoint other than its vendor's own, whose bill Avibe cannot know."""
 
-    from vibe.model_hub_runtime.api_key_vendors import official_api_key_base_url
+    from vibe.model_hub_runtime.api_key_vendors import is_official_api_key_endpoint
 
     if source.kind != "api_key" or not source.base_url:
         return False
-    return source.base_url.rstrip("/") != (official_api_key_base_url(source.vendor) or "").rstrip("/")
+    return not is_official_api_key_endpoint(source.vendor, source.base_url)
 
 
 def _status(
