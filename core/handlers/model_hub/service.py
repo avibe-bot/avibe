@@ -518,8 +518,9 @@ class V2ModelHubConfigStore:
     unchanged: a read costs one ``stat`` and a copy, never a parse. Any change to
     the file (a write through this store, another writer in this process, the UI
     process or the CLI) replaces or rewrites it, which changes its identity, and
-    the next read parses again. A write through this store parses its result at
-    once, where the write already does I/O, so the reads after it parse nothing.
+    the next read parses again. A write through this store keeps what it
+    committed as the snapshot, inside its own lock, so the reads after it parse
+    nothing.
     """
 
     _NATIVE_AUTH_FIELDS = {
@@ -552,21 +553,23 @@ class V2ModelHubConfigStore:
         *,
         expected_hub: tuple[dict, ...],
     ) -> None:
-        from config.v2_config import config_write_transaction
+        from config.v2_config import config_file_lock, config_write_transaction
 
         self.ensure_writable()
-        with config_write_transaction() as config:
-            if config.model_hub.to_payload() not in expected_hub:
-                raise MigrationConflictError
-            for backend, values in desired.items():
-                target = getattr(config.agents, backend)
-                actual = {name: getattr(target, name) for name in values}
-                if actual not in (expected.get(backend), values):
+        path = paths.get_config_path()
+        with config_file_lock(path):
+            with config_write_transaction(path) as config:
+                if config.model_hub.to_payload() not in expected_hub:
                     raise MigrationConflictError
-                for name, value in values.items():
-                    setattr(target, name, value)
-            config.model_hub = ModelHubConfig.from_payload(model_hub.to_payload())
-        self._read(paths.get_config_path())
+                for backend, values in desired.items():
+                    target = getattr(config.agents, backend)
+                    actual = {name: getattr(target, name) for name in values}
+                    if actual not in (expected.get(backend), values):
+                        raise MigrationConflictError
+                    for name, value in values.items():
+                        setattr(target, name, value)
+                config.model_hub = ModelHubConfig.from_payload(model_hub.to_payload())
+            self._seed(path, config.model_hub)
 
     def load(self) -> ModelHubConfig:
         path = paths.get_config_path()
@@ -604,21 +607,36 @@ class V2ModelHubConfigStore:
     def save(self, model_hub: ModelHubConfig) -> None:
         model_hub = ModelHubConfig.from_payload(model_hub.to_payload())
         self.ensure_writable()
-        from config.v2_config import update_config_fields
+        from config.v2_config import config_file_lock, update_config_fields
 
-        update_config_fields(lambda cfg: setattr(cfg, "model_hub", model_hub))
-        self._read(paths.get_config_path())
+        path = paths.get_config_path()
+        with config_file_lock(path):
+            committed = update_config_fields(lambda cfg: setattr(cfg, "model_hub", model_hub), config_path=path)
+            self._seed(path, committed.model_hub)
 
     def mutate(self, mutator: Callable[[ModelHubConfig], bool]) -> None:
         from config.v2_config import config_file_lock
 
-        with config_file_lock():
+        path = paths.get_config_path()
+        with config_file_lock(path):
             config = V2Config.load()
-            changed = mutator(config.model_hub)
-            if changed:
+            if mutator(config.model_hub):
                 config.save()
-        if changed:
-            self._read(paths.get_config_path())
+                self._seed(path, config.model_hub)
+
+    def _seed(self, path: Path, model_hub: ModelHubConfig) -> None:
+        """Keep what a write just committed as the snapshot, without reading the file back.
+
+        Called inside the write's config lock, so no other writer can have
+        replaced the file since: its identity now names exactly this content. The
+        section is settled the way a load settles it (the one repairing door).
+        """
+
+        identity = _file_identity(path)
+        if identity is not None:
+            settled = ModelHubConfig.from_payload(model_hub.to_payload(), repairing=True)
+            with self._snapshot_lock:
+                self._snapshot = (identity, settled)
 
 class UnavailableEngineAdapter:
     """Explicit fail-closed adapter for isolated callers and tests."""
