@@ -81,6 +81,8 @@ OFF = (False, None, None)
 DEGRADED = [
     # Damage never turns a cost-bearing tool on: a broken section or entry is off (AGENTS persisted-shape rule).
     ("not-an-object", ["web_search"], dict.fromkeys(ALL_TOOLS, OFF), True),
+    # Present but null is damage, not absence.
+    ("null-section", None, dict.fromkeys(ALL_TOOLS, OFF), True),
     # An rc build's section: its keys and fields are unknown to v2, but each tool's opt-out survives.
     (
         "rc-era-section",
@@ -241,6 +243,11 @@ async def test_a_clear_removes_only_the_refusals_it_names(tmp_path):
 
     for call, code, status_code in [
         (service.clear_hosted_refusals("image_generation", {}), "hosted_tool_not_found", 404),
+        # Nothing is nullable: a malformed body is refused, never widened into a broader clear.
+        (service.clear_hosted_refusals("x_search", {"source_id": None}), "invalid_parameter", 400),
+        (service.clear_hosted_refusals("x_search", {"source_id": source.id, "model_id": None}), "invalid_parameter", 400),
+        (service.clear_hosted_refusals("x_search", {"source_id": source.id, "model_id": " grok-4.6"}), "invalid_parameter", 400),
+        (service.clear_source_evidence(source.id, {"model_id": "grok-4.6 ", "feature": {"kind": "effort", "name": "max"}}), "invalid_parameter", 400),
         (service.clear_hosted_refusals("x_search", {"model_id": executor}), "invalid_parameter", 400),
         (service.clear_hosted_refusals("x_search", {"source_id": ""}), "invalid_parameter", 400),
         (service.clear_source_evidence("src_gone0001", {"model_id": "grok-4.6", "feature": {"kind": "effort", "name": "max"}}), "source_not_found", 404),
