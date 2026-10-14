@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import gzip
 import json
+import threading
 from dataclasses import replace
 from datetime import timedelta
 
@@ -196,10 +197,18 @@ async def test_a_proxied_search_runs_one_native_request_and_answers_its_canonica
     )
     service = _vibey_service(tmp_path, _sources(), handles=[LiveInvokeHandle(served, frames)])
     _bind(service, tool, executor)
-    status, answer = await _call(service, tool, {
-        "arguments": arguments,
-    })
+    admitting_threads = []
+    admit = service._admitted_executor
+
+    def recorded(*args):
+        admitting_threads.append(threading.current_thread())
+        return admit(*args)
+
+    service._admitted_executor = recorded
+    status, answer = await _call(service, tool, {"arguments": arguments})
     assert status == 200, answer
+    # Admission reads the config, which grows with use: at the chain step and again under the lock, off the loop.
+    assert len(admitting_threads) == 2 and threading.main_thread() not in admitting_threads
     assert service.adapter.invocations == [(executor[0], executor[1], "vibey")]
     sent = service.adapter.requests[0]
     assert sent.protocol == "openai_responses"

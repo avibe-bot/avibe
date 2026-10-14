@@ -517,7 +517,8 @@ These rules are C-1 rows in `cross-provider.md` and per-protocol rows in `conver
     attempt `included` gives `included`; the basis is `reported` only when every summed figure is reported, else
     `list` (shown with ≈); an attempt without a `cost` makes the total a lower bound, shown as "at least $X" /
     "至少 $X", never as complete. With `failed_attempts`, the card also names the attempt count ("3 attempts" /
-    "尝试 3 次").
+    "尝试 3 次"). B1 ships the sum, its basis and the attempt count (as the projection's `calls`); until D2 adds the
+    lower-bound form, an attempt without a `cost` leaves the total unknown rather than shown as complete.
   - The executor request is a short model request because no vendor exposes search without a model: Anthropic,
     OpenAI's public API, xAI and Google all run search inside a model call.
 - **The result is the canonical record** (v1's rules, unchanged): a `HostedRecord` with `sources[]` in the

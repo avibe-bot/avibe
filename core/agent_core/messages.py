@@ -493,7 +493,8 @@ class FailedAttempt:
 @dataclass(frozen=True)
 class ProxyExecution:
     """What ran a hosted call outside the model: a search executor (``proxy``) or an image endpoint (``direct``);
-    absent when the call never reached one. ``cost`` sums every billable attempt, ``failed_attempts`` included."""
+    absent when the call never reached one. ``cost`` is this attempt's own; ``failed_attempts`` lists the earlier
+    billed ones, and ``core/hosted_activity`` totals them for display."""
 
     executor_origin: Origin
     executor_source_id: str

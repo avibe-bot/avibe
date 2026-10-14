@@ -6385,14 +6385,17 @@ class ModelHubService:
         basis, usd = priced
         return HostedCost(basis=basis, usd=None if usd is None else round(usd, 6))
 
-    def _admitted_executor(self, config: ModelHubConfig, slot: ExecutorSlot, tool: str) -> ExecutorCandidate | None:
-        """The chain's candidate as this snapshot admits it, else None (``vibey-hosted-tools.md`` §6).
+    def _admitted_executor(self, slot: ExecutorSlot, tool: str) -> ExecutorCandidate | None:
+        """The chain's candidate as the current snapshot admits it, else None (``vibey-hosted-tools.md`` §6).
 
         The turn froze the order, not the Sources' runtime: a Source that is
         removed, no longer runs the tool on its executor model, or has refused
         it since is passed over, and so is one whose identity (base URL,
-        credential, ...) changed since the chain was built.
+        credential, ...) changed since the chain was built. It reads the config,
+        which grows with use: call it off the controller loop.
         """
+
+        config = self.store.load()
 
         return next(
             (
@@ -6478,7 +6481,7 @@ class ModelHubService:
         """Call one executor candidate; None when this snapshot does not admit it, so nothing ran."""
 
         tool, model_id = call.tool, slot.model_id
-        candidate = self._admitted_executor(self.store.load(), slot, tool)
+        candidate = await asyncio.to_thread(self._admitted_executor, slot, tool)
         if candidate is None:
             return None
         source = candidate.source
@@ -6512,7 +6515,7 @@ class ModelHubService:
 
                 try:
                     # Admitted again on the snapshot the call is made on, under the lock.
-                    if self._admitted_executor(self.store.load(), slot, tool) is None:
+                    if await asyncio.to_thread(self._admitted_executor, slot, tool) is None:
                         return
                     if not self._engine_synced:
                         continue
@@ -9540,7 +9543,9 @@ class ModelHubService:
         proven = resolved.hosted_calls & outcome.hosted_tools
         if not proven or resolved.origin is None:
             return
-        source = next((item for item in self.store.load().sources if item.id == resolved.source_id), None)
+        # The config grows with use: read it off the controller loop.
+        config = await asyncio.to_thread(self.store.load)
+        source = next((item for item in config.sources if item.id == resolved.source_id), None)
         if source is None or identity_digest(source) != resolved.origin.identity:
             return
         for tool in sorted(proven):
