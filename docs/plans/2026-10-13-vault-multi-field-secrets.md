@@ -222,12 +222,17 @@ also receives this hint when the original request had no field spec.
 
 - Create: a static secret looks the same as today until the user adds a field.
   Then the value becomes a list of field rows (name and value), with exactly one
-  default. A Login template fills `username`, `password` (default), and `totp`.
-  File upload stays available only for a single-value standard secret.
+  default. The template menu offers Login (`username`, `password`) and Login +
+  2FA (`username`, `password`, `totp`), both defaulting to `password`, which
+  receives any value already typed. File upload stays available only for a
+  single-value standard secret. Each row reports its own naming error, and a
+  preview lists the `NAME.field` references an agent can use.
+  Visual reference: `assets/vault-fields-redesign/`.
 - A protected create seals every field in the same sandbox session and sends
   one create request. Vault establishment fields are sent once.
 - Edit: replace any field's value, add or remove extra fields, and rename the
-  default field. Name, kind, and protection stay read-only. After mount the
+  default field. A row shows Save once it changes; on the default row Save
+  renames first and then writes a typed value under the renamed record. Name, kind, and protection stay read-only. After mount the
   editor owns current server metadata and drafts: own-write responses or
   sequenced authoritative refetches update truth, while changed parent props
   and Vault events trigger refetches rather than directly replacing it. Only
