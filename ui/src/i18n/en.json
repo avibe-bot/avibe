@@ -2409,6 +2409,9 @@
             "profile": "profile"
           },
           "listNote": "At API price",
+          "listNoteExtras": "At API price · {{extras}}",
+          "extra": "+ {{price}}",
+          "extraSeparator": " · ",
           "unknown": "No list price"
         },
         "empty": "None of your Sources can run {{toolInline}} natively. Add a Source that offers it, then check it here.",
@@ -2452,6 +2455,7 @@
           "total": "{{cost}} in total",
           "totalIncluded": "included in subscriptions",
           "totalUnknown": "cost unknown",
+          "summary": "{{pending}} · {{cost}}",
           "none": "Everything is checked",
           "action": "Check available tools"
         },

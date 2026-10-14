@@ -2862,6 +2862,29 @@ describe('SettingsModelsPage tools region', () => {
     await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
   });
 
+  it('reads the hosted-tools report again after a committed Source change, since its models decide which pairs could run a tool', async () => {
+    renderPage([retainedSource]);
+    const updatedSource = { ...retainedSource, display_name: 'Updated source' };
+    vi.spyOn(modelsApi, 'patchSource').mockResolvedValueOnce({ source: updatedSource, removed_hops: [], interrupted: [] });
+    await userEvent.click((await screen.findByText('Retained source')).closest('button') as HTMLButtonElement);
+    await screen.findByRole('dialog', { name: 'Retained source' });
+    const read = vi.mocked(modelsApi.getHostedTools);
+    await waitFor(() => expect(read).toHaveBeenCalled());
+    const readsBefore = read.mock.calls.length;
+    vi.mocked(modelsApi.listSources).mockResolvedValue([updatedSource]);
+
+    // A change that keeps the Source's identity (here its name) still commits a new Source row.
+    await userEvent.click(screen.getByRole('button', { name: /Manage Retained source|管理 Retained source/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
+    const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
+    await userEvent.clear(name);
+    await userEvent.type(name, updatedSource.display_name);
+    await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
+    await screen.findByText(/^The source was updated$|^供应商已更新$/);
+
+    await waitFor(() => expect(read.mock.calls.length).toBeGreaterThan(readsBefore));
+  });
+
   it('MH-HOSTED-UI-016: reads the Sources again after a check, since a probe can verify its Source', async () => {
     const unknown = { status: 'unknown' as const, stale: null, basis: null, observed_at: null, detail: null, changes_at: null };
     const withCandidate: HostedToolsStatus = {

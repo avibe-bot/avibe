@@ -209,4 +209,41 @@ describe('useHostedTools ordering', () => {
     await waitFor(() => expect(result.current.read.kind).not.toBe('loading'));
     expect(shown(result.current.read)).toBeNull();
   });
+
+  it('keeps a tool pending until the read reconciling its lost write lands', async () => {
+    const reconcile = deferred<HostedToolsStatus>();
+    vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValueOnce(status(false)).mockReturnValueOnce(reconcile.promise);
+    vi.spyOn(modelsApi, 'putHostedTool').mockRejectedValue(new Error('connection reset'));
+    const { result } = renderHook(() => useHostedTools(true), { wrapper });
+    await waitFor(() => expect(shown(result.current.read)).toBe(false));
+
+    let saving!: Promise<void>;
+    act(() => { saving = result.current.save('web_search', { enabled: true, executor: null }); });
+    // The answer was lost and the write may have committed: still pending while the read is out.
+    await waitFor(() => expect(modelsApi.getHostedTools).toHaveBeenCalledTimes(2));
+    expect(result.current.pending.has('web_search')).toBe(true);
+
+    await act(async () => { reconcile.resolve(status(true)); await saving; });
+    expect(result.current.pending.has('web_search')).toBe(false);
+    expect(shown(result.current.read)).toBe(true);
+  });
+
+  it('drops a write answer asked under another Source identity', async () => {
+    const put = deferred<HostedToolsStatus>();
+    vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValueOnce(status(false)).mockRejectedValue(new Error('offline'));
+    vi.spyOn(modelsApi, 'putHostedTool').mockReturnValue(put.promise);
+    const { result, rerender } = renderHook(({ revision }) => useHostedTools(true, revision), {
+      wrapper,
+      initialProps: { revision: 'identity-a' },
+    });
+    await waitFor(() => expect(shown(result.current.read)).toBe(false));
+
+    let saving!: Promise<void>;
+    act(() => { saving = result.current.save('web_search', { enabled: true, executor: null }); });
+    // The key is replaced while the write is out.
+    rerender({ revision: 'identity-b' });
+    await act(async () => { put.resolve(status(true)); await saving; });
+    // That answer described the old identity; the new one's read failed, so nothing shows.
+    expect(shown(result.current.read)).toBeNull();
+  });
 });

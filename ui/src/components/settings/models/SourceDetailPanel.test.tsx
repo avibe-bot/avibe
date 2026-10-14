@@ -1465,6 +1465,15 @@ describe('SourceDetailPanel hosted-tool capability chips', () => {
     await within(detail).findByText(/the model didn't use the tool|模型没有调用工具/);
   });
 
+  it('says a re-check\'s cost is unknown when no estimate is known', async () => {
+    const read = status({ enabled: false, bound: null });
+    const unpriced = { ...read, tools: read.tools.map((tool) => ({ ...tool, candidates: tool.candidates.map((candidate) => ({ ...candidate, probe_estimate: null })) })) };
+    renderChips(unpriced, { onProbe: vi.fn(async () => null) });
+    await userEvent.hover(screen.getByRole('button', { name: /X search · not supported on this Source|X 搜索 · 此供应商不支持/ }));
+    const detail = await screen.findByRole('dialog');
+    within(detail).getByRole('button', { name: /Check again · cost unknown|重新检测 · 费用未知/ });
+  });
+
   it('draws a chip for each reasoning effort the Source refused, even with no tool evidence', () => {
     const models = twoModels.models.map((model) => model.id === 'model-b'
       ? { ...model, refused_efforts: [{ effort: 'xhigh', basis: 'observed' as const, observed_at: at, detail: '400 · unsupported reasoning effort', changes_at: null }] }

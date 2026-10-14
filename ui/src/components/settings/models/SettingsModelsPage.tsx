@@ -1257,6 +1257,13 @@ export const SettingsModelsPage: React.FC = () => {
   const hostedTools = useHostedTools(tab === 'tools' || selectedSource !== null, selectedSourceIdentity);
   // A probe is a real call on exactly one Source, and a successful one verifies
   // that Source (a pending credential check clears), so the Sources read follows it.
+  // A committed Source change (a model added, removed or refetched, or its
+  // identity) changes which pairs could run a tool and what binds, so the
+  // hosted-tools report follows it once the Sources settle.
+  const presentSourceMutationAndTools = React.useCallback<PresentSourceMutationCommit>(async (commit) => {
+    await presentSourceMutation(commit);
+    void hostedTools.refresh();
+  }, [presentSourceMutation, hostedTools.refresh]);
   const probeHostedTool = React.useCallback(async (target: ProbeTarget) => {
     const result = await hostedTools.probe(target);
     void refresh();
@@ -1794,7 +1801,7 @@ export const SettingsModelsPage: React.FC = () => {
                 headingRef={sourceDetailHeadingRef}
                 trackMutation={trackSourceMutation(selectedSource.id)}
                 onReauth={setReauthSource}
-                onMutationCommitted={presentSourceMutation}
+                onMutationCommitted={presentSourceMutationAndTools}
               />
             : <section className="grid min-h-0 flex-1 place-items-center px-5 py-12 text-center text-[12px] text-muted">{t('settings.models.sourceDetail.gone')}</section>}
         </DialogContent>

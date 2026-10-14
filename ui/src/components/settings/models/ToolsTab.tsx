@@ -96,7 +96,13 @@ const CostCell: React.FC<{ tool: HostedToolName; candidate: HostedToolCandidate 
     <span className="flex min-w-0 flex-col">
       <span className="font-semibold text-foreground">{t('settings.models.tools.cost.list', { price: perUnit(price.usd_per_1k, price.unit) })}</span>
       <span className="model-hub-tool-cost-note">
-        {[t('settings.models.tools.cost.listNote'), ...price.extra.map((extra) => `+ ${perUnit(extra.usd_per_1k, extra.unit)}`)].join(' · ')}
+        {price.extra.length === 0
+          ? t('settings.models.tools.cost.listNote')
+          : t('settings.models.tools.cost.listNoteExtras', {
+              extras: price.extra
+                .map((extra) => t('settings.models.tools.cost.extra', { price: perUnit(extra.usd_per_1k, extra.unit) }))
+                .join(t('settings.models.tools.cost.extraSeparator')),
+            })}
       </span>
     </span>
   );
@@ -363,7 +369,7 @@ export const ToolsTab: React.FC<{
             {checkable && (
               <span className="model-hub-tools-reverify">
                 {toCheck.length > 0
-                  ? `${t('settings.models.tools.header.pending', { count: toCheck.length })} · ${toCheckCost}`
+                  ? t('settings.models.tools.header.summary', { pending: t('settings.models.tools.header.pending', { count: toCheck.length }), cost: toCheckCost })
                   : t('settings.models.tools.header.none')}
               </span>
             )}

@@ -2409,6 +2409,9 @@
             "profile": "个账号"
           },
           "listNote": "API 标价",
+          "listNoteExtras": "API 标价 · {{extras}}",
+          "extra": "另加 {{price}}",
+          "extraSeparator": "，",
           "unknown": "暂无标价"
         },
         "empty": "你的供应商都不能原生运行{{toolInline}}。添加提供该工具的供应商后，在这里检测。",
@@ -2452,6 +2455,7 @@
           "total": "共{{cost}}",
           "totalIncluded": "均为订阅内含",
           "totalUnknown": "费用未知",
+          "summary": "{{pending}} · {{cost}}",
           "none": "均已检测",
           "action": "检测可用工具"
         },

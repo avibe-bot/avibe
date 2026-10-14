@@ -189,7 +189,7 @@ const CapabilityChip: React.FC<{
           {last !== undefined && <ProbeAnswerNote result={last} />}
           <Button variant="outline" size="xs" disabled={running || probing.size > 0} aria-busy={running} onClick={() => void onProbe(target).then(setLast)}>
             {running ? <Loader2 className="animate-spin" aria-hidden /> : <Radar aria-hidden />}
-            {estimate ? t('settings.models.capability.recheckCost', { cost: estimate }) : t('settings.models.capability.recheck')}
+            {t('settings.models.capability.recheckCost', { cost: estimate ?? t('settings.models.tools.probe.unknown') })}
           </Button>
         </span>
       )

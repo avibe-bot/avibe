@@ -62,19 +62,38 @@ export function useHostedTools(active: boolean, revision: string | null = null) 
     void refresh({ forget });
   }, [active, revision, refresh]);
 
+  // Tools whose write ended without an answer: they stay pending until the read
+  // that reconciles them lands, so no control writes a body built on the status
+  // that write may already have changed.
+  const unsettled = React.useRef<Set<HostedToolName>>(new Set());
+  const release = React.useCallback((tools: Iterable<HostedToolName>) => {
+    const done = [...tools];
+    if (!alive.current || done.length === 0) return;
+    setPending((previous) => {
+      const next = new Set(previous);
+      for (const tool of done) next.delete(tool);
+      return next;
+    });
+  }, []);
+
   const save = React.useCallback(async (tool: HostedToolName, body: HostedToolPut) => {
     const clock = order.current;
     clock.writes += 1;
     clock.queued += 1;
+    // An answer is for the Source identity it was asked under (see `shownRevision`).
+    const revisionAtStart = shownRevision.current;
     setPending((previous) => new Set(previous).add(tool));
     const write = writeQueue.current.then(async () => {
       try {
         const status = await modelsApi.putHostedTool(tool, body);
-        if (alive.current) setRead(readyRegion(status));
+        if (!alive.current) return;
+        if (shownRevision.current === revisionAtStart) setRead(readyRegion(status));
+        else clock.rereadAfterWrites = true;
       } catch {
         // A refused write changed nothing, and a lost answer may have committed;
         // either way the tab converges on what the server now holds.
         clock.rereadAfterWrites = true;
+        unsettled.current.add(tool);
         if (alive.current) {
           showToast(t('settings.models.tools.saveFailed', { toolInline: t(`settings.models.tools.tool.${tool}.inline`) }) as string, 'error');
         }
@@ -84,16 +103,15 @@ export function useHostedTools(active: boolean, revision: string | null = null) 
     await write;
     clock.queued -= 1;
     if (!alive.current) return;
-    setPending((previous) => {
-      const next = new Set(previous);
-      next.delete(tool);
-      return next;
-    });
+    if (!unsettled.current.has(tool)) release([tool]);
     if (clock.queued === 0 && clock.rereadAfterWrites) {
       clock.rereadAfterWrites = false;
-      void refresh();
+      const reconciling = [...unsettled.current];
+      unsettled.current.clear();
+      await refresh();
+      release(reconciling);
     }
-  }, [refresh, showToast, t]);
+  }, [refresh, release, showToast, t]);
 
   /**
    * Run one call probe: a real, cost-bearing request the user asked for. Its
@@ -107,13 +125,14 @@ export function useHostedTools(active: boolean, revision: string | null = null) 
     const clock = order.current;
     const writesAtStart = clock.writes;
     const recordBefore = target.candidate.call.observed_at;
+    const revisionAtStart = shownRevision.current;
     setProbing((previous) => new Set(previous).add(key));
     try {
       const { probe: result, hosted_tools: status } = await modelsApi.probeHostedTool(target.tool, {
         source_id: target.candidate.source_id,
         model_id: target.candidate.model_id,
       });
-      if (alive.current && clock.writes === writesAtStart && clock.queued === 0) {
+      if (alive.current && clock.writes === writesAtStart && clock.queued === 0 && shownRevision.current === revisionAtStart) {
         // Newer than any read still out, which must not overwrite it.
         clock.reads += 1;
         setRead(readyRegion(status));
@@ -125,7 +144,7 @@ export function useHostedTools(active: boolean, revision: string | null = null) 
       // running until then, so no second paid request starts meanwhile. The
       // status read for that lands as a probe's answer would.
       const recovered = await lostProbeOutcome(target, recordBefore);
-      if (recovered && alive.current && clock.writes === writesAtStart && clock.queued === 0) {
+      if (recovered && alive.current && clock.writes === writesAtStart && clock.queued === 0 && shownRevision.current === revisionAtStart) {
         clock.reads += 1;
         setRead(readyRegion(recovered.status));
       }

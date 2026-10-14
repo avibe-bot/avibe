@@ -305,6 +305,14 @@ describe('ToolsTab claims', () => {
     within(image.querySelector('[data-candidate="src_chatgpt1:gpt-6.1-sol"]') as HTMLElement).getByText('订阅内含');
   });
 
+  it('lets the locale compose a price with its extras', () => {
+    renderTab(status([tool('x_search', { candidates: [{
+      source_id: GROK.id, model_id: 'grok-4.6', call: unknown, replay: unknown,
+      price: { unit: 'post', usd_per_1k: 5, extra: [{ unit: 'profile', usd_per_1k: 10 }], as_of: '2026-10-13', url: 'https://docs.x.ai/pricing' },
+    }] })]), { lng: 'zh' });
+    within(card('X 搜索').querySelector('[data-candidate="src_grok0001:grok-4.6"]') as HTMLElement).getByText('API 标价 · 另加 $0.01 / 个账号');
+  });
+
   it('MH-HOSTED-UI-004: says how many checks an engine upgrade made stale, and nothing when none did', () => {
     renderTab(status([tool('web_search')], { engine_upgraded: 2, aged: 1 }));
     const line = screen.getByRole('status');
