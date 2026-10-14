@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
@@ -26,8 +27,12 @@ from vibe.internal_client import (
 DEFAULT_SCRIPT_TIMEOUT_SECONDS = 300.0
 _SCRIPT_DIAGNOSTIC_TAIL_BYTES = 64 * 1024
 _SCRIPT_RESULT_MAX_BYTES = 8 * 1024 * 1024
+_SCRIPT_RUNTIME_STATE_MAX_BYTES = _SCRIPT_RESULT_MAX_BYTES
 _SCRIPT_RESULT_PATH_ENV = "AVIBE_COMPUTER_RESULT_PATH"
 _PROCESS_REAP_TIMEOUT_SECONDS = 0.25
+_ARTIFACT_DIRECTORY_PREFIX = "avibe-computer-script-"
+_SUPERVISOR_DIRECTORY_PREFIX = "avibe-computer-script-runner-"
+_MAX_RETAINED_ARTIFACT_RUNS = 20
 _FAILURE_ENVELOPE_FIELDS: tuple[str, ...] | None = None
 
 _SCRIPT_OPEN_ERROR_KEYS = {
@@ -56,8 +61,26 @@ class ComputerScriptRunnerError(RuntimeError):
         super().__init__(key)
 
 
-class _ComputerScriptProtocolError(RuntimeError):
-    """The child process produced an invalid or oversized protocol result."""
+@dataclass(frozen=True)
+class _CappedJsonRead:
+    value: Any = None
+    error: str | None = None
+
+
+@dataclass
+class _ScriptRun:
+    artifact_directory: Path
+    runtime_state_path: Path
+    result_path: Path
+    node_started: bool = False
+    completed: subprocess.CompletedProcess[str] | None = None
+
+
+@dataclass(frozen=True)
+class _FinalizedRun:
+    result: Any = None
+    error: ComputerScriptRunnerError | None = None
+    cause: Exception | None = None
 
 
 def parse_script_arguments(values: Iterable[str]) -> dict[str, str]:
@@ -149,12 +172,26 @@ def _failure_envelope(**values: Any) -> dict[str, Any]:
     return {field: values[field] for field in fields}
 
 
-def _runtime_state(path: Path) -> dict[str, Any]:
+def _read_capped_json(path: Path, limit: int) -> _CappedJsonRead:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, TypeError, json.JSONDecodeError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
+        size = path.stat().st_size
+    except FileNotFoundError:
+        return _CappedJsonRead(error="missing")
+    except OSError:
+        return _CappedJsonRead(error="unreadable")
+    if size > limit:
+        return _CappedJsonRead(error="too_large")
+    try:
+        with path.open("rb") as stream:
+            encoded = stream.read(limit + 1)
+    except OSError:
+        return _CappedJsonRead(error="unreadable")
+    if len(encoded) > limit:
+        return _CappedJsonRead(error="too_large")
+    try:
+        return _CappedJsonRead(value=json.loads(encoded.decode("utf-8")))
+    except (UnicodeError, json.JSONDecodeError):
+        return _CappedJsonRead(error="invalid_json")
 
 
 def _kill_process_group(process: subprocess.Popen[Any]) -> None:
@@ -169,40 +206,6 @@ def _kill_process_group(process: subprocess.Popen[Any]) -> None:
         pass
 
 
-def _read_file_tail(path: Path, limit: int) -> bytes:
-    with path.open("rb") as stream:
-        stream.seek(0, os.SEEK_END)
-        end = stream.tell()
-        stream.seek(max(0, end - limit))
-        return stream.read(limit)
-
-
-def _read_diagnostic_tail(paths: Iterable[Path]) -> str:
-    chunks = [
-        _read_file_tail(path, _SCRIPT_DIAGNOSTIC_TAIL_BYTES)
-        for path in paths
-        if path.exists()
-    ]
-    return b"".join(chunks)[-_SCRIPT_DIAGNOSTIC_TAIL_BYTES :].decode(
-        "utf-8",
-        errors="replace",
-    )
-
-
-def _read_protocol_result(path: Path) -> str:
-    try:
-        size = path.stat().st_size
-    except FileNotFoundError:
-        return ""
-    if size > _SCRIPT_RESULT_MAX_BYTES:
-        raise _ComputerScriptProtocolError("script result exceeds the size limit")
-    with path.open("rb") as stream:
-        encoded = stream.read(_SCRIPT_RESULT_MAX_BYTES + 1)
-    if len(encoded) > _SCRIPT_RESULT_MAX_BYTES:
-        raise _ComputerScriptProtocolError("script result exceeds the size limit")
-    return encoded.decode("utf-8", errors="replace")
-
-
 def _run_node_process(
     node: Path,
     runner: Path,
@@ -211,7 +214,7 @@ def _run_node_process(
 ) -> subprocess.CompletedProcess[str]:
     command = [str(node), str(runner)]
     supervisor_directory = Path(
-        tempfile.mkdtemp(prefix="avibe-computer-script-runner-")
+        tempfile.mkdtemp(prefix=_SUPERVISOR_DIRECTORY_PREFIX)
     ).resolve()
     try:
         try:
@@ -219,9 +222,7 @@ def _run_node_process(
         except OSError:
             pass
         request_path = supervisor_directory / "request.json"
-        result_path = supervisor_directory / "result.json"
-        stdout_path = supervisor_directory / "stdout.log"
-        stderr_path = supervisor_directory / "stderr.log"
+        result_path = Path(str(request["result_path"]))
         request_path.write_text(
             json.dumps(request, ensure_ascii=False),
             encoding="utf-8",
@@ -233,18 +234,12 @@ def _run_node_process(
         child_environment = os.environ.copy()
         child_environment[_SCRIPT_RESULT_PATH_ENV] = str(result_path)
 
-        with (
-            request_path.open("r", encoding="utf-8") as request_input,
-            stdout_path.open("w+b") as stdout_output,
-            stderr_path.open("w+b") as stderr_output,
-        ):
-            # A descendant that creates a new session is outside the process-group
-            # guarantee, but file-backed output cannot keep this supervisor blocked.
+        with request_path.open("r", encoding="utf-8") as request_input:
             process = subprocess.Popen(
                 command,
                 stdin=request_input,
-                stdout=stdout_output,
-                stderr=stderr_output,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 env=child_environment,
                 start_new_session=os.name == "posix",
             )
@@ -256,61 +251,28 @@ def _run_node_process(
                     process.wait(timeout=_PROCESS_REAP_TIMEOUT_SECONDS)
                 except subprocess.TimeoutExpired:
                     pass
-                stdout_output.flush()
-                stderr_output.flush()
                 raise subprocess.TimeoutExpired(
                     command,
                     timeout_seconds,
-                    stderr=_read_diagnostic_tail((stdout_path, stderr_path)),
                 ) from exc
-            stdout_output.flush()
-            stderr_output.flush()
 
         return subprocess.CompletedProcess(
             command,
             returncode,
-            _read_protocol_result(result_path),
-            _read_diagnostic_tail((stdout_path, stderr_path)),
+            "",
+            "",
         )
     finally:
         shutil.rmtree(supervisor_directory, ignore_errors=True)
 
 
-def _decode_runner_output(
-    stdout: str,
-    stderr: str,
-    returncode: int,
-) -> dict[str, Any]:
-    try:
-        payload = json.loads(stdout)
-    except (TypeError, json.JSONDecodeError) as exc:
-        detail = (stderr or stdout).strip()
-        if not detail:
-            raise ComputerScriptRunnerError(
-                "computer.cli.error.scriptRuntimeExit",
-                code="computer_script_runtime_failed",
-                params={"status": returncode},
-            ) from exc
-        raise ComputerScriptRunnerError(
-            "computer.cli.error.scriptRuntime",
-            code="computer_script_runtime_failed",
-            params={"error": detail[:2048]},
-        ) from exc
-    if not isinstance(payload, dict) or not isinstance(payload.get("ok"), bool):
-        raise ComputerScriptRunnerError(
-            "computer.cli.error.scriptRuntimeInvalid",
-            code="computer_script_runtime_failed",
-        )
-    return payload
-
-
 def _local_screenshot_path(
-    payload: dict[str, Any] | None,
+    error: dict[str, Any] | None,
     artifact_directory: Path,
 ) -> Path | None:
-    if not isinstance(payload, dict) or not isinstance(payload.get("error"), dict):
+    if not isinstance(error, dict):
         return None
-    screenshot_path = payload["error"].get("screenshot_path")
+    screenshot_path = error.get("screenshot_path")
     if not isinstance(screenshot_path, str) or not screenshot_path:
         return None
     try:
@@ -348,6 +310,220 @@ def _retain_only_screenshot(
                 candidate.unlink(missing_ok=True)
             else:
                 shutil.rmtree(candidate, ignore_errors=True)
+
+
+def _prune_retained_artifact_runs(parent: Path) -> None:
+    candidates: list[tuple[float, Path]] = []
+    try:
+        entries = list(parent.iterdir())
+    except OSError:
+        return
+    for candidate in entries:
+        if (
+            not candidate.name.startswith(_ARTIFACT_DIRECTORY_PREFIX)
+            or candidate.name.startswith(_SUPERVISOR_DIRECTORY_PREFIX)
+            or not candidate.is_dir()
+            or candidate.is_symlink()
+            or (candidate / ".active").exists()
+        ):
+            continue
+        try:
+            candidates.append((candidate.stat().st_mtime, candidate))
+        except OSError:
+            continue
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    for _modified_at, candidate in candidates[_MAX_RETAINED_ARTIFACT_RUNS:]:
+        shutil.rmtree(candidate, ignore_errors=True)
+
+
+def _runtime_context(read: _CappedJsonRead) -> dict[str, Any]:
+    payload = read.value if isinstance(read.value, dict) else {}
+    step = payload.get("step")
+    screenshot_path = payload.get("screenshot_path")
+    diagnostics = payload.get("diagnostics")
+    if not isinstance(step, str) or not step:
+        step = "script"
+    if not isinstance(screenshot_path, str) or not screenshot_path:
+        screenshot_path = None
+    if not isinstance(diagnostics, str):
+        diagnostics = ""
+    encoded_diagnostics = diagnostics.encode("utf-8", errors="replace")
+    diagnostics = encoded_diagnostics[-_SCRIPT_DIAGNOSTIC_TAIL_BYTES:].decode(
+        "utf-8",
+        errors="replace",
+    )
+    return {
+        "step": step,
+        "screenshot_path": screenshot_path,
+        "diagnostics": diagnostics,
+        "read_error": read.error,
+    }
+
+
+def _failure_params(
+    context: dict[str, Any],
+    values: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    params = dict(values or {})
+    if context["diagnostics"]:
+        params["diagnostics"] = context["diagnostics"]
+    if context["read_error"] is not None:
+        params["runtime_state_error"] = context["read_error"]
+    return params
+
+
+def _protocol_failure_envelope(
+    context: dict[str, Any],
+    *,
+    reason: str,
+    returncode: int | None,
+) -> dict[str, Any]:
+    if reason == "too_large":
+        message = "The script result exceeded the protocol size limit."
+        params = {"limit_bytes": _SCRIPT_RESULT_MAX_BYTES}
+    else:
+        message = "The script runtime did not produce a valid protocol result."
+        params = {"reason": reason}
+        if returncode is not None:
+            params["status"] = returncode
+    return _failure_envelope(
+        name="ControllerError",
+        code="computer_script_protocol_error",
+        message=message,
+        params=_failure_params(context, params),
+        step=context["step"],
+        screenshot_path=context["screenshot_path"],
+        ambiguous=True,
+    )
+
+
+def _merge_failure_context(
+    error: dict[str, Any],
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    merged = dict(error)
+    if context["step"] != "script" or not merged.get("step"):
+        merged["step"] = context["step"]
+    if context["screenshot_path"] is not None:
+        merged["screenshot_path"] = context["screenshot_path"]
+    error_params = merged.get("params")
+    merged["params"] = _failure_params(
+        context,
+        error_params if isinstance(error_params, dict) else {},
+    )
+    return merged
+
+
+def _finalize_run(
+    run: _ScriptRun,
+    pending_error: Exception | None,
+) -> _FinalizedRun:
+    state_read = _read_capped_json(
+        run.runtime_state_path,
+        _SCRIPT_RUNTIME_STATE_MAX_BYTES,
+    )
+    context = _runtime_context(state_read)
+    failure_envelope: dict[str, Any] | None = None
+    result: Any = None
+    cause = pending_error
+
+    if not run.node_started:
+        finalized_error = (
+            pending_error
+            if isinstance(pending_error, ComputerScriptRunnerError)
+            else None
+        )
+        if finalized_error is None and pending_error is not None:
+            finalized_error = ComputerScriptRunnerError(
+                "computer.cli.error.scriptRuntime",
+                code="computer_script_runtime_failed",
+                params={"error": str(pending_error)},
+            )
+    elif isinstance(pending_error, subprocess.TimeoutExpired):
+        failure_envelope = _failure_envelope(
+            name="Timeout",
+            code="script_timeout",
+            message="The script deadline expired.",
+            params=_failure_params(context),
+            step=context["step"],
+            screenshot_path=context["screenshot_path"],
+            ambiguous=True,
+        )
+        finalized_error = _script_failure(failure_envelope)
+    elif pending_error is not None:
+        failure_envelope = _failure_envelope(
+            name="ControllerError",
+            code="computer_script_runtime_failed",
+            message="The script runtime failed.",
+            params=_failure_params(context, {"error": str(pending_error)}),
+            step=context["step"],
+            screenshot_path=context["screenshot_path"],
+            ambiguous=True,
+        )
+        finalized_error = _script_failure(failure_envelope)
+    else:
+        result_read = _read_capped_json(run.result_path, _SCRIPT_RESULT_MAX_BYTES)
+        payload = result_read.value
+        if result_read.error is not None:
+            failure_envelope = _protocol_failure_envelope(
+                context,
+                reason=result_read.error,
+                returncode=run.completed.returncode if run.completed else None,
+            )
+            finalized_error = _script_failure(failure_envelope)
+        elif not isinstance(payload, dict) or not isinstance(payload.get("ok"), bool):
+            failure_envelope = _protocol_failure_envelope(
+                context,
+                reason="invalid_shape",
+                returncode=run.completed.returncode if run.completed else None,
+            )
+            finalized_error = _script_failure(failure_envelope)
+        elif payload["ok"] is True:
+            finalized_error = None
+            result = payload.get("result")
+        else:
+            error = payload.get("error")
+            if (
+                not isinstance(error, dict)
+                or set(error) != set(_failure_envelope_fields())
+            ):
+                failure_envelope = _protocol_failure_envelope(
+                    context,
+                    reason="invalid_failure_envelope",
+                    returncode=run.completed.returncode if run.completed else None,
+                )
+            else:
+                failure_envelope = _merge_failure_context(error, context)
+            finalized_error = _script_failure(failure_envelope)
+
+    retained_error = (
+        failure_envelope
+        if failure_envelope is not None
+        else (
+            finalized_error.structured_error
+            if isinstance(finalized_error, ComputerScriptRunnerError)
+            else None
+        )
+    )
+    local_screenshot = _local_screenshot_path(
+        retained_error,
+        run.artifact_directory,
+    )
+    if local_screenshot is None:
+        shutil.rmtree(run.artifact_directory, ignore_errors=True)
+    else:
+        _retain_only_screenshot(run.artifact_directory, local_screenshot)
+        try:
+            os.utime(run.artifact_directory)
+        except OSError:
+            pass
+        _prune_retained_artifact_runs(run.artifact_directory.parent)
+
+    return _FinalizedRun(
+        result=result,
+        error=finalized_error,
+        cause=cause,
+    )
 
 
 def _display_seconds(value: float) -> int | float:
@@ -403,16 +579,25 @@ def run_computer_script(
     deadline = time.monotonic() + timeout_seconds
     display_seconds = _display_seconds(timeout_seconds)
     artifact_directory = Path(
-        tempfile.mkdtemp(prefix="avibe-computer-script-")
+        tempfile.mkdtemp(prefix=_ARTIFACT_DIRECTORY_PREFIX)
     ).resolve()
     try:
         os.chmod(artifact_directory, 0o700)
     except OSError:
         pass
+    try:
+        (artifact_directory / ".active").touch(mode=0o600, exist_ok=False)
+    except OSError:
+        pass
 
-    payload: dict[str, Any] | None = None
+    run = _ScriptRun(
+        artifact_directory=artifact_directory,
+        runtime_state_path=artifact_directory / "runtime-state.json",
+        result_path=artifact_directory / "result.json",
+    )
     endpoint = None
     connection_token: str | None = None
+    pending_error: Exception | None = None
     try:
         try:
             endpoint = resolve_computer_script_endpoint()
@@ -482,7 +667,6 @@ def run_computer_script(
                 params={"seconds": display_seconds},
                 details={"step": "script"},
             )
-        runtime_state_path = artifact_directory / "runtime-state.json"
         request = {
             "script_url": script_path.as_uri(),
             "sdk_url": index.as_uri(),
@@ -490,66 +674,18 @@ def run_computer_script(
             "endpoint": computer_script_endpoint_payload(endpoint),
             "connection_token": connection_token,
             "artifact_directory": str(artifact_directory),
-            "runtime_state_path": str(runtime_state_path),
+            "runtime_state_path": str(run.runtime_state_path),
+            "result_path": str(run.result_path),
         }
-        try:
-            completed = _run_node_process(
-                node,
-                runner,
-                request,
-                remaining_seconds,
-            )
-        except subprocess.TimeoutExpired as exc:
-            runtime_state = _runtime_state(runtime_state_path)
-            screenshot_path = runtime_state.get("screenshot_path")
-            if not isinstance(screenshot_path, str) or not screenshot_path:
-                screenshot_path = None
-            failure_envelope = _failure_envelope(
-                name="Timeout",
-                code="script_timeout",
-                message="The script deadline expired.",
-                params={},
-                step=str(runtime_state.get("step") or "script"),
-                screenshot_path=screenshot_path,
-                ambiguous=True,
-            )
-            payload = {"ok": False, "error": failure_envelope}
-            raise _script_failure(failure_envelope) from exc
-        except _ComputerScriptProtocolError as exc:
-            runtime_state = _runtime_state(runtime_state_path)
-            screenshot_path = runtime_state.get("screenshot_path")
-            if not isinstance(screenshot_path, str) or not screenshot_path:
-                screenshot_path = None
-            failure_envelope = _failure_envelope(
-                name="ControllerError",
-                code="computer_script_protocol_error",
-                message="The script result exceeded the protocol size limit.",
-                params={"limit_bytes": _SCRIPT_RESULT_MAX_BYTES},
-                step=str(runtime_state.get("step") or "script"),
-                screenshot_path=screenshot_path,
-                ambiguous=True,
-            )
-            payload = {"ok": False, "error": failure_envelope}
-            raise _script_failure(failure_envelope) from exc
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise ComputerScriptRunnerError(
-                "computer.cli.error.scriptRuntime",
-                code="computer_script_runtime_failed",
-                params={"error": str(exc)},
-            ) from exc
-
-        payload = _decode_runner_output(
-            completed.stdout,
-            completed.stderr,
-            completed.returncode,
+        run.node_started = True
+        run.completed = _run_node_process(
+            node,
+            runner,
+            request,
+            remaining_seconds,
         )
-        if payload["ok"] is True:
-            return payload.get("result")
-
-        error = payload.get("error")
-        if not isinstance(error, dict):
-            error = {}
-        raise _script_failure(error)
+    except Exception as exc:
+        pending_error = exc
     finally:
         close_timeout = deadline - time.monotonic()
         if (
@@ -566,11 +702,10 @@ def run_computer_script(
             except (InternalServerUnavailable, InternalServerTimeout):
                 pass
 
-        local_screenshot = _local_screenshot_path(payload, artifact_directory)
-        if local_screenshot is None:
-            shutil.rmtree(artifact_directory, ignore_errors=True)
-        else:
-            _retain_only_screenshot(
-                artifact_directory,
-                local_screenshot,
-            )
+        finalized = _finalize_run(run, pending_error)
+
+    if finalized.error is not None:
+        if finalized.cause is not None and finalized.cause is not finalized.error:
+            raise finalized.error from finalized.cause
+        raise finalized.error
+    return finalized.result

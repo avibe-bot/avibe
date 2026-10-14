@@ -1,8 +1,11 @@
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
+import { inspect } from "node:util";
 
 const MAX_RESPONSE_BYTES = 128 * 1024 * 1024;
+export const PROTOCOL_FILE_MAX_BYTES = 8 * 1024 * 1024;
+export const DIAGNOSTIC_TAIL_MAX_BYTES = 64 * 1024;
 
 const failureEnvelopeContract = JSON.parse(
   fs.readFileSync(new URL("./failure-envelope.json", import.meta.url), "utf8"),
@@ -28,6 +31,8 @@ let lastStep = "script";
 let lastScreenshotPath;
 let lastOwnedScreenshotPath;
 let screenshotSequence = 0;
+let diagnosticTail = Buffer.alloc(0);
+let consoleDiagnosticsInstalled = false;
 
 export class ControllerFault extends Error {
   constructor(code, message, params = {}, options = {}) {
@@ -66,6 +71,7 @@ export function configureRuntime(config) {
     maxFreeSockets: 1,
     scheduling: "fifo",
   });
+  installConsoleDiagnostics();
   persistRuntimeState();
 }
 
@@ -392,27 +398,127 @@ export async function closeScriptConnection() {
   }
 }
 
+function installConsoleDiagnostics() {
+  if (consoleDiagnosticsInstalled) {
+    return;
+  }
+  consoleDiagnosticsInstalled = true;
+  for (const name of ["debug", "error", "info", "log", "trace", "warn"]) {
+    const original = console[name];
+    if (typeof original !== "function") {
+      continue;
+    }
+    console[name] = (...args) => {
+      try {
+        original.apply(console, args);
+      } finally {
+        appendDiagnostic(args);
+      }
+    };
+  }
+}
+
+function appendDiagnostic(args) {
+  const line = args.map(formatDiagnosticValue).join(" ");
+  const encoded = Buffer.from(`${line}\n`, "utf8");
+  if (encoded.length >= DIAGNOSTIC_TAIL_MAX_BYTES) {
+    diagnosticTail = Buffer.from(
+      encoded.subarray(encoded.length - DIAGNOSTIC_TAIL_MAX_BYTES),
+    );
+  } else {
+    const combined = Buffer.concat([diagnosticTail, encoded]);
+    diagnosticTail = Buffer.from(
+      combined.subarray(
+        Math.max(0, combined.length - DIAGNOSTIC_TAIL_MAX_BYTES),
+      ),
+    );
+  }
+  persistRuntimeState();
+}
+
+function formatDiagnosticValue(value) {
+  if (typeof value === "string") {
+    return value.slice(-DIAGNOSTIC_TAIL_MAX_BYTES);
+  }
+  if (value instanceof Error) {
+    return String(value.stack || value.message || value);
+  }
+  try {
+    return inspect(value, {
+      breakLength: Infinity,
+      colors: false,
+      compact: true,
+      depth: 4,
+      maxArrayLength: 100,
+      maxStringLength: 4096,
+    });
+  } catch {
+    return "<unprintable>";
+  }
+}
+
+function diagnosticStep() {
+  return currentStep && currentStep !== "script"
+    ? currentStep
+    : lastStep || "script";
+}
+
+export class ProtocolFileTooLargeError extends Error {
+  constructor(limitBytes) {
+    super("Computer Use protocol file exceeded its size limit.");
+    this.name = "ProtocolFileTooLargeError";
+    this.code = "computer_script_protocol_error";
+    this.params = { limit_bytes: limitBytes };
+    this.limitBytes = limitBytes;
+  }
+}
+
+export function writeCappedJsonFile(
+  targetPath,
+  payload,
+  limitBytes = PROTOCOL_FILE_MAX_BYTES,
+) {
+  const serialized = JSON.stringify(payload);
+  if (serialized === undefined) {
+    throw new Error("Computer Use protocol payload is not JSON serializable.");
+  }
+  const encoded = Buffer.from(serialized, "utf8");
+  if (encoded.length > limitBytes) {
+    throw new ProtocolFileTooLargeError(limitBytes);
+  }
+  const temporaryPath = `${targetPath}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(temporaryPath, encoded, {
+      flag: "w",
+      mode: 0o600,
+    });
+    fs.renameSync(temporaryPath, targetPath);
+  } catch (error) {
+    try {
+      fs.unlinkSync(temporaryPath);
+    } catch {
+      // The original write failure is authoritative.
+    }
+    throw error;
+  }
+}
+
 function persistRuntimeState() {
   if (!state?.runtimeStatePath) {
     return;
   }
-  const temporaryPath = `${state.runtimeStatePath}.${process.pid}.tmp`;
   try {
-    fs.writeFileSync(
-      temporaryPath,
-      JSON.stringify({
-        step: currentStep || lastStep || "script",
+    writeCappedJsonFile(
+      state.runtimeStatePath,
+      {
+        step: diagnosticStep(),
         screenshot_path: lastScreenshotPath ?? null,
-      }),
-      { mode: 0o600 },
+        diagnostics: diagnosticTail.toString("utf8"),
+      },
+      PROTOCOL_FILE_MAX_BYTES,
     );
-    fs.renameSync(temporaryPath, state.runtimeStatePath);
   } catch {
-    try {
-      fs.unlinkSync(temporaryPath);
-    } catch {
-      // Runtime state is diagnostic; script execution remains authoritative.
-    }
+    // Runtime state is diagnostic; script execution remains authoritative.
   }
 }
 
@@ -421,7 +527,7 @@ export function failureContext(error) {
     step:
       error && typeof error === "object" && typeof error.step === "string"
         ? error.step
-        : currentStep || lastStep || "script",
+        : diagnosticStep(),
     screenshot_path:
       error &&
       typeof error === "object" &&

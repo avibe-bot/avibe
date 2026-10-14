@@ -1,4 +1,3 @@
-import fs from "node:fs";
 import { register } from "node:module";
 import * as runtime from "./runtime.mjs";
 
@@ -32,33 +31,48 @@ try {
     if (serializedResult === undefined) {
       throw new Error("Computer Use scripts must return a JSON value.");
     }
-    output = JSON.stringify({ ok: true, result: JSON.parse(serializedResult) });
+    output = { ok: true, result: JSON.parse(serializedResult) };
   } catch (error) {
-    output = JSON.stringify({
+    output = {
       ok: false,
       error: runtime.failureEnvelope(error),
-    });
+    };
   } finally {
     await runtime.closeScriptConnection().catch(() => {});
   }
 } catch (error) {
-  output = JSON.stringify({
+  output = {
     ok: false,
     error: runtime.failureEnvelope(error, {
       defaultCode: "computer_script_runtime_failed",
     }),
-  });
+  };
 }
 
 try {
-  fs.writeFileSync(resultPath, output, {
-    encoding: "utf8",
-    flag: "w",
-    mode: 0o600,
-  });
+  runtime.writeCappedJsonFile(resultPath, output);
   process.exit(0);
 } catch (error) {
-  console.error(error);
+  if (error instanceof runtime.ProtocolFileTooLargeError) {
+    const protocolError = new Error(
+      "The script result exceeded the protocol size limit.",
+    );
+    protocolError.name = "ControllerError";
+    protocolError.code = "computer_script_protocol_error";
+    protocolError.params = { limit_bytes: error.limitBytes };
+    protocolError.ambiguous = true;
+    try {
+      runtime.writeCappedJsonFile(resultPath, {
+        ok: false,
+        error: runtime.failureEnvelope(protocolError),
+      });
+      process.exit(0);
+    } catch (fallbackError) {
+      console.error(fallbackError);
+    }
+  } else {
+    console.error(error);
+  }
   process.exit(1);
 }
 

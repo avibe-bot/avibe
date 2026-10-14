@@ -4,6 +4,7 @@ import base64
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import shutil
 import socket
@@ -368,6 +369,7 @@ def _run_node_script(
     )
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
+    result_path = artifacts / "result.json"
 
     with _fake_controller(
         click_error=click_error,
@@ -394,6 +396,7 @@ def _run_node_script(
             "connection_token": "script-token",
             "artifact_directory": str(artifacts),
             "runtime_state_path": str(artifacts / "runtime-state.json"),
+            "result_path": str(result_path),
         }
         started = time.monotonic()
         completed = computer_script_runner._run_node_process(
@@ -405,7 +408,13 @@ def _run_node_script(
         server.subprocess_elapsed = time.monotonic() - started  # type: ignore[attr-defined]
         server.completed = completed  # type: ignore[attr-defined]
         assert completed.returncode == 0, completed.stderr
-        return json.loads(completed.stdout), server, requests
+        result_read = computer_script_runner._read_capped_json(
+            result_path,
+            computer_script_runner._SCRIPT_RESULT_MAX_BYTES,
+        )
+        assert result_read.error is None
+        assert isinstance(result_read.value, dict)
+        return result_read.value, server, requests
 
 
 def _run_python_deadline_script(
@@ -622,15 +631,32 @@ export default async () => {{
         "computer_script_endpoint_payload",
         lambda value: {"endpoint": value is endpoint},
     )
+    def return_failure(_node, _runner, request, _timeout_seconds):
+        Path(request["result_path"]).write_text(
+            json.dumps(payload),
+            encoding="utf-8",
+        )
+        Path(request["runtime_state_path"]).write_text(
+            json.dumps(
+                {
+                    "step": expected["step"],
+                    "screenshot_path": expected["screenshot_path"],
+                    "diagnostics": "",
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(
+            args=["node", "runner.mjs"],
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
     monkeypatch.setattr(
         computer_script_runner,
         "_run_node_process",
-        lambda *_args: subprocess.CompletedProcess(
-            args=["node", "runner.mjs"],
-            returncode=0,
-            stdout=json.dumps(payload),
-            stderr="",
-        ),
+        return_failure,
     )
     monkeypatch.setattr(
         computer_script_runner,
@@ -1300,29 +1326,84 @@ export default async () => {
     assert server.subprocess_elapsed < 1.0  # type: ignore[attr-defined]
 
 
-def test_python_runner_retains_only_a_bounded_diagnostic_tail(
+def test_runtime_state_retains_only_a_bounded_console_diagnostic_tail(
     tmp_path: Path,
 ) -> None:
     payload, server, _requests = _run_node_script(
         tmp_path,
         """
 export default async () => {
-  process.stdout.write("discarded-marker\\n");
-  process.stdout.write("x".repeat(128 * 1024));
-  process.stdout.write("\\nretained-tail\\n");
+  console.log("discarded-marker");
+  console.log("x".repeat(128 * 1024));
+  console.log("retained-tail");
 };
 """,
     )
 
     completed = server.completed  # type: ignore[attr-defined]
+    state_read = computer_script_runner._read_capped_json(
+        tmp_path / "artifacts" / "runtime-state.json",
+        computer_script_runner._SCRIPT_RUNTIME_STATE_MAX_BYTES,
+    )
 
     assert payload == {"ok": True, "result": None}
     assert completed.returncode == 0
-    assert len(completed.stderr.encode("utf-8")) <= (
+    assert completed.stdout == ""
+    assert completed.stderr == ""
+    assert state_read.error is None
+    assert isinstance(state_read.value, dict)
+    diagnostics = state_read.value["diagnostics"]
+    assert len(diagnostics.encode("utf-8")) <= (
         computer_script_runner._SCRIPT_DIAGNOSTIC_TAIL_BYTES
     )
-    assert "discarded-marker" not in completed.stderr
-    assert completed.stderr.endswith("\nretained-tail\n")
+    assert "discarded-marker" not in diagnostics
+    assert diagnostics.endswith("retained-tail\n")
+    assert {path.name for path in (tmp_path / "artifacts").iterdir()} == {
+        "result.json",
+        "runtime-state.json",
+    }
+    assert (
+        tmp_path / "artifacts" / "runtime-state.json"
+    ).stat().st_size <= computer_script_runner._SCRIPT_RUNTIME_STATE_MAX_BYTES
+
+
+def test_continuous_console_logs_leave_no_capture_files_after_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    temp_root = tmp_path / "runner-temp"
+    temp_root.mkdir()
+    real_mkdtemp = tempfile.mkdtemp
+    created_directories: list[Path] = []
+
+    def tracked_mkdtemp(*args, **kwargs):
+        kwargs["dir"] = temp_root
+        created = Path(real_mkdtemp(*args, **kwargs))
+        created_directories.append(created)
+        return str(created)
+
+    monkeypatch.setattr(computer_script_runner.tempfile, "mkdtemp", tracked_mkdtemp)
+
+    error, _requests, elapsed = _run_python_deadline_script(
+        monkeypatch,
+        tmp_path,
+        """
+export default function () {
+  while (true) {
+    console.log("x".repeat(4096));
+  }
+};
+""",
+    )
+
+    diagnostics = error.details["params"]["diagnostics"]
+    assert len(diagnostics.encode("utf-8")) <= (
+        computer_script_runner._SCRIPT_DIAGNOSTIC_TAIL_BYTES
+    )
+    assert elapsed < 1.0
+    assert created_directories
+    assert all(not path.exists() for path in created_directories)
+    assert list(temp_root.iterdir()) == []
 
 
 def test_python_runner_rejects_an_oversized_result_with_canonical_error(
@@ -1363,6 +1444,19 @@ def test_python_deadline_is_not_held_by_a_detached_descendant_stdout(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    temp_root = tmp_path / "runner-temp"
+    temp_root.mkdir()
+    real_mkdtemp = tempfile.mkdtemp
+    created_directories: list[Path] = []
+
+    def tracked_mkdtemp(*args, **kwargs):
+        kwargs["dir"] = temp_root
+        created = Path(real_mkdtemp(*args, **kwargs))
+        created_directories.append(created)
+        return str(created)
+
+    monkeypatch.setattr(computer_script_runner.tempfile, "mkdtemp", tracked_mkdtemp)
+
     error, requests, elapsed = _run_python_deadline_script(
         monkeypatch,
         tmp_path,
@@ -1372,7 +1466,11 @@ import { spawn } from "node:child_process";
 export default async () => {
   const child = spawn(
     process.execPath,
-    ["-e", "setTimeout(() => process.exit(0), 2000)"],
+    [
+      "-e",
+      "const end=Date.now()+750; const chunk='x'.repeat(8192); " +
+        "while(Date.now()<end){process.stdout.write(chunk)}",
+    ],
     { detached: true, stdio: ["ignore", "inherit", "inherit"] },
   );
   child.unref();
@@ -1392,6 +1490,9 @@ export default async () => {
     }
     assert requests == []
     assert elapsed < 1.0
+    assert created_directories
+    assert all(not path.exists() for path in created_directories)
+    assert list(temp_root.iterdir()) == []
 
 
 @pytest.mark.parametrize(
@@ -1503,6 +1604,58 @@ export default async () => {
         shutil.rmtree(screenshot.parent, ignore_errors=True)
 
 
+@pytest.mark.parametrize(
+    ("termination", "expected_reason"),
+    [
+        ('process.kill(process.pid, "SIGKILL");', "missing"),
+        (
+            'fs.writeFileSync(process.env.AVIBE_COMPUTER_RESULT_PATH, "{bad"); '
+            "process.exit(7);",
+            "invalid_json",
+        ),
+        (
+            "fs.rmSync(process.env.AVIBE_COMPUTER_RESULT_PATH, { force: true }); "
+            "process.exit(8);",
+            "missing",
+        ),
+    ],
+)
+def test_finalize_recovers_step_and_screenshot_from_runtime_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    termination: str,
+    expected_reason: str,
+) -> None:
+    error, _requests, _elapsed = _run_python_deadline_script(
+        monkeypatch,
+        tmp_path,
+        f"""
+import fs from "node:fs";
+import {{ computer }} from "@avibe/computer";
+
+export default async () => {{
+  const mail = await computer.app({{ bundleId: "com.apple.mail" }});
+  const window = await mail.window({{ labelContains: "New Message" }});
+  await window.observe();
+  {termination}
+}};
+""",
+        timeout_seconds=5,
+    )
+
+    assert error.details["code"] == "computer_script_protocol_error"
+    assert error.details["step"] == "window.observe"
+    assert error.details["params"]["reason"] == expected_reason
+    screenshot_path = error.details["screenshot_path"]
+    assert isinstance(screenshot_path, str)
+    screenshot = Path(screenshot_path)
+    try:
+        assert screenshot.read_bytes() == b"png-fixture"
+        assert list(screenshot.parent.iterdir()) == [screenshot]
+    finally:
+        shutil.rmtree(screenshot.parent, ignore_errors=True)
+
+
 def test_python_failure_retains_only_the_referenced_screenshot(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1532,6 +1685,25 @@ export default async () => {
         assert list(screenshot.parent.iterdir()) == [screenshot]
     finally:
         shutil.rmtree(screenshot.parent, ignore_errors=True)
+
+
+def test_failure_artifact_retention_is_bounded(tmp_path: Path) -> None:
+    retained: list[Path] = []
+    for index in range(computer_script_runner._MAX_RETAINED_ARTIFACT_RUNS + 3):
+        directory = (
+            tmp_path
+            / f"{computer_script_runner._ARTIFACT_DIRECTORY_PREFIX}{index:02d}"
+        )
+        directory.mkdir()
+        (directory / "failure.png").write_bytes(b"png")
+        os.utime(directory, (index + 1, index + 1))
+        retained.append(directory)
+
+    computer_script_runner._prune_retained_artifact_runs(tmp_path)
+
+    survivors = [directory for directory in retained if directory.exists()]
+    assert len(survivors) == computer_script_runner._MAX_RETAINED_ARTIFACT_RUNS
+    assert survivors == retained[-computer_script_runner._MAX_RETAINED_ARTIFACT_RUNS :]
 
 
 @pytest.mark.parametrize(
@@ -1659,10 +1831,14 @@ def test_python_runner_uses_one_deadline_for_open_node_and_close(
         captured["runner"] = runner
         captured["request"] = request
         captured["timeout_seconds"] = timeout_seconds
+        Path(request["result_path"]).write_text(
+            '{"ok":true,"result":{"done":true}}',
+            encoding="utf-8",
+        )
         return subprocess.CompletedProcess(
             args=[str(node), str(runner)],
             returncode=0,
-            stdout='{"ok":true,"result":{"done":true}}',
+            stdout="",
             stderr="",
         )
 
@@ -1693,6 +1869,7 @@ def test_python_runner_uses_one_deadline_for_open_node_and_close(
     assert "timeout_ms" not in request
     assert "deadline_unix_ms" not in request
     assert request["runtime_state_path"].endswith("/runtime-state.json")
+    assert request["result_path"].endswith("/result.json")
     assert captured["close"] == {
         "endpoint": endpoint,
         "connection_token": "token",
