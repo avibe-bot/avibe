@@ -25,7 +25,9 @@ Reuse the request queue, approval surfaces, notification delivery, and callbacks
    truthful `await` guidance instead of claiming an automatic resume. Global
    dedupe preserves the original request's provenance/callback; when a reused
    request belongs to another Session or has callbacks disabled, `rm` gives the
-   same truthful `await` guidance rather than promising a new callback.
+   same truthful `await` guidance rather than promising a new callback. Reusing
+   a same-Session callback-enabled row still reports automatic resume, even when
+   the repeat invocation passes `--no-callback`; stored callback settings win.
 2. Persist `request_type="delete"`, `secret_name=NAME`, and the existing
    requester/session provenance. `delivery={reason, card}`; card fields are
    `{card_type: "approval", request_type: "delete", secret_name, kind,
@@ -41,7 +43,8 @@ Reuse the request queue, approval surfaces, notification delivery, and callbacks
    requests fail cleanly using existing error codes.
 4. Denial reuses `deny_request` and its endpoint unchanged.
 5. A pending delete whose secret is deleted another way settles `fulfilled`, not
-   `expired`, and its callback says the secret has been deleted. Other pending
+   `expired`, and its callback says the secret has been deleted. Apply the normal
+   lazy-expiry transition first: overdue requests stay `expired`. Other pending
    request types retain today's expiry behavior.
 6. Approved/fulfilled callback:
    "The user approved deleting the secret 'NAME'; it has been deleted. Continue
@@ -91,12 +94,38 @@ Avibe service, real home/keychain, or external tenant mutation. Tests run throug
   exact-head Codex pass, all required CI green, zero unresolved threads, one
   durable combined Watch; never merge.
 
+## Multi-field integration (approved 2026-10-14)
+
+- Integrate the released multi-field implementation and Vaults UX from master;
+  preserve whole-secret deletion, grant invalidation, and resident-scope release.
+- Reject `vibe vault rm NAME.field` with `vault_field_delete_forbidden` and point
+  to the Vaults page for single-field removal. The skill is version `0.4.0`.
+- A delete card snapshots `_field_metadata(secret)` at creation. Pending UI reads
+  refresh its `kind`, `default_field`, `fields`, and optional `fields_state` from
+  the current secret, without envelopes or grant options. Deleted-secret reads
+  retain the snapshot. The shared approval card displays all named fields from
+  these card fields; access cards keep their existing grant-member grouping.
+- Register the new approve-delete endpoint natively in FastAPI. Its async handler
+  awaits the synchronous API/DB work on a thread, with the same authorization
+  context and request hooks as the adjacent field routes. Existing deny/list
+  endpoints are not added by this PR and stay unchanged.
+- Review and Deny require Vault-use permission; Delete requires both Vault-use
+  and instance-management permission. English agent-facing callback/CLI copy
+  matches existing Vault guidance; Web and IM copy is localized.
+
+Integration validation is complete locally: 684 tests across the full Vault
+Python files plus resource ACL and member-management parity, 149 focused UI
+cases, UI typecheck, lint, build, changed-file Ruff, skill validation, and strict
+duplicate-key/en-zh parity checks. The payload, UI field-list, and native route
+regressions were run against `be12be7` production files and failed for the intended
+missing fields/compat registration reasons; they pass with the fixes.
+
 ## Delivery slices
 
 - [x] Record the contract as the first commit.
-- [ ] Service lifecycle, API/CLI, notifications, owning-boundary tests.
-- [ ] Shared UI, i18n, skill guidance, focused UI/parser tests.
-- [ ] Validation, self-review, PR, Codex/CI loop, reports to orchestrator.
+- [x] Service lifecycle, API/CLI, notifications, owning-boundary tests.
+- [x] Shared UI, i18n, skill guidance, focused UI/parser tests.
+- [ ] Final integrated-head Codex/CI loop and report to orchestrator.
 
 The PR Known-by-design ledger records that all Agent deletes need approval, the
 keypair/protected hold is retained, and single-field deletion is out of scope.

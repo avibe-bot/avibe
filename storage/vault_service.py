@@ -1290,6 +1290,18 @@ def _field_metadata(row: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _hydrate_card_delete_metadata(conn: Connection, row: dict[str, Any], card: dict[str, Any]) -> dict[str, Any]:
+    card = dict(card)
+    secret_name = row.get("secret_name")
+    if not secret_name:
+        return card
+    secret_row = conn.execute(select(vault_secrets).where(vault_secrets.c.name == secret_name)).mappings().first()
+    if secret_row is not None:
+        card.pop("fields_state", None)
+        card.update(_field_metadata(dict(secret_row)))
+    return card
+
+
 def _hydrate_card_unlock_material(conn: Connection, row: dict[str, Any], card: dict[str, Any]) -> dict[str, Any]:
     card = dict(card)
     secret_name = row.get("secret_name")
@@ -1391,6 +1403,14 @@ def _request_row_payload(
     card = delivery.get("card") if isinstance(delivery, dict) else None
     policy = _card_hydration_policy(audience)
     if (
+        conn is not None
+        and isinstance(card, dict)
+        and row.get("request_type") == "delete"
+        and row.get("status") == "pending"
+        and policy.audience == REQUEST_AUDIENCE_UI
+    ):
+        card = _hydrate_card_delete_metadata(conn, row, card)
+    elif (
         policy.include_protected_unlock_material
         and row.get("status") == "pending"
         and row.get("request_type") != "delete"
@@ -4258,6 +4278,7 @@ def create_delete_request(
         "tags": _row_tags(secret),
         "session_id": session_id,
         "reason": reason,
+        **_field_metadata(secret),
     }
     delivery = {"reason": reason, "card": card}
     stored_requester = _requester_with_authorization(requester, context)

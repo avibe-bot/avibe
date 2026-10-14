@@ -16,7 +16,7 @@ import { partitionTags } from '@/lib/vaultTags';
 import { useProtectedVault, useVaultSandboxWarm, type ProtectedUnlockMaterial } from '@/lib/useProtectedVault';
 import { openVaultsInBrowser, vaultPasskeyNeedsBrowser } from '@/lib/vaultBrowserHandoff';
 import { vaultApprovalNeedsPasskey } from '@/lib/vaultRequestPlacement';
-import { vaultHasNamedFieldShape } from '@/lib/vaultFields';
+import { vaultHasNamedFieldShape, vaultFieldNames } from '@/lib/vaultFields';
 import { usePreparedRequest } from '@/lib/usePreparedRequest';
 import { openVaultAuthorizationWindow } from '@/lib/vaultSandboxClient';
 import { SigningAddressList } from './signing-address-list';
@@ -68,12 +68,15 @@ type ApprovalCard = {
   secret_name?: string;
   secret_names?: string[];
   protected_secret_names?: string[];
-  kind?: string | null;
+  kind?: string;
   protection?: string | null;
   description?: string | null;
   tags?: string[];
   reason?: string | null;
   command?: string | null;
+  default_field?: string;
+  fields?: string[];
+  fields_state?: 'corrupt';
   egress?: string | null;
   session_id?: string | null;
   purpose?: string | null;
@@ -169,11 +172,9 @@ export const VaultApprovalCard: React.FC<{
   }, [card, isSign, option]);
   // Protected secret names to be granted (design: "show the protected secret names covered").
   const namedDeleteFields = useMemo(() => {
-    if (!isDelete) return [];
-    return [...new Set((option?.member_fields ?? []).flatMap((member) => (
-      vaultHasNamedFieldShape(member) ? member.fields : []
-    )))];
-  }, [isDelete, option]);
+    if (!isDelete || !card) return [];
+    return vaultHasNamedFieldShape(card) ? vaultFieldNames(card) : [];
+  }, [card, isDelete]);
   const protectedNames = useMemo(() => {
     const materialNames = [...new Set(materials.map((m) => m.name.split('.')[0]))];
     return materialNames.length ? materialNames : (card?.protected_secret_names ?? []);
@@ -507,7 +508,7 @@ export const VaultApprovalCard: React.FC<{
         {isDelete && card.tags?.length ? (
           <DetailRow label={t('vaults.approval.tags')}>{card.tags.map((tag) => <Badge key={tag} variant="outline">{tag}</Badge>)}</DetailRow>
         ) : null}
-        {!isSign && memberNames.map((name) => {
+        {!isSign && !isDelete && memberNames.map((name) => {
           const metadata = option?.member_fields?.find((member) => member.name === name);
           const labels = metadata?.fields ?? materials
             .filter((material) => material.name === name || material.name.startsWith(`${name}.`))

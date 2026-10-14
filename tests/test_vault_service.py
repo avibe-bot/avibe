@@ -1199,6 +1199,9 @@ def test_delete_request_deduplicates_and_keeps_value_free_card(vault):
         "card_type": "approval",
         "request_type": "delete",
         "secret_name": "DELETE_ME",
+        "name": "DELETE_ME",
+        "default_field": "value",
+        "fields": ["value"],
         "kind": "static",
         "protection": "protected",
         "description": "old credential",
@@ -1286,6 +1289,7 @@ def test_delete_request_expiry_and_deny_callbacks(vault):
     assert callback.message == "The user declined deleting the secret 'DELETE_DENY'. Do not retry — keep the secret and ask the user if needed."
 
 
+def test_protected_delete_does_not_require_authz_at_chokepoint(vault):
     _create(vault, name="PROTECTED_KEY", protection="protected")
 
     with vault.begin() as conn:
