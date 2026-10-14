@@ -66,7 +66,10 @@ shape and treats everything else as "not carried":
   startup (`ModelHubService.reconcile_source_reasoning_tiers`): every `catalog`
   or `upstream` row, or a row with no source and no tiers, whose model has a
   catalog row. A user's list waits for the next discovery, which records the
-  override event.
+  override event. An agent's provider row that still holds the tiers its
+  suppliers gave follows them (#2629): a hop offers only the tiers its row
+  lists, and Vibey sends no other. A row that holds anything else, and a
+  typed one, stays.
 - Any other/unknown metadata shape → rung 1 does not apply. No guessing from
   model-id patterns (family inference was explicitly deferred; wrong claims
   turn into upstream 400s).
