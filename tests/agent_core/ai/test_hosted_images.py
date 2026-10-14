@@ -116,7 +116,7 @@ def _stream(
     return _sse(*events)
 
 
-async def _generate(body: str, sink: Sink, *, declared: bool = True) -> list[Any]:
+async def _generate(body: str, sink: Sink | None, *, declared: bool = True) -> list[Any]:
     routes = {"image_generation": HostedToolRoute("native", None, False, declaration=DECLARATION)} if declared else {}
     request = ModelRequest(
         endpoint=ModelEndpoint(
@@ -168,26 +168,37 @@ async def test_a_native_image_is_saved_once_from_its_done_item_and_history_holds
 
 
 @pytest.mark.parametrize(
-    ("done", "status", "encoded", "error"),
+    ("done", "status", "encoded", "stored", "error", "code"),
     [
-        (False, "completed", base64.b64encode(JPEG).decode(), "the image was not streamed before the response ended"),
-        (True, "completed", "@@@ not base64 @@@", "the image could not be saved: "),
+        (
+            False,
+            "completed",
+            base64.b64encode(JPEG).decode(),
+            True,
+            "the image was not streamed before the response ended",
+            "image_not_streamed",
+        ),
+        (True, "completed", "@@@ not base64 @@@", True, "the image could not be saved: ", "image_not_saved"),
+        (True, "completed", base64.b64encode(JPEG).decode(), False, "nothing here can keep a generated image", "image_no_store"),
+        (True, "completed", "", True, "the provider returned no image", "provider_no_image"),
         # A call the provider did not complete lists no image, so its bytes are never saved: no file without a record.
-        (True, "failed", base64.b64encode(JPEG).decode(), "the provider ended the call failed"),
+        (True, "failed", base64.b64encode(JPEG).decode(), True, "the provider ended the call failed", "provider_no_reason"),
     ],
-    ids=["only-in-the-terminal-copy", "unreadable", "failed-with-bytes"],
+    ids=["only-in-the-terminal-copy", "unreadable", "no-store", "no-image", "failed-with-bytes"],
 )
 async def test_an_image_that_was_not_saved_is_a_failed_call_never_a_completed_one(
-    tmp_path, done, status, encoded, error
+    tmp_path, done, status, encoded, stored, error, code
 ):
-    sink = Sink(tmp_path)
+    """#2589: each reason Avibe writes carries its code, by which a display localizes it."""
+
+    sink = Sink(tmp_path) if stored else None
 
     events = await _generate(_stream(encoded, done=done, terminal_copy=encoded, status=status), sink)
 
     (call,) = [block for block in events[-1].message.content if isinstance(block, HostedToolBlock)]
-    assert call.record.status == "failed" and call.record.error.startswith(error)
+    assert call.record.status == "failed" and call.record.error.startswith(error) and call.record.error_code == code
     assert call.record.images == () and "result" not in call.native.payload[0]
-    assert not sink.saved
+    assert sink is None or not sink.saved
 
 
 async def test_a_six_megabyte_image_streams_under_the_image_line_cap_and_its_record_says_read_cannot_show_it(tmp_path):

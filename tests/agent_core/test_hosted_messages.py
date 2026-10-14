@@ -16,6 +16,7 @@ from jsonschema import Draft7Validator
 from referencing import Registry, Resource
 
 from core.agent_core.messages import (
+    HOSTED_ERROR_CODES,
     AssistantMessage,
     Citation,
     HostedAction,
@@ -158,9 +159,15 @@ def _produced() -> list:
     unexecuted = ToolResultMessage(
         tool_call_id="call_9",
         tool_name="web_search",
-        content=(TextBlock(text="[web_search failed: verify web search on a Source in Models]"),),
+        content=(TextBlock(text="[web_search failed: the gateway could not run the call (ConnectError)]"),),
         is_error=True,
-        hosted=HostedResult(record=HostedRecord(status="failed", error="no verified executor")),
+        hosted=HostedResult(
+            record=HostedRecord(
+                status="failed",
+                error="the gateway could not run the call (ConnectError)",
+                error_code="gateway_unreachable",
+            )
+        ),
     )
     return [native_turn, proxy_call, proxied, included, unexecuted]
 
@@ -237,6 +244,9 @@ VIOLATIONS = {
     "error-on-completed": _set(NATIVE, ("content", 0, "record", "error"), "boom"),
     "failed-without-error": _without(NATIVE, ("content", 5, "record"), "error"),
     "error-too-long": _set(NATIVE, ("content", 1, "record", "error"), "x" * 401),
+    "error-code-without-error": _set(NATIVE, ("content", 0, "record", "error_code"), "image_not_saved"),
+    "error-code-not-snake-case": _set(NATIVE, ("content", 5, "record", "error_code"), "Image Not Saved"),
+    "empty-error-code": _set(NATIVE, ("content", 5, "record", "error_code"), ""),
     "unknown-status": _set(NATIVE, ("content", 0, "record", "status"), "done"),
     "images-on-web-search": _set(NATIVE, ("content", 0, "record", "images"), []),
     "no-images-on-image-generation": _without(NATIVE, ("content", 4, "record"), "images"),
@@ -287,6 +297,15 @@ def test_schema_and_reader_refuse_the_same_hosted_violations(payload):
     assert not VALIDATOR.is_valid(payload)
     with pytest.raises(ValueError):
         message_from_dict(payload)
+
+
+def test_a_record_with_an_error_code_this_build_does_not_know_still_loads():
+    """#2589: a newer build may add codes; an older one reads the record and shows its English error."""
+
+    newer = _set(NATIVE, ("content", 5, "record", "error_code"), "executor_overloaded")
+    assert "executor_overloaded" not in HOSTED_ERROR_CODES
+    VALIDATOR.validate(newer)
+    assert message_from_dict(newer).content[5].record.error_code == "executor_overloaded"
 
 
 def test_a_failed_generate_may_lack_the_revised_prompt():

@@ -291,6 +291,7 @@ scenarios:
       - tests/agent_core/ai/test_hosted_parsing.py::test_no_hosted_call_without_a_native_declaration_or_a_known_serving_source
       - tests/agent_core/ai/test_hosted_parsing.py::test_an_anthropic_search_and_its_result_are_one_hosted_call_and_the_text_keeps_its_citation
       - tests/agent_core/ai/test_hosted_parsing.py::test_parallel_anthropic_searches_finalize_by_id_and_a_search_cut_off_stays_pending
+      - tests/agent_core/ai/test_hosted_parsing.py::test_a_failed_call_keeps_the_providers_reason_uncoded_and_codes_the_one_avibe_writes_for_none
       - tests/agent_core/agent/test_compaction.py::test_a_hosted_call_a_checkpoint_turn_makes_is_recorded_with_its_cost_and_the_checkpoint_holds
   - id: MH-HOSTED-VIBEY-003
     name: Each hosted call replays in portable form as exactly one unit, a synthetic same-named call and result or in-place text, written by the one record-to-text function with its own status
@@ -308,7 +309,7 @@ scenarios:
       - tests/agent_core/ai/test_hosted_transform.py::test_the_posts_an_answer_cites_show_on_a_call_kept_in_place
       - tests/agent_core/agent/test_context.py::test_a_hosted_call_counts_as_the_largest_form_it_can_go_back_in
   - id: MH-HOSTED-VIBEY-004
-    name: A proxied hosted call runs on the executor bound for the Turn; its record and execution stay on the tool result and the model reads the record as text, a call that reached no executor as a failure
+    name: A proxied hosted call runs on the executor bound for the Turn, every gateway request naming that Turn; its record and execution stay on the tool result and the model reads the record as text, a call that reached no executor as a failure whose reason carries its code
     status: covered
     kind: contract
     layer: contract
@@ -333,6 +334,7 @@ scenarios:
       - tests/agent_core/ai/test_hosted_images.py::test_a_six_megabyte_image_streams_under_the_image_line_cap_and_its_record_says_read_cannot_show_it
       - tests/agent_core/ai/test_hosted_images.py::test_a_response_that_streams_images_past_its_budget_ends_as_an_error
       - tests/test_vibey_agent.py::test_a_generated_image_is_kept_as_an_immutable_file_its_bytes_name_and_type
+      - tests/test_vibey_agent.py::test_a_proxied_image_that_was_not_saved_is_a_failed_call_with_its_code
   - id: MH-VIBEY-007
     name: Vibey starts once with the user's Sources and built-in Agent models, seeded when its first Source exists
     status: covered

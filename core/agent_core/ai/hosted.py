@@ -53,19 +53,25 @@ def _text(value: Any) -> Optional[str]:
     return value if isinstance(value, str) and value else None
 
 
-def bounded_error(message: str) -> str:
-    """A record's error text: the provider's words with any credential redacted, never longer than the record allows.
-    It is persisted and replayed to later models."""
+def failure(reason: Any, code: str | None = None) -> tuple[str, str | None]:
+    """A failed record's ``error`` and ``error_code``: the provider's own words, with no code, or the English reason
+    Avibe wrote for ``code`` (``HOSTED_ERROR_CODES``). The text has any credential redacted and is never longer than
+    the record allows; it is persisted and replayed to later models. A reason that says nothing is
+    ``provider_no_reason``."""
 
-    message = " ".join(redact_provider_text(message).split()) or "the provider reported no reason"
-    return message if len(message) <= HOSTED_ERROR_MAX_CHARS else message[: HOSTED_ERROR_MAX_CHARS - 1] + "…"
+    message = " ".join(redact_provider_text(reason).split()) if isinstance(reason, str) else ""
+    if not message:
+        return "the provider reported no reason", "provider_no_reason"
+    return (message if len(message) <= HOSTED_ERROR_MAX_CHARS else message[: HOSTED_ERROR_MAX_CHARS - 1] + "…"), code
 
 
-def _item_error(item: Mapping[str, Any], status: str) -> str:
+def _item_error(item: Mapping[str, Any], status: str) -> tuple[str, str | None]:
     error = item.get("error")
     if isinstance(error, Mapping):
         error = error.get("message") or error.get("code") or error.get("type")
-    return bounded_error(error if isinstance(error, str) else f"the provider ended the call {status}")
+    if isinstance(error, str):
+        return failure(error)
+    return failure(f"the provider ended the call {status}", "provider_no_reason")
 
 
 def _payload(*items: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
@@ -92,7 +98,7 @@ def responses_hosted_block(
     call_id: str,
     finished: bool = True,
     image: HostedImage | None = None,
-    image_error: str | None = None,
+    image_error: tuple[str, str] | None = None,
 ) -> HostedToolBlock:
     """One Responses hosted-call item (a ``web_search_call``, an ``image_generation_call``, or xAI's X-search
     ``custom_tool_call``) as its block.
@@ -100,7 +106,7 @@ def responses_hosted_block(
     ``call_id`` names the block when the item carries no id of its own. An item that has only been added
     (``finished`` false) holds the call's place in the output order as a pending call. A generated image is the file
     the adapter saved, ``image``: the item's base64 ``result`` is never kept (§7.3), and a finished call that saved no
-    image failed, for ``image_error`` when the adapter knows why.
+    image failed, for ``image_error``, a reason and its code, when the adapter knows why.
     """
 
     tool = responses_hosted_tool(item)
@@ -116,11 +122,12 @@ def responses_hosted_block(
         record_status = "completed"
     else:
         record_status = "pending"
-    error = _item_error(item, record_status) if record_status in ("failed", "incomplete") else None
+    error, error_code = _item_error(item, record_status) if record_status in ("failed", "incomplete") else (None, None)
     images: tuple[HostedImage, ...] | None = None
     if tool == "image_generation":
         if record_status == "completed" and image is None:
-            record_status, error = "failed", bounded_error(image_error or "the provider returned no image")
+            record_status = "failed"
+            error, error_code = failure(*(image_error or ("the provider returned no image", "provider_no_image")))
         images = (image,) if image is not None and record_status == "completed" else ()
         action, sources = generate_action(item), ()
         # The transcript's copy names the saved file in place of the base64 image.
@@ -135,7 +142,9 @@ def responses_hosted_block(
         id=_text(item.get("id")) or _text(item.get("call_id")) or call_id,
         tool=tool,  # type: ignore[arg-type]
         action=action,
-        record=HostedRecord(status=record_status, error=error, sources=sources, images=images),  # type: ignore[arg-type]
+        record=HostedRecord(
+            status=record_status, error=error, sources=sources, images=images, error_code=error_code  # type: ignore[arg-type]
+        ),
         native=HostedNative(source_id=source_id, payload=_payload(item)),
     )
 
@@ -235,8 +244,9 @@ def anthropic_hosted_block(
                 ),
             )
         else:
-            code = content.get("error_code") if isinstance(content, Mapping) else None
-            record = HostedRecord(status="failed", error=bounded_error(code if isinstance(code, str) else ""))
+            # The provider's own error code is its reason, in its words.
+            error, error_code = failure(content.get("error_code") if isinstance(content, Mapping) else None)
+            record = HostedRecord(status="failed", error=error, error_code=error_code)
     payload = (use,) if result is None else (use, result)
     return HostedToolBlock(
         id=str(use["id"]),
