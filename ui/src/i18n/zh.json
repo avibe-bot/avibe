@@ -4986,9 +4986,9 @@
         "ranNative": "原生执行：{{where}}",
         "ranProxy": "代理执行：{{where}}",
         "ranDirect": "直连执行：{{where}}",
-        "attempts_one": "尝试 {{count}} 次",
-        "attempts_other": "尝试 {{count}} 次",
-        "attemptsCost": "{{attempts}} · {{cost}}",
+        "billedAttempts_one": "计费 {{count}} 次",
+        "billedAttempts_other": "计费 {{count}} 次",
+        "billedAttemptsCost": "{{attempts}} · {{cost}}",
         "duration": "用时 {{seconds}} 秒",
         "alsoSearched": "还搜索了：{{queries}}",
         "image": {

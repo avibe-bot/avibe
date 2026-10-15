@@ -102,12 +102,12 @@ describe('hosted tool cards', () => {
     within(figure).getByText(fixture.direct_image.revised_prompt);
   });
 
-  it('MH-HOSTED-UI-008: names how many attempts a call took, and a total an attempt left unpriced only as a lower bound', () => {
+  it('MH-HOSTED-UI-008: names how many attempts a call was billed for, and a total an attempt left unpriced only as a lower bound', () => {
     renderGroup(['proxy_retried'], 'zh');
-    within(row('call_x6')).getByText('尝试 2 次 · 至少 $0.11');
+    within(row('call_x6')).getByText('计费 2 次 · 至少 $0.11');
     cleanup();
     renderGroup(['proxy_retried']);
-    within(row('call_x6')).getByText('2 attempts · at least $0.11');
+    within(row('call_x6')).getByText('2 billed attempts · at least $0.11');
   });
 
   it.each([

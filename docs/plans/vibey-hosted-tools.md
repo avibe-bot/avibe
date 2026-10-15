@@ -519,8 +519,10 @@ These rules are C-1 rows in `cross-provider.md` and per-protocol rows in `conver
     both render: `usd` is the sum of the known figures over the record's attempt and `failed_attempts[]`; every
     attempt `included` gives `included`; the basis is `reported` only when every summed figure is reported, else
     `list` (shown with ≈); an attempt without a `cost` makes the total a lower bound, shown as "at least $X" /
-    "至少 $X", never as complete. With `failed_attempts`, the card also names the attempt count ("3 attempts" /
-    "尝试 3 次"). The projection carries the count as `attempts` (beside `cost.calls`, which stays the number of
+    "至少 $X", never as complete. With `failed_attempts`, the card also names how many attempts were billed ("3
+    billed attempts" / "计费 3 次"): `failed_attempts` lists only billable attempts, so an attempt that produced nothing
+    and reported no tokens is not counted, as it added no cost. The projection carries the count as
+    `billed_attempts` (beside `cost.calls`, which stays the number of
     calls one native response's figure covers) and the lower bound as `cost.at_least`; with no priced attempt to
     sum, the cost is unknown rather than "at least $0".
   - The executor request is a short model request because no vendor exposes search without a model: Anthropic,

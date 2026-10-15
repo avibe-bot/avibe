@@ -1790,7 +1790,7 @@
       "image_generate": "Image generation"
     },
     "quoted": "“{subject}”",
-    "attempts": "{count} attempts",
+    "billedAttempts": "{count} billed attempts",
     "mode": {
       "native": "native ({provider})",
       "proxy": "via {provider} proxy",

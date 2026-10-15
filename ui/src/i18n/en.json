@@ -4986,9 +4986,9 @@
         "ranNative": "Ran natively on {{where}}",
         "ranProxy": "Run by proxy executor {{where}}",
         "ranDirect": "Ran directly on {{where}}",
-        "attempts_one": "{{count}} attempt",
-        "attempts_other": "{{count}} attempts",
-        "attemptsCost": "{{attempts}} · {{cost}}",
+        "billedAttempts_one": "{{count}} billed attempt",
+        "billedAttempts_other": "{{count}} billed attempts",
+        "billedAttemptsCost": "{{attempts}} · {{cost}}",
         "duration": "took {{seconds}} s",
         "alsoSearched": "Also searched: {{queries}}",
         "image": {

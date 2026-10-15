@@ -103,7 +103,7 @@
     "source_id": "src_grok0001",
     "source_name": "Grok",
     "model": "grok-4.6",
-    "attempts": 2,
+    "billed_attempts": 2,
     "cost": {
       "basis": "reported",
       "calls": 1,
