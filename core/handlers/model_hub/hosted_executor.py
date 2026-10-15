@@ -160,9 +160,52 @@ def executor_request(
 # Renders one of this module's failure keys (``modelHub.hostedTools.*``) in the user's language.
 Say = Callable[..., str]
 
+# The stable code of each reason this gateway words (``HOSTED_ERROR_CODES``, #2589): the key the Web card and the IM
+# line show it by, in their reader's language. The record's ``error`` keeps the worded text, details included, for
+# the model. A reason whose useful part is what only this call knows (which providers to add) has no code: it is
+# worded in the user's language and shown as written.
+FAILURE_CODES: Final[Mapping[str, str]] = {
+    "modelHub.hostedTools.providerRefused": "provider_refused",
+    "modelHub.hostedTools.timedOut": "provider_timed_out",
+    "modelHub.hostedTools.unreachable": "provider_unreachable",
+    "modelHub.hostedTools.unreadable": "provider_unreadable",
+    "modelHub.hostedTools.tooLarge": "provider_too_large",
+    "modelHub.hostedTools.didNotRun": "search_not_run",
+    "modelHub.hostedTools.callFailed": "search_failed",
+    "modelHub.hostedTools.responseEnded": "response_ended_early",
+    "modelHub.hostedTools.imageMissing": "provider_no_image",
+    "modelHub.hostedTools.imageUnreadable": "provider_image_unusable",
+}
 
-def failed_record(error: str, sources: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    return {"status": "failed", "error": bounded_diagnostic_detail(error) or error[:400], "sources": sources or []}
+
+@dataclass(frozen=True)
+class Failure:
+    """A reason this gateway words: its text in the user's language, and its code (None: shown as written)."""
+
+    error: str
+    code: str | None
+
+    def also(self, text: str) -> "Failure":
+        """The same reason, with more said after it."""
+
+        return Failure(f"{self.error} {text}".strip(), self.code)
+
+
+def failure(say: Say, key: str, *, provider_says: str | None = None, **params: str) -> Failure:
+    """The reason ``key`` names, worded by ``say``; what the provider said, verbatim, follows in brackets."""
+
+    text = say(key, **params)
+    return Failure(f"{text} ({provider_says})" if provider_says else text, FAILURE_CODES[key])
+
+
+def failed_record(
+    reason: Failure, sources: list[dict[str, Any]] | None = None, *, status: str = "failed",
+) -> dict[str, Any]:
+    error = bounded_diagnostic_detail(reason.error) or reason.error[:400]
+    record: dict[str, Any] = {"status": status, "error": error, "sources": sources or []}
+    if reason.code is not None:
+        record["error_code"] = reason.code
+    return record
 
 
 @dataclass
@@ -265,22 +308,24 @@ def _usage_section(response: Any) -> Mapping[str, Any] | None:
     return usage if isinstance(usage, Mapping) else None
 
 
-def responses_result(tool: str, readout: ResponsesReadout, say: Say, *, failure: str | None = None) -> ExecutorResult:
+def responses_result(
+    tool: str, readout: ResponsesReadout, say: Say, *, failed: Failure | None = None,
+) -> ExecutorResult:
     """The canonical record of one streamed Responses executor call.
 
-    ``failure`` is how the call failed, from its outcome, when it did; it takes
+    ``failed`` is how the call failed, from its outcome, when it did; it takes
     precedence over anything the stream emitted, whose sources a failed record
     keeps. A call the provider marked failed is failed too.
     """
 
-    return replace(_responses_record(tool, readout, say, failure), usage=_usage_section(readout.response))
+    return replace(_responses_record(tool, readout, say, failed), usage=_usage_section(readout.response))
 
 
-def _responses_record(tool: str, readout: ResponsesReadout, say: Say, failure: str | None) -> ExecutorResult:
+def _responses_record(tool: str, readout: ResponsesReadout, say: Say, failed: Failure | None) -> ExecutorResult:
     response = readout.response or {}
     calls = [item for item in readout.items if _responses_call_tool(item) == tool]
     if not calls:
-        return ExecutorResult(failed_record(failure or _ended_without(tool, response, say)))
+        return ExecutorResult(failed_record(failed or _ended_without(tool, response, say)))
     texts = [
         part
         for item in readout.items
@@ -290,10 +335,10 @@ def _responses_record(tool: str, readout: ResponsesReadout, say: Say, failure: s
     ]
     cited = _cited_sources(texts, x_posts_only=tool == "x_search")
     sources = _merge_sources(cited, [] if tool == "x_search" else _call_sources(calls))
-    if failure is not None:
-        return ExecutorResult(failed_record(failure, sources))
+    if failed is not None:
+        return ExecutorResult(failed_record(failed, sources))
     if any(call.get("status") == "failed" for call in calls):
-        return ExecutorResult(failed_record(say("modelHub.hostedTools.callFailed", tool=tool), sources))
+        return ExecutorResult(failed_record(failure(say, "modelHub.hostedTools.callFailed", tool=tool), sources))
     return ExecutorResult(_settled(response, sources, say))
 
 
@@ -307,12 +352,10 @@ def _settled(response: Mapping[str, Any], sources: list[dict[str, Any]], say: Sa
     status = _text_field(response, "status")
     if status == "completed":
         return {"status": "completed", "sources": sources}
-    ended = _ended_without("", response, say) if status in {"failed", "incomplete"} else say(
-        "modelHub.hostedTools.responseEnded", status=str(status or "unknown"),
+    ended = _ended_without("", response, say) if status in {"failed", "incomplete"} else failure(
+        say, "modelHub.hostedTools.responseEnded", status=str(status or "unknown"),
     )
-    if status == "incomplete":
-        return {"status": "incomplete", "error": failed_record(ended)["error"], "sources": sources}
-    return failed_record(ended, sources)
+    return failed_record(ended, sources, status="incomplete" if status == "incomplete" else "failed")
 
 
 def _text_field(item: Mapping[str, Any], key: str) -> str | None:
@@ -326,14 +369,16 @@ def _responses_call_tool(item: Mapping[str, Any]) -> str | None:
     return responses_item_tool(_text_field(item, "type"), _text_field(item, "name"))
 
 
-def _ended_without(tool: str, response: Mapping[str, Any], say: Say) -> str:
+def _ended_without(tool: str, response: Mapping[str, Any], say: Say) -> Failure:
     status = _text_field(response, "status")
     if status in {"failed", "incomplete"}:
         details = response.get("incomplete_details")
         reason = details.get("reason") if isinstance(details, dict) else None
-        text = say("modelHub.hostedTools.responseEnded", status=status)
-        return f"{text} ({reason})" if isinstance(reason, str) and reason else text
-    return say("modelHub.hostedTools.didNotRun", tool=tool)
+        return failure(
+            say, "modelHub.hostedTools.responseEnded", status=status,
+            provider_says=reason if isinstance(reason, str) and reason else None,
+        )
+    return failure(say, "modelHub.hostedTools.didNotRun", tool=tool)
 
 
 def _call_sources(calls: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -466,7 +511,7 @@ def anthropic_result(body: bytes | bytearray, say: Say) -> ExecutorResult:
     try:
         message = json.loads(body)
     except (ValueError, RecursionError):
-        return ExecutorResult(failed_record(say("modelHub.hostedTools.unreadable")))
+        return ExecutorResult(failed_record(failure(say, "modelHub.hostedTools.unreadable")))
     return replace(_anthropic_record(message, say), usage=_usage_section(message))
 
 
@@ -474,7 +519,7 @@ def _anthropic_record(message: Any, say: Say) -> ExecutorResult:
     content = message.get("content") if isinstance(message, dict) else None
     blocks = [block for block in content if isinstance(block, dict)] if isinstance(content, list) else []
     if not any(block.get("type") == "server_tool_use" and block.get("name") == "web_search" for block in blocks):
-        return ExecutorResult(failed_record(say("modelHub.hostedTools.didNotRun", tool="web_search")))
+        return ExecutorResult(failed_record(failure(say, "modelHub.hostedTools.didNotRun", tool="web_search")))
     results: list[dict[str, Any]] = []
     errors: list[str] = []
     for block in blocks:
@@ -486,7 +531,7 @@ def _anthropic_record(message: Any, say: Say) -> ExecutorResult:
             continue
         if not isinstance(found, list):
             # Only a list, possibly empty, is a result; anything else is not an answer.
-            return ExecutorResult(failed_record(say("modelHub.hostedTools.unreadable")))
+            return ExecutorResult(failed_record(failure(say, "modelHub.hostedTools.unreadable")))
         for result in found:
             if isinstance(result, dict) and isinstance(result.get("url"), str) and result["url"]:
                 source = {"url": result["url"]}
@@ -510,8 +555,8 @@ def _anthropic_record(message: Any, say: Say) -> ExecutorResult:
     if errors:
         # Any search the provider marked failed fails the call, as on Responses;
         # the results that did arrive stay as partial sources.
-        text = say("modelHub.hostedTools.callFailed", tool="web_search")
-        return ExecutorResult(failed_record(f"{text} ({', '.join(errors)})", sources))
+        failed = failure(say, "modelHub.hostedTools.callFailed", tool="web_search", provider_says=", ".join(errors))
+        return ExecutorResult(failed_record(failed, sources))
     # Success is an allow-list here too: an early stop is incomplete, anything else unknown fails.
     stop = _text_field(message, "stop_reason")
     if stop in {"end_turn", "stop_sequence"}:
@@ -522,9 +567,7 @@ def _anthropic_record(message: Any, say: Say) -> ExecutorResult:
         answered = [block.get("tool_use_id") for block in blocks if block.get("type") == "web_search_tool_result"]
         if not all(isinstance(ident, str) and ident for ident in (*uses, *answered)) or not set(uses) <= set(answered):
             # A finished response must carry every search's result block, even an empty one.
-            return ExecutorResult(failed_record(say("modelHub.hostedTools.unreadable"), sources))
+            return ExecutorResult(failed_record(failure(say, "modelHub.hostedTools.unreadable"), sources))
         return ExecutorResult({"status": "completed", "sources": sources})
-    ended = say("modelHub.hostedTools.responseEnded", status=str(stop or "unknown"))
-    if stop in {"max_tokens", "pause_turn"}:
-        return ExecutorResult({"status": "incomplete", "error": failed_record(ended)["error"], "sources": sources})
-    return ExecutorResult(failed_record(ended, sources))
+    ended = failure(say, "modelHub.hostedTools.responseEnded", status=str(stop or "unknown"))
+    return ExecutorResult(failed_record(ended, sources, status="incomplete" if stop in {"max_tokens", "pause_turn"} else "failed"))

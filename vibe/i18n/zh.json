@@ -1140,7 +1140,11 @@
       "upstream_error": "供应商返回错误。"
     },
     "hostedTools": {
-      "noExecutor": "当前没有可运行 {tool} 的来源。添加以下任一供应商的来源即可使用：{vendors}。",
+      "noExecutor": {
+        "web_search": {"one": "当前没有能运行网页搜索的供应商。请添加 {vendors} 的 API Key。", "several": "当前没有能运行网页搜索的供应商。请添加 {vendors} 其中一家的 API Key。"},
+        "x_search": {"one": "当前没有能运行 X 搜索的供应商。请添加 {vendors} 的 API Key。", "several": "当前没有能运行 X 搜索的供应商。请添加 {vendors} 其中一家的 API Key。"}
+      },
+      "listSeparator": "、",
       "providerRefused": "执行方的供应商拒绝了此次调用（{detail}）。",
       "timedOut": "执行方调用超时。",
       "unreachable": "无法连接执行方。",
@@ -1790,7 +1794,16 @@
       "image_param_unsupported": "所选图片模型不支持其中一个参数",
       "image_model_unavailable": "所选图片模型当前不可用",
       "image_argument_invalid": "图片调用的参数无法发送",
-      "image_reference_unreadable": "无法读取参考图片"
+      "image_reference_unreadable": "无法读取参考图片",
+      "provider_refused": "供应商拒绝了这次调用",
+      "provider_timed_out": "调用超时",
+      "provider_unreachable": "无法连接供应商",
+      "provider_unreadable": "无法读取供应商的回复",
+      "provider_too_large": "供应商的回复超出了大小上限",
+      "provider_image_unusable": "供应商返回的图片无法使用",
+      "search_not_run": "模型没有搜索就直接作答了",
+      "search_failed": "供应商的搜索失败了",
+      "response_ended_early": "回复提前结束了"
     },
     "tool": {
       "web_search": "网页搜索",

@@ -139,7 +139,9 @@ from .hosted_executor import (
     call_timeout,
     executor_request,
     executor_streams,
+    Failure,
     failed_record,
+    failure,
     parse_call,
     provider_charges,
     responses_result,
@@ -836,25 +838,25 @@ def _call_usage(outcome: RawCallOutcome | None, observed: ProtocolSSEState | Non
     return observed.usage if usage is None and observed is not None else usage
 
 
-def _executor_failure(outcome: RawCallOutcome | None, say: Callable[..., str], *, refused: str | None) -> str | None:
-    """How a proxied hosted call failed, in the user's language; None when it succeeded.
+def _executor_failure(outcome: RawCallOutcome | None, say: Callable[..., str], *, refused: str | None) -> Failure | None:
+    """How a proxied hosted call failed, in the user's language and by its code; None when it succeeded.
 
     ``refused`` names a bound the response itself broke (size, nesting).
     """
 
     if refused is not None:
-        return say(refused)
+        return failure(say, refused)
     if outcome is None or outcome.kind is RawOutcomeKind.SUCCESS:
         return None
     if outcome.error_code == RESPONSE_TOO_LARGE:
         # The engine client cut an answer past its bound while it downloaded.
-        return say("modelHub.hostedTools.tooLarge")
+        return failure(say, "modelHub.hostedTools.tooLarge")
     if outcome.kind is RawOutcomeKind.TIMEOUT:
-        return say("modelHub.hostedTools.timedOut")
+        return failure(say, "modelHub.hostedTools.timedOut")
     if outcome.kind is RawOutcomeKind.NETWORK_ERROR:
-        return say("modelHub.hostedTools.unreachable")
+        return failure(say, "modelHub.hostedTools.unreachable")
     if outcome.kind is RawOutcomeKind.PROTOCOL_ERROR:
-        return say("modelHub.hostedTools.unreadable")
+        return failure(say, "modelHub.hostedTools.unreadable")
     # The provider's own machine code and its redacted, bounded detail stay verbatim.
     detail = " ".join(
         part for part in (
@@ -864,7 +866,7 @@ def _executor_failure(outcome: RawCallOutcome | None, say: Callable[..., str], *
     )
     if outcome.upstream_detail:
         detail = f"{detail}: {outcome.upstream_detail}" if detail else outcome.upstream_detail
-    return say("modelHub.hostedTools.providerRefused", detail=detail or outcome.kind.value)
+    return failure(say, "modelHub.hostedTools.providerRefused", detail=detail or outcome.kind.value)
 
 
 def _cost_payload(cost: HostedCost) -> dict[str, Any]:
@@ -6527,17 +6529,22 @@ class ModelHubService:
             if not attempt.moves_on:
                 break
         if not attempts:
-            vendors = ", ".join(catalog_api_key_vendor_label(vendor) or vendor for vendor in executor_vendors(tool))
-            return {"record": failed_record(say("modelHub.hostedTools.noExecutor", tool=tool, vendors=vendors))}
+            vendors = [catalog_api_key_vendor_label(vendor) or vendor for vendor in executor_vendors(tool)]
+            form = "one" if len(vendors) == 1 else "several"
+            listed = say("modelHub.hostedTools.listSeparator").join(vendors)
+            # Which providers to add is this call's own fact: worded in the user's language and shown as written.
+            no_source = Failure(say(f"modelHub.hostedTools.noExecutor.{tool}.{form}", vendors=listed), None)
+            return {"record": failed_record(no_source)}
         # The record is the last attempt's; earlier billable ones are listed, each with its own billing.
         last = attempts[-1]
         record = last.record
         if last.moves_on:
             # Every candidate was tried and failed: say which, so the user sees whether retrying or those Sources is the issue.
             tried = ", ".join(dict.fromkeys(attempt.source.display_name for attempt in attempts))
+            # Its reason keeps its code; the Sources tried follow in its text.
+            last_failure = Failure(record["error"], record["error_code"])
             record = failed_record(
-                f"{record.get('error') or ''} {say('modelHub.hostedTools.triedSources', sources=tried)}".strip(),
-                record.get("sources"),
+                last_failure.also(say("modelHub.hostedTools.triedSources", sources=tried)), record.get("sources"),
             )
         execution = last.execution()
         failed_attempts = [attempt.failed_attempt() for attempt in attempts[:-1] if attempt.billable]
@@ -6567,11 +6574,11 @@ class ModelHubService:
             raise ModelHubError("tool_not_enabled", status=409)
         others = [item.model_id for item in turn.images if item.model_id != call.model]
 
-        def failed(error: str, code: str | None = None) -> dict:
+        def failed(reason: Failure) -> dict:
+            # The other models follow the reason in its text; its code stays its own.
             if others:
-                error = f"{error} {say('modelHub.hostedTools.imageAlternatives', models=', '.join(others))}"
-            record = failed_record(error)
-            return {"record": {**record, "error_code": code} if code else record}
+                reason = reason.also(say("modelHub.hostedTools.imageAlternatives", models=", ".join(others)))
+            return {"record": failed_record(reason)}
 
         unsupported = unsupported_argument(call, choice.spec)
         if unsupported is not None:
@@ -6579,16 +6586,17 @@ class ModelHubService:
             text = say("modelHub.hostedTools.imageParamUnsupported", model=call.model, param=unsupported)
             if takers:
                 text = f"{text} {say('modelHub.hostedTools.imageParamTakers', models=', '.join(takers))}"
-            return {"record": {**failed_record(text), "error_code": "image_param_unsupported"}}
+            return {"record": failed_record(Failure(text, "image_param_unsupported"))}
 
         async def admitted() -> ModelHubSourceConfig | None:
             # The config grows with use: read it off the controller loop.
             config = await asyncio.to_thread(self.store.load)
             return admitted_image(config, choice, evidence=self.hosted_evidence())
 
+        unavailable = Failure(say("modelHub.hostedTools.imageModelUnavailable", model=call.model), "image_model_unavailable")
         source = await admitted()
         if source is None:
-            return failed(say("modelHub.hostedTools.imageModelUnavailable", model=call.model), "image_model_unavailable")
+            return failed(unavailable)
         request = ModelHubRequest(image_request(call, choice.spec), protocol="openai_images")
         body = bytearray()
 
@@ -6603,12 +6611,12 @@ class ModelHubService:
             admitted_now=admitted,
         )
         if called is None:
-            return failed(say("modelHub.hostedTools.imageModelUnavailable", model=call.model), "image_model_unavailable")
+            return failed(unavailable)
         source = called.source
         outcome = called.outcome
-        failure = _executor_failure(outcome, say, refused=called.refused)
+        failed_reason = _executor_failure(outcome, say, refused=called.refused)
         # The bytearray itself goes to the worker: no copy of the answer on the loop.
-        result = await asyncio.to_thread(image_result, body, say) if failure is None else None
+        result = await asyncio.to_thread(image_result, body, say) if failed_reason is None else None
         execution: dict[str, Any] = {
             "mode": "direct",
             "executor_origin": {"provider": source.vendor, "api": source.protocol, "model": call.model},
@@ -6624,7 +6632,9 @@ class ModelHubService:
         if result is None or result.record["status"] != "completed":
             if outcome is not None and outcome.kind is not RawOutcomeKind.SUCCESS:
                 await self._learn_image_refusal(source, call.model, outcome)
-            answer = failed(failure or (result.record["error"] if result is not None else say("modelHub.hostedTools.unreadable")))
+            if failed_reason is None and result is not None:
+                failed_reason = Failure(result.record["error"], result.record.get("error_code"))
+            answer = failed(failed_reason or failure(say, "modelHub.hostedTools.unreadable"))
             return {**answer, "execution": execution}
         await self.record_hosted_success(source, call.model, IMAGE_TOOL, "direct")
         answer: dict[str, Any] = {"record": result.record, "execution": execution, "images": [
@@ -6721,10 +6731,10 @@ class ModelHubService:
             return None
         source = called.source
         outcome = called.outcome
-        failure = _executor_failure(outcome, say, refused=called.refused)
+        failed = _executor_failure(outcome, say, refused=called.refused)
         if reader is not None:
-            result = await asyncio.to_thread(responses_result, tool, reader.readout, say, failure=failure)
-        elif failure is not None:
+            result = await asyncio.to_thread(responses_result, tool, reader.readout, say, failed=failed)
+        elif failed is not None:
             result = None
         else:
             # The bytearray itself goes to the worker: no copy of up to the response budget on the loop.
@@ -6750,7 +6760,7 @@ class ModelHubService:
             model_id=model_id,
             record=(
                 result.record if result is not None
-                else failed_record(failure or say("modelHub.hostedTools.unreadable"))
+                else failed_record(failed or failure(say, "modelHub.hostedTools.unreadable"))
             ),
             cost=cost,
             billable=called.billable,

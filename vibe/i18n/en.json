@@ -1140,7 +1140,11 @@
       "upstream_error": "The upstream service returned an error."
     },
     "hostedTools": {
-      "noExecutor": "No Source can run {tool} right now. Add a Source from one of these providers to use it: {vendors}.",
+      "noExecutor": {
+        "web_search": {"one": "No Source can run web search right now. Add an API key from {vendors}.", "several": "No Source can run web search right now. Add an API key from one of {vendors}."},
+        "x_search": {"one": "No Source can run X search right now. Add an API key from {vendors}.", "several": "No Source can run X search right now. Add an API key from one of {vendors}."}
+      },
+      "listSeparator": ", ",
       "providerRefused": "The executor's provider refused the call ({detail}).",
       "timedOut": "The executor call timed out.",
       "unreachable": "The executor could not be reached.",
@@ -1790,7 +1794,16 @@
       "image_param_unsupported": "the chosen image model doesn't take one of the arguments",
       "image_model_unavailable": "the chosen image model isn't available",
       "image_argument_invalid": "the image call had an argument it can't send",
-      "image_reference_unreadable": "a reference image couldn't be read"
+      "image_reference_unreadable": "a reference image couldn't be read",
+      "provider_refused": "the provider refused the call",
+      "provider_timed_out": "the call timed out",
+      "provider_unreachable": "couldn't reach the provider",
+      "provider_unreadable": "the provider's response couldn't be read",
+      "provider_too_large": "the provider's response was larger than allowed",
+      "provider_image_unusable": "the provider returned an image that couldn't be used",
+      "search_not_run": "the model answered without searching",
+      "search_failed": "the provider's search failed",
+      "response_ended_early": "the response ended early"
     },
     "tool": {
       "web_search": "Web search",

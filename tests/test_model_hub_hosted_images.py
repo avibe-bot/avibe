@@ -196,6 +196,11 @@ async def test_only_usable_images_complete_the_call(tmp_path, monkeypatch, answe
     (status, answer), _ = await _call(service, {"model": "gpt-image-2", "prompt": "a cat"})
     assert status == 200
     assert answer["record"]["status"] == "failed" and error in answer["record"]["error"]
+    # The gateway's own reason carries the code each surface shows it by (#2589); the other models follow in its text.
+    assert answer["record"]["error_code"] == {
+        "returned no image data": "provider_no_image", "could not be used": "provider_image_unusable",
+        "larger than allowed": "provider_too_large",
+    }[error]
     assert "images" not in answer and answer["execution"]["executor_source_id"] == OPENAI
     assert _usage_of(service, OPENAI)
     assert latest_ok(service, IMAGE) is None

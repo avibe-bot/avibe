@@ -943,7 +943,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 400,
-          "description": "Bounded and redacted: the reason as text, which the model reads, the provider's own or one Avibe wrote. Every reason Avibe writes carries an error_code, the display key surfaces render in the viewer's language (#2589); a reason without one is the provider's."
+          "description": "Bounded and redacted: the reason as text, which the model reads, the provider's own or one Avibe wrote. Every reason Avibe writes carries an error_code, the display key surfaces render in the viewer's language (#2589); a reason without one is shown as written: the provider's own, or the gateway's no-provider reason, whose useful part (the providers to add) is that call's own fact and which Avibe writes in the user's language."
         },
         "error_code": {
           "type": "string",

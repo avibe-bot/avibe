@@ -19,7 +19,7 @@ from core.agent_core.tools.hosted import size_form
 from core.agent_core.tools.read import MAX_INLINE_IMAGE_BYTES, detect_supported_image_mime_type
 from vibe.backend_model_catalog import ImageModelSpec
 
-from .hosted_executor import ExecutorCallRefused, Say, failed_record
+from .hosted_executor import ExecutorCallRefused, Say, failed_record, failure
 
 IMAGE_TIMEOUT_SECONDS: Final = 300.0
 MAX_REFERENCE_IMAGES: Final = 4
@@ -133,28 +133,28 @@ def image_result(body: bytes | bytearray, say: Say) -> ImageResult:
     try:
         answer = json.loads(body)
     except (ValueError, RecursionError):
-        return ImageResult(failed_record(say("modelHub.hostedTools.unreadable")))
+        return ImageResult(failed_record(failure(say, "modelHub.hostedTools.unreadable")))
     data = answer.get("data") if isinstance(answer, dict) else None
     if not isinstance(data, list) or not data or not all(isinstance(item, dict) for item in data):
-        return ImageResult(failed_record(say("modelHub.hostedTools.imageMissing")))
+        return ImageResult(failed_record(failure(say, "modelHub.hostedTools.imageMissing")))
     if len(data) > MAX_IMAGES_PER_CALL:
         # A call asks for at most four; more is not what was asked for, and none of it is kept.
-        return ImageResult(failed_record(say("modelHub.hostedTools.tooLarge")))
+        return ImageResult(failed_record(failure(say, "modelHub.hostedTools.tooLarge")))
     images: list[str] = []
     total = 0
     for item in data:
         encoded = item.get("b64_json")
         if not isinstance(encoded, str) or not encoded:
-            return ImageResult(failed_record(say("modelHub.hostedTools.imageMissing")))
+            return ImageResult(failed_record(failure(say, "modelHub.hostedTools.imageMissing")))
         try:
             decoded = base64.b64decode(encoded, validate=True)
         except (binascii.Error, ValueError):
-            return ImageResult(failed_record(say("modelHub.hostedTools.imageUnreadable")))
+            return ImageResult(failed_record(failure(say, "modelHub.hostedTools.imageUnreadable")))
         total += len(decoded)
         if not decoded or len(decoded) > IMAGE_MAX_BYTES or total > IMAGES_TOTAL_MAX_BYTES:
-            return ImageResult(failed_record(say("modelHub.hostedTools.tooLarge")))
+            return ImageResult(failed_record(failure(say, "modelHub.hostedTools.tooLarge")))
         if detect_supported_image_mime_type(decoded[:4100]) is None:
-            return ImageResult(failed_record(say("modelHub.hostedTools.imageUnreadable")))
+            return ImageResult(failed_record(failure(say, "modelHub.hostedTools.imageUnreadable")))
         images.append(encoded)
     generation = {
         name: value

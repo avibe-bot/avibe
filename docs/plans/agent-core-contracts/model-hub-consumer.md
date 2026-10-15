@@ -172,7 +172,11 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
      - Success is an allow-list: a call is `completed` only when the response says it completed (Responses
        `status: completed`; Anthropic `end_turn` or `stop_sequence`) and nothing failed; a response that stopped
        early is `incomplete`; any reported failure, or any other or missing ending, is `failed`. An unreadable
-       response is `failed`. The record's `error` is in the user's language.
+       response is `failed`. The record's `error` is in the user's language, and every reason the gateway words
+       carries its `error_code` (`HOSTED_ERROR_CODES`), the key the surfaces show it by in their reader's language;
+       the provider's own detail, the Sources tried and an image call's other models stay in `error`. One reason has
+       no code: with no candidate, the record names the providers to add, which only that call knows, so it is shown
+       as written.
      - The record's search `sources` keep the executor's order. A snippet is the answer text its citation belongs
        to: the list item when that item cites only that source, else its sentence, with the citation markers
        removed. An Anthropic result keeps its `cited_text`. X search lists the cited posts. A response's first 256

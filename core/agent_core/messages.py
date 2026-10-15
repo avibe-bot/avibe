@@ -37,8 +37,7 @@ HOSTED_STATUSES: tuple[str, ...] = ("completed", "failed", "incomplete", "pendin
 HOSTED_ERROR_MAX_CHARS = 400
 #: The stable code of each hosted failure Avibe words itself (``HostedRecord.error_code``), by which a display localizes
 #: it; a provider's own reason has none. A record loads with any snake_case code, so one a newer build wrote still reads.
-#: ``provider_no_image`` and ``image_not_streamed`` have no producer since native images went (v2); they stay for the
-#: records already written.
+#: ``image_not_streamed`` has no producer since native images went (v2); it stays for the records already written.
 HOSTED_ERROR_CODES: tuple[str, ...] = (
     "provider_no_reason",
     "provider_no_image",
@@ -53,6 +52,16 @@ HOSTED_ERROR_CODES: tuple[str, ...] = (
     "image_model_unavailable",
     "image_argument_invalid",
     "image_reference_unreadable",
+    # The gateway's search executor and image endpoint (vibey-hosted-tools.md §6, §7.4).
+    "provider_refused",
+    "provider_timed_out",
+    "provider_unreachable",
+    "provider_unreadable",
+    "provider_too_large",
+    "provider_image_unusable",
+    "search_not_run",
+    "search_failed",
+    "response_ended_early",
 )
 COST_BASES: tuple[str, ...] = ("reported", "list", "included")
 SOURCE_BILLINGS: tuple[str, ...] = ("monthly", "metered")
@@ -355,7 +364,8 @@ class HostedRecord:
     ``error`` carries the reason as text, which the model reads: the provider's own, or one Avibe wrote. Every reason
     Avibe writes carries an ``error_code`` (``HOSTED_ERROR_CODES``, #2589), only beside an ``error``: the display key,
     which the Web card and the IM line render as that code's copy in the viewer's language. A reason without one is
-    the provider's, shown as it said it.
+    shown as written: the provider's own, or the one reason whose useful part is that call's own fact (the gateway's
+    "no provider can run this search; add an API key from …"), which Avibe writes in the user's language.
     """
 
     status: HostedStatus
