@@ -4,6 +4,9 @@ This directory records the source patches for Avibe's planned
 `model-hub-engine-v8.0.29-1` build. Apply the five patches in the order listed
 in `docs/plans/model-hub-cpa-v8.0.29.md`; adoption will record that order in the
 runtime manifest's `build.patches`. The packaged manifest is unchanged.
+The config-write/reload atomicity fix tracked in issue #2686 is planned for
+3.2.2 but is not implemented here; its 3.2.1-stable-tag implementation hold,
+Go regressions and upstream handoff are recorded in the upgrade plan.
 
 Base:
 
@@ -98,7 +101,8 @@ behavior, to assert this contract: the static catalog is registered before the
 probe answers, then narrowed to the entitled set. On v8.0.29 with all five
 patches and Go 1.26.9, `go test -run Antigravity ./sdk/cliproxy/` passes.
 The full SDK suite has a separate intermittent registration-concurrency
-failure, also reproduced without Avibe's patches; see the trial plan.
+failure, also reproduced without Avibe's patches; see the upgrade plan's known
+risk and owner-selected acceptance policy.
 
 Upstream closed router-for-me/CLIProxyAPI#6531 with v8.0.24 (091ff27f), which
 persists the probe's entitlement hints in the auth file and seeds them at the
@@ -108,7 +112,7 @@ nothing until the probe answers, and a failed probe leaves them unroutable for
 the backoff. Measured on stock v8.0.28 with a synthetic grant: `model_not_found`
 from the first request and an empty listing, nothing at all while the probe
 fails, and an immediate Source refresh refused. This remains the last completed
-synthetic-grant measurement; repeat it on v8.0.29 before adoption. Keep this patch
+synthetic-grant measurement, not v8.0.29 evidence. Keep this patch
 until upstream registers a catalog while no hints exist; where persisted hints
 exist the patch never runs, because `hints.ModelIDs` is set.
 
@@ -141,8 +145,8 @@ until it was killed; patched sent `event: error` (`request_timeout`) at
 45.0 s. A live stream silent for 120 s completed on both. Re-measured on
 v8.0.28 through the same kind of path: stock silent until the client's 120 s
 bound, patched `request_timeout` at 45.06 s, and a live stream silent for 90 s
-completed on both. The v8.0.29 trial must repeat this measurement before
-adoption.
+completed on both. These remain historical v8.0.28 measurements; the owner
+selected a single local service E2E rather than requiring repeat timing probes.
 
 Upstream declined the health check. router-for-me/CLIProxyAPI#6534 was
 closed as not planned: by the project's design policy CPA sets no timeout
@@ -220,7 +224,7 @@ Measured on v8.0.28 with a black-holing middlebox in front of an HTTP/2
 relay: stock stayed silent until the client's 120 s bound on both the
 `codex-api-key` and the `openai-compatibility` path; patched failed the stream
 at 45.04 s and 45.05 s. A live stream silent for 90 s completed on both.
-Re-measure on v8.0.29 before adoption.
+These are historical v8.0.28 measurements, not additional adoption gates.
 
 Upstream: the same failure mode as router-for-me/CLIProxyAPI#6534, declined
 under the same policy (see `codex-utls-h2-ping-health-check.patch`), so no
@@ -248,11 +252,12 @@ The exact v8.0.29 source plus these patches builds with Go 1.26.9. The executor,
 helper, management and focused Antigravity tests pass, as do the five hosted
 passthrough cases on the native darwin-arm64 trial binary. The engine contract
 and wire suites report 26 passed and 1 skipped; the fixed OAuth callback-port
-case still needs an isolated network. The full SDK suite
-is **not green**: its registration-concurrency test also fails intermittently
-on stock v8.0.29. The v8.0.28 timing measurements above remain historical,
-not v8.0.29 measurements. See `docs/plans/model-hub-cpa-v8.0.29.md` for trial
-evidence and the remaining adoption gates.
+case was not run on the host. The full SDK suite is **not green**: its
+registration-concurrency test also fails intermittently on stock v8.0.29 and
+remains a known risk, not a separate blocker under the owner's 2026-10-15
+acceptance decision. The v8.0.28 timing measurements above remain historical,
+not v8.0.29 measurements. See `docs/plans/model-hub-cpa-v8.0.29.md` for evidence
+and the single local Incus service E2E acceptance path.
 
 The repository-owned release path checks out the manifest's `source_sha`,
 applies `build.patches`, builds every supported target with `CGO_ENABLED=0`,

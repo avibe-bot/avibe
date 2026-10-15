@@ -1,13 +1,17 @@
-# Model Hub CPA v8.0.29 Trial
+# Model Hub CPA v8.0.29 Upgrade Candidate
 
-Status: evidence-only trial; the packaged runtime remains pinned to v8.0.23.
+Status: local upgrade candidate; the packaged runtime remains pinned to v8.0.23
+until the replacement assets are published and adoption is authorized.
 
 ## Change contract
 
-Evaluate upgrading the Avibe-managed Model Hub engine from CLIProxyAPI v8.0.23
+Prepare the Avibe-managed Model Hub engine upgrade from CLIProxyAPI v8.0.23
 to v8.0.29 at source commit
-`5fc580b1d72d87a7bcfe5cfb6f479c1aea5625b3`. Do not change the runtime manifest,
-serve a new engine asset, or restart a user's CPA process in this trial.
+`5fc580b1d72d87a7bcfe5cfb6f479c1aea5625b3`, and verify it once end to end in an
+isolated local Incus worktree environment. Do not restart the host runtime or
+change the persistent master regression environment. PR #2680 remains Draft
+and unmerged until the previously agreed 3.2.1 stable release sequencing is
+satisfied; the lighter acceptance policy does not authorize publication or merge.
 
 The trial carries the five compatibility patches that still apply to v8.0.29:
 
@@ -33,34 +37,96 @@ The v8.0.29 source includes changes in boundaries that Model Hub consumes:
 - configured TLS-handshake timeout/retry support, disabled by default; and
 - auth-file removal tracking and single-file snapshotting.
 
-These are compatibility-positive in isolation, but the registration, watcher,
-translator, and usage changes require runtime evidence before adoption. The
-root-level `requests.tls-handshake-timeout-seconds` setting is not rendered by
-Avibe in this trial, so the new handshake bound must not become an accidental
-behavior change.
+These changes motivate the focused acceptance path below, not an expanding
+protocol or race-test matrix. The root-level
+`requests.tls-handshake-timeout-seconds` setting is not rendered by Avibe, so
+the new handshake bound must not become an accidental behavior change.
 
-## Trial completion gates (not yet met)
+## Deferred engine config-reload patch (3.2.2, issue #2686)
 
-The preparation PR adds the patch set and test harness. It does not claim the
-trial is complete; the following checks must pass before adoption is proposed.
+Plan this Avibe-owned fix into the v8.0.29 patch set in PR #2680, and offer the
+same fix upstream. **Do not implement this new patch before the 3.2.1 stable
+tag exists.** Release candidates do not satisfy that boundary. The checked
+GitHub tag inventory still contains only 3.2.1 RC tags; no stable tag is present.
+This is not a 3.2.1 release blocker. The supervisor-side guard in issue #2687 is
+separate Avibe work and is not part of this engine patch.
 
-- All five patches apply in manifest order to the exact v8.0.29 source commit.
-- No v8.0.23 manifest or Avibe-owned release asset is overwritten by the trial.
-- CPA focused tests pass with the repository's pinned Go 1.26.9 toolchain.
-- The Model Hub engine contract and wire tests pass for buffered and streaming
-  OpenAI Chat, Responses, Anthropic Messages, Google/Antigravity, OAuth/source
-  lifecycle, and hosted-tool passthrough cases.
-- Registration races do not publish stale model catalogs after a credential
-  replacement, refresh, disable, or re-enable.
-- Antigravity static-catalog behavior, native token-field preservation, OAuth
-  loopback behavior, and the two HTTP/2 dead-path health checks are measured on
-  the v8.0.29 patched binary.
-- Adoption remains a separate follow-up that updates the manifest, publishes
-  all supported assets, records archive and binary digests, and runs the
-  release guard.
+Read-only inspection of the v8.0.29 source confirms the reported mechanism:
+`management/config_basic.go:WriteConfig` truncates the live file in place,
+`watcher/events.go` watches the file inode, and `reloadConfigIfChanged` hashes
+one read but calls a loader that reads again without serializing the full
+reload. The timer mutex protects debounce bookkeeping, not reload execution.
+The issue reports a defaults reset under disk load; this has not been proven
+to cause the separate Claude initialization timeout in the candidate E2E.
+
+Implement the following as one coherent patch after the stable-tag boundary:
+
+1. **Atomic replacement:** write a temporary file in the config directory,
+   sync and close it, replace `config.yaml` atomically, and sync the directory
+   where supported. Preserve permissions and the existing normalization/error
+   semantics. A Go regression must show concurrent readers only observe the
+   complete old or new document, never an empty or partial write.
+2. **Observe replacement:** watch the containing directory and filter events
+   to the config's normalized path/base name, without broadening auth-file
+   handling. A Go regression must prove successive rename replacements remain
+   observed and unrelated directory files do not trigger config reloads.
+3. **One read, ordered application:** parse the same bytes used for change
+   detection and serialize the full read/parse/apply/hash transition, preserving
+   existing config-loading semantics. Deterministically synchronized Go tests
+   must cover replacement between reads and overlapping reloads, proving that
+   a stale completion cannot overwrite the latest accepted configuration.
+
+Keep these tests at their owning Go boundaries rather than add an E2E matrix.
+Once implemented, update ordered patch metadata/checksums, rebuild and verify
+all six installation assets, and use the one relevant local Incus service E2E
+for the final patched candidate. Existing five-patch artifacts are baseline
+evidence, not acceptance for the future patch. Publish workflow-owned assets
+before any separately authorized packaged-pin change; do not create a separate
+v8.0.23 patch release for this work. Remove the patch only after an exact future
+upstream source contains the equivalent behavior and regressions.
+
+## Acceptance policy (owner decision, 2026-10-15)
+
+The owner requested a direct candidate upgrade followed by one local regression
+E2E, rather than clearing every exploratory trial item before adoption.
+
+- Keep the exact source SHA, ordered patch identities, archive/binary digests and
+  release guard. Build the six supported installation assets; this is packaging,
+  not a six-platform E2E matrix. Publish assets before changing the packaged pin.
+- Run `MH-SERVICE-001` once on the candidate in an isolated local Incus worktree:
+  install and start the real service/engine, create Sources, complete Vibey and
+  Claude Code turns, replace a Source credential, discover/register a new model,
+  complete another turn, and verify restart/orphan cleanup.
+- Extend that existing acceptance case rather than add another suite. The
+  observable invariant is that an accepted Source credential/model update reaches
+  the running engine and serves the next Agent turn. Existing B6 coverage stops
+  at API/discovery success, so it cannot catch a saved but unroutable update.
+- Keep the observed SDK concurrency failure as a known risk, not a separate
+  adoption blocker. An E2E pass does not prove the upstream race is resolved.
+- Do not require the remaining exploratory race, protocol or callback-port
+  probes as additional adoption gates. Normal PR review/CI, release sequencing,
+  and explicit publication/merge authority remain unchanged.
 
 ## Current evidence (2026-10-15)
 
+- Six unpublished candidate archives (darwin arm64/x64, Linux amd64/arm64,
+  Windows amd64/arm64) were built from the exact source and five pinned patches
+  with Go 1.26.9 and the unchanged release builder's flags/helpers. The local
+  release guard verifies the complete asset set, sizes, archive/binary digests,
+  sidecars and manifest. Candidate manifest SHA-256:
+  `b53c236ce02c3fcb0218824153df4bb3d1927246a3b889752c07a633857d9f2b`.
+  This is local build/verification evidence, not publication or six-platform
+  runtime acceptance. The packaged manifest remains unchanged.
+- The installed-service candidate E2E did **not** pass. Candidate installation,
+  version/platform verification, health, Source creation and the first Vibey
+  turn succeeded; Claude SDK initialization then timed out before an Anthropic
+  request reached the synthetic upstream. The later Source update, second turn
+  and restart/orphan checks were not reached. Preserve the failing result.
+  Separate fresh-home probes of the installed SDK/CLI, Avibe wrapper, hooks and
+  gateway discovery succeeded, so an SDK/CLI incompatibility is not established.
+  Next: one bounded probe in the actual service context, capturing CLI stderr,
+  engine requests and process state. Do not increase timeouts, add retries,
+  change SDK versions, or claim issue #2686 is its cause without evidence.
 - The exact v8.0.29 tag was checked out and all five patches applied in the
   listed order with `git apply --check --whitespace=error`.
 - Avibe's engine builder, release-guard and scenario catalog tests pass:
@@ -92,10 +158,11 @@ trial is complete; the following checks must pass before adoption is proposed.
   offline binary: **26 passed, 1 skipped** in 917.76 seconds. The skipped
   `test_oauth_callback_forwarder_is_loopback_only_and_optional` binds vendors'
   fixed callback ports and requires `AVIBE_E2E_ISOLATED_NETWORK=1`. It was not
-  forced on the host; that callback test remains an isolated-network adoption
-  gate. Passing these suites does not clear the SDK concurrency failure below.
+  forced on the host; it is recorded as unexecuted evidence, not an additional
+  adoption gate. Passing these suites does not resolve the SDK concurrency
+  failure below.
 
-### Adoption blocker: intermittent upstream registration failure
+### Known risk: intermittent upstream registration failure
 
 The full `sdk/cliproxy` run failed at
 `TestPutOpenAICompatConcurrentWithAuthFieldsPatch_Issue6559`:
@@ -109,9 +176,12 @@ A focused replay on the exact source, with Go 1.26.9 and fresh test-owned homes,
 reproduced the same assertion in **2 of 20 stock runs** and **1 of 20 patched
 runs**. A separate patched single run passed. This demonstrates an intermittent
 failure present without Avibe's patches, not a clean SDK pass or proof that
-registration is safe. Do not hide it with retries or label it an accepted
-non-change. Root-cause analysis and a verified resolution are required before
-adoption; this preparation PR does not patch that separate upstream boundary.
+registration is safe. Retain the failed-run evidence and do not hide it with
+retries. Under the owner's 2026-10-15 acceptance decision, this is a known risk
+rather than a separate adoption blocker. The local service E2E exercises Source
+replacement, model registration and an actual subsequent turn, but cannot prove
+this concurrent upstream test has been fixed. This upgrade does not patch that
+separate upstream boundary.
 
 Reproduce inside a disposable stock or five-patch v8.0.29 checkout:
 
@@ -146,7 +216,8 @@ version**. A before/after probe executing the actual test assertions verified
 accepted missing/duplicate/reordered messages, declarations and stream events,
 allowed canonicalization, and preservation of nested business fields named
 `cache_control`. This is assertion evidence, not 26 additional engine E2Es.
-The upstream concurrency failure remains an adoption blocker.
+The upstream concurrency failure is retained as a known risk under the owner's
+later acceptance decision above.
 
 ## Known by design
 
