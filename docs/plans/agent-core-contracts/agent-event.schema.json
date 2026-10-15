@@ -377,6 +377,9 @@
               "message": {
                 "type": "string"
               },
+              "retryable": { "type": "boolean", "default": false },
+              "continuable": { "type": "boolean", "default": false },
+              "retry_after_s": { "type": ["number", "null"], "minimum": 0 },
               "origin": {
                 "enum": [
                   "source",
@@ -409,6 +412,9 @@
           "message": {
             "type": "string"
           },
+          "retryable": { "type": "boolean", "default": false },
+          "continuable": { "type": "boolean", "default": false },
+          "retry_after_s": { "type": ["number", "null"], "minimum": 0 },
           "origin": {
             "description": "source: the served model produced the failure (a provider error other than an overflow, an answer the loop rejected, a response the transcript cannot hold); local: everything else (a Stop, an overflow or context exhaustion, a hook, tool, or store error).",
             "enum": [

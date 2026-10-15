@@ -117,6 +117,17 @@ opaque payload of an unknown vendor can ever be replayed. A block without a sign
 
 Error classification is part of the contract because the loop branches on it:
 
+`retryable` permits replay of the same request. `continuable` (default false) separately permits a new run
+from the committed transcript after the failed run closes. Classified transient errors grant continuation even
+when streamed output forbids replay. Model Hub's `model_hub_recovery_exhausted` ending, explicit pin/opaque
+refusals, permanent/protocol errors, unclassified failures, and local preparation errors grant no continuation.
+Neither the terminal sanitizer nor a downstream consumer may infer permission from `kind` alone. In particular,
+a recovery-exhausted error naming `server` stays non-retryable and non-continuable after thinking, too.
+
+The loop carries both permissions and `retry_after_s` into the terminal `AgentError` unchanged. These fields do
+not grant permission to replay committed tools or manufacture user input; Vibey uses `Agent.resume` under its
+own bounded continuation policy (`loop-control.md`).
+
 | `kind` | Meaning | Loop action |
 | --- | --- | --- |
 | `overflow` | the request exceeded the model's context (Pi's overflow patterns and Anthropic's refusal of input plus `max_tokens` over the window, HTTP 413, `context_length_exceeded`) | overflow recovery (plan §5.2) |
@@ -132,7 +143,8 @@ most once per request, inside the same count and time budget; a second drop ends
 some prompts drop at the same point every time. The dropped attempt's thinking is never context: it stays in the
 attempt ledger and its audit (C-9 `context.md` §10, invariant 4), and the retry resends the original request.
 A refusal or safety stop is a response, not an error, and `auth`, `invalid_request`, `overflow`, and `rate_limit`
-after thinking stay terminal.
+after thinking stay terminal. The unknown-wire exception grants one request replay only, not transcript
+continuation; an unknown local exception does not acquire the thinking-drop exception.
 
 A `ProviderError` whose `partial` is committed (a response that failed after output) carries the error's text as that
 partial's `error_message`, redacted like the error itself and bounded to 1,000 characters, so the transcript row says

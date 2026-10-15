@@ -12,6 +12,7 @@ class Agent:
                  context: ContextConfig | None = None) -> None: ...   # C-9; excludes hooks in v1 (§3)
 
     def run(self, input: Input, *, turn_id: str) -> AsyncIterator[AgentEvent]: ...   # one Avibe Turn
+    def resume(self, input: Input, *, turn_id: str, turn_inputs: Iterable[int] | None = None) -> AsyncIterator[AgentEvent]: ...
     def steer(self, input: Input) -> bool: ...       # False: not accepted, the adapter keeps ownership
     def follow_up(self, input: Input) -> bool: ...
     def abort(self, reason: str) -> None: ...
@@ -26,7 +27,23 @@ class Agent:
 wraps the given `JobHost` (`Agent.jobs`) to track foreground jobs for `abort`; tools are constructed with that
 wrapper.
 
-## 2. One run
+A transcript-only `resume` uses the same loop and cleanup path as `run`, but skips
+input consumption. It may be used only after the previous run has closed; the
+adapter supplies an existing input to `before_run` for hook setup but does not
+write a second `input` row. A fresh Agent passes the source Turn's committed input
+sequence numbers through `turn_inputs`; an Agent continuing its own run preserves
+its in-memory Turn-input set when the argument is omitted. Retry eligibility and
+retry budgets are adapter policy, not loop policy.
+
+A provider-caused `AgentError` preserves `retryable`, `continuable`, and `retry_after_s`; other errors default
+to false/false/None. Vibey continues only a source error explicitly marked `continuable`, with no committed final
+and no Stop. It permits at most five additional runs on the same Agent, with exponential backoff bounded by the
+loop's delay settings and Retry-After as a floor. One elapsed window (the loop policy's `max_elapsed_s`, at most
+120 seconds) starts at the first eligible failed run and includes all subsequent recovery work, waits, and runs;
+it is not restarted by `resume`. A delay that does not fit denies another continuation. Expiry prevents new
+continuations without interrupting a run already doing useful work. Stop wakes backoff immediately and settles
+the Turn as stopped without another provider request or a failure notice.
+
 
 ```text
 commit input → loop:

@@ -169,6 +169,7 @@ def classify_error(
         kind=kind,
         message=message,
         retryable=retryable,
+        continuable=kind in RETRYABLE_ERROR_KINDS,
         retry_after_s=retry_after,
         status=status,
         partial=partial,

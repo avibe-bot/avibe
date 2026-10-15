@@ -164,6 +164,10 @@ class AgentError:
     kind: str
     message: str
     origin: ErrorOrigin
+    #: Provider permissions survive the loop unchanged; local/protocol errors grant neither by default.
+    retryable: bool = False
+    continuable: bool = False
+    retry_after_s: Optional[float] = None
 
 
 AgentEvent = Union[

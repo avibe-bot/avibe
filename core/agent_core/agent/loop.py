@@ -406,23 +406,57 @@ class Agent:
 
     def run(self, input: AgentInput, *, turn_id: str) -> AsyncIterator[AgentEvent]:
         input = deepcopy(input)
-        return self._pump(turn_id, lambda emit: self._drive(emit, input))
+        return self._pump(turn_id, lambda emit: self._drive(emit, input, consume=True))
+
+    def resume(
+        self,
+        input: AgentInput,
+        *,
+        turn_id: str,
+        turn_inputs: Iterable[int] | None = None,
+    ) -> AsyncIterator[AgentEvent]:
+        """Continue from the committed transcript without consuming another input row.
+
+        The input is still passed to ``before_run`` so existing hook setup remains
+        unchanged; it is a control value, not a second transcript message. A fresh
+        Agent can provide the source Turn's input sequence numbers so compaction
+        pins only that Turn's inputs. Within the same Turn, newly admitted inputs
+        extend the existing pins rather than replacing them.
+        """
+        input = deepcopy(input)
+        resume_turn_inputs = None if turn_inputs is None else set(turn_inputs)
+        return self._pump(
+            turn_id,
+            lambda emit: self._drive(emit, input, consume=False),
+            preserve_turn_inputs=True,
+            resume_turn_inputs=resume_turn_inputs,
+        )
 
     async def _pump(
-        self, turn_id: str, drive: Callable[[Callable[..., Awaitable[None]]], Awaitable[None]]
+        self,
+        turn_id: str,
+        drive: Callable[[Callable[..., Awaitable[None]]], Awaitable[None]],
+        *,
+        preserve_turn_inputs: bool = False,
+        resume_turn_inputs: set[int] | None = None,
     ) -> AsyncIterator[AgentEvent]:
+        previous_turn_inputs = set(self._turn_inputs)
+        previous_seq = self._seq
         async with self._lock:
             if self._running:
                 raise RuntimeError("this Agent already has an active run")
             if self._steers or self._follow_ups:
                 raise RuntimeError("return unconsumed inputs with take_pending_inputs() before starting another run")
+            continuing_turn = preserve_turn_inputs and self._ctx.turn_id == turn_id
             self._running = True
             self._open = True
             self._consumer_closed = False
             self._ctx = RunContext(self.session_id, turn_id, CancelToken())
             self._scope = RunScope(self._ctx.cancel)
             self._outcome = OutcomeOwner()
-            self._seq = 0
+            self._seq = previous_seq if continuing_turn else 0
+            if preserve_turn_inputs:
+                self._turn_inputs = (previous_turn_inputs if continuing_turn else set()) | set(resume_turn_inputs or ())
 
         # Bounded delivery applies backpressure to provider streaming. No emit
         # awaits this queue while holding the input-admission lock.
@@ -552,8 +586,14 @@ class Agent:
         self._rows.append(row)
         return row
 
-    async def _drive(self, emit: Callable[..., Awaitable[None]], input: AgentInput) -> None:
-        """One run of ``input``."""
+    async def _drive(
+        self,
+        emit: Callable[..., Awaitable[None]],
+        input: AgentInput,
+        *,
+        consume: bool,
+    ) -> None:
+        """One run of ``input`` or one transcript-only continuation."""
         loaded = False
         try:
             try:
@@ -568,10 +608,12 @@ class Agent:
                 self._committed_state_json = state_representation(self._ctx.state)
                 self._committed_state = deepcopy(self._ctx.state)
                 self._unproductive = 0
-                self._turn_inputs = set()
+                if consume:
+                    self._turn_inputs = set()
                 self._attempts = []
                 self._refusals = _Refusals()
-                self._generated_images = []
+                if consume:
+                    self._generated_images = []
                 loaded = True
                 system = self.system
                 self._run_tools = dict(self._tools)
@@ -585,7 +627,8 @@ class Agent:
                             if len(names) != len(set(names)):
                                 raise ValueError("tool names must be unique")
                             self._run_tools = dict(zip(names, setup.tools))
-                await self._consume(input)
+                if consume:
+                    await self._consume(input)
                 self._outcome.primary(await self._loop(system, emit, selected))
             except _Ended:
                 self._outcome.primary("ended_by_hook")
@@ -625,14 +668,20 @@ class Agent:
         await emit(RunEnded, reason=self._outcome.reason, cause=self._outcome.cause)
 
     async def _error(
-        self, emit: Callable[..., Awaitable[Any]], kind: str, message: str, origin: ErrorOrigin, *, cause: bool
+        self, emit: Callable[..., Awaitable[Any]], kind: str, message: str, origin: ErrorOrigin, *, cause: bool,
+        provider_error: Optional[ProviderError] = None,
     ) -> None:
         """The one place the loop announces an error: ``origin`` as its caller states it, where the error is raised.
 
         ``cause``: the error decided the run's outcome (``OutcomeOwner.primary``), so ``RunEnded`` names it; a
         diagnostic never does.
         """
-        event = await emit(AgentError, kind=kind, message=message, origin=origin)
+        event = await emit(
+            AgentError, kind=kind, message=message, origin=origin,
+            retryable=provider_error.retryable if provider_error is not None else False,
+            continuable=provider_error.continuable if provider_error is not None else False,
+            retry_after_s=provider_error.retry_after_s if provider_error is not None else None,
+        )
         if cause:
             self._outcome.cause = event
 
@@ -994,7 +1043,9 @@ class Agent:
                     # ``aborted`` is the loop's own cancellation and ``overflow`` says our request was too large;
                     # every other provider error is the source's.
                     origin = "local" if terminal.kind in {"aborted", "overflow"} else "source"
-                    await self._error(emit, terminal.kind, terminal.message, origin, cause=decided)
+                    await self._error(
+                        emit, terminal.kind, terminal.message, origin, cause=decided, provider_error=terminal
+                    )
                     if terminal.partial is not None:
                         row = await self._response(terminal.partial, final=False)
                         await emit(MessageCommitted, message_id=row.row_id, context_seq=row.context_seq, final=False)

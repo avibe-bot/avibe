@@ -20,6 +20,7 @@ from sqlalchemy import (
 )
 
 from storage.delivery_states import DELIVERY_STATES
+from storage.vibey_recovery import VIBEY_RECOVERY_INPUT_PREDICATE
 from vibe.message_types import build_partial_index_predicate
 
 metadata = MetaData()
@@ -704,6 +705,16 @@ messages = Table(
         unique=True,
         sqlite_where=text("context_seq is not null"),
     ),
+    # T3 recovery only needs inputs that can still be consumed.  The hidden
+    # Vibey retry ownership row stays durable with a null context_seq but is
+    # deliberately outside this growing population.
+    Index(
+        "ix_messages_vibey_recovery_input",
+        "context_seq",
+        "session_id",
+        "id",
+        sqlite_where=text(VIBEY_RECOVERY_INPUT_PREDICATE),
+    ),
     Index("ix_messages_session_created", "session_id", "created_at"),
     Index("ix_messages_session_created_id", "session_id", "created_at", "id"),
     Index("ix_messages_session_type_created_id", "session_id", "type", "created_at", "id"),
@@ -1069,6 +1080,11 @@ message_deliveries = Table(
         ),
     ),
     Index("ix_message_deliveries_session_state", "session_id", "state", "submitted_at", "id"),
+    Index(
+        "ix_message_deliveries_message",
+        "message_id",
+        sqlite_where=text("message_id is not null"),
+    ),
     Index("ix_message_deliveries_turn", "turn_id", "turn_position"),
     Index(
         "uq_message_deliveries_turn_position",

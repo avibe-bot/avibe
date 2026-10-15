@@ -199,7 +199,10 @@ class MessageHandler(BaseHandler):
             # If message is empty AND no files attached (e.g., user just @mentioned bot without text),
             # trigger the /start command instead of sending empty message to agent
             has_files = bool(context.files)
-            if (not message or not message.strip()) and not has_files:
+            internal_vibey_resume = bool(
+                (context.platform_specific or {}).get("vibey_resume") is True
+            )
+            if (not message or not message.strip()) and not has_files and not internal_vibey_resume:
                 if is_human:
                     await self.controller.command_handler.handle_start(context, "")
                 return None

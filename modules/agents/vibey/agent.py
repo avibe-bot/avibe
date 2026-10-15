@@ -37,7 +37,7 @@ from types import SimpleNamespace
 from typing import Any, AsyncIterator, Callable, Mapping, Optional, Sequence
 
 import httpx
-from sqlalchemy import and_, select
+from sqlalchemy import and_, select, text as sql_text
 from sqlalchemy.engine import Engine
 
 from config import paths
@@ -117,6 +117,7 @@ from storage.agent_transcript import (
 )
 from storage.db import get_cached_sqlite_engine
 from storage.models import agent_events, agent_sessions, message_deliveries, messages, session_turns
+from storage.vibey_recovery import VIBEY_RECOVERY_INPUT_PREDICATE
 from vibe.i18n import t as i18n_t
 
 logger = logging.getLogger(__name__)
@@ -125,6 +126,7 @@ BACKEND = "vibey"
 # Final responses whose empty text is explained by the stop itself (loop-control.md section 2).
 _EXPLAINED_STOPS = ("length", "refusal", "safety")
 _COMPLETED = ("completed", "ended_by_hook")
+_MAX_AUTO_CONTINUATIONS = 5
 _JOB_PRUNE_INTERVAL_S = 3600.0
 
 
@@ -200,7 +202,13 @@ class _Run:
     reply_images: dict[str, tuple[HostedImage, ...]] = field(default_factory=dict)
     # Steer attempts ``Agent.steer`` accepted into this run: reconcile's in-process evidence.
     accepted_steers: set[str] = field(default_factory=set)
+    # Automatic transcript-only continuations already spent by this Turn. The
+    # initial model call is not counted; the limit is five additional attempts.
+    continuations: int = 0
+    # One elapsed window from the first continuable failure, shared by every outer continuation.
+    continuation_started_at: Optional[float] = None
     stop_requested: bool = False
+    stop_event: asyncio.Event = field(default_factory=asyncio.Event)
     # When each tool call started (monotonic), for a proxied hosted call's duration.
     tool_started: dict[str, float] = field(default_factory=dict)
     # Images the run's hosted calls generated, as (path, label), attached to its final reply.
@@ -318,7 +326,7 @@ class VibeyAgent(BaseAgent):
         context = request.context
         # Rows this Turn writes are the Turn's Agent's, from its request snapshot, even if the
         # Session's selected Agent changes while it runs.
-        self.store.bind_agent(session_id, request.vibe_agent_name)
+        self.store.bind_agent(session_id, request.vibe_agent_name, turn_id=turn.turn_id)
         await self._resume(runtime)
         if turn.stop_requested:
             return await self._settle_stopped(turn)
@@ -352,19 +360,125 @@ class VibeyAgent(BaseAgent):
             await indicator.delete_ack_message(request)
         accept_catalog(self.controller, context, skill_catalog, backend=BACKEND)
         agent_input: Optional[AgentInput] = AgentInput(input_id, message)
+        platform_specific = context.platform_specific or {}
+        transcript_resume = platform_specific.get("vibey_resume") is True
+        resume_turn_inputs = (
+            await asyncio.to_thread(
+                self._resume_turn_inputs, session_id, platform_specific.get("vibey_source_turn_id")
+            )
+            if transcript_resume
+            else None
+        )
         while agent_input is not None:
             if turn.stop_requested:
                 # A Stop acknowledged before this run could abort: no run starts. An input
                 # left unconsumed is admitted at the Session's next resume (T3).
                 turn.reason = "aborted"
                 break
-            async for event in turn.agent.run(agent_input, turn_id=turn.turn_id):
+            stream = (
+                turn.agent.resume(
+                    agent_input,
+                    turn_id=turn.turn_id,
+                    turn_inputs=resume_turn_inputs,
+                )
+                if transcript_resume
+                else turn.agent.run(agent_input, turn_id=turn.turn_id)
+            )
+            transcript_resume = False
+            resume_turn_inputs = None
+            async for event in stream:
                 await self._on_event(turn, event)
+            if self._can_auto_continue(turn) and turn.continuations < _MAX_AUTO_CONTINUATIONS:
+                if turn.continuation_started_at is None:
+                    turn.continuation_started_at = time.monotonic()
+                # Finish T2 before asking the same Agent to build its next request.
+                # Accepted P1 inputs are admitted into the transcript, but never
+                # become an implicit user-visible continuation message.
+                await self._settle_left_open(runtime)
+                resume_turn_inputs = await self._admit_returned_inputs(turn)
+                if await self._wait_auto_continue(turn):
+                    turn.continuations += 1
+                    turn.reason = None
+                    turn.cause = None
+                    turn.final_row = None
+                    transcript_resume = True
+                    continue
             agent_input = await self._continuing_input(turn)
         if turn.reason not in _COMPLETED:
             await self._settle_left_open(runtime)
         await self._settle(turn)
         self._maybe_backfill_session_title(request, session_id)
+
+    def _resume_turn_inputs(self, session_id: str, source_turn_id: Any) -> tuple[int, ...]:
+        """Committed inputs of the failed task, including steers across its retry ancestry."""
+        if not isinstance(source_turn_id, str) or not source_turn_id:
+            return ()
+        pins: set[int] = set()
+        visited: set[str] = set()
+        with self._engine.connect() as conn:
+            while source_turn_id and source_turn_id not in visited:
+                visited.add(source_turn_id)
+                turn = delivery_store.get_turn(conn, source_turn_id)
+                if turn is None or turn["session_id"] != session_id or turn["backend"] != BACKEND:
+                    break
+                pins.update(conn.execute(
+                    select(messages.c.context_seq)
+                    .select_from(message_deliveries.join(messages, message_deliveries.c.message_id == messages.c.id))
+                    .where(
+                        message_deliveries.c.turn_id == source_turn_id,
+                        messages.c.session_id == session_id,
+                        messages.c.context_seq.is_not(None),
+                        messages.c.type.in_(INPUT_TYPES),
+                    )
+                ).scalars())
+                initial = delivery_store.get_delivery(conn, turn["initial_delivery_id"])
+                payload = delivery_store.execution_delivery_payload(conn, initial) if initial else {}
+                if not delivery_store.is_vibey_resume_payload(payload):
+                    break
+                source_turn_id = payload["metadata"].get(delivery_store.VIBEY_SOURCE_TURN_METADATA_KEY)
+                if not isinstance(source_turn_id, str):
+                    break
+        return tuple(sorted(pins))
+
+    @staticmethod
+    def _can_auto_continue(run: _Run) -> bool:
+        """Whether the failed request can safely be retried from committed context."""
+
+        cause = run.cause
+        return bool(
+            not run.stop_requested
+            and run.reason == "error"
+            and not run.final_row
+            and cause is not None
+            and cause.origin == "source"
+            and cause.continuable
+        )
+
+    async def _wait_auto_continue(self, run: _Run) -> bool:
+        """Honor the provider's delay floor and one elapsed budget, with Stop owning the wait.
+
+        The initial run is not in this window. Subsequent runs and recovery work spend it, not just backoff.
+        Expiry prevents another continuation, but never interrupts a run already doing useful work.
+        """
+        if run.stop_requested:
+            run.reason = "aborted"
+            return False
+        if not self._can_auto_continue(run):
+            return False
+        policy = run.agent.retry
+        elapsed = time.monotonic() - run.continuation_started_at
+        backoff = min(policy.max_delay_s, policy.initial_delay_s * 2**run.continuations)
+        delay = max(backoff, run.cause.retry_after_s or 0.0)
+        if elapsed + delay >= policy.max_elapsed_s:
+            return False
+        try:
+            await asyncio.wait_for(run.stop_event.wait(), timeout=delay)
+        except asyncio.TimeoutError:
+            pass
+        if run.stop_requested:
+            run.reason = "aborted"
+            return False
+        return time.monotonic() - run.continuation_started_at < policy.max_elapsed_s
 
     async def _settle_stopped(self, turn: _Run) -> None:
         """A Stop before the loop started: the Turn settles as stopped, nothing dispatched."""
@@ -377,6 +491,7 @@ class VibeyAgent(BaseAgent):
             request.stop_failure_reason = "not_active"
             return False
         run.stop_requested = True
+        run.stop_event.set()
         if run.agent is not None:
             run.agent.abort("stopped by user")
         return True
@@ -403,6 +518,7 @@ class VibeyAgent(BaseAgent):
             run = runtime.run
             if run is not None and run.request.session_key == session_key:
                 run.stop_requested = True
+                run.stop_event.set()
                 if run.agent is not None:
                     run.agent.abort("session cleared")
                 cleared += 1
@@ -789,23 +905,26 @@ class VibeyAgent(BaseAgent):
         run.reason = None
         return pending[-1]
 
-    async def _admit_returned_inputs(self, run: _Run) -> None:
+    async def _admit_returned_inputs(self, run: _Run) -> tuple[int, ...]:
         """Inputs a stopped or failed run accepted but did not consume enter the context (T3).
 
         They belong to the Turn that accepted them and share its outcome, as a message
         merged into another backend's stopped or failed turn does; the next Turn
         answers them with the full context.
         """
+        consumed: list[int] = []
         if run.agent is None:
-            return
+            return ()
         try:
             for item in await run.agent.take_pending_inputs():
-                await self.store.consume_input(run.session_id, item.message_id, item.message)
+                entry = await self.store.consume_input(run.session_id, item.message_id, item.message)
+                consumed.append(entry.context_seq)
         except Exception:
             # The rows stay accepted and unconsumed: the recovery owner admits them (T3)
             # without waiting for the Session's next message.
             logger.exception("Vibey could not admit returned inputs for Session %s", run.session_id)
             self._schedule_recovery()
+        return tuple(consumed)
 
     # --- resume (recovery.md T2, T3) -------------------------------------------
 
@@ -875,8 +994,8 @@ class VibeyAgent(BaseAgent):
         # A tool result is the Agent's that made the call: its owning response's author, not
         # the Turn writing it now (or none, at startup) or the Session's current selection.
         # Only the last response can hold open calls, so they share one owner.
-        owner_agent = await asyncio.to_thread(self._author_of, open_calls[0][0].row_id)
-        with self.store.writing_as(session_id, owner_agent):
+        owner_agent, owner_turn = await asyncio.to_thread(self._response_owner, open_calls[0][0].row_id)
+        with self.store.writing_as(session_id, owner_agent, turn_id=owner_turn):
             await settle_open_calls(
                 session_id=session_id,
                 store=self.store,
@@ -885,9 +1004,14 @@ class VibeyAgent(BaseAgent):
                 render_result=suite.render_recovered,
             )
 
-    def _author_of(self, row_id: str) -> Optional[str]:
+    def _response_owner(self, row_id: str) -> tuple[Optional[str], Optional[str]]:
         with self._engine.connect() as conn:
-            return conn.execute(select(messages.c.author_name).where(messages.c.id == row_id)).scalar()
+            row = conn.execute(
+                select(messages.c.author_name, messages.c.metadata_json).where(messages.c.id == row_id)
+            ).first()
+        if row is None:
+            return None, None
+        return row.author_name, _json_object(row.metadata_json).get("turn_id")
 
     def _job_route(self, meta: Mapping[str, Any]) -> dict[str, Any]:
         """A job Watch's Agent and authorization, from the job's owning Turn (fail closed).
@@ -912,13 +1036,15 @@ class VibeyAgent(BaseAgent):
         session_id = call.session_id
         with self._engine.connect() as conn:
             owner = conn.execute(
-                select(messages.c.author_name).where(
+                select(messages.c.author_name, messages.c.metadata_json).where(
                     messages.c.id == call.response_id,
                     messages.c.session_id == session_id,
                     messages.c.context_seq == call.response_seq,
                 )
             ).first()
-            origin = self._turn_initial_input(conn, session_id, call.response_seq) if owner else None
+            origin = self._turn_initial_input(
+                conn, session_id, call.response_seq, turn_id=_json_object(owner.metadata_json).get("turn_id")
+            ) if owner else None
         if owner is None or origin is None:
             return {"unverifiable_remote": True}
         route: dict[str, Any] = {"agent_name": owner.author_name} if owner.author_name else {}
@@ -945,8 +1071,20 @@ class VibeyAgent(BaseAgent):
         return {**route, "user_context": context}
 
     @staticmethod
-    def _turn_initial_input(conn: Any, session_id: str, before_seq: int) -> Optional[dict]:
-        """The initial input row of the Turn whose input precedes ``before_seq``."""
+    def _turn_initial_input(
+        conn: Any, session_id: str, before_seq: int, *, turn_id: Optional[str] = None
+    ) -> Optional[dict]:
+        """The response's durable Turn input; legacy responses use context order."""
+        if turn_id is not None:
+            row = conn.execute(
+                select(messages.c.platform, messages.c.author_id, messages.c.metadata_json)
+                .select_from(
+                    session_turns.join(message_deliveries, message_deliveries.c.id == session_turns.c.initial_delivery_id)
+                    .join(messages, messages.c.id == message_deliveries.c.message_id)
+                )
+                .where(session_turns.c.id == turn_id, session_turns.c.session_id == session_id)
+            ).mappings().first()
+            return dict(row) if row is not None else None
         latest = conn.execute(
             select(messages.c.id)
             .where(
@@ -990,30 +1128,23 @@ class VibeyAgent(BaseAgent):
         from core.workbench_media import file_attachments_from_specs, resolve_attachment_specs
 
         with self._engine.connect() as conn:
+            # CROSS JOIN fixes SQLite's loop order: start with indexed live
+            # inputs, then seek their Deliveries/Turns. A materialized CTE alone
+            # still lets the planner scan all historical accepted Deliveries.
             rows = conn.execute(
-                select(
-                    messages.c.id,
-                    messages.c.content_text,
-                    messages.c.content_json,
-                    message_deliveries.c.id.label("delivery_id"),
-                    message_deliveries.c.turn_role,
-                    session_turns.c.dispatch_text.label("turn_dispatch_text"),
-                )
-                .select_from(
-                    messages.join(message_deliveries, message_deliveries.c.message_id == messages.c.id).join(
-                        session_turns, session_turns.c.id == message_deliveries.c.turn_id
-                    )
-                )
-                .where(
-                    and_(
-                        messages.c.session_id == session_id,
-                        messages.c.context_seq.is_(None),
-                        messages.c.type.in_(INPUT_TYPES),
-                        message_deliveries.c.state == "accepted",
-                        session_turns.c.backend == BACKEND,
-                    )
-                )
-                .order_by(message_deliveries.c.materialized_at, message_deliveries.c.turn_position, messages.c.id)
+                sql_text(
+                    "select messages.id, messages.content_text, messages.content_json, "
+                    "message_deliveries.id as delivery_id, message_deliveries.turn_role, "
+                    "session_turns.dispatch_text as turn_dispatch_text "
+                    "from messages cross join message_deliveries "
+                    "on message_deliveries.message_id = messages.id "
+                    "cross join session_turns on session_turns.id = message_deliveries.turn_id "
+                    f"where {VIBEY_RECOVERY_INPUT_PREDICATE} "
+                    "and messages.session_id = :session_id "
+                    "and message_deliveries.state = 'accepted' and session_turns.backend = :backend "
+                    "order by message_deliveries.materialized_at, message_deliveries.turn_position, messages.id"
+                ),
+                {"session_id": session_id, "backend": BACKEND},
             ).mappings().all()
             inputs = []
             seen: set[str] = set()
@@ -1026,6 +1157,8 @@ class VibeyAgent(BaseAgent):
                     conn, session_id=session_id, attachments=list(content.get("attachments") or [])
                 )
                 delivery = delivery_store.get_delivery(conn, row["delivery_id"])
+                if delivery is None:
+                    continue
                 # A Turn's initial input is sent as the Turn's dispatch text, which the Turn owner
                 # derived from its Delivery batch (attachment notes, merged scheduled inputs) and
                 # keeps after acceptance; the row's display text omits that.
@@ -1608,24 +1741,18 @@ class VibeyAgent(BaseAgent):
     def _sessions_with_unconsumed_inputs(self) -> list[str]:
         """Sessions with inputs accepted into a ``vibey`` Turn that no run consumed (T3)."""
         with self._engine.connect() as conn:
-            return sorted(
-                conn.execute(
-                    select(messages.c.session_id)
-                    .select_from(
-                        messages.join(message_deliveries, message_deliveries.c.message_id == messages.c.id).join(
-                            session_turns, session_turns.c.id == message_deliveries.c.turn_id
-                        )
-                    )
-                    .where(
-                        messages.c.session_id.is_not(None),
-                        messages.c.context_seq.is_(None),
-                        messages.c.type.in_(INPUT_TYPES),
-                        message_deliveries.c.state == "accepted",
-                        session_turns.c.backend == BACKEND,
-                    )
-                    .distinct()
-                ).scalars()
-            )
+            rows = conn.execute(
+                sql_text(
+                    "select messages.session_id from messages "
+                    "cross join message_deliveries on message_deliveries.message_id = messages.id "
+                    "cross join session_turns on session_turns.id = message_deliveries.turn_id "
+                    f"where {VIBEY_RECOVERY_INPUT_PREDICATE} "
+                    "and messages.session_id is not null "
+                    "and message_deliveries.state = 'accepted' and session_turns.backend = :backend"
+                ),
+                {"backend": BACKEND},
+            ).scalars()
+            return sorted({str(session_id) for session_id in rows if session_id is not None})
 
     def _session_workdir(self, session_id: str) -> str:
         with self._engine.connect() as conn:

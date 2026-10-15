@@ -1181,11 +1181,12 @@ class StreamAssembler:
                 kind=kind,
                 message=message,
                 retryable=kind in RETRYABLE_ERROR_KINDS and not self.streamed,
+                continuable=kind in RETRYABLE_ERROR_KINDS,
                 retry_after_s=parse_retry_after((headers or {}).get("retry-after")),
                 status=status,
                 partial=partial,
             )
-            return error
+            return self._after_thinking(error, allow_unknown=True)
         error = classify_error(
             body=message,
             code=code,
@@ -1195,7 +1196,7 @@ class StreamAssembler:
             partial=partial,
             protocol=self.protocol,
         )
-        return error
+        return self._after_thinking(error, allow_unknown=True)
 
     def exception(
         self,
@@ -1211,7 +1212,7 @@ class StreamAssembler:
             streamed=self.streamed,
             partial=self.partial() if self.streamed or self.usage is not None else None,
         )
-        return error
+        return self._after_thinking(error)
 
     def aborted(self, reason: str | None = None) -> ProviderError:
         return ProviderError(
@@ -1233,13 +1234,23 @@ class StreamAssembler:
         if self._terminal_seen:
             return None
         if isinstance(event, ProviderError):
-            event = _bounded_partial_error(self._sanitize_error(_partial_with_error(self._after_thinking(event))))
+            event = _bounded_partial_error(self._sanitize_error(_partial_with_error(event)))
         self._terminal_seen = True
         return event
 
-    def _after_thinking(self, error: ProviderError) -> ProviderError:
-        """A response that dropped after streaming thinking alone may be retried once (``provider.md``)."""
-        if self._emitted_output and not self._emitted_visible and error.kind in THINKING_DROP_RETRY_KINDS:
+    def _after_thinking(self, error: ProviderError, *, allow_unknown: bool = False) -> ProviderError:
+        """The producer alone grants thinking-drop replay, never terminal sanitization or error kind alone.
+
+        Unknown wire failures retain their one request retry; an unknown local exception does not. Neither
+        recovery exhaustion nor a refusal can regain permissions just because it names a transient kind.
+        """
+        if (
+            self._emitted_output
+            and not self._emitted_visible
+            and error.refusal is None
+            and error.kind in THINKING_DROP_RETRY_KINDS
+            and (error.continuable or (allow_unknown and error.kind == "unknown"))
+        ):
             return replace(error, retryable=True, after_thinking=True)
         return error
 
@@ -1677,7 +1688,7 @@ def pin_refusal(assembler: StreamAssembler, endpoint: ModelEndpoint, handed_back
     refusal = Refusal(
         "pin_unavailable", endpoint.source_id, endpoint.source_identity, handed_back.tool, handed_back.aspect
     )
-    return replace(error, retryable=False, refusal=refusal)
+    return replace(error, retryable=False, continuable=False, after_thinking=False, refusal=refusal)
 
 
 def portable_endpoint(endpoint: ModelEndpoint) -> ModelEndpoint:
@@ -1870,7 +1881,9 @@ async def drive_sse_stream(
                                 # A replayed ciphertext this account cannot read, refused before any output: the
                                 # loop renders the request again without that identity's opaque payloads (§3.5).
                                 refusal = Refusal("opaque_refused", endpoint.source_id, endpoint.source_identity)
-                                candidate = replace(candidate, retryable=False, refusal=refusal)
+                                candidate = replace(
+                                    candidate, retryable=False, continuable=False, after_thinking=False, refusal=refusal
+                                )
                 else:
                     resolved_origin = await resolve_served_origin(
                         endpoint,
@@ -2097,8 +2110,11 @@ async def prepare_messages(
             retryable=False,
         )
     except Exception as exc:
-        return classify_error(
-            body=f"request preparation failed: {type(exc).__name__}: {exc}",
+        # Preparation is local: diagnostic text resembling a transient upstream error grants no permission.
+        return replace(
+            classify_error(body=f"request preparation failed: {type(exc).__name__}: {exc}"),
+            retryable=False,
+            continuable=False,
         )
     return transformed.messages, loaded_images
 

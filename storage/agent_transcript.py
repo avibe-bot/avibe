@@ -90,6 +90,7 @@ from storage import agent_events_service, media_service, messages_service
 from storage.agent_session_rows import reserve_write_lock
 from storage.message_deliveries import TURN_OWNER_STATES
 from storage.models import agent_events, agent_sessions, message_deliveries, messages, scopes, session_turns
+from storage.vibey_recovery import VIBEY_RECOVERY_INPUT_PREDICATE
 
 INPUT_TYPES = ("user", "harness", "agent_initiated", "annotation")
 # A final response is ``result``, or ``error`` when ``final_outcome`` says it failed:
@@ -262,6 +263,7 @@ class SQLiteTranscriptStore:
         replied: Optional[bool] = None,
         images: Sequence[HostedImage] = (),
         agent_name: Optional[str] = None,
+        turn_id: Optional[str] = None,
     ) -> ContextEntry:
         if not isinstance(message, AssistantMessage):
             raise TypeError("append_response takes an AssistantMessage")
@@ -274,7 +276,7 @@ class SQLiteTranscriptStore:
         display_text = self._render(message, final=final, replied=replied, images=tuple(images))
 
         def work(conn: Connection) -> ContextEntry:
-            origin = _turn_origin(conn, session_id, agent_name)
+            origin = _turn_origin(conn, session_id, agent_name, turn_id)
             seq = _next_context_seq(conn, session_id)
             row = messages_service.append(
                 conn,
@@ -287,6 +289,7 @@ class SQLiteTranscriptStore:
                 message_type=_response_type(message, final=final, display_text=display_text, replied=replied),
                 text=display_text,
                 content={"model": model},
+                metadata={"turn_id": origin.turn_id} if origin.turn_id else None,
             )
             conn.execute(messages.update().where(messages.c.id == row["id"]).values(context_seq=seq))
             _register_images(conn, origin.scope_id, session_id, message)
@@ -303,6 +306,7 @@ class SQLiteTranscriptStore:
         *,
         details: Mapping[str, Any],
         agent_name: Optional[str] = None,
+        turn_id: Optional[str] = None,
     ) -> ContextEntry:
         if not isinstance(message, ToolResultMessage):
             raise TypeError("append_tool_result takes a ToolResultMessage")
@@ -318,14 +322,17 @@ class SQLiteTranscriptStore:
             settled = _settled_result(conn, session_id, message.tool_call_id)
             if settled is not None:
                 return settled
-            return self._append_event(conn, session_id, "tool_result", payload, message, agent_name)
+            return self._append_event(conn, session_id, "tool_result", payload, message, agent_name, turn_id)
 
         return await self._write(session_id, work)
 
     async def append_payload(
-        self, session_id: str, kind: PayloadKind, payload: Mapping[str, Any], *, agent_name: Optional[str] = None
+        self, session_id: str, kind: PayloadKind, payload: Mapping[str, Any], *, agent_name: Optional[str] = None,
+        turn_id: Optional[str] = None,
     ) -> ContextEntry:
-        return (await self.append_payloads(session_id, [(kind, payload)], agent_name=agent_name))[0]
+        return (await self.append_payloads(
+            session_id, [(kind, payload)], agent_name=agent_name, turn_id=turn_id
+        ))[0]
 
     async def append_payloads(
         self,
@@ -333,17 +340,19 @@ class SQLiteTranscriptStore:
         entries: Sequence[tuple[PayloadKind, Mapping[str, Any]]],
         *,
         agent_name: Optional[str] = None,
+        turn_id: Optional[str] = None,
     ) -> list[ContextEntry]:
         """Several payload rows in order, in one transaction: all of them or none (C-9 section 10)."""
         rows = [(kind, _payload(kind, payload)) for kind, payload in entries]
 
         def work(conn: Connection) -> list[ContextEntry]:
-            return [self._append_event(conn, session_id, kind, data, None, agent_name) for kind, data in rows]
+            return [self._append_event(conn, session_id, kind, data, None, agent_name, turn_id) for kind, data in rows]
 
         return await self._write(session_id, work)
 
     async def append_audit(
-        self, session_id: str, kind: AuditKind, payload: Mapping[str, Any], *, agent_name: Optional[str] = None
+        self, session_id: str, kind: AuditKind, payload: Mapping[str, Any], *, agent_name: Optional[str] = None,
+        turn_id: Optional[str] = None,
     ) -> str:
         """A non-context audit row (C-9 ``ModelAttempt`` or C-10 ``ForkTurn``); its id. Never loaded as context."""
         if kind not in _AUDIT_EVENT_TYPE:
@@ -351,7 +360,7 @@ class SQLiteTranscriptStore:
         data = _canonical(dict(payload), f"{kind} audit")
 
         def work(conn: Connection) -> str:
-            origin = _turn_origin(conn, session_id, agent_name)
+            origin = _turn_origin(conn, session_id, agent_name, turn_id)
             row = agent_events_service.append(
                 conn,
                 scope_id=origin.scope_id,
@@ -394,8 +403,9 @@ class SQLiteTranscriptStore:
         payload: dict[str, Any],
         message: Optional[ToolResultMessage],
         agent_name: Optional[str] = None,
+        turn_id: Optional[str] = None,
     ) -> ContextEntry:
-        origin = _turn_origin(conn, session_id, agent_name)
+        origin = _turn_origin(conn, session_id, agent_name, turn_id)
         seq = _next_context_seq(conn, session_id)
         row = agent_events_service.append(
             conn,
@@ -481,18 +491,33 @@ def _next_context_seq(conn: Connection, session_id: str) -> int:
     return top + 1
 
 
-def _turn_origin(conn: Connection, session_id: str, agent_name: Optional[str] = None) -> _TurnOrigin:
+def _turn_origin(
+    conn: Connection, session_id: str, agent_name: Optional[str] = None, turn_id: Optional[str] = None
+) -> _TurnOrigin:
     """Where an inserted row belongs, and the Agent that wrote it.
 
     ``agent_name`` is the running Turn's Agent (its request snapshot): the Session's
     selected Agent may change mid-Turn, so the Session row is only the fallback for a
-    write outside a Turn (startup recovery).
+    write outside a Turn (startup recovery). ``turn_id`` is explicit for live writes:
+    a transcript-only retry owns a new Turn without consuming another input.
     """
     session = conn.execute(
         select(agent_sessions.c.agent_name).where(agent_sessions.c.id == session_id)
     ).first()
     if session is None:
         raise TranscriptError(f"Session {session_id} does not exist")
+    if turn_id is not None:
+        initial = conn.execute(
+            select(messages.c.platform, messages.c.scope_id)
+            .select_from(
+                session_turns.join(message_deliveries, message_deliveries.c.id == session_turns.c.initial_delivery_id)
+                .join(messages, messages.c.id == message_deliveries.c.message_id)
+            )
+            .where(session_turns.c.id == turn_id, session_turns.c.session_id == session_id)
+        ).first()
+        if initial is None:
+            raise TranscriptError(f"Turn {turn_id} has no accepted input in Session {session_id}")
+        return _TurnOrigin(initial.platform, initial.scope_id, turn_id, agent_name or session.agent_name, CONTEXT_WRITER)
     latest = conn.execute(
         select(messages.c.id, messages.c.platform, messages.c.scope_id)
         .where(
@@ -580,14 +605,13 @@ def _unended_input_seq(conn: Connection, session_id: str, entries: Sequence[Cont
     ).all()
     awaiting_input = set(
         conn.execute(
-            select(message_deliveries.c.turn_id)
-            .select_from(message_deliveries.join(messages, messages.c.id == message_deliveries.c.message_id))
-            .where(
-                messages.c.session_id == session_id,
-                messages.c.context_seq.is_(None),
-                messages.c.type.in_(INPUT_TYPES),
-                message_deliveries.c.state == "accepted",
-            )
+            text(
+                "select message_deliveries.turn_id from messages "
+                "cross join message_deliveries on message_deliveries.message_id = messages.id "
+                f"where {VIBEY_RECOVERY_INPUT_PREDICATE} "
+                "and messages.session_id = :session_id and message_deliveries.state = 'accepted'"
+            ),
+            {"session_id": session_id},
         ).scalars()
     )
     inputs = sorted(seq for _, _, seq in turns if seq is not None)

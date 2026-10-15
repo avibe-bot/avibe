@@ -1239,6 +1239,326 @@ async def test_output_limited_final_is_a_failed_row_with_length_cause(
     assert "kind=length" in caplog.text
 
 
+@pytest.fixture
+def continuation_policy(monkeypatch):
+    """Configure the real loop's existing retry policy, without replacing continuation behavior."""
+    from functools import partial
+
+    from core.agent_core.agent.loop import Agent
+    from core.agent_core.agent.models import RetryPolicy
+
+    def configure(**settings):
+        monkeypatch.setattr("modules.agents.vibey.agent.Agent", partial(Agent, retry=RetryPolicy(**settings)))
+
+    return configure
+
+
+async def test_a_transient_failure_continues_from_the_same_transcript_without_a_notice(
+    engine, session, tmp_path, published, continuation_policy
+) -> None:
+    from core.agent_core.ai.provider import ProviderError
+
+    continuation_policy(initial_delay_s=0)
+    failure = ProviderError("server", "temporary upstream failure", False, continuable=True)
+    harness = _Harness(
+        engine,
+        tmp_path,
+        "telegram",
+        [[failure]] * 5 + [[Done(assistant("recovered"))]],
+    )
+
+    await harness.agent.handle_message(harness.request("finish the task"))
+
+    assert len(harness.provider.requests) == 6
+    assert harness.rows("notify") == []
+    assert harness.controller.im_client.sent == ["recovered"]
+    assert harness.controller.terminals[-1]["is_error"] is False
+
+
+async def test_a_continuation_reuses_a_committed_tool_result_without_rerunning_the_tool(
+    engine, session, tmp_path, published
+) -> None:
+    from core.agent_core.ai.provider import ProviderError
+
+    call = ToolCallBlock(id="call_1", name="echo", arguments={})
+    tool = FakeTool("echo")
+    harness = _Harness(
+        engine,
+        tmp_path,
+        "telegram",
+        [
+            [Done(assistant("", calls=(call,)))],
+            [ProviderError("server", "temporary upstream failure", False, continuable=True)],
+            [Done(assistant("done"))],
+        ],
+        tools=[tool],
+    )
+
+    await harness.agent.handle_message(harness.request("run the tool"))
+
+    assert len(tool.calls) == 1
+    assert len(harness.provider.requests) == 3
+    assert harness.rows("notify") == []
+    assert harness.controller.im_client.sent == ["🔧 echo {}", "done"]
+
+
+async def test_vibey_retry_resumes_the_existing_transcript_without_a_continue_message(
+    engine, session, tmp_path, published
+) -> None:
+    from core.agent_core.ai.provider import ProviderError
+    from storage import messages_service
+    from tests.backend_failure_retry_helpers import reserve_failure_retry
+
+    first_failure = ProviderError("invalid_request", "request rejected", False)
+    harness = _Harness(
+        engine,
+        tmp_path,
+        "avibe",
+        [[first_failure], [Done(assistant("recovered"))]],
+    )
+    first = harness.request("finish the task")
+    await harness.agent.handle_message(first)
+    with engine.begin() as conn:
+        message_deliveries.terminalize_turn(
+            conn,
+            _turn(first.context),
+            outcome="failed",
+            settled_by="terminal_result",
+            evidence_kind="terminal_result",
+        )
+
+    with engine.connect() as conn:
+        notice = next(
+            row
+            for row in messages_service.list_session_messages(conn, session_id=SESSION)["messages"]
+            if row["type"] == "notify"
+        )
+    with engine.begin() as conn:
+        retry = reserve_failure_retry(conn, notice)
+        turn_id = message_deliveries.new_turn_id()
+        claimed = message_deliveries.claim_start_batch(
+            conn,
+            turn_id=turn_id,
+            session_id=SESSION,
+            backend="vibey",
+            deliveries=[retry],
+            dispatch_text="",
+        )
+        retry_delivery = claimed["deliveries"][0]
+
+    retry_context = _context("avibe", SESSION, turn_id=turn_id, delivery_id=retry_delivery["id"])
+    retry_context.platform_specific["vibey_resume"] = True
+    retry_context.platform_specific["vibey_source_turn_id"] = _turn(first.context)
+    retry_context.message_id = retry_delivery["id"]
+    with engine.begin() as conn:
+        current_turn = message_deliveries.get_turn(conn, turn_id)
+        assert message_deliveries.bind_native_start(
+            conn,
+            turn_id,
+            expected_version=int(current_turn["version"]),
+            runtime_key="runtime",
+            runtime_turn_id=turn_id,
+            native_turn_id=f"vibey:{harness.agent._instance}:{turn_id}",
+        )
+        assert message_deliveries.materialize_start_acceptance(
+            conn,
+            turn_id=turn_id,
+            evidence={"kind": "test_acceptance"},
+        )
+    retry_request = AgentRequest(
+        **{
+            **first.__dict__,
+            "context": retry_context,
+            "message": "",
+            "user_message": "",
+        }
+    )
+
+    await harness.agent.handle_message(retry_request)
+
+    assert harness.controller.im_client.sent[-1] == "recovered"
+    assert len(harness.rows("user")) == 1
+    [resume_row] = harness.rows("agent_initiated")
+    assert resume_row["context_seq"] is None
+    assert harness.agent._sessions_with_unconsumed_inputs() == []
+    assert "continue" not in [row["content_text"] or "" for row in harness.rows("user")]
+
+
+async def test_user_metadata_cannot_trigger_vibey_resume(
+    engine, session, tmp_path, published
+) -> None:
+    harness = _Harness(
+        engine,
+        tmp_path,
+        "avibe",
+        [[Done(assistant("answered"))]],
+    )
+    request = harness.request("real input")
+    request.context.platform_specific["message_metadata"] = {"vibey_resume": True}
+
+    await harness.agent.handle_message(request)
+
+    [user_row] = harness.rows("user")
+    assert "real input" in (user_row["content_text"] or "")
+    assert harness.controller.im_client.sent[-1] == "answered"
+
+
+async def test_a_transient_failure_shows_one_notice_after_five_continuations(
+    engine, session, tmp_path, published, continuation_policy
+) -> None:
+    from core.agent_core.ai.provider import ProviderError
+
+    continuation_policy(initial_delay_s=0)
+    failure = ProviderError("server", "temporary upstream failure", False, continuable=True)
+    harness = _Harness(engine, tmp_path, "telegram", [[failure]] * 6)
+
+    await harness.agent.handle_message(harness.request("finish the task"))
+
+    assert len(harness.provider.requests) == 6
+    assert len(harness.rows("notify")) == 1
+    assert harness.controller.im_client.sent == [f"❌ {i18n_t('vibeyAgent.error.server', 'en')}"]
+    assert harness.controller.terminals[-1]["is_error"] is True
+
+
+@pytest.mark.parametrize(
+    "failure,continues",
+    [
+        ("streamed server", True),
+        ("streamed eof", True),
+        ("streamed rate limit", True),
+        ("rate limit past budget", False),
+        ("recovery exhausted", False),
+        ("recovery exhausted after thinking", False),
+        ("unknown", False),
+        ("malformed", False),
+    ],
+)
+async def test_provider_continuation_decision_reaches_vibey(
+    engine, session, tmp_path, published, continuation_policy, failure, continues
+):
+    """Classification -> loop -> adapter: neither an exhausted Hub nor a permanent stream fault may be retried.
+
+    Kind-only scripted tests missed real producers and erased Retry-After before the consumer saw it.
+    """
+    import httpx
+
+    from modules.agents.vibey.models import registry_providers
+
+    continuation_policy(initial_delay_s=0)
+    text_prefix = (
+        'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1"}}\n\n'
+        'data: {"type":"response.output_text.delta","output_index":0,"delta":"Working"}\n\n'
+    )
+    thinking_prefix = (
+        'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1"}}\n\n'
+        'data: {"type":"response.reasoning_summary_text.delta","output_index":0,"delta":"Thinking"}\n\n'
+    )
+    exhausted = {"code": "model_hub_recovery_exhausted", "cause": "server_error", "message": "recovery ended"}
+    sent = []
+
+    def gateway(request):
+        sent.append(json.loads(request.content))
+        if len(sent) > 1:
+            return httpx.Response(200, text=_TEXT_STREAMS["openai_responses"][1])
+        if failure == "rate limit past budget":
+            return httpx.Response(429, headers={"retry-after": "121"}, json={"error": {"message": "busy"}})
+        if failure == "recovery exhausted":
+            return httpx.Response(424, json={"error": exhausted})
+        if failure == "recovery exhausted after thinking":
+            body = thinking_prefix + "data: " + json.dumps({"type": "error", "error": exhausted}) + "\n\n"
+        elif failure == "streamed eof":
+            body = text_prefix
+        elif failure == "malformed":
+            body = text_prefix + 'data: {"type":"response.output_text.delta","output_index":0,"delta":[]}\n\n'
+        else:
+            code = {"streamed server": "server_error", "streamed rate limit": "rate_limit_error"}.get(failure, "new_code")
+            body = text_prefix + "data: " + json.dumps({"type": "error", "code": code, "message": "failed"}) + "\n\n"
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        harness = _Harness(engine, tmp_path, "avibe", [], providers=registry_providers(media_loader=None, client=client))
+        harness.controller.hub_protocol = "openai_responses"
+        await harness.agent.handle_message(harness.request("finish the task"))
+
+    assert len(sent) == (2 if continues else 1)
+    assert harness.controller.terminals[-1]["is_error"] is not continues
+    assert len(harness.rows("notify")) == (0 if continues else 1)
+    assert len(harness.rows("user")) == 1
+
+
+@pytest.mark.parametrize("stop", [False, True])
+async def test_continuation_honors_retry_after_without_delaying_stop(
+    engine, session, tmp_path, published, continuation_policy, stop
+):
+    """The outer wait must honor the provider's floor; a Stop during it must settle without another request."""
+    from core.agent_core.ai.errors import classify_error
+
+    continuation_policy(initial_delay_s=0)
+    failed = asyncio.Event()
+    times = []
+
+    async def fail(request, cancel):
+        times.append(time.monotonic())
+        failed.set()
+        yield classify_error(status=429, streamed=True, headers={"retry-after": "30" if stop else "0.15"})
+
+    async def recover(request, cancel):
+        times.append(time.monotonic())
+        yield Done(assistant("recovered"))
+
+    harness = _Harness(engine, tmp_path, "avibe", [fail, recover])
+    request = harness.request("finish the task")
+    task = asyncio.create_task(harness.agent.handle_message(request))
+    try:
+        await asyncio.wait_for(failed.wait(), timeout=2)
+        if stop:
+            await _until(
+                lambda: harness.agent._runtimes[SESSION].run.continuation_started_at is not None,
+                "the run never reached continuation backoff",
+            )
+            assert await harness.agent.handle_stop(request)
+        await asyncio.wait_for(task, timeout=2)
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    assert harness.rows("notify") == []
+    if stop:
+        assert len(times) == 1
+        assert harness.controller.terminals[-1]["settled_by"] == "stopped"
+    else:
+        assert len(times) == 2 and times[1] - times[0] >= 0.15
+        assert harness.controller.terminals[-1]["is_error"] is False
+
+
+@pytest.mark.parametrize("retry_after", [None, "61"])
+async def test_continuations_share_one_elapsed_budget(
+    engine, session, tmp_path, published, continuation_policy, monkeypatch, retry_after
+):
+    """Run time, not just backoff, spends the outer budget; restarting Agent.resume must not reset it."""
+    from core.agent_core.ai.errors import ProviderStalled, classify_error
+
+    continuation_policy(initial_delay_s=0)
+    now = [0.0]
+    monkeypatch.setattr("modules.agents.vibey.agent.time", SimpleNamespace(monotonic=lambda: now[0]))
+
+    async def fail(request, cancel):
+        # The initial stall is allowed to continue, but two 60s failed continuations spend the 120s window.
+        now[0] += 60
+        yield classify_error(
+            exc=ProviderStalled(600), streamed=True,
+            headers={"retry-after": retry_after} if retry_after and now[0] > 60 else None,
+        )
+
+    harness = _Harness(engine, tmp_path, "avibe", [fail] * 6)
+    await harness.agent.handle_message(harness.request("finish the task"))
+    assert len(harness.provider.requests) == (2 if retry_after else 3)
+    assert len(harness.rows("notify")) == 1
+    assert harness.controller.terminals[-1]["is_error"] is True
+    assert json.loads(harness.rows("notify")[0]["metadata_json"])["error_kind"] == "stalled"
+
+
 @pytest.mark.parametrize("language", ["en", "zh"])
 async def test_a_provider_stall_is_not_shown_as_a_connection_failure(
     engine, session, tmp_path, published, language
@@ -3226,11 +3546,10 @@ _THINKING_DROPS = {
 
 @pytest.mark.parametrize("drop", sorted(_THINKING_DROPS))
 @pytest.mark.parametrize("drops", [1, 2])
-async def test_a_stream_that_drops_after_thinking_alone_gets_one_retry_then_its_own_copy(
+async def test_a_stream_that_drops_after_thinking_alone_gets_provider_retry_then_transcript_continuation(
     engine, session, tmp_path, published, drops, drop
 ) -> None:
-    """Owner decision 2026-10-11: one retry after a stream that carried only thinking; a second drop shows the
-    drop's own copy, never the generic line."""
+    """A thinking-only provider drop is retried by the request loop, then by Vibey's transcript continuation."""
     import httpx
 
     from modules.agents.vibey.models import registry_providers
@@ -3239,7 +3558,7 @@ async def test_a_stream_that_drops_after_thinking_alone_gets_one_retry_then_its_
         {"provider": "upstream", "api": "openai_responses", "model": "served-model", "source": "src_upstream01"},
         separators=(",", ":"),
     )
-    ending, copy = _THINKING_DROPS[drop]
+    ending, _copy = _THINKING_DROPS[drop]
     thinking_then_cut = (
         'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1"}}\n\n'
         'data: {"type":"response.reasoning_summary_text.delta","output_index":0,"delta":"**Checking the catalog**"}\n\n'
@@ -3261,11 +3580,9 @@ async def test_a_stream_that_drops_after_thinking_alone_gets_one_retry_then_its_
         harness.controller.hub_protocol = "openai_responses"
         await harness.agent.handle_message(harness.request("hello"))
 
-    assert len(sent) == 2 and sent[1]["input"] == sent[0]["input"]
-    if drops == 1:
-        assert harness.controller.im_client.sent == ["hi"]
-    else:
-        assert harness.controller.im_client.sent == [f"❌ {i18n_t(f'vibeyAgent.error.{copy}', 'en')}"]
+    assert len(sent) == drops + 1
+    assert all(request["input"] == sent[0]["input"] for request in sent[1:])
+    assert harness.controller.im_client.sent == ["hi"]
 
 
 async def test_a_turn_runs_bash_through_the_real_job_host(engine, session, tmp_path, published) -> None:

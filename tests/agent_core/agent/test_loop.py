@@ -95,9 +95,95 @@ def make_agent(provider, *, store=None, session_id="session", tools=(), hooks=()
 async def collect(agent, row_id="input", value="hello", turn_id="turn"):
     return [event async for event in agent.run(input_row(row_id, value), turn_id=turn_id)]
 
-
 def user_texts(request):
     return [message.content[0].text for message in request.messages if isinstance(message, UserMessage)]
+
+
+async def test_resume_reuses_the_committed_transcript_without_consuming_an_input():
+    provider = ScriptedProvider(
+        [
+            [ProviderError("server", "temporary upstream failure", False)],
+            [Done(assistant("recovered"))],
+        ]
+    )
+    agent = make_agent(provider)
+    original = input_row("input", "hello")
+
+    first = [event async for event in agent.run(original, turn_id="turn")]
+    second = [event async for event in agent.resume(original, turn_id="turn")]
+
+    assert first[-1].reason == "error"
+    assert second[-1].reason == "completed"
+    assert [row.row_id for row in await agent.store.load("session") if row.kind == "input"] == ["input"]
+    assert [row.message.content[0].text for row in await agent.store.load("session") if row.kind == "response"] == [
+        "recovered"
+    ]
+    assert len(provider.requests) == 2
+    assert second[0].seq == first[-1].seq + 1
+
+
+async def test_resume_uses_only_explicit_source_turn_inputs_for_a_fresh_agent():
+    store = InMemoryTranscriptStore()
+    first = await store.consume_input("session", "first", user("first"))
+    await store.consume_input("session", "other", user("other"))
+    provider = ScriptedProvider([[Done(assistant("recovered"))]])
+    agent = make_agent(provider, store=store)
+
+    events = [
+        event
+        async for event in agent.resume(
+            input_row("retry", "ignored"),
+            turn_id="retry-turn",
+            turn_inputs={first.context_seq},
+        )
+    ]
+
+    assert events[-1].reason == "completed"
+    assert agent._turn_inputs == {first.context_seq}
+
+
+async def test_resume_merges_newly_admitted_inputs_into_same_turn_pins():
+    provider = ScriptedProvider([
+        [ProviderError("invalid_request", "failed", False)],
+        [Done(assistant("recovered"))],
+    ])
+    agent = make_agent(provider)
+    await collect(agent)
+    [initial] = [row for row in await agent.store.load("session") if row.kind == "input"]
+    returned = await agent.store.consume_input("session", "returned-steer", user("不要删文件"))
+
+    events = [event async for event in agent.resume(
+        input_row("retry", "ignored"), turn_id="turn", turn_inputs={returned.context_seq}
+    )]
+
+    assert events[-1].reason == "completed"
+    assert agent._turn_inputs == {initial.context_seq, returned.context_seq}
+    assert user_texts(provider.requests[-1]) == ["hello", "不要删文件"]
+
+
+async def test_resume_preserves_images_committed_by_an_earlier_tool_call():
+    from core.agent_core.messages import HostedResult, ProxyExecution
+
+    hosted = HostedResult(
+        HostedRecord(status="completed", images=(HostedImage(path="/media/winner.png", mime="image/png"),)),
+        ProxyExecution(ORIGIN, "src_executor01", "metered", mode="direct"),
+    )
+    tool = FakeTool("image_generate", result=ToolResult((text("saved"),), hosted=hosted))
+    provider = ScriptedProvider(
+        [
+            [Done(assistant("", calls=[ToolCallBlock("call_img", "image_generate", {})]))],
+            [ProviderError("server", "temporary upstream failure", False)],
+            [Done(assistant("recovered"))],
+        ]
+    )
+    agent = make_agent(provider, tools=[tool])
+
+    first_events = await collect(agent, value="make an image")
+    second_events = [event async for event in agent.resume(input_row("retry", "ignored"), turn_id="turn")]
+
+    assert first_events[-1].reason == "error"
+    assert second_events[-1].reason == "completed"
+    assert agent._generated_images == [HostedImage(path="/media/winner.png", mime="image/png")]
 
 
 async def test_C1_tool_set_is_captured_per_request_and_unavailable_calls_are_errors():
@@ -637,6 +723,27 @@ async def test_retry_obeys_provider_flag_and_allows_usage_only_partial(streamed,
         assert len(provider.requests) == agent.models.resolutions == 2
         assert sleeps == [3.0]
         assert events[-1].reason == "completed"
+
+
+@pytest.mark.parametrize("failure", ["before output", "after output", "recovery exhausted"])
+async def test_provider_permissions_and_delay_reach_the_terminal_cause(failure):
+    """C-3: consumers need the producer's decision, which the old kind/message-only event dropped."""
+    from core.agent_core.ai.errors import classify_error
+
+    error = classify_error(
+        status=424 if failure == "recovery exhausted" else 429,
+        body='{"error":{"code":"model_hub_recovery_exhausted","cause":"rate_limited"}}'
+        if failure == "recovery exhausted" else "busy",
+        headers={"retry-after": "17"},
+        streamed=failure == "after output",
+    )
+    agent = make_agent(ScriptedProvider([[error]]), retry=RetryPolicy(max_retries=0))
+    events = await collect(agent)
+    [announced] = [event for event in events if isinstance(event, AgentError)]
+    assert events[-1].cause == announced
+    assert (announced.kind, announced.origin, announced.retryable, announced.continuable, announced.retry_after_s) == (
+        "rate_limit", "source", failure == "before output", failure != "recovery exhausted", 17.0
+    )
 
 
 # OpenAI Responses streams, as the real adapter reads them: reasoning, then how the response ended.

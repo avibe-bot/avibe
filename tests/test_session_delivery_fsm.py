@@ -8049,8 +8049,90 @@ async def test_agent_initiated_continuation_materializes_as_hidden_turn_input(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("backend", ["vibey", "claude", "codex", "opencode"])
+@pytest.mark.parametrize("boundary", ["admission", "fifo", "admission_fifo", "dispatch"])
+async def test_vibey_resume_delivery_is_retired_if_the_resolved_backend_changes(
+    managers, monkeypatch, backend, boundary,
+) -> None:
+    """A hidden control Delivery may execute only on the resolved Vibey backend.
+
+    Admission-only coverage missed later FIFO claims (including a new input
+    driving the old queue) and routing rebuilt between claim and dispatch.
+    At admission the request omits trusted fields: only the stored row owns them.
+    """
+    manager, _other, engine, _engine_b, starts = managers
+    delivery_id = delivery_store.new_delivery_id()
+    metadata = {
+        delivery_store.VIBEY_RESUME_METADATA_KEY: True,
+        delivery_store.VIBEY_SOURCE_TURN_METADATA_KEY: "source-turn",
+    }
+
+    def context(session_id):
+        value = _context(session_id)
+        with engine.connect() as conn:
+            value.platform_specific["agent_session_target"]["agent_backend"] = conn.execute(
+                select(agent_sessions.c.agent_backend).where(agent_sessions.c.id == session_id)
+            ).scalar_one()
+        return value
+
+    manager.bind_context(context)
+    with engine.begin() as conn:
+        conn.execute(update(agent_sessions).where(agent_sessions.c.id == "ses_fsm").values(agent_backend="vibey"))
+        delivery_store.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="reserved",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="harness",
+                source="harness",
+                message_type="agent_initiated",
+                text="",
+                metadata=metadata,
+            ),
+            dispatch_text="",
+        )
+
+    request = DeliveryRequest(
+        session_id="ses_fsm", priority="p3", content="", has_content=False,
+        delivery_id=delivery_id, admission_only=boundary in {"fifo", "admission_fifo"},
+        **({"author": "harness", "source": "harness", "message_type": "agent_initiated", "metadata": metadata}
+           if boundary != "admission" else {}),
+    )
+    start_persisted_turn = manager._start_persisted_turn
+    if boundary == "dispatch":
+        monkeypatch.setattr(manager, "_start_persisted_turn", AsyncMock(return_value=False))
+    if boundary != "admission":
+        queued = await manager.deliver(request, context=context("ses_fsm"))
+        assert queued.state == ("claimed" if boundary == "dispatch" else "queued")
+        assert starts == []
+    with engine.begin() as conn:
+        conn.execute(update(agent_sessions).where(agent_sessions.c.id == "ses_fsm").values(agent_backend=backend))
+    if boundary == "admission":
+        result = await manager.deliver(request, context=context("ses_fsm"))
+        if backend != "vibey":
+            assert result.reason == "backend_changed"
+    elif boundary == "fifo":
+        await manager.drain_delivery_queue("ses_fsm")
+    elif boundary == "admission_fifo":
+        await manager.deliver(DeliveryRequest(session_id="ses_fsm", priority="p3", content="新的用户任务"))
+    else:
+        monkeypatch.setattr(manager, "_start_persisted_turn", start_persisted_turn)
+        await manager._start_persisted_turn(queued.turn_id)
+
+    with engine.connect() as conn:
+        stored = delivery_store.get_delivery(conn, delivery_id)
+        assert stored["state"] == ("claimed" if backend == "vibey" else "retired")
+    expected = [""] if backend == "vibey" else ["新的用户任务"] if boundary == "admission_fifo" else []
+    assert [text for _turn, text in starts] == expected
+
+
+@pytest.mark.anyio
 async def test_failed_session_lifecycle_preserves_sampled_epoch(managers) -> None:
-    """A failed reset preserves an in-flight turn epoch."""
 
     manager, _other, _engine, _engine_b, _starts = managers
     sampled_snapshot = manager.snapshot_session_lifecycle("ses_fsm")

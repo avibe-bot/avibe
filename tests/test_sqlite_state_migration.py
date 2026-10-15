@@ -38,7 +38,7 @@ from vibe.message_types import build_partial_index_predicate
 pytestmark = pytest.mark.no_sqlite_template
 
 
-HEAD_REVISION = "20261015_0066"
+HEAD_REVISION = "20261016_0067"
 # ``storage.models`` builds a bare ``MetaData()``, so its foreign keys are unnamed and
 # Alembic cannot re-emit them when batch mode recreates a table. Every migration that
 # rebuilds one therefore passes this convention; the rebuild simulated below has to pass
@@ -3602,6 +3602,8 @@ def test_run_migrations_repairs_head_indexes_before_stamping_head(tmp_path: Path
         engine.dispose()
 
     with sqlite3.connect(db_path) as conn:
+        conn.execute("drop index if exists ix_messages_vibey_recovery_input")
+        conn.execute("drop index if exists ix_message_deliveries_message")
         conn.execute("drop index if exists ix_agent_sessions_scope_status_activity")
         conn.execute("drop index if exists ix_messages_session_created_id")
         conn.execute("drop index if exists ix_messages_session_type_created_id")
@@ -3613,6 +3615,13 @@ def test_run_migrations_repairs_head_indexes_before_stamping_head(tmp_path: Path
         conn.execute("drop index if exists ix_messages_inbox_user_send")
         conn.commit()
         assert conn.execute("select name from sqlite_master where name = 'alembic_version'").fetchone() is None
+
+    # Check repair before the normal upgrade can hide an omitted index by
+    # replaying its migration from the schema-stamp floor.
+    migrations._stamp_existing_initial_schema(db_path, migrations.alembic_config(db_path))
+    with sqlite3.connect(db_path) as conn:
+        assert "context_seq is null" in _index_sql(conn, "ix_messages_vibey_recovery_input")
+        assert "message_id is not null" in _index_sql(conn, "ix_message_deliveries_message")
 
     run_migrations(db_path)
 
@@ -3631,6 +3640,7 @@ def test_run_migrations_repairs_head_indexes_before_stamping_head(tmp_path: Path
             )
         }
     assert version == (HEAD_REVISION,)
+    assert "ix_messages_vibey_recovery_input" in message_indexes
     assert "ix_messages_session_created_id" in message_indexes
     assert "ix_messages_session_type_created_id" in message_indexes
     assert "ix_messages_platform_session_created_id" in message_indexes

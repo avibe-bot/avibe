@@ -1248,6 +1248,9 @@ def create_app(
             "text": str(delivery.get("dispatch_text") or ""),
             "files": attachment_specs,
             "platform": delivery_payload.get("platform"),
+            "type": delivery_payload.get("type"),
+            "author": delivery_payload.get("author"),
+            "source": delivery_payload.get("source"),
             "user_id": delivery_payload.get("author_id"),
             "message_id": delivery_payload.get("native_message_id") or delivery_id,
             "thread_id": delivery_payload.get("parent_native_message_id"),
@@ -1877,12 +1880,13 @@ async def _build_dispatch_payload(payload: dict[str, Any]) -> tuple[str, Message
     if not isinstance(session_id, str) or not session_id.strip():
         raise ValueError("session_id is required")
 
-    # A turn may be text-only, attachments-only (the agent reads the files), or
-    # both. ``files`` are already-local web uploads resolved from media tokens.
+    # Text/files or a hidden control Delivery, whose entire provenance the
+    # endpoint restored from storage above (never from the wake-up request).
     from core.workbench_media import file_attachments_from_specs
+    from storage.message_deliveries import is_vibey_resume_payload
 
     files = file_attachments_from_specs(payload.get("files"))
-    if not text.strip() and not files:
+    if not text.strip() and not files and not is_vibey_resume_payload(payload):
         raise ValueError("text or files is required")
 
     context = await asyncio.to_thread(

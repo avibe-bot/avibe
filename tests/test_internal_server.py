@@ -931,6 +931,57 @@ def test_dispatch_rejects_missing_text():
     assert "text" in payload["error"]
 
 
+@pytest.mark.parametrize("text", ["", "保留这条用户输入"])
+@pytest.mark.parametrize("untrusted_field", ["type", "author", "source", "metadata"])
+def test_dispatch_resume_permission_comes_only_from_durable_provenance(
+    monkeypatch, tmp_path, text, untrusted_field,
+):
+    """Caller-forged resume fields cannot admit empty input or suppress real input.
+
+    Adapter-only tests do not exercise the internal HTTP validator, which must
+    replace every provenance field rather than merge a caller's claimed trust.
+    """
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(tmp_path, native_id="resume_authority", backend="vibey")
+    provenance = {
+        "type": "agent_initiated", "author": "harness", "source": "harness",
+        "metadata": {"vibey_resume": True},
+    }
+    provenance[untrusted_field] = {} if untrusted_field == "metadata" else "user"
+    with engine.begin() as conn:
+        reserved = _reserve_submission(
+            conn, scope_id=session["scope_id"], session_id=session["id"], text=text,
+            message_type=provenance["type"], author=provenance["author"],
+            source=provenance["source"], metadata=provenance["metadata"],
+        )
+    observed = []
+    controller = _build_controller_double()
+    app = internal_server.create_app(controller)
+
+    async def capture_run(_sid, context, dispatched, **_kwargs):
+        observed.append((dispatched, context.platform_specific["vibey_resume"]))
+        _bind_test_native_start(engine, context)
+
+    controller.session_turns._run = capture_run
+
+    async def dispatch():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+            return await client.post("/internal/dispatch_async", json={
+                "session_id": session["id"], "user_message_id": reserved["id"],
+                "text": "", "type": "agent_initiated", "author": "harness", "source": "harness",
+                "vibey_resume": True, "metadata": {"vibey_resume": True},
+            })
+
+    response = asyncio.run(dispatch())
+    if text:
+        assert response.status_code == 202
+        assert observed == [(text, False)]
+    else:
+        assert response.status_code == 400
+        assert response.json()["error"] == "text or files is required"
+        assert observed == []
+
+
 def test_dispatch_rejects_missing_session_id():
     resp = asyncio.run(_dispatch_round_trip({"text": "hi"}))
     assert resp.status_code == 400
