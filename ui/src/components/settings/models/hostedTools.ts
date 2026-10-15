@@ -82,11 +82,24 @@ export const pairEvidence = (status: HostedToolRunStatus): PairEvidence[] => {
 
 export type ModelCapability = { tool: HostedToolName; evidence: PairEvidence };
 
-/** A Source model's evidence for each tool, in catalog order, for its detail chips. No record draws nothing. */
+/**
+ * A Source model's chips, in catalog order: one per feature with a record. The
+ * call is one feature and its replay another. A call refusal wins over a success,
+ * because it is routing state, and also hides the replay chip, which is moot while
+ * the tool is not declared natively. A replay refusal sits beside the success: the
+ * model still runs the tool. No record draws nothing.
+ */
 export const modelCapabilities = (status: HostedToolsStatus, sourceId: string, modelId: string): ModelCapability[] =>
-  status.tools.flatMap((tool) => {
-    const evidence = pairEvidence(tool.status).find((pair) => pair.sourceId === sourceId && pair.modelId === modelId);
-    return evidence ? [{ tool: tool.name, evidence }] : [];
+  status.tools.flatMap((tool): ModelCapability[] => {
+    const mine = <T extends { source_id: string; model_id: string }>(item: T) => item.source_id === sourceId && item.model_id === modelId;
+    const success = tool.status.verified.find(mine) ?? null;
+    const call = tool.status.refused.find((refusal) => mine(refusal) && refusal.aspect === 'call');
+    if (call) return [{ tool: tool.name, evidence: { kind: 'refused', sourceId, modelId, refusal: call, lastOk: success } }];
+    const replay = tool.status.refused.find((refusal) => mine(refusal) && refusal.aspect === 'replay');
+    return [
+      ...(success ? [{ tool: tool.name, evidence: { kind: 'ok', sourceId, modelId, success } } satisfies ModelCapability] : []),
+      ...(replay ? [{ tool: tool.name, evidence: { kind: 'refused', sourceId, modelId, refusal: replay, lastOk: null } } satisfies ModelCapability] : []),
+    ];
   });
 
 /**
