@@ -20601,15 +20601,24 @@ class _TaskWithoutCancelCount:
 
 
 @pytest.mark.parametrize(
-    ("door", "step_raises", "python310"),
-    [("_store_step", True, False), ("_run_runtime_sync", True, False), ("_store_step", False, True)],
+    ("door", "step_raises", "python310", "expected"),
+    [
+        ("_store_step", False, False, ["step result", "cancelled at the next await"]),
+        ("_store_step", False, True, ["step result", "cancelled at the next await"]),
+        ("_store_step", True, False, ["cancelled at the door, caused by: step error"]),
+        ("_run_runtime_sync", False, False, ["cancelled at the door, caused by: None"]),
+        ("_run_runtime_sync", True, False, ["cancelled at the door, caused by: step error"]),
+    ],
 )
-def test_a_cancellation_caught_by_a_store_step_is_answered_at_the_next_await(
-    tmp_path: Path, monkeypatch, door: str, step_raises: bool, python310: bool
+def test_a_cancellation_caught_by_a_store_step_is_answered_from_its_outcome(
+    tmp_path: Path, monkeypatch, door: str, step_raises: bool, python310: bool, expected: list[str]
 ) -> None:
-    """#2649: a store step on the runtime-work door holds a cancellation that arrives while it runs until it lands, then
-    hands it back for the caller's next await -- also when the step raised (its error must not swallow the cancellation
-    and let the caller settle an ordinary failure), and on Python 3.10, whose tasks keep no cancellation count."""
+    """#2649, #2660: a store step on the runtime-work door holds a cancellation that arrives while it runs until it
+    lands, then answers it from the step's outcome. ``_store_step`` hands a landed step's result back and the
+    cancellation to the caller's next await (also on Python 3.10, whose tasks keep no cancellation count);
+    ``_run_runtime_sync`` answers it at once. A failed step has no result to hand back, so either door answers its
+    cancellation at once, with the error as its cause: an error that replaced the cancellation would let the caller
+    settle an ordinary failure, or end the task failed where no await follows."""
 
     service = ScheduledTaskService(
         controller=SimpleNamespace(platform_settings_managers={}, im_clients={}),
@@ -20635,8 +20644,9 @@ def test_a_cancellation_caught_by_a_store_step_is_answered_at_the_next_await(
     async def caller() -> None:
         try:
             outcomes.append(await getattr(service, door)(step))
-        except RuntimeError as exc:
-            outcomes.append(str(exc))
+        except asyncio.CancelledError as exc:
+            outcomes.append(f"cancelled at the door, caused by: {exc.__cause__}")
+            raise
         try:
             await asyncio.sleep(5)
         except asyncio.CancelledError:
@@ -20653,9 +20663,10 @@ def test_a_cancellation_caught_by_a_store_step_is_answered_at_the_next_await(
             await run
 
     asyncio.run(_go())
-    assert outcomes == ["step error" if step_raises else "step result", "cancelled at the next await"]
+    assert outcomes == expected
 
 
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="Task.uncancel and asyncio.timeout are Python 3.11+")
 def test_a_timeout_that_expires_during_a_store_step_still_reads_as_a_timeout(tmp_path: Path) -> None:
     """#2649: a cancellation a store step holds and re-arms is counted once, so an ``asyncio.timeout`` around the caller
     still turns its own expiry into ``TimeoutError`` instead of letting a bare cancellation escape the caller."""
@@ -20673,3 +20684,62 @@ def test_a_timeout_that_expires_during_a_store_step_still_reads_as_a_timeout(tmp
                 await asyncio.sleep(5)
 
     asyncio.run(_go())
+
+
+def test_a_claim_whose_terminal_settlement_fails_while_cancelled_is_settled_as_cancelled(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """#2660: a claimed execution's terminal settlement is its last step, with no await after it. When a cancellation
+    arrives while it runs and the settlement then fails, the execution must still end cancelled, so the cancelled-claim
+    settlement takes over, instead of ending failed with the run left ``running`` and its claim no longer live."""
+
+    service, request_store, claimed = _sqlite_claimed_agent_run(tmp_path, monkeypatch)
+    service._execute_agent_run = AsyncMock(  # type: ignore[assignment]
+        return_value=scheduled_tasks.AgentRunExecutionResult(error=None, complete_on_return=True)
+    )
+    entered, release = threading.Event(), threading.Event()
+
+    def failing_settlement(*_args, **_kwargs):
+        entered.set()
+        assert release.wait(5)
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(service, "_settle_claimed_request", failing_settlement)
+
+    async def _go() -> None:
+        service._spawn_execution(claimed, None)
+        execution = service._inflight_executions[claimed.id]
+        assert await asyncio.to_thread(entered.wait, 5)
+        execution.cancel()
+        await asyncio.sleep(0.05)
+        release.set()
+        await asyncio.gather(execution, return_exceptions=True)
+        assert execution.cancelled(), "the settlement's error replaced the cancellation"
+        for _ in range(100):
+            if not service._cancel_settlements:
+                break
+            await asyncio.sleep(0.05)
+
+    asyncio.run(_go())
+    settled = request_store.get_run(claimed.id)
+    assert settled["status"] != "running", "the run was left running, with no live claim to settle it"
+    assert claimed.id not in service._live_claimed_run_ids
+
+
+def test_stop_waits_for_the_settlement_of_a_claim_cancelled_just_before_it(tmp_path: Path, monkeypatch) -> None:
+    """#2660: ``stop`` joins every execution, then the settlements their done-callbacks start. An execution already
+    cancelled and done when ``stop`` awaits it does not suspend, so its done-callback may not have run yet: ``stop``
+    must still wait for the settlement that callback starts, not return with the claim's requeue pending."""
+
+    service, request_store, claimed = _sqlite_claimed_agent_run(tmp_path, monkeypatch)
+
+    async def _go() -> str:
+        service._spawn_execution(claimed, None)
+        execution = service._inflight_executions[claimed.id]
+        execution.cancel()
+        await asyncio.sleep(0)
+        assert execution.cancelled() and claimed.id in service._inflight_executions, "its done-callback already ran"
+        await service.stop()
+        return request_store.get_run(claimed.id)["status"]
+
+    assert asyncio.run(_go()) == "queued", "stop returned before the cancelled claim was given back to the queue"
