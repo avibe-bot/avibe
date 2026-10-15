@@ -1,6 +1,6 @@
 # Runtime activation boundary off the controller loop (#2655)
 
-Status: design note, proposed. No code yet.
+Status: accepted (option 3), implemented in the PR that adds this note.
 
 ## Background
 
@@ -96,13 +96,17 @@ Change only the two off-loop holders, W1 and W2. Each one becomes:
    - If it is, the commit stands.
    - If it is not, the commit lost to a retirement. Compensate with the existing `requeue`, which moves the run from running back to queued and clears `pid`. Then report "not admitted", so the execution is skipped exactly as it is today.
 
-The registry owns this rule as one new method, `commit_then_confirm(identity, commit, compensate)`. `commit_if_current` and `hold_if_current` keep their meaning and are documented as loop-only, because their commit holds the boundary.
+The registry owns this rule as one new method, `commit_then_confirm(identity, commit, *, compensate)`. `compensate(value)` undoes a commit that lost. A caller passes `None` only when its own not-admitted path already undoes the commit: W2's existing `requeue` gives the claim back and clears the marker in the same write.
+
+`commit_if_current` and `hold_if_current` keep their meaning but are now loop-only, because their commit holds the boundary. The controller binds its loop thread to the registry (`bind_loop_thread`). Either method called on any other thread logs an error that names its caller, so a new off-loop holder cannot bring the stall back unnoticed.
 
 **Why this is correct**, case by case:
 
 - **The retirement reserves before admission.** The commit is refused before it runs. Unchanged.
 - **The commit lands before the retirement's final snapshot.**
-  - Codex `_generation_drained` and Claude idle eviction read durable ownership through `RuntimeOwnershipProvider`. If that predicate counts the run as an owner, the retirement declines, as it does today. The confirm step then sees `live`, or sees `retiring` and compensates; either is safe.
+  - Codex `_generation_drained` and Claude idle eviction read durable ownership through `RuntimeOwnershipProvider`. If that predicate counts the run as an owner, the retirement declines, as it does today.
+  - The confirm step then sees `live`, and the run proceeds. If the reservation is still open when the confirm step runs, it sees `retiring` and compensates, even though the retirement is about to abort. That compensated retry is a valid outcome: the run goes back to the queue and is claimed again once the generation is live.
+  - Only a confirm step that runs before the reservation, or after the abort, guarantees that this attempt proceeds.
   - If the predicate does not count the run, the retirement completes, and the next case applies.
   - Correctness therefore does not depend on what any predicate sees.
 - **The commit lands after the snapshot, or the predicate is in memory only** (OpenCode `lambda: True`, Claude cleanup). The retirement completes, and the confirm step sees the identity retired and compensates.
@@ -112,10 +116,23 @@ The registry owns this rule as one new method, `commit_then_confirm(identity, co
 
 **What changes:**
 - A retirement no longer waits for an in-flight W1 or W2 commit.
-- One test pins that wait: `test_hfr_137_fallback_pid_marker_first_blocks_retirement_until_commit` (`tests/test_runtime_activation.py:1058`, order asserted at :1117). It is restated as an outcome assertion: no execution proceeds on a generation retired before its start was confirmed. The cleanup-first and claim-first tests (:885, :932) keep their outcomes.
+- Two tests pinned the wait, and both are restated as outcome assertions: the cleanup no longer waits, and nothing starts on a generation retired before its claim or start was confirmed.
+  - The pid-marker test (`test_hfr_137_fallback_pid_marker_first_blocks_retirement_until_commit`) becomes `test_hfr_137_pid_marker_that_loses_to_cleanup_during_its_write_is_requeued`.
+  - The claim-first test becomes `test_hfr_137_claim_that_loses_to_cleanup_during_its_write_is_given_back`. The claim used to be admitted and then requeued by the start; now it is given back by its own confirm step, one step earlier.
+  - The cleanup-first test is unchanged.
 - A run may be `running` for a moment before it is compensated. Graceful retirement treats that as an owner and declines, which is the conservative choice.
 
-**If the compensating write fails**, the step still reports "not admitted", so nothing executes on the retired generation. The row is left running and is recovered by the stale-run sweep or `recover_processing`, like any other failed store write.
+**If the compensating write fails**, the step still reports "not admitted", so nothing executes on the retired generation. What happens to the run afterwards differs:
+- **W1.** The registry logs the failure. The claim is left running without a pid and is not a live claim, so the claimed-run recovery requeues it, and the run is retried.
+- **W2.** The requeue on the not-admitted path raises from the start step, so the execution never begins. But the marker it failed to clear stays on the row. Startup recovery (`recover_processing_runs`) and the stale-run sweep read a marker as an execution that may have begun, so they settle the run as interrupted, with its failure notice, instead of retrying it. On master the same double failure leaves no marker, and the run is retried.
+  - The marker is the commit itself, so no durable rollback exists short of a persisted generation, which is the rejected option 1.
+  - This is a deliberate trade-off: removing the loop stall costs a visible interrupted run in a doubly rare case. A retirement must land between W2's write and its confirm step, and the write that follows must then fail. Nothing ever runs on the retired generation, and nothing is lost silently.
+
+**What `requeue` does**, since it is the compensation (`mark_run_queued_from_running`). It is a status-guarded update, running to queued, that:
+- clears `started_at` and `pid`, bumps `updated_at`, and leaves the metadata untouched;
+- publishes one `runs.updated` event, which wakes the request, callback, failure-notice and stale-run lanes and refreshes the UI.
+
+It bumps no attempt or retry counter, sends no notification and touches no Delivery. Failure notices are driven by `owed_failure_notice` metadata, which it does not write. So a compensation does not count as a failed attempt. It is the same write and event the existing not-admitted path of W2 already makes.
 
 **What it removes:**
 - Failure 1: off the loop, the boundary is held only for constant-time sections, so a retirement on the loop never waits on I/O.
@@ -129,8 +146,8 @@ The registry owns this rule as one new method, `commit_then_confirm(identity, co
 
 | Caller | Thread | Invariant | After this change |
 | --- | --- | --- | --- |
-| W1 scheduler claim | worker | A queued run does not become running against a retiring or retired generation | Admit, commit, confirm; compensate with `requeue` |
-| W2 execution start | worker | The pid marker never stands after its generation retired; the execution is skipped | Admit, commit, confirm; compensate with `requeue` |
+| W1 scheduler claim | worker | A queued run does not become running against a retiring or retired generation | Admit, commit, confirm; `compensate` requeues the claim |
+| W2 execution start | worker | No execution starts on a generation retired before its start was confirmed | Admit, commit, confirm; the existing not-admitted `requeue` clears the marker (a failed clear settles the run as interrupted, see above) |
 | Session Turn admissions | loop | A non-admitted owner is persisted as queued, never promoted | Unchanged: `hold_if_current` |
 | Native start / agent-initiated turn | loop | A retired generation does not bind the gate or the durable Turn | Unchanged: `commit_if_current` |
 | SessionActivity writes | loop | A stale generation does not rebuild or complete an owner | Unchanged: `commit_if_current` |
@@ -141,15 +158,19 @@ The registry owns this rule as one new method, `commit_then_confirm(identity, co
 ## Test design
 
 1. **Inversion.** A worker in W1 waits for the SQLite writer, which a transaction on the loop thread holds before that transaction takes the boundary (`drain_delivery_queue`'s order). The loop thread must acquire the boundary at once (under 50 ms). The claim then commits after the loop's transaction, or is retried. Neither side waits 5 s.
-2. **Retirement during a contended commit.** W1's or W2's commit waits on a writer that another connection holds. Meanwhile the loop runs `reserve_retirement` or `retire_if_current`, which must return at once. When the commit lands, the confirm step compensates: the run is queued and nothing starts.
-3. **Admission first, graceful retirement.** The commit lands before Codex's drained snapshot. The retirement declines, and the run proceeds (unchanged behavior).
-4. **Compensation fails.** The compensating `requeue` raises. The execution is still skipped.
+2. **Retirement during a commit.** W1's or W2's write is held in flight. Meanwhile a cleanup runs `retire_if_current`, which must return at once. When the write lands, the confirm step compensates: the run is queued and nothing starts. What holds the write does not matter, because no boundary is held during it; the tests hold it with an event.
+3. **Admission first, graceful retirement.** The claim is confirmed before the retirement reserves. A retirement whose snapshot sees the owner declines, and the run proceeds (unchanged behavior). If the reservation overlaps the confirm step instead, the result is a compensated retry, as above. The test orders the two explicitly so that it is not scheduling-dependent.
+4. **Compensation fails.** The compensating `requeue` raises. Each test asserts the run's eventual state on a real SQLite store:
+   - W1: the claim is refused and the failure logged, and the claimed-run recovery puts the run back in the queue.
+   - W2: the execution never starts, and recovery settles the run as interrupted.
+5. **Off-loop guard.** With the loop thread bound, `commit_if_current` and `hold_if_current` called from a worker thread each log an error that names the caller; on the loop thread they log nothing.
 
-Test 1 fails on master today, with the 5.35 s stall above.
+On master, test 1 fails for the intended reason: the loop waits for the claim's busy timeout, 2 s in the test. The two restated tests in design 2 fail there because the cleanup waits for the write. Test 4 fails because the lost claim is admitted.
 
 ## Plan
 
-- [ ] Registry: add `commit_then_confirm`, and document `commit_if_current` and `hold_if_current` as loop-only.
-- [ ] Scheduler: move W1 (`_claim_pending_request`) and W2 (`_start_claimed_execution`) to it, with `requeue` as the compensation.
-- [ ] Tests: restate the pinned wait-order tests as outcome tests, and add test designs 1–4.
-- [ ] Optional: log an error when `commit_if_current` or `hold_if_current` runs off the loop thread, so a new off-loop holder is caught early.
+- [x] Registry: add `commit_then_confirm`, and document `commit_if_current` and `hold_if_current` as loop-only.
+- [x] Scheduler: move W1 (`_claim_pending_request`) and W2 (`_start_claimed_execution`) to it, with `requeue` as the compensation.
+- [x] Tests: restate the pinned wait-order tests as outcome tests, and add test designs 1–5.
+- [x] Guard: the controller binds its loop thread, and `commit_if_current` or `hold_if_current` off that thread logs an error naming the caller.
+- [x] Follow-up issue (#2664): W1 and W2 resolve identity from loop-owned adapter state on the worker. A concurrent mutation surfaces as `dictionary changed size during iteration`; it fails closed and is retried, but it is noisy.
