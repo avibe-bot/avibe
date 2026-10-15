@@ -88,7 +88,7 @@ The user has an Anthropic API key, an xAI API key and an OpenAI API key, and has
 - **The catalog is the overlay's `providers` section** (capability model §4), bundled with the code that sends its
   declarations. For each vendor and model family, per protocol, it holds:
   - the native declaration of each search tool the vendor offers, with its `include` values and list price;
-  - new, at vendor scope: `executor_model`, the vendor's lightweight model that runs proxied search calls (§6), e.g.
+  - new, at vendor scope: `executor_models`, the vendor's lightweight models that run proxied search calls, preferred first (§6), e.g.
     Anthropic's Haiku tier, OpenAI's mini tier, xAI's fast tier; the executor call uses the declaration of the family
     row that model matches. The implementation PR picks the shipped ids;
   - new: `image_models`, the vendor's image models with a one-line description, the endpoint kind (§7.4), the
@@ -480,9 +480,11 @@ These rules are C-1 rows in `cross-provider.md` and per-protocol rows in `conver
   and closed admission); only the per-turn executor binding goes. Stopping the turn cancels the call, and it is
   still metered. A candidate whose identity changed since the chain was built is not used.
 - **The chain, built at call time.**
-  1. Candidates are the Sources whose vendor offers the tool natively (§3.1), with `runs_on` holding for the
-     vendor's `executor_model` and no current negative `call` evidence for that pair. So a subscription that does
-     not list the vendor's lightweight model is excluded when the chain is built, not found by a 404.
+  1. Candidates are the Sources whose vendor offers the tool natively (§3.1) and that list one of the vendor's
+     `executor_models`: the first one the Source lists, exactly or as a dated snapshot, never a retired one. `runs_on`
+     must hold for it, with no current negative `call` evidence for that pair. A Source that lists none is excluded
+     when the chain is built, not found by a 404: an API-key Source admits unlisted models on a turn's hop, but a
+     call nobody asked for must not guess.
   2. Order: the turn's frozen effective order, which is the user's `executor_order` when set, then the remaining
      candidates in Vibey's Source order, as they stood at the turn's first resolution. A Source added mid-turn joins
      from the next turn.
@@ -491,16 +493,17 @@ These rules are C-1 rows in `cross-provider.md` and per-protocol rows in `conver
      calling a removed or re-identified Source. This is the same per-request admission every model request of the
      turn already gets (C-6 item 3, #2616's identity rule): the turn freezes the order, not the Sources' runtime, and a
      removed Source cannot be served at all. It calls the first admitted candidate: one short native request on
-     that Source's `executor_model`, with the
+     that Source's executor model, with the
      overlay's declaration, the tool forced where the protocol allows it (`tool_choice: "required"` on Responses;
      Anthropic is asked in the message alone), a fixed instruction to search and list numbered results with one or
      two cited sentences each, a small output cap, and no reasoning effort.
-  4. On a failure that normal routing fails over from, or a narrow-rule refusal (which also writes negative
-     evidence), it tries the next candidate. A model refusal (the upstream's machine code naming the model, such as
-     `model_not_found`, or a 404 `not_found_error`, as routing's classifier reads it; L1 hands no prose to it) skips
-     that Source for this call without settling its health, as `_InvocationUnsupported` does, and, because it names
-     the executor model, writes negative `call` evidence for (Source, `executor_model`, tool), so the Source leaves
-     the chain until the refusal is cleared or its wire stamp changes, and shows and clears like any refusal. A failure mid-stream moves on too: nothing
+  4. On a failure that normal routing fails over from (a transient one such as an overload or a server error
+     included), or a narrow-rule refusal (which also writes negative evidence), it tries the next candidate. A model
+     refusal (the upstream's machine code naming the model, such as `model_not_found`, or a 404 `not_found_error`, as
+     routing's classifier reads it; L1 hands no prose to it) skips that Source for this call without settling its
+     health, as `_InvocationUnsupported` does. It is not a refusal of the tool and writes no evidence: only the
+     narrow rule, an error naming the feature, does. With the executor model taken from the Source's listing, it
+     means a stale listing, which the Source's next inventory refresh corrects. A failure mid-stream moves on too: nothing
      reaches Vibey until the gateway returns the record, so "before output" here means before the result is
      returned, and the partial call is still metered on its Source. A completed response that never ran the tool
      (the model chose not to; Anthropic is asked in the message alone) ends the chain with a `failed` record: it is
@@ -825,7 +828,7 @@ under the freeze protocol (`model-hub-contracts/README.md`).
   `source_id`, → the read, §3.3) and
   `POST /api/models/sources/<source_id>/evidence/clear` (`{model_id, feature}` with an effort feature → the Source,
   for an effort refusal; capability model §5), each with its `api-response.schema.json` branch.
-- `provider-overlay.schema.json` gains `executor_model` per vendor and `image_models[]`.
+- `provider-overlay.schema.json` gains `executor_models[]` per vendor and `image_models[]`.
 - V2 config: `model_hub.hosted_tools` as §3.3.
 
 ### 10.4 Pricing
@@ -857,7 +860,7 @@ phase D's display work; that PR adds the codes' en and zh copy in `vibe/i18n` an
 
 | PR | Lane | Work | Depends on |
 | --- | --- | --- | --- |
-| **A1** Evidence, priors, settings | foundation | the evidence model: status-keyed records with `mode`, negative-only routing, no time limit (efforts included), the in-memory `wire` stamp computed at `sync_sources`, memory updated when a refusal's write fails, no `probe` basis or `shape`, the `hosted_wire` branch gone; the positive rule's entry point, which B1's observer calls; the clear endpoints (hosted and effort) with their edge and persistence rules; overlay `executor_model` and `image_models` (schema and loader; image entries land with B2); the `hosted_tools` config v2 with the generic loader rule; the hop-fact functions (§3.4) and the image enum function; the `hosted-tools-status` v2 read and per-field PUT with the `latest_ok` projection; removal of the probe stack (§11 Model Hub); the Model Hub contracts of §10.3 and the coordinated version event | — |
+| **A1** Evidence, priors, settings | foundation | the evidence model: status-keyed records with `mode`, negative-only routing, no time limit (efforts included), the in-memory `wire` stamp computed at `sync_sources`, memory updated when a refusal's write fails, no `probe` basis or `shape`, the `hosted_wire` branch gone; the positive rule's entry point, which B1's observer calls; the clear endpoints (hosted and effort) with their edge and persistence rules; overlay `executor_models` and `image_models` (schema and loader; image entries land with B2); the `hosted_tools` config v2 with the generic loader rule; the hop-fact functions (§3.4) and the image enum function; the `hosted-tools-status` v2 read and per-field PUT with the `latest_ok` projection; removal of the probe stack (§11 Model Hub); the Model Hub contracts of §10.3 and the coordinated version event | — |
 | **B1** Signal, refusal, executor chain | gateway | the observer's projection paths and the positive write at settlement (§3.2); `pin_unavailable.reason` and admission on negative evidence only; `HopResolution.hosted_tools` v2 from A1's facts, frozen in the turn trace with the executor order and the image enum; the executor chain (§6) with `{arguments}` bodies, `turn_not_live` / `tool_not_enabled`, failover, one deadline, `failed_attempts`, and the executor-model refusal; the C-6 text (§10.2); gateway removals (§11) | A1 |
 | **C1** Declarations and re-render | Vibey | declarations from facts and the turn freeze; the 409 matched on `type` and `code`; `pin_unavailable` surfaced to the loop and re-resolve with its bounds; the decrypt refusal; the in-flight rule; the C-1 changes of §10.1 (`execution.mode`, `failed_attempts`, `generate.model`, the two image error codes with en and zh copy); the localized context-load error for a row that no longer validates; Vibey removals (§11) | B1's HopResolution and executor body: developed on B1's branch and merged together with it |
 | **B2** Image endpoints | gateway | the engine images invoke path, `stream_wire`'s images taxonomy, the per-model `image` flag, the image narrow rule (upstream refusals only), request and response bounds, enum authorization; one hermetic engine E2E per image path; the overlay `image_models` entries for the paths that pass | A1, B1 |

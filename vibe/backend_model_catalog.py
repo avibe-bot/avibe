@@ -783,10 +783,10 @@ class ProviderModelOverlay:
 
 @dataclass(frozen=True)
 class ProviderVendorOverlay:
-    """One vendor of the ``providers`` section: its model families, executor model and image models."""
+    """One vendor of the ``providers`` section: its model families, executor models and image models."""
 
     models: tuple[ProviderModelOverlay, ...]
-    executor_model: str | None = None
+    executor_models: tuple[str, ...] = ()
     image_models: tuple[ImageModelSpec, ...] = ()
 
 
@@ -796,11 +796,14 @@ def bundled_provider_overlay() -> Mapping[str, tuple[ProviderModelOverlay, ...]]
     return MappingProxyType({vendor: entry.models for vendor, entry in bundled_provider_vendors().items()})
 
 
-def provider_executor_model(vendor: str) -> str | None:
-    """The vendor's lightweight model that runs proxied search calls (vibey-hosted-tools.md §6)."""
+def provider_executor_models(vendor: str) -> tuple[str, ...]:
+    """The vendor's lightweight models that run proxied search calls, preferred first (vibey-hosted-tools.md §6).
+
+    A Source runs the first of them it lists; each names its dated snapshots too.
+    """
 
     entry = bundled_provider_vendors().get(vendor.strip().lower())
-    return entry.executor_model if entry is not None else None
+    return entry.executor_models if entry is not None else ()
 
 
 def provider_image_models(vendor: str) -> tuple[ImageModelSpec, ...]:
@@ -875,17 +878,22 @@ def _overlay_vendor_id(vendor: str) -> str:
 
 
 def _overlay_vendor(raw: object) -> ProviderVendorOverlay:
-    vendor = _overlay_object(raw, "vendor entry", required=("models",), optional=("executor_model", "image_models"))
+    vendor = _overlay_object(raw, "vendor entry", required=("models",), optional=("executor_models", "image_models"))
     models = vendor["models"]
     if not isinstance(models, list):
         raise ValueError("models must be a list")
     image_models = vendor.get("image_models", [])
     if not isinstance(image_models, list):
         raise ValueError("image_models must be a list")
-    executor_model = vendor.get("executor_model")
+    executor_models = vendor.get("executor_models", [])
+    if not isinstance(executor_models, list):
+        raise ValueError("executor_models must be a list")
+    executor_ids = tuple(_overlay_token(item, "executor_models") for item in executor_models)
+    if len(set(executor_ids)) != len(executor_ids):
+        raise ValueError("executor_models must not repeat a model")
     return ProviderVendorOverlay(
         models=tuple(_overlay_model(item) for item in models),
-        executor_model=None if executor_model is None else _overlay_token(executor_model, "executor_model"),
+        executor_models=executor_ids,
         image_models=tuple(_overlay_image_model(item) for item in image_models),
     )
 

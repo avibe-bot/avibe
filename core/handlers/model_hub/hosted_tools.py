@@ -15,12 +15,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, replace
 from datetime import datetime
 from functools import lru_cache
 from importlib import resources
 from pathlib import Path
-from typing import Any, Callable, Literal, Mapping, Optional
+from typing import Any, Callable, Final, Literal, Mapping, Optional
 
 from config.v2_config import (
     MODEL_HUB_HOSTED_TOOLS,
@@ -39,7 +40,7 @@ from vibe.backend_model_catalog import (
     HostedToolSpec,
     ImageModelSpec,
     bundled_provider_vendors,
-    provider_executor_model,
+    provider_executor_models,
     provider_image_models,
     provider_overlay_entry,
 )
@@ -154,6 +155,10 @@ class HostedEvidence:
         return self.refusal(source, model_id, feature) is not None
 
 
+# A provider's dated snapshot of a model id, as `claude-haiku-4-5-20251001` is of `claude-haiku-4-5`.
+_DATED_SNAPSHOT: Final = re.compile(r"-\d{8}")
+
+
 @dataclass(frozen=True)
 class HostedToolFacts:
     """What priors and evidence say about one search tool on one hop (§3.4).
@@ -217,16 +222,16 @@ def executor_candidates(
 ) -> tuple[ExecutorCandidate, ...]:
     """The executor chain for a search tool, in effective order (§6).
 
-    Sources whose vendor offers the tool natively on its ``executor_model``,
-    with no current refusal for that pair: the user's ``executor_order`` first,
-    then Vibey's Source order.
+    Sources whose vendor offers the tool natively on the executor model they
+    list (``listed_executor_model``), with no current refusal for that pair:
+    the user's ``executor_order`` first, then Vibey's Source order.
     """
 
     if tool not in MODEL_HUB_SEARCH_TOOLS:
         return ()
     candidates: dict[str, ExecutorCandidate] = {}
     for source in _vibey_order(config):
-        model_id = provider_executor_model(source.vendor)
+        model_id = listed_executor_model(source)
         if model_id is None:
             continue
         spec = runs_on(source, model_id, tool, spec_for=spec_for)
@@ -238,13 +243,31 @@ def executor_candidates(
     return tuple(first + [candidate for source_id, candidate in candidates.items() if source_id not in order])
 
 
+def listed_executor_model(source: ModelHubSourceConfig) -> Optional[str]:
+    """The model this Source runs proxied searches on: the first of its vendor's executor models it lists (§6).
+
+    Only a listed model: an API-key Source admits unlisted models on a turn's
+    hop, but an executor call nobody asked for must not guess. A dated snapshot
+    of an entry counts as listing it, the latest first; a retired one does not.
+    """
+
+    listed = {model.id for model in source.models if not model.retired}
+    for entry in provider_executor_models(source.vendor):
+        if entry in listed:
+            return entry
+        snapshots = sorted(model for model in listed if _DATED_SNAPSHOT.fullmatch(model.removeprefix(entry)) and model != entry)
+        if snapshots:
+            return snapshots[-1]
+    return None
+
+
 def executor_vendors(tool: str) -> tuple[str, ...]:
-    """The vendors whose Sources can run a proxied search ``tool``: their executor model's family declares it."""
+    """The vendors whose Sources can run a proxied search ``tool``: one of their executor models' families declares it."""
 
     vendors = []
     for vendor, entry in bundled_provider_vendors().items():
-        family = provider_overlay_entry(vendor, entry.executor_model) if entry.executor_model else None
-        if family is not None and any(tool in specs for specs in family.hosted_tools.values()):
+        families = (provider_overlay_entry(vendor, model_id) for model_id in entry.executor_models)
+        if any(family is not None and any(tool in specs for specs in family.hosted_tools.values()) for family in families):
             vendors.append(vendor)
     return tuple(sorted(vendors))
 

@@ -234,7 +234,11 @@ _PRICE = (*_X_SEARCH, "price")
         pytest.param("xai", _edit((*_PRICE, "url"), "http://docs.x.ai/developers/pricing"), id="url-not-https"),
         pytest.param("xai", _edit((*_PRICE, "url"), _DROP), id="url-missing"),
         pytest.param("xai", _edit((*_PRICE, "extra", 0, "unit"), "image"), id="extra-unit-per-image"),
-        pytest.param("xai", _edit(("executor_model",), " "), id="executor-model-blank"),
+        pytest.param("xai", _edit(("executor_models", 0), " "), id="executor-model-blank"),
+        pytest.param("xai", _edit(("executor_models",), "grok-4.20-0309-non-reasoning"), id="executor-models-not-a-list"),
+        pytest.param(
+            "xai", _edit(("executor_models",), ["grok-4.20-0309-non-reasoning"] * 2), id="executor-model-repeated",
+        ),
         pytest.param("xai", _edit(("image_models",), {}), id="image-models-not-a-list"),
         pytest.param("xai", _image_edit(("kinds",), ["oauth"]), id="image-kind-unknown"),
         pytest.param("xai", _image_edit(("kinds",), []), id="image-kinds-empty"),
@@ -286,19 +290,20 @@ def test_an_image_model_entry_is_read_in_a_stable_form(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("vendor", sorted(BUNDLED["providers"]))
-def test_each_vendors_executor_model_runs_every_search_tool_the_vendor_offers(vendor):
+def test_each_vendors_executor_models_run_every_search_tool_the_vendor_offers(vendor):
     """MH-HOSTED-005: an executor model the overlay does not declare a tool on would silently drop the vendor from
-    that tool's executor chain."""
+    that tool's executor chain on every Source that lists it first."""
     offered = {
         (protocol, tool)
         for family in catalog.bundled_provider_overlay()[vendor]
         for protocol, tools in family.hosted_tools.items()
         for tool in tools
     }
-    executor = catalog.provider_executor_model(vendor)
-    assert (executor is not None) is bool(offered)
-    for protocol, tool in offered:
-        assert catalog.hosted_tool_spec(vendor, protocol, executor, tool) is not None, (protocol, tool)
+    executors = catalog.provider_executor_models(vendor)
+    assert bool(executors) is bool(offered)
+    for executor in executors:
+        for protocol, tool in offered:
+            assert catalog.hosted_tool_spec(vendor, protocol, executor, tool) is not None, (executor, protocol, tool)
 
 
 @pytest.mark.parametrize("providers", [[], "openai", None])

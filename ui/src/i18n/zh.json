@@ -4959,6 +4959,7 @@
           "image_argument_invalid": "图片调用的参数无法发送。",
           "image_reference_unreadable": "无法读取参考图片。",
           "provider_refused": "供应商拒绝了这次调用。",
+          "provider_overloaded": "供应商当前过载，请稍后重试。",
           "provider_timed_out": "调用超时。",
           "provider_unreachable": "无法连接供应商。",
           "provider_unreadable": "无法读取供应商的回复。",

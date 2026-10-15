@@ -873,6 +873,9 @@ def _executor_failure(outcome: RawCallOutcome | None, say: Callable[..., str], *
     )
     if outcome.upstream_detail:
         detail = f"{detail}: {outcome.upstream_detail}" if detail else outcome.upstream_detail
+    if classify_outcome(replace(outcome, stream_started=False)).reason == "server_error":
+        # An overload or server error is transient: the provider did not refuse the call.
+        return failure(say, "modelHub.hostedTools.providerOverloaded", detail=detail or outcome.kind.value)
     return failure(say, "modelHub.hostedTools.providerRefused", detail=detail or outcome.kind.value)
 
 
@@ -6946,17 +6949,15 @@ class ModelHubService:
 
         Nothing reaches Vibey until the chain returns, so a failure mid-response
         counts as before output here. A narrow rule's refusal records its
-        evidence, as on any hop. A refusal of the executor model records that
-        the Source does not run the tool on it, so the Source leaves the chain
-        until the refusal is cleared or its wire stamp changes.
+        evidence, as on any hop. A refusal of the executor model (the Source
+        does not serve it) skips the Source for this call only: it names the
+        model, not the tool, so it is no evidence about the tool (§6 step 4).
         """
 
         learned = await self._learn_capability_evidence(source, model_id, request, outcome)
         if learned is not None and learned.feature.kind == "hosted_tool":
             return True
         if not outcome.stream_started and names_model_refusal(outcome):
-            detail = f"{outcome.http_status or 'error'} {outcome.error_code or outcome.error_type or 'model'}"[:64]
-            await self.record_hosted_refusals(source, ((model_id, EvidenceFeature.hosted(tool, "call"), detail),))
             return True
         decision = classify_outcome(replace(outcome, stream_started=False))
         return decision.action in {"fallback", "refresh"}

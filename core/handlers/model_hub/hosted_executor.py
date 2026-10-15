@@ -166,6 +166,7 @@ Say = Callable[..., str]
 # worded in the user's language and shown as written.
 FAILURE_CODES: Final[Mapping[str, str]] = {
     "modelHub.hostedTools.providerRefused": "provider_refused",
+    "modelHub.hostedTools.providerOverloaded": "provider_overloaded",
     "modelHub.hostedTools.timedOut": "provider_timed_out",
     "modelHub.hostedTools.unreachable": "provider_unreachable",
     "modelHub.hostedTools.unreadable": "provider_unreadable",

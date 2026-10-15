@@ -153,13 +153,15 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
        `image_generate` a model outside the turn's frozen models, is 409 `tool_not_enabled`. Nothing runs. Stopping
        the turn cancels an admitted call, which is still metered.
      - **A search call runs on a chain** built from the turn's frozen executor order: each candidate is a Source
-       whose vendor offers the tool natively, called with its vendor's `executor_model`, and admitted on the final
-       snapshot when the gateway reaches it (`runs_on`, its identity, no current negative `call` evidence). The
-       gateway sends one short native request (the overlay's declaration; on Responses `tool_choice: "required"`;
-       Anthropic is asked in the message alone; no reasoning effort) and moves to the next candidate on a failure
-       normal routing fails over from, a narrow-rule refusal, or a failure mid-stream. A refusal of the executor
-       model (`model_not_found`) also writes negative `call` evidence for (Source, `executor_model`, tool). A
-       completed response that never ran the tool ends the chain. One deadline covers the whole chain (180 s).
+       whose vendor offers the tool natively, called with the first of its vendor's `executor_models` the Source
+       lists (a Source listing none is no candidate), and admitted on the final snapshot when the gateway reaches it
+       (`runs_on`, its identity, no current negative `call` evidence). The gateway sends one short native request
+       (the overlay's declaration; on Responses `tool_choice: "required"`; Anthropic is asked in the message alone;
+       no reasoning effort) and moves to the next candidate on a failure normal routing fails over from (an overload
+       or server error included), a narrow-rule refusal, a refusal of the executor model (`model_not_found`), or a
+       failure mid-stream. Only the narrow rule writes negative `call` evidence; a model refusal is not a refusal of
+       the tool. A completed response that never ran the tool ends the chain. One deadline covers the whole chain
+       (180 s).
      - **An `image_generate` call** runs directly on the image endpoint of the (Source, model) the turn's frozen
        models name (`vibey-hosted-tools.md` §7.4), admitted on the final snapshot; there is no chain and no
        fallback. Its arguments are `{model, prompt, size?, images?, n?}`, `images` being at most 4 base64 strings,
