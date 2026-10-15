@@ -1,6 +1,6 @@
 ---
 name: pr-delivery-loop
-description: Deliver implementation PRs across Avibe, avibe-backend, avibe-docs, avault, and vault-sandbox. Required for branch and scope discipline, Codex review, CI, circuit breaking, and user-facing close-out, regardless of agent backend.
+description: Deliver Avibe, backend, docs, avault and vault-sandbox PRs through worktrees, Codex review, CI, circuit breaking and gated close-out. Required on every Agent backend.
 ---
 
 # PR Delivery Loop
@@ -74,8 +74,8 @@ do not load them routinely. They introduce no additional delivery gates.
   manual/E2E checks, dependencies, and a **Known-by-design ledger** for intentional
   non-changes. Reply to repeated intentional findings with that ledger entry.
 - Use one durable combined PR + CI Watch per owner/concern through
-  `background-watch-hook`: `wait_pr.py`, `--forever`, required `--workflow`
-  names, optional `--branch`, and no fixed `--sha` during a normal delivery loop.
+  `background-watch-hook`'s preferred mode: `wait_pr.py`, `--forever`, required
+  `--workflow` names; no fixed `--sha` during a normal delivery loop.
   Set `--timeout 0` on both supervisor and waiter; do not impose a lifetime cap.
 - Seed one complete owner-specific baseline and arm the Watch before the first
   watched push or review trigger. For a new PR, create it first, then immediately
@@ -141,8 +141,8 @@ do not load them routinely. They introduce no additional delivery gates.
   person's pending review prevents a reply, never delete/dismiss it: preserve
   their drafts, report the blocker, keep observation live, and continue safe
   work. Retry the reply after they submit/discard it; do not hide the open thread.
-- Internal round reports identify PR/head, findings addressed, and remaining
-  gates in one or two lines. Do not add redundant round-summary PR comments.
+- Notify findings/errors promptly; keep half-success silent until CI/review
+  both pass. Fix reports include PR/head; no round-summary PR comments.
 
 ## 4. Complete delivery
 
