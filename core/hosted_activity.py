@@ -76,9 +76,6 @@ class HostedActivity:
     # How many calls ``cost`` covers: a native response's figure is for all its calls.
     cost_calls: int
     duration_ms: Optional[int] = None
-    # How many executor attempts the call was billed for: 1, or more when earlier billed ones failed and moved on
-    # (§6). An attempt that produced nothing and reported no tokens was not billed, and the producer does not list it.
-    billed_attempts: int = 1
     # ``cost`` is a lower bound: an attempt reported no price, so the call cost at least this.
     cost_at_least: bool = False
     # The stable code of a reason Avibe worded itself (``HOSTED_ERROR_CODES``), by
@@ -129,8 +126,6 @@ class HostedActivity:
         payload.update({key: value for key, value in optional.items() if value is not None})
         if self.extra_queries:
             payload["extra_queries"] = list(self.extra_queries)
-        if self.billed_attempts > 1:
-            payload["billed_attempts"] = self.billed_attempts
         if self.cost is not None:
             cost: dict[str, Any] = {"basis": self.cost.basis, "calls": self.cost_calls}
             if self.cost.usd is not None:
@@ -275,7 +270,6 @@ def proxy_activity(
         cost=cost,
         cost_calls=1,
         duration_ms=duration_ms,
-        billed_attempts=1 + len(execution.failed_attempts) if execution is not None else 1,
         cost_at_least=at_least,
     )
 
@@ -384,7 +378,5 @@ def hosted_line(activity: HostedActivity, lang: str, *, escape: Callable[[str], 
         parts.append(_count(activity, lang))
     else:
         parts.append(i18n_t(f"hostedTools.status.{activity.status}", lang, error=escape(_error_text(activity, lang))))
-    if activity.billed_attempts > 1:
-        parts.append(i18n_t("hostedTools.billedAttempts", lang, count=activity.billed_attempts))
     parts.append(_cost(activity, lang))
     return " · ".join(part for part in parts if part)

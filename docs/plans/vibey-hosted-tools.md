@@ -519,12 +519,10 @@ These rules are C-1 rows in `cross-provider.md` and per-protocol rows in `conver
     both render: `usd` is the sum of the known figures over the record's attempt and `failed_attempts[]`; every
     attempt `included` gives `included`; the basis is `reported` only when every summed figure is reported, else
     `list` (shown with ≈); an attempt without a `cost` makes the total a lower bound, shown as "at least $X" /
-    "至少 $X", never as complete. With `failed_attempts`, the card also names how many attempts were billed ("3
-    billed attempts" / "计费 3 次"): `failed_attempts` lists only billable attempts, so an attempt that produced nothing
-    and reported no tokens is not counted, as it added no cost. The projection carries the count as
-    `billed_attempts` (beside `cost.calls`, which stays the number of
-    calls one native response's figure covers) and the lower bound as `cost.at_least`; with no priced attempt to
-    sum, the cost is unknown rather than "at least $0".
+    "至少 $X", never as complete. The projection carries the lower bound as `cost.at_least`; `cost.calls` stays the
+    number of calls one native response's figure covers. With no priced attempt to sum, the cost is unknown rather
+    than "at least $0". No attempt count is shown: the producer lists billable attempts only and does not say whether
+    the last attempt was billed, so any count would be inferred, and the total already says what the call cost.
   - The executor request is a short model request because no vendor exposes search without a model: Anthropic,
     OpenAI's public API, xAI and Google all run search inside a model call.
 - **The result is the canonical record** (v1's rules, unchanged): a `HostedRecord` with `sources[]` in the

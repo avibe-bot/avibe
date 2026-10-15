@@ -1790,7 +1790,6 @@
       "image_generate": "图片生成"
     },
     "quoted": "“{subject}”",
-    "billedAttempts": "计费 {count} 次",
     "mode": {
       "native": "原生（{provider}）",
       "proxy": "由 {provider} 代理",

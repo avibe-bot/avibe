@@ -49,25 +49,20 @@ const formatBytes = (bytes: number): string =>
 
 /**
  * What a call cost, only when it is known; unknown is never shown as zero, and a
- * lower bound (an attempt reported no price) never as a complete figure. A call
- * billed for several executor attempts says how many, so a total above one call's
- * price explains itself.
+ * lower bound (an attempt reported no price) never as a complete figure.
  */
 const useHostedCost = (card: HostedActivity): string | null => {
   const { t } = useTranslation();
   const cost = card.cost;
-  const attempts = card.billed_attempts && card.billed_attempts > 1 ? t('chat.agentActivity.hosted.billedAttempts', { count: card.billed_attempts }) as string : null;
-  const figure = !cost
-    ? null
-    : cost.basis === 'included'
-      ? t('chat.agentActivity.hosted.cost.included') as string
-      : cost.usd === undefined
-        ? null
-        : t(cost.basis === 'list' ? 'chat.agentActivity.hosted.cost.list' : 'chat.agentActivity.hosted.cost.reported', { usd: formatUsd(cost.usd) }) as string;
-  const bounded = figure !== null && cost?.at_least ? t('chat.agentActivity.hosted.cost.atLeast', { cost: figure }) as string : figure;
-  const total = bounded !== null && cost && cost.calls > 1 ? t('chat.agentActivity.hosted.cost.calls', { cost: bounded, count: cost.calls }) as string : bounded;
-  if (attempts === null) return total;
-  return total === null ? attempts : t('chat.agentActivity.hosted.billedAttemptsCost', { attempts, cost: total }) as string;
+  if (!cost) return null;
+  const figure = cost.basis === 'included'
+    ? t('chat.agentActivity.hosted.cost.included') as string
+    : cost.usd === undefined
+      ? null
+      : t(cost.basis === 'list' ? 'chat.agentActivity.hosted.cost.list' : 'chat.agentActivity.hosted.cost.reported', { usd: formatUsd(cost.usd) }) as string;
+  if (figure === null) return null;
+  const bounded = cost.at_least ? t('chat.agentActivity.hosted.cost.atLeast', { cost: figure }) as string : figure;
+  return cost.calls > 1 ? t('chat.agentActivity.hosted.cost.calls', { cost: bounded, count: cost.calls }) as string : bounded;
 };
 
 /** 「原生 · Anthropic」 or 「由 xAI 代理」 once it completed; until then, its status. */

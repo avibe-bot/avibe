@@ -316,25 +316,25 @@ def _attempt(source_id: str, billing: str, cost: HostedCost | None):
 @pytest.mark.parametrize(
     ("failed", "last", "cost", "line_tail"),
     [
-        # A metered failure before the call that ran: both charges, and how many billed attempts they cover.
+        # A metered failure before the call that ran: both charges, summed.
         ((("src_relaygpt1", "metered", HostedCost(basis="list", usd=0.02)),), HostedCost(basis="reported", usd=0.11),
-         {"basis": "list", "usd": 0.13, "calls": 1}, "2 billed attempts · ≈ $0.13"),
+         {"basis": "list", "usd": 0.13, "calls": 1}, "≈ $0.13"),
         ((("src_relaygpt1", "metered", HostedCost(basis="reported", usd=0.02)),), HostedCost(basis="reported", usd=0.11),
-         {"basis": "reported", "usd": 0.13, "calls": 1}, "2 billed attempts · $0.13"),
+         {"basis": "reported", "usd": 0.13, "calls": 1}, "$0.13"),
         # A subscription attempt adds no money.
         ((("src_chatgpt01", "monthly", HostedCost(basis="included")),), HostedCost(basis="reported", usd=0.11),
-         {"basis": "reported", "usd": 0.11, "calls": 1}, "2 billed attempts · $0.11"),
+         {"basis": "reported", "usd": 0.11, "calls": 1}, "$0.11"),
         # A billed attempt with no known price: the total is a lower bound, never shown as complete.
         ((("src_relaygpt1", "metered", None),), HostedCost(basis="reported", usd=0.11),
-         {"basis": "reported", "usd": 0.11, "calls": 1, "at_least": True}, "2 billed attempts · at least $0.11"),
+         {"basis": "reported", "usd": 0.11, "calls": 1, "at_least": True}, "at least $0.11"),
         # Nothing priced to sum: the cost is unknown, not "at least $0".
-        ((("src_chatgpt01", "monthly", HostedCost(basis="included")),), None, None, "2 billed attempts"),
-        ((("src_relaygpt1", "metered", None),), None, None, "2 billed attempts"),
+        ((("src_chatgpt01", "monthly", HostedCost(basis="included")),), None, None, None),
+        ((("src_relaygpt1", "metered", None),), None, None, None),
     ],
 )
 def test_a_proxied_calls_cost_counts_every_billed_attempt(failed, last, cost, line_tail):
-    """MH-HOSTED-GATEWAY-005: the card and the IM line show what the whole executor chain cost, never less, and how
-    many attempts it was billed for."""
+    """MH-HOSTED-GATEWAY-005: the card and the IM line show what the whole executor chain cost, never less, and a
+    total an attempt left unpriced only as a lower bound."""
 
     activity = proxy_activity(
         _x_call("call_x5", "from:OpenAI"),
@@ -344,8 +344,9 @@ def test_a_proxied_calls_cost_counts_every_billed_attempt(failed, last, cost, li
         ),
     )
     payload = activity.to_payload()
-    assert (payload.get("cost"), payload.get("billed_attempts")) == (cost, 2)
-    assert hosted_line(activity, "en").endswith(f" · {line_tail}")
+    assert payload.get("cost") == cost
+    line = hosted_line(activity, "en")
+    assert line.endswith(f" · {line_tail}") if line_tail else "$" not in line
 
 
 def test_the_im_line_escapes_the_quoted_subject_for_its_destination():

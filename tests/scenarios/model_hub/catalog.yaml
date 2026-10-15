@@ -237,14 +237,14 @@ scenarios:
       - tests/test_provider_overlay.py::test_an_image_model_entry_is_read_in_a_stable_form
       - tests/test_provider_overlay.py::test_each_vendors_executor_model_runs_every_search_tool_the_vendor_offers
   - id: MH-HOSTED-UI-008
-    name: The execution-process group draws a native, a proxied and a direct hosted call as one card, with how it ran, its known cost (a lower bound when an attempt was unpriced, with the billed-attempt count) and its sources or image
+    name: The execution-process group draws a native, a proxied and a direct hosted call as one card, with how it ran, its known cost (a lower bound when an attempt was unpriced) and its sources or image
     status: covered
     kind: observation
     layer: unit
     test:
       - 'ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-008: shows a native and a proxied call the same way, each with how it ran and its known cost'
       - 'ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-008: shows a direct image call with how it ran, its file and the prompt it rendered, and no cost when none is known'
-      - 'ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-008: names how many attempts a call was billed for, and a total an attempt left unpriced only as a lower bound'
+      - 'ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-008: shows a total an unpriced attempt left only as a lower bound'
   - id: MH-HOSTED-UI-009
     name: A hosted call's card payload is projected from the canonical C-1 records in the shape the Web renders
     status: covered

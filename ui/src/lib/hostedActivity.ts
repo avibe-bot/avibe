@@ -48,9 +48,6 @@ export type HostedActivity = {
   quality?: string;
   revised_prompt?: string;
   duration_ms?: number;
-  /** How many executor attempts the call was billed for, when earlier billed ones failed and moved on; absent for one.
-   *  An attempt that produced nothing and reported no tokens was not billed and is not counted. */
-  billed_attempts?: number;
   /** Absent when no price is known: unknown is never shown as zero. ``calls`` is how many calls it covers, and
    *  ``at_least`` marks a lower bound: an attempt reported no price. */
   cost?: { basis: 'reported' | 'list' | 'included'; usd?: number; calls: number; at_least?: boolean };
