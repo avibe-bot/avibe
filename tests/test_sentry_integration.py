@@ -25,6 +25,17 @@ def _config() -> V2Config:
     )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_user_state(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(home / "data"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(home / "cache"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(home / "state"))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe"))
+
+
 def test_resolve_sentry_options_prefers_environment(monkeypatch):
     monkeypatch.setenv("VIBE_SENTRY_DSN", "https://env@example.ingest.sentry.io/2")
     monkeypatch.setenv("VIBE_DEPLOYMENT_ENV", "regression")
@@ -53,12 +64,12 @@ def test_resolve_sentry_options_honors_empty_env_dsn_as_opt_out(monkeypatch):
     assert sentry_integration.resolve_sentry_options() is None
 
 
-def test_detect_sentry_environment_defaults_to_local(monkeypatch):
+def test_detect_sentry_environment_defaults_to_local(monkeypatch, tmp_path):
     monkeypatch.delenv("VIBE_SENTRY_ENVIRONMENT", raising=False)
     monkeypatch.delenv("SENTRY_ENVIRONMENT", raising=False)
     monkeypatch.delenv("VIBE_DEPLOYMENT_ENV", raising=False)
     monkeypatch.delenv("E2E_TEST_MODE", raising=False)
-    monkeypatch.setenv("AVIBE_HOME", "/tmp/vibe-remote-home")
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe"))
     monkeypatch.setattr(sentry_integration, "Path", lambda _: type("P", (), {"exists": staticmethod(lambda: False)})())
 
     assert sentry_integration.detect_sentry_environment() == "local"
@@ -72,18 +83,18 @@ def test_detect_sentry_environment_uses_explicit_deployment_env(monkeypatch):
     assert sentry_integration.detect_sentry_environment() == "production"
 
 
-def test_detect_sentry_environment_marks_integration_mode(monkeypatch):
+def test_detect_sentry_environment_marks_integration_mode(monkeypatch, tmp_path):
     monkeypatch.delenv("VIBE_SENTRY_ENVIRONMENT", raising=False)
     monkeypatch.delenv("SENTRY_ENVIRONMENT", raising=False)
     monkeypatch.delenv("VIBE_DEPLOYMENT_ENV", raising=False)
     monkeypatch.setenv("E2E_TEST_MODE", "true")
-    monkeypatch.setenv("AVIBE_HOME", "/tmp/vibe-remote-home")
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe"))
 
     assert sentry_integration.detect_sentry_environment() == "integration"
 
 
-def test_build_sentry_contexts_contains_debug_metadata(monkeypatch):
-    monkeypatch.setenv("AVIBE_HOME", "/tmp/vibe-remote-home")
+def test_build_sentry_contexts_contains_debug_metadata(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe"))
 
     contexts = sentry_integration.build_sentry_contexts(_config(), component="service", environment="regression")
 
@@ -535,6 +546,60 @@ def test_before_send_keeps_request_records_to_their_origin(monkeypatch, tmp_path
     assert http_crumb["data"]["http.response.status_code"] == 404
     assert subprocess_crumb["message"] == "git"
     assert subprocess_crumb["data"] == {}
+
+
+def test_known_secret_matching_survives_normalization_and_early_breadcrumbs(monkeypatch, tmp_path):
+    """A credential is protected before and after delimiter normalization on both hooks."""
+    import json
+
+    from config.v2_config import LarkConfig
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe"))
+    monkeypatch.setenv("VIBE_SENTRY_EVENT_RATE_LIMIT_PER_WINDOW", "0")
+    config = _config()
+    config.lark = LarkConfig(app_secret="demo%3Acredential")
+    config.save()
+
+    breadcrumb = sentry_integration.before_breadcrumb(
+        {"message": "early breadcrumb demo%3Acredential"}, {}
+    )
+    event = {
+        "message": "event demo%3Acredential and normalized demo:credential",
+        "breadcrumbs": {"values": [breadcrumb]},
+    }
+    sent = sentry_integration.before_send(event, {})
+
+    rendered = json.dumps(sent)
+    assert "demo%3Acredential" not in rendered
+    assert "demo:credential" not in rendered
+    assert breadcrumb["message"] == "early breadcrumb [Filtered]"
+
+
+def test_known_secret_redaction_preserves_protocol_keys_and_filters_user_maps(monkeypatch, tmp_path):
+    """Stored values cannot rewrite Sentry schema keys while custom maps stay protected."""
+    from config.v2_config import LarkConfig
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe"))
+    monkeypatch.setenv("VIBE_SENTRY_EVENT_RATE_LIMIT_PER_WINDOW", "0")
+    config = _config()
+    config.lark = LarkConfig(app_secret="type")
+    config.save()
+
+    sent = sentry_integration.before_send(
+        {
+            "message": "failure type",
+            "exception": {"values": [{"type": "ValueError", "value": "type"}]},
+            "spans": [{"op": "http.client", "data": {"type": "type"}}],
+            "extra": {"type": "type"},
+        },
+        {},
+    )
+
+    assert sent["message"] == "failure [Filtered]"
+    assert sent["exception"]["values"][0]["type"] == "ValueError"
+    assert sent["exception"]["values"][0]["value"] == "[Filtered]"
+    assert sent["spans"][0]["data"] == {"[Filtered]": "[Filtered]"}
+    assert sent["extra"] == {"[Filtered]": "[Filtered]"}
 
 
 def test_performance_transactions_are_scrubbed_like_events(monkeypatch, tmp_path):

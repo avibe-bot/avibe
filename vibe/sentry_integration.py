@@ -335,9 +335,11 @@ def _known_secret_files() -> list[tuple[Path, frozenset[str]]]:
 
 def _secret_spellings(value: str) -> set[str]:
     # The value as it appears raw, URL-encoded, escaped inside JSON or a repr, and
-    # with either quote backslash-escaped as a repr picks its quote.
+    # with either quote backslash-escaped as a repr picks its quote. Every spelling
+    # also gets the same delimiter normalization that the outbound scrubber applies,
+    # so an early breadcrumb cannot turn a credential into a new unmatched value.
     backslashed = value.replace("\\", "\\\\")
-    return {
+    base_spellings = {
         value,
         quote(value, safe=""),
         json.dumps(value)[1:-1],
@@ -345,6 +347,16 @@ def _secret_spellings(value: str) -> set[str]:
         backslashed.replace("'", "\\'"),
         backslashed.replace('"', '\\"'),
     }
+    spellings: set[str] = set()
+    for spelling in base_spellings:
+        normalized = spelling
+        for _ in range(4):
+            decoded = _ENCODED_DELIMITER_RE.sub(_decoded_delimiter, normalized)
+            spellings.add(decoded)
+            if decoded == normalized:
+                break
+            normalized = decoded
+    return spellings
 
 
 def _secret_alternative(spelling: str) -> str:
@@ -407,16 +419,113 @@ def _known_secret_pattern() -> re.Pattern[str] | None:
         return pattern
 
 
-def _redact_matches(value: Any, pattern: re.Pattern[str]) -> Any:
+_SENTRY_PROTOCOL_KEYS = frozenset(
+    {
+        "abs_path",
+        "breadcrumbs",
+        "category",
+        "colno",
+        "contexts",
+        "data",
+        "debug_meta",
+        "description",
+        "dist",
+        "environment",
+        "event_id",
+        "exception",
+        "extra",
+        "fingerprint",
+        "filename",
+        "function",
+        "grouping_config",
+        "in_app",
+        "instruction_offset",
+        "level",
+        "line",
+        "lineno",
+        "logger",
+        "mechanism",
+        "message",
+        "module",
+        "modules",
+        "name",
+        "op",
+        "origin",
+        "package",
+        "platform",
+        "raw",
+        "release",
+        "request",
+        "response",
+        "sdk",
+        "server_name",
+        "span_id",
+        "spans",
+        "stacktrace",
+        "start_timestamp",
+        "status",
+        "tags",
+        "thread_id",
+        "timestamp",
+        "trace_id",
+        "transaction",
+        "transaction_info",
+        "type",
+        "user",
+        "value",
+        "values",
+        "vars",
+    }
+)
+# These containers have a Sentry protocol shape. Their own keys stay intact, but
+# nested maps named in _USER_MAP_KEYS are application-controlled and still have
+# their keys redacted when they equal a stored credential.
+_SENTRY_PROTOCOL_CONTAINERS = frozenset(
+    {
+        "breadcrumbs",
+        "entries",
+        "exception",
+        "frames",
+        "logentry",
+        "mechanism",
+        "packages",
+        "request",
+        "response",
+        "sdk",
+        "spans",
+        "stacktrace",
+        "user",
+        "values",
+    }
+)
+_USER_MAP_KEYS = frozenset({"contexts", "cookies", "data", "env", "extra", "headers", "tags", "vars"})
+
+
+def _redaction_child_mode(mode: str, key: str) -> str:
+    if mode == "user":
+        return "user"
+    if key in _USER_MAP_KEYS:
+        return "user"
+    if key in _SENTRY_PROTOCOL_CONTAINERS:
+        return "protocol"
+    return "user"
+
+
+def _redact_matches(value: Any, pattern: re.Pattern[str], *, mode: str = "protocol") -> Any:
     if isinstance(value, dict):
-        return {
-            (pattern.sub(_REDACTED, key) if isinstance(key, str) else key): _redact_matches(item, pattern)
-            for key, item in value.items()
-        }
+        redacted: dict[Any, Any] = {}
+        for key, item in value.items():
+            if isinstance(key, str) and (mode == "user" or key not in _SENTRY_PROTOCOL_KEYS):
+                out_key = pattern.sub(_REDACTED, key)
+            else:
+                out_key = key
+            child_mode = _redaction_child_mode(mode, key) if isinstance(key, str) else mode
+            redacted[out_key] = _redact_matches(item, pattern, mode=child_mode)
+        return redacted
     if isinstance(value, list):
-        return [_redact_matches(item, pattern) for item in value]
+        return [_redact_matches(item, pattern, mode=mode) for item in value]
     if isinstance(value, tuple):
-        return tuple(_redact_matches(item, pattern) for item in value)
+        return tuple(_redact_matches(item, pattern, mode=mode) for item in value)
     if isinstance(value, str):
         return pattern.sub(_REDACTED, value)
     return value
@@ -758,8 +867,14 @@ def before_send_transaction(event: dict[str, Any], hint: dict[str, Any]) -> Opti
 
 
 def _scrub_outgoing(event: dict[str, Any]) -> dict[str, Any]:
-    scrubbed = scrub_data(_minimize_event(event))
+    # Match stored credentials before normalization, then once again after it.
+    # The second pass covers values that arrived through before_breadcrumb or were
+    # transformed by URL/delimiter minimization into another spelling.
     known_secrets = _known_secret_pattern()
+    protected: Any = event
+    if known_secrets is not None:
+        protected = _redact_matches(protected, known_secrets)
+    scrubbed = scrub_data(_minimize_event(protected))
     if known_secrets is not None:
         scrubbed = _redact_matches(scrubbed, known_secrets)
     return scrubbed
@@ -767,7 +882,7 @@ def _scrub_outgoing(event: dict[str, Any]) -> dict[str, Any]:
 
 def before_breadcrumb(crumb: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any]:
     del hint
-    return scrub_data(_minimize_breadcrumb(crumb))
+    return _scrub_outgoing(crumb)
 
 
 def init_sentry(config: V2Config, component: str, enable_fastapi: bool = False) -> bool:
