@@ -15,6 +15,7 @@ differ, under a running runner.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import shlex
@@ -22,7 +23,7 @@ import signal
 import sys
 from collections import deque
 from dataclasses import dataclass
-from typing import Callable, Collection, Mapping, Optional
+from typing import Awaitable, Callable, Collection, Mapping, Optional
 
 from config import paths as config_paths
 from core import watch_worker
@@ -289,7 +290,9 @@ async def run_supervised_command(
     cwd: str,
     timeout_seconds: float,
     label: str,
-    on_spawn: Optional[Callable[[int, Optional[PersistedProcessIdentity]], None]] = None,
+    on_spawn: Optional[
+        Callable[[int, Optional[PersistedProcessIdentity]], Optional[Awaitable[None]]]
+    ] = None,
     max_output_bytes: Optional[int] = None,
     env: Optional[Mapping[str, str]] = None,
     extra_env: Optional[Mapping[str, str]] = None,
@@ -338,7 +341,11 @@ async def run_supervised_command(
             # other failure here rather than leaking the very orphan it is protecting
             # against. Still before the spec is written, so the supervisor is blocked
             # on stdin and nothing the user asked for has started yet.
-            on_spawn(process.pid, identity)
+            # A callback that persists the worker may do so off the loop and hand back
+            # the awaitable; the spec is not written until it has landed.
+            recorded = on_spawn(process.pid, identity)
+            if inspect.isawaitable(recorded):
+                await recorded
         if process.stdin is None:
             await terminate_and_communicate(process, logger, label)
             raise RuntimeError("watch worker supervisor stdin is unavailable")
