@@ -61,6 +61,17 @@ CODEX_REVIEW_PASS_REACTION_USERS = {
     "chatgpt-codex-connector[bot]",
 }
 CODEX_REVIEW_PASS_REACTION_CONTENT = "+1"
+CODEX_STANDARD_SUMMARY_FOOTER = (
+    "<details> <summary>ℹ️ About Codex in GitHub</summary>",
+    "<br/>",
+    "[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general).",
+    "Codex reviews are triggered when you",
+    "- Open a pull request for review",
+    "- Mark a draft as ready",
+    "- Comment \"@codex review\" or \"@codex security review\".",
+    "Codex reacts with 👀 while any review is running, comments if it has suggestions, and reacts with 👍 once all reviews finish with no findings.",
+    "</details>",
+)
 
 # Comments that only drive the review loop rather than report its result. On a
 # busy PR these outnumber the real findings, and each one costs a full Agent turn.
@@ -335,10 +346,7 @@ def _is_codex_summary_shape(body: str) -> bool:
     suffix = [line.strip() for line in lines[table_end + 1:] if line.strip()]
     if not suffix:
         return True
-    if not (suffix[0].startswith("<details") and "About Codex in GitHub" in suffix[0]):
-        return False
-    closing = next((index for index, line in enumerate(suffix) if "</details>" in line), None)
-    return closing is not None and not any(suffix[closing + 1:])
+    return tuple(suffix) == CODEX_STANDARD_SUMMARY_FOOTER
 
 
 def _is_codex_clean_pass_body(body: str) -> bool:

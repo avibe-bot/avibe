@@ -4598,7 +4598,12 @@ def test_coalescing_ignores_codex_summary_progress_but_not_errors(tmp_path, stat
         f"| 📝 **Code Review** | ✅ **{status}** | `{COALESCED_HEAD[:7]}` | New commits |\n\n"
         "<details> <summary>ℹ️ About Codex in GitHub</summary>\n"
         "<br/>\n"
-        "Codex reacts with 👀 while any review is running and with 👍 once reviews finish.\n"
+        "[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general).\n"
+        "Codex reviews are triggered when you\n"
+        "- Open a pull request for review\n"
+        "- Mark a draft as ready\n"
+        "- Comment \"@codex review\" or \"@codex security review\".\n"
+        "Codex reacts with 👀 while any review is running, comments if it has suggestions, and reacts with 👍 once all reviews finish with no findings.\n"
         "</details>"
     )}
     rc, output, _ = _ci_cycle(
@@ -4608,6 +4613,30 @@ def test_coalescing_ignores_codex_summary_progress_but_not_errors(tmp_path, stat
         assert rc == 0 and "issue_comment #601" in output
     else:
         assert (rc, output) == (124, "")
+
+
+def test_coalescing_surfaces_an_unknown_codex_summary_footer(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
+    summary = {**_clean_codex_comment(), "body": (
+        "<!-- codex-pull-request-review-summary -->\n"
+        "<!-- codex-review-state:v1 {\"code_review\":{\"status\":\"running\"}} -->\n"
+        "## Codex Review Summary\n\n"
+        "This comment shows the latest Codex review activity on this pull request.\n\n"
+        "| Review | Status | Commit | Review trigger |\n"
+        "| --- | --- | --- | --- |\n"
+        f"| 📝 **Code Review** | 🔄 **Running** | `{COALESCED_HEAD[:7]}` | New commits |\n\n"
+        "<details><summary>About Codex in GitHub</summary>\n"
+        "The reviewer noted an authentication bypass in the generated report.\n"
+        "</details>"
+    )}
+    rc, output, _ = _ci_cycle(
+        module, path, [_success_state(pending, issue_comments=[summary])], extra_args=("--coalesce-success",),
+    )
+    assert rc == 0 and "issue_comment #601" in output
+    assert "success candidate" not in output
 
 
 def test_coalescing_policy_requires_ci_and_has_independent_cursor_ownership():
