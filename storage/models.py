@@ -375,6 +375,15 @@ agent_runs = Table(
             "and callback_terminal_turn_id is not null and session_id is not null"
         ),
     ),
+    # A callback child by the parent Run and actor it answers (migration 0066).
+    Index(
+        "ix_agent_runs_callback_parent",
+        "parent_run_id",
+        "source_actor",
+        "created_at",
+        "id",
+        sqlite_where=text("run_type = 'agent_run' and source_kind = 'callback'"),
+    ),
     # Leading-timestamp index for the run-graph window scan: updated_at bumps on
     # every state change, so it is the single column that scan filters on.
     Index("ix_agent_runs_updated", "updated_at"),

@@ -14711,3 +14711,56 @@ def test_an_escalated_command_failure_is_never_delivered_a_notice(
         "the suppression leaked to un-escalated failures; every failed command fire "
         "would go silent"
     )
+
+
+def test_a_callback_childs_lookup_seeks_its_parent_rather_than_walking_every_agent_run(tmp_path: Path) -> None:
+    """#2524: enqueueing a callback first looks for an existing child of the same parent and actor, holding SQLite's
+    write lock. The lookup seeks that parent's callback children in order, never every ``agent_run`` and a sort."""
+
+    sqlite, _ = _store(tmp_path)
+    sqlite.enqueue_run(
+        {
+            "id": "run-parent",
+            "request_type": "agent_run",
+            "status": "succeeded",
+            "session_id": "session-callee",
+            "created_at": "2026-10-15T00:00:00+00:00",
+        }
+    )
+    child = {
+        "id": "run-callback-child",
+        "request_type": "agent_run",
+        "status": "queued",
+        "source_kind": "callback",
+        "source_actor": "vibe",
+        "parent_run_id": "run-parent",
+        "session_id": "session-caller",
+        "created_at": "2026-10-15T00:01:00+00:00",
+    }
+    plans = _agent_run_query_plans(
+        sqlite,
+        tmp_path / "state" / "vibe.sqlite",
+        lambda: sqlite.enqueue_callback_run(child, parent_run_id="run-parent", source_actor="vibe"),
+    )
+    (plan,) = [lines for statement, lines in plans if "agent_runs.parent_run_id = " in statement]
+    assert any("INDEX ix_agent_runs_callback_parent (parent_run_id=? AND source_actor=?)" in line for line in plan), plan
+    assert not any("TEMP B-TREE" in line for line in plan), plan
+
+
+def test_a_watchs_heartbeat_is_read_by_its_row_rather_than_every_heartbeat(tmp_path: Path) -> None:
+    """#2524: a watch's details read its supervisor heartbeat on the loop's paths; one row per watch ever run
+    accumulates, so the read seeks that watch's row by primary key."""
+
+    sqlite, _ = _store(tmp_path)
+    _watch(sqlite, "watch-1")
+    sqlite.write_watch_runtime(
+        {"watches": {"watch-1": {"running": True, "started_at": "2026-10-15T00:00:00+00:00"}}},
+        updated_at="2026-10-15T00:00:00+00:00",
+    )
+    watch: dict = {}
+    plans = _agent_run_query_plans(
+        sqlite, tmp_path / "state" / "vibe.sqlite", lambda: watch.update(sqlite.get_watch("watch-1") or {}),
+    )
+    (plan,) = [lines for statement, lines in plans if "agent_runs.pid" in statement]
+    assert plan and all("(id=?)" in line for line in plan if line.startswith("SEARCH agent_runs")), plan
+    assert watch["runtime"]["running"] is True
