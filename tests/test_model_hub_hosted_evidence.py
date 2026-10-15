@@ -95,6 +95,8 @@ ITEMS = [
 async def test_a_served_response_proves_only_its_own_completed_search_item(
     protocol: str, item: dict, tool: str | None, terminal: str, stream: bool,
 ) -> None:
+    """MH-HOSTED-GATEWAY-006: a failed, unfinished or other item proves nothing, and neither does a failed response."""
+
     payload = WIRE[protocol][0 if stream else 1](item, terminal)
 
     async def respond(_request: web.Request) -> web.Response:

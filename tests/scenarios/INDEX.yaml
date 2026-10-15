@@ -100,6 +100,7 @@ capabilities:
       - tests/test_model_hub_declared_tools.py
       - tests/test_model_hub_l3.py
       - tests/test_model_hub_hosted_executor.py
+      - tests/test_model_hub_hosted_evidence.py
       - tests/test_model_hub_usage.py
       - tests/test_ui_server_fastapi.py
       - tests/test_model_hub_quota.py

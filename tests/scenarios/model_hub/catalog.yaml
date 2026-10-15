@@ -44,6 +44,7 @@ capability:
     - tests/test_model_hub_declared_tools.py
     - tests/test_model_hub_l3.py
     - tests/test_model_hub_hosted_executor.py
+    - tests/test_model_hub_hosted_evidence.py
     - tests/test_model_hub_usage.py
     - tests/test_ui_server_fastapi.py
     - tests/test_model_hub_quota.py
@@ -2476,6 +2477,7 @@ scenarios:
     related_tests:
       - tests/test_model_hub_hosted_evidence.py::test_a_native_success_is_recorded_at_settlement_for_a_tool_the_request_declared
 next_priority:
+  - MH-HOSTED-UI-012
   - MH-PROTOCOL-004
   - MH-RUNTIME-001
   - MH-OAUTH-B-001
