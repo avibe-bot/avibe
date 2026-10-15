@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type {
   RunningAgentsResult,
+  InboxSession,
+  VaultRequest,
   WorkbenchEventHandlers,
   WorkbenchMessage,
   WorkbenchSession,
@@ -94,7 +96,10 @@ const idleTurn = {
 let setupDone = true;
 let sessionReads: Record<string, () => Promise<WorkbenchSessionReadResult>> = {};
 let tails: Record<string, WorkbenchMessage[]> = {};
-let switcherSessions: WorkbenchSession[] = [];
+let mainId: string | null = 'S';
+let inboxSessions: InboxSession[] = [];
+let unreadLoaded = true;
+let inboxLoading = false;
 let unreadBySession: Record<string, number> = {};
 let runningAgents: RunningAgentsResult = { ok: true, agents: [], counts: { total: 0, active: 0, idle: 0, orphan: 0, by_backend: {} } };
 const workingIn = (sessionId: string): RunningAgentsResult => ({
@@ -118,14 +123,10 @@ const markRead = vi.fn(async (): Promise<boolean> => {
 });
 
 const api = {
+  cancelSession: vi.fn(async (_payload: unknown) => ({ ok: true })),
   setHarnessWatchEnabled: vi.fn(async () => ({ ok: true })),
   setHarnessTaskEnabled: vi.fn(async () => ({ ok: true })),
-  getMainSession: vi.fn(() => {
-    const binding = (window as unknown as { __AVIBE_PET_BINDING__?: unknown }).__AVIBE_PET_BINDING__;
-    return typeof binding === 'string' && binding
-      ? api.getSessionResult(binding)
-      : Promise.resolve({ status: 404, session: null });
-  }),
+  getMainSession: vi.fn((): Promise<WorkbenchSessionReadResult> => mainId ? api.getSessionResult(mainId) : Promise.resolve({ status: 403, session: null })),
   getConfig: vi.fn(async () => (setupDone
     ? { mode: 'self_host', setup_state: { needs_setup: false } }
     : { mode: 'self_host', setup_state: { needs_setup: true } })),
@@ -133,9 +134,9 @@ const api = {
     ? sessionReads[id]()
     : Promise.resolve({ status: 200, session: session(id), capabilities: { can_chat: true } }))),
   listSessionMessages: vi.fn(async (id: string) => ({ messages: tails[id] ?? [], next_after_id: null, next_before_id: null })),
-  getTurnState: vi.fn(async () => idleTurn),
-  listSessions: vi.fn(async () => ({ sessions: switcherSessions, next_before_id: null })),
-  getVaultRequests: vi.fn(async () => ({ requests: [] })),
+  getTurnState: vi.fn(async (_id?: string, _options?: unknown) => idleTurn),
+  listSessions: vi.fn(async () => ({ sessions: [], next_before_id: null })),
+  getVaultRequests: vi.fn(async (_filter?: { session?: string }, _options?: unknown): Promise<{ requests: VaultRequest[] }> => ({ requests: [] })),
   getRunningAgents: vi.fn(async (): Promise<RunningAgentsResult> => runningAgents),
   sendSessionMessage: vi.fn(async () => message('sent', 'S', { author: 'user', type: 'user' })),
   connectWorkbenchEvents: (h: WorkbenchEventHandlers) => {
@@ -161,7 +162,7 @@ vi.mock('@/context/WorkbenchInboxContext', async () => {
         inboxListeners.add(listener);
         return () => inboxListeners.delete(listener);
       }, () => inboxVersion);
-      return { unreadBySession: { ...unreadBySession }, markRead };
+      return { unreadBySession: { ...unreadBySession }, inboxSessions, unreadLoaded, loading: inboxLoading, markRead };
     },
   };
 });
@@ -184,34 +185,27 @@ Object.defineProperty(window, 'localStorage', { value: memoryStorage(), configur
 let windowFocused = true;
 Object.defineProperty(document, 'hasFocus', { value: () => windowFocused, configurable: true });
 
-// The dev bridge's stand-in for the shell: the binding and its revision.
-const DEV_BINDING_KEY = 'avibe.pet.devBinding';
-const devBinding = (): { binding: string | null; revision: number } => {
-  const stored = window.localStorage.getItem(DEV_BINDING_KEY);
-  return stored ? JSON.parse(stored) : { binding: null, revision: 0 };
+// Configure the authoritative endpoint independently from legacy shell state.
+const mainSession = (sessionId: string | null) => { mainId = sessionId; };
+const resolveMainAs = (sessionId: string | null) => {
+  mainId = sessionId;
+  return emit((h) => h.onAuthorizationChanged?.({}));
 };
-const devBind = (sessionId: string | null) => {
-  const next = { binding: sessionId, revision: devBinding().revision + 1 };
-  window.localStorage.setItem(DEV_BINDING_KEY, JSON.stringify(next));
-  return next;
-};
-// A change made elsewhere (the main window's "Show in pet"), reported by event.
-const bound = (sessionId: string | null) => act(() => {
-  const next = devBind(sessionId);
-  window.dispatchEvent(new CustomEvent(PET_BOUND_EVENT, { detail: { session_id: sessionId, revision: next.revision } }));
-});
 const shellBound = (sessionId: string | null, revision: number) => act(() => {
   window.dispatchEvent(new CustomEvent(PET_BOUND_EVENT, { detail: { session_id: sessionId, revision } }));
 });
 const summon = (intent: 'listen' | 'show' | 'release') => act(() => {
   window.dispatchEvent(new CustomEvent(PET_SUMMON_EVENT, { detail: { intent } }));
 });
-// v2 puts the exchange behind the main card. Tests of the exchange explicitly
+// The speech bubble holds the exchange. Tests of the exchange explicitly
 // open it; raw summon remains available for collapsed/detail visibility tests.
-const showDetail = async () => {
+const showCards = async () => {
   summon('show');
   await act(async () => new Promise((resolve) => setTimeout(resolve, 15)));
-  const main = document.querySelector('.pet-mini-card[role="button"]');
+};
+const showDetail = async () => {
+  await showCards();
+  const main = document.querySelector('.pet-mini-reply-toggle');
   if (main && !document.querySelector('.pet-mini-detail.is-open')) fireEvent.click(main);
 };
 const pose = () => document.querySelector('.pet-avatar')?.getAttribute('data-pose');
@@ -231,19 +225,19 @@ beforeEach(async () => {
   api.getRunningAgents.mockClear();
   sessionReads = {};
   tails = Object.fromEntries(['S', 'A', 'B', 'C'].map((id) => [id, [message(`u-${id}`, id, { author: 'user', type: 'user', text: `Session ${id}` })]]));
-  switcherSessions = [];
+  mainId = 'S';
+  inboxSessions = [];
+  unreadLoaded = true;
+  inboxLoading = false;
   unreadBySession = {};
+  api.getVaultRequests.mockReset().mockResolvedValue({ requests: [] });
   markRead.mockClear();
   inboxVersion = 0;
   api.getSessionResult.mockClear();
+  api.listSessionMessages.mockClear();
   api.listSessions.mockClear();
   api.getMainSession.mockReset();
-  api.getMainSession.mockImplementation(() => {
-    const binding = (window as unknown as { __AVIBE_PET_BINDING__?: unknown }).__AVIBE_PET_BINDING__;
-    return typeof binding === 'string' && binding
-      ? api.getSessionResult(binding)
-      : Promise.resolve({ status: 404, session: null });
-  });
+  api.getMainSession.mockImplementation(() => mainId ? api.getSessionResult(mainId) : Promise.resolve({ status: 403, session: null }));
   window.localStorage.clear();
 });
 
@@ -285,107 +279,149 @@ describe('PetPage setup', () => {
   });
 });
 
-describe('PetPage binding', () => {
-  it('keeps B bound when a late 404 for A arrives after switching', async () => {
-    const lateA = deferred<WorkbenchSessionReadResult>();
-    sessionReads.A = () => lateA.promise;
-    devBind('A');
+
+describe('main-only resolution', () => {
+  const mainResult = (): WorkbenchSessionReadResult => ({ status: 200, session: session('S'), capabilities: { can_chat: true } });
+
+  it('ignores legacy ready/bound state and never selects another session', async () => {
+    const legacy = JSON.stringify({ binding: 'legacy', revision: 9 });
+    localStorage.setItem('avibe.pet.devBinding', legacy);
+    const invoke = vi.fn(async (command: string) => command === 'pet_ready'
+      ? { binding: 'legacy', revision: 9, dismissed_ids: ['unrelated'], summon_pending: { intent: 'listen' } }
+      : { panel_side: 'left', panel_edge: 'bottom' });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
     render(<PetPage />);
-    await waitFor(() => expect(api.getSessionResult).toHaveBeenCalledWith('A'));
-    await bound('B');
-    summon('listen');
-    await waitFor(() => expect(api.getSessionResult).toHaveBeenCalledWith('B'));
-    await act(async () => lateA.resolve({ status: 404, session: null }));
+    await userEvent.type(await screen.findByRole('textbox'), 'main only{Enter}');
+    await shellBound('another-session', 10);
+    expect(api.sendSessionMessage).toHaveBeenCalledWith('S', { text: 'main only' });
+    expect(api.getSessionResult).not.toHaveBeenCalledWith('legacy');
+    expect(api.getSessionResult).not.toHaveBeenCalledWith('another-session');
+    expect(invoke.mock.calls.some(([command]) => command === 'pet_bind' || command === 'pet_unbind')).toBe(false);
+    expect(localStorage.getItem('avibe.pet.devBinding')).toBe(legacy);
     await showDetail();
-    expect(await screen.findAllByText('Session B')).toBeTruthy();
-    expect(devBinding().binding).toBe('B');
+    expect(screen.queryByText('pet.switchSession')).toBeNull();
+    expect(api.listSessions).not.toHaveBeenCalled();
+    const { petShell } = await import('./petShell');
+    expect(petShell.dismissed()).not.toContain('unrelated');
   });
 
-  it('clears a persisted binding to a Runtime-owned session and opens the switcher', async () => {
-    sessionReads['ses-workspace-notices'] = async () => ({
-      status: 200,
-      session: session('ses-workspace-notices', { visibility: 'system' }),
+  it.each([null, 'legacy-session', 'ses_main'])('normalizes persisted binding %s to main while keeping closes document-local', async (persisted) => {
+    mainSession('ses_main');
+    canUseAgents = true;
+    runningAgents = workingIn('T');
+    const invoke = vi.fn(async (command: string) => {
+      if (command === 'pet_ready') return { binding: persisted, revision: 4, dismissed_ids: [], summon_pending: null };
+      if (command === 'pet_bind') return { binding: 'ses_main', revision: 5 };
+      return { panel_side: 'left', panel_edge: 'bottom' };
     });
-    switcherSessions = [session('fresh', { title: 'Brand new' })];
-    devBind('ses-workspace-notices');
-    render(<PetPage />);
-    await waitFor(() => expect(devBinding().binding).toBeNull());
-    summon('listen');
-    expect(await screen.findByText('Brand new')).toBeTruthy();
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    render(<PetPage />); summon('show');
+    const close = await screen.findByLabelText('pet.dismiss');
+    if (persisted !== 'ses_main') await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_bind', { sessionId: 'ses_main' }));
+    await userEvent.click(close);
+    const { petShell } = await import('./petShell');
+    await waitFor(() => expect(petShell.dismissed()).toEqual(['T']));
+    expect(invoke.mock.calls.some(([command]) => command === 'pet_set_dismissed')).toBe(false);
+    await emit((h) => h.onConnected?.());
+    expect(invoke.mock.calls.filter(([command]) => command === 'pet_bind')).toHaveLength(persisted === 'ses_main' ? 0 : 1);
+    expect(invoke.mock.calls.some(([command]) => command === 'pet_unbind')).toBe(false);
   });
 
-  it('lists new sessions in the switcher and leaves out read-only ones', async () => {
-    switcherSessions = [
-      session('new', { title: 'No reply yet' }),
-      session('old', { title: 'Archived', status: 'archived' }),
-    ];
+  it('does not retry failed main normalization until the authorization epoch changes', async () => {
+    mainSession('ses_main');
+    const invoke = vi.fn(async (command: string) => {
+      if (command === 'pet_ready') return { binding: 'legacy-session', revision: 4, dismissed_ids: [], summon_pending: null };
+      if (command === 'pet_bind') throw new Error('disk unavailable');
+      return { panel_side: 'left', panel_edge: 'bottom' };
+    });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
     render(<PetPage />);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_bind', { sessionId: 'ses_main' }));
+    await emit((h) => h.onConnected?.());
+    await emit((h) => h.onConnected?.());
+    expect(invoke.mock.calls.filter(([command]) => command === 'pet_bind')).toHaveLength(1);
+    await emit((h) => h.onAuthorizationChanged?.({}));
+    await waitFor(() => expect(invoke.mock.calls.filter(([command]) => command === 'pet_bind')).toHaveLength(2));
+  });
+
+  it.each(['reconnect', 'reactivation'])('recovers a failed main lookup on %s without a polling loop', async (trigger) => {
+    api.getMainSession.mockRejectedValueOnce(new Error('offline')).mockResolvedValue(mainResult());
+    render(<PetPage />);
+    await screen.findByText('pet.vibeyUnavailable');
+    expect(api.listSessionMessages).not.toHaveBeenCalled();
+    expect(api.getMainSession).toHaveBeenCalledTimes(1);
+    if (trigger === 'reconnect') await emit((h) => h.onConnected?.());
+    else {
+      act(() => { windowFocused = false; window.dispatchEvent(new Event('blur')); });
+      act(() => { windowFocused = true; window.dispatchEvent(new Event('focus')); });
+    }
     summon('listen');
-    expect(await screen.findByText('No reply yet')).toBeTruthy();
-    expect(screen.queryByText('Archived')).toBeNull();
-    await userEvent.click(screen.getByText('No reply yet'));
-    expect(devBinding().binding).toBe('new');
+    await userEvent.type(await screen.findByRole('textbox'), 'recovered{Enter}');
+    expect(api.sendSessionMessage).toHaveBeenCalledWith('S', { text: 'recovered' });
+    expect(api.getMainSession).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    [403, 'owner_only'], [409, 'main_session_invalid'], [409, 'main_session_archived'], [409, 'builtin_agent_unavailable'],
+  ])('keeps main unavailable for %s %s and offers Avibe', async (status) => {
+    api.getMainSession.mockResolvedValue({ status: Number(status), session: null });
+    render(<PetPage />);
+    await screen.findByText('pet.vibeyUnavailable');
+    expect(screen.getByRole('button', { name: 'pet.openInAvibe' })).toBeTruthy();
+    summon('listen');
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(api.listSessionMessages).not.toHaveBeenCalled();
+    expect(api.listSessions).not.toHaveBeenCalled();
+  });
+
+  it('discards main and transcript reads from the prior authorization before resolving again', async () => {
+    const oldMain = deferred<WorkbenchSessionReadResult>();
+    const freshMain = deferred<WorkbenchSessionReadResult>();
+    api.getMainSession.mockReturnValueOnce(oldMain.promise).mockReturnValueOnce(freshMain.promise);
+    render(<PetPage />);
+    await waitFor(() => expect(api.getMainSession).toHaveBeenCalledTimes(1));
+    await emit((h) => h.onAuthorizationChanged?.({}));
+    await waitFor(() => expect(api.getMainSession).toHaveBeenCalledTimes(2));
+    await act(async () => oldMain.resolve(mainResult()));
+    expect(api.listSessionMessages).not.toHaveBeenCalled();
+    await act(async () => freshMain.resolve({ status: 403, session: null }));
+    await screen.findByText('pet.vibeyUnavailable');
+    expect(api.listSessionMessages).not.toHaveBeenCalled();
+  });
+
+  it('keeps live updates working after main is reauthorized with the same id', async () => {
+    render(<PetPage />); await showDetail();
+    await emit((h) => h.onAuthorizationChanged?.({}));
+    await showDetail();
+    await emit((h) => h.onMessageNew?.(message('new-authorized', 'S', { text: 'New authorized reply' })));
+    expect(await screen.findByText('New authorized reply')).toBeTruthy();
+  });
+
+  it('keeps a draft through a transient resolution failure and fences a late transcript after access is lost', async () => {
+    render(<PetPage />); summon('listen');
+    await userEvent.type(await screen.findByRole('textbox'), 'keep my words');
+    api.getMainSession.mockRejectedValueOnce(new Error('offline'));
+    await emit((h) => h.onConnected?.());
+    await screen.findByText('pet.vibeyUnavailable');
+    await emit((h) => h.onConnected?.());
+    summon('listen');
+    expect((await screen.findByRole('textbox') as HTMLTextAreaElement).value).toBe('keep my words');
+    const oldTail = deferred<{ messages: WorkbenchMessage[]; next_after_id: null; next_before_id: null }>();
+    api.listSessionMessages.mockReturnValueOnce(oldTail.promise);
+    await emit((h) => h.onConnected?.());
+    api.getMainSession.mockResolvedValue({ status: 403, session: null });
+    await emit((h) => h.onAuthorizationChanged?.({}));
+    await act(async () => oldTail.resolve({ messages: [message('old-secret', 'S', { text: 'private stale text' })], next_after_id: null, next_before_id: null }));
+    await screen.findByText('pet.vibeyUnavailable');
+    expect(screen.queryByText('private stale text')).toBeNull();
+    expect(screen.queryByRole('textbox')).toBeNull();
   });
 });
 
 describe('PetPage Vibey conversation', () => {
-  const mainResult = (id = 'V'): WorkbenchSessionReadResult => ({
-    status: 200,
-    session: session(id, { agent_name: 'vibey', agent_backend: 'vibey' }),
-    capabilities: { can_chat: true },
-  });
-
-  it('binds the stable main session when nothing is bound', async () => {
-    api.getMainSession.mockResolvedValue(mainResult());
-    render(<PetPage />);
-    await waitFor(() => expect(devBinding().binding).toBe('V'));
-    expect(api.getMainSession).toHaveBeenCalled();
-  });
-
-  it('leaves an existing binding alone', async () => {
-    devBind('S');
-    render(<PetPage />);
-    await waitFor(() => expect(api.getSessionResult).toHaveBeenCalledWith('S'));
-  });
-
-  it('never re-binds a conversation that was cleared as invalid', async () => {
-    api.getMainSession.mockResolvedValueOnce(mainResult());
-    sessionReads.V = async () => ({ status: 404, session: null });
-    render(<PetPage />);
-    await waitFor(() => expect(api.getSessionResult).toHaveBeenCalledWith('V'));
-    await waitFor(() => expect(devBinding().binding).toBeNull());
-    await act(async () => new Promise((resolve) => setTimeout(resolve, 30)));
-    expect(devBinding().binding).toBeNull();
-  });
-
-  it('offers the stable main session in the switcher without requiring a project', async () => {
-    switcherSessions = [session('B', { title: 'Another session' })];
-    api.getMainSession.mockResolvedValueOnce({ status: 404, session: null });
-    api.getMainSession.mockResolvedValue(mainResult());
-    render(<PetPage />);
-    summon('show');
-    await userEvent.click(await screen.findByText('pet.talkToVibey'));
-    await waitFor(() => expect(devBinding().binding).toBe('V'));
-  });
-
-  it('shows an error when the main-session endpoint resolves without a session', async () => {
-    api.getMainSession.mockResolvedValue({ status: 409, session: null });
-    render(<PetPage />);
-    summon('show');
-    await userEvent.click(await screen.findByText('pet.talkToVibey'));
-    expect(await screen.findByText('pet.vibeyUnavailable')).toBeTruthy();
-  });
-
-  it('does not offer Vibey to someone who cannot chat', async () => {
-    canChat = false;
-    switcherSessions = [session('B', { title: 'Another session' })];
-    render(<PetPage />);
-    summon('show');
-    expect(await screen.findByText('Another session')).toBeTruthy();
-    expect(screen.queryByText('pet.talkToVibey')).toBeNull();
-    expect(api.getMainSession).not.toHaveBeenCalled();
-  });
-
   it('shows a turn the agent could not run, with the way to fix it', async () => {
     tails.S = [
       message('u', 'S', { author: 'user', type: 'user', text: 'hello' }),
@@ -395,7 +431,7 @@ describe('PetPage Vibey conversation', () => {
         metadata: { event: 'backend_failure', failure_id: 'f', turn_id: 't', failure_next_step: 'models' },
       }),
     ];
-    devBind('S');
+    mainSession('S');
     render(<PetPage />);
     expect(await screen.findByText('pet.failedPrefix No model source yet.')).toBeTruthy();
     await showDetail();
@@ -408,7 +444,7 @@ describe('PetPage state', () => {
   it('offers an open quick-reply group in the panel without asking for attention', async () => {
     const asking = message('q', 'S', { content: { quick_replies: ['Yes', 'No'] } });
     tails.S = [message('u', 'S', { author: 'user', type: 'user' }), asking];
-    devBind('S');
+    mainSession('S');
     render(<PetPage />);
     await showDetail();
     expect(await screen.findByText('Yes')).toBeTruthy();
@@ -418,7 +454,7 @@ describe('PetPage state', () => {
   it('asks for attention only for a pending vault request', async () => {
     api.getVaultRequests.mockImplementation(async () => ({ requests: [{ id: 'v1', request_type: 'access' }] } as never));
     try {
-      devBind('S');
+      mainSession('S');
       render(<PetPage />);
       await waitFor(() => expect(pose()).toBe('needs_input'));
     } finally {
@@ -427,14 +463,14 @@ describe('PetPage state', () => {
   });
 
   it('derives Blocked from the first session read, with no provider row', async () => {
-    sessionReads.S = async () => ({ status: 200, session: session('S', { agent_status: 'failed' }) });
-    devBind('S');
+    sessionReads.S = async () => ({ status: 200, session: session('S', { agent_status: 'failed' }), capabilities: { can_chat: true } });
+    mainSession('S');
     render(<PetPage />);
     await waitFor(() => expect(pose()).toBe('blocked'));
   });
 
   it('re-reads turn state on any runs.updated, even for another executor session', async () => {
-    devBind('S');
+    mainSession('S');
     render(<PetPage />);
     await waitFor(() => expect(api.getTurnState).toHaveBeenCalled());
     const before = api.getTurnState.mock.calls.length;
@@ -450,7 +486,7 @@ describe('PetPage state', () => {
       message('r3', 'S', { read_at: null }),
     ];
     unreadBySession = { S: 2 };
-    devBind('S');
+    mainSession('S');
     render(<PetPage />);
     await waitFor(() => expect(pose()).toBe('ready'));
     await showDetail();
@@ -464,7 +500,7 @@ describe('PetPage state', () => {
       messages: tails[id] ?? [], next_after_id: null, next_before_id: 'older',
     }));
     unreadBySession = { S: 5 };
-    devBind('S');
+    mainSession('S');
     render(<PetPage />);
     await showDetail();
     expect(await screen.findByText('pet.moreInAvibe')).toBeTruthy();
@@ -478,7 +514,7 @@ describe('PetPage other conversations', () => {
   it('looks busy while another conversation\'s agent works, and the bound session stays idle', async () => {
     canUseAgents = true;
     runningAgents = workingIn('T');
-    devBind('S');
+    mainSession('S');
     render(<PetPage />);
     await waitFor(() => expect(pose()).toBe('running'));
     expect(dataState()).toBe('idle');
@@ -489,7 +525,7 @@ describe('PetPage other conversations', () => {
 
   it('keeps re-reading a started turn until the backend registers it', async () => {
     canUseAgents = true;
-    devBind('S');
+    mainSession('S');
     render(<PetPage />);
     await waitFor(() => expect(api.getRunningAgents).toHaveBeenCalled());
     // turn.start lands before the agent is active in the snapshot.
@@ -506,7 +542,7 @@ describe('PetPage other conversations', () => {
 
   it('keeps re-reading a started turn after a failed read', async () => {
     canUseAgents = true;
-    devBind('S');
+    mainSession('S');
     render(<PetPage />);
     await waitFor(() => expect(api.getRunningAgents).toHaveBeenCalled());
     const before = api.getRunningAgents.mock.calls.length;
@@ -522,7 +558,7 @@ describe('PetPage other conversations', () => {
     const { REFRESH_TRIGGERS } = await import('./useConversationAgentWorking');
     canUseAgents = true;
     runningAgents = workingIn('T');
-    devBind('S');
+    mainSession('S');
     render(<PetPage />);
     await waitFor(() => expect(pose()).toBe('running'));
     for (const trigger of REFRESH_TRIGGERS) {
@@ -545,7 +581,7 @@ describe('PetPage other conversations', () => {
 
   it('never reads other conversations without the agents permission', async () => {
     runningAgents = workingIn('T');
-    devBind('S');
+    mainSession('S');
     render(<PetPage />);
     await waitFor(() => expect(api.getTurnState).toHaveBeenCalled());
     expect(pose()).toBe('idle');
@@ -557,7 +593,7 @@ describe('PetPage review fixes', () => {
   it('marks a rendered row read once, however often the inbox state changes', async () => {
     tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('r1', 'S', { read_at: null })];
     unreadBySession = { S: 1 };
-    devBind('S');
+    mainSession('S');
     render(<PetPage />);
     await showDetail();
     await screen.findByText('reply r1');
@@ -570,14 +606,15 @@ describe('PetPage review fixes', () => {
     const pending = deferred<WorkbenchMessage>();
     api.sendSessionMessage.mockImplementationOnce(() => pending.promise);
     tails.B = [message('b1', 'B', { text: 'B only' })];
-    devBind('A');
+    mainSession('A');
     render(<PetPage />);
     summon('listen');
     const input = await screen.findByLabelText('pet.inputPlaceholder');
     await userEvent.type(input, 'hello{Enter}');
-    await bound('B');
+    await resolveMainAs('B');
     summon('listen');
-    await screen.findByText('B only');
+    await screen.findByRole('textbox');
+    await waitFor(() => expect(api.listSessionMessages).toHaveBeenCalledWith('B', expect.anything()));
     await act(async () => pending.resolve(message('a-sent', 'A', { author: 'user', type: 'user', text: 'sent to A' })));
     // B neither shows A's row nor enters A's post-send Running grace.
     expect(screen.queryByText('sent to A')).toBeNull();
@@ -585,7 +622,7 @@ describe('PetPage review fixes', () => {
     expect(pose()).toBe('idle');
   });
 
-  it('acts on the binding pet_ready returns together with a pending summon', async () => {
+  it('acts on a pending summon while ignoring the legacy binding from pet_ready', async () => {
     const ready = deferred<unknown>();
     const invoke = vi.fn((command: string) => (command === 'pet_ready'
       ? ready.promise
@@ -595,30 +632,14 @@ describe('PetPage review fixes', () => {
     render(<PetPage />);
     // The surface is mounted and subscribed before the shell answers.
     await screen.findByLabelText('pet.toggle');
-    await act(async () => ready.resolve({ binding: 'S', revision: 1, summon_pending: { intent: 'listen' } }));
-    // The summon opens the bound session's input, not the switcher.
+    await act(async () => ready.resolve({ binding: 'legacy', revision: 1, summon_pending: { intent: 'listen' } }));
+    // The summon opens the resolved main's input.
     expect(await screen.findByLabelText('pet.inputPlaceholder')).toBeTruthy();
     expect(api.listSessions).not.toHaveBeenCalled();
   });
 });
 
 describe('PetPage review fixes, round 2', () => {
-  it('does not mark replies read while the switcher hides them', async () => {
-    tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('r1', 'S', { read_at: null })];
-    unreadBySession = { S: 1 };
-    switcherSessions = [session('S'), session('T')];
-    devBind('S');
-    render(<PetPage />);
-    await showDetail();
-    await screen.findByText('reply r1');
-    await waitFor(() => expect(markRead).toHaveBeenCalledTimes(1));
-    // A newer reply arrives while the user is looking at the switcher.
-    await userEvent.click(screen.getByLabelText('pet.switchSession'));
-    await screen.findAllByText('Session T');
-    await emit((h) => h.onMessageNew?.(message('r2', 'S', { read_at: null })));
-    await act(async () => new Promise((resolve) => setTimeout(resolve, 50)));
-    expect(markRead).toHaveBeenCalledTimes(1);
-  });
 
   it('retries a failed mark-read the next time the reply is shown', async () => {
     tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('r1', 'S', { read_at: null })];
@@ -626,7 +647,7 @@ describe('PetPage review fixes, round 2', () => {
     markRead.mockImplementationOnce(async (): Promise<boolean> => {
       throw new Error('offline');
     });
-    devBind('S');
+    mainSession('S');
     render(<PetPage />);
     await showDetail();
     await waitFor(() => expect(markRead).toHaveBeenCalledTimes(1));
@@ -641,7 +662,7 @@ describe('PetPage review fixes, round 2', () => {
   it('keeps a draft typed after submitting when the send completes', async () => {
     const pending = deferred<WorkbenchMessage>();
     api.sendSessionMessage.mockImplementationOnce(() => pending.promise);
-    devBind('S');
+    mainSession('S');
     render(<PetPage />);
     summon('listen');
     const input = await screen.findByLabelText('pet.inputPlaceholder') as HTMLTextAreaElement;
@@ -656,7 +677,7 @@ describe('PetPage review fixes, round 3', () => {
   it('sends a draft once however often Enter is pressed while the POST is pending', async () => {
     const pending = deferred<WorkbenchMessage>();
     api.sendSessionMessage.mockImplementationOnce(() => pending.promise);
-    devBind('S');
+    mainSession('S');
     render(<PetPage />);
     summon('listen');
     const input = await screen.findByLabelText('pet.inputPlaceholder');
@@ -671,7 +692,7 @@ describe('PetPage review fixes, round 3', () => {
     let visibility: DocumentVisibilityState = 'hidden';
     Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => visibility });
     try {
-      devBind('S');
+      mainSession('S');
       render(<PetPage />);
       await showDetail();
       await screen.findByText('reply r1');
@@ -687,21 +708,6 @@ describe('PetPage review fixes, round 3', () => {
     }
   });
 
-  it('keeps a bind that lands while pet_ready is still answering', async () => {
-    const ready = deferred<unknown>();
-    const invoke = vi.fn((command: string) => (command === 'pet_ready'
-      ? ready.promise
-      : Promise.resolve({ panel_side: 'left', panel_edge: 'bottom' })));
-    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
-    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
-    render(<PetPage />);
-    await screen.findByLabelText('pet.toggle');
-    // The shell moved to B (revision 2) after answering pet_ready at revision 1.
-    await shellBound('B', 2);
-    await act(async () => ready.resolve({ binding: 'A', revision: 1, summon_pending: null }));
-    await showDetail();
-    expect(await screen.findAllByText('Session B')).toBeTruthy();
-  });
 });
 
 describe('PetPage independent sweep', () => {
@@ -712,7 +718,7 @@ describe('PetPage independent sweep', () => {
     let visibility: DocumentVisibilityState = 'visible';
     Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => visibility });
     try {
-      devBind('S');
+      mainSession('S');
       render(<PetPage />);
       await showDetail();
       await waitFor(() => expect(markRead).toHaveBeenCalledTimes(1));
@@ -731,28 +737,16 @@ describe('PetPage independent sweep', () => {
     }
   });
 
-  it('lands a bound summon on the session even if the switcher was left open', async () => {
-    switcherSessions = [session('S')];
-    render(<PetPage />);
-    await showDetail();
-    expect(await screen.findAllByText('Session S')).toBeTruthy();
-    act(() => {
-      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
-    });
-    await bound('S');
-    summon('listen');
-    expect(await screen.findByLabelText('pet.inputPlaceholder')).toBeTruthy();
-  });
 
   it('clears sent text even when the session changed while it was sending', async () => {
     const pending = deferred<WorkbenchMessage>();
     api.sendSessionMessage.mockImplementationOnce(() => pending.promise);
-    devBind('A');
+    mainSession('A');
     render(<PetPage />);
     summon('listen');
     const input = await screen.findByLabelText('pet.inputPlaceholder') as HTMLTextAreaElement;
     await userEvent.type(input, 'deploy{Enter}');
-    await bound('B');
+    await resolveMainAs('B');
     summon('listen');
     await act(async () => pending.resolve(message('a-sent', 'A', { author: 'user', type: 'user' })));
     expect((screen.getByLabelText('pet.inputPlaceholder') as HTMLTextAreaElement).value).toBe('');
@@ -761,9 +755,10 @@ describe('PetPage independent sweep', () => {
   it('does not mark read through rows trimmed from a long live tail', async () => {
     tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('r1', 'S', { read_at: null })];
     unreadBySession = { S: 2 };
-    devBind('S');
+    mainSession('S');
     render(<PetPage />);
-    await waitFor(() => expect(api.listSessionMessages).toHaveBeenCalled());
+    // The hidden history proves the initial read applied without marking it read.
+    await screen.findByText('reply r1');
     // A long turn: many transcript rows arrive live, pushing r1 out of the tail.
     await emit((h) => {
       for (let index = 0; index < 70; index += 1) {
@@ -777,54 +772,13 @@ describe('PetPage independent sweep', () => {
   });
 });
 
-describe('PetPage review fixes, round 4', () => {
-  it('goes back to the binding the shell still holds when a pick cannot be persisted', async () => {
-    const invoke = vi.fn((command: string) => {
-      if (command === 'pet_ready') return Promise.resolve({ binding: 'A', revision: 1, summon_pending: null });
-      if (command === 'pet_bind') return Promise.reject(new Error('disk full'));
-      return Promise.resolve({ panel_side: 'left', panel_edge: 'bottom' });
-    });
-    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
-    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
-    switcherSessions = [session('A'), session('B')];
-    render(<PetPage />);
-    await showDetail();
-    expect(await screen.findAllByText('Session A')).toBeTruthy();
-    await userEvent.click(screen.getByLabelText('pet.switchSession'));
-    await userEvent.click(await screen.findByText('Session B'));
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_bind', { sessionId: 'B' }));
-    // The header shows the session the shell still holds.
-    await waitFor(() => expect(api.getSessionResult).toHaveBeenLastCalledWith('A'));
-  });
-});
 
-describe('PetPage review fixes, round 5', () => {
-  it('stays unbound, without a validation loop, when the shell cannot persist a clear', async () => {
-    sessionReads.A = async () => ({ status: 404, session: null });
-    const invoke = vi.fn((command: string) => {
-      if (command === 'pet_ready') return Promise.resolve({ binding: 'A', revision: 1, summon_pending: null });
-      if (command === 'pet_unbind') return Promise.reject(new Error('disk full'));
-      return Promise.resolve({ panel_side: 'left', panel_edge: 'bottom' });
-    });
-    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
-    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
-    switcherSessions = [session('B')];
-    render(<PetPage />);
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_unbind', { sessionId: 'A' }));
-    await act(async () => new Promise((resolve) => setTimeout(resolve, 50)));
-    await showDetail();
-    // The invalid session is never offered as usable: the switcher shows.
-    expect(await screen.findAllByText('Session B')).toBeTruthy();
-    expect(api.getSessionResult.mock.calls.filter(([id]) => id === 'A')).toHaveLength(1);
-    expect(invoke.mock.calls.filter(([command]) => command === 'pet_unbind')).toHaveLength(1);
-  });
-});
 
 describe('PetPage review fixes, round 6', () => {
   it('accepts no input for a binding whose session has not been validated yet', async () => {
     const validation = deferred<WorkbenchSessionReadResult>();
     sessionReads.S = () => validation.promise;
-    devBind('S');
+    mainSession('S');
     render(<PetPage />);
     summon('listen');
     await screen.findByLabelText('pet.panel');
@@ -841,37 +795,17 @@ describe('PetPage review fixes, round 6', () => {
   });
 
   it('starts an empty draft when the binding changes', async () => {
-    devBind('A');
+    mainSession('A');
     render(<PetPage />);
     summon('listen');
     const input = await screen.findByLabelText('pet.inputPlaceholder') as HTMLTextAreaElement;
     await userEvent.type(input, 'meant for A');
-    await bound('B');
+    await resolveMainAs('B');
     summon('listen');
-    await screen.findAllByText('Session B');
+    await screen.findByRole('textbox');
     expect((screen.getByLabelText('pet.inputPlaceholder') as HTMLTextAreaElement).value).toBe('');
   });
 
-  it('keeps a pick made before pet_ready answers over the older answer', async () => {
-    const ready = deferred<unknown>();
-    const invoke = vi.fn((command: string) => {
-      if (command === 'pet_ready') return ready.promise;
-      if (command === 'pet_bind') return Promise.resolve({ binding: 'B', revision: 2, shown: false });
-      return Promise.resolve({ panel_side: 'left', panel_edge: 'bottom' });
-    });
-    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
-    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
-    switcherSessions = [session('B')];
-    render(<PetPage />);
-    await userEvent.click(await screen.findByLabelText('pet.toggle'));
-    await userEvent.click(await screen.findByText('Session B'));
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_bind', { sessionId: 'B' }));
-    // The shell answered pet_ready at revision 1, before it applied the pick.
-    await act(async () => ready.resolve({ binding: 'A', revision: 1, summon_pending: null }));
-    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
-    expect(api.getSessionResult).not.toHaveBeenCalledWith('A');
-    expect(api.getSessionResult).toHaveBeenLastCalledWith('B');
-  });
 });
 
 describe('PetPage review fixes, round 7', () => {
@@ -908,7 +842,7 @@ describe('PetPage review fixes, round 8', () => {
       tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('r1', 'S', { text: 'first reply' })];
       return true;
     });
-    devBind('S');
+    mainSession('S');
     render(<PetPage />);
     await showDetail();
     await waitFor(() => expect(markRead).toHaveBeenCalledWith('S', 'r1'));
@@ -925,12 +859,12 @@ describe('PetPage review fixes, round 8', () => {
     const pending = deferred<WorkbenchMessage>();
     api.sendSessionMessage.mockImplementationOnce(() => pending.promise);
     tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('q', 'S', { content: { quick_replies: ['Yes', 'No'] } })];
-    devBind('S');
+    mainSession('S');
     render(<PetPage />);
-    summon('listen');
-    const input = await screen.findByLabelText('pet.inputPlaceholder');
     await showDetail();
     await userEvent.click(await screen.findByText('Yes'));
+    summon('listen');
+    const input = await screen.findByLabelText('pet.inputPlaceholder');
     await userEvent.type(input, 'also this{Enter}');
     expect(api.sendSessionMessage).toHaveBeenCalledTimes(1);
     await act(async () => pending.resolve(message('sent', 'S', { author: 'user', type: 'user' })));
@@ -939,14 +873,14 @@ describe('PetPage review fixes, round 8', () => {
   it('does not clear a draft typed in another session by an older send', async () => {
     const pending = deferred<WorkbenchMessage>();
     api.sendSessionMessage.mockImplementationOnce(() => pending.promise);
-    devBind('A');
+    mainSession('A');
     render(<PetPage />);
     summon('listen');
     const input = await screen.findByLabelText('pet.inputPlaceholder') as HTMLTextAreaElement;
     await userEvent.type(input, 'continue{Enter}');
-    await bound('B');
+    await resolveMainAs('B');
     summon('listen');
-    await screen.findAllByText('Session B');
+    await screen.findByRole('textbox');
     const inputB = screen.getByLabelText('pet.inputPlaceholder') as HTMLTextAreaElement;
     await userEvent.type(inputB, 'continue');
     await act(async () => pending.resolve(message('a-sent', 'A', { author: 'user', type: 'user' })));
@@ -955,7 +889,7 @@ describe('PetPage review fixes, round 8', () => {
 });
 
 describe('PetPage review fixes, round 9', () => {
-  it('counts own running sub-tasks in the collapsed busy pose', async () => {
+  it('does not turn background definitions into visible team activity', async () => {
     api.getTurnState.mockImplementation(async () => ({
       ...idleTurn,
       background_activities: [
@@ -964,11 +898,11 @@ describe('PetPage review fixes, round 9', () => {
       ],
     }) as never);
     try {
-      devBind('S');
+      mainSession('S');
       render(<PetPage />);
-      expect(await screen.findByLabelText('chat.activities.running')).toBeTruthy();
-      expect(screen.getByLabelText('chat.activities.running').textContent).toBe('2');
-      expect(pose()).toBe('running');
+      await screen.findByLabelText('pet.toggle');
+      await act(async () => {});
+      expect(pose()).toBe('idle');
     } finally {
       api.getTurnState.mockImplementation(async () => idleTurn);
     }
@@ -980,7 +914,7 @@ describe('PetPage review fixes, round 10', () => {
     tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('r1', 'S', { read_at: null, text: 'unseen' })];
     unreadBySession = { S: 1 };
     windowFocused = false;
-    devBind('S');
+    mainSession('S');
     render(<PetPage />);
     await showDetail();
     await screen.findByText('unseen');
@@ -993,28 +927,6 @@ describe('PetPage review fixes, round 10', () => {
     await waitFor(() => expect(markRead).toHaveBeenCalledWith('S', 'r1'));
   });
 
-  it('reverts a failed pick to the binding the shell confirmed, not an earlier pick', async () => {
-    const binds: Record<string, ReturnType<typeof deferred<unknown>>> = { B: deferred(), C: deferred() };
-    const invoke = vi.fn((command: string, args?: { sessionId?: string }) => {
-      if (command === 'pet_ready') return Promise.resolve({ binding: 'A', revision: 1, summon_pending: null });
-      if (command === 'pet_bind') return binds[args?.sessionId ?? ''].promise;
-      return Promise.resolve({ panel_side: 'left', panel_edge: 'bottom' });
-    });
-    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
-    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
-    switcherSessions = [session('A'), session('B'), session('C')];
-    render(<PetPage />);
-    await showDetail();
-    await screen.findAllByText('Session A');
-    await userEvent.click(screen.getByLabelText('pet.switchSession'));
-    await userEvent.click(await screen.findByText('Session B'));
-    await showDetail();
-    await userEvent.click(await screen.findByLabelText('pet.switchSession'));
-    await userEvent.click(await screen.findByText('Session C'));
-    await act(async () => binds.B.reject(new Error('disk full')));
-    await act(async () => binds.C.reject(new Error('disk full')));
-    await waitFor(() => expect(api.getSessionResult).toHaveBeenLastCalledWith('A'));
-  });
 });
 
 describe('PetPage review fixes, round 12', () => {
@@ -1038,7 +950,7 @@ describe('PetPage review fixes, round 13', () => {
   it('offers no composer or quick replies without the chat capability', async () => {
     canChat = false;
     tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('q', 'S', { content: { quick_replies: ['Yes'] } })];
-    devBind('S');
+    mainSession('S');
     render(<PetPage />);
     summon('listen');
     await screen.findByLabelText('pet.panel');
@@ -1055,7 +967,7 @@ describe('PetPage review fixes, round 13', () => {
       capabilities: { can_chat: false },
     });
     tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('q', 'S', { content: { quick_replies: ['Yes'] } })];
-    devBind('S');
+    mainSession('S');
     render(<PetPage />);
     summon('listen');
     await screen.findByLabelText('pet.panel');
@@ -1067,7 +979,7 @@ describe('PetPage review fixes, round 13', () => {
   });
 
   it('ends the post-send Running grace on an authoritative turn.end', async () => {
-    devBind('S');
+    mainSession('S');
     render(<PetPage />);
     summon('listen');
     const input = await screen.findByLabelText('pet.inputPlaceholder');
@@ -1081,69 +993,27 @@ describe('PetPage review fixes, round 13', () => {
 
   it('drops what it read and unbinds when authorization to the session is lost', async () => {
     tails.S = [message('r1', 'S', { text: 'private reply' })];
-    devBind('S');
+    mainSession('S');
     render(<PetPage />);
     await showDetail();
     await screen.findByText('private reply');
     sessionReads.S = async () => ({ status: 403, session: null });
     await emit((h) => h.onAuthorizationChanged?.({}));
     await waitFor(() => expect(screen.queryByText('private reply')).toBeNull());
-    await waitFor(() => expect(devBinding().binding).toBeNull());
+    await screen.findByText('pet.vibeyUnavailable');
   });
 });
 
 describe('PetPage async closure', () => {
-  // Binding order: the shell's revision decides, and picks reach it in order.
-  it('sends picks one at a time and ignores a report older than the newest answer', async () => {
-    const binds: Record<string, Deferred<unknown>> = { B: deferred(), C: deferred() };
-    const invoke = vi.fn((command: string, args?: { sessionId?: string }) => {
-      if (command === 'pet_ready') return Promise.resolve({ binding: 'A', revision: 1, summon_pending: null });
-      if (command === 'pet_bind') return binds[args?.sessionId ?? ''].promise;
-      return Promise.resolve({ panel_side: 'left', panel_edge: 'bottom' });
-    });
-    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
-    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
-    switcherSessions = [session('A'), session('B'), session('C')];
-    render(<PetPage />);
-    await showDetail();
-    await screen.findAllByText('Session A');
-    await userEvent.click(screen.getByLabelText('pet.switchSession'));
-    await userEvent.click(await screen.findByText('Session B'));
-    await showDetail();
-    await userEvent.click(await screen.findByLabelText('pet.switchSession'));
-    await userEvent.click(await screen.findByText('Session C'));
-    // C waits for B's answer, so the shell sees the picks in the user's order.
-    expect(invoke.mock.calls.filter(([command]) => command === 'pet_bind')).toEqual([['pet_bind', { sessionId: 'B' }]]);
-    await act(async () => binds.B.resolve({ binding: 'B', revision: 2, shown: false }));
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_bind', { sessionId: 'C' }));
-    await act(async () => binds.C.resolve({ binding: 'C', revision: 3, shown: false }));
-    // B's own pet:bound arrives late, after the answer for C.
-    await shellBound('B', 2);
-    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
-    expect(api.getSessionResult).toHaveBeenLastCalledWith('C');
-    expect(await screen.findAllByText('Session C')).toBeTruthy();
-  });
 
   // Read freshness: what was read under the old authorization goes at once.
-  it('drops switcher rows at once when authorization changes, then re-reads', async () => {
-    switcherSessions = [session('X', { title: 'Revoked project' })];
-    render(<PetPage />);
-    await showDetail();
-    await screen.findByText('Revoked project');
-    const reread = deferred<{ sessions: WorkbenchSession[]; next_before_id: null }>();
-    api.listSessions.mockImplementationOnce(() => reread.promise);
-    await emit((h) => h.onAuthorizationChanged?.({}));
-    expect(screen.queryByText('Revoked project')).toBeNull();
-    await act(async () => reread.resolve({ sessions: [session('Y', { title: 'Still allowed' })], next_before_id: null }));
-    expect(await screen.findByText('Still allowed')).toBeTruthy();
-  });
 
   // Unknown outcomes are not treated as answers.
   it('does not mark read from live rows that land before the first tail read', async () => {
     const tail = deferred<{ messages: WorkbenchMessage[]; next_after_id: null; next_before_id: string | null }>();
     api.listSessionMessages.mockImplementationOnce(() => tail.promise);
     unreadBySession = { S: 3 };
-    devBind('S');
+    mainSession('S');
     render(<PetPage />);
     await showDetail();
     await screen.findByLabelText('pet.panel');
@@ -1164,7 +1034,7 @@ describe('PetPage async closure', () => {
   it('keeps the draft and closes input when a send may have been admitted', async () => {
     tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('q', 'S', { content: { quick_replies: ['Yes'] } })];
     api.sendSessionMessage.mockRejectedValueOnce(new ApiError('dispatch pending', 504, null));
-    devBind('S');
+    mainSession('S');
     render(<PetPage />);
     summon('listen');
     const input = await screen.findByLabelText('pet.inputPlaceholder') as HTMLTextAreaElement;
@@ -1187,7 +1057,7 @@ describe('PetPage async closure', () => {
 
   it('keeps input open when the server refused the send', async () => {
     api.sendSessionMessage.mockRejectedValueOnce(new ApiError('conflict', 409, null));
-    devBind('S');
+    mainSession('S');
     render(<PetPage />);
     summon('listen');
     const input = await screen.findByLabelText('pet.inputPlaceholder');
@@ -1252,7 +1122,7 @@ describe('PetPage live convergence', () => {
     api.sendSessionMessage
       .mockRejectedValueOnce(new ApiError('dispatch pending', 504, null))
       .mockRejectedValueOnce(new ApiError('dispatch pending', 504, null));
-    devBind('A');
+    mainSession('A');
     render(<PetPage />);
     summon('listen');
     const input = await screen.findByLabelText('pet.inputPlaceholder') as HTMLTextAreaElement;
@@ -1260,7 +1130,7 @@ describe('PetPage live convergence', () => {
     await userEvent.type(input, 'to A{Enter}');
     expect(await screen.findByText('newSession.sendUncertain')).toBeTruthy();
 
-    await bound('B');
+    await resolveMainAs('B');
     summon('listen');
     await waitFor(() => expect(api.getSessionResult).toHaveBeenCalledWith('B'));
     const inputB = await screen.findByLabelText('pet.inputPlaceholder') as HTMLTextAreaElement;
@@ -1269,7 +1139,7 @@ describe('PetPage live convergence', () => {
     await userEvent.type(inputB, 'to B{Enter}');
     expect(await screen.findByText('newSession.sendUncertain')).toBeTruthy();
 
-    await bound('A');
+    await resolveMainAs('A');
     await settle();
     expect(screen.getByText('newSession.sendUncertain')).toBeTruthy();
     expect(screen.queryByRole('textbox', { name: 'pet.inputPlaceholder' })).toBeNull();
@@ -1293,12 +1163,12 @@ describe('PetPage live convergence', () => {
     Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
     tails.S = [message('u', 'S', { author: 'user', type: 'user' })];
     render(<PetPage />);
-    await showDetail();
+    summon('show');
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_set_expanded', { expanded: true }));
     await act(async () => first.resolve({ panel_side: 'left', panel_edge: 'bottom' }));
     await screen.findByLabelText('pet.panel');
 
-    await showDetail();
+    await showCards();
     await waitFor(() => expect(invoke.mock.calls.filter(([c]) => c === 'pet_set_expanded')).toHaveLength(2));
     await act(async () => second.reject(new Error('already expanded')));
     await settle();
@@ -1317,7 +1187,7 @@ describe('PetPage live convergence', () => {
     Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
     Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
     render(<PetPage />);
-    await showDetail();
+    summon('show');
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_set_expanded', { expanded: true }));
     await settle();
     expect(screen.queryByLabelText('pet.panel')).toBeNull();
@@ -1329,11 +1199,11 @@ describe('PetPage live convergence', () => {
     expect(markRead).not.toHaveBeenCalled();
   });
 
-  it('reads the session on a status event when no read has supplied it yet', async () => {
+  it('resolves main on reconnect when the initial read failed', async () => {
     sessionReads.S = vi.fn()
       .mockResolvedValueOnce({ status: 500, session: null })
       .mockResolvedValue({ status: 200, session: session('S'), capabilities: { can_chat: true } });
-    devBind('S');
+    mainSession('S');
     render(<PetPage />);
     await showDetail();
     await screen.findByLabelText('pet.panel');
@@ -1341,7 +1211,7 @@ describe('PetPage live convergence', () => {
     expect(sessionReads.S).toHaveBeenCalledTimes(1);
     expect(screen.getByLabelText('pet.keyboard.open').hasAttribute('disabled')).toBe(true);
 
-    await emit((h) => h.onSessionStatus?.({ session_id: 'S', agent_status: 'idle' }));
+    await emit((h) => h.onConnected?.());
     await waitFor(() => expect(sessionReads.S).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(screen.getByLabelText('pet.keyboard.open').hasAttribute('disabled')).toBe(false));
     summon('listen');
@@ -1351,9 +1221,9 @@ describe('PetPage live convergence', () => {
 
   it('reads the tail on a live row when no tail read has landed yet', async () => {
     api.listSessionMessages.mockRejectedValueOnce(new Error('network'));
-    devBind('S');
+    mainSession('S');
     render(<PetPage />);
-    await showDetail();
+    await showCards();
     await screen.findByLabelText('pet.panel');
     await settle();
     const reads = api.listSessionMessages.mock.calls.filter(([id]) => id === 'S').length;
@@ -1364,9 +1234,9 @@ describe('PetPage live convergence', () => {
   });
 
   it('re-reads the tail when the session is marked read in another window', async () => {
-    devBind('S');
+    mainSession('S');
     render(<PetPage />);
-    await showDetail();
+    await showCards();
     await screen.findByLabelText('pet.panel');
     await settle();
     const reads = api.listSessionMessages.mock.calls.filter(([id]) => id === 'S').length;
@@ -1384,7 +1254,7 @@ describe('PetPage review fixes, round 14', () => {
     api.listSessionMessages.mockImplementationOnce(async (id: string) => ({
       messages: tails[id] ?? [], next_after_id: null, next_before_id: 'older',
     }));
-    devBind('S');
+    mainSession('S');
     render(<PetPage />);
     await showDetail();
     expect(await screen.findByText('pet.moreInAvibe')).toBeTruthy();
@@ -1394,7 +1264,7 @@ describe('PetPage review fixes, round 14', () => {
   it('keeps an in-flight send locked across a page remount', async () => {
     const pending = deferred<WorkbenchMessage>();
     api.sendSessionMessage.mockImplementationOnce(() => pending.promise);
-    devBind('S');
+    mainSession('S');
     const first = render(<PetPage />);
     summon('listen');
     const input = await screen.findByLabelText('pet.inputPlaceholder');
@@ -1411,7 +1281,7 @@ describe('PetPage review fixes, round 14', () => {
 
   it('keeps an uncertain send locked across a page recheck', async () => {
     api.sendSessionMessage.mockRejectedValueOnce(new ApiError('dispatch pending', 504, null));
-    devBind('S');
+    mainSession('S');
     const first = render(<PetPage />);
     summon('listen');
     const input = await screen.findByLabelText('pet.inputPlaceholder');
@@ -1442,7 +1312,7 @@ describe('PetPage review fixes, round 14', () => {
     Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
     tails.S = [message('u', 'S', { author: 'user', type: 'user' })];
     render(<PetPage />);
-    await showDetail();
+    summon('show');
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_set_expanded', { expanded: true }));
     expect(order).toEqual([true]);
     // Collapse while expand is still in flight: Esc is not listening yet
@@ -1479,18 +1349,26 @@ describe('PetPage review fixes, round 14', () => {
 
 
 describe('desktop mini v2 interaction contract', () => {
-  // Match derive_session_harness_activities(): definitions carry durable
-  // enabled/scheduled states, while delegated executions carry running.
-  const activity = (id: string, item_kind: 'watch' | 'task' | 'agent_run', status = { watch: 'enabled', task: 'scheduled', agent_run: 'running' }[item_kind]) => ({
+  // Visible process rows replace background definitions; stopping keeps v2 timing.
+  const activity = (id: string, item_kind: 'watch' | 'task' | 'agent_run', status = 'running') => ({
     id, item_kind, status, label: id, description: id, backend: 'codex',
     runtime_key: id, session_id: 'S', kind: item_kind, started_at: '', updated_at: '',
   });
   const turn = (items: ReturnType<typeof activity>[]) => {
-    api.getTurnState.mockResolvedValue({ ...idleTurn, background_activities: items } as never);
+    canUseAgents = true;
+    api.getTurnState.mockImplementation(async (id: string) => ({ ...idleTurn, in_flight: items.some((item) => item.id === id && item.status === 'running') }));
+    runningAgents = {
+      ok: true,
+      agents: items.map((item) => ({
+        ...workingIn(item.id).agents[0], backend: 'codex', title: item.label,
+        state: item.status === 'running' ? 'active' : 'idle',
+        trigger_source: item.item_kind === 'agent_run' ? 'agent' : 'human',
+      })),
+      counts: { total: items.length, active: items.length, idle: 0, orphan: 0, by_backend: {} },
+    };
   };
   beforeEach(() => {
-    api.setHarnessWatchEnabled.mockReset().mockResolvedValue({ ok: true });
-    api.setHarnessTaskEnabled.mockReset().mockResolvedValue({ ok: true });
+    api.cancelSession.mockReset().mockResolvedValue({ ok: true });
   });
   afterEach(() => {
     vi.useRealTimers();
@@ -1503,22 +1381,22 @@ describe('desktop mini v2 interaction contract', () => {
     const id = `${kind}:private`;
     turn([activity(id, kind)]);
     const pending = deferred<{ ok: boolean }>();
-    const pause = kind === 'watch' ? api.setHarnessWatchEnabled : api.setHarnessTaskEnabled;
+    const pause = api.cancelSession;
     pause.mockImplementationOnce(() => pending.promise);
-    devBind('S'); render(<PetPage />); await showDetail();
-    const stop = await screen.findByLabelText('pet.stop.confirmPause');
+    mainSession('S'); render(<PetPage />); await showCards();
+    const stop = await screen.findByLabelText('pet.stop.stop');
     vi.useFakeTimers();
     fireEvent.click(stop); fireEvent.click(stop);
-    expect(screen.getByText('pet.stop.pausing')).toBeTruthy();
+    expect(screen.getByText('pet.stop.stopping')).toBeTruthy();
     turn([]);
     await emit((h) => h.onAuthorizationChanged?.({}));
     expect(screen.queryByText(id)).toBeNull();
-    expect(screen.queryByText('pet.stop.pausing')).toBeNull();
+    expect(screen.queryByText('pet.stop.stopping')).toBeNull();
     // An authorized new version with the same id must not inherit old phases.
     turn([{ ...activity(id, kind), label: 'Allowed replacement' }]);
-    await emit((h) => h.onDefinitionsUpdated?.({}));
+    await emit((h) => h.onRunsUpdated?.({}));
     expect(screen.getByText('Allowed replacement')).toBeTruthy();
-    const freshStop = screen.getByLabelText('pet.stop.confirmPause');
+    const freshStop = screen.getByLabelText('pet.stop.stop');
     expect(freshStop.hasAttribute('disabled')).toBe(false);
     fireEvent.click(freshStop);
     expect(freshStop.classList.contains('is-confirm')).toBe(true);
@@ -1527,7 +1405,7 @@ describe('desktop mini v2 interaction contract', () => {
       else pending.reject(new Error('old pause failed'));
     });
     expect(freshStop.classList.contains('is-confirm')).toBe(true);
-    expect(screen.queryByText('pet.stop.paused')).toBeNull();
+    expect(screen.queryByText('pet.stop.stopped')).toBeNull();
     expect(screen.queryByText('pet.stop.failed')).toBeNull();
     await act(async () => vi.advanceTimersByTime(4000));
     expect(screen.getByText('Allowed replacement')).toBeTruthy();
@@ -1538,7 +1416,7 @@ describe('desktop mini v2 interaction contract', () => {
   it('drops an exiting card on authorization change and ignores its already-queued removal', async () => {
     const id = 'watch:private';
     turn([activity(id, 'watch')]);
-    devBind('S'); render(<PetPage />); await showDetail();
+    mainSession('S'); render(<PetPage />); await showCards();
     vi.useFakeTimers();
     const timeouts = vi.spyOn(window, 'setTimeout');
     fireEvent.click(screen.getByLabelText('pet.dismiss'));
@@ -1551,7 +1429,7 @@ describe('desktop mini v2 interaction contract', () => {
     expect(screen.queryByText(id)).toBeNull();
     expect(document.querySelector('.is-leaving')).toBeNull();
     turn([{ ...activity(id, 'watch'), label: 'New authorized card' }]);
-    await emit((h) => h.onDefinitionsUpdated?.({}));
+    await emit((h) => h.onRunsUpdated?.({}));
     await act(async () => { (remove as () => void)(); });
     await act(async () => vi.advanceTimersByTime(500));
     expect(screen.getByText('New authorized card')).toBeTruthy();
@@ -1563,26 +1441,28 @@ describe('desktop mini v2 interaction contract', () => {
     const id = 'watch:private';
     turn([activity(id, 'watch')]);
     const pending = deferred<{ ok: boolean }>();
-    api.setHarnessWatchEnabled.mockImplementationOnce(() => pending.promise);
-    devBind('S'); render(<PetPage />); await showDetail();
-    const stop = await screen.findByLabelText('pet.stop.confirmPause');
+    api.cancelSession.mockImplementationOnce(() => pending.promise);
+    mainSession('S'); render(<PetPage />); await showCards();
+    const stop = await screen.findByLabelText('pet.stop.stop');
     fireEvent.click(stop); fireEvent.click(stop);
     turn([]);
-    await bound('B');
+    await resolveMainAs('B');
+    await emit((h) => h.onRunsUpdated?.({}));
     expect(screen.queryByText(id)).toBeNull();
     turn([{ ...activity(id, 'watch'), label: 'Fresh S card' }]);
-    await bound('S');
-    await showDetail();
+    await emit((h) => h.onRunsUpdated?.({}));
+    await resolveMainAs('S');
+    await showCards();
     expect(await screen.findByText('Fresh S card')).toBeTruthy();
     await act(async () => pending.resolve({ ok: true }));
-    expect(screen.queryByText('pet.stop.paused')).toBeNull();
-    expect(screen.getByLabelText('pet.stop.confirmPause').hasAttribute('disabled')).toBe(false);
+    expect(screen.queryByText('pet.stop.stopped')).toBeNull();
+    expect(screen.getByLabelText('pet.stop.stop').hasAttribute('disabled')).toBe(false);
   });
 
   it.each(['success', 'uncertain'])('preserves user text while fencing a late send %s after authorization changes', async (outcome) => {
     const pending = deferred<WorkbenchMessage>();
     api.sendSessionMessage.mockImplementationOnce(() => pending.promise);
-    devBind('S'); render(<PetPage />); summon('listen');
+    mainSession('S'); render(<PetPage />); summon('listen');
     const input = await screen.findByRole('textbox');
     await userEvent.type(input, 'my own words{Enter}');
     await emit((h) => h.onAuthorizationChanged?.({}));
@@ -1599,14 +1479,14 @@ describe('desktop mini v2 interaction contract', () => {
     expect(screen.queryByText('Old authorized response')).toBeNull();
     // The async completion cannot clear the user's draft or open old detail.
     if (outcome === 'success') expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('my own words');
-    else expect(document.querySelector('.pet-mini-title')?.textContent).toBe('my own words');
+    else expect(petComposer.isUncertain('S')).toBe(true);
     expect(document.querySelector('.pet-mini-detail.is-open')).toBeNull();
   });
 
   it('keeps the document send ledger locked when an old page fails after remount', async () => {
     const pending = deferred<WorkbenchMessage>();
     api.sendSessionMessage.mockImplementationOnce(() => pending.promise);
-    devBind('S');
+    mainSession('S');
     const first = render(<PetPage />);
     summon('listen');
     await userEvent.type(await screen.findByRole('textbox'), 'preserve this{Enter}');
@@ -1621,36 +1501,11 @@ describe('desktop mini v2 interaction contract', () => {
     expect(petComposer.isUncertain('S')).toBe(true);
     expect(petComposer.isSending()).toBe(false);
     expect(screen.queryByRole('textbox')).toBeNull();
-    expect(document.querySelector('.pet-mini-title')?.textContent).toBe('preserve this');
+    expect(petComposer.isUncertain('S')).toBe(true);
     await userEvent.keyboard('{Enter}');
     expect(api.sendSessionMessage).toHaveBeenCalledTimes(1);
   });
 
-  it('discards an unauthorized queued pick while mirroring the already-sent native binding', async () => {
-    const pending = deferred<unknown>();
-    const invoke = vi.fn((command: string) => {
-      if (command === 'pet_ready') return Promise.resolve({ binding: 'S', revision: 1, summon_pending: null });
-      if (command === 'pet_bind') return pending.promise;
-      return Promise.resolve(null);
-    });
-    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
-    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
-    switcherSessions = [session('A'), session('B')];
-    render(<PetPage />); await showDetail();
-    await userEvent.click(screen.getByLabelText('pet.switchSession'));
-    await userEvent.click(await screen.findByRole('button', { name: 'Session A' }));
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_bind', { sessionId: 'A' }));
-    await showDetail();
-    await userEvent.click(screen.getByLabelText('pet.switchSession'));
-    await userEvent.click(await screen.findByRole('button', { name: 'Session B' }));
-    await emit((h) => h.onAuthorizationChanged?.({}));
-    await act(async () => pending.resolve({ binding: 'A', revision: 2 }));
-    expect(invoke.mock.calls.filter(([command]) => command === 'pet_bind')).toEqual([['pet_bind', { sessionId: 'A' }]]);
-    const { petShell } = await import('./petShell');
-    expect(petShell.currentBinding()).toBe('A');
-    expect(await screen.findAllByText('Session A')).toHaveLength(2);
-    expect(screen.queryByText('Session B')).toBeNull();
-  });
 
   // A tapped (not held) hotkey opens the text input once voice status is known.
   const tapHotkey = () => { summon('listen'); summon('release'); };
@@ -1691,7 +1546,7 @@ describe('desktop mini v2 interaction contract', () => {
     }
     await withVoiceEnv(() => true, Dictation, async () => {
       ({ VoiceTranscriptionError: TranscriptionError } = await import('@/lib/voiceTranscription'));
-      devBind('S'); render(<PetPage />); tapHotkey();
+      mainSession('S'); render(<PetPage />); tapHotkey();
       const input = await screen.findByRole('textbox');
       await userEvent.type(input, 'typed before voice');
       await userEvent.click(await screen.findByLabelText('pet.voice.open'));
@@ -1712,7 +1567,7 @@ describe('desktop mini v2 interaction contract', () => {
         asrCalls += 1;
         return asrCalls === 1 ? Promise.resolve({ ok: true, json: async () => ({ available: true }) }) : status.promise;
       }));
-      devBind('S'); render(<PetPage />); tapHotkey();
+      mainSession('S'); render(<PetPage />); tapHotkey();
       expect(await screen.findByLabelText('pet.voice.open')).toBeTruthy();
       await emit((h) => h.onAuthorizationChanged?.({}));
       await waitFor(() => expect(screen.queryByLabelText('pet.voice.open')).toBeNull());
@@ -1728,7 +1583,7 @@ describe('desktop mini v2 interaction contract', () => {
     class Dictation { done = new Promise<string>(() => {}); start = start; finish = () => {}; abort = () => {}; }
     await withVoiceEnv(() => true, Dictation, async () => {
       vi.stubGlobal('fetch', vi.fn(() => status.promise));
-      devBind('S'); render(<PetPage />); summon('listen');
+      mainSession('S'); render(<PetPage />); summon('listen');
       expect(await screen.findByRole('textbox')).toBeTruthy();
       expect(pose()).not.toBe('listening');
       await act(async () => status.resolve({ ok: true, json: async () => ({ available: true }) }));
@@ -1744,7 +1599,7 @@ describe('desktop mini v2 interaction contract', () => {
     class Dictation { done = new Promise<string>(() => {}); start = start; finish = () => {}; abort = () => {}; }
     await withVoiceEnv(() => true, Dictation, async () => {
       vi.stubGlobal('fetch', vi.fn(() => status.promise));
-      devBind('S'); render(<PetPage />); await screen.findByText('Session S');
+      mainSession('S'); render(<PetPage />); await screen.findByText('Session S');
       const avatar = screen.getByLabelText('pet.toggle');
       vi.useFakeTimers();
       try {
@@ -1783,7 +1638,7 @@ describe('desktop mini v2 interaction contract', () => {
       vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ available: true }) })));
       vi.resetModules();
       ({ PetPage } = await import('./PetPage'));
-      devBind('S'); render(<PetPage />); tapHotkey();
+      mainSession('S'); render(<PetPage />); tapHotkey();
       const input = await screen.findByRole('textbox');
       await userEvent.type(input, 'typed before voice');
       await userEvent.click(await screen.findByLabelText('pet.voice.open'));
@@ -1812,7 +1667,7 @@ describe('desktop mini v2 interaction contract', () => {
     const { petBridge } = await import('./petBridge');
     const report = vi.spyOn(petBridge, 'setHitRegions').mockResolvedValue(undefined);
     try {
-      devBind('S'); render(<PetPage />);
+      mainSession('S'); render(<PetPage />);
       await screen.findByText('Session S');
       const oldFrames = [...frames];
       expect(oldFrames.length).toBeGreaterThan(0);
@@ -1845,7 +1700,7 @@ describe('desktop mini v2 interaction contract', () => {
     try {
       tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('result', 'S', { read_at: null })];
       unreadBySession = { S: 1 };
-      devBind('S'); render(<PetPage />); await showDetail();
+      mainSession('S'); render(<PetPage />); await showDetail();
       const oldIntersection = intersections.at(-1)!;
       await act(async () => oldIntersection([{ isIntersecting: true }]));
       expect(markRead).toHaveBeenCalledTimes(1);
@@ -1871,9 +1726,10 @@ describe('desktop mini v2 interaction contract', () => {
     tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('q', 'S', { content: { quick_replies: ['Yes'] } })];
     const pending = deferred<WorkbenchMessage>();
     api.sendSessionMessage.mockImplementationOnce(() => pending.promise);
-    devBind('S'); render(<PetPage />); await showDetail(); summon('listen');
-    await userEvent.type(await screen.findByRole('textbox'), 'my draft');
+    mainSession('S'); render(<PetPage />); await showDetail();
     await userEvent.click(screen.getByText('Yes'));
+    summon('listen');
+    await userEvent.type(await screen.findByRole('textbox'), 'my draft');
     await emit((h) => h.onAuthorizationChanged?.({}));
     await userEvent.keyboard('{Enter}');
     expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', { text: 'Yes', metadata: { quick_reply_for: 'q' } });
@@ -1888,10 +1744,10 @@ describe('desktop mini v2 interaction contract', () => {
     tails.S = [message('u', 'S', { author: 'user', type: 'user' }), asking];
     const pending = deferred<WorkbenchMessage>();
     api.sendSessionMessage.mockImplementationOnce(() => pending.promise);
-    devBind('S'); render(<PetPage />); await showDetail();
+    mainSession('S'); render(<PetPage />); await showDetail();
+    await userEvent.click(await screen.findByText('Yes'));
     summon('listen');
     const input = await screen.findByRole('textbox');
-    await userEvent.click(await screen.findByText('Yes'));
     const chosen = { ...asking, content: { ...asking.content, quick_reply_chosen: 'Yes' } };
     const update = () => {
       tails.S = tails.S.map((row) => row.id === chosen.id ? chosen : row);
@@ -1917,6 +1773,8 @@ describe('desktop mini v2 interaction contract', () => {
     expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', { text: 'Yes', metadata: { quick_reply_for: 'q1' } });
     expect(screen.queryByRole('button', { name: 'Yes', exact: true })).toBeNull();
     expect(screen.queryByRole('button', { name: 'No', exact: true })).toBeNull();
+    await userEvent.keyboard('{Escape}');
+    await showDetail();
     // An older update must never reclaim a newer result's quick-reply group.
     await emit((h) => h.onMessageNew?.(message('q2', 'S', { content: { quick_replies: ['Continue', 'Wait'] } })));
     expect(await screen.findByRole('button', { name: 'Continue', exact: true })).toBeTruthy();
@@ -1928,7 +1786,7 @@ describe('desktop mini v2 interaction contract', () => {
   it('keeps quick replies behind the same uncertain-send lock as typed input', async () => {
     tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('q1', 'S', { content: { quick_replies: ['Yes', 'No'] } })];
     api.sendSessionMessage.mockRejectedValueOnce(new Error('connection lost'));
-    devBind('S'); render(<PetPage />); await showDetail();
+    mainSession('S'); render(<PetPage />); await showDetail();
     await userEvent.click(await screen.findByText('Yes'));
     expect(await screen.findByText('newSession.sendUncertain')).toBeTruthy();
     summon('listen');
@@ -1941,87 +1799,23 @@ describe('desktop mini v2 interaction contract', () => {
     expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', { text: 'Yes', metadata: { quick_reply_for: 'q1' } });
   });
 
-  it('keeps waiting definitions pausable without marking them as executing', async () => {
-    turn([activity('watch:w1', 'watch'), activity('task:t1', 'task')]);
-    devBind('S'); render(<PetPage />); await showDetail();
-    expect(screen.getAllByLabelText('pet.stop.confirmPause')).toHaveLength(2);
-    expect(screen.getByText('pet.activityKind.watch · pet.activityStatus.waiting')).toBeTruthy();
-    expect(screen.getByText('pet.activityKind.task · pet.activityStatus.waiting')).toBeTruthy();
-    expect(document.querySelector('.pet-mini-running-dot')).toBeNull();
+  it('does not label idle processes as working or completed, and hides unsupported run stops', async () => {
+    turn([activity('watch:w1', 'watch', 'idle'), activity('task:t1', 'task', 'idle')]);
+    mainSession('S'); render(<PetPage />); await showDetail();
+    expect(document.querySelectorAll('.pet-mini-card')).toHaveLength(0);
     expect(pose()).toBe('idle');
-    expect(document.querySelector('[data-busy]')?.getAttribute('data-busy')).toBe('false');
-    turn([activity('watch:w1', 'watch'), activity('task:t1', 'task'), activity('agent_run:r1', 'agent_run')]);
+    turn([activity('run:r1', 'agent_run')]);
     await emit((h) => h.onRunsUpdated?.({}));
     await waitFor(() => expect(pose()).toBe('running'));
-    expect(document.querySelectorAll('.pet-mini-running-dot')).toHaveLength(1);
-    expect(screen.getAllByLabelText('pet.stop.confirmPause')).toHaveLength(2);
-    expect(screen.queryByLabelText('pet.stop.confirmStop')).toBeNull();
+    expect(screen.queryByLabelText('pet.stop.stop')).toBeNull();
   });
 
-  it.each([false, true])('keeps switching reachable without a main exchange (background work: %s)', async (hasBackgroundWork) => {
-    tails.S = [];
-    turn(hasBackgroundWork ? [activity('watch:w1', 'watch')] : []);
-    switcherSessions = [session('B', { title: 'Another session' })];
-    devBind('S'); render(<PetPage />);
-    await waitFor(() => expect(api.listSessionMessages).toHaveBeenCalledWith('S', expect.anything()));
-    summon('show');
-    if (hasBackgroundWork) expect(await screen.findByText('watch:w1')).toBeTruthy();
-    // An empty bound session is not the picker: it shows the switch control.
-    expect(screen.queryByText('Another session')).toBeNull();
-    fireEvent.click(await screen.findByText('pet.switchSession'));
-    fireEvent.click(await screen.findByText('Another session'));
-    await waitFor(() => expect(devBinding().binding).toBe('B'));
-    expect(await screen.findAllByText('Session B')).toHaveLength(2);
-  });
 
-  it('picking a session with nothing to show leaves the switcher instead of reopening it', async () => {
-    tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('r', 'S')];
-    tails.B = [];
-    switcherSessions = [session('B', { title: 'Another session' })];
-    devBind('S'); render(<PetPage />);
-    await showDetail();
-    fireEvent.click(await screen.findByText('pet.switchSession'));
-    fireEvent.click(await screen.findByText('Another session'));
-    await waitFor(() => expect(devBinding().binding).toBe('B'));
-    await waitFor(() => expect(api.listSessionMessages).toHaveBeenCalledWith('B', expect.anything()));
-    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
-    expect(screen.queryByText('Another session')).toBeNull();
-    expect(screen.getByText('pet.switchSession')).toBeTruthy();
-  });
 
-  it('goes back from the switcher with the back control, and a collapse leaves it', async () => {
-    tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('r', 'S')];
-    switcherSessions = [session('B', { title: 'Another session' })];
-    devBind('S'); render(<PetPage />);
-    await showDetail();
-    fireEvent.click(await screen.findByText('pet.switchSession'));
-    expect(await screen.findByText('Another session')).toBeTruthy();
-    fireEvent.click(screen.getByText('common.back'));
-    await waitFor(() => expect(screen.queryByText('Another session')).toBeNull());
-    expect(document.querySelector('.pet-mini-card.is-main')).toBeTruthy();
-    expect(devBinding().binding).toBe('S');
 
-    fireEvent.click(screen.getByText('pet.switchSession'));
-    expect(await screen.findByText('Another session')).toBeTruthy();
-    fireEvent.click(screen.getByLabelText('pet.toggle'));
-    await waitFor(() => expect(screen.getByLabelText('pet.toggle').getAttribute('aria-expanded')).toBe('false'));
-    fireEvent.click(screen.getByLabelText('pet.toggle'));
-    await waitFor(() => expect(screen.getByLabelText('pet.toggle').getAttribute('aria-expanded')).toBe('true'));
-    expect(screen.queryByText('Another session')).toBeNull();
-    expect(document.querySelector('.pet-mini-card.is-main')).toBeTruthy();
-  });
-
-  it('offers no back control when nothing is bound', async () => {
-    canChat = false;
-    switcherSessions = [session('B', { title: 'Another session' })];
-    render(<PetPage />);
-    summon('show');
-    expect(await screen.findByText('Another session')).toBeTruthy();
-    expect(screen.queryByText('common.back')).toBeNull();
-  });
 
   it('shows the dock while the shell reports hover over Vibey, and reports that zone', async () => {
-    devBind('S'); render(<PetPage />);
+    mainSession('S'); render(<PetPage />);
     const wrap = (await screen.findByLabelText('pet.toggle')).closest('.pet-mini-avatar-wrap')!;
     expect(wrap.hasAttribute('data-pet-hover')).toBe(true);
     expect(wrap.classList.contains('is-hovered')).toBe(false);
@@ -2034,7 +1828,7 @@ describe('desktop mini v2 interaction contract', () => {
   it('keeps the unread count visible until the inbox confirms the result was read', async () => {
     tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('r', 'S', { read_at: null })];
     unreadBySession = { S: 1 };
-    devBind('S'); render(<PetPage />);
+    mainSession('S'); render(<PetPage />);
     expect((await screen.findByLabelText('pet.unreadBadge')).textContent).toBe('1');
     summon('show');
     expect(screen.getByLabelText('pet.unreadBadge').textContent).toBe('1');
@@ -2052,17 +1846,17 @@ describe('desktop mini v2 interaction contract', () => {
   it('does not mark the collapsed card read; detail is explicitly opened and closes on collapse', async () => {
     tails.S = [message('u', 'S', { author: 'user', type: 'user', text: 'Question' }), message('r', 'S', { read_at: null })];
     unreadBySession = { S: 1 };
-    devBind('S');
+    mainSession('S');
     render(<PetPage />);
     await screen.findByText('Question');
     expect(markRead).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByLabelText('pet.stack.expand'));
+    summon('show');
     await waitFor(() => expect(document.querySelector('.pet-mini-detail')).toBeTruthy());
     expect(markRead).not.toHaveBeenCalled();
-    fireEvent.click(document.querySelector('.pet-mini-card[role=button]')!);
+    fireEvent.click(document.querySelector('.pet-mini-reply-toggle')!);
     await waitFor(() => expect(markRead).toHaveBeenCalledWith('S', 'r'));
     fireEvent.click(screen.getByLabelText('pet.toggle'));
-    await waitFor(() => expect(document.querySelector('.pet-mini-detail')).toBeNull());
+    await waitFor(() => expect(document.querySelector('.pet-mini-detail.is-open')).toBeNull());
   });
 
   it('marks detail read only after its result intersects the fixed scroll viewport', async () => {
@@ -2075,7 +1869,7 @@ describe('desktop mini v2 interaction contract', () => {
     try {
       tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('unseen', 'S', { read_at: null })];
       unreadBySession = { S: 1 };
-      devBind('S'); render(<PetPage />); await showDetail();
+      mainSession('S'); render(<PetPage />); await showDetail();
       expect(intersect).toBeDefined();
       expect(markRead).not.toHaveBeenCalled();
       await act(async () => intersect!([{ isIntersecting: true }]));
@@ -2087,19 +1881,19 @@ describe('desktop mini v2 interaction contract', () => {
 
   it('requires a second press, uses the native watch id, and retains the stopped row through linger and both exit beats', async () => {
     turn([activity('watch:w1', 'watch'), activity('run:r1', 'agent_run')]);
-    devBind('S'); render(<PetPage />); await showDetail();
-    const stop = await screen.findByLabelText('pet.stop.confirmPause');
-    expect(screen.queryByLabelText('pet.stop.confirmStop')).toBeNull();
+    mainSession('S'); render(<PetPage />); await showCards();
+    const stop = await screen.findByLabelText('pet.stop.stop');
+    expect(screen.getAllByLabelText('pet.stop.stop')).toHaveLength(1);
     const pending = deferred<{ ok: boolean }>();
-    api.setHarnessWatchEnabled.mockImplementationOnce(() => pending.promise);
+    api.cancelSession.mockImplementationOnce(() => pending.promise);
     vi.useFakeTimers();
     fireEvent.click(stop);
-    expect(api.setHarnessWatchEnabled).not.toHaveBeenCalled();
+    expect(api.cancelSession).not.toHaveBeenCalled();
     fireEvent.click(stop);
-    expect(api.setHarnessWatchEnabled).toHaveBeenCalledExactlyOnceWith('w1', false);
+    expect(api.cancelSession).toHaveBeenCalledExactlyOnceWith('watch:w1');
     expect(stop.hasAttribute('disabled')).toBe(true);
     await act(async () => pending.resolve({ ok: true }));
-    expect(screen.getByText('pet.stop.paused')).toBeTruthy();
+    expect(screen.getByText('pet.stop.stopped')).toBeTruthy();
     turn([]);
     // Server removal during the linger cannot cut off the local exit.
     await act(async () => { handlers.forEach((h) => h.onRunsUpdated?.({})); });
@@ -2115,23 +1909,23 @@ describe('desktop mini v2 interaction contract', () => {
   });
 
   it('expires confirmation at 3s and lets a failed pause be retried', async () => {
-    turn([activity('task:t1', 'task')]); devBind('S'); render(<PetPage />); await showDetail();
-    const stop = await screen.findByLabelText('pet.stop.confirmPause');
+    turn([activity('task:t1', 'task')]); mainSession('S'); render(<PetPage />); await showCards();
+    const stop = await screen.findByLabelText('pet.stop.stop');
     vi.useFakeTimers(); fireEvent.click(stop);
     await act(async () => vi.advanceTimersByTime(3000));
     expect(stop.classList.contains('is-confirm')).toBe(false);
-    api.setHarnessTaskEnabled.mockRejectedValueOnce(new Error('offline'));
+    api.cancelSession.mockRejectedValueOnce(new Error('offline'));
     fireEvent.click(stop); fireEvent.click(stop);
     await act(async () => {});
     expect(screen.getByText('pet.stop.failed')).toBeTruthy();
     fireEvent.click(stop); fireEvent.click(stop);
     await act(async () => {});
-    expect(api.setHarnessTaskEnabled).toHaveBeenNthCalledWith(2, 't1', false);
-    expect(screen.getByText('pet.stop.paused')).toBeTruthy();
+    expect(api.cancelSession).toHaveBeenNthCalledWith(2, 'task:t1');
+    expect(screen.getByText('pet.stop.stopped')).toBeTruthy();
   });
 
   it('holds for exactly 320ms, cancels a departed press, and falls back to text without voice support', async () => {
-    devBind('S'); render(<PetPage />); await screen.findByText('Session S');
+    mainSession('S'); render(<PetPage />); await screen.findByText('Session S');
     const avatar = screen.getByLabelText('pet.toggle');
     vi.useFakeTimers();
     fireEvent.pointerDown(avatar, { button: 0, pointerId: 1 });
@@ -2146,5 +1940,460 @@ describe('desktop mini v2 interaction contract', () => {
     expect(screen.queryByLabelText('pet.voice.open')).toBeNull();
     fireEvent.pointerUp(avatar, { pointerId: 2 });
     expect(api.sendSessionMessage).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('Personal Agent mini', () => {
+  it('uses the same visible sessions for cards and attention, excluding the main and unknown visibility', async () => {
+    canUseAgents = true;
+    const row = workingIn('running').agents[0];
+    runningAgents = { ...workingIn('running'), agents: [
+      { ...row, session_id: 'S' },
+      { ...row, session_id: 'ses_main' },
+      { ...row, session_id: 'hidden', visibility: 'background' },
+      { ...row, session_id: 'system', visibility: 'system' },
+      { ...row, session_id: 'unknown', visibility: null },
+      { ...row, session_id: 'closed', openable_in_chat: false },
+      { ...row, session_id: 'reply', state: 'idle' },
+      { ...row, session_id: 'running', state: 'idle' },
+      row,
+      { ...row, session_id: 'approval', state: 'idle' },
+    ] };
+    unreadBySession = { reply: 1 };
+    api.getVaultRequests.mockImplementation(async (filter) => ({ requests: filter?.session === 'approval' ? [{ id: 'request', request_type: 'access', session: { id: 'approval' } } as VaultRequest] : [] }));
+    mainSession('S'); render(<PetPage />); await showCards();
+    await waitFor(() => expect(pose()).toBe('needs_input'));
+    expect(Array.from(document.querySelectorAll('.pet-mini-card'), (node) => node.getAttribute('data-session-id'))).toEqual(['approval', 'running', 'reply']);
+    expect(document.querySelector('.pet-mini-card.is-main')).toBeNull();
+    expect(api.getVaultRequests).not.toHaveBeenCalledWith(expect.objectContaining({ session: 'hidden' }), expect.anything());
+    api.getVaultRequests.mockResolvedValue({ requests: [] });
+    await emit((h) => h.onVaultsUpdated?.({}));
+    await waitFor(() => expect(pose()).toBe('ready'));
+    expect(Array.from(document.querySelectorAll('.pet-mini-card'), (node) => node.getAttribute('data-session-id'))).toEqual(['running', 'reply']);
+  });
+
+  it('keeps unread Inbox replies after their process ends and rechecks visibility', async () => {
+    canUseAgents = true;
+    inboxSessions = [{ session_id: 'reply', unread: true, project_name: 'Project' } as InboxSession];
+    unreadBySession = { reply: 1 };
+    mainSession('S'); render(<PetPage />); await showDetail();
+    await waitFor(() => expect(document.querySelector('[data-session-id="reply"]')).not.toBeNull());
+    expect(screen.getByText('pet.replied')).toBeTruthy();
+    expect(pose()).toBe('ready');
+    sessionReads.reply = async () => ({ status: 200, session: session('reply', { visibility: 'background' }) });
+    await emit((h) => h.onSessionActivity?.({ session_id: 'reply', scope_id: null, event: 'visibility', visibility: 'background' }));
+    await waitFor(() => expect(document.querySelector('[data-session-id="reply"]')).toBeNull());
+    expect(pose()).toBe('idle');
+  });
+
+  it('appends a removable reference to the draft and sends it only to the main binding', async () => {
+    canUseAgents = true;
+    runningAgents = workingIn('other');
+    api.sendSessionMessage.mockResolvedValueOnce(message('sent-ref', 'S', { author: 'user', type: 'user' }));
+    mainSession('S'); render(<PetPage />); summon('listen');
+    await userEvent.type(await screen.findByRole('textbox'), 'Check this');
+    await userEvent.click(await screen.findByRole('button', { name: 'pet.referenceSession' }));
+    expect(screen.getByRole('textbox').getAttribute('placeholder')).toBe('pet.inputPlaceholder');
+    expect(api.sendSessionMessage).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('button', { name: 'pet.send' }));
+    expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', {
+      text: 'Check this #<other>', content: { references: [{ kind: 'session', session_id: 'other', title: 'pet.untitledTask' }] },
+    });
+  });
+});
+
+
+describe('Personal Agent review invariants', () => {
+  it.each(['ended', 'hidden', 'unreachable', 'remount'])('keeps selected reference metadata when the activity is %s', async (reason) => {
+    canUseAgents = true;
+    runningAgents = workingIn('other');
+    api.sendSessionMessage.mockResolvedValueOnce(message('sent-ref', 'S', { author: 'user', type: 'user' }));
+    mainSession('S'); const view = render(<PetPage />); summon('listen');
+    await userEvent.type(await screen.findByRole('textbox'), 'Check this');
+    await userEvent.click(await screen.findByRole('button', { name: 'pet.referenceSession' }));
+    runningAgents = reason === 'hidden'
+      ? { ...workingIn('other'), agents: workingIn('other').agents.map((row) => ({ ...row, visibility: 'background' })) }
+      : { ok: false, unreachable: true, agents: [], counts: {} };
+    if (reason === 'ended' || reason === 'remount') runningAgents = { ...workingIn('other'), agents: [] };
+    await emit((h) => h.onRunsUpdated?.({}));
+    if (reason === 'remount') {
+      view.unmount(); render(<PetPage />); summon('listen');
+    }
+    const input = await screen.findByRole('textbox');
+    expect((input as HTMLTextAreaElement).value).toBe('Check this ');
+    expect(screen.getByRole('button', { name: 'pet.removeReference' })).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: 'pet.send' }));
+    expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', {
+      text: 'Check this #<other>', content: { references: [{ kind: 'session', session_id: 'other', title: 'pet.untitledTask' }] },
+    });
+    summon('listen');
+    await screen.findByRole('textbox');
+    expect(screen.queryByRole('button', { name: 'pet.removeReference' })).toBeNull();
+  });
+
+  it.each(['remove', 'escape', 'binding'])('clears draft references on %s', async (action) => {
+    canUseAgents = true; runningAgents = workingIn('other');
+    mainSession('S'); render(<PetPage />); summon('show');
+    await userEvent.click(await screen.findByRole('button', { name: 'pet.referenceSession' }));
+    if (action === 'remove') await userEvent.click(screen.getByRole('button', { name: 'pet.removeReference' }));
+    else if (action === 'escape') await userEvent.keyboard('{Escape}');
+    else await resolveMainAs('B');
+    summon('listen');
+    expect((await screen.findByRole('textbox') as HTMLTextAreaElement).value).toBe('');
+    expect(screen.queryByRole('button', { name: 'pet.removeReference' })).toBeNull();
+  });
+
+  it('sleeps despite unread sessions excluded from the visible activity model', async () => {
+    vi.useFakeTimers();
+    try {
+      canUseAgents = true;
+      const row = workingIn('hidden').agents[0];
+      runningAgents = { ...workingIn('hidden'), agents: [
+        { ...row, session_id: 'hidden', visibility: 'background' },
+        { ...row, session_id: 'system', visibility: 'system' },
+        { ...row, session_id: 'unknown', visibility: null },
+        { ...row, session_id: 'closed', openable_in_chat: false },
+      ] };
+      unreadBySession = { hidden: 1, system: 1, unknown: 1, closed: 1 };
+      mainSession('S'); render(<PetPage />);
+      await act(async () => {});
+      expect(pose()).toBe('idle');
+      await act(async () => vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1));
+      expect(pose()).toBe('sleeping');
+      runningAgents = workingIn('visible');
+      await emit((h) => h.onRunsUpdated?.({}));
+      expect(pose()).toBe('running');
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('reads each activity action source once on mount and when IDs change with a healthy bridge', async () => {
+    canUseAgents = true; runningAgents = workingIn('other');
+    api.getTurnState.mockClear();
+    mainSession('S'); render(<PetPage />); await showDetail();
+    await waitFor(() => expect(api.getTurnState).toHaveBeenCalledWith('other', expect.anything()));
+    expect(api.getVaultRequests.mock.calls.filter(([filter]) => filter?.session === 'other')).toHaveLength(1);
+    expect(api.getTurnState.mock.calls.filter(([id]) => id === 'other')).toHaveLength(1);
+    await emit((h) => h.onEventBridgeStatus?.({ connected: true }));
+    runningAgents = { ...workingIn('other'), agents: [...workingIn('other').agents, ...workingIn('new').agents] };
+    await emit((h) => h.onRunsUpdated?.({}));
+    await waitFor(() => expect(api.getTurnState).toHaveBeenCalledWith('new', expect.anything()));
+    expect(api.getVaultRequests.mock.calls.filter(([filter]) => filter?.session === 'other')).toHaveLength(2);
+    expect(api.getVaultRequests.mock.calls.filter(([filter]) => filter?.session === 'new')).toHaveLength(1);
+    expect(api.getTurnState.mock.calls.filter(([id]) => id === 'new')).toHaveLength(1);
+  });
+});
+
+describe('Personal Agent review: history and lifecycle', () => {
+  it.each(['disappeared', 'new-turn', 'new-turn-during-outage'])('forgets a manual dismissal when %s', async (reason) => {
+    mainSession('ses_main'); canUseAgents = true; runningAgents = workingIn('T');
+    const invoke = vi.fn(async (command: string) => command === 'pet_ready'
+      ? { binding: 'ses_main', revision: 1, dismissed_ids: [], summon_pending: null }
+      : { panel_side: 'left', panel_edge: 'bottom' });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    render(<PetPage />); summon('show');
+    await userEvent.click(await screen.findByLabelText('pet.dismiss'));
+    const { petShell } = await import('./petShell');
+    await waitFor(() => expect(petShell.dismissed()).toEqual(['T']));
+    if (reason === 'disappeared') {
+      runningAgents = { ...runningAgents, agents: [] };
+      await emit((h) => h.onRunsUpdated?.({}));
+    } else {
+      if (reason === 'new-turn-during-outage') {
+        api.getMainSession.mockRejectedValueOnce(new Error('offline'));
+        await emit((h) => h.onConnected?.());
+        await screen.findByText('pet.vibeyUnavailable');
+      }
+      await emit((h) => h.onTurnStart?.({ session_id: 'T' }));
+    }
+    await waitFor(() => expect(petShell.dismissed()).toEqual([]));
+    expect(invoke.mock.calls.some(([command]) => command === 'pet_set_dismissed')).toBe(false);
+    runningAgents = workingIn('T');
+    await emit((h) => h.onConnected?.());
+    await waitFor(() => expect(document.querySelector('[data-session-id="T"]')).toBeTruthy());
+  });
+
+  it('cancels an old manual exit when the next turn starts before its animation ends', async () => {
+    canUseAgents = true; runningAgents = workingIn('T');
+    render(<PetPage />); summon('show');
+    const close = await screen.findByLabelText('pet.dismiss');
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(close);
+      expect(document.querySelector('.is-leaving')).toBeTruthy();
+      await emit((h) => h.onTurnStart?.({ session_id: 'T' }));
+      await act(async () => vi.advanceTimersByTime(500));
+      const { petShell } = await import('./petShell');
+      expect(petShell.dismissed()).toEqual([]);
+      expect(document.querySelector('[data-session-id="T"]')).toBeTruthy();
+      expect(document.querySelector('.is-leaving')).toBeNull();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('renders reference sidecars in current and historical Markdown', async () => {
+    const reference = (id: string, title: string) => ({ references: [{ kind: 'session', session_id: id, title }] });
+    tails.S = [
+      message('old-user', 'S', { author: 'user', type: 'user', text: 'Read #<older>', content: reference('older', '旧项目') }),
+      message('old-result', 'S', { text: 'Done #<old-result-ref>', content: reference('old-result-ref', 'Old result') }),
+      message('current-user', 'S', { author: 'user', type: 'user', text: 'Summarize #<current>', content: reference('current', '当前项目') }),
+      message('current-result', 'S', { text: 'See #<result-ref>', content: reference('result-ref', 'Latest result') }),
+    ];
+    render(<PetPage />); await showDetail();
+    const detail = within(document.querySelector('.pet-mini-detail') as HTMLElement);
+    for (const title of ['#旧项目', '#Old result', '#当前项目', '#Latest result']) expect(detail.getByText(title)).toBeTruthy();
+    expect(document.querySelector('.pet-mini-detail')?.textContent).not.toMatch(/#</);
+  });
+
+  it.each([false, true])('preserves document dismissals across an outage (native bind succeeds: %s)', async (persistable) => {
+    mainSession('ses_main'); canUseAgents = true; runningAgents = workingIn('T');
+    const invoke = vi.fn(async (command: string) => {
+      if (command === 'pet_ready') return { binding: null, revision: 0, dismissed_ids: [], summon_pending: null };
+      if (command === 'pet_bind') {
+        if (!persistable) throw new Error('storage unavailable');
+        return { binding: 'ses_main', revision: 1 };
+      }
+      return { panel_side: 'left', panel_edge: 'bottom' };
+    });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    render(<PetPage />); summon('show');
+    await userEvent.click(await screen.findByLabelText('pet.dismiss'));
+    const { petShell } = await import('./petShell');
+    await waitFor(() => expect(petShell.dismissed()).toEqual(['T']));
+    api.getMainSession.mockRejectedValueOnce(new Error('offline'));
+    await emit((h) => h.onConnected?.());
+    await screen.findByText('pet.vibeyUnavailable');
+    expect(petShell.dismissed()).toEqual(['T']);
+    await emit((h) => h.onConnected?.());
+    await waitFor(() => expect(petShell.currentBinding()).toBe('ses_main'));
+    expect(petShell.dismissed()).toEqual(['T']);
+    expect(document.querySelector('[data-session-id="T"]')).toBeNull();
+  });
+
+  it('shows loading during slow reauthorization while preserving the draft', async () => {
+    render(<PetPage />); summon('listen');
+    await userEvent.type(await screen.findByRole('textbox'), 'unsent draft');
+    const pending = deferred<WorkbenchSessionReadResult>();
+    api.getMainSession.mockReturnValueOnce(pending.promise);
+    await emit((h) => h.onAuthorizationChanged?.({}));
+    expect(screen.getByRole('status').textContent).toContain('common.loading');
+    expect(screen.getByRole('button', { name: 'pet.openInAvibe' })).toBeTruthy();
+    expect(screen.queryByRole('textbox')).toBeNull();
+    await act(async () => pending.resolve({ status: 200, session: session('S'), capabilities: { can_chat: true } }));
+    expect((await screen.findByRole('textbox') as HTMLTextAreaElement).value).toBe('unsent draft');
+    expect(screen.queryByText('common.loading')).toBeNull();
+  });
+
+  it.each(['idle-then-running', 'new-turn', 'unread'])('does not turn a stop exit into a manual dismissal before %s', async (next) => {
+    canUseAgents = true; runningAgents = workingIn('T');
+    api.getTurnState.mockImplementation(async (id) => ({ ...idleTurn, in_flight: id === 'T' }));
+    api.cancelSession.mockResolvedValue({ ok: true });
+    render(<PetPage />); summon('show');
+    const stop = await screen.findByLabelText('pet.stop.stop');
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(stop); fireEvent.click(stop);
+      await act(async () => {});
+      await act(async () => vi.advanceTimersByTime(2500));
+      await act(async () => vi.advanceTimersByTime(500));
+      expect(document.querySelector('[data-session-id="T"]')).toBeNull();
+      const { petShell } = await import('./petShell');
+      expect(petShell.dismissed()).not.toContain('T');
+      if (next === 'idle-then-running') {
+        runningAgents = { ...runningAgents, agents: runningAgents.agents.map((row) => ({ ...row, state: 'idle' })) };
+        await emit((h) => h.onRunsUpdated?.({}));
+        runningAgents = workingIn('T');
+        await emit((h) => h.onRunsUpdated?.({}));
+      } else if (next === 'new-turn') {
+        await emit((h) => h.onTurnStart?.({ session_id: 'T' }));
+      } else {
+        runningAgents = { ...runningAgents, agents: runningAgents.agents.map((row) => ({ ...row, state: 'idle' })) };
+        act(() => {
+          unreadBySession = { T: 1 }; inboxVersion += 1; inboxListeners.forEach((listener) => listener());
+        });
+        await emit((h) => h.onRunsUpdated?.({}));
+      }
+      expect(document.querySelector('[data-session-id="T"]')).toBeTruthy();
+      expect(petShell.dismissed()).not.toContain('T');
+    } finally { vi.useRealTimers(); }
+  });
+});
+
+describe('Personal Agent breaker: readiness and turn generations', () => {
+  it('keeps closes only in this document and ignores legacy dismissals even after slow ready', async () => {
+    mainSession('ses_main'); canUseAgents = true; runningAgents = workingIn('T');
+    const ready = deferred<unknown>();
+    const legacy = { binding: 'ses_main', revision: 5, dismissed_ids: ['T'], summon_pending: null };
+    const invoke = vi.fn((command: string) => command === 'pet_ready' ? ready.promise : Promise.resolve({ panel_side: 'left', panel_edge: 'bottom' }));
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    const view = render(<PetPage />); await showCards();
+    await userEvent.click(await screen.findByLabelText('pet.dismiss'));
+    const { petShell } = await import('./petShell');
+    await waitFor(() => expect(petShell.dismissed()).toEqual(['T']));
+    await act(async () => ready.resolve(legacy));
+    expect(petShell.dismissed()).toEqual(['T']);
+    expect(document.querySelector('[data-session-id="T"]')).toBeNull();
+    expect(invoke.mock.calls.some(([command]) => command === 'pet_set_dismissed')).toBe(false);
+    view.unmount();
+    // A new module graph represents reopening the document, with the same file.
+    vi.resetModules();
+    const { PetPage: ReopenedPet } = await import('./PetPage');
+    render(<ReopenedPet />); await showCards();
+    await waitFor(() => expect(document.querySelector('[data-session-id="T"]')).toBeTruthy());
+    expect(invoke.mock.calls.some(([command]) => command === 'pet_set_dismissed')).toBe(false);
+  });
+
+  it.each(['unread', 'feed', 'running'])('does not forget a close while the %s source is unready', async (source) => {
+    mainSession('ses_main'); canUseAgents = true;
+    unreadLoaded = source !== 'unread'; inboxLoading = source === 'feed';
+    if (source === 'running') runningAgents = { ok: false, agents: [], counts: {} };
+    const { petShell } = await import('./petShell');
+    petShell.addDismissed('reply');
+    render(<PetPage />); await showCards();
+    await waitFor(() => expect(petShell.currentBinding()).toBe('ses_main'));
+    await waitFor(() => expect(api.getRunningAgents).toHaveBeenCalled());
+    expect(petShell.dismissed()).toEqual(['reply']);
+    act(() => {
+      inboxSessions = [{ session_id: 'reply', unread: true } as InboxSession];
+      unreadBySession = { reply: 1 }; unreadLoaded = true; inboxLoading = false;
+      inboxVersion += 1; inboxListeners.forEach((listener) => listener());
+    });
+    runningAgents = { ok: true, agents: [], counts: {} };
+    await emit((h) => h.onRunsUpdated?.({}));
+    await waitFor(() => expect(api.getSessionResult).toHaveBeenCalledWith('reply'));
+    expect(petShell.dismissed()).toEqual(['reply']);
+    expect(document.querySelector('[data-session-id="reply"]')).toBeNull();
+    // A loaded empty snapshot can now forget it.
+    act(() => {
+      inboxSessions = []; unreadBySession = {};
+      inboxVersion += 1; inboxListeners.forEach((listener) => listener());
+    });
+    await waitFor(() => expect(petShell.dismissed()).toEqual([]));
+  });
+
+  it.each([false, true])('retains reply cards and their generation during revalidation (dismissed: %s)', async (dismissed) => {
+    mainSession('ses_main'); canUseAgents = true;
+    inboxSessions = [{ session_id: 'reply', unread: true } as InboxSession];
+    unreadBySession = { reply: 1 };
+    render(<PetPage />); await showCards();
+    await waitFor(() => expect(document.querySelector('[data-session-id="reply"]')).toBeTruthy());
+    const { petShell } = await import('./petShell');
+    if (dismissed) {
+      await userEvent.click(await screen.findByLabelText('pet.dismiss'));
+      await waitFor(() => expect(petShell.dismissed()).toEqual(['reply']));
+    }
+    const first = deferred<WorkbenchSessionReadResult>();
+    const latest = deferred<WorkbenchSessionReadResult>();
+    sessionReads.reply = () => first.promise;
+    await emit((h) => h.onConnected?.());
+    const assertStable = () => {
+      expect(petShell.dismissed()).toEqual(dismissed ? ['reply'] : []);
+      expect(Boolean(document.querySelector('[data-session-id="reply"]'))).toBe(!dismissed);
+      if (!dismissed) expect(pose()).toBe('ready');
+    };
+    assertStable();
+    sessionReads.reply = () => latest.promise;
+    await emit((h) => h.onSessionActivity?.({ session_id: 'unrelated', scope_id: null, event: 'updated' }));
+    assertStable();
+    await act(async () => latest.resolve({ status: 200, session: session('reply') }));
+    assertStable();
+    // The older read must not remove the newer validated row.
+    await act(async () => first.resolve({ status: 404, session: null }));
+    assertStable();
+    sessionReads.reply = () => Promise.reject(new Error('offline'));
+    await emit((h) => h.onConnected?.());
+    assertStable();
+  });
+
+  it('records a new close against the retained main during a lookup outage', async () => {
+    mainSession('ses_main'); canUseAgents = true; runningAgents = workingIn('T');
+    render(<PetPage />); await showCards();
+    await screen.findByLabelText('pet.dismiss');
+    api.getMainSession.mockRejectedValueOnce(new Error('offline'));
+    await emit((h) => h.onConnected?.());
+    await screen.findByText('pet.vibeyUnavailable');
+    await userEvent.click(await screen.findByLabelText('pet.dismiss'));
+    const { petShell } = await import('./petShell');
+    await waitFor(() => expect(petShell.dismissed()).toEqual(['T']));
+    expect(document.querySelector('[data-session-id="T"]')).toBeNull();
+    await emit((h) => h.onConnected?.());
+    await waitFor(() => expect(petShell.currentBinding()).toBe('ses_main'));
+    expect(petShell.dismissed()).toEqual(['T']);
+    expect(document.querySelector('[data-session-id="T"]')).toBeNull();
+  });
+
+  it('requires two fresh stop presses after confirmation, manual exit and a new turn', async () => {
+    canUseAgents = true; runningAgents = workingIn('T');
+    api.getTurnState.mockImplementation(async (id) => ({ ...idleTurn, in_flight: id === 'T' }));
+    api.cancelSession.mockReset().mockResolvedValue({ ok: true });
+    render(<PetPage />); await showCards();
+    const stop = await screen.findByLabelText('pet.stop.stop');
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(stop);
+      fireEvent.click(screen.getByLabelText('pet.dismiss'));
+      await act(async () => vi.advanceTimersByTime(500));
+      expect(document.querySelector('[data-session-id="T"]')).toBeNull();
+      await emit((h) => h.onTurnStart?.({ session_id: 'T' }));
+      const nextStop = screen.getByLabelText('pet.stop.stop');
+      fireEvent.click(nextStop);
+      expect(nextStop.getAttribute('aria-label')).toBe('pet.stop.confirmStop');
+      expect(api.cancelSession).not.toHaveBeenCalled();
+      // The old confirmation timer must not clear the new turn's confirmation.
+      await act(async () => vi.advanceTimersByTime(2500));
+      expect(nextStop.getAttribute('aria-label')).toBe('pet.stop.confirmStop');
+      fireEvent.click(nextStop);
+      expect(api.cancelSession).toHaveBeenCalledExactlyOnceWith('T');
+      await act(async () => {});
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each([
+    ['event', 'success'], ['event', 'failure'], ['reappearance', 'success'], ['reappearance', 'failure'],
+  ] as const)('fences a pending cancel across %s before late %s', async (boundary, outcome) => {
+    canUseAgents = true; runningAgents = workingIn('T');
+    api.getTurnState.mockImplementation(async (id) => ({ ...idleTurn, in_flight: id === 'T' }));
+    const pending = deferred<{ ok: boolean }>();
+    api.cancelSession.mockReset().mockImplementationOnce(() => pending.promise);
+    render(<PetPage />); await showCards();
+    const stop = await screen.findByLabelText('pet.stop.stop');
+    fireEvent.click(stop); fireEvent.click(stop);
+    expect(screen.getByText('pet.stop.stopping')).toBeTruthy();
+    if (boundary === 'event') await emit((h) => h.onTurnStart?.({ session_id: 'T' }));
+    else {
+      runningAgents = { ...runningAgents, agents: [] };
+      await emit((h) => h.onRunsUpdated?.({}));
+      runningAgents = workingIn('T');
+      await emit((h) => h.onRunsUpdated?.({}));
+    }
+    const nextStop = await screen.findByLabelText('pet.stop.stop');
+    expect(nextStop.hasAttribute('disabled')).toBe(false);
+    fireEvent.click(nextStop);
+    await act(async () => {
+      if (outcome === 'success') pending.resolve({ ok: true });
+      else pending.reject(new Error('old cancellation failed'));
+    });
+    expect(nextStop.getAttribute('aria-label')).toBe('pet.stop.confirmStop');
+    expect(screen.queryByText('pet.stop.stopped')).toBeNull();
+    expect(screen.queryByText('pet.stop.failed')).toBeNull();
+    expect(document.querySelector('.is-leaving')).toBeNull();
+    expect(api.cancelSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers stop for a scope-less Web turn but excludes IM and non-running turns', async () => {
+    canUseAgents = true;
+    runningAgents = { ...workingIn('web'), agents: [
+      { ...workingIn('web').agents[0], platform: null, scope_type: null },
+      { ...workingIn('idleweb').agents[0], platform: null, scope_type: null },
+      { ...workingIn('im').agents[0], platform: 'feishu' },
+    ] };
+    api.getTurnState.mockReset().mockImplementation(async (id) => ({ ...idleTurn, in_flight: id === 'web' || id === 'im' }));
+    render(<PetPage />); await showCards();
+    await waitFor(() => expect(document.querySelector('[data-session-id="web"] .pet-mini-stop')).toBeTruthy());
+    expect(document.querySelector('[data-session-id="idleweb"] .pet-mini-stop')).toBeNull();
+    expect(document.querySelector('[data-session-id="im"] .pet-mini-stop')).toBeNull();
+    expect(api.getTurnState).not.toHaveBeenCalledWith('im', expect.anything());
   });
 });

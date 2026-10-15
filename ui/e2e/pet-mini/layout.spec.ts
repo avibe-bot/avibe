@@ -1,5 +1,33 @@
 import { expect, test } from '@playwright/test';
 
+for (const theme of ['light', 'dark']) {
+  for (const lang of ['en', 'zh']) {
+    test(`collapsed bubble spacing and action copy (${theme}, ${lang})`, async ({ page }) => {
+      await page.goto(`/e2e/pet-mini/fixture.html?scenario=personal&lang=${lang}`);
+      await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
+      await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
+      await expect(page.locator('.pet-mini-stage')).toHaveCSS('color', theme === 'dark' ? 'rgb(255, 255, 255)' : 'rgb(23, 23, 28)');
+      await page.evaluate(async () => {
+        await Promise.all(document.getAnimations()
+          .filter((animation) => animation.effect?.getTiming().iterations !== Infinity)
+          .map((animation) => animation.finished.catch(() => {})));
+      });
+      const gap = await page.evaluate(() =>
+        document.querySelector('.pet-mini-reply-bubble')!.getBoundingClientRect().top
+        - document.querySelector('.pet-mini-collapsed')!.getBoundingClientRect().bottom);
+      expect(gap).toBeGreaterThanOrEqual(13);
+      expect(gap).toBeLessThanOrEqual(15);
+      await expect(page.locator('.pet-mini-reply-toggle')).toContainText(lang === 'zh' ? /已回复：\S/ : /Replied: \S/);
+      await page.locator('.pet-mini-collapsed').click();
+      const stop = page.locator('.pet-mini-stop').first();
+      await expect(stop).toHaveAttribute('aria-label', lang === 'zh' ? /^停止：.+/ : /^Stop: .+/);
+      await stop.click();
+      await expect(stop).toHaveAttribute('aria-label', lang === 'zh' ? '停止？' : 'Stop?');
+      expect(await page.evaluate(() => window.petFixtureStops)).toEqual([]);
+    });
+  }
+}
+
 test('an unmounted surface releases desktop input and a remount reports fresh regions', async ({ page }) => {
   await page.goto('/e2e/pet-mini/fixture.html');
   await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
@@ -66,7 +94,6 @@ for (const main of [true, false]) {
         const x = (first.left + first.right) / 2;
         return { card: covers(x, (first.top + first.bottom) / 2), gap: covers(x, (first.bottom + second.top) / 2) };
       })).toEqual({ card: true, gap: false });
-      if (main) await page.locator('.pet-mini-card[role=button]').click();
       // A long nowrap title and long detail must remain inside the fixed list.
       const widths = await page.locator('.pet-mini-scroll').evaluate((scroll) => ({
         client: scroll.clientWidth, content: scroll.scrollWidth,
@@ -74,29 +101,12 @@ for (const main of [true, false]) {
       }));
       expect(widths.content).toBe(widths.client);
       expect(widths.cards.every((width) => width <= widths.client)).toBe(true);
+      if (main) await page.locator('.pet-mini-reply-toggle').click();
       expect(await page.locator('.pet-mini-avatar-button').boundingBox()).toEqual(avatar);
       expect(errors).toEqual([]);
     });
   }
 }
-
-test('the session picker keeps every row at its text height and scrolls', async ({ page }) => {
-  await page.goto('/e2e/pet-mini/fixture.html?main=true&layers=0&sessions=14');
-  await page.locator('.pet-mini-collapsed').click();
-  await page.locator('.pet-mini-card[role=button]').click();
-  const toggle = page.getByRole('button', { name: 'Switch session' });
-  await expect(toggle).toBeVisible();
-  // The switcher is a real button, not a text link.
-  expect(await toggle.evaluate((node) => getComputedStyle(node).borderTopStyle)).toBe('solid');
-  await toggle.click();
-  const options = page.locator('.pet-mini-session-option');
-  await expect(options).toHaveCount(15);
-  // A shrunk flex column squeezes overflow-hidden rows below their text height.
-  const rows = await options.evaluateAll((nodes) => nodes.map((node) => ({ client: node.clientHeight, content: node.scrollHeight })));
-  expect(rows.every((row) => row.client >= 36 && row.client >= row.content)).toBe(true);
-  const scroll = await page.locator('.pet-mini-scroll').evaluate((node) => ({ client: node.clientHeight, content: node.scrollHeight }));
-  expect(scroll.content).toBeGreaterThan(scroll.client);
-});
 
 test('no mini surface casts a shadow the transparent window would clip', async ({ page }) => {
   await page.goto('/e2e/pet-mini/fixture.html?main=true&layers=2&sessions=4');
@@ -123,23 +133,9 @@ test('no mini surface casts a shadow the transparent window would clip', async (
     .map((node) => node.className.toString()));
   expect(await shadowed()).toEqual([]);
   await page.locator('.pet-mini-collapsed').click();
-  await page.locator('.pet-mini-card[role=button]').click();
-  await page.getByRole('button', { name: 'Switch session' }).click();
-  await expect(page.locator('.pet-mini-session-option')).toHaveCount(5);
+  await page.locator('.pet-mini-reply-toggle').click();
+  await expect(page.getByRole('button', { name: 'Switch session' })).toHaveCount(0);
   expect(await shadowed()).toEqual([]);
-});
-
-test('the switcher goes back to the cards', async ({ page }) => {
-  await page.goto('/e2e/pet-mini/fixture.html?main=true&layers=0&sessions=3');
-  await page.locator('.pet-mini-collapsed').click();
-  await page.locator('.pet-mini-card[role=button]').click();
-  await page.getByRole('button', { name: 'Switch session' }).click();
-  await expect(page.locator('.pet-mini-session-option')).toHaveCount(4);
-  const back = page.getByRole('button', { name: 'Back' });
-  expect(await back.evaluate((node) => getComputedStyle(node).borderTopStyle)).toBe('solid');
-  await back.click();
-  await expect(page.locator('.pet-mini-session-option')).toHaveCount(0);
-  await expect(page.locator('.pet-mini-card.is-main')).toBeVisible();
 });
 
 test('Vibey and its dock are reported as the hover zone, and a shell hover shows the dock', async ({ page }) => {
@@ -167,10 +163,160 @@ test('Vibey and its dock are reported as the hover zone, and a shell hover shows
   await expect(dock).toHaveCSS('opacity', '0');
 });
 
-test('the main card names Vibey as written', async ({ page }) => {
+test('the reply bubble names Vibey as written', async ({ page }) => {
   await page.goto('/e2e/pet-mini/fixture.html?main=true&layers=0');
-  const eyebrow = page.locator('.pet-mini-collapsed .pet-mini-eyebrow');
+  const eyebrow = page.locator('.pet-mini-bubble-speaker');
   await expect(eyebrow).toBeVisible();
   // innerText applies text-transform, so this is what the user reads.
-  expect(await eyebrow.evaluate((node) => node.innerText)).toBe('Vibey');
+  expect(await eyebrow.evaluate((node) => node.innerText)).toContain('Vibey');
 });
+
+
+test('attention leads the list and referencing sends only through the main composer', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal');
+  await page.locator('.pet-mini-collapsed').click();
+  const first = page.locator('.pet-mini-card').first();
+  await expect(first).toHaveAttribute('data-session-id', 'ses_fixture_0');
+  await expect(first).toHaveClass(/is-needs-input/);
+  await first.getByRole('button', { name: 'Open in Avibe', exact: true }).click();
+  await expect(page.getByRole('textbox')).toHaveCount(0);
+  await first.locator('.pet-mini-card-reference').click();
+  await expect(page.locator('.pet-mini-reference-chip')).toHaveCount(1);
+  await expect(page.locator('.pet-mini-reply-bubble')).toHaveCount(0);
+  await page.getByRole('textbox').fill('请总结进展');
+  await page.getByRole('textbox').press('Enter');
+  await expect.poll(() => page.evaluate(() => window.petFixtureSends)).toEqual([{
+    sessionId: 'ses_main', payload: { text: '#<ses_fixture_0> 请总结进展', content: { references: [{ kind: 'session', session_id: 'ses_fixture_0', title: '修复桌宠语音输入' }] } },
+  }]);
+  await expect(page.locator('.pet-mini-reply-bubble')).toBeVisible();
+});
+
+test('reply history and input remain within the fixed window with reduced motion', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal');
+  await page.locator('.pet-mini-collapsed').click();
+  const avatar = await page.locator('.pet-mini-avatar-button').boundingBox();
+  await page.locator('.pet-mini-reply-toggle').click();
+  await expect(page.locator('.pet-mini-detail')).toHaveClass(/is-open/);
+  const history = await page.locator('.pet-mini-bubble-history').boundingBox();
+  expect(history!.y).toBeGreaterThanOrEqual(0);
+  expect(history!.y + history!.height).toBeLessThanOrEqual(600);
+  expect(await page.locator('.pet-mini-avatar-button').boundingBox()).toEqual(avatar);
+  expect(await page.locator('.pet-mini-detail').evaluate((node) => parseFloat(getComputedStyle(node).transitionDuration))).toBeLessThan(0.01);
+});
+
+for (const theme of ['light', 'dark']) {
+  for (const reduced of [false, true]) {
+    test(`history and cards share expansion with reachable actions (${theme}, reduced=${reduced})`, async ({ page }) => {
+      await page.emulateMedia({ reducedMotion: reduced ? 'reduce' : 'no-preference' });
+      await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=actions');
+      await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
+      const avatar = page.locator('.pet-mini-avatar-button');
+      await expect(avatar).toBeVisible();
+      const anchor = await avatar.boundingBox();
+      await page.locator('.pet-mini-collapsed').click();
+      await expect(page.locator('.pet-mini-scroll')).toBeVisible();
+      await page.locator('.pet-mini-reply-toggle').click();
+      await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
+      await expect(page.locator('.pet-mini-scroll')).toHaveCount(0);
+      await expect(page.locator('.pet-mini-detail')).toHaveClass(/is-open/);
+      await page.evaluate(async () => {
+        await Promise.all(document.getAnimations()
+          .filter((animation) => animation.effect?.getTiming().iterations !== Infinity)
+          .map((animation) => animation.finished.catch(() => {})));
+      });
+      const history = page.locator('.pet-mini-bubble-history');
+      for (const name of ['在 Avibe 中打开', '需要授权，在 Avibe 中打开', '继续']) {
+        const button = history.getByRole('button', { name, exact: true });
+        await expect(button).toBeVisible();
+        const bounds = await button.boundingBox(), box = await history.boundingBox();
+        expect(bounds!.y).toBeGreaterThanOrEqual(box!.y);
+        expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(box!.y + box!.height + 1);
+      }
+      expect(await history.evaluate((node) => node.scrollHeight <= node.clientHeight + 1)).toBe(true);
+      expect((await page.locator('.pet-mini-collapsed').boundingBox())!.y).toBeGreaterThanOrEqual(0);
+      expect(await avatar.boundingBox()).toEqual(anchor);
+      await page.locator('.pet-mini-collapsed').click();
+      await expect(page.locator('.pet-mini-scroll')).toBeVisible();
+      await expect(page.locator('.pet-mini-detail')).not.toHaveClass(/is-open/);
+      await page.locator('.pet-mini-reply-toggle').click();
+      await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
+      await avatar.click();
+      await expect(page.locator('.pet-mini-scroll')).toBeVisible();
+      await expect(page.locator('.pet-mini-detail')).not.toHaveClass(/is-open/);
+      expect(await avatar.boundingBox()).toEqual(anchor);
+    });
+  }
+}
+
+
+test('an empty activity stack takes no space while history remains usable without a switcher', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&activities=0');
+  await page.locator('.pet-mini-reply-toggle').waitFor();
+  const avatar = await page.locator('.pet-mini-avatar-button').boundingBox();
+  await page.locator('.pet-mini-avatar-button').click();
+  await expect(page.locator('.pet-mini-cards')).toHaveCSS('height', '0px');
+  await expect(page.locator('.pet-mini-panel')).toHaveCount(0);
+  await page.locator('.pet-mini-reply-toggle').click();
+  await expect(page.getByRole('button', { name: 'Switch session' })).toHaveCount(0);
+  await expect(page.locator('.pet-mini-session-option')).toHaveCount(0);
+  await expect(page.locator('.pet-mini-detail')).toHaveClass(/is-open/);
+  await expect(page.locator('.pet-mini-cards')).toHaveCSS('height', '0px');
+  expect(await page.locator('.pet-mini-avatar-button').boundingBox()).toEqual(avatar);
+});
+
+test('a close during a main outage lasts until the mini document reopens', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal');
+  await page.locator('.pet-mini-collapsed').click();
+  const card = page.locator('.pet-mini-card[data-session-id="ses_fixture_0"]');
+  await expect(card).toBeVisible();
+  await page.evaluate(() => {
+    window.petFixtureConnection(false);
+    window.setPetMainAvailable(false);
+    window.petFixtureConnection(true);
+  });
+  await expect(page.getByText("Couldn't open the conversation with Vibey. Try again in a moment.")).toBeVisible();
+  await card.locator('.pet-mini-dismiss').click();
+  await expect(card).toHaveCount(0);
+  await page.evaluate(() => {
+    window.petFixtureConnection(false);
+    window.setPetMainAvailable(true);
+    window.petFixtureConnection(true);
+  });
+  await expect(page.locator('.pet-mini-reply-toggle')).toBeVisible();
+  await expect(card).toHaveCount(0);
+  await page.reload();
+  await page.locator('.pet-mini-collapsed').click();
+  await expect(card).toBeVisible();
+});
+
+for (const trigger of ['reconnect', 'reactivation']) {
+  test(`main resolves automatically after service recovery on ${trigger}`, async ({ page }) => {
+    await page.goto('/e2e/pet-mini/fixture.html?offline=true&activities=0');
+    await expect(page.getByText("Couldn't open the conversation with Vibey. Try again in a moment.")).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Open in Avibe', exact: true })).toBeVisible();
+    await expect(page.getByRole('textbox')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Switch session' })).toHaveCount(0);
+    if (trigger === 'reconnect') {
+      await page.evaluate(() => {
+        window.petFixtureConnection(false);
+        window.setPetMainAvailable(true);
+        window.petFixtureConnection(true);
+      });
+    } else {
+      await page.evaluate(() => {
+        Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => false });
+        window.dispatchEvent(new Event('blur'));
+        window.setPetMainAvailable(true);
+        Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => true });
+        window.dispatchEvent(new Event('focus'));
+      });
+    }
+    await expect(page.locator('.pet-mini-reply-bubble')).toContainText('Ready to help');
+    await page.evaluate(() => window.dispatchEvent(new CustomEvent('avibe:pet-summon', { detail: { intent: 'listen' } })));
+    await page.getByRole('textbox').fill('recovered');
+    await page.getByRole('textbox').press('Enter');
+    await expect.poll(() => page.evaluate(() => window.petFixtureSends)).toEqual([{ sessionId: 'ses_main', payload: { text: 'recovered' } }]);
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem('avibe.pet.devBinding')!).binding)).toBe('ses_main');
+  });
+}

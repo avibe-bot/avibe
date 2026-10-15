@@ -16,6 +16,12 @@ Status: ready for implementation, v2 (2026-10-12). Supersedes v1 of this file.
   #2408) stays the base for binding, IPC, the shortcut, `pet.json`, poses and
   mark-read. This spec changes the layout and interaction on top of it.
 
+> P1 amendment (2026-10-15): §§4.2, 4.3, 5.2, 8 and 10 supersede the v2 main-card
+> and background-card descriptions elsewhere in this document. Layout, shell,
+> voice, dock, motion and timing remain v2. References to main-card detail now
+> mean the reply bubble's expandable detail. §10 now uses the shipped owner-only
+> main endpoint; the binding switcher and Workbench binding action are removed.
+
 ## 1. What changes, in one walk-through
 
 1. Vibey (歪比) sits at the bottom of the mini. Above it is a **collapsed
@@ -73,6 +79,14 @@ the main agent; there is no Follow up on cards.
   nowrap title was the bug we hit.)
 
 ### 3.2 Expanded box
+
+- **Shared expansion (owner decision, 2026-10-15).** The card list and Vibey's
+  recent-turn history share the expanded space; they never expand together.
+  History retains the collapsed stack above it and uses up to the list's 292px
+  height, bounded by the measured stack, bubble header and fixed window. On the
+  460×600 frame this leaves about 240px with four cards. Only overflowing history
+  scrolls; ordinary replies and their Open in Avibe/approval/quick-reply actions
+  fit without scrolling. Vibey and the dock keep their fixed anchors.
 
 - **No backing panel on the desktop (owner decision, 2026-10-12).** The
   expanded list sits in a transparent wrapper with 6px padding (kept so the
@@ -133,64 +147,67 @@ the main agent; there is no Follow up on cards.
 - There is **no reply/return button** and **no Follow up** (owner decisions).
 - **Icons are SVG**, never Unicode glyphs. iOS renders `↩` as a blue emoji.
 
-### 4.2 Main agent card
+### 4.2 Personal Agent reply bubble
 
-- **Position:** always the first card, collapsed or expanded. It cannot be
-  dismissed and has no stop button in this version.
-- **Eyebrow:** the agent's name above the title, 2px gap: "Vibey" / "歪比"
-  as written, no forced uppercase (owner decision, 2026-10-14). The fallback
-  title and the input placeholder ("Message Vibey…" / "和歪比说…") name
-  Vibey the same way; "main agent" is never shown to the user.
-  - 11px, semibold, normal case and tracking.
-  - Light green at 80%: map to the theme's mint token; the prototype used
-    `emerald-300`.
-  - It names the card type, not the speaker.
-- **Title:** the user's last message to the main agent. No avatar or icon:
-  these are the user's own words, so nothing may suggest Vibey said them.
-- **Subtitle:**
-  - while the turn runs, the current step ("Thinking", "Reading file", "Ran
-    command", "Delegating", …) with the running dot;
-  - after the turn, the start of the reply, "已回复：…", with no dot.
-- **Distinct but quiet:**
-  - background `#34343b`, one step lighter than sub-task cards;
-  - border light green at 45% (the same mint token);
-  - 16px of row spacing after it.
-- **Click to open the conversation detail.** Clicking the main agent card in
-  the expanded list opens an inline detail region inside the card. This keeps
-  everything today's pet panel does, so nothing regresses (decided in review):
-  - the latest exchange: the last user message and the unread results (or the
-    last result), rendered with the existing Markdown renderer. Mark-read
-    follows the existing rule: what is rendered and seen is marked read; when
-    unread rows reach past the loaded tail, show "More in Avibe";
-  - quick replies for the latest result, clickable, using the existing
-    `QuickReplies` path (they never change Vibey's pose, #2408);
-  - pending vault requests, one "需要授权，在 Avibe 中打开" button each;
-  - the uncertain-send notice and the queued notice from the existing panel;
-  - an "在 Avibe 中打开" link.
+There is no main-agent card. Vibey's own progress and reply occupy the speech
+slot above the avatar: thinking, delegated-to (only when provenance is known),
+then the latest reply. The bubble names Vibey in its existing localized spelling.
+It remains available with either the collapsed or expanded stack.
 
-  The detail opens and closes with the `grid-template-rows 0fr ↔ 1fr`
-  technique: 280ms settle for the rows, opacity 200ms ease. It grows inside
-  the fixed scroll box: the box and Vibey do not move. It closes when the
-  stack collapses, and clicking the card again also closes it.
-- **Before the first send,** the card shows the main session's last exchange.
-  If there is none, it is absent.
-- **Pose:** Vibey takes the running pose while this card's turn runs.
+Click the bubble to expand recent turns from the loaded tail. Preserve all
+previous main detail behavior:
 
-### 4.3 Sub-task cards
+- Markdown for the latest exchange and recent user/result rows;
+- mark-read only for the current, fully loaded unread exchange when its result
+  is visible and the page has focus; incomplete unread tails keep More in Avibe;
+- latest quick replies, pending Vault authorization handoffs, queued and
+  uncertain-send notices, and Open in Avibe;
+- the document-wide send lock and authorization/session epoch fencing.
 
-- **Source:** the main session's turn state, `background_activities`. It
-  already unions delegated runs (`item_kind: agent_run`), watches (`watch`)
-  and scheduled tasks (`task`); this was verified live.
-- **Title:** the item's `label`, falling back to `description`.
-- **Subtitle:** "{kind} · {status}". Map the kind and raw status to readable,
-  localized text: 委派运行 / 监控 / 定时任务; Running, 排队中, 等待中…
-  Never show raw values such as `enabled`.
-- **Running** means `status` is `running` or `processing`; it shows the
-  running dot and the stop button.
-- **Order:** the main agent card first, then running sub-tasks, then the rest.
-  A sub-task the current turn just created goes directly below the main agent
-  card. Live data must not reshuffle rows under the pointer while the list is
-  expanded; apply reorders on collapse.
+Detail retains the 280ms grid / 200ms opacity transition and closes on stack
+collapse. Its own scroll region fits the existing window; opening it never
+resizes the avatar or the 292px activity scroll box. Input and dictation hide
+this detail according to §5.2, including quick replies.
+
+### 4.3 Visible activity cards
+
+Use `api.getRunningAgents()` as the activity source, shared by the card and
+team-pose derivation. Exclude the bound main session, `ses_main`, missing session
+identities, and rows without explicit foreground visibility and chat access.
+Deduplicate by session; an active row wins over an idle row. A process going
+idle or disappearing is not evidence of a completed reply.
+
+The existing Inbox supplies unread evidence. Foreground unread sessions in its
+loaded feed remain eligible after their process disappears, with visibility
+revalidated by `getSessionResult`. No separate unread counter is created.
+The card says Replied while it has unread evidence and no running process.
+Callbacks to the main session are reported in Vibey's bubble.
+
+- Heading: project · agent; for IM, platform · project · agent.
+- Title: session title, with the existing localized fallback.
+- Priority: needs authorization, running, then replied. Preserve relative order
+  within a priority group while expanded; a newly actionable card moves first.
+- Clicking the card body appends the Web marker `#<session-id>` to the main
+  draft. It appears as a removable title chip; sending uses the main binding and
+  the existing session-reference sidecar. Cards never send replies directly.
+- Actions: dismiss, authorization handoff, Open in Avibe, and supported stop.
+  A foreground Web session exposes stop only after its live turn-state confirms
+  an in-flight dispatch turn. Use `cancelSession`, with §6's two presses, 3s
+  confirmation, 2.5s success linger and §7's exit. Runtime teardown is not stop.
+  Agent runs and IM rows without this cancellation evidence hide the control.
+  A process snapshot does not identify a Watch/Task definition; never infer a
+  definition ID or pause a schedule from a runtime identifier.
+
+Known data limitations for P1:
+
+- `trigger_source` defaults to human and does not prove caller lineage. Omit
+  the delegated badge and delegated-to summary until a reliable read-only
+  relation exists; do not fabricate attribution or suppress a visible result.
+- Background/system/unknown visibility is excluded. Ordinary questions lack a
+  reliable attention field; only pending Vault requests supply this signal.
+- Replied fallback is bounded by the existing loaded Inbox feed, which covers
+  Web Inbox data. A process-free session absent from that feed cannot be
+  discovered here, including a Vault-only session with no unread Inbox row.
 
 ### 4.4 Empty
 
@@ -241,7 +258,14 @@ the main agent; there is no Follow up on cards.
 
 - **One slot** sits at the bottom of the column, between the cards and
   Vibey. By priority it holds the marquee while dictating, otherwise the
-  input bubble when it is open, otherwise nothing.
+  input bubble when it is open, otherwise Vibey's reply bubble when it has
+  progress, history, a notice, quick replies or a pending authorization.
+  Only the highest-priority content is interactive or eligible for mark-read.
+- **Mutually exclusive expansion.** Opening "Recent turns" collapses the cards
+  into their layered stack. Opening the card stack or clicking Vibey expands
+  the cards and closes history. Closing history returns to the collapsed mini.
+  Both transitions reuse the v2 height/content motion (§7.1, §7.4); reduced
+  motion switches directly. There is no separate 48–120px history cap.
 - **No margin of its own.** The last card's row spacing plus the panel's 6px
   padding separate it from the cards (about 14px).
 - **Motion:**
@@ -361,7 +385,8 @@ Two beats, so the exit reads before the reflow:
 
 - The leaving row ignores the pointer.
 - A second click on the same × is a no-op.
-- A dismissed card does **not** come back on a refresh (§9.3).
+- A dismissed card stays closed through activity refreshes in the same document.
+  Reloading or reopening the mini starts fresh (§11.3).
 
 ### 7.4 No reflow jumps
 
@@ -395,19 +420,24 @@ With `prefers-reduced-motion: reduce`, every transition and animation in this
 spec is off. States switch instantly, a dismissed card disappears at once, and
 the marquee text still updates.
 
-## 8. Busy rule (pose)
+## 8. Pose priority
 
-Vibey shows the running pose when **any** agent is working in a conversation
-the user can see: the main session, built-in role sessions, or ordinary user
-sessions.
+Use the first matching condition, following the approved prototype's `POSES`:
 
-- This keeps #2401: an `active` foreground session in the running-agents
-  snapshot.
-- It **adds the main session's own running sub-tasks**: running items in its
-  turn state's `background_activities`. They run in background sessions, which
-  #2401 excludes.
-- The main session's own needs-input, blocked and ready states still win over
-  busy (existing priority).
+1. Listening: active dictation.
+2. Needs input: pending authorization in the main session or any eligible card.
+3. Blocked: the main session failed.
+4. Running: the main session is running.
+5. Ready: main unread results or a nondismissed replied card.
+6. Team working: an eligible activity is active.
+7. Idle; sleeping after five idle minutes.
+
+Cards and team activity use the same filtered snapshot. Background definitions
+alone do not create cards or a busy pose. Quick-reply suggestions do not count
+as needs input. Keep the current static images (team uses the existing running
+image); layered pose animation is deferred. Preserve reduced-motion behavior.
+The lower-left green activity-count badge is removed; the stack and team pose
+already communicate activity. Keep the upper-right red unread badge.
 
 ## 9. Shell (Tauri) work
 
@@ -464,78 +494,70 @@ sessions.
   the pet page only, like the other pet commands, and must recheck its
   caller.
 
-## 10. Main agent session (dependency; owned by another lane)
+## 10. Main agent session (implemented; main-only)
 
-- **Model:**
-  - sessions get a built-in type (`main`, `memory`, `ops`, …);
-  - each user has their **own** `main`;
-  - `main` is a writable session with **normal visibility** (the pet's
-    validity rule accepts it);
-  - it is **built in at install** (upgrades must create it too);
-  - it **cannot be archived or deleted**;
-  - its **id is stable** across context rotation.
-- **Lookup API — not built yet; mock it.** Proposed contract:
+`GET /api/sessions/main` shipped in #2637. The mini uses this endpoint through
+`api.getMainSession()` as its only conversation selector:
 
-  ```
-  GET /api/sessions/main
-  200 { "session": WorkbenchSession, "capabilities": { "can_chat": bool } }
-  ```
+```
+GET /api/sessions/main
+200 { "session": WorkbenchSession, "capabilities": { "can_chat": true } }
+```
 
-  - The pet reads the main session only through one client function,
-    `api.getMainSession()`.
-  - Until the endpoint exists, the function returns the session the pet is
-    bound to today (the user-picked binding from `pet_ready()`), in the same
-    shape. Under this mock, keep a way to pick the session (for example in
-    the main card's detail header).
-  - When the endpoint lands: call it on start, on reconnect and after
-    authorization changes. Then remove the switcher, "在桌宠中显示" and the
-    binding writes. Older `pet.json` files that contain `binding` must still
-    load; ignore the field (persisted-shape rule).
-
-### 10.1 Interim: the mini talks to Vibey (owner decision, 2026-10-13)
-
-Until the `main` type exists, the mini's main agent is a Vibey conversation
-(the built-in Agent, `backend: vibey`).
-
-- **One per person, created on first use.** `POST /api/desktop-mini/session`
-  (Editor) returns the caller's conversation, creating it the first time in
-  their most recently active Project they can chat in. A session needs a
-  Project so it has a Workbench sidebar home and "在 Avibe 中打开" lands on it.
-  It is an ordinary foreground session, so the Workbench shows and manages it
-  like any other. Which session belongs to whom is recorded server-side in
-  `state_meta` (`desktop_mini_session:<principal>`, principal `local` or
-  `remote:<sub>`), never in session metadata a client can write or a fork can
-  copy.
-- **Who the caller is.** The principal comes from the request's authorization
-  context, never from a second lookup that could fall back: a remote context
-  without a subject owns nothing and is refused.
-- **Reuse.** The same session is returned while it is still what creation
-  would produce: active, foreground, a Project the caller can chat in, still on
-  the built-in Agent (a Workbench route change makes it an ordinary chat), which
-  the caller may use. Title, model and effort are the user's to change. An archived session, an archived Project or lost
-  access gets a new one. With no chat Project at all the answer is
-  `409 no_chat_project`, and the mini asks the user to create a Project.
-- **Binding.** The mini binds that session whenever nothing is bound. An
-  existing binding is kept; the switcher offers "和歪比对话" to move to it.
-- **Switcher navigation.** The switcher opens only from "切换会话", or by
-  itself when nothing is bound. While a session is bound it has a "返回"
-  control that goes back to the cards, and collapsing the panel leaves it. A
-  bound session with nothing to show (no exchange, no sub-tasks) expands to the
-  "切换会话" control alone, never to the switcher, so picking such a session
-  does not reopen the list.
-  A session the mini already bound and then cleared as invalid is not
-  re-bound automatically, so a bad answer cannot loop.
-- **A turn Vibey cannot run is shown.** When the latest exchange ended in a
-  backend failure notice (for example no model source), the main card's
-  subtitle reads "没跑起来：<notice>" (the exchange ends at its foreground
-  terminal row, by the transcript's own rule, so detached completions and
-  replayed failures never decide it), and the detail shows the notice as plain
-  text with "在 Avibe 中处理" when it names a next step. That opens the session,
-  where the Workbench draws "Open Models" for those who manage the instance.
-- **Not in this change.** A live step label ("Ran command", …) for the main
-  card still waits on §11.1; the server already computes `status_label` for
-  the IM status bubble and can expose it later.
-- When `main` lands, this endpoint is replaced by `GET /api/sessions/main`.
+- **Owner-only in this release.** The instance owner uses the stable `ses_main`
+  session. Non-owner 403 is an accepted unavailable state; per-member main
+  sessions and permission expansion are outside P1.
+- **Lifecycle and recovery.** Resolve main on startup, reconnect and authorization
+  change, and retry on page reactivation after transient failures. Use the existing
+  authorization epoch and `FencedSource` request ordering. No new polling loop.
+  Transcript/runtime reads wait for main's explicit chat grant. Authorization
+  changes immediately invalidate pending reads and action callbacks before resolving
+  again. Retain the user's draft and document send ledger across transient failures.
+- **No switcher.** The bubble's switch button, the entire recent-session picker,
+  its "Talk to Vibey" option and the Workbench "Show in pet" action are removed.
+  The only allowed binding write is `pet_bind("ses_main")` after successful main
+  resolution, to normalize the legacy binding. No caller writes another
+  session or invokes `pet_unbind`. Summons still open/listen
+  through the existing shell flow and wait for a usable main.
+- **Persisted compatibility.** Existing `pet.json` shapes still load unchanged.
+  Legacy `binding` values and bound events never select a conversation, including
+  when they arrive after main has resolved. The existing native IPC normalizes empty or other persisted bindings to
+  `ses_main`; the file format and native code remain unchanged.
+- **Unavailable.** A 403, `409 main_session_invalid`, `409 main_session_archived`,
+  `builtin_agent_unavailable`, or a transport failure shows the existing localized
+  unavailable message and "Open in Avibe". No arbitrary-session fallback. Pending
+  resolution shows the existing loading copy; reconnect/reactivation can recover.
+- **Main-only binding normalization.** After main resolves successfully, compare the legacy
+  binding from `pet_ready` with `ses_main`. If different, make at most one
+  `pet_bind("ses_main")` attempt per surface epoch. An already-main file
+  needs no binding write. A failed normalization does not retry in a loop;
+  a later epoch may try again. This does not synchronize dismissals.
+- **Document-only dismissal.** Manual × closes a card for the current document.
+  The last successfully resolved main owns these closes, including new closes
+  made during a temporary main lookup failure. Do not read or write native
+  `dismissed_ids`; `pet_ready` and binding normalization cannot restore, clear,
+  or delay document closes. Reloading or reopening starts with no closed cards.
+  Forget an id on an explicit new turn, or after it disappears from eligible
+  activities and has no unread Inbox reply. Absence-based forgetting and local
+  reappearance detection require an applied whole-account Inbox unread snapshot,
+  no initial Inbox feed load in progress, a successful running-agents snapshot,
+  and no pending reply-activity validation. Retain validated reply rows during
+  revalidation; only the latest read may replace them. A failed read stays
+  non-authoritative until a later event retries. No new polling loop or shared
+  activity-source lifecycle is introduced.
+- **Turn-scoped card presentation.** Confirmation, cancellation, stopped/failed
+  notices, exits, leaving animation and retained cards use `sessionId:generation`
+  keys. Increment the local generation on `turn.start` or healthy activity
+  disappearance followed by reappearance. Retire that key's timers together;
+  every timer/cancel callback checks its captured key and authorization epoch.
+  Old callbacks cannot alter a new turn. Stop exits never add manual dismissals.
+- **Standalone stop eligibility.** A foreground, chat-openable human activity
+  with `platform = null` is a Web candidate, as is `platform = avibe`. Both still
+  require an explicitly in-flight turn-state read; actual IM platforms stay excluded.
+- **Turn failures remain visible.** A foreground terminal failure notice is shown
+  in the reply bubble/detail, with "Fix in Avibe" when it names a next step. Detached
+  completions and replayed failures do not replace the current exchange. Live step
+  labels still wait on §11.1; the mini shows "Thinking" meanwhile.
 
 ## 11. Backend gaps (not in this delivery; degrade gracefully)
 
@@ -547,10 +569,12 @@ Until the `main` type exists, the mini's main agent is a Vibey conversation
    - **Do not guess from tool names in the client.**
 2. **No HTTP cancel for agent runs.** Hide stop on agent runs until it exists
    (§6).
-3. **Dismiss persistence.** There is no server state for dismissed cards.
-   Keep the dismissed ids in `pet.json`, so a dismissed card stays gone across
-   restarts. Forget an id once its item disappears from the turn state. This
-   adds an optional field, so older files keep loading.
+3. **No dismissal persistence in this delivery.** A manual × lasts only for the
+   current mini document. Refreshing the page or restarting the mini lets the
+   activity sources populate cards again. Existing `pet.json` files still load,
+   but their `dismissed_ids` are ignored and no dismissal IPC writes are made.
+   Forgetting within the document follows §10. Cross-restart memory and a unified
+   readiness model for the three activity sources are deferred.
 
 ## 12. Prototype-only (do not copy)
 

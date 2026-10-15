@@ -1,79 +1,38 @@
 import { useEffect, useSyncExternalStore } from 'react';
 
 import { onPetEvents, petBridge, type PetBinding, type PetIntent } from './petBridge';
+import type { PetSurfaceEpoch } from './usePetSession';
 
-/**
- * The pet window's shell state, held once per document outside React so the
- * setup-pending view and the pet surface share it across their remounts:
- *
- * - `binding`: the bound session (undefined until the shell has told us);
- * - the latest summon not yet acted on. A summon that arrives while setup is
- *   pending, or before the surface has mounted, waits here, so the user's
- *   hotkey is never lost to the page's own loading order.
- *
- * The shell owns the binding and orders every change to it by revision. The
- * page applies whatever the shell reports (`pet_ready()`, `pet:bound`, and the
- * answers to its own picks and clears) only when it is newer than what it
- * already applied, so no answer or event can be overtaken by an older one.
- * The page's own changes are sent one at a time, in the order the user made
- * them, and shown at once; when none is outstanding, the page shows exactly
- * what the shell last reported.
- *
- * Listeners are installed before `pet_ready()` is called, so nothing the shell
- * sends after it can be missed; anything it sent earlier is returned by it.
- */
-let binding: string | null | undefined;
-let reported: PetBinding | null = null;
-// The page's own changes not yet answered by the shell, and the latest one.
-let outstanding = 0;
-let latestChange: string | null = null;
-let changes: Promise<void> = Promise.resolve();
+/** Document-local main resolution and pending summons. Legacy shell bindings
+ * remain readable for compatibility, but never select the conversation. */
+let binding: string | null = null;
+let legacyBinding: PetBinding | null = null;
 let pendingSummon: PetIntent | null = null;
+let dismissedSession: string | null = null;
 let dismissedIds: string[] = [];
+let readyLoaded = false;
+let changes: Promise<void> = Promise.resolve();
+let readyPromise: Promise<void> = Promise.resolve();
+const normalizationAttempts = new WeakSet<PetSurfaceEpoch>();
 let started = false;
-// Bumped by every live summon, so a summon `pet_ready()` returns is used only
-// if no live one has arrived since it was asked.
 let liveSummons = 0;
 const storeListeners = new Set<() => void>();
 const summonListeners = new Set<() => void>();
 
-const show = () => {
-  const next = outstanding > 0 ? latestChange : reported?.binding;
-  if (next === binding) return;
+const setMain = (next: string | null) => {
+  if (binding === next) return;
   binding = next;
-  dismissedIds = [];
-  (window as unknown as { __AVIBE_PET_BINDING__?: string | null }).__AVIBE_PET_BINDING__ = next;
+  // A failed lookup withdraws the conversation, not the user's preferences.
+  if (next && next !== dismissedSession) {
+    if (dismissedSession) dismissedIds = [];
+    dismissedSession = next;
+  }
   storeListeners.forEach((listener) => listener());
-};
-
-const report = (next: PetBinding) => {
-  if (reported && next.revision <= reported.revision) return;
-  reported = next;
-  show();
 };
 
 const noteSummon = (intent: PetIntent) => {
   pendingSummon = intent;
   summonListeners.forEach((listener) => listener());
-};
-
-/** A change made by this page: shown now, sent after the ones before it. */
-const change = (next: string | null, send: () => Promise<PetBinding>, failed: () => void, maySend?: () => boolean) => {
-  outstanding += 1;
-  latestChange = next;
-  show();
-  changes = changes
-    .then(() => maySend?.() === false ? null : send())
-    .then((confirmed) => {
-      // An IPC already sent changes the shell's authoritative binding. Keep
-      // mirroring its revision even if authorization changed meanwhile; the
-      // surface must validate that binding afresh before displaying any data.
-      if (confirmed) report(confirmed);
-    }, failed)
-    .finally(() => {
-      outstanding -= 1;
-      show();
-    });
 };
 
 const start = () => {
@@ -84,40 +43,36 @@ const start = () => {
       liveSummons += 1;
       noteSummon(intent);
     },
-    bound: report,
   });
   const liveSummonsAtRequest = liveSummons;
-  void petBridge.ready().then((ready) => {
-    const applies = !reported || ready.revision >= reported.revision;
-    report(ready);
-    if (applies && binding === ready.binding) {
-      dismissedIds = ready.dismissed_ids ?? [];
-      storeListeners.forEach((listener) => listener());
-    }
+  readyPromise = petBridge.ready().then((ready) => {
+    legacyBinding = ready;
+    readyLoaded = true;
     if (ready.summon_pending && liveSummons === liveSummonsAtRequest) noteSummon(ready.summon_pending.intent);
-  }).catch(() => {
-    // Without an answer the pet starts unbound; the shell's next report wins.
-    if (!reported) report({ binding: null, revision: 0 });
-  });
+  }).catch(() => undefined);
+};
+
+const setDismissed = (ids: string[]) => {
+  dismissedIds = ids;
+  storeListeners.forEach((listener) => listener());
 };
 
 export const petShell = {
-  /** Bind `sessionId`. If the shell cannot, the pet shows what it holds. */
-  pick: (sessionId: string, isAuthorizationCurrent?: () => boolean) => change(sessionId, () => petBridge.bind(sessionId), () => undefined, isAuthorizationCurrent),
+  setMain,
 
-  /**
-   * Clear an invalid binding (compare-and-clear). Unlike a failed pick, a
-   * failed clear is not undone: the session is archived, missing or read-only,
-   * so showing it again would only re-run validation and clear it again, in a
-   * loop. The page treats it as cleared until the shell reports a newer
-   * binding; if the shell keeps it durably, the next load validates it the
-   * same way before the pet uses it, so it is never sent to.
-   */
-  unbind: (sessionId: string) => {
-    if (binding !== sessionId) return;
-    change(null, () => petBridge.unbind(sessionId), () => {
-      if (reported?.binding === sessionId) reported = { binding: null, revision: reported.revision };
-    });
+  /** One main-only binding normalization attempt per authorized epoch. */
+  normalizeMain: (epoch: PetSurfaceEpoch) => {
+    if (epoch.binding !== 'ses_main' || normalizationAttempts.has(epoch)) return;
+    normalizationAttempts.add(epoch);
+    start();
+    changes = changes.then(async () => {
+      await readyPromise;
+      if (!readyLoaded || !epoch.isCurrent() || legacyBinding?.binding === 'ses_main') return;
+      const confirmed = await petBridge.bindMain();
+      // An IPC already sent may finish after authorization changes. It only
+      // writes main; mirror the native storage owner without selecting a session.
+      legacyBinding = confirmed;
+    }).catch(() => undefined); // A later epoch may retry; never loop in this one.
   },
 
   /** Take the waiting summon, if any. */
@@ -128,18 +83,19 @@ export const petShell = {
   },
 
   /** The binding now, for callbacks that must not read a stale render. */
-  currentBinding: (): string | null | undefined => binding,
+  currentBinding: (): string | null => binding,
   dismissed: (): string[] => dismissedIds,
-  setDismissed: (sessionId: string, ids: string[]) => {
-    if (sessionId !== binding) return;
-    dismissedIds = ids;
-    storeListeners.forEach((listener) => listener());
-    // Persist writes in order, so an older dismiss cannot resurrect a later one.
-    changes = changes.then(() => petBridge.setDismissedIds(sessionId, ids)).catch(() => undefined);
+  // Document-local preferences stay with the last resolved main through an
+  // outage. They never wait for pet_ready and never reach native storage.
+  addDismissed: (id: string) => {
+    if (!dismissedIds.includes(id)) setDismissed([...dismissedIds, id]);
+  },
+  forgetDismissed: (id: string) => {
+    if (dismissedIds.includes(id)) setDismissed(dismissedIds.filter((entry) => entry !== id));
   },
 };
 
-export function usePetBinding(): string | null | undefined {
+export function usePetBinding(): string | null {
   useEffect(start, []);
   return useSyncExternalStore(
     (listener) => {

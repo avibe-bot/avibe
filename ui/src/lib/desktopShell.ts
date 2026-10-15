@@ -5,7 +5,7 @@ declare global {
     readonly __AVIBE_DESKTOP_VERSION__?: string;
     /** The macOS shell grants Tauri window dragging to this page. */
     readonly __AVIBE_DESKTOP_DRAG__?: true;
-    /** The shell has a desktop pet this page can bind a session to (`pet_bind`). */
+    /** The shell supports the desktop pet IPC. Conversation selection is main-only. */
     readonly __AVIBE_DESKTOP_PET__?: true;
   }
 }
@@ -38,9 +38,8 @@ export function desktopDragRegion(): '' | undefined {
 }
 
 /**
- * True when this Workbench runs in a desktop shell that can show a session in
- * its pet. An older shell has no pet, so the page offers "Show in pet" only on
- * this marker, never on the shell marker alone.
+ * Retained capability probe for the native shell's frontend contract.
+ * Main-only mini no longer exposes a Workbench "Show in pet" action.
  */
 export function canShowInDesktopPet(): boolean {
   return isDesktopShell() && window.__AVIBE_DESKTOP_PET__ === true;

@@ -51,15 +51,15 @@ class ConversationWorkingSource {
   private readonly awaiting = new Map<string, number>();
   private retry: number | undefined;
 
-  constructor(read: () => Promise<RunningAgentsResult>, onWorking: (working: boolean) => void) {
+  constructor(read: () => Promise<RunningAgentsResult>, onResult: (result: RunningAgentsResult) => void) {
     this.fenced = new FencedSource({
       read,
       apply: (_key, result) => {
-        onWorking(conversationAgentWorking(result));
+        onResult(result);
         this.settle(activeSessions(result));
       },
       fail: () => {
-        onWorking(false);
+        onResult({ ok: false, unreachable: true, agents: [], counts: {} });
         // A failed read registers nothing: keep waiting on every started turn
         // until its cap, as `turn.start` is not replayed.
         this.settle(new Set());
@@ -101,18 +101,24 @@ class ConversationWorkingSource {
   }
 }
 
+const UNREACHABLE: RunningAgentsResult = { ok: false, unreachable: true, agents: [], counts: {} };
+
 /**
- * Whether an agent is working in any conversation the user can see, from the
- * running-agents snapshot the Agents page reads. `enabled` is the caller's
- * permission to read it; without it the answer is always false.
+ * The running-agents snapshot used by both the pose and the desktop mini
+ * activity cards. The source is fenced so an old response cannot replace a
+ * newer authorization/session snapshot.
  */
-export function useConversationAgentWorking(enabled: boolean): boolean {
+export function useConversationAgentSnapshot(enabled: boolean): RunningAgentsResult {
   const api = useApi();
-  const [working, setWorking] = useState(false);
-  const source = useMemo(() => new ConversationWorkingSource(() => api.getRunningAgents(), setWorking), [api]);
+  const [result, setResult] = useState<RunningAgentsResult>(UNREACHABLE);
+  const [displayedEnabled, setDisplayedEnabled] = useState(enabled);
+  if (displayedEnabled !== enabled) {
+    setDisplayedEnabled(enabled);
+    setResult(UNREACHABLE);
+  }
+  const source = useMemo(() => new ConversationWorkingSource(() => api.getRunningAgents(), setResult), [api]);
 
   useEffect(() => {
-    // Disabled, the return value below ignores whatever was last read.
     source.setEnabled(enabled);
     if (!enabled) return undefined;
     const refresh = () => source.refresh();
@@ -122,6 +128,12 @@ export function useConversationAgentWorking(enabled: boolean): boolean {
       onTurnEnd: ({ session_id }) => source.turnEnded(session_id),
     };
     for (const trigger of REFRESH_TRIGGERS) handlers[trigger] = refresh;
+    handlers.onAuthorizationChanged = () => {
+      setResult(UNREACHABLE);
+      source.setEnabled(false);
+      source.setEnabled(true);
+      refresh();
+    };
     const disconnect = api.connectWorkbenchEvents(handlers);
     const stopReactivation = onPageReactivated(refresh);
     const interval = window.setInterval(() => {
@@ -135,5 +147,15 @@ export function useConversationAgentWorking(enabled: boolean): boolean {
     };
   }, [api, enabled, source]);
 
-  return enabled && working;
+  return enabled ? result : UNREACHABLE;
+}
+
+/**
+ * Whether an agent is working in any conversation the user can see, from the
+ * running-agents snapshot the Agents page reads. `enabled` is the caller's
+ * permission to read it; without it the answer is always false.
+ */
+export function useConversationAgentWorking(enabled: boolean): boolean {
+  const snapshot = useConversationAgentSnapshot(enabled);
+  return enabled && conversationAgentWorking(snapshot);
 }
