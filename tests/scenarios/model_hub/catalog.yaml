@@ -247,6 +247,7 @@ scenarios:
       - 'ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-008: shows a native and a proxied call the same way, each with how it ran and its known cost'
       - 'ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-008: shows a direct image call by its model and Source, with its size, file and prompt, and no cost when none is known'
       - 'ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-008: shows a total an unpriced attempt left only as a lower bound'
+      - 'ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-008: says why a search ran by proxy when the turn''s Source refused it, and how to undo that'
   - id: MH-HOSTED-UI-009
     name: A hosted call's card payload is projected from the canonical C-1 records in the shape the Web renders
     status: covered
@@ -265,6 +266,7 @@ scenarios:
     test: tests/test_hosted_activity.py::test_the_im_line_states_tool_query_mode_count_and_known_cost
     related_tests:
       - tests/test_hosted_activity.py::test_the_im_line_names_a_subscription_and_a_shared_response_cost
+      - tests/test_hosted_activity.py::test_the_im_line_leaves_no_mention_or_masked_link_live_in_untrusted_text
   - id: MH-HOSTED-UI-012
     name: A turn whose image_generate call completed reaches the user with the image as an attachment, and a final that says nothing after it is still a reply, never the empty-reply error; the turn keeps its first hop's image models
     status: covered

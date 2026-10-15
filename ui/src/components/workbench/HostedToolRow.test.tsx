@@ -11,6 +11,9 @@ import zh from '../../i18n/zh.json';
 import fixture from '../../lib/hostedActivity.fixture.json';
 import { groupFromWire } from '../../lib/agentActivity';
 import { ActivityChip } from './AgentActivityGroup';
+import { InstanceAuthorizationContext } from '../../context/InstanceAuthorizationContext';
+import type { InstanceRole } from '../../lib/sessionInfo';
+import { capabilitiesFor } from '../../lib/testing/instanceRoleCapabilities';
 
 const translator = (lng: 'en' | 'zh') => {
   const instance = createInstance();
@@ -26,7 +29,7 @@ const translator = (lng: 'en' | 'zh') => {
 type Payload = keyof Omit<typeof fixture, '_comment'>;
 
 /** The stored rows, through the same wire mapping the /activity endpoint feeds. */
-const renderGroup = (payloads: (Payload | Record<string, unknown>)[], lng: 'en' | 'zh' = 'en') => {
+const renderGroup = (payloads: (Payload | Record<string, unknown>)[], lng: 'en' | 'zh' = 'en', role: InstanceRole = 'owner') => {
   const group = groupFromWire({
     id: 'turn', anchor_message_id: 'reply', anchor_position: 'before', open: false, status: 'done',
     steps: payloads.length, duration_ms: 38000,
@@ -36,9 +39,11 @@ const renderGroup = (payloads: (Payload | Record<string, unknown>)[], lng: 'en' 
     })),
   });
   render(
-    <I18nextProvider i18n={translator(lng)}>
-      <ActivityChip group={group} expanded loading={false} onToggle={() => {}} showToolCalls onToggleTools={() => {}} />
-    </I18nextProvider>,
+    <InstanceAuthorizationContext.Provider value={{ remote: false, instanceKind: null, instanceRole: role, capabilities: capabilitiesFor(role) }}>
+      <I18nextProvider i18n={translator(lng)}>
+        <ActivityChip group={group} expanded loading={false} onToggle={() => {}} showToolCalls onToggleTools={() => {}} />
+      </I18nextProvider>
+    </InstanceAuthorizationContext.Provider>,
   );
 };
 
@@ -111,6 +116,25 @@ describe('hosted tool cards', () => {
     cleanup();
     renderGroup(['proxy_retried']);
     within(row('call_x6')).getByText('at least $0.11');
+  });
+
+  it('MH-HOSTED-UI-008: says why a search ran by proxy when the turn\'s Source refused it, and how to undo that', () => {
+    renderGroup(['proxy_fallback'], 'zh');
+    const card = row('call_w7');
+    within(card).getByText('由 Anthropic 代理 · claude-haiku-5-5');
+    // In view while the card is collapsed.
+    within(card).getByText('relay-gpt 不支持网页搜索，已改用 Anthropic（relay-claude）');
+    within(card).getByText('之后自动沿用，可在 模型 › 工具 中清除');
+    cleanup();
+
+    // A reader who cannot manage the instance is told who can clear it, not sent to a page they cannot open.
+    renderGroup(['proxy_fallback'], 'zh', 'editor');
+    within(row('call_w7')).getByText('之后自动沿用，实例管理员可在 模型 › 工具 中清除');
+    cleanup();
+
+    // A call that did not complete claims nothing about who ran it.
+    renderGroup([{ ...fixture.proxy_fallback, status: 'failed', error: 'upstream timeout' }]);
+    expect(document.querySelector('[data-hosted-fallback]')).toBeNull();
   });
 
   it.each([
