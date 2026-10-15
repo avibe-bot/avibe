@@ -509,7 +509,8 @@ def budget(
     output = request.max_tokens
     margin = min(max(MARGIN_MIN, math.ceil(MARGIN_RATIO * window)), math.floor(MARGIN_CAP_RATIO * window))
     threshold = min(limit - output - margin, math.floor(THRESHOLD_RATIO * window))
-    step = min((size for size in capabilities.context_price_steps if size >= PRICE_STEP_MIN), default=None)
+    # A step at or past the window cannot lower T, and is never multiplied: a hand-edited price may name any size.
+    step = min((size for size in capabilities.context_price_steps if PRICE_STEP_MIN <= size < window), default=None)
     if step is not None:
         threshold = min(threshold, math.floor(THRESHOLD_RATIO * step))
     keep = max(0, min(KEEP_MAX, math.floor(KEEP_RATIO * threshold)))

@@ -34,7 +34,7 @@ L_in = input_limit                                 (W when unknown)
 O    = the request's max_tokens: for a conversation request max_output_tokens (8,192 when unknown), capped by the
        Agent's output budget; for a checkpoint request min(64,000, that)
 M    = min(max(8,000, ceil(0.03 * W)), floor(W / 8))
-P    = the smallest context_price_steps size of at least 100,000   (none when there is none)
+P    = the smallest context_price_steps size of at least 100,000 and below W   (none when there is none)
 T    = min(L_in - O - M, floor(0.9 * W), floor(0.9 * P))     the compaction threshold; without P, the first two
 keep = min(20,000, floor(0.25 * T))                the verbatim tail of a normal checkpoint
 ```
@@ -61,7 +61,8 @@ output, the median request took 23 s under 100,000 tokens, 43 s at 200,000 to 30
 `T` stays a tenth below the step, the window's ratio: the tenth leaves room for one tool batch and the checkpoint
 request, so the checkpoint is written below the step too. A step under 100,000 tokens is not kept below: a
 checkpoint's own context (system prompt, tools, checkpoint, `keep`) is some 30,000 tokens, so a lower threshold would
-compact almost every request, and a dearer step above it still counts. The step is the model's list price whatever
+compact almost every request, and a dearer step above it still counts. A step at or past the window cannot lower
+`T` and is ignored without arithmetic, whatever size a hand-edited price names. The step is the model's list price whatever
 the Source bills (a subscription's request is as slow). With no price, or a flat one, `T` is as before.
 
 A conversation request **fits** when `est + O + M <= L_in`, where `est` is its estimate (§2); `M` absorbs the

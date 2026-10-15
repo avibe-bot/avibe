@@ -255,6 +255,7 @@ def test_limits_follow_the_frozen_formula_from_the_route_capabilities(
         (1_000_000, 128_000, (32_000,), 842_000),  # a smaller one is not
         (1_000_000, 128_000, (32_000, 128_000), 115_200),  # but a dearer step above it is
         (128_000, 32_000, (200_000,), 88_000),  # a step past the window changes nothing
+        (1_050_000, 128_000, (10**400,), 890_500),  # nor does one past any float a hand-edited price may name
     ],
 )
 def test_the_threshold_stays_below_the_context_price_step(window, output, steps, threshold):
