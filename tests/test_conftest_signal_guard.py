@@ -25,7 +25,7 @@ import psutil
 import pytest
 
 from core.process_isolation import process_group_exists
-from tests.conftest import _REAL_OS_KILL
+from tests.conftest import _REAL_OS_KILL, claim_test_directory
 from tests.fake_pid_helpers import fake_pid
 from vibe import runtime
 
@@ -215,6 +215,19 @@ def test_a_detached_process_naming_this_tests_tmp_path_stays_signalable(stop, tm
     _, detached = _spawn_detached(sleeper_session=True, sleeper=[*_SLEEP, str(tmp_path)])
     try:
         stop(detached)
+        assert _wait_until_gone(detached)
+    finally:
+        with suppress(ProcessLookupError):
+            _REAL_OS_KILL(detached, signal.SIGKILL)
+
+
+def test_a_detached_process_naming_a_directory_the_test_claimed_stays_signalable(tmp_path_factory):
+    # A harness root outside tmp_path, such as the Model Hub e2e app's under /tmp.
+    claimed = tmp_path_factory.mktemp("harness-root")
+    claim_test_directory(claimed)
+    _, detached = _spawn_detached(sleeper_session=True, sleeper=[*_SLEEP, str(claimed / "runtime" / "ui.log")])
+    try:
+        os.killpg(detached, signal.SIGTERM)
         assert _wait_until_gone(detached)
     finally:
         with suppress(ProcessLookupError):

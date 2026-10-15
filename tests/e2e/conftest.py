@@ -14,7 +14,7 @@ import pytest
 import urllib.request
 import urllib.error
 
-from tests.conftest import REAL_USER_HOME
+from tests.conftest import REAL_USER_HOME, claim_test_directory
 from tests.e2e.drivers.model_hub_app import ModelHubTestApp
 from tests.e2e.drivers.mock_llm_upstream import MockLLMUpstream
 
@@ -100,9 +100,13 @@ def model_hub_app_factory():
             if enabled
             else "avibe-model-hub-disabled-e2e-"
         )
+        # Under /tmp, not tmp_path: the app's socket paths must fit macOS's
+        # 104-byte limit. Claimed, so the guard lets teardown stop what the
+        # app's detached helpers leave behind.
         with tempfile.TemporaryDirectory(
             prefix=prefix, dir="/tmp"
         ) as runtime_root:
+            claim_test_directory(Path(runtime_root))
             runtime = ModelHubTestApp(
                 repo_root,
                 Path(runtime_root),
