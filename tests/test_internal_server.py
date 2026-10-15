@@ -8534,3 +8534,59 @@ def test_show_access_apply_serializes_controller_writes(monkeypatch):
 
     assert [response.status_code for response in responses] == [200, 200]
     assert calls == ["ses-first", "ses-second"]
+
+
+def test_a_scheduled_turns_admission_never_holds_the_loop(monkeypatch, tmp_path):
+    """#2630: admitting a scheduled turn writes its Delivery and Run rows in one transaction that waits for SQLite's
+    write lock and commits. The loop runs every session's turns, so it stays free while another writer holds the
+    lock."""
+    import sqlite3
+    import threading
+
+    from core import session_turns
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(tmp_path, native_id="proj_admission_off_loop")
+    session_id = session["id"]
+
+    async def _fake_dispatch_turn(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None, **_kwargs):
+        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
+
+    monkeypatch.setattr(session_turns, "dispatch_turn_with_outcome", _fake_dispatch_turn)
+    controller = _build_controller_double()
+    internal_server.create_app(controller)
+    ctx = MessageContext(
+        user_id="workbench",
+        channel_id=session_id,
+        platform="avibe",
+        message_id="scheduled:admission-off-loop:1",
+        platform_specific={"agent_session_id": session_id, "agent_session_target": {"agent_backend": "claude"}},
+    )
+
+    held, release = threading.Event(), threading.Event()
+    released_in_time: list[bool] = []
+
+    def _hold_write_lock() -> None:
+        # Another writer, as a second process or a long transaction would be.
+        holder = sqlite3.connect(engine.url.database, timeout=10)
+        try:
+            holder.execute("BEGIN IMMEDIATE")
+            held.set()
+            released_in_time.append(release.wait(2))
+            holder.rollback()
+        finally:
+            holder.close()
+
+    async def _go():
+        holder = threading.Thread(target=_hold_write_lock)
+        holder.start()
+        assert await asyncio.to_thread(held.wait, 5)
+        submitting = asyncio.create_task(controller.session_turn_gate.submit_scheduled(session_id, ctx, "digest please"))
+        await asyncio.sleep(0.1)
+        # The loop lets the other writer go while admission waits for it.
+        release.set()
+        await submitting
+        await asyncio.to_thread(holder.join, 5)
+
+    asyncio.run(_go())
+    assert released_in_time == [True]

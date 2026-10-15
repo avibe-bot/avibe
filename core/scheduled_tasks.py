@@ -51,6 +51,7 @@ from core.runtime_work import (
     RuntimeWorkItem,
     RuntimeWorkLane,
     RuntimeWorkRegistrationToken,
+    RuntimeWorkSupervisor,
 )
 from core.run_settlement import (
     INTERRUPT_REASON_DELIVERY_TARGET_MISSING,
@@ -4957,9 +4958,9 @@ class ScheduledTaskService:
     async def _run_runtime_sync(self, operation, /, *args, **kwargs):  # noqa: ANN001, ANN202
         call = partial(operation, *args, **kwargs)
         supervisor = getattr(self.controller, "runtime_work_supervisor", None)
-        run_sync = getattr(supervisor, "run_sync", None)
-        if callable(run_sync):
-            return await run_sync(call)
+        # Gate on the type: a stand-in controller's attribute can be callable without being awaitable.
+        if isinstance(supervisor, RuntimeWorkSupervisor):
+            return await supervisor.run_sync(call)
         return await asyncio.to_thread(call)
 
     def _start_legacy_runtime_work_probes(self) -> None:
@@ -6019,28 +6020,19 @@ class ScheduledTaskService:
             self._spawn_execution(request, lock_key)
 
     async def _drain_callbacks(self) -> None:
+        """Send every owed callback now, each through the RUN_CALLBACKS lane's own step.
+
+        Its store work (the listing, the callback enqueue under the write lock, the
+        status update) runs on the runtime-work executor like the lane's, never on the
+        loop: a settled run calls this from its execution task (#2630).
+        """
         if not self._owns_service_instance():
             return
-        for run in self.request_store.list_pending_callbacks():
-            run_id = str(run.get("id") or "")
-            if not run_id:
-                continue
-            try:
-                callback_run = self._enqueue_callback_run(run)
-            except Exception as exc:
-                logger.error("Agent run callback failed for %s: %s", run_id, exc, exc_info=True)
-                self.request_store.update_callback_status(run_id, status="failed", error=str(exc))
-                self._wake_runtime_work(RuntimeWorkLane.RUN_CALLBACKS)
-                continue
-            if callback_run is None:
-                self.request_store.update_callback_status(run_id, status="skipped")
-                self._wake_runtime_work(RuntimeWorkLane.RUN_CALLBACKS)
-                continue
-            self.request_store.update_callback_status(run_id, status="sent", callback_run_id=callback_run.id)
-            self._wake_runtime_work(
-                RuntimeWorkLane.REQUESTS,
-                RuntimeWorkLane.RUN_CALLBACKS,
-            )
+        pending = await self._run_runtime_sync(self.request_store.list_pending_callbacks)
+        for run in pending:
+            await self._process_run_callback(run)
+        if pending:
+            self._wake_runtime_work(RuntimeWorkLane.RUN_CALLBACKS)
 
     # --- the owed-failure-notice drain ---------------------------------------
     #
