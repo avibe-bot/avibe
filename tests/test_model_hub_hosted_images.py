@@ -187,20 +187,22 @@ LATE_APNG = base64.b64encode(_png(animated=True, padding=10_000)).decode()
     ({"created": 1, "data": [{"b64_json": NOT_AN_IMAGE}]}, "could not be used"),
     ({"created": 1, "data": [{"b64_json": BMP}]}, "could not be used"),
     ({"created": 1, "data": [{"b64_json": LATE_APNG}]}, "could not be used"),
-    ({"created": 1, "data": [{"b64_json": PNG}, {"b64_json": PNG}], "oversized": True}, "larger than allowed"),
-    # A call asks for at most four images: an answer with more is not kept at all.
-    ({"created": 1, "data": [{"b64_json": PNG}] * 5}, "larger than allowed"),
+    ({"created": 1, "data": [{"b64_json": PNG}, {"b64_json": PNG}], "oversized": True, "n": 2}, "larger than allowed"),
+    # An answer with more images than the call asked for, or than one when it named no n, is not kept at all.
+    ({"created": 1, "data": [{"b64_json": PNG}] * 2}, "larger than allowed"),
+    ({"created": 1, "data": [{"b64_json": PNG}] * 5, "n": 4}, "larger than allowed"),
 ])
 async def test_only_usable_images_complete_the_call(tmp_path, monkeypatch, answer_body, error):
     """MH-HOSTED-GATEWAY-007: completion is an allow-list; a URL is never fetched; the call is still metered."""
 
     if answer_body.pop("oversized", False):
         monkeypatch.setattr(images_module, "IMAGES_TOTAL_MAX_BYTES", len(base64.b64decode(PNG)) + 1)
+    asked = {"n": answer_body.pop("n")} if "n" in answer_body else {}
     handle = LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=OPENAI, usage=ProtocolUsageReport.of(
         input_tokens=20, cached_input_tokens=0, output_tokens=10,
     )), (json.dumps(answer_body).encode(),))
     service = _vibey_service(tmp_path, _sources(), handles=[handle])
-    (status, answer), _ = await _call(service, {"model": "gpt-image-2", "prompt": "a cat"})
+    (status, answer), _ = await _call(service, {"model": "gpt-image-2", "prompt": "a cat", **asked})
     assert status == 200
     assert answer["record"]["status"] == "failed" and error in answer["record"]["error"]
     # The gateway's own reason carries the code each surface shows it by (#2589); the other models follow in its text.

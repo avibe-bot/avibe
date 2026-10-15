@@ -131,12 +131,14 @@ class ImageResult:
     usage: Mapping[str, Any] | None = None
 
 
-def image_result(body: bytes | bytearray, say: Say) -> ImageResult:
-    """The canonical record of one images-endpoint answer; parse it off the loop.
+def image_result(body: bytes | bytearray, say: Say, *, asked: int) -> ImageResult:
+    """The canonical record of one images-endpoint answer to a call that asked for ``asked`` images; parse it off
+    the loop.
 
     Completion is an allow-list: only an answer whose every item is a usable
-    base64 image completes. An endpoint that answers with URLs only fails, as
-    the gateway never fetches an arbitrary URL.
+    base64 image, and that holds no more images than the call asked for,
+    completes. An endpoint that answers with URLs only fails, as the gateway
+    never fetches an arbitrary URL.
     """
 
     try:
@@ -146,8 +148,8 @@ def image_result(body: bytes | bytearray, say: Say) -> ImageResult:
     data = answer.get("data") if isinstance(answer, dict) else None
     if not isinstance(data, list) or not data or not all(isinstance(item, dict) for item in data):
         return ImageResult(failed_record(failure(say, "modelHub.hostedTools.imageMissing")))
-    if len(data) > MAX_IMAGES:
-        # A call asks for at most four; more is not what was asked for, and none of it is kept.
+    if len(data) > asked:
+        # More is not what the call asked for, and none of it is kept.
         return ImageResult(failed_record(failure(say, "modelHub.hostedTools.tooLarge")))
     images: list[str] = []
     total = 0

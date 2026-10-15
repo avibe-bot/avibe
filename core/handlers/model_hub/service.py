@@ -6617,7 +6617,8 @@ class ModelHubService:
         outcome = called.outcome
         failed_reason = _executor_failure(outcome, say, refused=called.refused)
         # The bytearray itself goes to the worker: no copy of the answer on the loop.
-        result = await asyncio.to_thread(image_result, body, say) if failed_reason is None else None
+        # Every images endpoint offered makes one image when the call names no n.
+        result = await asyncio.to_thread(image_result, body, say, asked=call.n or 1) if failed_reason is None else None
         execution: dict[str, Any] = {
             "mode": "direct",
             "executor_origin": {"provider": source.vendor, "api": source.protocol, "model": call.model},
