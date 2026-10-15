@@ -21,7 +21,6 @@ from typing import Any, Awaitable, Callable, Mapping, Optional, Sequence
 
 import httpx
 
-from core.agent_core.agent.models import ModelSelection
 from core.agent_core.agent.recovery import RecoveryRenderer
 from core.agent_core.ai._common import CONNECT_TIMEOUT_S, auth_headers, join_endpoint_url
 from core.agent_core.ai.hosted import failure, generate_action, image_dimensions, record_text
@@ -37,6 +36,7 @@ from core.agent_core.messages import (
 from core.agent_core.tools.base import CallInstance, JobHost, Tool, ToolContext, ToolResult, ToolSpec
 from core.agent_core.tools.hosted import hosted_tool_spec
 from core.agent_core.tools.shell import default_shell
+from modules.agents.vibey.models import HubModelRouter
 
 ImageSink = Callable[[bytes, str, str], Awaitable[str]]
 #: Whether a job's tool call has a durable ``tool_result`` (the adapter's half of J5).
@@ -124,8 +124,9 @@ class HostedTool:
     """
 
     spec: ToolSpec
-    #: The Turn's gateway: where the executor endpoint lives, and the token and headers that authorize the call.
-    endpoint: ModelEndpoint = field(repr=False)
+    #: The hop the Turn runs on now: where the executor endpoint lives, and the token and headers that authorize the
+    #: call. A re-resolve can move the Turn to another Source, and the gateway answers only the hop it now holds.
+    route: Callable[[], ModelEndpoint] = field(repr=False)
     client: Optional[httpx.AsyncClient] = field(default=None, repr=False)
     #: Where a proxied image is saved: the same sink as a native one.
     media: Optional[MediaSink] = field(default=None, repr=False)
@@ -141,9 +142,10 @@ class HostedTool:
         return ToolResult(content=(TextBlock(text),), is_error=failed, hosted=hosted)
 
     async def _run(self, arguments: dict[str, Any]) -> HostedResult:
-        url = join_endpoint_url(self.endpoint.base_url, f"/hosted-tools/{self.spec.name}")
+        endpoint = self.route()
+        url = join_endpoint_url(endpoint.base_url, f"/hosted-tools/{self.spec.name}")
         body = {"arguments": arguments}
-        headers = auth_headers(self.endpoint, provider="openai", gateway=True)
+        headers = auth_headers(endpoint, provider="openai", gateway=True)
         # The gateway bounds the call (180 s for a search); only connecting is bounded here.
         timeout = httpx.Timeout(None, connect=CONNECT_TIMEOUT_S)
         try:
@@ -244,19 +246,22 @@ def _hosted_result(tool: str, body: Any) -> HostedResult:
 
 
 def hosted_tools(
-    selection: Optional[ModelSelection],
+    router: HubModelRouter,
     client: Optional[httpx.AsyncClient] = None,
     media: Optional[MediaSink] = None,
 ) -> tuple[Tool, ...]:
     """The Turn's hosted tools: every tool the user enabled, in Model Hub's order, whatever preflight's hop runs it as.
     They lead the Turn's tools, so its last tool stays a local one whatever a hop renders them as, and the list stays
-    the same for the whole Turn."""
+    the same for the whole Turn. Each call goes out on the hop the Turn runs on then (``HubModelRouter.current``)."""
 
-    if selection is None:
+    if router.preflight is None:
         return ()
-    endpoint = selection.endpoint
+
+    def route() -> ModelEndpoint:
+        return router.current.endpoint
+
     return tuple(
-        HostedTool(hosted_tool_spec(name), endpoint, client, media)
-        for name in endpoint.hosted_tools
+        HostedTool(hosted_tool_spec(name), route, client, media)
+        for name in router.preflight.endpoint.hosted_tools
         if name in PARSED_HOSTED_TOOLS
     )

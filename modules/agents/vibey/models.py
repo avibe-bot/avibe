@@ -208,13 +208,18 @@ class HubModelRouter:
         self._first = first
         #: The route preflight resolved; the Turn's tool list is fixed from it.
         self.preflight = first
+        #: The hop the Turn runs on now, its latest resolution. The gateway answers the Turn's requests only on that
+        #: hop's credential (C-6 item 3), so the Turn's hosted calls go out on it too.
+        self.current = first
         self._adapters: dict[str, ProviderAdapter] = {}
 
     async def resolve(self) -> ModelSelection:
         if self._first is not None:
             selection, self._first = self._first, None
-            return selection
-        return await self._resolve()
+        else:
+            selection = await self._resolve()
+        self.current = selection
+        return selection
 
     def provider_for(self, protocol: ProtocolName) -> ProviderAdapter:
         adapter = self._adapters.get(protocol)
