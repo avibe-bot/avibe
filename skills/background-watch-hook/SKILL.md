@@ -2,7 +2,7 @@
 name: background-watch-hook
 slug: background-watch-hook
 description: Use `vibe watch` to run a managed Harness waiter that returns to the same conversation later. Best for reviews, CI, files, logs, and other wait-now-continue-later workflows.
-version: 0.17.4
+version: 0.18.0
 ---
 
 # Background Watch Hook
@@ -203,19 +203,19 @@ opts into retrying that code. Exit code `64` with the
 `avibe-watch: no-event` marker means a cycle finished with nothing worth an Agent
 turn.
 
-**A waiter detects change; the follow-up Agent Run makes the decision.** Keep that
-split when writing your own. A waiter that fires only once a composite gate is
-satisfied — CI green *and* a verdict bound to the exact head *and* zero unresolved
-threads — must match the shape of every signal in that gate, and it can only match
-the shapes its author has already seen. A wrong predicate then produces silence,
-which is indistinguishable from "nothing has happened yet", so it can sit on a retry
-exit code for hours after the state it was armed for arrived. The bundled waiters
-avoid that by reporting the change and leaving the judgment to the turn that has the
-whole picture. One caveat on the CI half: `render_actions_result` reports nothing
-while a requested workflow is missing, so a `--workflow` value that never matches —
-renamed, misspelled, or never triggered on this branch — never yields a CI event. PR
-activity still comes through, so the watch keeps firing; it is the CI verdict that
-silently never arrives. Check the name against a head that actually ran it.
+**A waiter detects reportable change; the follow-up Agent Run makes the decision.**
+Do not turn the waiter into a merge authorizer. `--coalesce-success` is a narrow
+notification policy for recognized success shapes, not a generic readiness gate:
+known half-successes stay quiet, but findings, errors, unfamiliar review payloads,
+and head/lifecycle/thread changes still reach the Agent. The Agent must fetch live
+state and apply the repository's exact-head review, complete CI, and thread gates.
+A completed Codex summary or a `Reviewed commit` line alone is not a clean pass.
+
+One caveat on CI: a requested workflow that never matches — renamed, misspelled,
+or never triggered on this branch — cannot establish success. Verify each
+`--workflow` name against actual runs. Coalescing still reports failures from
+other matching workflows and actionable PR activity; it never treats missing CI
+as green.
 
 A predicate never seen to fire has not been tested. Verify it the way the delivery
 loop below is armed — seed the baseline, produce one event, confirm exit `0` — not by
@@ -247,19 +247,50 @@ At least one repeatable `--workflow` enables combined CI monitoring. Omit `--sha
 for the normal delivery loop: each cycle resolves the PR's current head and queries
 Actions for that exact SHA. `--branch`, `--max-pages`, and `--success-conclusion`
 remain optional. Add `--sha` only when the caller intentionally wants a fixed-head
-one-shot wait. The waiter stays quiet while a requested run is missing or still
-running, then reports the complete exact-head result when every requested workflow
-has terminal runs. Every distinct matching run ID is included, so an earlier failed
-rerun remains visible to the follow-up turn. Set the forever Watch's `--timeout 0`:
-the default 21600-second per-cycle timeout treats six quiet hours as a terminal
-failure, which is not a meaningful end condition for a PR delivery loop.
+one-shot wait. Prefer `--coalesce-success` for delivery loops:
+
+| Observation | Report |
+| --- | --- |
+| Only CI is green, or only a recognized Codex pass arrived | None; persist it and keep waiting |
+| Both successes at the same head, with no unresolved threads | One combined success **candidate** for Agent verification |
+| A requested CI run fails/cancels/times out | Report immediately, even if another workflow is missing/running |
+| Review findings, Codex errors, or unfamiliar review payloads | Report without waiting for CI |
+
+Recognized review successes are Codex-authored clean-pass comments/reviews naming
+the current SHA, and a new Codex `+1` on the PR body observed after an unchanged
+head's baseline. A reaction present at seeding or first seen with a head change
+cannot be bound this way; head-transition reactions remain visible as ordinary
+activity. A reaction candidate still needs the repository's stricter epoch and
+prior-review checks in the follow-up; the waiter does not certify that gate.
+Codex's mutable summary comment is progress, not a verdict: routine updates stay
+quiet in this mode, while its error/failure text remains reportable. Unknown
+verdict formats are surfaced rather than silently interpreted as success.
+
+Deferred evidence lives in the same owner-specific state file and pending delivery
+transaction. A head change, changed/deleted verdict, or new bot findings/errors
+invalidates the deferred review; CI from another SHA cannot complete its pair.
+A combined success is deduplicated across ordinary polls and restarts. A new CI
+run/attempt or recovery after a reported problem can produce a fresh pair.
+
+Without `--coalesce-success`, combined mode retains the activity stream: each PR
+change is reportable and CI reports once all requested workflows have terminal
+runs. Every distinct matching run ID is included in either mode, so an earlier
+failed rerun remains visible. Set the forever Watch's `--timeout 0`: the default
+21600-second per-cycle timeout treats six quiet hours as a terminal failure,
+which is not a meaningful end condition for a PR delivery loop.
+
+The reporting mode is part of cursor ownership. Enable it on a new, pre-action
+seed and Watch with the same arguments; do not append it to an armed activity-mode
+Watch, replace its cursor, or reseed between rounds. Existing Watches and installed
+Skill snapshots retain their configured behavior until deliberately rolled out.
 
 The durable Actions snapshot is the notification baseline, not the latest poll.
 Missing runs, nonterminal responses, and older rerun attempts do not erase a
 previously reported result. A new head starts a new baseline; complete terminal
 results for new run IDs, rerun attempts, or conclusions still wake the Agent.
 An inventory missing a previously known run cannot establish a new CI verdict.
-Review/comment/thread activity remains reportable while CI is incomplete.
+Review/comment/thread activity remains reportable while CI is incomplete; in
+`--coalesce-success` mode only recognized success/progress payloads are deferred.
 The current head's known run inventory is retained separately from notification
 progress, including through a PR-only report or a restart. Existing cursor files
 are accepted without reseeding; notification history already overwritten by an
@@ -279,20 +310,20 @@ uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
   --repo avibe-bot/avibe --pr 151 \
   --branch "$BRANCH" \
   --workflow lint \
-  --actionable-only \
+  --coalesce-success --actionable-only \
   --state-file "$STATE_FILE" --seed-state
 
 vibe watch add \
   --name "Watch PR 151 review and CI" \
   --forever \
   --timeout 0 \
-  --message "PR #151 has new review activity, a head change, or current-head CI activity. Fetch the latest PR and Actions state, resolve actionable findings, and leave this durable combined Watch armed until close-out. Summarise the round here in one or two lines; do not post that summary as a PR comment." \
+  --message "PR #151 has a combined review/CI success candidate or new actionable activity. Fetch live PR, review threads, and exact-head Actions state. Handle findings/errors promptly and summarize actual fixes or blockers briefly; do not announce a half-success. For a success candidate, verify all delivery gates and send one combined final report. Keep this durable combined Watch armed until close-out. Do not post round summaries as PR comments." \
   -- \
   uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
     --repo avibe-bot/avibe --pr 151 \
     --branch "$BRANCH" \
     --workflow lint \
-    --actionable-only --settle 20 --state-file "$STATE_FILE" --interval 60 \
+    --coalesce-success --actionable-only --settle 20 --state-file "$STATE_FILE" --interval 60 \
     --timeout 0
 
 # After the seeded Watch is confirmed live, push or post the review trigger.
@@ -452,7 +483,7 @@ cannot both see an unowned path; the one that loses that exclusive create reads 
 winner's claim and stops. Ownership is re-checked before every replacement as well,
 because the loser of a microsecond-wide race has already passed the startup check.
 Identity is the repo, the PR, and the options that decide what the watch reports
-(`--actionable-only`, `--ignore-author`, `--ignore-comment-pattern`,
+(`--actionable-only`, `--coalesce-success`, `--ignore-author`, `--ignore-comment-pattern`,
 `--include-self-comments`, `--new-prs`) — two watches on the same PR that report
 different things cannot share cursors either, because the filtered one advances past
 events the other never reported. Pacing options such as `--interval` and `--settle`
@@ -479,14 +510,13 @@ GitHub-specific notes:
   so edits and deletions remain observable, reactions are filtered server-side with
   `content=+1`, and unchanged pages revalidate to `304`, which GitHub does not charge
   against the rate limit — an idle watch can poll for hours for free
-- a Codex verdict arrives in more than one shape and the waiter reports all of them:
-  findings as a review with inline comments, and a pass as either a `+1` reaction on
-  the PR body or a PR conversation comment. Pass reactions remain visible even when
-  `--event-limit` is reached. A predicate keyed to reviews alone never sees a pass.
-  Whether a reported pass *counts* — bot author, pass phrase, reviewed SHA against the
-  current head, and the different qualification a bodyless reaction carries — is a
-  judgment the follow-up turn makes against this repo's review rules, and is not
-  something a waiter should encode
+- a Codex verdict arrives in more than one shape: findings as a review with inline
+  comments, and a pass as a PR-body `+1` reaction or PR conversation comment. Pass reactions remain visible
+  even when `--event-limit` is reached (or are retained for the paired candidate
+  in `--coalesce-success` mode). A predicate keyed to reviews alone never sees
+  a pass. Whether evidence *counts* — bot author, clean-pass phrase, reviewed SHA,
+  and a reaction's stricter epoch qualification — remains the follow-up Agent's
+  responsibility, not a merge decision encoded in the waiter
 - PR activity also includes lifecycle changes on the PR itself, for example draft/ready, closed, reopened, or merged transitions
 - a changed PR head is reported as activity so a new push cannot leave the review
   loop asleep

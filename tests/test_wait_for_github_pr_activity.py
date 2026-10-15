@@ -3,6 +3,8 @@ from __future__ import annotations
 import io
 import importlib.util
 import json
+import re
+import shlex
 import urllib.error
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -4338,6 +4340,324 @@ def _ci_cycle(module, path, states, *, delivery="1", workflows=("CI",), settle=0
                 "--settle", str(settle), *extra_args,
             ),
         )
+
+
+COALESCED_HEAD = "a" * 40
+
+
+def _clean_codex_comment(comment_id=601, *, head=COALESCED_HEAD, author="chatgpt-codex-connector[bot]"):
+    return {
+        "id": comment_id,
+        "body": f"Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** `{head[:7]}`",
+        "user": {"login": author},
+        "html_url": f"https://github.com/example/repo/pull/153#issuecomment-{comment_id}",
+    }
+
+
+def _success_state(*runs, clean=False, head=COALESCED_HEAD, **items):
+    state = _pr_state(
+        issue_comments=[_clean_codex_comment(head=head)] if clean else items.pop("issue_comments", []),
+        **items,
+    )
+    state["pull_request"]["head"] = {"sha": head}
+    state["actions"] = list(runs)
+    return state
+
+
+@pytest.mark.parametrize("first", ["ci", "review"])
+def test_coalesced_success_waits_for_both_gates_across_restart_and_delivers_once(tmp_path, first):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    green = _ci_run(head=COALESCED_HEAD)
+    _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
+    half = _success_state(green) if first == "ci" else _success_state(pending, clean=True)
+    options = ("--coalesce-success",)
+
+    rc, output, payload = _ci_cycle(module, path, [half], extra_args=options)
+    assert rc == 124  # Virtual-clock timeout proves that no Agent event was emitted.
+    assert output == ""
+    assert module.STAGED_KEY not in payload
+
+    both = _success_state(green, clean=True)
+    rc, output, payload = _ci_cycle(module, path, [both], extra_args=options)
+    assert rc == 0
+    assert "CI + Codex review success candidate" in output
+    assert "GitHub Actions success" in output
+    assert "Didn't find any major issues" in output
+    assert payload[module.STAGED_KEY]["output"] == output.strip()
+
+    # No delivery stamp change: replay exactly, even if the live evidence is gone.
+    rc, replay, _ = _ci_cycle(module, path, [_success_state()], extra_args=options)
+    assert rc == 0
+    assert replay == output
+
+    # Acknowledgement and a process restart may not turn the same level into an edge.
+    rc, repeated, _ = _ci_cycle(module, path, [both], delivery="2", extra_args=options)
+    assert rc == 124
+    assert repeated == ""
+
+
+@pytest.mark.parametrize("shape", ["comment", "review", "reaction", "api-reaction"])
+def test_coalesced_success_recognizes_all_supported_codex_shapes(tmp_path, shape):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
+    items = {"issue_comments": [_clean_codex_comment()]}
+    if shape == "review":
+        review = {**_clean_codex_comment(), "state": "COMMENTED", "commit_id": COALESCED_HEAD}
+        items = {"reviews": [review]}
+    elif "reaction" in shape:
+        login = "chatgpt-codex-connector" if shape == "api-reaction" else "chatgpt-codex-connector[bot]"
+        items = {"reactions": [{"id": 701, "content": "+1", "user": {"login": login}}]}
+
+    options = ("--coalesce-success",)
+    rc, output, _ = _ci_cycle(module, path, [_success_state(pending, **items)], extra_args=options)
+    assert (rc, output) == (124, "")
+    rc, output, _ = _ci_cycle(
+        module, path, [_success_state(_ci_run(head=COALESCED_HEAD), **items)], extra_args=options,
+    )
+    assert rc == 0
+    assert "CI + Codex review success candidate" in output
+
+
+@pytest.mark.parametrize("event", ["inline", "changes-requested", "error", "unknown", "wrong-sha", "spoof", "reviewed-only"])
+def test_coalescing_never_hides_findings_errors_or_unknown_evidence(tmp_path, event):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
+    items = {"issue_comments": [{**_clean_codex_comment(), "body": "Something went wrong. Please try again."}]}
+    if event == "inline":
+        items = {"review_comments": [_review_comment(501)]}
+    elif event == "changes-requested":
+        items = {"reviews": [{**_clean_codex_comment(), "state": "CHANGES_REQUESTED", "body": "Fix this"}]}
+    elif event == "unknown":
+        items = {"issue_comments": [{**_clean_codex_comment(), "body": "A new verdict format worth inspecting"}]}
+    elif event == "wrong-sha":
+        items = {"issue_comments": [_clean_codex_comment(head="b" * 40)]}
+    elif event == "spoof":
+        items = {"issue_comments": [_clean_codex_comment(author="another-person")]}
+    elif event == "reviewed-only":
+        items = {"issue_comments": [{**_clean_codex_comment(), "body": f"Reviewed commit: `{COALESCED_HEAD}`"}]}
+    rc, output, _ = _ci_cycle(
+        module, path, [_success_state(pending, **items)], extra_args=("--coalesce-success",),
+    )
+    assert rc == 0
+    assert "success candidate" not in output
+    assert "GitHub PR activity" in output
+
+
+@pytest.mark.parametrize("other", ["missing", "running", "missing-known-run"])
+def test_coalesced_ci_failure_reports_before_other_workflows_and_is_not_repeated(tmp_path, other):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    workflows = ("CI", "Security")
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    security = _ci_run(8, head=COALESCED_HEAD, workflow="Security", status="in_progress", conclusion=None)
+    initial = (pending, security) if other == "missing-known-run" else (pending,)
+    _seed_ci_state(module, path, *initial, workflows=workflows, head=COALESCED_HEAD)
+    failure = _ci_run(head=COALESCED_HEAD, conclusion="failure")
+    runs = (failure, security) if other == "running" else (failure,)
+    options = ("--coalesce-success",)
+
+    rc, output, _ = _ci_cycle(
+        module, path, [_success_state(*runs)], workflows=workflows, settle=1, extra_args=options,
+    )
+    assert rc == 0
+    assert "GitHub Actions failure" in output
+    assert "Still waiting for workflow(s): Security" in output
+
+    # Another workflow finishing is not a new failure or a combined success.
+    complete = _success_state(failure, {**security, "status": "completed", "conclusion": "success"})
+    rc, output, _ = _ci_cycle(module, path, [complete], delivery="2", workflows=workflows, extra_args=options)
+    assert (rc, output) == (124, "")
+    newer = _success_state({**failure, "run_attempt": 2}, {**security, "status": "completed", "conclusion": "success"})
+    rc, output, _ = _ci_cycle(module, path, [newer], delivery="2", workflows=workflows, extra_args=options)
+    assert rc == 0
+    assert "GitHub Actions failure" in output
+
+
+def test_deferred_review_survives_an_unrelated_report_and_acknowledgement(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
+    options = ("--coalesce-success",)
+    rc, output, _ = _ci_cycle(module, path, [_success_state(pending, clean=True)], extra_args=options)
+    assert (rc, output) == (124, "")
+    comments = [_clean_codex_comment(), {"id": 602, "body": "Please check this too", "user": {"login": "human"}}]
+    rc, output, _ = _ci_cycle(
+        module, path, [_success_state(pending, issue_comments=comments)], extra_args=options,
+    )
+    assert rc == 0
+    assert "Please check this too" in output
+    rc, output, _ = _ci_cycle(
+        module, path, [_success_state(_ci_run(head=COALESCED_HEAD), issue_comments=comments)],
+        delivery="2", extra_args=options,
+    )
+    assert rc == 0
+    assert "CI + Codex review success candidate" in output
+
+
+@pytest.mark.parametrize("invalidation", ["delete", "edit-to-error", "finding"])
+def test_deferred_review_is_invalidated_until_a_new_clean_verdict(tmp_path, invalidation):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
+    options = ("--coalesce-success",)
+    rc, output, _ = _ci_cycle(module, path, [_success_state(pending, clean=True)], extra_args=options)
+    assert (rc, output) == (124, "")
+    items = {}
+    if invalidation == "edit-to-error":
+        items = {"issue_comments": [{**_clean_codex_comment(), "body": "Something went wrong"}]}
+    elif invalidation == "finding":
+        items = {"issue_comments": [_clean_codex_comment()], "review_comments": [_review_comment(501)]}
+    broken = _success_state(_ci_run(head=COALESCED_HEAD), **items)
+    rc, output, _ = _ci_cycle(module, path, [broken], extra_args=options)
+    assert rc == 0
+    assert "success candidate" not in output
+    rc, output, _ = _ci_cycle(module, path, [broken], delivery="2", extra_args=options)
+    assert (rc, output) == (124, "")
+    fixed = {**broken, "issue_comments": [*broken["issue_comments"], _clean_codex_comment(603)]}
+    rc, output, _ = _ci_cycle(module, path, [fixed], delivery="2", extra_args=options)
+    assert rc == 0
+    assert "success candidate" in output
+
+
+def test_coalescing_never_binds_an_existing_or_head_transition_reaction(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    baseline = _success_state(pending, reactions=[{
+        "id": 701, "content": "+1", "user": {"login": "chatgpt-codex-connector[bot]"},
+    }])
+    _managed_state(module, path, "wat_9", **_complete_pr_baseline_fields(module, baseline),
+                   actions=module.normalize_selected_runs({"CI": [pending]}))
+    options = ("--coalesce-success",)
+    rc, output, _ = _ci_cycle(
+        module, path, [{**baseline, "actions": [_ci_run(head=COALESCED_HEAD)]}], extra_args=options,
+    )
+    assert (rc, output) == (124, "")
+    moved = _success_state(_ci_run(head="b" * 40), head="b" * 40, reactions=[
+        *baseline["reactions"], {**baseline["reactions"][0], "id": 702},
+    ])
+    rc, output, _ = _ci_cycle(module, path, [moved], extra_args=options)
+    assert rc == 0
+    assert "pr_head" in output and "pr_reaction #702" in output
+    assert "success candidate" not in output
+    rc, output, _ = _ci_cycle(module, path, [moved], delivery="2", extra_args=options)
+    assert (rc, output) == (124, "")
+
+
+def test_coalescing_resets_old_head_evidence_without_mixing_ci(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
+    options = ("--coalesce-success",)
+    _ci_cycle(module, path, [_success_state(pending, clean=True)], extra_args=options)
+    new_head = "b" * 40
+    moved = _success_state(_ci_run(head=new_head), head=new_head, issue_comments=[_clean_codex_comment()])
+    rc, output, _ = _ci_cycle(module, path, [moved], extra_args=options)
+    assert rc == 0 and "pr_head" in output and "success candidate" not in output
+    rc, output, _ = _ci_cycle(module, path, [moved], delivery="2", extra_args=options)
+    assert (rc, output) == (124, "")
+    moved["issue_comments"].append(_clean_codex_comment(602, head=new_head))
+    rc, output, _ = _ci_cycle(module, path, [moved], delivery="2", extra_args=options)
+    assert rc == 0
+    assert "success candidate" in output
+    assert f"@{new_head[:12]}" in output
+
+
+@pytest.mark.parametrize("status", ["Running", "Completed", "Something went wrong", "Unavailable"])
+def test_coalescing_ignores_codex_summary_progress_but_not_errors(tmp_path, status):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
+    summary = {**_clean_codex_comment(), "body": (
+        "<!-- codex-pull-request-review-summary -->\n"
+        "| Review | Status | Commit | Review trigger |\n"
+        "| --- | --- | --- | --- |\n"
+        f"| 📝 **Code Review** | ✅ **{status}** | `{COALESCED_HEAD[:7]}` | New commits |"
+    )}
+    rc, output, _ = _ci_cycle(
+        module, path, [_success_state(pending, issue_comments=[summary])], extra_args=("--coalesce-success",),
+    )
+    if status not in {"Running", "Completed"}:
+        assert rc == 0 and "issue_comment #601" in output
+    else:
+        assert (rc, output) == (124, "")
+
+
+def test_coalescing_policy_requires_ci_and_has_independent_cursor_ownership():
+    module = _load_module()
+    parser = module._build_parser()
+    base = ["--repo", "avibe-bot/avibe", "--pr", "153"]
+    assert module._validate_ci_args(parser.parse_args([*base, "--coalesce-success"])) is not None
+    ordinary = parser.parse_args([*base, "--workflow", "CI"])
+    coalesced = parser.parse_args([*base, "--workflow", "CI", "--coalesce-success"])
+    assert module._watch_identity(ordinary) != module._watch_identity(coalesced)
+    assert module._watch_identity(ordinary) not in module._legacy_watch_identity_aliases(coalesced, None)
+
+
+@pytest.mark.parametrize("new_ci", ["rerun", "new-run"])
+def test_coalesced_success_reports_a_new_ci_pair_without_repeating_the_old_pair(tmp_path, new_ci):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
+    options = ("--coalesce-success",)
+    green = _ci_run(head=COALESCED_HEAD)
+    rc, output, _ = _ci_cycle(module, path, [_success_state(green, clean=True)], extra_args=options)
+    assert rc == 0 and "success candidate" in output
+    next_runs = [{**green, "run_attempt": 2}] if new_ci == "rerun" else [green, {**green, "id": 8}]
+    rc, output, _ = _ci_cycle(
+        module, path, [_success_state(*next_runs, clean=True)], delivery="2", extra_args=options,
+    )
+    assert rc == 0 and "success candidate" in output
+    rc, output, _ = _ci_cycle(
+        module, path, [_success_state(*next_runs, clean=True)], delivery="3", extra_args=options,
+    )
+    assert (rc, output) == (124, "")
+
+
+@pytest.mark.parametrize("location", ["committed", "pending"])
+def test_malformed_deferred_success_evidence_does_not_overwrite_history(tmp_path, location):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    _seed_ci_state(module, path, _ci_run(head=COALESCED_HEAD), head=COALESCED_HEAD)
+    payload = json.loads(path.read_text())
+    invalid = {"head_sha": COALESCED_HEAD, "review": {"kind": "not-a-collection", "id": 601}}
+    if location == "pending":
+        payload[module.STAGED_KEY] = {"delivered_after": "1", "output": "old report", "cursors": {
+            module.SUCCESS_BATCH_KEY: invalid,
+        }}
+    else:
+        payload[module.SUCCESS_BATCH_KEY] = invalid
+    path.write_text(json.dumps(payload))
+    before = path.read_bytes()
+    with pytest.raises(module.StateFileUnusableError, match="success_batch"):
+        _ci_cycle(module, path, [_success_state()], extra_args=("--coalesce-success",))
+    assert path.read_bytes() == before
+
+
+def test_preferred_combined_watch_examples_parse_with_the_same_success_policy():
+    module = _load_module()
+    body = (Path(__file__).resolve().parents[1] / "skills/background-watch-hook/SKILL.md").read_text()
+    preferred = body.split("### Preferred PR + CI watch", 1)[1].split("One-shot watch:", 1)[0]
+    commands = re.findall(
+        r'uv run --no-project "\$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py"[^\n]*',
+        preferred.replace("\\\n", " "),
+    )
+    assert len(commands) == 2  # The seed and the armed waiter must share ownership.
+    args = [module._build_parser().parse_args(shlex.split(command)[4:]) for command in commands]
+    assert all(arg.coalesce_success and arg.actionable_only for arg in args)
+    assert all(module._validate_ci_args(arg) is None for arg in args)
+    assert module._watch_identity(args[0]) == module._watch_identity(args[1])
 
 
 @pytest.mark.parametrize("intermediate", ["missing", "nonterminal", "older-attempt", "partial"])
