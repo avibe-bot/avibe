@@ -24,7 +24,6 @@ from typing import Any, Awaitable, Callable, Mapping, Optional, Sequence
 
 import httpx
 
-from core.agent_core.agent.models import ModelSelection
 from core.agent_core.agent.recovery import RecoveryRenderer
 from core.agent_core.ai._common import CONNECT_TIMEOUT_S, auth_headers, join_endpoint_url
 from core.agent_core.ai.hosted import failure, generate_action, image_dimensions, record_text
@@ -42,6 +41,7 @@ from core.agent_core.tools.base import CallInstance, JobHost, Tool, ToolContext,
 from core.agent_core.tools.hosted import MAX_IMAGES, hosted_tool_spec, image_generate_spec, size_form
 from core.agent_core.tools.read import ImageUnreadable, read_image
 from core.agent_core.tools.shell import default_shell
+from modules.agents.vibey.models import HubModelRouter
 
 ImageSink = Callable[[bytes, str, str], Awaitable[str]]
 #: Whether a job's tool call has a durable ``tool_result`` (the adapter's half of J5).
@@ -125,13 +125,14 @@ class HostedTool:
     """
 
     spec: ToolSpec
-    #: The Turn's gateway: where the executor endpoint lives, and the token and headers that authorize the call.
-    endpoint: ModelEndpoint = field(repr=False)
+    #: The hop the Turn runs on now: where the executor endpoint lives, and the token and headers that authorize the
+    #: call. A re-resolve can move the Turn to another Source, and the gateway answers only the hop it now holds.
+    route: Callable[[], ModelEndpoint] = field(repr=False)
     client: Optional[httpx.AsyncClient] = field(default=None, repr=False)
 
     async def execute(self, arguments: Mapping[str, Any], ctx: ToolContext) -> ToolResult:
         del ctx
-        hosted, _ = await _gateway_call(self.endpoint, self.client, self.spec.name, dict(arguments))
+        hosted, _ = await _gateway_call(self.route(), self.client, self.spec.name, dict(arguments))
         query = arguments.get("query")
         return _result(self.spec.name, hosted, query=query if isinstance(query, str) else None)
 
@@ -148,7 +149,9 @@ class ImageGenerateTool:
 
     spec: ToolSpec
     models: ImageModels
-    endpoint: ModelEndpoint = field(repr=False)
+    #: The hop the Turn runs on now: where the executor endpoint lives, and the token and headers that authorize the
+    #: call. A re-resolve can move the Turn to another Source, and the gateway answers only the hop it now holds.
+    route: Callable[[], ModelEndpoint] = field(repr=False)
     client: Optional[httpx.AsyncClient] = field(default=None, repr=False)
     media: Optional[MediaSink] = field(default=None, repr=False)
 
@@ -172,7 +175,7 @@ class ImageGenerateTool:
             return _failed(self.spec.name, str(error), None)
         if references:
             arguments["images"] = references
-        hosted, answer = await _gateway_call(self.endpoint, self.client, self.spec.name, arguments)
+        hosted, answer = await _gateway_call(self.route(), self.client, self.spec.name, arguments)
         if answer is None or hosted.record.status != "completed":
             return hosted
         return await self._saved(hosted, answer)
@@ -386,20 +389,24 @@ def _hosted_result(tool: str, body: Any) -> HostedResult:
 
 
 def hosted_tools(
-    selection: Optional[ModelSelection],
+    router: HubModelRouter,
     client: Optional[httpx.AsyncClient] = None,
     media: Optional[MediaSink] = None,
 ) -> tuple[Tool, ...]:
     """The Turn's hosted tools from its first resolution (§3.4): every search tool the user enabled, in Model Hub's
     order, whatever a hop runs it as, then ``image_generate`` when an image model is available. They lead the Turn's
     tools, so its last tool stays a local one whatever a hop renders them as, and the list and the image enum stay the
-    same for the whole Turn."""
+    same for the whole Turn. Each call goes out on the hop the Turn runs on then (``HubModelRouter.current``)."""
 
-    if selection is None:
+    if router.preflight is None:
         return ()
-    endpoint = selection.endpoint
-    tools: list[Tool] = [HostedTool(hosted_tool_spec(name), endpoint, client) for name in endpoint.hosted_tools]
-    if endpoint.image_models is not None:
-        spec = image_generate_spec(endpoint.image_models)
-        tools.append(ImageGenerateTool(spec, endpoint.image_models, endpoint, client, media))
+    frozen = router.preflight.endpoint
+
+    def route() -> ModelEndpoint:
+        return router.current.endpoint
+
+    tools: list[Tool] = [HostedTool(hosted_tool_spec(name), route, client) for name in frozen.hosted_tools]
+    if frozen.image_models is not None:
+        spec = image_generate_spec(frozen.image_models)
+        tools.append(ImageGenerateTool(spec, frozen.image_models, route, client, media))
     return tuple(tools)

@@ -2695,7 +2695,7 @@ def _image_tool(client, *, media=None):
 
     models = ImageModels(tuple(ImageModel("src_executor01", *entry) for entry in _IMAGE_MODELS))
     endpoint = ModelEndpoint("anthropic", "http://hub.invalid/vibey/v1", "claude-opus-5-5", "hub-token")
-    return ImageGenerateTool(image_generate_spec(models), models, endpoint, client, media)
+    return ImageGenerateTool(image_generate_spec(models), models, lambda: endpoint, client, media)
 
 
 def _tool_context(cwd: Path):
@@ -2838,7 +2838,7 @@ async def test_vibeys_image_tool_runs_on_the_gateways_image_endpoint_from_the_ho
 
     from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
     from modules.agents.model_hub import ModelHubRuntimeRouter
-    from modules.agents.vibey.models import selection_from_hop
+    from modules.agents.vibey.models import HubModelRouter, selection_from_hop
     from modules.agents.vibey.tools import hosted_tools
     from tests.test_model_hub_hosted_images import GEMINI, OPENAI, PNG, _served, _sources
     from tests.test_model_hub_vibey_consumer import _vibey_service
@@ -2847,10 +2847,13 @@ async def test_vibeys_image_tool_runs_on_the_gateways_image_endpoint_from_the_ho
     service = _vibey_service(tmp_path, _sources(), handles=[_served(PNG, source_id=GEMINI), _served(PNG, size="1536x1024")])
     gateway = ModelHubTurnGateway(service)
     router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+    async def resolve():
+        return selection_from_hop(await router.resolve_hop("menu-alias", process_scope="vibey:image", turn_id="turn-image"))
+
     try:
-        hop = await router.resolve_hop("menu-alias", process_scope="vibey:image", turn_id="turn-image")
+        turn = HubModelRouter(resolve, lambda protocol: None, first=await resolve())
         async with httpx.AsyncClient(trust_env=False) as client:
-            tools = hosted_tools(selection_from_hop(hop), client, MediaSnapshots(None, tmp_path / "media"))
+            tools = hosted_tools(turn, client, MediaSnapshots(None, tmp_path / "media"))
             (tool,) = [tool for tool in tools if tool.spec.name == "image_generate"]
             drawn = await tool.execute(
                 {"model": "gemini-2.5-flash-image", "prompt": "a cat", "size": "16:9"}, _tool_context(tmp_path)
@@ -2950,6 +2953,50 @@ async def test_a_generated_image_reaches_the_user_with_the_turns_reply_even_when
         [row] = harness.rows("error")
         assert harness.rows("result") == []
         assert (empty in row["content_text"]) is (stop == "stop")
+
+
+async def test_a_proxied_call_after_the_turn_moved_to_another_source_runs_on_the_hop_it_now_holds(
+    tmp_path, monkeypatch
+):
+    """MH-HOSTED-VIBEY-004, closed loop: the gateway answers a Vibey request only while its credential's route is the
+    one the turn now holds (C-6 item 3). After a re-resolve moved the turn to another Source, a proxied call goes out
+    on that hop, never on the one the turn's tools were built from, which the gateway answers ``turn_not_live``."""
+    import httpx
+
+    from config.v2_config import ModelHubHostedToolConfig, ModelHubRouteConfig, ModelHubRouteHopConfig
+    from core.handlers.model_hub import hosted_tools as hosted_tools_module
+    from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
+    from modules.agents.model_hub import ModelHubRuntimeRouter
+    from modules.agents.vibey.models import HubModelRouter, selection_from_hop
+    from modules.agents.vibey.tools import hosted_tools
+    from tests.test_model_hub_hosted_executor import OPENAI, XAI, _served_by_openai, _sources
+    from tests.test_model_hub_vibey_consumer import _vibey_service
+
+    monkeypatch.setattr(hosted_tools_module, "provider_executor_model", {"openai": "gpt-6-astra"}.get)
+    service = _vibey_service(tmp_path, _sources(), handles=[_served_by_openai()])
+    config = service.store.config
+    config.hosted_tools["web_search"] = ModelHubHostedToolConfig(enabled=True, executor_order=(OPENAI,))
+    gateway = ModelHubTurnGateway(service)
+    hub = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+
+    async def resolve():
+        hop = await hub.resolve_hop("menu-alias", process_scope="vibey:moved", turn_id="turn-moved")
+        return selection_from_hop(hop)
+
+    try:
+        router = HubModelRouter(resolve, lambda protocol: None, first=await resolve())
+        async with httpx.AsyncClient(trust_env=False) as client:
+            (search,) = [tool for tool in hosted_tools(router, client) if tool.spec.name == "web_search"]
+            assert (await router.resolve()).endpoint.source_id == XAI
+            # The turn's next hop is another Source (here its route changed; a pin refusal or a failover moves it too).
+            config.agents["vibey"].routes["menu-alias"] = ModelHubRouteConfig((ModelHubRouteHopConfig(OPENAI, "gpt-6-astra"),))
+            assert (await router.resolve()).endpoint.source_id == OPENAI
+            result = await search.execute({"query": "q"}, None)  # type: ignore[arg-type]
+    finally:
+        await gateway.close()
+
+    assert not result.is_error, result.content[0].text
+    assert result.hosted.execution.executor_source_id == OPENAI
 
 
 _NATIVE_SEARCH = {"native": "assumed", "declaration": {"type": "web_search"}, "include": [], "replay": "assumed"}
