@@ -8595,15 +8595,20 @@ def test_a_scheduled_turns_admission_never_holds_the_loop(monkeypatch, tmp_path)
     assert released_in_time == [True]
 
 
-def test_a_cancellation_during_admission_keeps_the_runs_delivery_ownership(monkeypatch, tmp_path):
+@pytest.mark.parametrize("admission_fails", [False, True])
+def test_a_cancellation_during_admission_keeps_the_runs_delivery_ownership(monkeypatch, tmp_path, admission_fails):
     """#2630: admission runs on a thread now, so a cancellation can arrive while it waits for SQLite's write lock.
     Once its transaction moves the Run's ownership to the Delivery, the submission must hand the turn to recovery,
-    as a cancellation during delivery does, instead of letting the Run be terminalized and the turn dropped."""
+    as a cancellation during delivery does, instead of letting the Run be terminalized and the turn dropped.
+
+    #2657: an admission that fails moved nothing, so the submission answers the cancellation, not the error: the
+    error would have the executor settle an ordinary failure instead of the stop or shutdown that cancelled it."""
     import sqlite3
     import threading
 
     from core import session_turns
     from core.scheduled_tasks import TaskExecutionStore
+    from storage import background
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     engine, session = _create_test_session(tmp_path, native_id="proj_admission_cancel")
@@ -8643,6 +8648,12 @@ def test_a_cancellation_during_admission_keeps_the_runs_delivery_ownership(monke
         },
     )
     held, release = threading.Event(), threading.Event()
+    if admission_fails:
+
+        def _refuse_binding(*_args, **_kwargs):
+            raise sqlite3.OperationalError("disk I/O error")
+
+        monkeypatch.setattr(background, "attach_agent_run_delivery_in_connection", _refuse_binding)
 
     def _hold_write_lock() -> None:
         holder = sqlite3.connect(engine.url.database, timeout=10)
@@ -8666,10 +8677,16 @@ def test_a_cancellation_during_admission_keeps_the_runs_delivery_ownership(monke
         release.set()
         try:
             return await submitting
+        except asyncio.CancelledError:
+            return "cancelled"
         finally:
             await asyncio.to_thread(holder.join, 5)
 
     result = asyncio.run(_go())
-    assert result.delivery_owner_transferred is True
     stored = request_store.get_run(run.id)
+    if admission_fails:
+        assert result == "cancelled", f"the admission's error replaced the cancellation: {result!r}"
+        assert not stored["delivery_id"]
+        return
+    assert result.delivery_owner_transferred is True
     assert stored["delivery_id"] and stored["status"] in {"running", "queued"}

@@ -236,28 +236,22 @@ def create_app(
             return await supervisor.run_sync(operation)
         return await asyncio.to_thread(operation)
 
-    async def _off_loop(operation: Callable[[], Any]) -> tuple[Any, bool]:
+    async def _off_loop(operation: Callable[[], Any]) -> tuple["asyncio.Future[Any]", bool]:
         """Run one scheduled-turn store step on the runtime-work executor, the door the
         scheduler's own store work uses, so its write-lock wait and commit never hold
         the loop (#2630).
 
         Cancellation cannot split the step, as it could not while the step ran
         synchronously on the loop: one that arrives meanwhile waits for the step to
-        land. Returns ``(result, cancelled)``, and the caller answers the cancellation
-        from what the step committed. Once a Run's ownership has moved to its Delivery,
-        the answer is recovery, never an escaping cancellation that would let the
-        executor settle the Run and drop the turn.
+        land. Returns the landed step and whether a cancellation was caught, and the
+        caller answers the cancellation from what the step committed. Once a Run's
+        ownership has moved to its Delivery, the answer is recovery, never an escaping
+        cancellation that would let the executor settle the Run and drop the turn.
         """
 
-        step = asyncio.ensure_future(_run_store_step(operation))
-        cancelled = False
-        while True:
-            try:
-                return await asyncio.shield(step), cancelled
-            except asyncio.CancelledError:
-                if step.cancelled():
-                    raise
-                cancelled = True
+        from core.runtime_work import land_step
+
+        return await land_step(_run_store_step(operation))
 
     async def _submit_scheduled_turn(
         session_id: str,
@@ -280,6 +274,7 @@ def create_app(
 
         from core.message_mirror import _scope_id_for_session
         from core.message_priority import normalize_delivery_intent
+        from core.runtime_work import answer_caught_cancellation, step_failed
         from core.session_turns import (
             DeliveryRequest,
             SCHEDULED_PROVENANCE_KEY,
@@ -528,7 +523,11 @@ def create_app(
                     delivery_owner_transferred = True
             return _ADMITTED
 
-        admission, admission_cancelled = await _off_loop(_admit_delivery)
+        admission_step, admission_cancelled = await _off_loop(_admit_delivery)
+        if admission_cancelled and not delivery_owner_transferred and step_failed(admission_step):
+            # A failed admission moved nothing to the Delivery: answer the cancellation, not its error.
+            answer_caught_cancellation(admission_step)
+        admission = admission_step.result()
         if admission is not _ADMITTED:
             if admission_cancelled and not getattr(admission, "delivery_owner_transferred", False):
                 raise asyncio.CancelledError
@@ -591,7 +590,8 @@ def create_app(
             delivery_status = "reserved"
             try:
                 # Already answering a cancellation: a further one cannot change the answer.
-                (delivery_status, recorded), _cancelled = await _off_loop(_record_deferred_outcome)
+                deferred_step, _cancelled = await _off_loop(_record_deferred_outcome)
+                delivery_status, recorded = deferred_step.result()
                 if not recorded:
                     logger.warning(
                         "Agent Run deferred Delivery outcome lost its exact CAS: "
@@ -689,7 +689,8 @@ def create_app(
             try:
                 # Ownership has moved to the Delivery: the submission's answer must reach
                 # the executor, so a cancellation here does not escape it.
-                recorded, _cancelled = await _off_loop(_record_outcome)
+                outcome_step, _cancelled = await _off_loop(_record_outcome)
+                recorded = outcome_step.result()
                 if not recorded:
                     logger.warning(
                         "Agent Run Delivery outcome lost its exact CAS after ownership "
