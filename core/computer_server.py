@@ -14,7 +14,6 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 import logging
-import math
 import os
 from pathlib import Path
 import sys
@@ -49,7 +48,6 @@ from core.computer_script_handles import (
     parse_handle_descriptor,
     validate_handle_is_current,
 )
-from vibe.runtime import process_start_token
 
 _LEASE_TTL_SECONDS = 60.0
 _LEASE_HEARTBEAT_SECONDS = 10.0
@@ -63,10 +61,6 @@ _UPSTREAM_DIAGNOSTIC_SCAN_LIMIT = 8192
 _UPSTREAM_DIAGNOSTIC_LOG_LIMIT = 20
 _ADMISSION_RETRY_LIMIT = 1
 _NO_SCRIPT_HANDLE = object()
-_FOREGROUND_CONTROL_SOCKET = "foreground-control.sock"
-_SOCKET_FLAVOR_HEX_BYTES = 12
-_FOREGROUND_POINTER_TOLERANCE = 0.01
-_FOREGROUND_STOP_TIMEOUT_SECONDS = 5.0
 _PROXY_PROCESS_ENV_KEYS = (
     "HOME",
     "LANG",
@@ -131,68 +125,6 @@ class Upstream(Protocol):
     async def notify(self, method: str, params: Mapping[str, Any]) -> None: ...
 
     async def close(self) -> None: ...
-
-
-class ForegroundControl(Protocol):
-    async def request(
-        self,
-        operation: str,
-        *,
-        session: str,
-        title: str,
-        target: Mapping[str, Any] | None = None,
-        restoration: Mapping[str, Any] | None = None,
-        reason: str | None = None,
-    ) -> dict[str, Any]: ...
-
-
-class UnixForegroundControl:
-    """Client for the shell-owned, ephemeral foreground control socket."""
-
-    def __init__(self, socket_path: Path) -> None:
-        self._socket_path = socket_path
-
-    async def request(
-        self,
-        operation: str,
-        *,
-        session: str,
-        title: str,
-        target: Mapping[str, Any] | None = None,
-        restoration: Mapping[str, Any] | None = None,
-        reason: str | None = None,
-    ) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "operation": operation,
-            "session": session,
-            "title": title,
-        }
-        if target is not None:
-            payload["target"] = dict(target)
-        if restoration is not None:
-            payload["restoration"] = dict(restoration)
-        if reason is not None:
-            payload["reason"] = reason
-        reader, writer = await asyncio.open_unix_connection(str(self._socket_path))
-        try:
-            writer.write(
-                (
-                    json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-                    + "\n"
-                ).encode("utf-8")
-            )
-            await writer.drain()
-            line = await reader.readline()
-        finally:
-            writer.close()
-            with suppress(ConnectionError):
-                await writer.wait_closed()
-        if not line:
-            raise ConnectionError("foreground shell closed its control connection")
-        response = json.loads(line.decode("utf-8"))
-        if not isinstance(response, dict):
-            raise ValueError("foreground shell returned a non-object response")
-        return response
 
 
 @dataclass(frozen=True)
@@ -665,353 +597,6 @@ class _SessionState:
     active_daemon_key: tuple[str, int] | None = None
     last_epoch: int | None = None
     observed_windows: set[tuple[int | None, int]] = field(default_factory=set)
-    window_observations: dict[tuple[int, int], "_WindowObservation"] = field(
-        default_factory=dict
-    )
-
-
-@dataclass(frozen=True)
-class _WindowObservation:
-    identity: "_WindowIdentity"
-    snapshot_id: str | None
-    capture_id: str | None
-    element_tokens: frozenset[str]
-
-
-@dataclass(frozen=True)
-class _WindowIdentity:
-    pid: int
-    process_start_stamp: str
-    window_id: int
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "pid": self.pid,
-            "process_start_stamp": self.process_start_stamp,
-            "window_id": self.window_id,
-        }
-
-
-@dataclass(frozen=True)
-class _ForegroundContract:
-    target_identity: _WindowIdentity
-    target_label: dict[str, str]
-    prior_frontmost: _WindowIdentity
-    pointer: dict[str, float]
-    active_spaces: dict[str, int]
-
-    @property
-    def target(self) -> dict[str, Any]:
-        return {**self.target_identity.as_dict(), **self.target_label}
-
-
-@dataclass
-class _RestorationComponent:
-    recorded: Any
-    attempted: bool = False
-    verified: bool = False
-    failure_detail: str | None = None
-
-    def fail(self, detail: Any) -> None:
-        bounded = _bounded_diagnostic(detail) or "restoration failed without detail"
-        if self.failure_detail is None:
-            self.failure_detail = bounded
-        elif bounded not in self.failure_detail:
-            self.failure_detail = _bounded_diagnostic(
-                f"{self.failure_detail}; {bounded}"
-            )
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "recorded": deepcopy(self.recorded),
-            "attempted": self.attempted,
-            "verified": self.verified,
-            "failure_detail": self.failure_detail,
-        }
-
-
-@dataclass
-class _ForegroundRestoration:
-    prior_frontmost: _RestorationComponent
-    pointer: _RestorationComponent
-    active_space: _RestorationComponent
-
-    @classmethod
-    def from_contract(
-        cls,
-        contract: _ForegroundContract,
-    ) -> "_ForegroundRestoration":
-        return cls(
-            prior_frontmost=_RestorationComponent(
-                recorded=contract.prior_frontmost.as_dict()
-            ),
-            pointer=_RestorationComponent(recorded=deepcopy(contract.pointer)),
-            active_space=_RestorationComponent(
-                recorded=deepcopy(contract.active_spaces)
-            ),
-        )
-
-    def items(self) -> tuple[tuple[str, _RestorationComponent], ...]:
-        return (
-            ("prior_frontmost", self.prior_frontmost),
-            ("pointer", self.pointer),
-            ("active_space", self.active_space),
-        )
-
-    @property
-    def restoration_ok(self) -> bool:
-        return all(
-            component.attempted
-            and component.verified
-            and component.failure_detail is None
-            for _name, component in self.items()
-        )
-
-    def fail_all(self, detail: Any) -> None:
-        for _name, component in self.items():
-            component.fail(detail)
-
-    def apply_native_result(self, response: Mapping[str, Any]) -> None:
-        if response.get("ok") is not True:
-            self.fail_all(
-                response.get("error") or "native restoration failed"
-            )
-            return
-        native = response.get("restoration")
-        if not isinstance(native, Mapping):
-            self.fail_all("native restoration result was missing")
-            return
-        components = native.get("components")
-        if not isinstance(components, Mapping):
-            self.fail_all("native restoration components were missing")
-            return
-        for name, component in self.items():
-            native_component = components.get(name)
-            if not isinstance(native_component, Mapping):
-                component.fail(f"native {name} restoration result was missing")
-                continue
-            if native_component.get("recorded") != component.recorded:
-                component.fail(
-                    f"native {name} restoration changed the recorded value"
-                )
-            component.attempted = native_component.get("attempted") is True
-            if not component.attempted:
-                component.fail(f"native {name} restoration was not attempted")
-            detail = native_component.get("failure_detail")
-            if isinstance(detail, str) and detail.strip():
-                component.fail(detail)
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "components": {
-                name: component.as_dict()
-                for name, component in self.items()
-            },
-            "restoration_ok": self.restoration_ok,
-        }
-
-
-def _structured_content(result: Mapping[str, Any]) -> dict[str, Any] | None:
-    structured = result.get("structuredContent")
-    if isinstance(structured, dict):
-        return deepcopy(structured)
-    content = result.get("content")
-    if not isinstance(content, list):
-        return None
-    for item in content:
-        if not isinstance(item, Mapping) or item.get("type") != "text":
-            continue
-        text = item.get("text")
-        if not isinstance(text, str):
-            continue
-        if text.startswith("Structured content:\n"):
-            text = text.split("\n", 1)[1]
-        try:
-            payload = json.loads(text)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            continue
-        if isinstance(payload, dict):
-            return payload
-    return None
-
-
-def _frontmost_window(payload: Mapping[str, Any]) -> dict[str, Any] | None:
-    windows = payload.get("windows")
-    if not isinstance(windows, list):
-        return None
-    candidates = [
-        window
-        for window in windows
-        if isinstance(window, Mapping)
-        and window.get("on_current_space") is True
-        and window.get("is_on_screen") is True
-        and window.get("minimized") is not True
-        and isinstance(window.get("z_index"), int)
-        and not isinstance(window.get("z_index"), bool)
-        and isinstance(window.get("pid"), int)
-        and not isinstance(window.get("pid"), bool)
-        and isinstance(window.get("window_id"), int)
-        and not isinstance(window.get("window_id"), bool)
-    ]
-    if not candidates:
-        return None
-    highest = max(int(window["z_index"]) for window in candidates)
-    winners = [window for window in candidates if window["z_index"] == highest]
-    if len(winners) != 1:
-        return None
-    window = winners[0]
-    return {
-        "pid": int(window["pid"]),
-        "window_id": int(window["window_id"]),
-        "app_name": str(window.get("app_name") or ""),
-        "title": str(window.get("title") or ""),
-        "current_space_id": window.get("current_space_id"),
-    }
-
-
-def _window_key_from_record(window: Mapping[str, Any]) -> tuple[int, int] | None:
-    pid = window.get("pid")
-    window_id = window.get("window_id")
-    if (
-        isinstance(pid, bool)
-        or not isinstance(pid, int)
-        or isinstance(window_id, bool)
-        or not isinstance(window_id, int)
-    ):
-        return None
-    return (pid, window_id)
-
-
-def _process_start_stamp(pid: int) -> str | None:
-    token = process_start_token(pid)
-    if not isinstance(token, str):
-        return None
-    try:
-        started_at = float(token)
-    except (TypeError, ValueError, OverflowError):
-        return None
-    if not math.isfinite(started_at) or started_at <= 0:
-        return None
-    return str(round(started_at * 1_000_000))
-
-
-def _record_window_identity(
-    window: Mapping[str, Any],
-    process_start_stamp_reader: Callable[[int], str | None],
-) -> _WindowIdentity | None:
-    key = _window_key_from_record(window)
-    if key is None:
-        return None
-    process_stamp = process_start_stamp_reader(key[0])
-    if not isinstance(process_stamp, str) or not process_stamp:
-        return None
-    return _WindowIdentity(
-        pid=key[0],
-        process_start_stamp=process_stamp,
-        window_id=key[1],
-    )
-
-
-def _verify_window_identity(
-    identity: _WindowIdentity,
-    window: Mapping[str, Any],
-    process_start_stamp_reader: Callable[[int], str | None],
-) -> bool:
-    return (
-        _window_key_from_record(window) == (identity.pid, identity.window_id)
-        and process_start_stamp_reader(identity.pid)
-        == identity.process_start_stamp
-    )
-
-
-def _window_by_key(
-    payload: Mapping[str, Any],
-    key: tuple[int | None, int],
-) -> dict[str, Any] | None:
-    windows = payload.get("windows")
-    if not isinstance(windows, list):
-        return None
-    for window in windows:
-        if (
-            isinstance(window, Mapping)
-            and window.get("pid") == key[0]
-            and window.get("window_id") == key[1]
-        ):
-            return dict(window)
-    return None
-
-
-def _window_by_identity(
-    payload: Mapping[str, Any],
-    identity: _WindowIdentity,
-    process_start_stamp_reader: Callable[[int], str | None],
-) -> dict[str, Any] | None:
-    window = _window_by_key(payload, (identity.pid, identity.window_id))
-    if window is None or not _verify_window_identity(
-        identity,
-        window,
-        process_start_stamp_reader,
-    ):
-        return None
-    return window
-
-
-def _float_value(value: Any) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    return float(value)
-
-
-def _space_id(window: Mapping[str, Any]) -> int | None:
-    value = window.get("current_space_id")
-    if isinstance(value, bool) or not isinstance(value, int):
-        return None
-    return int(value)
-
-
-def _foreground_error(
-    code: str,
-    message: str,
-    *,
-    outcome: str = "unattempted",
-    dispatched: bool | None = None,
-    **params: Any,
-) -> dict[str, Any]:
-    params = {"foreground_outcome": outcome, **params}
-    return _error_result(
-        code,
-        message,
-        dispatched=dispatched,
-        result_params=params,
-    )
-
-
-def _with_foreground_outcome(
-    result: dict[str, Any],
-    *,
-    outcome: str,
-    restoration: Mapping[str, Any],
-    effect: str | None = None,
-) -> dict[str, Any]:
-    enriched = deepcopy(result)
-    payload = _structured_content(enriched) or {}
-    payload["foreground_outcome"] = outcome
-    payload["restoration"] = deepcopy(dict(restoration))
-    if effect is not None:
-        payload["effect"] = effect
-    content = enriched.get("content")
-    if not isinstance(content, list):
-        content = []
-    content.append(
-        {
-            "type": "text",
-            "text": "Structured content:\n"
-            + json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-        }
-    )
-    enriched["content"] = content
-    enriched["structuredContent"] = payload
-    return enriched
 
 
 def _load_snapshot(state_path: Path) -> tuple[list[dict[str, Any]], set[str]]:
@@ -1353,14 +938,10 @@ def _validate_input(tool_name: str, arguments: Mapping[str, Any]) -> None:
                     'click_mode="raw" requires an exact pid + window_id '
                     "background left-click with x/y, count=1, and no modifiers.",
                 )
-    delivery_mode = arguments.get("delivery_mode", "background")
-    if not isinstance(delivery_mode, str) or delivery_mode not in {
-        "background",
-        "foreground",
-    }:
+    if arguments.get("delivery_mode") == "foreground":
         raise ComputerServerError(
-            "invalid_arguments",
-            'delivery_mode must be "background" or "foreground".',
+            "foreground_forbidden",
+            "Foreground input is disabled on macOS computer use.",
         )
     if "scope" in arguments and arguments.get("scope") != "window":
         raise ComputerServerError(
@@ -1404,106 +985,6 @@ def _validate_input(tool_name: str, arguments: Mapping[str, Any]) -> None:
         )
 
 
-def _validate_foreground_input(
-    tool_name: str,
-    arguments: Mapping[str, Any],
-    *,
-    platform: str,
-) -> None:
-    if arguments.get("delivery_mode") != "foreground":
-        return
-    if platform != "darwin":
-        raise ComputerServerError(
-            "platform_unsupported",
-            "Foreground Computer Use is available only on macOS.",
-        )
-    if tool_name not in {"get_window_state", "click"}:
-        raise ComputerServerError(
-            "foreground_forbidden",
-            "Foreground delivery is limited to window observation and one click.",
-        )
-    if _window_key(arguments) is None or _window_key(arguments)[0] is None:
-        raise ComputerServerError(
-            "window_target_required",
-            "Foreground delivery requires an exact pid and window_id.",
-        )
-    if tool_name != "click":
-        return
-    if arguments.get("button", "left") != "left":
-        raise ComputerServerError(
-            "foreground_forbidden",
-            "Foreground delivery supports left clicks only.",
-        )
-    count = arguments.get("count", 1)
-    if isinstance(count, bool) or not isinstance(count, int) or count != 1:
-        raise ComputerServerError(
-            "foreground_forbidden",
-            "Foreground delivery supports one click only.",
-        )
-    modifier = arguments.get("modifier", [])
-    if not isinstance(modifier, list) or modifier:
-        raise ComputerServerError(
-            "foreground_forbidden",
-            "Foreground delivery does not support modifiers.",
-        )
-    if arguments.get("click_mode") == "raw":
-        raise ComputerServerError(
-            "foreground_forbidden",
-            "Raw click delivery is background-only.",
-        )
-    if arguments.get("action", "press") not in {"press", "click"}:
-        raise ComputerServerError(
-            "foreground_forbidden",
-            "Foreground delivery supports a single press action only.",
-        )
-    element_token = arguments.get("element_token")
-    has_element_token = isinstance(element_token, str) and bool(element_token.strip())
-    x = arguments.get("x")
-    y = arguments.get("y")
-    has_coordinates = (
-        not isinstance(x, bool)
-        and isinstance(x, (int, float))
-        and not isinstance(y, bool)
-        and isinstance(y, (int, float))
-    )
-    capture_id = arguments.get("capture_id")
-    has_capture_id = isinstance(capture_id, str) and bool(capture_id.strip())
-    if has_element_token == has_coordinates:
-        raise ComputerServerError(
-            "target_not_admissible",
-            "Foreground click requires exactly one current element or captured coordinate target.",
-        )
-    if has_element_token:
-        if has_capture_id or any(
-            arguments.get(key) is not None
-            for key in ("from_zoom", "debug_image_out")
-        ):
-            raise ComputerServerError(
-                "target_not_admissible",
-                "Foreground element clicks cannot include coordinate-only arguments.",
-            )
-    elif not has_capture_id or arguments.get("from_zoom") is True or arguments.get(
-        "debug_image_out"
-    ) is not None:
-        raise ComputerServerError(
-            "target_not_admissible",
-            "Foreground coordinate clicks require the exact current capture_id.",
-        )
-
-
-def _foreground_control_socket_path(state_path: Path) -> Path:
-    state_directory = state_path.parent
-    owner_uid = state_directory.stat().st_uid
-    flavor = hashlib.sha256(os.fsencode(state_directory)).hexdigest()[
-        :_SOCKET_FLAVOR_HEX_BYTES
-    ]
-    return (
-        Path("/tmp")
-        / f"avibe-cua-{owner_uid}-{flavor}"
-        / _FOREGROUND_CONTROL_SOCKET
-    )
-
-
 class ComputerUseServer:
     def __init__(
         self,
@@ -1512,11 +993,6 @@ class ComputerUseServer:
         status_reader: Callable[[], ComputerUseStatus] | None = None,
         upstream_factory: Callable[[ComputerUseState], Awaitable[Upstream]] = JsonRpcUpstream.start,
         lease_manager: DesktopLeaseManager | None = None,
-        foreground_control: ForegroundControl | None = None,
-        platform: str | None = None,
-        process_start_stamp_reader: Callable[[int], str | None] = (
-            _process_start_stamp
-        ),
     ) -> None:
         self._state_path = state_path or computer_use_state_path()
         self._tools, self._upstream_accepts_session = _load_snapshot(self._state_path)
@@ -1532,14 +1008,6 @@ class ComputerUseServer:
         self._upstream_lock = asyncio.Lock()
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._sessions: dict[str, _SessionState] = {}
-        self._foreground_transaction_lock = asyncio.Lock()
-        self._foreground_admission_open = True
-        self._foreground_transaction: asyncio.Task[dict[str, Any]] | None = None
-        self._foreground_control = foreground_control or UnixForegroundControl(
-            _foreground_control_socket_path(self._state_path)
-        )
-        self._platform = platform or sys.platform
-        self._process_start_stamp_reader = process_start_stamp_reader
 
     @property
     def tools(self) -> list[dict[str, Any]]:
@@ -1578,7 +1046,6 @@ class ComputerUseServer:
                 session_state.active_proxy_serial = None
                 session_state.active_daemon_key = None
                 session_state.observed_windows.clear()
-                session_state.window_observations.clear()
             return upstream
 
     async def _discard_upstream(self, upstream: Upstream) -> None:
@@ -1593,7 +1060,6 @@ class ComputerUseServer:
                     session_state.active_proxy_serial = None
                     session_state.active_daemon_key = None
                     session_state.observed_windows.clear()
-                    session_state.window_observations.clear()
         # Close even when another transport has already replaced the shared
         # slot. The failed process still belongs to this request and must not
         # remain alive merely because it lost the race to replacement.
@@ -1616,7 +1082,6 @@ class ComputerUseServer:
         session_state.active_proxy_serial = None
         session_state.active_daemon_key = None
         session_state.observed_windows.clear()
-        session_state.window_observations.clear()
 
     @staticmethod
     def _commit_session_started(
@@ -1627,7 +1092,6 @@ class ComputerUseServer:
     ) -> None:
         if session_state.last_epoch is None or session_state.last_epoch != lease.epoch:
             session_state.observed_windows.clear()
-            session_state.window_observations.clear()
         session_state.active_proxy_serial = upstream.serial
         session_state.active_daemon_key = state.daemon_key
         session_state.last_epoch = lease.epoch
@@ -1702,16 +1166,10 @@ class ComputerUseServer:
         """Run one setup or forwarding step while observing lease loss."""
 
         operation_task = asyncio.ensure_future(operation)
-        try:
-            done, _pending = await asyncio.wait(
-                (operation_task, heartbeat),
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-        except asyncio.CancelledError:
-            operation_task.cancel()
-            with suppress(BaseException):
-                await operation_task
-            raise
+        done, _pending = await asyncio.wait(
+            (operation_task, heartbeat),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
         if heartbeat in done:
             operation_task.cancel()
             with suppress(BaseException):
@@ -1741,642 +1199,12 @@ class ComputerUseServer:
                 "Observe this exact window with get_window_state or zoom before sending input.",
             )
 
-    def _record_observation(
-        self,
-        result: Mapping[str, Any],
-        arguments: Mapping[str, Any],
-        session_state: _SessionState,
-        identity_before: _WindowIdentity | None,
-    ) -> None:
-        key = _window_key(arguments)
-        if key is None:
-            return
-        session_state.observed_windows.add(key)
-        if key[0] is None:
-            return
-        payload = _structured_content(result)
-        if (
-            payload is None
-            or identity_before is None
-            or not _verify_window_identity(
-                identity_before,
-                payload,
-                self._process_start_stamp_reader,
-            )
-        ):
-            session_state.window_observations.pop((key[0], key[1]), None)
-            return
-        snapshot_id = payload.get("snapshot_id")
-        if not isinstance(snapshot_id, str) or not snapshot_id.strip():
-            snapshot_id = None
-        capture_id = payload.get("capture_id")
-        if not isinstance(capture_id, str) or not capture_id.strip():
-            capture_id = None
-        elements = payload.get("elements")
-        element_tokens = (
-            frozenset(
-                token
-                for element in elements
-                if isinstance(element, Mapping)
-                and isinstance((token := element.get("element_token")), str)
-                and token.strip()
-            )
-            if isinstance(elements, list)
-            else frozenset()
-        )
-        session_state.window_observations[(key[0], key[1])] = _WindowObservation(
-            identity=identity_before,
-            snapshot_id=snapshot_id,
-            capture_id=capture_id,
-            element_tokens=element_tokens,
-        )
-
-    @staticmethod
-    def _foreground_observation(
-        arguments: Mapping[str, Any],
-        session_state: _SessionState,
-    ) -> _WindowObservation | None:
-        key = _window_key(arguments)
-        if key is None or key[0] is None:
-            return None
-        return session_state.window_observations.get((key[0], key[1]))
-
-    @staticmethod
-    def _require_foreground_observation(
-        arguments: Mapping[str, Any],
-        observation: _WindowObservation | None,
-    ) -> _WindowIdentity:
-        if observation is None:
-            raise ComputerServerError(
-                "target_not_admissible",
-                "Foreground input requires a current exact-window observation.",
-            )
-        element_token = arguments.get("element_token")
-        if isinstance(element_token, str) and element_token.strip():
-            if element_token not in observation.element_tokens:
-                raise ComputerServerError(
-                    "target_not_admissible",
-                    "The foreground element does not belong to the current target observation.",
-                )
-            return observation.identity
-        capture_id = arguments.get("capture_id")
-        if (
-            not isinstance(capture_id, str)
-            or not capture_id.strip()
-            or capture_id != observation.capture_id
-        ):
-            raise ComputerServerError(
-                "target_not_admissible",
-                "The foreground coordinates are not bound to the current target capture.",
-            )
-        return observation.identity
-
-    async def _foreground_contract(
-        self,
-        upstream: Upstream,
-        arguments: Mapping[str, Any],
-        *,
-        session: str,
-        title: str,
-        heartbeat: asyncio.Task[None],
-        target_observation: _WindowObservation | None,
-        require_target_observation: bool,
-    ) -> _ForegroundContract:
-        key = _window_key(arguments)
-        if key is None or key[0] is None:
-            raise ComputerServerError(
-                "window_target_required",
-                "Foreground delivery requires an exact pid and window_id.",
-            )
-        windows_result = await self._run_while_lease_owned(
-            heartbeat,
-            self._upstream_call(upstream, "list_windows", {"session": session}),
-        )
-        if windows_result.get("isError"):
-            raise ComputerServerError(
-                "target_not_admissible",
-                "The target window could not be admitted from a fresh window observation.",
-            )
-        windows_payload = _structured_content(windows_result)
-        if windows_payload is None:
-            raise ComputerServerError(
-                "target_not_admissible",
-                "The fresh window observation was not verifiable.",
-            )
-        target = _window_by_key(windows_payload, key)
-        if target is None:
-            raise ComputerServerError(
-                "target_missing",
-                "The exact target window is no longer present.",
-            )
-        expected_target_identity = (
-            self._require_foreground_observation(arguments, target_observation)
-            if require_target_observation
-            else None
-        )
-        if expected_target_identity is None:
-            target_identity = _record_window_identity(
-                target,
-                self._process_start_stamp_reader,
-            )
-        elif _verify_window_identity(
-            expected_target_identity,
-            target,
-            self._process_start_stamp_reader,
-        ):
-            target_identity = expected_target_identity
-        else:
-            target_identity = None
-        if target_identity is None:
-            raise ComputerServerError(
-                "target_not_admissible",
-                "The exact target window identity changed or could not be verified.",
-            )
-        if target.get("on_current_space") is not True:
-            raise ComputerServerError(
-                "target_off_active_space",
-                "The target window is not on the active Space.",
-            )
-        if not isinstance(target.get("is_on_screen"), bool):
-            raise ComputerServerError(
-                "target_not_admissible",
-                "The target visibility state could not be verified.",
-            )
-        minimized = target.get("minimized")
-        if target["is_on_screen"] is False or minimized is True:
-            raise ComputerServerError(
-                "target_not_admissible",
-                "Hidden and minimized targets require the Route B reveal follow-up.",
-            )
-        target_space_id = _space_id(target)
-        if target_space_id is None:
-            raise ComputerServerError(
-                "target_not_admissible",
-                "The target display's active Space could not be verified.",
-            )
-        prior_frontmost = _frontmost_window(windows_payload)
-        if prior_frontmost is None:
-            raise ComputerServerError(
-                "target_not_admissible",
-                "The prior frontmost window could not be verified.",
-            )
-        prior_identity = _record_window_identity(
-            prior_frontmost,
-            self._process_start_stamp_reader,
-        )
-        if prior_identity is None:
-            raise ComputerServerError(
-                "target_not_admissible",
-                "The prior frontmost window identity could not be verified.",
-            )
-        prior_space_id = _space_id(prior_frontmost)
-        if prior_space_id is None:
-            raise ComputerServerError(
-                "target_not_admissible",
-                "The prior frontmost display's active Space could not be verified.",
-            )
-        prior_window = _window_by_identity(
-            windows_payload,
-            prior_identity,
-            self._process_start_stamp_reader,
-        )
-        if (
-            prior_window is None
-            or _space_id(prior_window) != prior_space_id
-            or prior_window.get("on_current_space") is not True
-        ):
-            raise ComputerServerError(
-                "target_not_admissible",
-                "The prior frontmost window is not on its active Space.",
-            )
-        pointer_result = await self._run_while_lease_owned(
-            heartbeat,
-            self._upstream_call(upstream, "get_cursor_position", {"session": session}),
-        )
-        if pointer_result.get("isError"):
-            raise ComputerServerError(
-                "target_not_admissible",
-                "The hardware pointer position could not be observed.",
-            )
-        pointer_payload = _structured_content(pointer_result)
-        if pointer_payload is None or pointer_payload.get("available") is not True:
-            raise ComputerServerError(
-                "target_not_admissible",
-                "The hardware pointer position was unavailable.",
-            )
-        pointer_x = _float_value(pointer_payload.get("x"))
-        pointer_y = _float_value(pointer_payload.get("y"))
-        if pointer_x is None or pointer_y is None:
-            raise ComputerServerError(
-                "target_not_admissible",
-                "The hardware pointer position was not verifiable.",
-            )
-        return _ForegroundContract(
-            target_identity=target_identity,
-            target_label={
-                "app_name": str(target.get("app_name") or ""),
-                "title": str(target.get("title") or ""),
-            },
-            prior_frontmost=prior_identity,
-            pointer={"x": pointer_x, "y": pointer_y},
-            active_spaces={
-                "prior_frontmost_display": prior_space_id,
-                "target_display": target_space_id,
-            },
-        )
-
-    async def _restore_and_verify_foreground(
-        self,
-        upstream: Upstream,
-        contract: _ForegroundContract,
-        *,
-        session: str,
-        title: str,
-    ) -> _ForegroundRestoration:
-        restoration = _ForegroundRestoration.from_contract(contract)
-        try:
-            native_result = await self._foreground_control.request(
-                "restore",
-                session=session,
-                title=title,
-                target=contract.target,
-                restoration=restoration.as_dict(),
-            )
-        except Exception as exc:
-            restoration.fail_all(
-                _bounded_diagnostic(str(exc)) or "native restoration failed"
-            )
-        else:
-            restoration.apply_native_result(native_result)
-
-        windows_payload: dict[str, Any] | None = None
-        windows_failure: str | None = None
-        try:
-            windows_result = await self._upstream_call(
-                upstream,
-                "list_windows",
-                {"session": session},
-            )
-            if windows_result.get("isError"):
-                windows_failure = "fresh window observation failed"
-            else:
-                windows_payload = _structured_content(windows_result)
-                if windows_payload is None:
-                    windows_failure = (
-                        "fresh window observation was not structured"
-                    )
-        except Exception as exc:
-            windows_failure = (
-                _bounded_diagnostic(str(exc))
-                or "fresh window observation failed"
-            )
-
-        pointer_payload: dict[str, Any] | None = None
-        pointer_failure: str | None = None
-        try:
-            pointer_result = await self._upstream_call(
-                upstream,
-                "get_cursor_position",
-                {"session": session},
-            )
-            if pointer_result.get("isError"):
-                pointer_failure = "fresh pointer observation failed"
-            else:
-                pointer_payload = _structured_content(pointer_result)
-                if (
-                    pointer_payload is None
-                    or pointer_payload.get("available") is not True
-                ):
-                    pointer_failure = "fresh pointer observation was unavailable"
-        except Exception as exc:
-            pointer_failure = (
-                _bounded_diagnostic(str(exc))
-                or "fresh pointer observation failed"
-            )
-
-        if windows_failure is not None:
-            restoration.prior_frontmost.fail(windows_failure)
-            restoration.active_space.fail(windows_failure)
-        else:
-            assert windows_payload is not None
-            prior_frontmost = _frontmost_window(windows_payload)
-            if (
-                prior_frontmost is not None
-                and _verify_window_identity(
-                    contract.prior_frontmost,
-                    prior_frontmost,
-                    self._process_start_stamp_reader,
-                )
-            ):
-                restoration.prior_frontmost.verified = True
-            else:
-                if prior_frontmost is None:
-                    detail = "prior frontmost application or exact window was not restored"
-                elif _window_key_from_record(prior_frontmost) != (
-                    contract.prior_frontmost.pid,
-                    contract.prior_frontmost.window_id,
-                ):
-                    detail = "prior frontmost exact window identity was not restored"
-                else:
-                    detail = "prior frontmost process identity changed before verification"
-                restoration.prior_frontmost.fail(detail)
-
-            prior_window = _window_by_identity(
-                windows_payload,
-                contract.prior_frontmost,
-                self._process_start_stamp_reader,
-            )
-            target_window = _window_by_identity(
-                windows_payload,
-                contract.target_identity,
-                self._process_start_stamp_reader,
-            )
-            observed_spaces = {
-                "prior_frontmost_display": (
-                    _space_id(prior_window) if prior_window is not None else None
-                ),
-                "target_display": (
-                    _space_id(target_window) if target_window is not None else None
-                ),
-            }
-            if (
-                prior_window is not None
-                and prior_window.get("on_current_space") is True
-                and observed_spaces["prior_frontmost_display"]
-                == contract.active_spaces["prior_frontmost_display"]
-                and observed_spaces["target_display"]
-                == contract.active_spaces["target_display"]
-            ):
-                restoration.active_space.verified = True
-            else:
-                restoration.active_space.fail(
-                    "one or more involved display active Spaces were not restored"
-                )
-
-        if pointer_failure is not None:
-            restoration.pointer.fail(pointer_failure)
-        else:
-            assert pointer_payload is not None
-            pointer_x = _float_value(pointer_payload.get("x"))
-            pointer_y = _float_value(pointer_payload.get("y"))
-            if pointer_x is None or pointer_y is None:
-                restoration.pointer.fail(
-                    "fresh pointer observation was not verifiable"
-                )
-            elif (
-                abs(pointer_x - contract.pointer["x"])
-                <= _FOREGROUND_POINTER_TOLERANCE
-                and abs(pointer_y - contract.pointer["y"])
-                <= _FOREGROUND_POINTER_TOLERANCE
-            ):
-                restoration.pointer.verified = True
-            else:
-                restoration.pointer.fail(
-                    "hardware pointer position was not restored"
-                )
-        return restoration
-
-    async def _terminal_foreground_transaction(
-        self,
-        contract: _ForegroundContract,
-        restoration: _ForegroundRestoration,
-        *,
-        session: str,
-        title: str,
-        reason: str,
-    ) -> str | None:
-        try:
-            terminal = await self._foreground_control.request(
-                "terminal",
-                session=session,
-                title=title,
-                target=contract.target,
-                restoration=restoration.as_dict(),
-                reason=reason,
-            )
-        except Exception as exc:
-            return (
-                _bounded_diagnostic(str(exc))
-                or "the foreground transaction could not reach terminal"
-            )
-        if terminal.get("ok") is not True:
-            return str(
-                terminal.get("error")
-                or "the foreground transaction could not reach terminal"
-            )
-        return None
-
-    async def _run_foreground_transaction(
-        self,
-        name: str,
-        arguments: Mapping[str, Any],
-        *,
-        title: str,
-        session_lock: asyncio.Lock,
-    ) -> dict[str, Any]:
-        try:
-            return await self.call_tool(
-                name,
-                arguments,
-                session_title=title,
-                _foreground_transaction_owner=True,
-                _session_lock=session_lock,
-            )
-        finally:
-            async with self._foreground_transaction_lock:
-                if self._foreground_transaction is asyncio.current_task():
-                    self._foreground_transaction = None
-
-    async def _call_foreground(
-        self,
-        upstream: Upstream,
-        name: str,
-        arguments: Mapping[str, Any],
-        *,
-        session: str,
-        title: str,
-        heartbeat: asyncio.Task[None],
-        target_observation: _WindowObservation | None,
-    ) -> dict[str, Any]:
-        try:
-            contract = await self._foreground_contract(
-                upstream,
-                arguments,
-                session=session,
-                title=title,
-                heartbeat=heartbeat,
-                target_observation=target_observation,
-                require_target_observation=name == "click",
-            )
-        except ComputerServerError as exc:
-            return _foreground_error(exc.code, str(exc))
-
-        try:
-            consent = await self._foreground_control.request(
-                "request_consent",
-                session=session,
-                title=title,
-                target=contract.target,
-            )
-        except (ConnectionError, OSError, asyncio.IncompleteReadError, ValueError, json.JSONDecodeError) as exc:
-            return _foreground_error(
-                "foreground_shell_unavailable",
-                "The native shell could not receive the foreground consent request.",
-                detail=_bounded_diagnostic(str(exc)),
-            )
-        if consent.get("ok") is not True:
-            shell_error = str(consent.get("error") or "unknown")
-            if shell_error == "foreground_disabled":
-                return _foreground_error(
-                    "foreground_disabled",
-                    "Foreground control is disabled in the native desktop shell.",
-                )
-            if shell_error == "foreground_attention_pending":
-                return _foreground_error(
-                    "foreground_attention_pending",
-                    "Foreground control is blocked until the owner dismisses the native restoration warning.",
-                )
-            return _foreground_error(
-                "foreground_shell_unavailable",
-                "The native shell did not accept the foreground consent request.",
-                shell_error=shell_error,
-            )
-        if consent.get("allowed") is not True:
-            return _foreground_error(
-                "foreground_consent_required",
-                "Foreground control requires consent from the native desktop shell.",
-                session_title=title,
-            )
-
-        try:
-            active = await self._foreground_control.request(
-                "set_active",
-                session=session,
-                title=title,
-                target=contract.target,
-                restoration=_ForegroundRestoration.from_contract(
-                    contract
-                ).as_dict(),
-            )
-        except Exception as exc:
-            return _foreground_error(
-                "foreground_shell_unavailable",
-                "The native shell could not prepare foreground control.",
-                detail=_bounded_diagnostic(str(exc)),
-            )
-        if active.get("ok") is not True:
-            shell_error = str(active.get("error") or "unknown")
-            if shell_error == "foreground_disabled":
-                return _foreground_error(
-                    "foreground_disabled",
-                    "Foreground control is disabled in the native desktop shell.",
-                )
-            if shell_error == "foreground_attention_pending":
-                return _foreground_error(
-                    "foreground_attention_pending",
-                    "Foreground control is blocked until the owner dismisses the native restoration warning.",
-                )
-            return _foreground_error(
-                "foreground_shell_unavailable",
-                "The native shell could not mark foreground control active.",
-                shell_error=shell_error,
-            )
-
-        forwarded = dict(arguments)
-        if name == "click":
-            forwarded["delivery_mode"] = "foreground"
-        else:
-            forwarded.pop("delivery_mode", None)
-        forwarded["session"] = session
-        if name not in self._upstream_accepts_session:
-            forwarded.pop("session", None)
-        effect = None
-        try:
-            result = await self._upstream_call(upstream, name, forwarded)
-            payload = _structured_content(result)
-            if isinstance(payload, dict):
-                effect = payload.get("effect")
-        except Exception as exc:
-            result = _error_result(
-                "upstream_unavailable",
-                "The foreground Computer Use call could not be completed.",
-                detail=_bounded_diagnostic(str(exc)),
-            )
-
-        restoration = await self._restore_and_verify_foreground(
-            upstream,
-            contract,
-            session=session,
-            title=title,
-        )
-        terminal_error = await self._terminal_foreground_transaction(
-            contract,
-            restoration,
-            session=session,
-            title=title,
-            reason="completed",
-        )
-        if terminal_error is not None:
-            outcome = (
-                "effect_occurred_restore_failed"
-                if effect == "confirmed" and not restoration.restoration_ok
-                else "attempted_effect_unverifiable"
-            )
-            return _error_result(
-                "foreground_shell_unavailable",
-                "Foreground control reached its terminal result, but the native shell could not receive it.",
-                result_params={
-                    "foreground_outcome": outcome,
-                    "restoration": restoration.as_dict(),
-                    "effect": effect or "unverifiable",
-                    "shell_error": terminal_error,
-                },
-            )
-
-        if not restoration.restoration_ok:
-            if effect == "confirmed":
-                outcome = "effect_occurred_restore_failed"
-            else:
-                outcome = "attempted_effect_unverifiable"
-            return _error_result(
-                "foreground_restore_failed",
-                "Foreground control could not restore and verify the prior desktop state.",
-                result_params={
-                    "foreground_outcome": outcome,
-                    "restoration": restoration.as_dict(),
-                    "effect": effect or "unverifiable",
-                },
-            )
-
-        outcome = (
-            "attempted_effect_unverifiable"
-            if effect != "confirmed"
-            else "effect_occurred_restore_verified"
-        )
-
-        if result.get("isError"):
-            return _with_foreground_outcome(
-                result,
-                outcome="attempted_effect_unverifiable",
-                restoration=restoration.as_dict(),
-                effect=effect or "unverifiable",
-            )
-        return _with_foreground_outcome(
-            result,
-            outcome=outcome,
-            restoration=restoration.as_dict(),
-            effect=effect or "unverifiable",
-        )
-
     async def call_tool(
         self,
         name: str,
         arguments: Mapping[str, Any],
         *,
         handle_descriptor: Any = _NO_SCRIPT_HANDLE,
-        session_title: str | None = None,
-        _foreground_transaction_owner: bool = False,
-        _session_lock: asyncio.Lock | None = None,
     ) -> dict[str, Any]:
         session = arguments.get("session")
         if not isinstance(session, str) or not session.strip():
@@ -2406,62 +1234,12 @@ class ComputerUseServer:
                     result_params=exc.params,
                 )
 
-        lock = _session_lock or self._session_locks.setdefault(
-            session,
-            asyncio.Lock(),
-        )
-        if (
-            arguments.get("delivery_mode") == "foreground"
-            and not _foreground_transaction_owner
-        ):
-            async with self._foreground_transaction_lock:
-                if not self._foreground_admission_open:
-                    return _foreground_error(
-                        "computer_use_unavailable",
-                        "Computer Use is shutting down.",
-                    )
-                existing = self._foreground_transaction
-                if existing is not None and not existing.done():
-                    return _foreground_error(
-                        "foreground_transaction_active",
-                        "Another foreground Computer Use call is still in flight.",
-                    )
-                foreground_task = asyncio.create_task(
-                    self._run_foreground_transaction(
-                        name,
-                        arguments,
-                        title=session_title or session,
-                        session_lock=lock,
-                    ),
-                    name=f"computer-use-foreground-{session}",
-                )
-                self._foreground_transaction = foreground_task
-            return await asyncio.shield(foreground_task)
-
+        lock = self._session_locks.setdefault(session, asyncio.Lock())
         async with lock:
             try:
                 _validate_input(name, arguments)
-                _validate_foreground_input(
-                    name,
-                    arguments,
-                    platform=self._platform,
-                )
             except ComputerServerError as exc:
-                if arguments.get("delivery_mode") == "foreground":
-                    return _foreground_error(
-                        exc.code,
-                        str(exc),
-                        dispatched=False,
-                    )
                 return _error_result(exc.code, str(exc), dispatched=False)
-
-            if arguments.get("delivery_mode") == "foreground":
-                async with self._foreground_transaction_lock:
-                    if not self._foreground_admission_open:
-                        return _foreground_error(
-                            "computer_use_unavailable",
-                            "Computer Use is shutting down.",
-                        )
 
             for admission_attempt in range(_ADMISSION_RETRY_LIMIT + 1):
                 acquisition: LeaseAcquisition | None = None
@@ -2551,68 +1329,29 @@ class ComputerUseServer:
                         if validation_error is not None:
                             return _not_dispatched_error_result(validation_error)
                     self._require_observation(name, arguments, session_state)
-                    foreground_observation: _WindowObservation | None = None
-                    if (
-                        arguments.get("delivery_mode") == "foreground"
-                        and name == "click"
-                    ):
-                        foreground_observation = self._foreground_observation(
-                            arguments,
-                            session_state,
-                        )
-                    observation_identity_before: _WindowIdentity | None = None
-                    if name in _OBSERVE_TOOLS:
-                        observation_key = _window_key(arguments)
-                        if (
-                            observation_key is not None
-                            and observation_key[0] is not None
-                        ):
-                            observation_identity_before = (
-                                _record_window_identity(
-                                    {
-                                        "pid": observation_key[0],
-                                        "window_id": observation_key[1],
-                                    },
-                                    self._process_start_stamp_reader,
-                                )
-                            )
                     await self._run_while_lease_owned(
                         heartbeat,
                         asyncio.sleep(0),
                     )
                     pre_forward = False
 
-                    if arguments.get("delivery_mode") == "foreground":
-                        result = await self._call_foreground(
+                    forwarded = dict(arguments)
+                    forwarded["session"] = session
+                    if name not in self._upstream_accepts_session:
+                        forwarded.pop("session", None)
+                    result = await self._run_while_lease_owned(
+                        heartbeat,
+                        self._upstream_call(
                             upstream,
                             name,
-                            arguments,
-                            session=session,
-                            title=session_title or session,
-                            heartbeat=heartbeat,
-                            target_observation=foreground_observation,
-                        )
-                    else:
-                        forwarded = dict(arguments)
-                        forwarded["session"] = session
-                        if name not in self._upstream_accepts_session:
-                            forwarded.pop("session", None)
-                        result = await self._run_while_lease_owned(
-                            heartbeat,
-                            self._upstream_call(
-                                upstream,
-                                name,
-                                forwarded,
-                            ),
-                        )
+                            forwarded,
+                        ),
+                    )
 
                     if name in _OBSERVE_TOOLS and not result.get("isError"):
-                        self._record_observation(
-                            result,
-                            arguments,
-                            session_state,
-                            observation_identity_before,
-                        )
+                        key = _window_key(arguments)
+                        if key is not None:
+                            session_state.observed_windows.add(key)
                     if name == "start_session":
                         if result.get("isError"):
                             if acquisition.newly_claimed:
@@ -2633,10 +1372,8 @@ class ComputerUseServer:
                             self._lease_manager.release,
                             lease,
                         )
-                        await self.revoke_foreground_consent(session)
                         self._sessions.pop(session, None)
-                        if self._foreground_transaction is None:
-                            self._session_locks.pop(session, None)
+                        self._session_locks.pop(session, None)
                     return result
                 except _LeaseLost:
                     if upstream is not None:
@@ -2685,12 +1422,6 @@ class ComputerUseServer:
                         await asyncio.to_thread(
                             self._lease_manager.release,
                             acquisition.lease,
-                        )
-                    if arguments.get("delivery_mode") == "foreground":
-                        return _foreground_error(
-                            exc.code,
-                            str(exc),
-                            dispatched=False if pre_forward else None,
                         )
                     return _error_result(
                         exc.code,
@@ -2774,28 +1505,8 @@ class ComputerUseServer:
             )
         session_state = self._sessions.get(normalized)
         if session_state is None or session_state.active_proxy_serial is None:
-            await self.revoke_foreground_consent(normalized)
             return {"isError": False, "content": []}
-        result = await self.call_tool("end_session", {"session": normalized})
-        await self.revoke_foreground_consent(normalized)
-        return result
-
-    async def revoke_foreground_consent(self, session: str) -> None:
-        normalized = str(session or "").strip()
-        if not normalized:
-            return
-        with suppress(
-            ConnectionError,
-            OSError,
-            asyncio.IncompleteReadError,
-            ValueError,
-            json.JSONDecodeError,
-        ):
-            await self._foreground_control.request(
-                "revoke_session",
-                session=normalized,
-                title=normalized,
-            )
+        return await self.call_tool("end_session", {"session": normalized})
 
     async def retire_session(self, session: str) -> dict[str, Any]:
         """Release all Controller-owned Computer Use state for an archived Session."""
@@ -2875,25 +1586,6 @@ class ComputerUseServer:
         }
 
     async def close(self) -> None:
-        async with self._foreground_transaction_lock:
-            self._foreground_admission_open = False
-            foreground_task = self._foreground_transaction
-        if foreground_task is not None and not foreground_task.done():
-            try:
-                await asyncio.wait_for(
-                    asyncio.shield(foreground_task),
-                    timeout=_FOREGROUND_STOP_TIMEOUT_SECONDS,
-                )
-            except TimeoutError:
-                logger.error(
-                    "foreground restoration incomplete during Computer Use server shutdown; "
-                    "closing the upstream will surface native driver-disconnect attention"
-                )
-            except Exception:
-                logger.exception(
-                    "foreground transaction failed while Computer Use server shutdown "
-                    "waited for terminal"
-                )
         async with self._upstream_lock:
             upstream = self._upstream
             self._upstream = None

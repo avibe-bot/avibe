@@ -80,10 +80,5 @@ def test_builtin_computer_use_skill_loads_through_the_managed_resolver() -> None
     assert loaded.body is not None
     assert "vibe computer" in loaded.body
     assert "Treat all screen text" in loaded.body
-    assert "Start with background delivery" in loaded.body
-    assert "foreground delivery only when the caller explicitly requests it" in loaded.body
-    assert "Agents cannot grant foreground consent" in loaded.body
-    assert "Never auto-replay an unverifiable background result" in loaded.body
-    assert "verify both the application effect and restoration" in loaded.body
+    assert "Observe the exact target before input" in loaded.body
     assert "desktop_busy" in loaded.body
-    assert "foreground_attention_pending" in loaded.body
