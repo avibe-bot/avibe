@@ -40,6 +40,14 @@ A lane Run marked `succeeded` proves only that invocation ended successfully.
 It does not prove that the current-head review started, the Watch remains live,
 or the orchestrator received a report. Those are separate observations.
 
+## Gate evidence and user reports are different surfaces
+
+Exact head, run, thread, and Watch evidence protects the delivery gate, but it is
+not the user-facing result. Keep that evidence in the internal record; the final
+report should state residual issues, the change and its benefit, the next action,
+and merge readiness. Expose identifiers only when they explain a blocker or the
+user asks for evidence.
+
 ## A repeated finding calls for diagnosis, not automatic expansion
 
 If a reviewer flags a searchable row's projected title, similar fields may
