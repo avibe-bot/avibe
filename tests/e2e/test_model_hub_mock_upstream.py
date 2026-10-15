@@ -15,6 +15,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
 
+import psutil
 import pytest
 import yaml
 
@@ -242,6 +243,17 @@ def _send_through_real_engine(
         return status, captured[0]["body"]
 
 
+def _opencode_generation_records(app) -> list[dict[str, Any]]:
+    """The process record of each OpenCode generation the app runs (#2329)."""
+
+    records = app.avibe_home / "runtime" / "opencode" / "generations"
+    return [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in sorted(records.glob("*.json"))
+        if not path.name.endswith(".overlay.json")
+    ]
+
+
 def _send_through_opencode_gateway_engine(
     model_hub_app_factory,
     mock_llm_upstream: MockLLMUpstream,
@@ -373,7 +385,7 @@ def _send_through_opencode_gateway_engine(
         assert set(projected_providers["avibe-anthropic"]["models"]) == {
             "claude-opus-5"
         }
-        assert not (app.avibe_home / "logs" / "opencode_server.json").exists()
+        assert not _opencode_generation_records(app)
 
         started = app.client.post("/api/models/runtime/start", {})
         assert started.status == 200, started.json()
@@ -508,13 +520,10 @@ def _send_through_opencode_gateway_engine(
             "high"
         ] == variant
 
-        pid_info = json.loads(
-            (app.avibe_home / "logs" / "opencode_server.json").read_text(
-                encoding="utf-8"
-            )
-        )
+        # The one OpenCode generation serving the turn, the controller's own child.
+        (pid_info,) = _opencode_generation_records(app)
         assert app._controller is not None
-        assert pid_info["owner_pid"] == app._controller.pid
+        assert psutil.Process(pid_info["pid"]).ppid() == app._controller.pid
         providers_status, _, providers_payload = _json_request(
             f"http://{pid_info['host']}:{pid_info['port']}",
             "/config/providers",
@@ -607,8 +616,18 @@ def test_opencode_v4_s4_variant_shapes_are_frozen_against_mock_capture(
     )
 
     assert captured_body["model"] == fixture["stored_model"]
-    for key, value in fixture["upstream_fragment"].items():
-        assert captured_body.get(key) == value, captured_body
+    # What the variant sets must survive; fields OpenCode adds on its own vary by its version.
+    assert _contains(captured_body, fixture["upstream_fragment"]), captured_body
+
+
+def _contains(actual: object, expected: object) -> bool:
+    """Whether ``actual`` holds ``expected``: every key of an expected mapping, recursively; anything else equal."""
+
+    if isinstance(expected, dict):
+        return isinstance(actual, dict) and all(
+            key in actual and _contains(actual[key], value) for key, value in expected.items()
+        )
+    return actual == expected
 
 
 def test_opencode_responses_turn_completes_through_openai_chat_upstream(
@@ -770,16 +789,17 @@ def test_mock_upstream_required_key_uses_the_configured_protocol_header(
     assert _json_request(mock_llm_upstream.url, "/v1/models")[0] == 200
 
 
+@pytest.mark.parametrize("scheme", ["bearer", "either"])
 @pytest.mark.parametrize("surface", ["models", "probe", "buffered"])
 @pytest.mark.parametrize("header", ["missing", "wrong", "x-api-key", "bearer"])
 def test_mock_upstream_bearer_opt_in_preserves_authentication_shape(
-    mock_llm_upstream, surface, header,
+    mock_llm_upstream, scheme, surface, header,
 ) -> None:
-    """A custom Anthropic relay can require Bearer, not either auth header."""
+    """A custom Anthropic relay can require Bearer, or take the key in either auth header."""
     key = "fixture-static-bearer"
     _configure(
         mock_llm_upstream.url, protocol="anthropic",
-        required_api_key=key, required_auth_scheme="bearer",
+        required_api_key=key, required_auth_scheme=scheme,
     )
     headers = {
         "missing": {},
@@ -796,7 +816,8 @@ def test_mock_upstream_bearer_opt_in_preserves_authentication_shape(
         ),
         headers=headers,
     )
-    assert status == (401 if header != "bearer" else 400 if surface == "probe" else 200)
+    accepted = header == "bearer" or (scheme == "either" and header == "x-api-key")
+    assert status == (401 if not accepted else 400 if surface == "probe" else 200)
 
 
 @pytest.mark.parametrize("protocol", PROTOCOL_CASES)

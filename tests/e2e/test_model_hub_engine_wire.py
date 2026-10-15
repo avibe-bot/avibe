@@ -214,7 +214,8 @@ async def _through_engine(tmp_path, monkeypatch, protocol: str, *handlers):
 async def _post(url: str, hop: dict, body: dict, *, timeout: float = 150) -> dict:
     started = time.monotonic()
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as client:
-        async with client.post(url, headers={"Authorization": f'Bearer {hop["token"]}'}, json=body) as response:
+        headers = {"Authorization": f'Bearer {hop["token"]}', **hop["request_headers"]}
+        async with client.post(url, headers=headers, json=body) as response:
             transport_error = None
             try:
                 raw = await response.read()
@@ -495,7 +496,8 @@ async def test_consumer_cancel_closes_upstream_and_keeps_the_source(tmp_path, mo
     async with _through_engine(tmp_path, monkeypatch, protocol, handler) as harness:
         url, body = _frontend_request(protocol, harness.hop, stream=True)
         async with aiohttp.ClientSession() as client:
-            async with client.post(url, headers={"Authorization": f'Bearer {harness.hop["token"]}'},
+            async with client.post(url, headers={"Authorization": f'Bearer {harness.hop["token"]}',
+                                                 **harness.hop["request_headers"]},
                                    json=body) as response:
                 assert response.status == 200
                 await response.content.readuntil(b"partial")
