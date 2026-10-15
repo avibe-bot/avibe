@@ -54,6 +54,7 @@ HOSTED_ERROR_CODES: tuple[str, ...] = (
     "image_reference_unreadable",
     # The gateway's search executor and image endpoint (vibey-hosted-tools.md §6, §7.4).
     "provider_refused",
+    "provider_unavailable",
     "provider_timed_out",
     "provider_unreachable",
     "provider_unreadable",

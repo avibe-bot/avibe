@@ -59,7 +59,7 @@ SPECS = {
     ("anthropic", "anthropic", "web_search"): _spec({"type": "web_search_20250305", "name": "web_search"}),
     ("google", "google", "web_search"): _spec({"type": "google_search"}),
 }
-EXECUTOR_MODELS = {"xai": "grok-fast", "openai": "gpt-mini", "anthropic": "claude-haiku"}
+EXECUTOR_MODELS = {"xai": ("grok-fast",), "openai": ("gpt-mini",), "anthropic": ("claude-haiku",)}
 
 
 def _image(model_id: str, description: str, *, price: float | None = None, kinds=("api_key", "subscription")) -> ImageModelSpec:
@@ -80,7 +80,7 @@ IMAGE_MODELS = {
 
 @pytest.fixture(autouse=True)
 def _overlay(monkeypatch):
-    monkeypatch.setattr(hosted_tools_module, "provider_executor_model", EXECUTOR_MODELS.get)
+    monkeypatch.setattr(hosted_tools_module, "provider_executor_models", lambda vendor: EXECUTOR_MODELS.get(vendor, ()))
     monkeypatch.setattr(hosted_tools_module, "provider_image_models", lambda vendor: IMAGE_MODELS.get(vendor, ()))
     # The bundled overlay's vendors; which of them list image models is `IMAGE_MODELS`.
     monkeypatch.setattr(hosted_tools_module, "bundled_provider_vendors", lambda: dict.fromkeys(("anthropic", "openai", "xai")))
@@ -90,7 +90,7 @@ def _spec_for(vendor, protocol, model_id, tool):
     return SPECS.get((vendor, protocol, tool))
 
 
-def _source(source_id, vendor, protocol, model_id, *, kind="api_key", base_url=None) -> ModelHubSourceConfig:
+def _source(source_id, vendor, protocol, model_id, *, kind="api_key", base_url=None, listed=()) -> ModelHubSourceConfig:
     return ModelHubSourceConfig(
         id=source_id,
         kind=kind,
@@ -100,14 +100,16 @@ def _source(source_id, vendor, protocol, model_id, *, kind="api_key", base_url=N
         supply_channel="hub",
         billing="monthly" if kind == "subscription" else "metered",
         state=ModelHubSourceStateConfig(status="standby"),
-        models=[ModelHubModelConfig(id=model_id, provenance="discovered")],
+        models=[ModelHubModelConfig(id=model, provenance="discovered") for model in (model_id, *listed)],
         credential_ref=f"cred_{source_id}",
         base_url=base_url,
     )
 
 
-XAI = _source("src_xai00001", "xai", "openai_responses", "grok-4.6")
-OPENAI = _source("src_oai00001", "openai", "openai_responses", "gpt-6-astra", base_url="https://relay.example/v1")
+XAI = _source("src_xai00001", "xai", "openai_responses", "grok-4.6", listed=("grok-fast",))
+OPENAI = _source(
+    "src_oai00001", "openai", "openai_responses", "gpt-6-astra", base_url="https://relay.example/v1", listed=("gpt-mini",),
+)
 CLAUDE_SUB = _source("src_cla00001", "anthropic", "anthropic", "claude-opus-5-5", kind="subscription")
 GEMINI = _source("src_gem00001", "google", "google", "gemini-3-pro")
 ALL = [CLAUDE_SUB, XAI, OPENAI, GEMINI]
@@ -166,6 +168,35 @@ def test_a_hops_facts_come_from_priors_and_refusals(tmp_path, primary, tool, ref
     )
     assert (facts.native, facts.replay, facts.refused) == (native, replay, fallback)
     assert (facts.declaration is not None) is (native == "assumed")
+
+
+@pytest.mark.parametrize(
+    "listed,retired,expected",
+    [
+        # The relay that 404'd the catalog prior: the next listed model of the family runs the call.
+        (("claude-3-5-haiku-20241022", "claude-haiku-4-5", "claude-haiku-4-5-20251001"), (), "claude-haiku-4-5"),
+        (("claude-haiku-5-5", "claude-haiku-4-5"), (), "claude-haiku-5-5"),
+        # A dated snapshot names its model, the latest first; a lookalike id does not.
+        (("claude-haiku-4-5-20251001", "claude-haiku-4-5-20260101"), (), "claude-haiku-4-5-20260101"),
+        (("claude-haiku-5-50",), (), None),
+        # A retired row is not listed; a Source that lists none runs no executor call.
+        (("claude-haiku-5-5", "claude-haiku-4-5"), ("claude-haiku-5-5",), "claude-haiku-4-5"),
+        (("claude-opus-5-5",), (), None),
+    ],
+    ids=["prior-unlisted", "prior-listed", "dated-snapshot", "lookalike", "retired", "none-listed"],
+)
+def test_an_executor_runs_on_a_model_its_source_lists(tmp_path, monkeypatch, listed, retired, expected):
+    """MH-HOSTED-001: an API-key Source admits unlisted models on a hop, but an executor call nobody asked for must
+    not guess one: the first of the vendor's executor models the Source lists, or the Source is no executor."""
+    monkeypatch.setattr(
+        hosted_tools_module, "provider_executor_models",
+        lambda vendor: ("claude-haiku-5-5", "claude-haiku-4-5") if vendor == "anthropic" else (),
+    )
+    source = _source("src_rel00001", "anthropic", "anthropic", listed[0], listed=listed[1:])
+    for model in source.models:
+        model.retired = model.id in retired or None
+    chain = executor_candidates(_config(sources=[source]), "web_search", evidence=_evidence(tmp_path), spec_for=_spec_for)
+    assert [candidate.model_id for candidate in chain] == ([] if expected is None else [expected])
 
 
 def test_the_executor_chain_follows_the_users_order_then_vibeys(tmp_path):

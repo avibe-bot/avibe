@@ -237,7 +237,7 @@ scenarios:
       - tests/test_provider_overlay.py::test_bundled_providers_section_satisfies_its_schema
       - tests/test_provider_overlay.py::test_an_invalid_vendor_entry_disables_only_that_vendor
       - tests/test_provider_overlay.py::test_an_image_model_entry_is_read_in_a_stable_form
-      - tests/test_provider_overlay.py::test_each_vendors_executor_model_runs_every_search_tool_the_vendor_offers
+      - tests/test_provider_overlay.py::test_each_vendors_executor_models_run_every_search_tool_the_vendor_offers
   - id: MH-HOSTED-UI-008
     name: The execution-process group draws a native, a proxied and a direct hosted call as one card, with how it ran, its known cost (a lower bound when an attempt was unpriced) and its sources or image
     status: covered

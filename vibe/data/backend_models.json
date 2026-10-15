@@ -49,7 +49,7 @@
   },
   "providers": {
     "anthropic": {
-      "executor_model": "claude-haiku-5-5",
+      "executor_models": ["claude-haiku-5-5", "claude-haiku-4-5"],
       "models": [
         {
           "match": {"prefix": "claude-"},
@@ -66,7 +66,7 @@
       ]
     },
     "openai": {
-      "executor_model": "gpt-6-luna",
+      "executor_models": ["gpt-6-luna", "gpt-5.6-luna"],
       "models": [
         {
           "match": {"prefix": "gpt-"},
@@ -117,7 +117,7 @@
       ]
     },
     "xai": {
-      "executor_model": "grok-4.20-0309-non-reasoning",
+      "executor_models": ["grok-4.20-0309-non-reasoning"],
       "models": [
         {
           "match": {"prefix": "grok-4"},

@@ -1141,11 +1141,12 @@
     },
     "hostedTools": {
       "noExecutor": {
-        "web_search": {"one": "No Source can run web search right now. Add an API key from {vendors}.", "several": "No Source can run web search right now. Add an API key from one of {vendors}."},
-        "x_search": {"one": "No Source can run X search right now. Add an API key from {vendors}.", "several": "No Source can run X search right now. Add an API key from one of {vendors}."}
+        "web_search": {"one": "No Source can run web search right now. Add an API key from {vendors} as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.", "several": "No Source can run web search right now. Add an API key from one of {vendors} as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this."},
+        "x_search": {"one": "No Source can run X search right now. Add an API key from {vendors} as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.", "several": "No Source can run X search right now. Add an API key from one of {vendors} as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this."}
       },
       "listSeparator": ", ",
       "providerRefused": "The executor's provider refused the call ({detail}).",
+      "providerUnavailable": "The executor's provider is unavailable right now ({detail}). Try again later.",
       "timedOut": "The executor call timed out.",
       "unreachable": "The executor could not be reached.",
       "unreadable": "The executor's response could not be read.",
@@ -1796,6 +1797,7 @@
       "image_argument_invalid": "the image call had an argument it can't send",
       "image_reference_unreadable": "a reference image couldn't be read",
       "provider_refused": "the provider refused the call",
+      "provider_unavailable": "the provider is unavailable right now, try again later",
       "provider_timed_out": "the call timed out",
       "provider_unreachable": "couldn't reach the provider",
       "provider_unreadable": "the provider's response couldn't be read",

@@ -19,7 +19,7 @@ from datetime import timedelta
 import aiohttp
 import pytest
 
-from config.v2_config import ModelHubHostedToolConfig
+from config.v2_config import ModelHubModelConfig, ModelHubHostedToolConfig
 from core.agent_core.messages import HostedCost, message_from_dict
 from core.handlers.model_hub import service as service_module
 from core.handlers.model_hub.adapter import InvokeCancelledError, RawOutcomeKind, UpstreamRejection
@@ -107,13 +107,13 @@ def _sources(*extra):
 
 
 # The vendors' executor models these tests run with, in place of the bundled overlay's (vibey-hosted-tools.md §6).
-_EXECUTOR_MODELS: dict[str, str] = {}
+_EXECUTOR_MODELS: dict[str, tuple[str, ...]] = {}
 
 
 @pytest.fixture(autouse=True)
 def _executor_models(monkeypatch):
     _EXECUTOR_MODELS.clear()
-    monkeypatch.setattr(hosted_tools_module, "provider_executor_model", _EXECUTOR_MODELS.get)
+    monkeypatch.setattr(hosted_tools_module, "provider_executor_models", lambda vendor: _EXECUTOR_MODELS.get(vendor, ()))
 
 
 def _bind(service, tool, executor):
@@ -126,7 +126,7 @@ def _bind(service, tool, executor):
     if executor is None:
         return
     source = next(item for item in config.sources if item.id == executor[0])
-    _EXECUTOR_MODELS[source.vendor] = executor[1]
+    _EXECUTOR_MODELS[source.vendor] = (executor[1],)
 
 
 async def _call(service, tool, body, *, token=None, after_launch=None, language="en"):
@@ -346,10 +346,10 @@ FAILED_WITH_PARTIAL = {**WEB_CALL, "status": "failed"}
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("case", "bound", "handles", "error", "sources", "executed"), [
     # No Source can run it: the record says which providers' Sources could.
-    ("no_candidate", None, [], "No Source can run web search right now. Add an API key from one of Anthropic, OpenAI, xAI.", [], False),
-    ("source_removed", (XAI, "grok-4.6"), [], "No Source can run web search right now. Add an API key from one of Anthropic, OpenAI, xAI.", [], False),
+    ("no_candidate", None, [], "No Source can run web search right now. Add an API key from one of Anthropic, OpenAI, xAI as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.", [], False),
+    ("source_removed", (XAI, "grok-4.6"), [], "No Source can run web search right now. Add an API key from one of Anthropic, OpenAI, xAI as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.", [], False),
     # A new base URL or credential is a new identity, which the turn's chain was not built for.
-    ("source_identity_changed", (XAI, "grok-4.6"), [], "No Source can run web search right now. Add an API key from one of Anthropic, OpenAI, xAI.", [], False),
+    ("source_identity_changed", (XAI, "grok-4.6"), [], "No Source can run web search right now. Add an API key from one of Anthropic, OpenAI, xAI as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.", [], False),
     # The only candidate failed: its failure, and the Sources tried.
     ("provider_refused", (XAI, "grok-4.6"),
      [InvokeHandle(_outcome(RawOutcomeKind.HTTP_ERROR, status=429, code="rate_limit_error", source_id=XAI))],
@@ -365,7 +365,7 @@ FAILED_WITH_PARTIAL = {**WEB_CALL, "status": "failed"}
     ("stream_failed_after_items", (XAI, "grok-4.6"),
      [LiveInvokeHandle(_outcome(RawOutcomeKind.HTTP_ERROR, status=200, code="server_error", source_id=XAI,
                                 stream_started=True), _responses(WEB_CALL, WEB_ANSWER)[:-1])],
-     "refused the call (HTTP 200 server_error)",
+     "is unavailable right now (HTTP 200 server_error)",
      [{"url": PAGE_B, "snippet": "v8.0.27 is the latest release. It adds a streaming keepalive."}, {"url": PAGE_A}],
      True),
 ])
@@ -398,7 +398,7 @@ async def test_a_proxied_call_that_cannot_complete_is_a_failed_record(
         "no_candidate": None, "source_removed": None,
         "source_identity_changed": None, "provider_refused": "provider_refused",
         "tool_never_ran": "search_not_run", "call_failed_with_partial_results": "search_failed",
-        "stream_failed_after_items": "provider_refused",
+        "stream_failed_after_items": "provider_unavailable",
     }[case]
     assert answer["record"]["sources"] == sources
     assert ("execution" in answer) is executed
@@ -412,7 +412,7 @@ def _chain(service, tool, *executors):
     config = service.store.config
     config.hosted_tools[tool] = ModelHubHostedToolConfig(enabled=True, executor_order=tuple(e[0] for e in executors))
     for source_id, model_id in executors:
-        _EXECUTOR_MODELS[next(item for item in config.sources if item.id == source_id).vendor] = model_id
+        _EXECUTOR_MODELS[next(item for item in config.sources if item.id == source_id).vendor] = (model_id,)
 
 
 def _refusal(status, code, source_id, **fields):
@@ -424,10 +424,84 @@ def _served_by_openai():
 
 
 BILLED = ProtocolUsageReport.of(input_tokens=900, cached_input_tokens=0, output_tokens=40)
+OVERLOADED = "Our servers are currently overloaded. Please try again later."
 NARROW = replace(
     _refusal(400, "invalid_request_error", XAI),
     rejection=UpstreamRejection(status=400, code="invalid_request_error", unsupported_tool_type="web_search"),
 )
+
+
+@pytest.mark.asyncio
+async def test_a_frozen_executor_slot_runs_while_its_model_stays_listed(tmp_path):
+    """MH-HOSTED-GATEWAY-005: a turn froze its slot on a fallback model; the Source then lists the model its vendor
+    prefers. The frozen model is still listed and runnable, so the call runs on it instead of finding no executor."""
+
+    body = json.dumps({
+        "type": "message", "role": "assistant", "stop_reason": "end_turn",
+        "content": [{"type": "text", "text": "no results"}], "usage": {"input_tokens": 10, "output_tokens": 2},
+    }).encode()
+    service = _vibey_service(tmp_path, _sources(), handles=[
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=ANTHROPIC), (body,)),
+    ])
+    _bind(service, "web_search", (ANTHROPIC, "claude-haiku-4-5"))
+    _EXECUTOR_MODELS["anthropic"] = ("claude-haiku-5-5", "claude-haiku-4-5")
+
+    def preferred_now_listed(_hop):
+        source = next(item for item in service.store.config.sources if item.id == ANTHROPIC)
+        source.models.append(ModelHubModelConfig(id="claude-haiku-5-5", provenance="discovered"))
+
+    status, answer = await _call(service, "web_search", {"arguments": {"query": "q"}}, after_launch=preferred_now_listed)
+    assert status == 200
+    assert service.adapter.invocations == [(ANTHROPIC, "claude-haiku-4-5", "vibey")]
+    assert answer["execution"]["executor_origin"]["model"] == "claude-haiku-4-5"
+
+
+# Each vendor's own answer for a model it does not serve, as its API sends it.
+MODEL_NOT_SERVED = {
+    "anthropic": (ANTHROPIC, "claude-haiku-4-5", "anthropic", {
+        "type": "error", "error": {"type": "not_found_error", "message": "model: claude-haiku-5-5"},
+    }),
+    "openai": (OPENAI, "gpt-6-astra", "openai_responses", {
+        "error": {"message": "The model `gpt-6-luna` does not exist or you do not have access to it.",
+                  "type": "invalid_request_error", "param": None, "code": "model_not_found"},
+    }),
+}
+
+
+async def _engine_outcome(protocol, status, body):
+    """The outcome the real engine client reads from this answer."""
+
+    from aiohttp import web
+
+    from tests.test_model_hub_retry_advice import _engine, _source as _engine_source
+
+    async def respond(_request):
+        return web.json_response(body, status=status)
+
+    async with _engine(respond) as (client, _requests):
+        handle = await client.invoke(_engine_source(protocol), "model-a", {"input": "q"}, stream=False)
+        return await handle.outcome()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("vendor", sorted(MODEL_NOT_SERVED))
+async def test_a_model_the_source_does_not_serve_moves_on_and_refuses_no_tool(tmp_path, vendor):
+    """MH-HOSTED-GATEWAY-005: a model-not-found names the model, not the tool, so it is no refusal (§6 step 4).
+
+    It used to write negative ``call`` evidence that never expires, silently dropping the Source from the chain.
+    """
+
+    source_id, model_id, protocol, body = MODEL_NOT_SERVED[vendor]
+    not_served = replace(await _engine_outcome(protocol, 404, body), source_id=source_id)
+    served = LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=XAI), _responses(WEB_CALL, WEB_ANSWER))
+    service = _vibey_service(tmp_path, _sources(), handles=[InvokeHandle(not_served), served])
+    _chain(service, "web_search", (source_id, model_id), (XAI, "grok-4.6"))
+    status, answer = await _call(service, "web_search", {"arguments": {"query": "q"}})
+    assert (status, answer["record"]["status"], answer["execution"]["executor_source_id"]) == (200, "completed", XAI)
+    source = next(item for item in service.store.config.sources if item.id == source_id)
+    assert not service.hosted_evidence().unsupported(source, model_id, EvidenceFeature.hosted("web_search", "call"))
+    chain = service.freeze_turn_hosted_tools(service.store.config).executors["web_search"]
+    assert [slot.source_id for slot in chain] == [source_id, XAI]
 
 
 @pytest.mark.asyncio
@@ -440,9 +514,10 @@ NARROW = replace(
         LiveInvokeHandle(_refusal(200, "server_error", XAI, stream_started=True, usage=BILLED), _responses(WEB_CALL)[:-1]),
         _served_by_openai(),
     ], [XAI, OPENAI], "completed", OPENAI, [XAI]),
-    # A refusal of the executor model, or a narrow rule's: the Source leaves the chain until the refusal is cleared.
-    ("executor_model_refused", lambda: [InvokeHandle(_refusal(404, "model_not_found", XAI)), _served_by_openai()],
+    # An overload is transient: it moves on, and it is no refusal.
+    ("overloaded", lambda: [InvokeHandle(_refusal(200, "server_error", XAI, message=OVERLOADED)), _served_by_openai()],
      [XAI, OPENAI], "completed", OPENAI, []),
+    # A narrow rule's refusal names the tool: the Source leaves the chain until the refusal is cleared.
     ("narrow_rule_refused", lambda: [InvokeHandle(NARROW), _served_by_openai()], [XAI, OPENAI], "completed", OPENAI, []),
     # The model chose not to search: no Source failed, and moving on would double the cost.
     ("model_chose_not_to_run", lambda: [
@@ -474,7 +549,7 @@ async def test_the_chain_moves_on_only_past_a_source_failure(
         assert answer["record"]["error"].endswith("Tried: xAI key, OpenAI key.")
     xai = next(item for item in service.store.config.sources if item.id == XAI)
     refused = service.hosted_evidence().unsupported(xai, "grok-4.6", EvidenceFeature.hosted("web_search", "call"))
-    assert refused is (case in {"executor_model_refused", "narrow_rule_refused"})
+    assert refused is (case == "narrow_rule_refused")
     # The next turn's chain leaves a refused Source out.
     chain = service.freeze_turn_hosted_tools(service.store.config).executors["web_search"]
     assert [slot.source_id for slot in chain] == ([OPENAI] if refused else [XAI, OPENAI])
@@ -514,7 +589,7 @@ async def test_failure_text_is_in_the_users_language(tmp_path):
         service, "x_search", {"arguments": {"query": "q"}}, language="zh",
     )
     assert status == 200
-    assert answer["record"]["error"] == "当前没有能运行 X 搜索的供应商。请添加 xAI 的 API Key。"
+    assert answer["record"]["error"] == "当前没有能运行 X 搜索的供应商。请在 模型 › 供应商与路由 中把 xAI 的 API Key 添加为供应商；存在 Vaults 里的密钥不会用于这里。"
 
 
 @pytest.mark.asyncio

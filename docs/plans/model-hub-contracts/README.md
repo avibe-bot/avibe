@@ -13,7 +13,7 @@ before it ships.
   with their default.
 - The probe endpoint and `hosted-tool-probe-result.schema.json` are removed. `POST /api/models/hosted-tools/<tool>/clear`
   and `POST /api/models/sources/<source_id>/evidence/clear` clear refusals; the PUT is per field.
-- The provider overlay gains a vendor's `executor_model` and `image_models[]`, and loses the native `image_generation`
+- The provider overlay gains a vendor's `executor_models[]` and `image_models[]`, and loses the native `image_generation`
   declaration.
 - `HopResolution.capabilities` gains `context_price_steps` (`hop-resolution.schema.json`): where the target model's
   list price rises with its context, from the price table, which Vibey's compaction threshold stays below.

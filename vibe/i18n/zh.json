@@ -1141,11 +1141,12 @@
     },
     "hostedTools": {
       "noExecutor": {
-        "web_search": {"one": "当前没有能运行网页搜索的供应商。请添加 {vendors} 的 API Key。", "several": "当前没有能运行网页搜索的供应商。请添加 {vendors} 其中一家的 API Key。"},
-        "x_search": {"one": "当前没有能运行 X 搜索的供应商。请添加 {vendors} 的 API Key。", "several": "当前没有能运行 X 搜索的供应商。请添加 {vendors} 其中一家的 API Key。"}
+        "web_search": {"one": "当前没有能运行网页搜索的供应商。请在 模型 › 供应商与路由 中把 {vendors} 的 API Key 添加为供应商；存在 Vaults 里的密钥不会用于这里。", "several": "当前没有能运行网页搜索的供应商。请在 模型 › 供应商与路由 中把 {vendors} 其中一家的 API Key 添加为供应商；存在 Vaults 里的密钥不会用于这里。"},
+        "x_search": {"one": "当前没有能运行 X 搜索的供应商。请在 模型 › 供应商与路由 中把 {vendors} 的 API Key 添加为供应商；存在 Vaults 里的密钥不会用于这里。", "several": "当前没有能运行 X 搜索的供应商。请在 模型 › 供应商与路由 中把 {vendors} 其中一家的 API Key 添加为供应商；存在 Vaults 里的密钥不会用于这里。"}
       },
       "listSeparator": "、",
       "providerRefused": "执行方的供应商拒绝了此次调用（{detail}）。",
+      "providerUnavailable": "执行方的供应商暂时不可用（{detail}），请稍后重试。",
       "timedOut": "执行方调用超时。",
       "unreachable": "无法连接执行方。",
       "unreadable": "无法读取执行方的响应。",
@@ -1796,6 +1797,7 @@
       "image_argument_invalid": "图片调用的参数无法发送",
       "image_reference_unreadable": "无法读取参考图片",
       "provider_refused": "供应商拒绝了这次调用",
+      "provider_unavailable": "供应商暂时不可用，请稍后重试",
       "provider_timed_out": "调用超时",
       "provider_unreachable": "无法连接供应商",
       "provider_unreadable": "无法读取供应商的回复",

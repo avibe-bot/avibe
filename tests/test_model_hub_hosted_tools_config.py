@@ -35,7 +35,11 @@ SOURCE = {
     "supply_channel": "hub",
     "billing": "metered",
     "state": {"status": "standby", "retry_at": None, "detail_key": None},
-    "models": [{"id": "grok-4.6", "display_name": "Grok 4.6", "origin": "discovered", "reasoning_efforts": [], "reasoning_efforts_source": None}],
+    # An executor runs only on a model its Source lists, so the fixture lists xAI's lightweight model as xAI does.
+    "models": [
+        {"id": "grok-4.6", "display_name": "Grok 4.6", "origin": "discovered", "reasoning_efforts": [], "reasoning_efforts_source": None},
+        {"id": "grok-4.20-0309-non-reasoning", "origin": "discovered", "reasoning_efforts": [], "reasoning_efforts_source": None},
+    ],
     "created_at": "2026-10-13T00:00:00Z",
     "credential_ref": "cred_src_xai00001",
 }

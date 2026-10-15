@@ -192,9 +192,14 @@
             "$ref": "#/definitions/ModelFamily"
           }
         },
-        "executor_model": {
-          "$ref": "#/definitions/Token",
-          "description": "The vendor's lightweight model that runs proxied search calls on this vendor's Sources (vibey-hosted-tools.md §6). The executor call uses the declaration of the family row this id matches. A vendor without it is never an executor."
+        "executor_models": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/definitions/Token"
+          },
+          "description": "The vendor's lightweight models that run proxied search calls on this vendor's Sources, preferred first (vibey-hosted-tools.md §6). A Source runs the first one it lists, exactly or as a dated snapshot (`<id>-YYYYMMDD`), and is no executor if it lists none. The executor call uses the declaration of the family row that model matches. A vendor without them is never an executor."
         },
         "image_models": {
           "type": "array",
