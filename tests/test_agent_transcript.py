@@ -443,7 +443,7 @@ async def test_the_display_copy_commits_with_its_row_and_never_reaches_the_conte
         _session(conn, "ses_main", home)
         consumed = _row(conn, "ses_main", home, "go")
 
-    def render(message, *, final, replied):
+    def render(message, *, final, replied, images):
         body = "\n".join(block.text for block in message.content if isinstance(block, TextBlock) and block.text)
         return f"{body} (shown)" if final else body.upper()
 
@@ -470,31 +470,44 @@ async def test_the_display_copy_commits_with_its_row_and_never_reaches_the_conte
 
 
 @pytest.mark.parametrize(
-    ("replied", "row_type"),
-    [(True, "assistant"), (False, "error"), (None, "error")],
-    ids=["replies-with-its-turns-images", "does-not-reply", "no-decision"],
+    ("replied", "display", "row_type"),
+    [
+        # Its display carries the turn's images: a terminal result as committed.
+        (True, "Generated image:\n\n![a.png](file:///a.png)", "result"),
+        # A reply the model kept silent shows nothing.
+        (True, "", "assistant"),
+        (False, "", "error"),
+        (None, "", "error"),
+    ],
+    ids=["replies-with-its-turns-images", "replies-silently", "does-not-reply", "no-decision"],
 )
-async def test_a_final_commits_as_the_loops_reply_decision_says(engine, replied, row_type) -> None:
+async def test_a_final_commits_as_the_loops_reply_decision_says(engine, replied, display, row_type) -> None:
     """MH-HOSTED-UI-012: whether a final replies is the loop's decision (``has_reply``), and the row commits with the type
     it gives, so a final that replies with its turn's images is no failed final even if the process stops before its
-    delivery rewrites the row. The renderer gets the same decision. Without one, the response alone decides."""
+    delivery rewrites the row. The renderer gets the same decision and the images the final delivers. Without a
+    decision, the response alone decides."""
     with engine.begin() as conn:
         home = _scope(conn, "C-home")
         _session(conn, "ses_main", home)
         consumed = _row(conn, "ses_main", home, "draw a lighthouse")
-    decisions: list[bool] = []
+    from core.agent_core.messages import HostedImage
 
-    def render(message, *, final, replied):
-        decisions.append(replied)
-        return ""
+    image = HostedImage(path="/a.png", mime="image/png")
+    given: list[tuple] = []
+
+    def render(message, *, final, replied, images):
+        given.append((replied, images))
+        return display
 
     store = SQLiteTranscriptStore(engine, render=render)
     await store.consume_input("ses_main", consumed, _user("draw a lighthouse"))
-    final = await store.append_response("ses_main", AssistantMessage((), ORIGIN, "stop"), final=True, replied=replied)
+    final = await store.append_response(
+        "ses_main", AssistantMessage((), ORIGIN, "stop"), final=True, replied=replied, images=(image,)
+    )
 
     with engine.connect() as conn:
         committed = conn.execute(select(messages.c.type).where(messages.c.id == final.row_id)).scalar_one()
-    assert committed == row_type and decisions == [bool(replied)]
+    assert committed == row_type and given == [(bool(replied), (image,))]
 
 
 async def test_a_call_instance_is_settled_once_whoever_writes(engine) -> None:

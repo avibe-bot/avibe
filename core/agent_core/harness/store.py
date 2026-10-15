@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, Optional, Protocol, Sequence
 
-from core.agent_core.messages import AssistantMessage, Message, ToolResultMessage, UserMessage
+from core.agent_core.messages import AssistantMessage, HostedImage, Message, ToolResultMessage, UserMessage
 
 EntryKind = Literal["input", "response", "tool_result", "compaction", "context_edit", "agent_state"]
 
@@ -56,12 +56,14 @@ class TranscriptStore(Protocol):
         final: bool,
         request: Optional[Mapping[str, Any]] = None,
         replied: Optional[bool] = None,
+        images: Sequence[HostedImage] = (),
     ) -> ContextEntry:
         """Commit a response; ``request`` (C-9 ``ModelResponse.request``) is stored with it and read back in ``payload``.
 
         The loop passes ``request`` only when context management is on. ``replied`` is the loop's decision whether the
         response replies (``has_reply``), which a final's row type takes as given; without one, the response alone
-        decides.
+        decides. ``images`` are those the run's committed tool results generated, which a final delivers with its
+        reply: its committed display carries them, so the row is a complete result even if delivery never runs.
         """
         ...
 

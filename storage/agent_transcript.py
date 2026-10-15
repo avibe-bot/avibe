@@ -76,6 +76,7 @@ from core.agent_core.harness.projection import open_tool_calls
 from core.agent_core.harness.store import ContextEntry, EntryKind
 from core.agent_core.messages import (
     AssistantMessage,
+    HostedImage,
     HostedToolBlock,
     TextBlock,
     ToolResultMessage,
@@ -115,8 +116,8 @@ _EVENT_TYPE_BY_KIND: dict[str, str] = {
 }
 _KIND_BY_EVENT_TYPE = {event_type: kind for kind, event_type in _EVENT_TYPE_BY_KIND.items()}
 
-# ``render(message, final=..., replied=...)``: a response row's commit-time display text; ``replied`` is the decision
-# ``final_outcome`` takes.
+# ``render(message, final=..., replied=..., images=...)``: a response row's commit-time display text; ``replied`` is
+# the decision ``final_outcome`` takes, and ``images`` those a final delivers with its reply.
 DisplayRenderer = Callable[..., str]
 _T = TypeVar("_T")
 FinalOutcome = Literal["completed", "failed"]
@@ -146,7 +147,9 @@ def _response_type(message: AssistantMessage, *, final: bool, display_text: str,
     return "result" if display_text.strip() else "assistant"
 
 
-def render_text(message: AssistantMessage, *, final: bool = False, replied: bool = True) -> str:
+def render_text(
+    message: AssistantMessage, *, final: bool = False, replied: bool = True, images: Sequence[HostedImage] = ()
+) -> str:
     """Default display copy of a response: its text blocks, verbatim, in order."""
     return "\n\n".join(block.text for block in message.content if isinstance(block, TextBlock) and block.text)
 
@@ -235,6 +238,7 @@ class SQLiteTranscriptStore:
         final: bool,
         request: Optional[Mapping[str, Any]] = None,
         replied: Optional[bool] = None,
+        images: Sequence[HostedImage] = (),
         agent_name: Optional[str] = None,
     ) -> ContextEntry:
         if not isinstance(message, AssistantMessage):
@@ -245,7 +249,7 @@ class SQLiteTranscriptStore:
         model = _canonical(response, "response")
         if replied is None:
             replied = has_reply(message)
-        display_text = self._render(message, final=final, replied=replied)
+        display_text = self._render(message, final=final, replied=replied, images=tuple(images))
 
         def work(conn: Connection) -> ContextEntry:
             origin = _turn_origin(conn, session_id, agent_name)

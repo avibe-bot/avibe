@@ -128,6 +128,7 @@ from core.agent_core.harness.projection import (
 from core.agent_core.harness.store import ContextEntry, EntryKind, TranscriptStore
 from core.agent_core.messages import (
     AssistantMessage,
+    HostedImage,
     Message,
     Origin,
     ToolCallBlock,
@@ -346,8 +347,9 @@ class Agent:
         # The run's attempt ledger (C-9): every model attempt, in order.
         self._attempts: list[_Attempt] = []
         self._refusals = _Refusals()
-        # The run's calls generated images, which its final delivers: a reply even without text (``has_reply``).
-        self._generated_images = False
+        # The images the run's committed tool results generated, which its final delivers: a reply even without text
+        # (``has_reply``). Read from the committed rows, so a result another writer settled counts as it committed.
+        self._generated_images: list[HostedImage] = []
         # When each upstream prompt cache was last used in this Agent: the end of its latest model call, by the provider
         # and model that served it (``_cache_of``, C-9 section 3).
         self._last_model_at: dict[tuple[str, str], float] = {}
@@ -535,7 +537,14 @@ class Agent:
         attempt = next((item for item in reversed(self._attempts) if item.purpose == "conversation"), None)
         facts = {"request": request_facts(attempt.request)} if self.context is not None and attempt else {}
         row = await self._scope.call(
-            lambda: self.store.append_response(self.session_id, deepcopy(message), final=final, replied=replied, **facts),
+            lambda: self.store.append_response(
+                self.session_id,
+                deepcopy(message),
+                final=final,
+                replied=replied,
+                images=tuple(self._generated_images) if final else (),
+                **facts,
+            ),
             interruptible=False,
         )
         if attempt is not None:
@@ -562,7 +571,7 @@ class Agent:
                 self._turn_inputs = set()
                 self._attempts = []
                 self._refusals = _Refusals()
-                self._generated_images = False
+                self._generated_images = []
                 loaded = True
                 system = self.system
                 self._run_tools = dict(self._tools)
@@ -1005,7 +1014,7 @@ class Agent:
                         cause=decided,
                     )
                 # Decided once: the empty-reply test, the row's type and settlement all take it (``has_reply``).
-                replied = has_reply(message, generated_images=self._generated_images)
+                replied = has_reply(message, generated_images=bool(self._generated_images))
                 response, final = await self._commit_model_message(message, emit, replied=replied)
                 empty_reply = final and not replied
                 truncated_reply = final and message.stop_reason == "length"
@@ -1212,8 +1221,10 @@ class Agent:
             interruptible=False,
         )
         self._rows.append(row)
-        if result.hosted is not None and result.hosted.record.status == "completed" and result.hosted.record.images:
-            self._generated_images = True
+        # The committed result, which a settlement race may have taken from another writer, not this execution's.
+        committed = row.message.hosted if isinstance(row.message, ToolResultMessage) else None
+        if committed is not None and committed.record.status == "completed":
+            self._generated_images.extend(committed.record.images or ())
         await emit(
             ToolFinished,
             tool_call_id=call.id,

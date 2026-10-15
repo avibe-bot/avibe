@@ -273,6 +273,7 @@ scenarios:
     test: tests/test_vibey_agent.py::test_a_generated_image_reaches_the_user_with_the_turns_reply_even_when_the_model_says_nothing
     related_tests:
       - tests/test_agent_transcript.py::test_a_final_commits_as_the_loops_reply_decision_says
+      - tests/agent_core/agent/test_loop.py::test_a_reply_counts_the_images_of_the_tool_result_that_committed_not_the_writer_that_lost
   - id: MH-HOSTED-UI-011
     name: Vibey delivers a native hosted call as its IM line and Web card, and its answer with provider citations as links
     status: covered

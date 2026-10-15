@@ -14,8 +14,8 @@ Two adapter rules live at this boundary, where the loop consumes an input:
   consumption waits, bounded, for the row to exist.
 
 Each committed response is handed to ``on_response`` once, with the loop's
-decision whether it replies, for the run that owns it; nothing here keeps
-responses after that.
+decision whether it replies and the images a final delivers, for the run that
+owns it; nothing here keeps responses after that.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from sqlalchemy.engine import Engine
 
 from core.agent_core.harness.projection import context_view
 from core.agent_core.harness.store import ContextEntry
-from core.agent_core.messages import AssistantMessage, ToolResultMessage, UserMessage
+from core.agent_core.messages import AssistantMessage, HostedImage, ToolResultMessage, UserMessage
 from modules.agents.vibey.prompt import (
     EnvironmentValue,
     displayed_environment,
@@ -44,7 +44,7 @@ from storage.agent_transcript import SQLiteTranscriptStore, fork_link
 from storage.models import agent_sessions, messages
 
 EnvironmentSource = Callable[[str], Mapping[str, EnvironmentValue]]
-ResponseObserver = Callable[[str, str, AssistantMessage, Optional[bool]], None]
+ResponseObserver = Callable[[str, str, AssistantMessage, Optional[bool], tuple[HostedImage, ...]], None]
 
 #: How long consumption waits for an accepted steer's row before failing the run.
 INPUT_ROW_TIMEOUT_S = 10.0
@@ -130,11 +130,18 @@ class AdapterTranscriptStore:
         final: bool,
         request: Optional[Mapping[str, Any]] = None,
         replied: Optional[bool] = None,
+        images: Sequence[HostedImage] = (),
     ) -> ContextEntry:
         entry = await self._store.append_response(
-            session_id, message, final=final, request=request, replied=replied, agent_name=self._agents.get(session_id)
+            session_id,
+            message,
+            final=final,
+            request=request,
+            replied=replied,
+            images=images,
+            agent_name=self._agents.get(session_id),
         )
-        self._on_response(session_id, entry.row_id, message, replied)
+        self._on_response(session_id, entry.row_id, message, replied, tuple(images))
         return entry
 
     async def append_tool_result(

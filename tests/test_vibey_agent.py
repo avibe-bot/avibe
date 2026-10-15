@@ -2952,8 +2952,12 @@ async def test_a_generated_image_reaches_the_user_with_the_turns_reply_even_when
     """MH-HOSTED-UI-012 (vibey-hosted-tools.md §3.4, §7.3): the turn declares ``image_generate`` with the image models
     its first hop offers, and keeps that enum for the whole turn even when a later hop offers others. A completed
     image is delivered with the turn's reply as an attachment. A final that ends normally without text after it is
-    still a reply, the image under its heading, never the empty-reply error; a refusal stays the turn's failure."""
+    still a reply, the image under its heading, never the empty-reply error; a refusal stays the turn's failure. The
+    final row is that complete reply as it commits, before delivery rewrites it, so a process that stops in between
+    still leaves the image's terminal result."""
     import httpx
+
+    from modules.agents.vibey.store import AdapterTranscriptStore
 
     completed = {
         "record": {"status": "completed", "sources": []},
@@ -2981,7 +2985,21 @@ async def test_a_generated_image_reaches_the_user_with_the_turns_reply_even_when
             gateway_client=client,
         )
         harness.controller.hub_hosted_tools = {"image_generate": _image_entry("gpt-image-2", "gemini-3.1-flash-image")}
-        await harness.agent.handle_message(harness.request("draw a lighthouse"))
+        # The final row as it commits, before delivery rewrites it.
+        committed: list[dict] = []
+        append = AdapterTranscriptStore.append_response
+
+        async def append_response(self, session_id, message, **kwargs):
+            entry = await append(self, session_id, message, **kwargs)
+            if kwargs.get("final"):
+                with engine.connect() as conn:
+                    row = conn.execute(select(messages).where(messages.c.id == entry.row_id)).mappings().one()
+                committed.append({"type": row["type"], "text": row["content_text"]})
+            return entry
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(AdapterTranscriptStore, "append_response", append_response)
+            await harness.agent.handle_message(harness.request("draw a lighthouse"))
 
     first, second = (
         next(tool for tool in request.tools if tool.name == "image_generate") for request in harness.provider.requests
@@ -2994,11 +3012,17 @@ async def test_a_generated_image_reaches_the_user_with_the_turns_reply_even_when
     assert harness.controller.im_client.uploads == [str(Path(image.path).resolve()) for image in images]
     assert len(images) == (1 if status == "completed" else 0)
     empty = i18n_t("vibeyAgent.error.emptyResponse", "en")
+    (as_committed,) = committed
+    links = [f"]({Path(image.path).as_uri()})" for image in images]
+    assert all(link in as_committed["text"] for link in links)
     if replied:
         [row] = harness.rows("result")
         assert row["content_text"].startswith(said or i18n_t("info.generatedImagesFallback", "en"))
         assert not any(empty in item for item in harness.controller.im_client.sent)
+        assert as_committed["type"] == "result"
+        assert as_committed["text"].startswith(said or i18n_t("info.generatedImagesFallback", "en"))
     else:
+        assert as_committed["type"] == "error"
         [row] = harness.rows("error")
         assert harness.rows("result") == []
         assert (empty in row["content_text"]) is (stop == "stop")
@@ -3987,14 +4011,13 @@ async def test_a_proxied_hosted_result_shows_once_its_result_is_committed(engine
 
 def test_an_image_is_attached_unless_the_reply_already_links_it(tmp_path) -> None:
     """A prose mention of the path is not a delivered file; a relative path names no file to send."""
-    from modules.agents.vibey.agent import _Run, VibeyAgent
+    from modules.agents.vibey.agent import VibeyAgent
 
     image = tmp_path / "image-3f2a.png"
-    run = _Run(request=None, session_id=SESSION, turn_id="turn", instance="test")
-    run.hosted_images = [("relative.png", "relative.png"), (str(image), image.name)]
+    images = [("relative.png", "relative.png"), (str(image), image.name)]
 
-    assert VibeyAgent._hosted_image_links(run, f"Saved it to {image}.") == f"![{image.name}]({image.as_uri()})"
-    assert VibeyAgent._hosted_image_links(run, f"Here: ![night]({image.as_uri()})") == ""
+    assert VibeyAgent._image_links(images, f"Saved it to {image}.") == f"![{image.name}]({image.as_uri()})"
+    assert VibeyAgent._image_links(images, f"Here: ![night]({image.as_uri()})") == ""
 
 
 async def test_a_hosted_named_call_without_a_record_still_shows_its_tool_line(engine, session, tmp_path, published) -> None:

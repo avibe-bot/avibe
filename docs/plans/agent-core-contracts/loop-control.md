@@ -55,8 +55,11 @@ calls generated images (a completed `image_generate` result): a final that ends
 normally then replies with them, delivered under their heading
 (`vibey-hosted-tools.md` §7.3). A refusal, safety or length stop stays a failure,
 its images still delivered. The loop decides whether a response replies once
-(`has_reply`) and passes the decision to `append_response` as `replied`; the
-row's type at commit, its display and live settlement take it as given. This does not
+(`has_reply`), from the tool results as they committed (a settlement another
+writer won counts as it committed), and passes the decision to `append_response`
+as `replied`, with the images a final delivers as `images`. The row's type and
+display at commit carry both, so the committed final is the complete terminal
+reply even if delivery never runs; live settlement takes the same values. This does not
 add a model call, increase an output limit, or replay a task. Non-final responses
 with pending steer/follow-up keep continuing normally; truncated tool calls keep
 the existing bounded reissue path without executing their partial arguments.
