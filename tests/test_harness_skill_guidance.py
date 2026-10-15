@@ -240,28 +240,45 @@ def test_background_watch_skill_uses_bundled_waiters_and_persists_managed_pr_sta
     assert '--workflow lint' in body
 
 
-def test_pr_delivery_loop_keeps_one_optional_reference_out_of_routine_loading() -> None:
+def test_pr_delivery_loop_keeps_optional_references_out_of_routine_loading() -> None:
     directory = ROOT / ".agents/skills/pr-delivery-loop"
     body = (directory / "SKILL.md").read_text()
     flat = " ".join(body.split())
     references = re.findall(r"\]\((references/[^)]+\.md)\)", body)
 
-    assert references == ["references/rationale.md"]
+    assert references == ["references/rationale.md", "references/local-regression.md"]
     assert {path.relative_to(directory).as_posix() for path in directory.rglob("*.md")} == {
         "SKILL.md", *references,
     }
     assert "are optional reading" in flat and "do not load them routinely" in flat
     assert "They introduce no additional delivery gates." in flat
     assert "sync the **whole maintained package**, including references, byte-for-byte" in flat
+    assert "Keep exact head-bound evidence in the internal gate record" in flat
+    assert "residual issues (or none known)" in flat
+    assert "gate-state dumps belong in the evidence" in flat
+    assert "offer Merge with the PR link" in flat
+    assert "persist the target PR and exact offered head" in flat
+    assert "visible report may omit the SHA" in flat
 
     skill = parse_skill_file(directory / "SKILL.md", priority=(1, 0, 1))
     assert skill is not None
     rendered = render_skill_content(skill)
     assert "## 4. Complete delivery" in rendered
     assert "### Authorized local regression updates" in rendered
-    reference = (directory / references[0]).read_text()
-    assert reference.startswith("# Delivery Rationale and Examples")
-    assert reference not in rendered
+    for reference_path in references:
+        reference = (directory / reference_path).read_text()
+        assert reference not in rendered
+
+
+def test_quick_replies_are_action_driven_not_mandatory() -> None:
+    body = _read("core/prompts/quick-replies.md")
+    flat = " ".join(body.split())
+    assert "Offer buttons for useful next actions or decisions" in body
+    assert "When buttons are supported and enabled, put this exact multiline footer" in body
+    assert "---\n[button text] | [another action]" in body
+    assert "When none is useful, omit the footer" in body
+    assert "Do not invent filler choices" in body
+    assert "treat displaying an action as authorization" in flat
 
 
 def test_agent_prompt_audit_examples_parse_against_the_real_cli() -> None:
