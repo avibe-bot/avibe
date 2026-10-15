@@ -745,10 +745,12 @@ used and the cost; IM attaches the file.
 **When a search ran by proxy because the turn's own Source refused it** (`hosted.fallback_from`, set by Vibey on a
 hop whose C-6 facts say `refused`), both surfaces say so, so the switch is never silent:
 - the Web card keeps a note in view, collapsed or expanded: "relay-gpt 不支持网页搜索，已改用 Anthropic（relay-claude）"
-  with "之后自动沿用，可在 模型 › 工具 中清除";
+  with "之后自动沿用，可在 模型 › 工具 中清除" for a reader who can manage the instance, and "之后自动沿用，实例管理员可在
+  模型 › 工具 中清除" for anyone else, who cannot open Models;
 - the IM line names it in place of how the call ran: "🔎 网页搜索 “…” · relay-gpt 不支持，已改用 Anthropic · 6 个来源 · $0.01".
 Like every claim about how a call ran, the note shows only for a completed call. The refusing Source is named by
-its current name (`source_names`), and the note disappears once the refusal is cleared and the hop is native again.
+its current name (`source_names`), escaped for the IM destination's markup as the subject is, and the note
+disappears once the refusal is cleared and the hop is native again.
 
 ## 9. Defaults, cost and privacy
 

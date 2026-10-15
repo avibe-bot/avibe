@@ -8,6 +8,7 @@ import { AtSign, Check, ChevronRight, CircleSlash, Download, FileImage, Globe, I
 import clsx from 'clsx';
 
 import { ChatImage } from '../ui/chat-image';
+import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import { apiKeyVendorPreset } from '../settings/models/apiKeyVendors';
 import { serverText } from '../settings/models/serverCopy';
 import { hostedCompleted, type HostedActivity, type HostedActivityImage, type HostedToolName } from '../../lib/hostedActivity';
@@ -235,10 +236,12 @@ const HostedDetail: React.FC<{ card: HostedActivity }> = ({ card }) => {
 /**
  * Why a search ran by proxy: the turn's own Source refused it natively. The note
  * stays in view, collapsed or expanded, and says the refusal lasts until it is
- * cleared, which is where the user undoes it.
+ * cleared: where to clear it for a reader who can, and who can for anyone else.
  */
 const FallbackNote: React.FC<{ card: HostedActivity }> = ({ card }) => {
   const { t } = useTranslation();
+  // Only an instance manager reaches Models › Tools; anyone else is told who can clear it.
+  const { capabilities } = useInstanceAuthorization();
   const from = card.fallback_from;
   const vendor = vendorLabel(card.provider);
   if (!from || !hostedCompleted(card) || !vendor) return null;
@@ -252,7 +255,7 @@ const FallbackNote: React.FC<{ card: HostedActivity }> = ({ card }) => {
           ? t('chat.agentActivity.hosted.fallback.ranOn', { from: refusedBy, toolInline, provider: vendor, source: card.source_name })
           : t('chat.agentActivity.hosted.fallback.ran', { from: refusedBy, toolInline, provider: vendor })}
       </span>
-      <span className="ml-auto text-muted">{t('chat.agentActivity.hosted.fallback.kept')}</span>
+      <span className="ml-auto text-muted">{t(capabilities.can_manage_instance ? 'chat.agentActivity.hosted.fallback.kept' : 'chat.agentActivity.hosted.fallback.keptManager')}</span>
     </p>
   );
 };

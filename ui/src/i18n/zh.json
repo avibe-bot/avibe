@@ -5014,7 +5014,8 @@
         "fallback": {
           "ranOn": "{{from}} 不支持{{toolInline}}，已改用 {{provider}}（{{source}}）",
           "ran": "{{from}} 不支持{{toolInline}}，已改用 {{provider}}",
-          "kept": "之后自动沿用，可在 模型 › 工具 中清除"
+          "kept": "之后自动沿用，可在 模型 › 工具 中清除",
+          "keptManager": "之后自动沿用，实例管理员可在 模型 › 工具 中清除"
         },
         "duration": "用时 {{seconds}} 秒",
         "alsoSearched": "还搜索了：{{queries}}",

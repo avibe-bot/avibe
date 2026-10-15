@@ -372,6 +372,16 @@ def test_a_proxied_calls_cost_counts_every_billed_attempt(failed, last, cost, li
     assert line.endswith(f" · {line_tail}") if line_tail else "$" not in line
 
 
+def test_the_im_line_escapes_a_fallback_sources_name_for_its_destination():
+    """MH-HOSTED-UI-010: a Source name is the user's own text, so the destination's escape applies to it as to the
+    subject; a Slack Source named with ``<!channel>`` must not mention the channel."""
+
+    activity = replace(proxy_fallback(), fallback_source_name="relay <!channel>")
+    line = hosted_line(activity, "en", escape=lambda text: text.replace("<", "&lt;").replace(">", "&gt;"))
+    assert "relay &lt;!channel&gt; doesn't support it, now using Anthropic" in line
+    assert "<!channel>" not in line
+
+
 def test_the_im_line_escapes_the_quoted_subject_for_its_destination():
     activity = proxy_activity(
         _x_call("call_x4", "*bold* claim"),

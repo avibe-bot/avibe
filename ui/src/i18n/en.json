@@ -5014,7 +5014,8 @@
         "fallback": {
           "ranOn": "{{from}} doesn't support {{toolInline}}, so {{provider}} ({{source}}) ran it",
           "ran": "{{from}} doesn't support {{toolInline}}, so {{provider}} ran it",
-          "kept": "Used from now on; clear it in Models › Tools"
+          "kept": "Used from now on; clear it in Models › Tools",
+          "keptManager": "Used from now on; an instance manager can clear it in Models › Tools"
         },
         "duration": "took {{seconds}} s",
         "alsoSearched": "Also searched: {{queries}}",

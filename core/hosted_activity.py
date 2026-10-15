@@ -335,7 +335,7 @@ def _clip(text: str, limit: int = LINE_SUBJECT_MAX_CHARS) -> str:
     return flat if len(flat) <= limit else flat[: limit - 1].rstrip() + "…"
 
 
-def _ran(activity: HostedActivity, lang: str) -> list[Optional[str]]:
+def _ran(activity: HostedActivity, lang: str, escape: Callable[[str], str]) -> list[Optional[str]]:
     """How a completed call ran and what it produced, as the IM line names them.
 
     A direct image call names the image model and the image's size rather than a vendor: the model is what the call
@@ -352,7 +352,8 @@ def _ran(activity: HostedActivity, lang: str) -> list[Optional[str]]:
         mode = None
     elif activity.mode == "proxy" and activity.fallback_source_id is not None:
         # Why it ran by proxy: the turn's own Source refused the native tool (§8.3, mockup 06).
-        refused_by = activity.fallback_source_name or activity.fallback_source_id
+        # A Source name is the user's own text: escaped for the destination's markup, as the subject is.
+        refused_by = escape(activity.fallback_source_name or activity.fallback_source_id)
         mode = i18n_t("hostedTools.mode.fallback", lang, source=refused_by, provider=vendor)
     elif activity.mode == "proxy" and activity.model:
         mode = i18n_t("hostedTools.mode.proxyModel", lang, provider=vendor, model=activity.model)
@@ -419,7 +420,7 @@ def hosted_line(activity: HostedActivity, lang: str, *, escape: Callable[[str], 
     if activity.subject:
         parts[0] += " " + i18n_t("hostedTools.quoted", lang, subject=escape(_clip(activity.subject)))
     if activity.completed:
-        parts.extend(_ran(activity, lang))
+        parts.extend(_ran(activity, lang, escape))
     else:
         parts.append(i18n_t(f"hostedTools.status.{activity.status}", lang, error=escape(_error_text(activity, lang))))
     parts.append(_cost(activity, lang))
