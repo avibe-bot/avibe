@@ -78,7 +78,12 @@ trial is complete; the following checks must pass before adoption is proposed.
   hosted items, declaration/include preservation, partial images, citations,
   tool usage, replay and absence of injected image tools. The engine runs
   under the existing isolated adapter against a synthetic loopback upstream;
-  this does not prove live-provider or complete Vibey-turn behavior.
+  this does not prove live-provider or complete Vibey-turn behavior. The
+  Responses replay assertion compares the entire ordered non-reasoning
+  sequence, including message anchors. An assertion-only mutation probe
+  verifies unchanged and normalized-reasoning cases are accepted, while
+  reordered, duplicated, dropped, or answer-crossing calls and a dropped
+  answer are rejected; both real-engine hosted suites pass with that check.
 - The same five hosted cases also pass on the published v8.0.23-3 baseline,
   downloaded into a separate temporary directory and verified against the
   unchanged packaged manifest. This checks that the new suite remains usable

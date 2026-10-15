@@ -2613,7 +2613,7 @@ scenarios:
     layer: e2e-auto
     test: tests/e2e/test_model_hub_engine_hosted_passthrough.py::test_responses_hosted_declarations_and_items_pass_through
   - id: MH-ENGINE-HOSTED-002
-    name: The real CPA Responses path preserves hosted search and image items replayed in input history
+    name: The real CPA Responses path preserves hosted history content, order and cardinality relative to user and assistant messages
     status: assert
     kind: compatibility
     layer: e2e-auto

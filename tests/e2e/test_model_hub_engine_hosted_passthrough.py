@@ -305,7 +305,7 @@ async def test_responses_hosted_declarations_and_items_pass_through(tmp_path, mo
 
 
 async def test_responses_hosted_history_replays_verbatim(tmp_path, monkeypatch) -> None:
-    """MH-ENGINE-HOSTED-002: hosted input history survives the codex executor."""
+    """MH-ENGINE-HOSTED-002: hosted replay keeps content, order and cardinality around messages."""
     history = [
         {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "search and draw"}]},
         WEB_SEARCH_CALL, X_SEARCH_CALL, X_REASONING, XAI_OPAQUE_REASONING, IMAGE_CALL, ANSWER_ITEM,
@@ -320,10 +320,13 @@ async def test_responses_hosted_history_replays_verbatim(tmp_path, monkeypatch) 
     _record(tmp_path, exchange)
     assert status == 200, raw[:500]
     replayed = json.loads(exchange["upstream_body"])["input"]
-    for item in (WEB_SEARCH_CALL, X_SEARCH_CALL, IMAGE_CALL):
-        assert item in replayed, (item["type"], replayed)
     # Reasoning items are not hosted items: the engine prefixes their ids (``rs_``) and drops
     # ciphertext without a Fernet envelope unless the model is ``is-compat``. Recorded, not pinned.
+    # Compare the rest as one sequence, including message anchors, so calls cannot be duplicated,
+    # dropped, reordered, or moved across the assistant answer while still passing the contract.
+    expected_history = [item for item in history if item.get("type") != "reasoning"]
+    replayed_history = [item for item in replayed if item.get("type") != "reasoning"]
+    assert replayed_history == expected_history, replayed
 
 
 async def test_image_generation_is_never_injected_or_answered_by_the_engine(tmp_path, monkeypatch) -> None:
