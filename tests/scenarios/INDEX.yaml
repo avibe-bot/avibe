@@ -119,6 +119,7 @@ capabilities:
       - ui/src/components/settings/models/AgentCard.test.tsx
       - ui/src/components/workbench/HostedToolRow.test.tsx
       - ui/src/components/settings/models/ToolsTab.test.tsx
+      - ui/src/components/settings/models/imageModelCopy.test.ts
       - ui/src/components/settings/models/hostedTools.test.ts
       - ui/src/components/settings/models/useHostedTools.test.tsx
       - ui/src/components/settings/models/SourceDetailPanel.test.tsx

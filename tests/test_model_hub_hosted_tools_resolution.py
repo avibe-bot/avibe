@@ -79,6 +79,8 @@ IMAGE_MODELS = {
 def _overlay(monkeypatch):
     monkeypatch.setattr(hosted_tools_module, "provider_executor_model", EXECUTOR_MODELS.get)
     monkeypatch.setattr(hosted_tools_module, "provider_image_models", lambda vendor: IMAGE_MODELS.get(vendor, ()))
+    # The bundled overlay's vendors; which of them list image models is `IMAGE_MODELS`.
+    monkeypatch.setattr(hosted_tools_module, "bundled_provider_vendors", lambda: dict.fromkeys(("anthropic", "openai", "xai")))
 
 
 def _spec_for(vendor, protocol, model_id, tool):
@@ -244,7 +246,17 @@ def test_the_tools_read_states_saved_and_effective_values_and_what_real_use_show
     ]
     image = by_name["image_generate"]
     assert (image["default_model"], image["effective_default"]["model_id"]) == (None, "grok-imagine-image")
+    # Each model carries its serving Source's billing, as the executor rows do.
+    assert [(m["source_id"], m["billing"]) for m in image["models"]] == [("src_xai00001", "metered"), ("src_oai00001", "metered")]
     assert image["image_offered_by"] == ["openai", "xai"]
+    # Which vendors offer image models is a catalog fact: with no image vendor configured, the read still names
+    # the vendors a key could add one from.
+    bare = hosted_tools_status(
+        _config(sources=[CLAUDE_SUB]), evidence=_evidence(tmp_path / "bare"), spec_for=_spec_for,
+        image_price=lambda _source, _spec: None,
+    )
+    bare_image = next(tool for tool in bare["tools"] if tool["name"] == "image_generate")
+    assert (bare_image["models"], bare_image["image_offered_by"]) == ([], ["openai", "xai"])
 
     # The same Source id under a new credential is another Source: what the old one showed is not claimed for it.
     rotated = replace(XAI, credential_ref="cred_rotated")
