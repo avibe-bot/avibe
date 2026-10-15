@@ -121,6 +121,33 @@ GOTOOLCHAIN=go1.26.9 CGO_ENABLED=0 go test -count=20 -timeout 60s \
   ./sdk/cliproxy
 ```
 
+## Review-scope decision (2026-10-15)
+
+The same assertion-coverage class appeared on reviewed heads `d428e4eeac`
+(Responses membership-only replay checks) and `53de3827b2` (Anthropic checking
+only one message's content). The delivery loop paused before another fix to
+inventory both findings and audit all five scenarios. Root cause: a collection
+preservation contract was asserted through a partial projection rather than
+its complete ordered contents and cardinality.
+
+The orchestrator's scope decision is a test-only, contract-preserving repair
+across this small suite: compare complete replay histories, full tool lists,
+and complete decoded response-event sequences. The only allowed wire
+normalizations are explicit: Responses reasoning normalization remains outside
+the hosted contract, `include` values may be reordered but not lost or
+duplicated, and Anthropic may add top-level tool/content-block `cache_control`
+metadata or represent a text string as a text block. Cache normalization is
+shallow; it must never erase identically named fields inside tool inputs or
+hosted results. Real-engine captures confirm these existing transformations.
+No runtime, upstream patch, or release-policy change is authorized by this
+review repair. Both real-engine hosted suites were rerun: **5 passed on each
+version**. A before/after probe executing the actual test assertions verified
+**26 assertion-only cases** across all five scenarios, including previously
+accepted missing/duplicate/reordered messages, declarations and stream events,
+allowed canonicalization, and preservation of nested business fields named
+`cache_control`. This is assertion evidence, not 26 additional engine E2Es.
+The upstream concurrency failure remains an adoption blocker.
+
 ## Known by design
 
 - This trial does not enable upstream `latest` resolution and does not change

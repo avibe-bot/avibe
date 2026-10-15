@@ -2607,7 +2607,7 @@ scenarios:
     related_tests:
       - tests/test_model_hub_runtime.py::test_only_an_xai_responses_entry_marks_its_models_is_compat
   - id: MH-ENGINE-HOSTED-001
-    name: The real CPA Responses path preserves hosted declarations, include values, output items, partial images and usage
+    name: The real CPA Responses path preserves complete tool declarations, include cardinality and the complete decoded response event sequence
     status: assert
     kind: compatibility
     layer: e2e-auto
@@ -2625,13 +2625,13 @@ scenarios:
     layer: e2e-auto
     test: tests/e2e/test_model_hub_engine_hosted_passthrough.py::test_image_generation_is_never_injected_or_answered_by_the_engine
   - id: MH-ENGINE-HOSTED-004
-    name: The real CPA Anthropic path preserves hosted search declarations, result blocks, citations and server-tool usage
+    name: The real CPA Anthropic path preserves complete hosted search declarations and the decoded response event sequence including tool inputs, results, citations and usage
     status: assert
     kind: compatibility
     layer: e2e-auto
     test: tests/e2e/test_model_hub_engine_hosted_passthrough.py::test_anthropic_web_search_and_its_results_pass_through
   - id: MH-ENGINE-HOSTED-005
-    name: The real CPA Anthropic path preserves replayed server tools, search results and cited answer history
+    name: The real CPA Anthropic path preserves the complete ordered replay message sequence and its tool, result and citation contents
     status: assert
     kind: compatibility
     layer: e2e-auto

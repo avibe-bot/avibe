@@ -1,4 +1,4 @@
-"""Hosted tools pass through the pinned engine verbatim on same-protocol paths.
+"""Hosted tools preserve business payloads through the real engine on same-protocol paths.
 
 These engine-boundary scenarios protect same-protocol hosted declarations,
 ``include`` values, output items and replayed history against CPA upgrades.
@@ -245,6 +245,22 @@ def _events(raw: bytes) -> list[dict]:
     return parsed
 
 
+def _without_cache_control(item: dict) -> dict:
+    """Ignore only engine-added metadata on one tool or content block, never nested business data."""
+    return {key: value for key, value in item.items() if key != "cache_control"}
+
+
+def _anthropic_history(messages: list[dict]) -> list[dict]:
+    """Keep every message/block in order; normalize only text form and shallow cache metadata."""
+    normalized = []
+    for message in messages:
+        content = message["content"]
+        if isinstance(content, str):
+            content = [{"type": "text", "text": content}]
+        normalized.append({**message, "content": [_without_cache_control(block) for block in content]})
+    return normalized
+
+
 def _record(tmp_path, payload: dict) -> None:
     text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     (tmp_path / "evidence.json").write_text(text, encoding="utf-8")
@@ -291,17 +307,11 @@ async def test_responses_hosted_declarations_and_items_pass_through(tmp_path, mo
     _record(tmp_path, exchange)
     sent = json.loads(exchange["upstream_body"])
     assert status == 200, raw[:500]
-    assert sent["tools"][:3] == [WEB_SEARCH, X_SEARCH, IMAGE_GENERATION], sent["tools"]
-    assert all(value in sent["include"] for value in INCLUDE), sent["include"]
-    events = _events(raw)
-    done = [event["item"] for event in events if event.get("type") == "response.output_item.done"]
-    assert done == items, done
-    partials = [event for event in events if event.get("type") == "response.image_generation_call.partial_image"]
-    assert [event["partial_image_index"] for event in partials] == [0, 1]
-    assert all(event["partial_image_b64"] == _PNG_B64 for event in partials)
-    [completed] = [event["response"] for event in events if event.get("type") == "response.completed"]
-    assert completed["output"] == items
-    assert completed["usage"] == RESPONSES_USAGE
+    assert sent["tools"] == body["tools"], sent["tools"]
+    # CPA canonicalizes include order; compare the full multiset, not membership.
+    assert sorted(sent["include"]) == sorted(INCLUDE), sent["include"]
+    # Every decoded event must survive, including progress, deltas, citations and usage.
+    assert _events(raw) == _events(reply)
 
 
 async def test_responses_hosted_history_replays_verbatim(tmp_path, monkeypatch) -> None:
@@ -327,6 +337,7 @@ async def test_responses_hosted_history_replays_verbatim(tmp_path, monkeypatch) 
     expected_history = [item for item in history if item.get("type") != "reasoning"]
     replayed_history = [item for item in replayed if item.get("type") != "reasoning"]
     assert replayed_history == expected_history, replayed
+    assert _events(raw) == _events(reply)
 
 
 async def test_image_generation_is_never_injected_or_answered_by_the_engine(tmp_path, monkeypatch) -> None:
@@ -341,7 +352,8 @@ async def test_image_generation_is_never_injected_or_answered_by_the_engine(tmp_
     _record(tmp_path, exchange)
     assert status == 200, raw[:500]
     sent = json.loads(exchange["upstream_body"])
-    assert [tool["type"] for tool in sent.get("tools") or []] == ["function"], sent.get("tools")
+    assert sent["tools"] == body["tools"], sent.get("tools")
+    assert _events(raw) == _events(reply)
 
 
 async def test_anthropic_web_search_and_its_results_pass_through(tmp_path, monkeypatch) -> None:
@@ -356,20 +368,12 @@ async def test_anthropic_web_search_and_its_results_pass_through(tmp_path, monke
     _record(tmp_path, exchange)
     assert status == 200, raw[:500]
     sent = json.loads(exchange["upstream_body"])
-    assert ANTHROPIC_WEB_SEARCH in sent["tools"], sent["tools"]
-    starts = [event["content_block"] for event in _events(raw) if event.get("type") == "content_block_start"]
-    assert starts[0] == {"type": "server_tool_use", "id": "srvtoolu_01", "name": "web_search", "input": {}}, starts
-    assert starts[1] == {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_01", "content": [HIT]}, starts
-    events = _events(raw)
-    citations = [event["delta"]["citation"] for event in events
-                 if event.get("delta", {}).get("type") == "citations_delta"]
-    assert citations == [LOCATION]
-    [usage] = [event["usage"] for event in events if event.get("type") == "message_delta"]
-    assert usage["server_tool_use"] == {"web_search_requests": 1, "web_fetch_requests": 0}
+    assert [_without_cache_control(tool) for tool in sent["tools"]] == body["tools"], sent["tools"]
+    assert _events(raw) == _events(reply)
 
 
 async def test_anthropic_hosted_history_replays_verbatim(tmp_path, monkeypatch) -> None:
-    """MH-ENGINE-HOSTED-005: Anthropic server tools, results and cited history survive CPA."""
+    """MH-ENGINE-HOSTED-005: the entire Anthropic replay keeps messages, tools, results and citations."""
     use = {"type": "server_tool_use", "id": "srvtoolu_01", "name": "web_search",
            "input": {"query": "CLIProxyAPI releases"}}
     result = {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_01", "content": [HIT]}
@@ -386,5 +390,6 @@ async def test_anthropic_hosted_history_replays_verbatim(tmp_path, monkeypatch) 
     exchange = _exchange(captured, status, raw)
     _record(tmp_path, exchange)
     assert status == 200, raw[:500]
-    replayed = json.loads(exchange["upstream_body"])["messages"][1]["content"]
-    assert replayed == [use, result, text], replayed
+    replayed = json.loads(exchange["upstream_body"])["messages"]
+    assert _anthropic_history(replayed) == _anthropic_history(body["messages"]), replayed
+    assert _events(raw) == _events(reply)
