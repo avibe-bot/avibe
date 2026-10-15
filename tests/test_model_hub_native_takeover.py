@@ -517,7 +517,7 @@ def test_rejected_refresh_finishes_custody_without_claiming_success(monkeypatch,
     assert repeated.value.code == "migration_credentials_invalid"
     assert len(adapter.validated) == 2
     # Normal Hub config/auth repair is not trapped behind the migration gate.
-    service._save_config(service._clone_config(store.config))
+    asyncio.run(service._save_config(service._clone_config(store.config)))
 
 
 @pytest.mark.parametrize("crash_before_receipt", [False, True])
