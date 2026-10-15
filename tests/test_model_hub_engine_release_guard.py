@@ -4,7 +4,10 @@ import gzip
 import hashlib
 import io
 import json
+import os
+import shutil
 import subprocess
+import sys
 import tarfile
 from pathlib import Path
 
@@ -82,6 +85,136 @@ def _fake_download(remote: dict[str, bytes]):
         destination.write_bytes(payload)
 
     return download
+
+
+def test_manifest_go_version_cli_accepts_alternate_stable_pin(tmp_path: Path) -> None:
+    manifest_path, _owned, _built = _manifest(tmp_path)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["build"] = {"go_version": "go1.27.1"}
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(guard.REPO_ROOT / "scripts/model_hub_engine_release_guard.py"),
+            "--manifest",
+            str(manifest_path),
+            "go-version",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "go1.27.1"
+
+
+@pytest.mark.parametrize(
+    "build",
+    [{}, {"go_version": "1.27.1"}, {"go_version": "go1.27"}, {"go_version": "go1.27.1-beta1"}],
+)
+def test_manifest_go_version_cli_rejects_missing_or_nonstable_pin(tmp_path: Path, build: dict) -> None:
+    manifest_path, _owned, _built = _manifest(tmp_path)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["build"] = build
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(guard.REPO_ROOT / "scripts/model_hub_engine_release_guard.py"),
+            "--manifest",
+            str(manifest_path),
+            "go-version",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "exact stable Go version" in result.stderr
+
+
+def _run_workflow_go_pin_step(tmp_path: Path, build: dict | None) -> tuple[subprocess.CompletedProcess[str], bytes, bytes]:
+    import yaml
+
+    workflow = yaml.safe_load(
+        (guard.REPO_ROOT / ".github/workflows/model-hub-engine-release-guard.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    steps = workflow["jobs"]["build-patched-source"]["steps"]
+    producer = next(step for step in steps if step.get("id") == "go_pin")["run"]
+    staged = tmp_path / "workflow"
+    (staged / "scripts").mkdir(parents=True)
+    (staged / "vibe/model_hub_runtime").mkdir(parents=True)
+    shutil.copy2(
+        guard.REPO_ROOT / "scripts/model_hub_engine_release_guard.py",
+        staged / "scripts/model_hub_engine_release_guard.py",
+    )
+    manifest = staged / "vibe/model_hub_runtime/cliproxyapi_manifest.json"
+    payload = {"build": build} if build is not None else {}
+    manifest.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    before = manifest.read_bytes()
+    output = staged / "github-output"
+    environment = os.environ.copy()
+    environment["GITHUB_OUTPUT"] = str(output)
+    result = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", producer],
+        cwd=staged,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result, output.read_bytes() if output.exists() else b"", before
+
+
+def test_publication_workflow_produces_bare_go_semver_for_setup_go(tmp_path: Path) -> None:
+    import yaml
+
+    workflow = yaml.safe_load(
+        (guard.REPO_ROOT / ".github/workflows/model-hub-engine-release-guard.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    steps = workflow["jobs"]["build-patched-source"]["steps"]
+    resolve_index = next(index for index, step in enumerate(steps) if step.get("id") == "go_pin")
+    resolve = steps[resolve_index]
+    setup_index = next(
+        index for index, step in enumerate(steps) if str(step.get("uses", "")).startswith("actions/setup-go@")
+    )
+    setup = steps[setup_index]
+
+    assert resolve_index < setup_index
+    assert "raw_go_version" in resolve["run"]
+    assert "${raw_go_version#go}" in resolve["run"]
+    assert setup["with"]["go-version"] == "${{ steps.go_pin.outputs.go_version }}"
+    assert 'go-version: "1.26.9"' not in (guard.REPO_ROOT / ".github/workflows/model-hub-engine-release-guard.yml").read_text(
+        encoding="utf-8"
+    )
+
+    for raw_version, expected in (("go1.26.9", "1.26.9"), ("go1.27.1", "1.27.1")):
+        result, output, before = _run_workflow_go_pin_step(tmp_path / raw_version, {"go_version": raw_version})
+        assert result.returncode == 0, result.stderr
+        assert output == f"go_version={expected}\n".encode()
+        assert before == (tmp_path / raw_version / "workflow/vibe/model_hub_runtime/cliproxyapi_manifest.json").read_bytes()
+
+
+@pytest.mark.parametrize(
+    "build",
+    [None, {}, {"go_version": "1.27.1"}, {"go_version": "go1.27"}, {"go_version": "go1.27.1-beta1"}],
+)
+def test_publication_workflow_rejects_invalid_go_pin_without_consumer_output(
+    tmp_path: Path,
+    build: dict | None,
+) -> None:
+    result, output, before = _run_workflow_go_pin_step(tmp_path, build)
+    assert result.returncode != 0
+    assert output == b""
+    assert before == (tmp_path / "workflow/vibe/model_hub_runtime/cliproxyapi_manifest.json").read_bytes()
 
 
 def test_fetch_owned_release_materializes_exact_verified_assets(

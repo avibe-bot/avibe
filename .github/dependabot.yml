@@ -7,14 +7,82 @@ updates:
       day: monday
       time: "09:00"
       timezone: Asia/Shanghai
+    open-pull-requests-limit: 3
     groups:
-      github-actions:
+      github-actions-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: npm
+    directory: /ui
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 3
+    groups:
+      ui-npm-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: npm
+    directory: /desktop
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 3
+    groups:
+      desktop-npm-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: cargo
+    directory: /desktop
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 3
+    groups:
+      desktop-cargo-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  # Dependabot's uv ecosystem can update the declared Python requirements and
+  # uv.lock together. `increase` makes declaration-bound maintenance explicit;
+  # review still rejects lock-only drift. Keep the Claude SDK on its explicit
+  # runtime path: it bundles a CLI and has a separate Windows wheel constraint.
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 3
+    versioning-strategy: increase
+    groups:
+      python-uv-minor-patch:
         patterns:
           - "*"
         update-types:
           - minor
           - patch
     ignore:
-      - dependency-name: "*"
-        update-types:
-          - version-update:semver-major
+      - dependency-name: claude-agent-sdk
