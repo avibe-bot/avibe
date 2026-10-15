@@ -345,10 +345,13 @@ processes can keep using the snapshot each one advertised. After a snapshot is
 in place, Avibe atomically updates `builtin-skills/<name>` to the current
 snapshot and removes named live links that no longer exist in that snapshot.
 Live-link publication is serialized across snapshot IDs so overlapping
-publishers cannot mix catalogs. Built-in directory names must match the
-declared Skill name. If a platform cannot refresh a live link, Avibe removes a
-recognized stale alias rather than leaving it pointing at an older snapshot.
-Agents still receive the bound snapshot path when they load a Skill.
+publishers cannot mix catalogs. Snapshot materialization still takes the
+legacy per-snapshot lock and stages under `.snapshots/`, so a still-running
+older publisher cannot share this version's staging directory. Built-in
+directory names must match the declared Skill name. If a platform cannot
+refresh a live link, Avibe removes a recognized stale alias rather than
+leaving it pointing at an older snapshot. Agents still receive the bound
+snapshot path when they load a Skill.
 Published snapshots are not a user customization surface. V1 does not
 garbage-collect old snapshots, detect later manual tampering, or repair user
 changes there.

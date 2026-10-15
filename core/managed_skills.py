@@ -1777,40 +1777,43 @@ def publish_builtin_skills(
 
     umbrella.mkdir(parents=True, exist_ok=True)
     snapshots_root.mkdir(mode=0o700, exist_ok=True)
-    lock_path = umbrella / ".publish.lock"
-    with MigrationFileLock(lock_path, timeout_seconds=None):
-        if _readable_snapshot_dir(destination) is not None:
-            _ensure_readable_snapshot(destination)
-            _publish_live_skill_links(umbrella, destination)
-            return snapshot_id
-        if _readable_snapshot_dir(legacy_destination) is not None:
-            _ensure_readable_snapshot(legacy_destination)
-            _publish_live_skill_links(umbrella, legacy_destination)
-            return snapshot_id
-        staging = umbrella / f".snapshot-{snapshot_id}.staging"
-        _remove_snapshot_staging(staging)
-        if os.path.lexists(destination):
-            _ensure_readable_snapshot(destination)
-            _publish_live_skill_links(umbrella, destination)
-            return snapshot_id
-        staging.mkdir(mode=0o700)
-        try:
-            _copy_snapshot_entries(_snapshot_entries(source), staging)
-            _validate_builtin_catalog(staging)
-            if snapshot_tree_digest(staging) != snapshot_id:
-                raise RuntimeError("Built-in Skill source changed during publication")
+    catalog_lock = umbrella / ".publish.lock"
+    snapshot_lock = umbrella / f".publish-{snapshot_id}.lock"
+    with MigrationFileLock(catalog_lock, timeout_seconds=None):
+        with MigrationFileLock(snapshot_lock, timeout_seconds=None):
+            if _readable_snapshot_dir(destination) is not None:
+                _ensure_readable_snapshot(destination)
+                _publish_live_skill_links(umbrella, destination)
+                return snapshot_id
+            if _readable_snapshot_dir(legacy_destination) is not None:
+                _ensure_readable_snapshot(legacy_destination)
+                _publish_live_skill_links(umbrella, legacy_destination)
+                return snapshot_id
+            staging = snapshots_root / f".snapshot-{snapshot_id}.staging"
+            _remove_snapshot_staging(staging)
+            _remove_snapshot_staging(umbrella / f".snapshot-{snapshot_id}.staging")
+            if os.path.lexists(destination):
+                _ensure_readable_snapshot(destination)
+                _publish_live_skill_links(umbrella, destination)
+                return snapshot_id
+            staging.mkdir(mode=0o700)
             try:
-                os.rename(staging, destination)
-            except OSError as exc:
-                if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
-                    raise
-        finally:
-            if os.path.lexists(staging):
-                _remove_snapshot_staging(staging)
-        if _readable_snapshot_dir(destination) is None:
-            raise RuntimeError(f"Built-in Skill snapshot is unavailable: {destination}")
-        _ensure_readable_snapshot(destination)
-        _publish_live_skill_links(umbrella, destination)
+                _copy_snapshot_entries(_snapshot_entries(source), staging)
+                _validate_builtin_catalog(staging)
+                if snapshot_tree_digest(staging) != snapshot_id:
+                    raise RuntimeError("Built-in Skill source changed during publication")
+                try:
+                    os.rename(staging, destination)
+                except OSError as exc:
+                    if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
+                        raise
+            finally:
+                if os.path.lexists(staging):
+                    _remove_snapshot_staging(staging)
+            if _readable_snapshot_dir(destination) is None:
+                raise RuntimeError(f"Built-in Skill snapshot is unavailable: {destination}")
+            _ensure_readable_snapshot(destination)
+            _publish_live_skill_links(umbrella, destination)
     return snapshot_id
 
 

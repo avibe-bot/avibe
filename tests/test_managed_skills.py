@@ -1607,12 +1607,16 @@ def test_publication_reclaims_interrupted_staging_and_retries(tmp_path: Path) ->
     destination = tmp_path / "builtin-skills"
     _write_skill(source, "alpha", "alpha", "Alpha")
     snapshot_id = snapshot_tree_digest(source)
-    staging = destination / f".snapshot-{snapshot_id}.staging"
-    staging.mkdir(parents=True)
-    (staging / "partial").write_text("interrupted", encoding="utf-8")
+    legacy_staging = destination / f".snapshot-{snapshot_id}.staging"
+    nested_staging = destination / BUILTIN_SNAPSHOTS_DIRNAME / f".snapshot-{snapshot_id}.staging"
+    legacy_staging.mkdir(parents=True)
+    nested_staging.mkdir(parents=True)
+    (legacy_staging / "partial").write_text("interrupted", encoding="utf-8")
+    (nested_staging / "partial").write_text("interrupted", encoding="utf-8")
 
     assert publish_builtin_skills(source_root=source, destination_root=destination) == snapshot_id
-    assert not staging.exists()
+    assert not legacy_staging.exists()
+    assert not nested_staging.exists()
     assert (_published_snapshot(destination, snapshot_id) / "alpha" / "SKILL.md").is_file()
 
 
