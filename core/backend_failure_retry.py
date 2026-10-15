@@ -200,9 +200,9 @@ def reserve_retry(
                 metadata = {}
             metadata.update(
                 {
-                    "vibey_resume": True,
+                    deliveries.VIBEY_RESUME_METADATA_KEY: True,
                     "retry_notice_id": notice_id,
-                    "vibey_source_turn_id": turn["id"],
+                    deliveries.VIBEY_SOURCE_TURN_METADATA_KEY: turn["id"],
                 }
             )
             retry_snapshot["metadata_json"] = json.dumps(

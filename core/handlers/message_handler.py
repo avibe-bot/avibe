@@ -200,7 +200,7 @@ class MessageHandler(BaseHandler):
             # trigger the /start command instead of sending empty message to agent
             has_files = bool(context.files)
             internal_vibey_resume = bool(
-                (context.platform_specific or {}).get("message_metadata", {}).get("vibey_resume")
+                (context.platform_specific or {}).get("vibey_resume") is True
             )
             if (not message or not message.strip()) and not has_files and not internal_vibey_resume:
                 if is_human:

@@ -12,7 +12,7 @@ class Agent:
                  context: ContextConfig | None = None) -> None: ...   # C-9; excludes hooks in v1 (§3)
 
     def run(self, input: Input, *, turn_id: str) -> AsyncIterator[AgentEvent]: ...   # one Avibe Turn
-    def resume(self, input: Input, *, turn_id: str) -> AsyncIterator[AgentEvent]: ...  # same Turn, no new input row
+    def resume(self, input: Input, *, turn_id: str, turn_inputs: Iterable[int] | None = None) -> AsyncIterator[AgentEvent]: ...
     def steer(self, input: Input) -> bool: ...       # False: not accepted, the adapter keeps ownership
     def follow_up(self, input: Input) -> bool: ...
     def abort(self, reason: str) -> None: ...
@@ -30,8 +30,10 @@ wrapper.
 A transcript-only `resume` uses the same loop and cleanup path as `run`, but skips
 input consumption. It may be used only after the previous run has closed; the
 adapter supplies an existing input to `before_run` for hook setup but does not
-write a second `input` row. Retry eligibility and retry budgets are adapter
-policy, not loop policy.
+write a second `input` row. A fresh Agent passes the source Turn's committed input
+sequence numbers through `turn_inputs`; an Agent continuing its own run preserves
+its in-memory Turn-input set when the argument is omitted. Retry eligibility and
+retry budgets are adapter policy, not loop policy.
 
 
 ```text

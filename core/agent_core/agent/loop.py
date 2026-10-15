@@ -408,17 +408,27 @@ class Agent:
         input = deepcopy(input)
         return self._pump(turn_id, lambda emit: self._drive(emit, input, consume=True))
 
-    def resume(self, input: AgentInput, *, turn_id: str) -> AsyncIterator[AgentEvent]:
+    def resume(
+        self,
+        input: AgentInput,
+        *,
+        turn_id: str,
+        turn_inputs: Iterable[int] | None = None,
+    ) -> AsyncIterator[AgentEvent]:
         """Continue from the committed transcript without consuming another input row.
 
         The input is still passed to ``before_run`` so existing hook setup remains
-        unchanged; it is a control value, not a second transcript message.
+        unchanged; it is a control value, not a second transcript message. A fresh
+        Agent can provide the source Turn's input sequence numbers so compaction
+        pins only that Turn's inputs.
         """
         input = deepcopy(input)
+        resume_turn_inputs = None if turn_inputs is None else set(turn_inputs)
         return self._pump(
             turn_id,
             lambda emit: self._drive(emit, input, consume=False),
             preserve_turn_inputs=True,
+            resume_turn_inputs=resume_turn_inputs,
         )
 
     async def _pump(
@@ -427,8 +437,10 @@ class Agent:
         drive: Callable[[Callable[..., Awaitable[None]]], Awaitable[None]],
         *,
         preserve_turn_inputs: bool = False,
+        resume_turn_inputs: set[int] | None = None,
     ) -> AsyncIterator[AgentEvent]:
-        previous_turn_inputs = set(self._turn_inputs) if preserve_turn_inputs else set()
+        previous_turn_inputs = set(self._turn_inputs)
+        previous_seq = self._seq
         async with self._lock:
             if self._running:
                 raise RuntimeError("this Agent already has an active run")
@@ -440,9 +452,13 @@ class Agent:
             self._ctx = RunContext(self.session_id, turn_id, CancelToken())
             self._scope = RunScope(self._ctx.cancel)
             self._outcome = OutcomeOwner()
-            self._seq = 0
+            self._seq = previous_seq if preserve_turn_inputs else 0
             if preserve_turn_inputs:
-                self._turn_inputs = previous_turn_inputs
+                self._turn_inputs = (
+                    set(resume_turn_inputs)
+                    if resume_turn_inputs is not None
+                    else previous_turn_inputs
+                )
 
         # Bounded delivery applies backpressure to provider streaming. No emit
         # awaits this queue while holding the input-admission lock.
@@ -596,15 +612,10 @@ class Agent:
                 self._unproductive = 0
                 if consume:
                     self._turn_inputs = set()
-                elif not self._turn_inputs:
-                    self._turn_inputs = {
-                        row.context_seq
-                        for row in self._rows
-                        if row.kind == "input" and row.context_seq is not None
-                    }
                 self._attempts = []
                 self._refusals = _Refusals()
-                self._generated_images = []
+                if consume:
+                    self._generated_images = []
                 loaded = True
                 system = self.system
                 self._run_tools = dict(self._tools)

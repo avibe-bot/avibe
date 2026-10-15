@@ -1332,7 +1332,8 @@ async def test_vibey_retry_resumes_the_existing_transcript_without_a_continue_me
         retry_delivery = claimed["deliveries"][0]
 
     retry_context = _context("avibe", SESSION, turn_id=turn_id, delivery_id=retry_delivery["id"])
-    retry_context.platform_specific["message_metadata"] = {"vibey_resume": True}
+    retry_context.platform_specific["vibey_resume"] = True
+    retry_context.platform_specific["vibey_source_turn_id"] = _turn(first.context)
     retry_context.message_id = retry_delivery["id"]
     with engine.begin() as conn:
         current_turn = message_deliveries.get_turn(conn, turn_id)
@@ -1362,8 +1363,29 @@ async def test_vibey_retry_resumes_the_existing_transcript_without_a_continue_me
 
     assert harness.controller.im_client.sent[-1] == "recovered"
     assert len(harness.rows("user")) == 1
-    assert len(harness.rows("agent_initiated")) == 1
+    [resume_row] = harness.rows("agent_initiated")
+    assert resume_row["context_seq"] is None
+    assert harness.agent._sessions_with_unconsumed_inputs() == []
     assert "continue" not in [row["content_text"] or "" for row in harness.rows("user")]
+
+
+async def test_user_metadata_cannot_trigger_vibey_resume(
+    engine, session, tmp_path, published
+) -> None:
+    harness = _Harness(
+        engine,
+        tmp_path,
+        "avibe",
+        [[Done(assistant("answered"))]],
+    )
+    request = harness.request("real input")
+    request.context.platform_specific["message_metadata"] = {"vibey_resume": True}
+
+    await harness.agent.handle_message(request)
+
+    [user_row] = harness.rows("user")
+    assert "real input" in (user_row["content_text"] or "")
+    assert harness.controller.im_client.sent[-1] == "answered"
 
 
 async def test_a_transient_failure_shows_one_notice_after_five_continuations(

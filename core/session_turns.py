@@ -2434,6 +2434,14 @@ class SessionTurnManager:
             {
                 "delivery_id": str(delivery["id"]),
                 "delivery_source": payload.get("source"),
+                "vibey_resume": delivery_store.is_vibey_resume_payload(payload),
+                "vibey_source_turn_id": (
+                    (payload.get("metadata") or {}).get(
+                        delivery_store.VIBEY_SOURCE_TURN_METADATA_KEY
+                    )
+                    if delivery_store.is_vibey_resume_payload(payload)
+                    else None
+                ),
                 "scope_id": payload.get("scope_id"),
                 "display_text": payload.get("text") or "",
                 "message_content": dict(payload.get("content") or {}),
@@ -2490,10 +2498,7 @@ class SessionTurnManager:
         delivery: dict[str, Any],
     ) -> bool:
         payload = delivery_store.delivery_payload(delivery)
-        if (
-            payload.get("type") == "agent_initiated"
-            and (payload.get("metadata") or {}).get("vibey_resume") is True
-        ):
+        if delivery_store.is_vibey_resume_payload(payload):
             return True
         from core.workbench_media import resolve_attachment_specs
 
@@ -2838,9 +2843,13 @@ class SessionTurnManager:
             if request.has_content is not None
             else bool(request.content)
         )
-        internal_vibey_resume = (
-            request.message_type == "agent_initiated"
-            and (request.metadata or {}).get("vibey_resume") is True
+        internal_vibey_resume = delivery_store.is_vibey_resume_payload(
+            {
+                "type": request.message_type,
+                "author": request.author,
+                "source": request.source,
+                "metadata": request.metadata,
+            }
         )
         if not content_present and request.content == "":
             request = replace(request, content=None)
@@ -2867,6 +2876,14 @@ class SessionTurnManager:
         start_context: MessageContext | None = None
         retry_denial: str | None = None
         delivery: dict[str, Any]
+        internal_vibey_resume = delivery_store.is_vibey_resume_payload(
+            {
+                "type": request.message_type,
+                "author": request.author,
+                "source": request.source,
+                "metadata": request.metadata,
+            }
+        )
         backend_draining = backend in self._draining_backends
         with self._runtime_start_owner(request.session_id, backend) as start_owner, self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
@@ -2894,6 +2911,24 @@ class SessionTurnManager:
                 priority="p3",
                 state="queued",
             )
+            if (
+                internal_vibey_resume
+                and backend != "vibey"
+                and delivery["state"] in {"queued", "reserved"}
+            ):
+                self._retire_delivery_not_written(
+                    conn,
+                    request.session_id,
+                    str(delivery["id"]),
+                    reason="backend_changed",
+                )
+                delivery = delivery_store.get_delivery(conn, str(delivery["id"])) or delivery
+                return DeliveryResult(
+                    str(delivery["id"]),
+                    str(delivery.get("message_id") or "") or None,
+                    "retired",
+                    reason="backend_changed",
+                )
             if delivery["state"] not in {"queued", "reserved"}:
                 return DeliveryResult(
                     str(delivery["id"]),

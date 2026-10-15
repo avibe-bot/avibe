@@ -41,8 +41,11 @@ adapter-local policy over the same committed transcript.
   an accepted Vibey Turn retries from its committed transcript through a hidden
   `agent_initiated` Delivery, so no visible `continue` Message is created. It
   also performs up to five additional transcript continuations automatically
-  for transient provider failures before emitting the failure notice. Neither
-  path rolls back transcript history or replays a committed tool call.
+  for transient provider failures before emitting the failure notice. The hidden
+  ownership row is excluded from Vibey's T3 unconsumed-input recovery, and a
+  backend change before admission retires the Vibey-specific Delivery rather
+  than sending an empty prompt to a native backend. Neither path rolls back
+  transcript history or replays a committed tool call.
 - A proven `not_written` Turn reuses its retained, unaccepted initial Delivery
   and the normal queue/admission path, preserving its prompt and attachments.
   Unknown native acceptance is not proof that replay is safe.
@@ -52,8 +55,9 @@ adapter-local policy over the same committed transcript.
 - Retry is independent of the composer draft. The original error remains
   visible; the button reports that retry was requested. Accepted continuation
   input remains in the ordinary transcript for truthful history.
-- There is no implicit model switch, auth reset, service restart, automatic
-  retry loop, native history truncation, or new storage table.
+- There is no backend-wide automatic retry loop, implicit model switch, auth reset,
+  service restart, native history truncation, or new storage table. Vibey's bounded
+  continuation is the adapter-local exception described above.
 
 ## Interfaces and ownership
 

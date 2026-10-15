@@ -119,9 +119,54 @@ async def test_resume_reuses_the_committed_transcript_without_consuming_an_input
         "recovered"
     ]
     assert len(provider.requests) == 2
+    assert second[0].seq == first[-1].seq + 1
 
 
-async def test_C1_tool_set_is_captured_per_request_and_unavailable_calls_are_errors():
+async def test_resume_uses_only_explicit_source_turn_inputs_for_a_fresh_agent():
+    store = InMemoryTranscriptStore()
+    first = await store.consume_input("session", "first", user("first"))
+    await store.consume_input("session", "other", user("other"))
+    provider = ScriptedProvider([[Done(assistant("recovered"))]])
+    agent = make_agent(provider, store=store)
+
+    events = [
+        event
+        async for event in agent.resume(
+            input_row("retry", "ignored"),
+            turn_id="retry-turn",
+            turn_inputs={first.context_seq},
+        )
+    ]
+
+    assert events[-1].reason == "completed"
+    assert agent._turn_inputs == {first.context_seq}
+
+
+async def test_resume_preserves_images_committed_by_an_earlier_tool_call():
+    from core.agent_core.messages import HostedResult, ProxyExecution
+
+    hosted = HostedResult(
+        HostedRecord(status="completed", images=(HostedImage(path="/media/winner.png", mime="image/png"),)),
+        ProxyExecution(ORIGIN, "src_executor01", "metered", mode="direct"),
+    )
+    tool = FakeTool("image_generate", result=ToolResult((text("saved"),), hosted=hosted))
+    provider = ScriptedProvider(
+        [
+            [Done(assistant("", calls=[ToolCallBlock("call_img", "image_generate", {})]))],
+            [ProviderError("server", "temporary upstream failure", False)],
+            [Done(assistant("recovered"))],
+        ]
+    )
+    agent = make_agent(provider, tools=[tool])
+
+    first_events = await collect(agent, value="make an image")
+    second_events = [event async for event in agent.resume(input_row("retry", "ignored"), turn_id="turn")]
+
+    assert first_events[-1].reason == "error"
+    assert second_events[-1].reason == "completed"
+    assert agent._generated_images == [HostedImage(path="/media/winner.png", mime="image/png")]
+
+
     old, new = FakeTool("old"), FakeTool("new")
     entered, release = asyncio.Event(), asyncio.Event()
 

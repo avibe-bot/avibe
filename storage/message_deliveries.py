@@ -39,6 +39,20 @@ FAILURE_RETRY_HISTORY_KIND = "backend_failure_retry"
 WEB_PUSH_USER_KEY_METADATA = "_web_push_user_key"
 WEB_PUSH_USER_KEYS_METADATA = "_web_push_user_keys"
 WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA = "_web_push_authorization_contexts"
+VIBEY_RESUME_METADATA_KEY = "vibey_resume"
+VIBEY_SOURCE_TURN_METADATA_KEY = "vibey_source_turn_id"
+
+
+def is_vibey_resume_payload(payload: Mapping[str, Any]) -> bool:
+    """Return whether a Delivery carries the server-owned Vibey resume marker."""
+    metadata = payload.get("metadata")
+    return bool(
+        payload.get("type") == "agent_initiated"
+        and payload.get("author") == "harness"
+        and payload.get("source") == "harness"
+        and isinstance(metadata, Mapping)
+        and metadata.get(VIBEY_RESUME_METADATA_KEY) is True
+    )
 
 
 def legacy_admitted_user_id(metadata: object) -> str | None:

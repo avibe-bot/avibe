@@ -8049,8 +8049,59 @@ async def test_agent_initiated_continuation_materializes_as_hidden_turn_input(
 
 
 @pytest.mark.anyio
+async def test_vibey_resume_delivery_is_retired_if_the_resolved_backend_changes(
+    managers,
+) -> None:
+    manager, _other, engine, _engine_b, starts = managers
+    delivery_id = delivery_store.new_delivery_id()
+    metadata = {
+        delivery_store.VIBEY_RESUME_METADATA_KEY: True,
+        delivery_store.VIBEY_SOURCE_TURN_METADATA_KEY: "source-turn",
+    }
+    with engine.begin() as conn:
+        delivery_store.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="reserved",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="harness",
+                source="harness",
+                message_type="agent_initiated",
+                text="",
+                metadata=metadata,
+            ),
+            dispatch_text="",
+        )
+
+    result = await manager.deliver(
+        DeliveryRequest(
+            session_id="ses_fsm",
+            priority="p3",
+            content="",
+            has_content=False,
+            delivery_id=delivery_id,
+            author="harness",
+            source="harness",
+            message_type="agent_initiated",
+            metadata=metadata,
+        ),
+        context=_context(),
+    )
+
+    assert result.state == "retired"
+    assert result.reason == "backend_changed"
+    assert starts == []
+    with engine.connect() as conn:
+        assert delivery_store.get_delivery(conn, delivery_id)["state"] == "retired"
+
+
+@pytest.mark.anyio
 async def test_failed_session_lifecycle_preserves_sampled_epoch(managers) -> None:
-    """A failed reset preserves an in-flight turn epoch."""
 
     manager, _other, _engine, _engine_b, _starts = managers
     sampled_snapshot = manager.snapshot_session_lifecycle("ses_fsm")

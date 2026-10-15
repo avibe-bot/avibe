@@ -358,7 +358,13 @@ class VibeyAgent(BaseAgent):
             await indicator.delete_ack_message(request)
         accept_catalog(self.controller, context, skill_catalog, backend=BACKEND)
         agent_input: Optional[AgentInput] = AgentInput(input_id, message)
-        transcript_resume = bool((context.platform_specific or {}).get("message_metadata", {}).get("vibey_resume"))
+        platform_specific = context.platform_specific or {}
+        transcript_resume = platform_specific.get("vibey_resume") is True
+        resume_turn_inputs = (
+            self._resume_turn_inputs(session_id, platform_specific.get("vibey_source_turn_id"))
+            if transcript_resume
+            else None
+        )
         while agent_input is not None:
             if turn.stop_requested:
                 # A Stop acknowledged before this run could abort: no run starts. An input
@@ -366,11 +372,16 @@ class VibeyAgent(BaseAgent):
                 turn.reason = "aborted"
                 break
             stream = (
-                turn.agent.resume(agent_input, turn_id=turn.turn_id)
+                turn.agent.resume(
+                    agent_input,
+                    turn_id=turn.turn_id,
+                    turn_inputs=resume_turn_inputs,
+                )
                 if transcript_resume
                 else turn.agent.run(agent_input, turn_id=turn.turn_id)
             )
             transcript_resume = False
+            resume_turn_inputs = None
             async for event in stream:
                 await self._on_event(turn, event)
             if self._can_auto_continue(turn) and turn.continuations < _MAX_AUTO_CONTINUATIONS:
@@ -390,6 +401,28 @@ class VibeyAgent(BaseAgent):
             await self._settle_left_open(runtime)
         await self._settle(turn)
         self._maybe_backfill_session_title(request, session_id)
+
+    def _resume_turn_inputs(self, session_id: str, source_turn_id: Any) -> tuple[int, ...]:
+        """Return only the committed input sequence numbers owned by a failed Turn."""
+        if not isinstance(source_turn_id, str) or not source_turn_id:
+            return ()
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                select(messages.c.context_seq)
+                .select_from(
+                    message_deliveries.join(
+                        messages, message_deliveries.c.message_id == messages.c.id
+                    )
+                )
+                .where(
+                    message_deliveries.c.turn_id == source_turn_id,
+                    messages.c.session_id == session_id,
+                    messages.c.context_seq.is_not(None),
+                    messages.c.type.in_(INPUT_TYPES),
+                )
+                .order_by(messages.c.context_seq)
+            ).scalars()
+            return tuple(int(seq) for seq in rows if seq is not None)
 
     @staticmethod
     def _can_auto_continue(run: _Run) -> bool:
@@ -1065,6 +1098,10 @@ class VibeyAgent(BaseAgent):
                     conn, session_id=session_id, attachments=list(content.get("attachments") or [])
                 )
                 delivery = delivery_store.get_delivery(conn, row["delivery_id"])
+                if delivery is None or delivery_store.is_vibey_resume_payload(
+                    delivery_store.execution_delivery_payload(conn, delivery)
+                ):
+                    continue
                 # A Turn's initial input is sent as the Turn's dispatch text, which the Turn owner
                 # derived from its Delivery batch (attachment notes, merged scheduled inputs) and
                 # keeps after acceptance; the row's display text omits that.
@@ -1647,24 +1684,29 @@ class VibeyAgent(BaseAgent):
     def _sessions_with_unconsumed_inputs(self) -> list[str]:
         """Sessions with inputs accepted into a ``vibey`` Turn that no run consumed (T3)."""
         with self._engine.connect() as conn:
-            return sorted(
-                conn.execute(
-                    select(messages.c.session_id)
-                    .select_from(
-                        messages.join(message_deliveries, message_deliveries.c.message_id == messages.c.id).join(
-                            session_turns, session_turns.c.id == message_deliveries.c.turn_id
-                        )
+            rows = conn.execute(
+                select(messages.c.session_id, message_deliveries.c.id.label("delivery_id"))
+                .select_from(
+                    messages.join(message_deliveries, message_deliveries.c.message_id == messages.c.id).join(
+                        session_turns, session_turns.c.id == message_deliveries.c.turn_id
                     )
-                    .where(
-                        messages.c.session_id.is_not(None),
-                        messages.c.context_seq.is_(None),
-                        messages.c.type.in_(INPUT_TYPES),
-                        message_deliveries.c.state == "accepted",
-                        session_turns.c.backend == BACKEND,
-                    )
-                    .distinct()
-                ).scalars()
-            )
+                )
+                .where(
+                    messages.c.session_id.is_not(None),
+                    messages.c.context_seq.is_(None),
+                    messages.c.type.in_(INPUT_TYPES),
+                    message_deliveries.c.state == "accepted",
+                    session_turns.c.backend == BACKEND,
+                )
+            ).all()
+            candidate_ids = set()
+            for session_id, delivery_id in rows:
+                delivery = delivery_store.get_delivery(conn, delivery_id)
+                if delivery is not None and not delivery_store.is_vibey_resume_payload(
+                    delivery_store.execution_delivery_payload(conn, delivery)
+                ):
+                    candidate_ids.add(session_id)
+            return sorted(candidate_ids)
 
     def _session_workdir(self, session_id: str) -> str:
         with self._engine.connect() as conn:
