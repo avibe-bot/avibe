@@ -288,7 +288,9 @@ def test_candidate_mode_writes_real_digests_and_owned_urls_without_pinned_hashes
         if command[:2] == ["go", "version"]:
             return "go version go1.26.0 darwin/arm64\n"
         if command[:2] == ["go", "build"]:
-            assert (cwd / "patched-marker.txt").read_text(encoding="utf-8") == "patched twice\n"
+            marker = cwd / "patched-marker.txt"
+            if marker.exists():
+                assert marker.read_text(encoding="utf-8") == "patched twice\n"
             binary = Path(command[command.index("-o") + 1])
             binary.write_bytes(FIXTURE_BINARY)
             return ""
@@ -305,6 +307,18 @@ def test_candidate_mode_writes_real_digests_and_owned_urls_without_pinned_hashes
         builder.build_source_release(
             manifest,
             tmp_path / "rejected-candidate-output",
+            candidate=True,
+            source_repository=str(source),
+            go_binary="go",
+        )
+    manifest.write_bytes(candidate_bytes)
+    missing_toolchain = json.loads(candidate_bytes)
+    missing_toolchain["build"].pop("go_version")
+    manifest.write_text(json.dumps(missing_toolchain), encoding="utf-8")
+    with pytest.raises(builder.BuildError, match="must record an exact go_version"):
+        builder.build_source_release(
+            manifest,
+            tmp_path / "missing-toolchain-output",
             candidate=True,
             source_repository=str(source),
             go_binary="go",
@@ -341,3 +355,16 @@ def test_candidate_mode_writes_real_digests_and_owned_urls_without_pinned_hashes
             assert asset["binary_sha256"] == hashlib.sha256(binary.read()).hexdigest()
 
     assert guard.verify_release_assets(generated_manifest, output).version == "v7.3.16"
+
+    patchless = json.loads(candidate_bytes)
+    patchless["build"]["patches"] = []
+    manifest.write_text(json.dumps(patchless), encoding="utf-8")
+    patchless_output = tmp_path / "patchless-candidate-output"
+    patchless_manifest = builder.build_source_release(
+        manifest,
+        patchless_output,
+        candidate=True,
+        source_repository=str(source),
+        go_binary="go",
+    )
+    assert guard.verify_release_assets(patchless_manifest, patchless_output).version == "v7.3.16"

@@ -119,11 +119,15 @@ def _binary_name(platform: str) -> str:
     return "cli-proxy-api.exe" if TARGETS[platform][0] == "windows" else "cli-proxy-api"
 
 
-def _pinned_patches(build_metadata: Mapping[str, Any]) -> list[Path]:
+def _pinned_patches(
+    build_metadata: Mapping[str, Any],
+    *,
+    allow_empty: bool = False,
+) -> list[Path]:
     """Return the manifest's patches in apply order, each checked against its digest."""
 
     recorded = build_metadata.get("patches")
-    if not isinstance(recorded, list) or not recorded:
+    if not isinstance(recorded, list) or (not recorded and not allow_empty):
         raise BuildError("Model Hub manifest compatibility patch identity is invalid")
     patches: list[Path] = []
     for item in recorded:
@@ -302,7 +306,7 @@ def build_source_release(
     build_metadata = payload.get("build")
     if not isinstance(build_metadata, dict):
         build_metadata = {}
-    patches = _pinned_patches(build_metadata)
+    patches = _pinned_patches(build_metadata, allow_empty=candidate)
     source_date_epoch = build_metadata.get("source_date_epoch", 0)
     if isinstance(source_date_epoch, bool) or not isinstance(source_date_epoch, int) or source_date_epoch < 0:
         raise BuildError("Model Hub build source_date_epoch is invalid")
@@ -316,6 +320,10 @@ def build_source_release(
         )
         go_version = _go_toolchain_version(_run([go_binary, "version"], cwd=checkout))
         pinned_go_version = build_metadata.get("go_version")
+        if candidate and (
+            not isinstance(pinned_go_version, str) or not pinned_go_version
+        ):
+            raise BuildError("candidate Model Hub build must record an exact go_version")
         if isinstance(pinned_go_version, str) and pinned_go_version and go_version != pinned_go_version:
             raise BuildError(
                 f"Go toolchain {go_version} differs from pinned manifest toolchain {pinned_go_version}"

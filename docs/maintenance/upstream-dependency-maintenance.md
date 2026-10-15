@@ -104,7 +104,31 @@ Preparation:
    Candidate mode computes all six real archive sizes, archive hashes, binary
    hashes, and owned planned URLs, then runs the same release-asset verifier.
    It does not publish, call `gh`, or modify the packaged manifest.
-4. Verify the generated manifest again if a separate step consumes it:
+4. Before the installed-service E2E, materialize the target archive locally. For
+   the arm64 Incus target, create an offline manifest outside the exact asset
+   directory and point only `linux-arm64` at the container-local archive path:
+
+   ```bash
+   python3 - "$TMP/cpa-candidate-assets/model-hub-engine-manifest.json" \
+     "$TMP/cpa-offline-manifest.json" <<'PY'
+   import json
+   from pathlib import Path
+   import sys
+
+   source = Path(sys.argv[1])
+   destination = Path(sys.argv[2])
+   manifest = json.loads(source.read_text())
+   target = next(item for item in manifest["assets"] if item["platform"] == "linux-arm64")
+   target["url"] = (Path("/tmp/avibe-candidate-assets") / Path(target["url"]).name).as_uri()
+   destination.write_text(json.dumps(manifest, indent=2) + "\n")
+   PY
+   ```
+
+   Use the existing `scripts/incus_regression.py` Runner/`tenant_exec` helpers
+   to transfer that offline manifest and the matching generated archive into
+   `/tmp/avibe-candidate-assets` in the test-owned Incus target. Do not publish
+   the planned Avibe URL and do not touch the runner service at `/opt/avibe/venv`.
+5. Verify the generated manifest again if a separate step consumes it:
 
    ```bash
    python3 scripts/model_hub_engine_release_guard.py \
@@ -112,10 +136,13 @@ Preparation:
      verify --asset-dir "$TMP/cpa-candidate-assets"
    ```
 
-5. Run the focused builder/guard tests, one candidate service E2E in local
-   Incus, and prepare the PR with the candidate manifest/patch metadata. The
-   existing release workflow remains the publication/recovery authority; do
-   not change the packaged pin or publish from candidate mode.
+6. Run the focused builder/guard tests, then run the existing installed-service
+   acceptance once with
+   `VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH=/tmp/avibe-candidate-assets/offline-manifest.json`
+   (and the candidate normal wheel) against synthetic loopback upstreams. Record
+   the real result and prepare the PR with the candidate manifest/patch
+   metadata. The existing release workflow remains the publication/recovery
+   authority; do not change the packaged pin or publish from candidate mode.
 
 Strict pinned mode remains the recovery and publication path: it must verify
 bytes against the checked-in manifest and reject mismatched archives. A
@@ -216,8 +243,16 @@ an explicit exception; do not fill it with a placeholder archive.
 
 - ordinary npm dependencies in `/ui` and `/desktop`;
 - the desktop Cargo workspace in `/desktop`;
-- the root `uv` ecosystem, which updates declared Python requirements and
-  `uv.lock` together.
+- the root `uv` ecosystem, with `versioning-strategy: increase` so the lane
+  explicitly targets declaration-bound maintenance while updating `uv.lock`
+  when applicable.
+
+A uv PR is accepted only when it contains a meaningful `pyproject.toml`
+requirement change together with the corresponding `uv.lock` update; a lock-only
+change is an exception, not ordinary declaration maintenance. The lock is
+consumed by desktop packaging and focused frozen-lock jobs, while most ordinary
+lint installs use `uv pip install --system -e . --group dev` and resolve the
+project declarations directly.
 
 Minor and patch updates are grouped per ecosystem. Major updates remain
 individual, reviewable PRs. Each lane has a small open-PR limit and no
