@@ -284,6 +284,47 @@ def _has_codex_problem_text(body: str) -> bool:
     ))
 
 
+def _is_codex_summary_table_line(line: str) -> bool:
+    stripped = line.strip()
+    return stripped.startswith("|") and len(stripped.split("|")) >= 5
+
+
+def _is_codex_summary_shape(body: str) -> bool:
+    """Require the recognized progress table to be the whole known summary shape."""
+
+    lines = body.splitlines()
+    table_start = next(
+        (
+            index for index, line in enumerate(lines)
+            if _is_codex_summary_table_line(line)
+            and (cells := line.strip().split("|"))[1].strip() == "Review"
+            and cells[2].strip() == "Status"
+        ),
+        None,
+    )
+    if table_start is None:
+        return False
+
+    allowed_prefix = {
+        "<!-- codex-pull-request-review-summary -->",
+        "## Codex Review Summary",
+        "This comment shows the latest Codex review activity on this pull request.",
+    }
+    if any(line.strip() and line.strip() not in allowed_prefix for line in lines[:table_start]):
+        return False
+
+    table_end = table_start
+    while table_end + 1 < len(lines) and _is_codex_summary_table_line(lines[table_end + 1]):
+        table_end += 1
+    suffix = [line.strip() for line in lines[table_end + 1:] if line.strip()]
+    if not suffix:
+        return True
+    if not (suffix[0].startswith("<details") and "About Codex in GitHub" in suffix[0]):
+        return False
+    closing = next((index for index, line in enumerate(suffix) if "</details>" in line), None)
+    return closing is not None and not any(suffix[closing + 1:])
+
+
 def _is_codex_clean_pass(item: dict[str, Any], head_sha: str) -> bool:
     """Recognize a success shape, not a substitute for the Agent's review gate."""
 
@@ -310,6 +351,7 @@ def _is_codex_progress(item: dict[str, Any]) -> bool:
         not _is_codex_item(item)
         or "<!-- codex-pull-request-review-summary -->" not in body
         or _has_codex_problem_text(body)
+        or not _is_codex_summary_shape(body)
     ):
         return False
     statuses = [
@@ -2540,8 +2582,12 @@ def main() -> int:
     if args.coalesce_success and token is not None:
         latest_review_thread_states = _review_thread_state_map(state.get("review_threads") or [])
     if args.coalesce_success and (args.seed_state or not resumed or explicit_replay):
+        # Deliberate replay must not rebuild monotonic review history from the
+        # current response: omitted rows can otherwise resurrect an older pass
+        # over a newer invalidating outcome. A seed is an explicit new baseline.
+        prior_success_batch = success_batch if (args.catch_up or explicit_replay) else None
         success_batch, _ = _coalesced_review_state(
-            _visible_success_state(), None, snapshot, initialize=True,
+            _visible_success_state(), prior_success_batch, snapshot, initialize=True,
             reaction_cursor=_saved_int(saved, "reaction_cursor") or 0,
         )
         _baseline_output, baseline_failed = render_actions_result(

@@ -4590,9 +4590,15 @@ def test_coalescing_ignores_codex_summary_progress_but_not_errors(tmp_path, stat
     _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
     summary = {**_clean_codex_comment(), "body": (
         "<!-- codex-pull-request-review-summary -->\n"
+        "## Codex Review Summary\n\n"
+        "This comment shows the latest Codex review activity on this pull request.\n\n"
         "| Review | Status | Commit | Review trigger |\n"
         "| --- | --- | --- | --- |\n"
-        f"| 📝 **Code Review** | ✅ **{status}** | `{COALESCED_HEAD[:7]}` | New commits |"
+        f"| 📝 **Code Review** | ✅ **{status}** | `{COALESCED_HEAD[:7]}` | New commits |\n\n"
+        "<details> <summary>ℹ️ About Codex in GitHub</summary>\n"
+        "<br/>\n"
+        "Codex reacts with 👀 while any review is running and with 👍 once reviews finish.\n"
+        "</details>"
     )}
     rc, output, _ = _ci_cycle(
         module, path, [_success_state(pending, issue_comments=[summary])], extra_args=("--coalesce-success",),
@@ -4943,7 +4949,8 @@ def test_coalescing_never_silences_a_finding_appended_to_a_progress_summary(tmp_
         "<!-- codex-pull-request-review-summary -->\n"
         "| Review | Status | Commit | Review trigger |\n| --- | --- | --- | --- |\n"
         f"| Code Review | **Completed** | `{COALESCED_HEAD[:7]}` | New commits |\n"
-        "[P1] Fix the authentication bypass before merging."
+        "## Review findings\n"
+        "Race allows duplicate notifications"
     )}
     rc, output, _ = _ci_cycle(
         module, path, [_success_state(pending, issue_comments=[summary])], extra_args=("--coalesce-success",),
@@ -5079,8 +5086,43 @@ def test_coalescing_preserves_requested_clean_verdict_replay(tmp_path, kind, ci_
     if not catch_up:
         assert "GitHub Actions" not in output  # Explicit PR replay baselines unrelated CI.
     assert payload[module.STAGED_KEY]["cursors"][cursor] == 601
+
+
+@pytest.mark.parametrize("replay", [("--catch-up",), ("--since-issue-comment-id", "0")])
+def test_deliberate_replay_preserves_a_newer_invalidating_outcome(tmp_path, replay):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
+    options = ("--coalesce-success",)
+
+    _ci_cycle(module, path, [_success_state(pending, clean=True)], extra_args=options)
+    error = _codex_error(602)
     rc, output, _ = _ci_cycle(
-        module, path, [state], delivery="2", extra_args=("--coalesce-success",),
+        module, path, [_success_state(pending, issue_comments=[error])], extra_args=options,
+    )
+    assert rc == 0 and "Something went wrong" in output
+    rc, output, payload = _ci_cycle(
+        module, path, [_success_state(pending, issue_comments=[error])],
+        delivery="2", extra_args=options,
+    )
+    assert (rc, output) == (124, "")
+    assert payload[module.SUCCESS_BATCH_KEY]["outcome"]["id"] == 602
+    assert payload[module.SUCCESS_BATCH_KEY]["review"] is None
+
+    old_clean = _clean_codex_comment(601)
+    replay_state = _success_state(pending, issue_comments=[old_clean])
+    rc, output, _ = _ci_cycle(
+        module, path, [replay_state], delivery="2",
+        extra_args=(*options, *replay),
+    )
+    assert rc == 0 and "issue_comment #601" in output
+    assert "success candidate" not in output
+
+    green = _ci_run(head=COALESCED_HEAD)
+    rc, output, _ = _ci_cycle(
+        module, path, [_success_state(green, issue_comments=[old_clean])],
+        delivery="3", extra_args=options,
     )
     assert (rc, output) == (124, "")
 
