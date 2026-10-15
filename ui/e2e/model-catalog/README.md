@@ -32,6 +32,12 @@ live discovery excludes the fixture, while isolated discovery finds every fixtur
 spec on desktop and mobile.
 Collection starts no browser, web server or fixture.
 
+`shell-layout.spec.ts` renders the complete Models page with synthetic API data.
+It checks the always-on surface (no runtime switch), single-line title/status/tab
+labels, reachable last-tab navigation, and no page-level horizontal overflow in
+EN/ZH at 320–402px mobile widths and desktop/tablet widths. This is browser layout
+coverage, not evidence of a live provider connection.
+
 `gateway-status.spec.ts` consumes `MH-GATEWAY-STATUS-001`. It renders the real
 Agent card with isolated catalog and Agent supply data. The route summary and
 collapsible Agent footer remain separate, and long identifiers wrap inside the

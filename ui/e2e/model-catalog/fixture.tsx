@@ -15,6 +15,7 @@ import { QuotaFixture } from './quotaFixture';
 import { RouteFixture } from './routeFixture';
 import { TokenScopeFixture } from './tokenScopeFixture';
 import { UsageFixture } from './usageFixture';
+import { ShellFixture } from './shellFixture';
 
 const params = new URLSearchParams(location.search);
 const backend = params.get('backend') as AgentBackend;
@@ -66,7 +67,13 @@ export function Fixture() {
   </I18nextProvider>;
 }
 
-createRoot(document.getElementById('root')!).render(params.get('view') === 'gateway'
+if (params.get('view') === 'shell') {
+  document.documentElement.dataset.theme = params.get('theme') ?? 'dark';
+}
+
+createRoot(document.getElementById('root')!).render(params.get('view') === 'shell'
+  ? <I18nextProvider i18n={language}><ShellFixture /></I18nextProvider>
+  : params.get('view') === 'gateway'
   ? <I18nextProvider i18n={language}><GatewayFixture /></I18nextProvider>
   : params.get('view') === 'route'
   ? <I18nextProvider i18n={language}><RouteFixture /></I18nextProvider>

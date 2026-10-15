@@ -913,40 +913,32 @@
       "shell": {
         "title": "Models",
         "running": "Gateway running",
-        "stopped": "Gateway off",
-        "unavailable": "Gateway enabled, currently unavailable",
+        "stopped": "Gateway unavailable",
+        "unavailable": "Gateway currently unavailable",
         "degraded": "Gateway running degraded",
         "unread": "Gateway status unavailable",
-        "notStarted": "Gateway off",
+        "notStarted": "Gateway not ready",
         "notInstalled": "Gateway component not installed",
         "allDirect_one": "The only backend is direct",
         "allDirect_other": "All {{count}} backends are direct",
         "starting": "Starting…",
-        "stopping": "Stopping…",
         "unsupported": "No gateway component for this platform yet",
-        "toggle": {
-          "turnOn": "Turn model gateway on",
-          "turnOff": "Turn model gateway off",
-          "stopBlocked": "Switch {{names}} to Direct before turning the model gateway off",
-          "stopVibeyBlocked": "{{name}}'s models use the model gateway; remove them before turning it off.",
-          "stopUnavailable": "Agent routing status is unavailable; the model gateway cannot be turned off yet"
-        },
         "closed": {
           "off": {
-            "title": "Model gateway is off",
-            "body": "Turn it on to view and edit sources, routes, and gateway models."
+            "title": "Model gateway is not ready",
+            "body": "Retry to restore access to sources, routes, and gateway models."
           },
           "down": {
-            "title": "Model gateway is off",
-            "body": "The previous start did not become ready. Turn it on to try again."
+            "title": "Model gateway is unavailable",
+            "body": "The previous start did not become ready. Retry to start the gateway again."
           },
           "enabledDown": {
-            "title": "Model gateway is enabled but unavailable",
-            "body": "The enabled setting is saved. Turn it off and back on to retry now."
+            "title": "Model gateway is unavailable",
+            "body": "Your configuration is saved. Retry to restore the gateway."
           },
           "notInstalled": {
             "title": "Model gateway is not installed",
-            "body": "Turn it on to install the managed gateway component."
+            "body": "Retry to install and start the managed gateway component."
           },
           "unsupported": {
             "title": "Model gateway is unavailable",
@@ -959,10 +951,6 @@
           "starting": {
             "title": "Starting model gateway",
             "body": "Sources and routing will appear when the gateway is ready."
-          },
-          "stopping": {
-            "title": "Turning model gateway off",
-            "body": "Gateway configuration is hidden while the runtime stops."
           },
           "unread": {
             "title": "Model gateway status unavailable",
@@ -1760,8 +1748,7 @@
       },
       "errors": {
         "engineDown": "Model engine is not ready yet; try again shortly",
-        "startFailed": "Model engine could not be started",
-        "stopFailed": "Model gateway could not be turned off"
+        "startFailed": "Model engine could not be started"
       },
       "runtime": {
         "notStarted": "Not started · starts automatically on first use",
