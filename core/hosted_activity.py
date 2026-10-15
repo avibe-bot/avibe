@@ -76,6 +76,10 @@ class HostedActivity:
     # How many calls ``cost`` covers: a native response's figure is for all its calls.
     cost_calls: int
     duration_ms: Optional[int] = None
+    # How many executor attempts the call made: 1, or more when earlier ones failed and moved on (§6).
+    attempts: int = 1
+    # ``cost`` is a lower bound: an attempt reported no price, so the call cost at least this.
+    cost_at_least: bool = False
     # The stable code of a reason Avibe worded itself (``HOSTED_ERROR_CODES``), by
     # which each surface says it in its reader's language; None for a provider's own.
     error_code: Optional[str] = None
@@ -124,10 +128,14 @@ class HostedActivity:
         payload.update({key: value for key, value in optional.items() if value is not None})
         if self.extra_queries:
             payload["extra_queries"] = list(self.extra_queries)
+        if self.attempts > 1:
+            payload["attempts"] = self.attempts
         if self.cost is not None:
             cost: dict[str, Any] = {"basis": self.cost.basis, "calls": self.cost_calls}
             if self.cost.usd is not None:
                 cost["usd"] = self.cost.usd
+            if self.cost_at_least:
+                cost["at_least"] = True
             payload["cost"] = cost
         return payload
 
@@ -240,7 +248,7 @@ def proxy_activity(
     )
     size = arguments.get("size") if isinstance(arguments.get("size"), str) else None
     execution = result.execution
-    cost, cost_calls = _chain_cost(execution)
+    cost, at_least = _chain_cost(execution)
     # What the executor reports it did (an image's rendered prompt and resolved size and quality), read as a native
     # call's block action is.
     ran = result.action if result.action is not None and result.action.type == "generate" else None
@@ -264,29 +272,32 @@ def proxy_activity(
         quality=ran.quality if ran is not None else None,
         revised_prompt=ran.prompt if ran is not None else None,
         cost=cost,
-        cost_calls=cost_calls,
+        cost_calls=1,
         duration_ms=duration_ms,
+        attempts=1 + len(execution.failed_attempts) if execution is not None else 1,
+        cost_at_least=at_least,
     )
 
 
-def _chain_cost(execution: Optional[ProxyExecution]) -> tuple[Optional[HostedCost], int]:
-    """What a proxied call cost over every executor attempt it billed, and how many attempts that is (§6).
+def _chain_cost(execution: Optional[ProxyExecution]) -> tuple[Optional[HostedCost], bool]:
+    """What a proxied call cost over every executor attempt it billed, and whether that is only a lower bound (§6).
 
     ``execution.cost`` is the last attempt's own, and ``failed_attempts`` the earlier billed ones. Every attempt
     included is ``included``; otherwise the known figures are summed, ``reported`` only when each is. An attempt
-    without a cost leaves the total unknown rather than understated.
+    without a cost makes the sum a lower bound, never a complete figure; with no priced attempt to sum, the cost is
+    unknown rather than "at least $0".
     """
 
     if execution is None:
-        return None, 1
+        return None, False
     costs = [*(attempt.cost for attempt in execution.failed_attempts), execution.cost]
-    if any(cost is None for cost in costs):
-        return None, len(costs)
-    if all(cost.basis == "included" for cost in costs):
-        return HostedCost(basis="included"), len(costs)
-    priced = [cost for cost in costs if cost.basis != "included"]
+    known = [cost for cost in costs if cost is not None]
+    unpriced = len(known) < len(costs)
+    priced = [cost for cost in known if cost.basis != "included"]
+    if not priced:
+        return (HostedCost(basis="included"), False) if known and not unpriced else (None, False)
     basis = "reported" if all(cost.basis == "reported" for cost in priced) else "list"
-    return HostedCost(basis=basis, usd=round(sum(cost.usd or 0.0 for cost in priced), 6)), len(costs)
+    return HostedCost(basis=basis, usd=round(sum(cost.usd or 0.0 for cost in priced), 6)), unpriced
 
 
 def _vendor_label(provider: Optional[str]) -> Optional[str]:
@@ -333,6 +344,8 @@ def _cost(activity: HostedActivity, lang: str) -> Optional[str]:
     else:
         key = "hostedTools.cost.list" if cost.basis == "list" else "hostedTools.cost.reported"
         text = i18n_t(key, lang, usd=_usd(cost.usd))
+    if activity.cost_at_least:
+        text = i18n_t("hostedTools.cost.atLeast", lang, cost=text)
     if activity.cost_calls > 1:
         text = i18n_t("hostedTools.cost.calls", lang, cost=text, calls=activity.cost_calls)
     return text
@@ -370,5 +383,7 @@ def hosted_line(activity: HostedActivity, lang: str, *, escape: Callable[[str], 
         parts.append(_count(activity, lang))
     else:
         parts.append(i18n_t(f"hostedTools.status.{activity.status}", lang, error=escape(_error_text(activity, lang))))
+    if activity.attempts > 1:
+        parts.append(i18n_t("hostedTools.attempts", lang, count=activity.attempts))
     parts.append(_cost(activity, lang))
     return " · ".join(part for part in parts if part)

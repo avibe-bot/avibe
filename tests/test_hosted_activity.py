@@ -171,7 +171,21 @@ def proxy_unreachable():
     )
 
 
-@pytest.mark.parametrize("build", [native_web_search, proxy_x_search, direct_image, proxy_failed, proxy_unreachable])
+def proxy_retried():
+    """An X search whose first executor failed after it billed and reported no price: the cost is a lower bound."""
+    return proxy_activity(
+        _x_call("call_x6", "from:OpenAI"),
+        HostedResult(
+            record=HostedRecord(status="completed", sources=POSTS[:1]),
+            execution=replace(XAI, failed_attempts=(_attempt("src_relaygpt1", "metered", None),)),
+        ),
+        source_names=NAMES,
+    )
+
+
+@pytest.mark.parametrize(
+    "build", [native_web_search, proxy_x_search, direct_image, proxy_failed, proxy_unreachable, proxy_retried]
+)
 def test_payloads_match_the_shape_the_web_card_renders(build):
     """MH-HOSTED-UI-009: every mode and outcome the card distinguishes, from the canonical records each producer writes.
 
@@ -300,22 +314,27 @@ def _attempt(source_id: str, billing: str, cost: HostedCost | None):
 
 
 @pytest.mark.parametrize(
-    ("failed", "last", "cost", "line_cost"),
+    ("failed", "last", "cost", "line_tail"),
     [
-        # A metered failure before the call that ran: both charges, and how many calls they cover.
+        # A metered failure before the call that ran: both charges, and how many attempts they cover.
         ((("src_relaygpt1", "metered", HostedCost(basis="list", usd=0.02)),), HostedCost(basis="reported", usd=0.11),
-         {"basis": "list", "usd": 0.13, "calls": 2}, "≈ $0.13 for 2 calls"),
+         {"basis": "list", "usd": 0.13, "calls": 1}, "2 attempts · ≈ $0.13"),
         ((("src_relaygpt1", "metered", HostedCost(basis="reported", usd=0.02)),), HostedCost(basis="reported", usd=0.11),
-         {"basis": "reported", "usd": 0.13, "calls": 2}, "$0.13 for 2 calls"),
+         {"basis": "reported", "usd": 0.13, "calls": 1}, "2 attempts · $0.13"),
         # A subscription attempt adds no money.
         ((("src_chatgpt01", "monthly", HostedCost(basis="included")),), HostedCost(basis="reported", usd=0.11),
-         {"basis": "reported", "usd": 0.11, "calls": 2}, "$0.11 for 2 calls"),
-        # A billed attempt with no known price: the total is unknown, never shown smaller than it was.
-        ((("src_relaygpt1", "metered", None),), HostedCost(basis="reported", usd=0.11), None, None),
+         {"basis": "reported", "usd": 0.11, "calls": 1}, "2 attempts · $0.11"),
+        # A billed attempt with no known price: the total is a lower bound, never shown as complete.
+        ((("src_relaygpt1", "metered", None),), HostedCost(basis="reported", usd=0.11),
+         {"basis": "reported", "usd": 0.11, "calls": 1, "at_least": True}, "2 attempts · at least $0.11"),
+        # Nothing priced to sum: the cost is unknown, not "at least $0".
+        ((("src_chatgpt01", "monthly", HostedCost(basis="included")),), None, None, "2 attempts"),
+        ((("src_relaygpt1", "metered", None),), None, None, "2 attempts"),
     ],
 )
-def test_a_proxied_calls_cost_counts_every_billed_attempt(failed, last, cost, line_cost):
-    """MH-HOSTED-GATEWAY-005: the card and the IM line show what the whole executor chain cost, never less."""
+def test_a_proxied_calls_cost_counts_every_billed_attempt(failed, last, cost, line_tail):
+    """MH-HOSTED-GATEWAY-005: the card and the IM line show what the whole executor chain cost, never less, and how
+    many attempts it took."""
 
     activity = proxy_activity(
         _x_call("call_x5", "from:OpenAI"),
@@ -324,9 +343,9 @@ def test_a_proxied_calls_cost_counts_every_billed_attempt(failed, last, cost, li
             execution=replace(XAI, cost=last, failed_attempts=tuple(_attempt(*item) for item in failed)),
         ),
     )
-    assert activity.to_payload().get("cost") == cost
-    line = hosted_line(activity, "en")
-    assert line.endswith(f" · {line_cost}") if line_cost else "$" not in line
+    payload = activity.to_payload()
+    assert (payload.get("cost"), payload.get("attempts")) == (cost, 2)
+    assert hosted_line(activity, "en").endswith(f" · {line_tail}")
 
 
 def test_the_im_line_escapes_the_quoted_subject_for_its_destination():

@@ -1790,6 +1790,7 @@
       "image_generate": "图片生成"
     },
     "quoted": "“{subject}”",
+    "attempts": "尝试 {count} 次",
     "mode": {
       "native": "原生（{provider}）",
       "proxy": "由 {provider} 代理",
@@ -1807,7 +1808,8 @@
       "included": "订阅内含",
       "list": "≈ ${usd}",
       "reported": "${usd}",
-      "calls": "{cost}（{calls} 次调用）"
+      "calls": "{cost}（{calls} 次调用）",
+      "atLeast": "至少 {cost}"
     },
     "status": {
       "failed": "失败：{error}",

@@ -81,22 +81,33 @@ describe('hosted tool cards', () => {
     within(failed).getByText('no Source is verified for X search');
   });
 
-  it('shows a generated image with its prompt and file, and no cost when none is known', () => {
+  it('MH-HOSTED-UI-008: shows a direct image call with how it ran, its file and the prompt it rendered, and no cost when none is known', () => {
     renderGroup([{
-      ...fixture.native_image,
-      images: [{ ...fixture.native_image.images[0], media_url: '/api/media/tok_3f2a?w=1536&h=1024', bytes: 1_993_000 }],
+      ...fixture.direct_image,
+      images: [{ ...fixture.direct_image.images[0], media_url: '/api/media/tok_3f2a?w=1536&h=1024', bytes: 1_993_000 }],
     }]);
-    const image = row('ig_01');
+    const image = row('call_ig1');
+    within(image).getByText('image_generate');
+    within(image).getByText('Direct · OpenAI');
     within(image).getByText('1 image · 1536×1024');
     expect(image.textContent).not.toMatch(/\$/);
 
     fireEvent.click(within(image).getByRole('button'));
-    const figure = image.querySelector('[data-hosted-image="ig_01"]') as HTMLElement;
+    within(image).getByText('Ran directly on relay-gpt · gpt-image-2');
+    const figure = image.querySelector('[data-hosted-image="call_ig1"]') as HTMLElement;
     expect((figure.querySelector('img') as HTMLImageElement).getAttribute('src')).toBe('/api/media/tok_3f2a?w=1536&h=1024');
     within(figure).getByRole('link', { name: '3f2a.png' });
     within(figure).getByText('1.9 MB');
     within(figure).getByText('Revised prompt');
-    within(figure).getByText(fixture.native_image.revised_prompt);
+    within(figure).getByText(fixture.direct_image.revised_prompt);
+  });
+
+  it('MH-HOSTED-UI-008: names how many attempts a call took, and a total an attempt left unpriced only as a lower bound', () => {
+    renderGroup(['proxy_retried'], 'zh');
+    within(row('call_x6')).getByText('尝试 2 次 · 至少 $0.11');
+    cleanup();
+    renderGroup(['proxy_retried']);
+    within(row('call_x6')).getByText('2 attempts · at least $0.11');
   });
 
   it.each([
