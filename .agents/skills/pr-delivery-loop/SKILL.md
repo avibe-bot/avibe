@@ -210,6 +210,11 @@ use ordinary visible prose with the target PR URL, not a strip-prone footer.
   `CLEAN`, offer Merge with the PR link unless the owner asked not to offer it.
   Lack of auto-merge authority does not hide this option; offering is not
   executing. A single Merge button is enough.
+- Before offering a mutating action, persist the target PR and exact offered head
+  in source-bound action metadata or the internal source report; the visible
+  report may omit the SHA, but the callback must be able to compare that bound
+  head with the freshly fetched head. If the destination cannot retain this
+  binding, do not offer a label-only mutation button.
 - Bind a click to its source report using actual source-message metadata, or to
   an explicit user-named target. Labels and adjacent links carry no hidden PR or
   SHA payload. If the target is ambiguous, ask for the PR URL; never guess from

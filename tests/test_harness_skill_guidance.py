@@ -257,6 +257,8 @@ def test_pr_delivery_loop_keeps_optional_references_out_of_routine_loading() -> 
     assert "residual issues (or none known)" in flat
     assert "gate-state dumps belong in the evidence" in flat
     assert "offer Merge with the PR link" in flat
+    assert "persist the target PR and exact offered head" in flat
+    assert "visible report may omit the SHA" in flat
 
     skill = parse_skill_file(directory / "SKILL.md", priority=(1, 0, 1))
     assert skill is not None
@@ -270,10 +272,13 @@ def test_pr_delivery_loop_keeps_optional_references_out_of_routine_loading() -> 
 
 def test_quick_replies_are_action_driven_not_mandatory() -> None:
     body = _read("core/prompts/quick-replies.md")
+    flat = " ".join(body.split())
     assert "Offer buttons for useful next actions or decisions" in body
+    assert "When buttons are supported and enabled, put this exact multiline footer" in body
+    assert "---\n[button text] | [another action]" in body
     assert "When none is useful, omit the footer" in body
     assert "Do not invent filler choices" in body
-    assert "treat displaying an action as authorization" in body
+    assert "treat displaying an action as authorization" in flat
 
 
 def test_agent_prompt_audit_examples_parse_against_the_real_cli() -> None:
