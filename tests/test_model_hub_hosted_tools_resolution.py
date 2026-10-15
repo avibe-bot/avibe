@@ -34,11 +34,13 @@ from core.handlers.model_hub.hosted_tools import (
     HostedToolSettingRefused,
     apply_hosted_tool_put,
     executor_candidates,
+    freeze_turn_tools,
+    hop_hosted_tools,
     hosted_tool_facts,
     hosted_tools_status,
     image_choices,
-    resolve_hosted_tools,
 )
+from core.handlers.model_hub.hosted_turn import ExecutorSlot
 from vibe.backend_model_catalog import HostedToolPrice, HostedToolSpec, ImageModelPrice, ImageModelSpec
 
 NOW = datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc)
@@ -195,25 +197,42 @@ def test_the_image_enum_is_deterministic_with_the_default_first(tmp_path):
     assert image_choices(_config(sources=[CLAUDE_SUB, GEMINI]), evidence=evidence).models == ()
 
 
-def test_resolution_states_v2_facts_in_todays_hop_shape(tmp_path):
-    """MH-HOSTED-001: every tool is on unless turned off; native when assumed; the first executor binds."""
-    resolved = resolve_hosted_tools(
-        _config(), source=XAI, model_id="grok-4.6", evidence=_evidence(tmp_path), spec_for=_spec_for,
-    )
-    assert resolved == {
+def test_a_turn_freezes_its_tools_executors_and_image_enum_and_each_hop_states_its_own_facts(tmp_path):
+    """MH-HOSTED-001: every tool is on unless turned off; the turn freezes the set, each search tool's executor order
+    with the identity it was built under, and the image enum; a hop states facts only, the enum's params sorted."""
+    evidence = _evidence(tmp_path)
+    turn = freeze_turn_tools(_config(), evidence=evidence, spec_for=_spec_for)
+    assert turn.tools == {"web_search", "x_search", "image_generate"}
+    assert turn.executors == {
+        "web_search": (
+            ExecutorSlot("src_xai00001", "grok-fast", identity_digest(XAI)),
+            ExecutorSlot("src_oai00001", "gpt-mini", identity_digest(OPENAI)),
+        ),
+        "x_search": (ExecutorSlot("src_xai00001", "grok-fast", identity_digest(XAI)),),
+    }
+    image = {"description": "Grok Imagine", "params": ["images", "size"], "size_forms": ["pixels"]}
+    assert hop_hosted_tools(turn, OPENAI, "gpt-6-astra", evidence=evidence, spec_for=_spec_for) == {
         "web_search": {
-            "mode": "native", "declaration": {"type": "web_search"}, "include": [],
-            "executor": {"source_id": "src_xai00001", "model_id": "grok-fast"}, "replay": True,
+            "native": "assumed", "declaration": {"type": "web_search"},
+            "include": ["web_search_call.action.sources"], "replay": "assumed",
         },
-        "x_search": {
-            "mode": "native", "declaration": {"type": "x_search"}, "include": [],
-            "executor": {"source_id": "src_xai00001", "model_id": "grok-fast"}, "replay": True,
+        # OpenAI does not run X search: the hop takes the function.
+        "x_search": {"native": "unsupported", "replay": "unsupported"},
+        "image_generate": {
+            "models": [
+                {"source_id": "src_xai00001", "model_id": "grok-imagine-image", **image},
+                {**{"source_id": "src_oai00001", "model_id": "gpt-image-2", **image}, "description": "OpenAI's image model"},
+            ],
+            "default": {"source_id": "src_xai00001", "model_id": "grok-imagine-image"},
         },
     }
-    off = _config({"x_search": ModelHubHostedToolConfig(enabled=False)})
-    assert set(resolve_hosted_tools(
-        off, source=XAI, model_id="grok-4.6", evidence=_evidence(tmp_path / "o"), spec_for=_spec_for,
-    )) == {"web_search"}
+    # Off, or with no image model available, a tool is not declared at all.
+    off = _config({"x_search": ModelHubHostedToolConfig(enabled=False)}, sources=[CLAUDE_SUB, OPENAI, GEMINI])
+    turn = freeze_turn_tools(
+        off, evidence=_evidence(tmp_path / "o", (OPENAI, "gpt-image-2", "image_generate", "call")), spec_for=_spec_for,
+    )
+    assert (turn.tools, turn.images) == ({"web_search"}, ())
+    assert set(hop_hosted_tools(turn, OPENAI, "gpt-6-astra", evidence=evidence, spec_for=_spec_for)) == {"web_search"}
 
 
 def test_the_tools_read_states_saved_and_effective_values_and_what_real_use_showed(tmp_path):

@@ -4953,7 +4953,9 @@
           "executor_no_image": "The proxy executor returned no image.",
           "gateway_unreachable": "Couldn't reach the model gateway.",
           "gateway_refused": "The model gateway refused the call.",
-          "gateway_no_result": "The model gateway returned no result."
+          "gateway_no_result": "The model gateway returned no result.",
+          "image_param_unsupported": "The chosen image model doesn't take one of the arguments.",
+          "image_model_unavailable": "The chosen image model isn't available."
         },
         "mode": {
           "native": "Native · {{provider}}",

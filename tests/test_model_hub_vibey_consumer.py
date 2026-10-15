@@ -104,7 +104,7 @@ def _validate(schema_name, value):
 
 # Each enabled hosted tool's promised fields, for a native and a proxied entry.
 HOSTED_TOOL_MANDATORY_FIELDS = {
-    ("hosted_tools", "web_search"): ("mode", "executor", "replay", "declaration", "include"),
+    ("hosted_tools", "web_search"): ("native", "replay", "declaration", "include"),
 }
 
 
@@ -617,7 +617,7 @@ async def test_a_finished_turns_request_is_never_credited_to_the_next_turn_on_it
         ) as response:
             return response.status, await response.json(content_type=None)
 
-    search = {"arguments": {"query": "q"}, "executor": None}
+    search = {"arguments": {"query": "q"}}
     try:
         async with aiohttp.ClientSession() as client:
             finished = await router.resolve_hop("menu-alias", process_scope="vibey:session", turn_id="turn-finished")
@@ -631,7 +631,7 @@ async def test_a_finished_turns_request_is_never_credited_to_the_next_turn_on_it
             stale = finished["request_headers"]
             assert (await post(client, live, stale, "messages", message))[0] == 400
             status, answer = await post(client, live, stale, "hosted-tools/x_search", search)
-            assert (status, answer["error"]["code"]) == (409, "executor_not_bound")
+            assert (status, answer["error"]["code"]) == (409, "turn_not_live")
             status, answer = await post(client, live, live["request_headers"], "hosted-tools/x_search", search)
             assert status == 200 and answer["record"]["status"] == "failed"
             assert (await post(client, live, live["request_headers"], "messages", message))[0] == 200
@@ -1069,8 +1069,8 @@ def test_native_cli_and_direct_are_not_vibey_channels(tmp_path):
 
 @pytest.mark.asyncio
 async def test_hop_resolution_states_each_enabled_hosted_tool(tmp_path):
-    """MH-HOSTED-001: a tool the overlay offers is native with no evidence (nothing is probed); every enabled tool
-    binds the first executor of its chain, the vendor's lightweight model."""
+    """MH-HOSTED-001: a tool the overlay offers is assumed native with no evidence (nothing is probed); the hop states
+    facts only, never an executor, and a tool the user turned off is absent."""
     primary = _source("src_primary01", "Primary", protocol="openai_responses", model_id="gpt-6-astra")
     service = _vibey_service(tmp_path, [primary])
     service.store.config.hosted_tools = {"x_search": ModelHubHostedToolConfig(enabled=False)}
@@ -1091,26 +1091,33 @@ async def test_hop_resolution_states_each_enabled_hosted_tool(tmp_path):
         _validate("hop-resolution.schema.json", hop)
         assert hop["hosted_tools"] == {
             "web_search": {
-                "mode": "native",
+                "native": "assumed",
                 "declaration": {"type": "web_search"},
                 "include": ["web_search_call.action.sources"],
-                "executor": {"source_id": "src_primary01", "model_id": "gpt-6-luna"},
-                "replay": True,
+                "replay": "assumed",
             },
         }
         _assert_mandatory_fields("hop-resolution.schema.json", hop, HOSTED_TOOL_MANDATORY_FIELDS)
+        image = {"source_id": "src_primary01", "model_id": "gpt-image-2", "description": "OpenAI images",
+                 "params": ["images", "n", "size"], "size_forms": ["pixels"]}
+        _validate("hop-resolution.schema.json", {**hop, "hosted_tools": {
+            "web_search": {"native": "unsupported", "replay": "unsupported"},
+            "image_generate": {"models": [image], "default": {"source_id": "src_primary01", "model_id": "gpt-image-2"}},
+        }})
         for broken in (
-            {"mode": "proxy", "declaration": {"type": "web_search"}, "executor": None, "replay": False},
-            {"mode": "native", "executor": None, "replay": False, "include": []},
-            {"mode": "proxy", "executor": {"source_id": "src_primary01"}, "replay": False},
+            # Declaration and include belong to an assumed native tool only.
+            {"web_search": {"native": "unsupported", "declaration": {"type": "web_search"}, "replay": "unsupported"}},
+            {"web_search": {"native": "assumed", "include": [], "replay": "assumed"}},
+            # v1's shape is gone: no mode, no executor, no boolean replay.
+            {"web_search": {"mode": "proxy", "executor": None, "replay": False}},
+            {"web_search": {"native": "assumed", "declaration": {"type": "web_search"}, "include": [], "replay": True}},
+            {"image_generation": {"native": "unsupported", "replay": "unsupported"}},
+            # image_generate is absent rather than empty, and names only what the enum needs.
+            {"image_generate": {"models": [], "default": {"source_id": "src_primary01", "model_id": "gpt-image-2"}}},
+            {"image_generate": {"models": [{**image, "endpoint": "images"}], "default": image}},
         ):
             with pytest.raises(ValidationError):
-                _validate("hop-resolution.schema.json", {**hop, "hosted_tools": {"web_search": broken}})
-        with pytest.raises(ValidationError):
-            _validate(
-                "hop-resolution.schema.json",
-                {**hop, "hosted_tools": {"image_generation": {"mode": "proxy", "executor": None, "replay": True}}},
-            )
+                _validate("hop-resolution.schema.json", {**hop, "hosted_tools": broken})
     finally:
         await gateway.close()
 

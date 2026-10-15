@@ -29,6 +29,7 @@ from core.handlers.model_hub.events import (
     EventAgent,
     EventReason,
 )
+from core.handlers.model_hub.hosted_turn import TurnHostedTools
 from core.handlers.model_hub.identifiers import (
     OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL,
     opencode_menu_model_id,
@@ -770,23 +771,6 @@ def overlay_identifier_bytes(content: bytes) -> bytes:
     return json.dumps(identifiers, ensure_ascii=True, separators=(",", ":")).encode()
 
 
-def _hosted_executor_bindings(
-    config: ModelHubConfig, hosted_tools: Mapping[str, Mapping[str, Any]],
-) -> tuple[tuple[str, tuple[str, str, str] | None], ...]:
-    """Each enabled tool's bound executor with its Source identity at launch, for the gateway's route."""
-
-    sources = {source.id: source for source in config.sources}
-    bindings: list[tuple[str, tuple[str, str, str] | None]] = []
-    for tool, entry in sorted(hosted_tools.items()):
-        executor = entry.get("executor")
-        source = sources.get(executor["source_id"]) if executor else None
-        bindings.append((
-            tool,
-            (source.id, executor["model_id"], identity_digest(source)) if source is not None else None,
-        ))
-    return tuple(bindings)
-
-
 class ModelHubRuntimeRouter:
     """Select a supply channel once per turn and build ephemeral injections."""
 
@@ -968,7 +952,7 @@ class ModelHubRuntimeRouter:
         via_mapping: bool = False,
         gateway_request_model_id: Optional[str] = None,
         primary_origin: HopOrigin | None = None,
-        hosted_executors: tuple[tuple[str, tuple[str, str, str] | None], ...] = (),
+        hosted_tools: TurnHostedTools | None = None,
     ) -> tuple[str, str]:
         if self.turn_gateway is not None:
             return await self.turn_gateway.endpoint(
@@ -982,7 +966,7 @@ class ModelHubRuntimeRouter:
                 gateway_request_model_id=gateway_request_model_id,
                 request_scoped=backend == "codex",
                 **({"primary_origin": primary_origin} if primary_origin is not None else {}),
-                **({"hosted_executors": hosted_executors} if hosted_executors else {}),
+                **({"hosted_tools": hosted_tools} if hosted_tools is not None else {}),
             )
         await self.service._ensure_engine_synced()
         status = await self.service._engine_call(self.service.adapter.start())
@@ -1340,22 +1324,20 @@ class ModelHubRuntimeRouter:
                 else target_model
             )
             identity = identity_digest(source) if backend == "vibey" else None
-            # A turn's first resolution binds its hosted tools and executors;
-            # later attempts of the turn keep that binding (settings apply from
-            # the next turn) and recompute only what belongs to their hop.
+            # A turn's first resolution freezes its hosted tools, executor
+            # orders and image models; later attempts of the turn keep them
+            # (settings apply from the next turn) and recompute only their
+            # hop's own facts.
             frozen = (
-                self.turn_gateway.correlation.turn_hosted_executors(turn_id)
+                self.turn_gateway.correlation.turn_hosted_tools(turn_id)
                 if backend == "vibey" and self.turn_gateway is not None
                 else None
             )
+            if backend == "vibey" and frozen is None:
+                frozen = await asyncio.to_thread(self.service.freeze_turn_hosted_tools, config)
             hosted_tools = (
-                # Off the controller loop: the first resolution loads the evidence file.
-                await asyncio.to_thread(
-                    self.service.hosted_tools_for_hop, config, source, target_model,
-                    {tool: bound[:2] if bound is not None else None for tool, bound in frozen}
-                    if frozen is not None else None,
-                )
-                if backend == "vibey"
+                await asyncio.to_thread(self.service.hosted_tools_for_hop, source, target_model, frozen)
+                if frozen is not None
                 else {}
             )
             gateway_base_url, gateway_token = await self._gateway_credentials(
@@ -1372,11 +1354,8 @@ class ModelHubRuntimeRouter:
                     HopOrigin(source.vendor, source.protocol, target_model, source.id, identity)
                     if identity is not None else None
                 ),
-                # The proxy endpoint runs only the executor this launch bound per
-                # tool, and only while its Source keeps the identity it had now.
-                hosted_executors=(
-                    frozen if frozen is not None else _hosted_executor_bindings(config, hosted_tools)
-                ),
+                # The executor endpoint runs only what the turn froze.
+                hosted_tools=frozen,
             )
             if self.turn_gateway is None:
                 prefix = await self._source_prefix(source.id)

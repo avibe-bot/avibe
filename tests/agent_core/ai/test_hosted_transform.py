@@ -13,7 +13,7 @@ import itertools
 import pytest
 
 from core.agent_core.ai.provider import ModelEndpoint, ModelRequest
-from core.agent_core.ai.registry import build_wire_request
+from tests.agent_core.ai._wire import build_wire_request
 from core.agent_core.ai.transform import SYNTHETIC_TOOL_RESULT, transform_messages
 from core.agent_core.messages import (
     AssistantMessage,

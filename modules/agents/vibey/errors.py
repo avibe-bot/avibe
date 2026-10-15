@@ -45,6 +45,8 @@ _KIND_KEYS: dict[str, str] = {
     # Tool calls under a stop reason that cannot carry them.
     "stop": "providerProtocol",
     "stream_cleanup": "internal",
+    # A context row this build cannot read (a shape it no longer accepts): the session cannot continue.
+    "TranscriptError": "historyUnreadable",
     # The loop refuses a route that declares no tool support before any request.
     "UnsupportedModelRoute": "toolsUnsupported",
     # A provider answer the canonical transcript cannot hold.

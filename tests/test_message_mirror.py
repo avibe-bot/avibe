@@ -1631,8 +1631,8 @@ def _hosted_card(image_path: str) -> dict:
     return {
         "version": 1,
         "call_id": "ig_01",
-        "tool": "image_generation",
-        "mode": "native",
+        "tool": "image_generate",
+        "mode": "direct",
         "status": "completed",
         "subject": "a laptop at night",
         "sources": [],
@@ -1687,7 +1687,7 @@ def test_a_hosted_card_rides_on_its_toolcall_row_and_its_image_joins_the_answer(
     card = json.loads(event["content_json"])["hosted"]
     [stored] = card["images"]
     assert {key: card[key] for key in ("call_id", "tool", "mode", "status", "subject")} == {
-        "call_id": "ig_01", "tool": "image_generation", "mode": "native", "status": "completed",
+        "call_id": "ig_01", "tool": "image_generate", "mode": "direct", "status": "completed",
         "subject": "a laptop at night",
     }
     assert stored["path"] == str(image) and stored["bytes"] == image.stat().st_size

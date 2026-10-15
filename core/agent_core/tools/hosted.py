@@ -38,23 +38,11 @@ _SPECS: dict[str, tuple[str, dict[str, Any]]] = {
             "additionalProperties": False,
         },
     ),
-    "image_generation": (
-        "Generate an image from a text prompt. The image is saved as a file, and the result names its path.",
-        {
-            "type": "object",
-            "properties": {
-                "prompt": {"type": "string", "description": "What the image shows."},
-                "size": {"type": "string", "description": "Width x height in pixels, e.g. 1024x1024."},
-            },
-            "required": ["prompt"],
-            "additionalProperties": False,
-        },
-    ),
 }
 
 
 def hosted_tool_spec(tool: str) -> ToolSpec:
-    """The canonical spec of the catalog tool ``tool`` (``web_search``, ``x_search`` or ``image_generation``)."""
+    """The canonical spec of the search tool ``tool`` (``web_search`` or ``x_search``)."""
 
     if tool not in HOSTED_TOOLS:
         raise ValueError(f"unknown hosted tool: {tool!r}")

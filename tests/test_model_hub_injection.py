@@ -322,7 +322,7 @@ def test_route_alias_keeps_its_own_planning_metadata(tmp_path, monkeypatch, back
         turn_gateway=SimpleNamespace(
             endpoint=AsyncMock(return_value=("http://127.0.0.1:19000", "fixture-token")),
             correlation=SimpleNamespace(
-                gateway_request_metadata=lambda **_kwargs: {}, turn_hosted_executors=lambda _turn_id: None,
+                gateway_request_metadata=lambda **_kwargs: {}, turn_hosted_tools=lambda _turn_id: None,
             ),
         ),
         overlay_path=tmp_path / "overlay.json",

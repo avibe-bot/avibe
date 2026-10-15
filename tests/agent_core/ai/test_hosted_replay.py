@@ -2,8 +2,8 @@
 
 A hosted call goes back verbatim, its native payload in place, only to the Source that served it, on the same origin,
 and either within its turn or with the hop's current ``replay`` evidence. Such a request is pinned to that Source; an
-in-flight continuation also names the model that served it. When the gateway answers ``pin_unavailable``, the adapter
-sends the same request exactly once more, in portable form and unpinned.
+in-flight continuation also names the model that served it. A refusal before any output, the gateway's
+``pin_unavailable`` or xAI's decrypt refusal, ends the send; the loop renders the request again within its bounds.
 """
 
 from __future__ import annotations
@@ -15,9 +15,20 @@ from typing import Any
 import httpx
 import pytest
 
+from core.agent_core.agent.events import RunEnded
+from core.agent_core.agent.loop import Agent
+from core.agent_core.agent.models import ModelSelection
 from core.agent_core.ai._common import PIN_MODEL_HEADER, PIN_SOURCE_HEADER
-from core.agent_core.ai.provider import Done, HostedToolRoute, ModelEndpoint, ModelRequest, ProviderError
-from core.agent_core.ai.registry import build_wire_request, create_adapter
+from core.agent_core.ai.provider import (
+    HostedToolRoute,
+    ModelCapabilities,
+    ModelEndpoint,
+    ModelRequest,
+    ProviderError,
+    Refusal,
+)
+from core.agent_core.ai.registry import create_adapter
+from tests.agent_core.ai._wire import build_wire_request
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
     AssistantMessage,
@@ -34,6 +45,7 @@ from core.agent_core.messages import (
     UserMessage,
 )
 from core.agent_core.tools.hosted import hosted_tool_spec
+from tests.agent_core.fakes import FakeJobHost, FakeTool, InMemoryTranscriptStore, input_row
 
 SOURCE = "src_served00001"
 OTHER = "src_other000001"
@@ -63,9 +75,9 @@ def _endpoint(protocol: str, *, replay: bool, native: bool = True, source_id: st
     provider, model = MODELS[protocol]
     declaration = {"type": "web_search_20250305", "name": "web_search"} if protocol == "anthropic" else {"type": "web_search"}
     route = (
-        HostedToolRoute("native", None, replay, declaration=declaration)
+        HostedToolRoute("native", replay, declaration=declaration)
         if native
-        else HostedToolRoute("proxy", None, replay)
+        else HostedToolRoute("proxy", replay)
     )
     return ModelEndpoint(
         protocol,  # type: ignore[arg-type]
@@ -137,7 +149,7 @@ async def test_a_hosted_call_goes_back_verbatim_and_pinned_only_to_its_own_sourc
     protocol, replay, served_by, identity, verbatim
 ):
     request = _request(
-        _endpoint(protocol, replay=replay, native=False),
+        _endpoint(protocol, replay=replay),
         _searched(protocol, served_by=served_by, identity=identity),
         UserMessage((TextBlock("and then?"),)),
     )
@@ -145,30 +157,33 @@ async def test_a_hosted_call_goes_back_verbatim_and_pinned_only_to_its_own_sourc
     wire = await build_wire_request(request, gateway=True)
 
     assert _verbatim(protocol, wire.body) is verbatim
-    # The request carries no native declaration here (a proxied route), so only a verbatim payload pins it.
-    assert (wire.headers.get(PIN_SOURCE_HEADER) == SOURCE) is verbatim
+    # A payload goes back verbatim only where the tool is declared natively, so the request is pinned either way.
+    assert wire.headers[PIN_SOURCE_HEADER] == SOURCE
     assert PIN_MODEL_HEADER not in wire.headers
 
 
 @pytest.mark.parametrize("protocol", ["openai_responses", "anthropic"])
 @pytest.mark.parametrize(
-    ("hop_source", "after", "continued"),
+    ("hop_source", "native", "after", "continued"),
     [
-        (SOURCE, (), True),
-        (OTHER, (), False),
-        (SOURCE, (UserMessage((TextBlock("a new turn"),)),), False),
+        (SOURCE, True, (), True),
+        (OTHER, True, (), False),
+        # A refusal's fresh hop on the same Source that no longer runs the tool natively (§3.5).
+        (SOURCE, False, (), False),
+        (SOURCE, True, (UserMessage((TextBlock("a new turn"),)),), False),
     ],
-    ids=["on-the-hop-that-served-it", "after-the-hop-moved", "after-its-turn-ended"],
+    ids=["on-the-hop-that-served-it", "after-the-hop-moved", "after-the-tool-turned-proxy", "after-its-turn-ended"],
 )
-async def test_a_continuation_goes_back_verbatim_only_to_the_hop_that_served_it(protocol, hop_source, after, continued):
+async def test_a_continuation_goes_back_verbatim_only_to_the_hop_that_served_it(protocol, hop_source, native, after, continued):
     """Within its turn the provider's own continuation contract applies: no replay evidence is needed, and the request
     is pinned to its hop's Source and the model that served the response it continues. A fresh hop that is another
-    Source gets the in-place form instead (§4.4), so one hop builds and serves the request. A turn can end right after
-    its tool results; a later turn is no continuation, so without replay evidence its calls go back portable."""
+    Source, or that no longer declares the tool natively, gets the in-place form instead (§4.4), since a provider
+    refuses server items without their declaration. A turn can end right after its tool results; a later turn is no
+    continuation, so without replay evidence its calls go back portable."""
 
     read = ToolCallBlock(id="toolu_1", name="read", arguments={"path": "a"})
     request = _request(
-        _endpoint(protocol, replay=False, source_id=hop_source),
+        _endpoint(protocol, replay=False, native=native, source_id=hop_source),
         _searched(protocol, stop_reason="tool_use", extra=(read,)),
         ToolResultMessage("toolu_1", "read", (TextBlock("contents"),)),
         *after,
@@ -177,10 +192,10 @@ async def test_a_continuation_goes_back_verbatim_only_to_the_hop_that_served_it(
     wire = await build_wire_request(request, gateway=True)
 
     assert _verbatim(protocol, wire.body) is continued
-    # The hop's native declaration pins every case to the hop's own Source.
-    assert wire.headers[PIN_SOURCE_HEADER] == hop_source
+    # The hop's native declaration pins the request to the hop's own Source; without one nothing pins it.
+    assert wire.headers.get(PIN_SOURCE_HEADER) == (hop_source if native else None)
     assert (wire.headers.get(PIN_MODEL_HEADER) == MODELS[protocol][1]) is continued
-    if hop_source == OTHER:
+    if not continued and not after:
         in_place = json.dumps(wire.body)
         assert '[web_search: \\"avibe release\\"]' in in_place
 
@@ -238,47 +253,246 @@ def _tool_name(tool: dict[str, Any]) -> str:
     return tool.get("name") or tool["function"]["name"]
 
 
-@pytest.mark.parametrize("protocol", ["openai_responses", "anthropic", "openai_chat"])
-@pytest.mark.parametrize(
-    ("second", "served_by"),
-    [("served", OTHER), ("served", SOURCE), ("pin_unavailable", OTHER)],
-    ids=["served-by-another-source", "served-by-its-source", "pin_unavailable"],
-)
-async def test_pin_unavailable_gets_exactly_one_portable_resend_and_never_the_generic_retry(protocol, second, served_by):
-    """MH-HOSTED-VIBEY-005: the pinned request carries a native declaration and, where the protocol replays one, a
-    verbatim payload. Its one resend carries neither and no pin; that resend's own answer is what the loop sees. A
-    resend the hop's own Source serves is still its own: the answer keeps that Source's identity."""
+def _sse(protocol: str, events: tuple[dict[str, Any], ...]) -> str:
+    body = "".join(f"data: {json.dumps(event)}\n\n" for event in events)
+    return body + ("data: [DONE]\n\n" if protocol == "openai_chat" else "")
 
-    replayed = protocol in PAYLOADS
-    history = (_searched(protocol), UserMessage((TextBlock("and then?"),))) if replayed else ()
-    endpoint = _endpoint(protocol, replay=True)
-    request = _request(endpoint, *history)
+
+def _served(protocol: str, source: str = SOURCE) -> dict[str, str]:
     provider, model = MODELS[protocol]
-    served = json.dumps({"provider": provider, "api": protocol, "model": model, "source": served_by}, separators=(",", ":"))
+    report = {"provider": provider, "api": protocol, "model": model, "source": source}
+    return {"content-type": "text/event-stream", "x-avibe-served-hop": json.dumps(report, separators=(",", ":"))}
+
+
+async def _send(request: ModelRequest, answer: Any) -> tuple[list[httpx.Request], list[Any]]:
     sent: list[httpx.Request] = []
 
     def gateway(wire: httpx.Request) -> httpx.Response:
         sent.append(wire)
-        if len(sent) == 1 or second == "pin_unavailable":
-            return httpx.Response(409, json=_PIN_UNAVAILABLE)
-        body = "".join(f"data: {json.dumps(event)}\n\n" for event in _ANSWERED[protocol])
-        body += "data: [DONE]\n\n" if protocol == "openai_chat" else ""
-        return httpx.Response(200, headers={"content-type": "text/event-stream", "x-avibe-served-hop": served}, text=body)
+        return answer(len(sent))
+
+    protocol = request.endpoint.protocol
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        adapter = create_adapter(protocol, client=client, gateway=True)
+        events = [event async for event in adapter.stream(request, CancelToken())]
+    return sent, events
+
+
+def _hosted_unsupported(tool: str = "web_search", aspect: str = "call", source_id: str = SOURCE) -> dict[str, Any]:
+    reason = {"kind": "hosted_unsupported", "tool": tool, "aspect": aspect, "source_id": source_id}
+    return {"type": "error", "error": {**_PIN_UNAVAILABLE["error"], "message": "refused", "reason": reason}}
+
+
+@pytest.mark.parametrize("protocol", ["openai_responses", "anthropic", "openai_chat"])
+@pytest.mark.parametrize(
+    ("native", "body", "refusal"),
+    [
+        (True, _PIN_UNAVAILABLE, Refusal("pin_unavailable", SOURCE, IDENTITY)),
+        (True, _hosted_unsupported(), Refusal("pin_unavailable", SOURCE, IDENTITY, "web_search", "call")),
+        # A 409 to an unpinned request is the gateway's ordinary error: nothing was handed back.
+        (False, _PIN_UNAVAILABLE, None),
+    ],
+    ids=["no-reason", "narrow-rule-reason", "unpinned"],
+)
+async def test_pin_unavailable_ends_the_pinned_send_as_a_refusal_with_no_output(protocol, native, body, refusal):
+    """MH-HOSTED-VIBEY-005: the gateway's hand-back, matched on ``type`` and ``code`` with any other field tolerated,
+    ends the pinned send with one error that carries the refusal, the narrow rule when one fired, and no output. The
+    adapter sends nothing more and the generic retry never takes it: the loop renders the request again (§3.5)."""
+
+    request = _request(_endpoint(protocol, replay=True, native=native))
+
+    sent, events = await _send(request, lambda _: httpx.Response(409, json=body))
+
+    assert len(sent) == 1 and (PIN_SOURCE_HEADER in sent[0].headers) is native
+    (error,) = events
+    assert isinstance(error, ProviderError) and error.status == 409 and error.partial is None
+    assert error.refusal == refusal
+    if refusal is not None:
+        assert not error.retryable
+
+
+_DECRYPT_REFUSAL = "Could not decrypt the provided encrypted_content"
+
+
+@pytest.mark.parametrize("native", [True, False], ids=["pinned", "unpinned"])
+@pytest.mark.parametrize(
+    ("body", "refused"),
+    [
+        (_DECRYPT_REFUSAL, True),
+        # A relay may wrap the provider's text in its own error object.
+        (json.dumps({"error": {"message": _DECRYPT_REFUSAL, "type": "invalid_request_error"}}), True),
+        ("Invalid request: unknown parameter", False),
+    ],
+    ids=["plain-text", "wrapped", "another-400"],
+)
+async def test_a_decrypt_refusal_ends_the_send_as_an_opaque_refusal_of_its_source_identity(native, body, refused):
+    """xAI's plain-text 400 for a replayed ciphertext it cannot read says neither which one nor why. The adapter, its
+    one classifier, ends the send with an opaque refusal of the request's Source identity, pinned or not (§3.5)."""
+
+    request = _request(_endpoint("openai_responses", replay=True, native=native))
+
+    sent, events = await _send(request, lambda _: httpx.Response(400, text=body))
+
+    (error,) = events
+    assert len(sent) == 1 and isinstance(error, ProviderError) and error.status == 400 and not error.retryable
+    assert error.refusal == (Refusal("opaque_refused", SOURCE, IDENTITY) if refused else None)
+
+
+# The loop answers a refusal (§3.5). These run a turn through the Agent loop and the real adapters against a stub
+# gateway; each resolution is the next hop of the run.
+
+THIRD = "src_third000001"
+CAPABILITIES = ModelCapabilities(context_window=200_000, max_output_tokens=4096, supports_tools=True)
+X_DECLARATION = {"type": "x_search"}
+READ = FakeTool("read")
+
+
+class _Hops:
+    def __init__(self, client: httpx.AsyncClient, hops: tuple[ModelEndpoint, ...]) -> None:
+        self.client, self.hops, self.resolved = client, hops, 0
+
+    async def resolve(self) -> ModelSelection:
+        hop = self.hops[min(self.resolved, len(self.hops) - 1)]
+        self.resolved += 1
+        return ModelSelection(hop, CAPABILITIES)
+
+    def provider_for(self, protocol: str) -> Any:
+        return create_adapter(protocol, client=self.client, gateway=True)  # type: ignore[arg-type]
+
+
+def _hosted_tool(name: str) -> FakeTool:
+    tool = FakeTool(name)
+    tool.spec = hosted_tool_spec(name)
+    return tool
+
+
+async def _turn(answer: Any, *hops: ModelEndpoint, tools: tuple[Any, ...]) -> tuple[list[httpx.Request], Any, int]:
+    """One turn; ``answer(n, body)`` answers the n-th request the gateway receives."""
+
+    sent: list[httpx.Request] = []
+
+    def gateway(wire: httpx.Request) -> httpx.Response:
+        sent.append(wire)
+        return answer(len(sent), json.loads(wire.content))
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
-        adapter = create_adapter(protocol, client=client, gateway=True)  # type: ignore[arg-type]
-        events = [event async for event in adapter.stream(request, CancelToken())]
+        router = _Hops(client, hops)
+        agent = Agent(
+            session_id="session",
+            models=router,
+            tools=tools,
+            hooks=(),
+            store=InMemoryTranscriptStore(),
+            jobs=FakeJobHost(),
+            cwd="/test-owned",
+        )
+        events = [event async for event in agent.run(input_row("input", "search"), turn_id="turn")]
+    ended = events[-1]
+    assert isinstance(ended, RunEnded)
+    return sent, ended, router.resolved
 
-    assert len(sent) == 2
-    pinned, portable = (json.loads(wire.content) for wire in sent)
-    assert sent[0].headers[PIN_SOURCE_HEADER] == SOURCE and PIN_SOURCE_HEADER not in sent[1].headers
-    assert pinned["tools"] == [dict(endpoint.hosted_tools["web_search"].declaration)]
-    assert [_tool_name(tool) for tool in portable["tools"]] == ["web_search"] and portable["tools"] != pinned["tools"]
-    if replayed:
-        assert _verbatim(protocol, pinned) and not _verbatim(protocol, portable)
-    if second == "served":
-        assert isinstance(events[-1], Done)
-        assert events[-1].message.source_identity == (IDENTITY if served_by == SOURCE else None)
+
+def _xai(source_id: str = SOURCE, *, web: bool = True, model: str = "grok-4.6") -> ModelEndpoint:
+    """An xAI hop: ``x_search`` native, ``web_search`` native while ``web`` holds."""
+
+    web_route = HostedToolRoute("native", True, declaration={"type": "web_search"}) if web else HostedToolRoute("proxy", False)
+    return replace(
+        _endpoint("openai_responses", replay=True, source_id=source_id),
+        model_id=model,
+        hosted_tools={"web_search": web_route, "x_search": HostedToolRoute("native", True, declaration=X_DECLARATION)},
+    )
+
+
+def _answered(number: int, body: dict[str, Any]) -> httpx.Response:
+    return httpx.Response(200, headers=_served("openai_responses"), text=_sse("openai_responses", _ANSWERED["openai_responses"]))
+
+
+async def test_a_narrow_refusal_is_answered_by_a_fresh_hop_that_runs_only_that_tool_as_its_function():
+    """MH-HOSTED-VIBEY-005: the gateway refuses the pinned request because ``web_search`` cannot run natively there and
+    writes that evidence; the fresh hop says so. The request is rendered again for it: ``web_search`` as its function,
+    ``x_search`` still native and the request still pinned. No output was lost and nothing waited for a retry."""
+
+    def answer(number: int, body: dict[str, Any]) -> httpx.Response:
+        return httpx.Response(409, json=_hosted_unsupported()) if number == 1 else _answered(number, body)
+
+    sent, ended, resolved = await _turn(
+        answer, _xai(), _xai(web=False), tools=(_hosted_tool("web_search"), _hosted_tool("x_search"))
+    )
+
+    assert ended.reason == "completed" and resolved == 2 and len(sent) == 2
+    first, second = (json.loads(wire.content)["tools"] for wire in sent)
+    assert first == [{"type": "web_search"}, X_DECLARATION]
+    assert second[0]["name"] == "web_search" and second[1] == X_DECLARATION
+    assert sent[1].headers[PIN_SOURCE_HEADER] == SOURCE
+
+
+@pytest.mark.parametrize(
+    ("hops", "refusals", "pins", "resolved"),
+    [
+        # The fresh hop is the refused one again: the same request would go out, so it goes portable at once.
+        ((_xai(), _xai()), (_PIN_UNAVAILABLE,), (SOURCE, None), 2),
+        # One fresh hop per (Source, tool, aspect): the same rule refusing again on another model there goes portable.
+        ((_xai(), _xai(model="grok-4.6-fast")), (_hosted_unsupported(),) * 2, (SOURCE, SOURCE, None), 2),
+        # At most two fresh hops in a turn, whatever the reason: a third refusal goes portable on the hop it has.
+        ((_xai(), _xai(OTHER), _xai(THIRD)), (_PIN_UNAVAILABLE,) * 3, (SOURCE, OTHER, THIRD, None), 3),
+    ],
+    ids=["same-hop", "per-rule", "per-turn"],
+)
+async def test_refusals_are_answered_within_their_bounds_and_portable_rendering_is_the_last_resort(
+    hops, refusals, pins, resolved
+):
+    """A portable request is never pinned, so the gateway never hands it back: every refusal chain ends."""
+
+    def answer(number: int, body: dict[str, Any]) -> httpx.Response:
+        return httpx.Response(409, json=refusals[number - 1]) if number <= len(refusals) else _answered(number, body)
+
+    sent, ended, resolutions = await _turn(answer, *hops, tools=(_hosted_tool("web_search"), _hosted_tool("x_search")))
+
+    assert ended.reason == "completed" and resolutions == resolved
+    assert tuple(wire.headers.get(PIN_SOURCE_HEADER) for wire in sent) == pins
+    portable = json.loads(sent[-1].content)["tools"]
+    assert [_tool_name(tool) for tool in portable] == ["web_search", "x_search"]
+
+
+def _reasoned(cipher: str, *, call: str | None) -> str:
+    """An xAI response: a reasoning item carrying ``cipher``, then a ``read`` call or a final answer."""
+
+    reasoning = {"id": f"rs_{cipher}", "type": "reasoning", "summary": [], "encrypted_content": cipher}
+    if call is None:
+        last = {"id": "msg_1", "type": "message", "content": [{"type": "output_text", "text": "ok", "annotations": []}]}
     else:
-        # A 409 to an unpinned request is an ordinary error: there is no second portable resend.
-        assert isinstance(events[-1], ProviderError) and events[-1].status == 409
+        last = {"id": f"fc_{call}", "type": "function_call", "call_id": call, "name": "read", "arguments": "{}"}
+    events = (
+        {"type": "response.output_item.added", "output_index": 0, "item": {**reasoning, "encrypted_content": None}},
+        {"type": "response.output_item.done", "output_index": 0, "item": reasoning},
+        {"type": "response.output_item.added", "output_index": 1, "item": {**last, "status": "in_progress"}},
+        {"type": "response.output_item.done", "output_index": 1, "item": last},
+        {"type": "response.completed", "response": {"status": "completed", "output": None, "usage": {"input_tokens": 5, "output_tokens": 1}}},
+    )
+    return _sse("openai_responses", events)
+
+
+@pytest.mark.parametrize("again", [False, True], ids=["answered", "refused-again"])
+async def test_a_decrypt_refusal_drops_every_opaque_payload_of_that_identity_for_the_rest_of_the_turn(again):
+    """xAI's encrypted reasoning rides an ordinary, unpinned request. Refused, the request is rendered again without any
+    of that identity's ciphertext, and every later request of the turn too, including ciphertext issued after the
+    refusal: the refusal does not say which one failed. That is answered once per identity; refused again, the error
+    stands."""
+
+    def answer(number: int, body: dict[str, Any]) -> httpx.Response:
+        if number == 2 or (number == 3 and again):
+            return httpx.Response(400, text=_DECRYPT_REFUSAL)
+        reply = {1: _reasoned("cipher-1", call="call_1"), 3: _reasoned("cipher-3", call="call_3")}.get(number)
+        return httpx.Response(200, headers=_served("openai_responses"), text=reply or _reasoned("cipher-4", call=None))
+
+    unpinned = replace(_endpoint("openai_responses", replay=False, native=False), hosted_tools={})
+    sent, ended, _ = await _turn(answer, unpinned, tools=(READ,))
+
+    bodies = [wire.content.decode() for wire in sent]
+    assert all(PIN_SOURCE_HEADER not in wire.headers for wire in sent)
+    assert "cipher-1" in bodies[1]
+    assert not any(cipher in body for body in bodies[2:] for cipher in ("cipher-1", "cipher-3"))
+    if again:
+        assert len(sent) == 3 and ended.reason == "error"
+    else:
+        assert len(sent) == 4 and ended.reason == "completed"

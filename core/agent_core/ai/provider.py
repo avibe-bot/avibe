@@ -39,28 +39,16 @@ THINKING_DROP_RETRY_KINDS: frozenset[str] = frozenset(
 
 
 @dataclass(frozen=True)
-class HostedExecutor:
-    """The proxy executor Model Hub bound for the turn: one verified (Source, model)."""
-
-    source_id: str
-    model_id: str
-
-    def __post_init__(self) -> None:
-        if not all(isinstance(value, str) and value for value in (self.source_id, self.model_id)):
-            raise ValueError("a hosted executor names a Source and a model")
-
-
-@dataclass(frozen=True)
 class HostedToolRoute:
-    """One enabled hosted tool on a hop (C-6 ``HopResolution.hosted_tools``, ``vibey-hosted-tools.md`` §3.5).
+    """How a hop sends one enabled search tool, from its C-6 facts (``HopResolution.hosted_tools``,
+    ``vibey-hosted-tools.md`` §3.4, §4.1).
 
-    ``mode`` is Model Hub's decision for this hop; the agent never decides nativity itself. A ``native`` route has
-    the wire ``declaration`` and the Responses ``include`` values it needs; a ``proxy`` route has neither.
-    ``executor`` (None when no executor is verified) and ``replay`` hold in either mode.
+    The agent declares the tool natively exactly when Model Hub assumes the hop runs it (``native: assumed``), with
+    the wire ``declaration`` and the Responses ``include`` values; otherwise (``proxy``) as the same-named function,
+    which the gateway's executor chain runs. ``replay`` is whether a hosted payload may go back verbatim to this hop.
     """
 
     mode: Literal["native", "proxy"]
-    executor: Optional[HostedExecutor]
     replay: bool
     declaration: Optional[Mapping[str, Any]] = None
     include: tuple[str, ...] = ()
@@ -68,8 +56,6 @@ class HostedToolRoute:
     def __post_init__(self) -> None:
         if self.mode not in ("native", "proxy"):
             raise ValueError(f"unknown hosted tool mode: {self.mode!r}")
-        if self.executor is not None and not isinstance(self.executor, HostedExecutor):
-            raise ValueError("a hosted executor must be a HostedExecutor or None")
         if not isinstance(self.replay, bool):
             raise ValueError("hosted replay must be a boolean")
         if self.mode == "proxy":
@@ -81,6 +67,29 @@ class HostedToolRoute:
             raise ValueError("a native hosted tool needs a declaration with a type")
         if not isinstance(self.include, tuple) or not all(isinstance(item, str) and item for item in self.include):
             raise ValueError("hosted include must be a tuple of strings")
+
+
+@dataclass(frozen=True)
+class ImageModel:
+    """One image model ``image_generate`` may call (C-6 ``HopResolution.hosted_tools.image_generate``, §7.2): its
+    Source, its id, one short description line, and the optional arguments it takes."""
+
+    source_id: str
+    model_id: str
+    description: str
+    params: tuple[str, ...]
+    size_forms: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ImageModels:
+    """The turn's image models, default first, as the ``image_generate`` enum lists them."""
+
+    models: tuple[ImageModel, ...]
+
+    def __post_init__(self) -> None:
+        if not self.models or not all(isinstance(model, ImageModel) for model in self.models):
+            raise ValueError("image models are a non-empty tuple of ImageModel")
 
 
 @dataclass(frozen=True)
@@ -96,11 +105,16 @@ class ModelEndpoint:
     #: That Source's credential-free identity (``HopResolution.source_identity``): the account a response's opaque
     #: payloads are bound to (``cross-provider.md``).
     source_identity: Optional[str] = None
-    #: A portable request (§3.5, ``portable_request``): never pinned, and no native hosted content. Its Source and
+    #: A portable request (§3.5, ``portable_endpoint``): never pinned, and no native hosted content. Its Source and
     #: identity stay, so a response its own Source serves is still attributed to them.
     portable: bool = False
-    #: Each enabled hosted tool's route on this hop, in Model Hub's order; empty when none is enabled.
+    #: The Source identities whose opaque payloads go nowhere for the rest of the turn: their provider refused one
+    #: (§3.5). A message they served is sent as a different origin's.
+    opaque_refused: frozenset[str | None] = frozenset()
+    #: Each enabled search tool's route on this hop, in Model Hub's order; empty when none is enabled.
     hosted_tools: Mapping[str, HostedToolRoute] = field(default_factory=dict)
+    #: The models ``image_generate`` may call; None when the tool is off or no model is available.
+    image_models: Optional[ImageModels] = None
 
 
 @dataclass(frozen=True)
@@ -148,10 +162,6 @@ class ModelRequest:
     cache: Literal["default", "none"] = "default"
     supports_images: bool = False
     """Resolved by the loop from ``ModelCapabilities``; an unknown capability counts as False."""
-    tool_choice: Optional[str] = None
-    """The one tool the response must call, by name (a function's, or a hosted tool's catalog name); ``None``
-    leaves the choice to the model. Only a hosted-tool probe sets it (``vibey-hosted-tools.md`` §3.2), and never on
-    Anthropic, whose current models refuse a forced choice."""
 
 
 @dataclass(frozen=True)
@@ -200,6 +210,26 @@ class ProviderError:
     #: The response streamed thinking and nothing else before this error (``THINKING_DROP_RETRY_KINDS``): it is
     #: ``retryable``, and the loop retries it at most once per request (``provider.md``).
     after_thinking: bool = False
+    #: A refusal before any output, which the loop answers by rendering the request again (``vibey-hosted-tools.md``
+    #: §3.5), never by the generic retry.
+    refusal: Optional["Refusal"] = None
+
+
+@dataclass(frozen=True)
+class Refusal:
+    """Why a request was refused before any output, so the next attempt renders it differently (§3.5).
+
+    ``pin_unavailable``: the gateway handed a pinned request back; ``tool`` and ``aspect`` name the narrow hosted rule
+    that fired, when one did. ``opaque_refused``: the provider refused a replayed ciphertext (xAI's "Could not decrypt
+    the provided encrypted_content"), which does not say which one. ``source_id`` and ``source_identity`` are the
+    refused request's hop.
+    """
+
+    kind: Literal["pin_unavailable", "opaque_refused"]
+    source_id: Optional[str] = None
+    source_identity: Optional[str] = None
+    tool: Optional[str] = None
+    aspect: Optional[str] = None
 
 
 ProviderEvent = Union[TextDelta, ThinkingDelta, ToolCallStart, ToolCallDelta, BlockEnd, Done, ProviderError]

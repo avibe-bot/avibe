@@ -323,7 +323,7 @@ def test_the_anchor_holds_while_the_transcript_up_to_its_response_is_unchanged()
         endpoint=replace(
             ENDPOINT,
             source_id="src_hostedtest1",
-            hosted_tools={"web_search": HostedToolRoute("native", None, False, declaration=declaration)},
+            hosted_tools={"web_search": HostedToolRoute("native", False, declaration=declaration)},
         ),
     )
     as_spec = len(json.dumps([search.name, search.description, dict(search.input_schema)]).encode())

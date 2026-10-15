@@ -25,8 +25,9 @@ from typing import Any, Awaitable, Callable, Mapping, Optional
 
 from core.agent_core.agent.models import ModelSelection
 from core.agent_core.ai.provider import (
-    HostedExecutor,
     HostedToolRoute,
+    ImageModel,
+    ImageModels,
     ModelCapabilities,
     ModelEndpoint,
     ProviderAdapter,
@@ -51,60 +52,84 @@ def _optional(value: Any, kind: type, what: str) -> Any:
     return value
 
 
-#: The keys of one ``hosted_tools`` entry per mode, exactly (hop-resolution.schema.json).
-_HOSTED_ENTRY_KEYS = {
-    "native": {"mode", "executor", "replay", "declaration", "include"},
-    "proxy": {"mode", "executor", "replay"},
-}
+#: The facts of one search tool's ``hosted_tools`` entry, exactly (hop-resolution.schema.json): the declaration and
+#: include values are present exactly when the tool is assumed to run natively.
+_FACTS = ("assumed", "unsupported")
+_SEARCH_KEYS = {"assumed": {"native", "replay", "declaration", "include"}, "unsupported": {"native", "replay"}}
+_IMAGE_KEYS = {"source_id", "model_id", "description", "params", "size_forms"}
+_IMAGE_PARAMS = {"size", "images", "n"}
+_SIZE_FORMS = {"pixels", "ratio"}
 _SOURCE_ID = re.compile(r"src_[a-z0-9]{8,}")
 
 
-def _hosted_routes(raw: Any) -> dict[str, HostedToolRoute]:
-    """``HopResolution.hosted_tools``: each enabled tool's mode, native declaration, executor and replay."""
+def _hosted_routes(raw: Any) -> tuple[dict[str, HostedToolRoute], Optional[ImageModels]]:
+    """``HopResolution.hosted_tools``: each enabled search tool's facts as its route, and ``image_generate``'s models."""
     if not isinstance(raw, Mapping):
         raise HopResolutionError("hop has no hosted_tools")
     routes: dict[str, HostedToolRoute] = {}
+    images: Optional[ImageModels] = None
     for tool, entry in raw.items():
         try:
-            routes[tool] = _hosted_route(tool, entry)
+            if tool == "image_generate":
+                images = _image_models(entry)
+            else:
+                routes[tool] = _hosted_route(tool, entry)
         except (TypeError, ValueError, KeyError) as error:
             # Every malformed entry fails here, whatever the parse raised on it.
             raise HopResolutionError(f"hop hosted tool {tool!r} is invalid: {error}") from None
-    return routes
+    return routes, images
 
 
 def _hosted_route(tool: Any, entry: Any) -> HostedToolRoute:
-    """One entry, exactly as the hop schema allows it."""
+    """One search tool's facts, exactly as the hop schema allows them: declared natively exactly when ``native`` is
+    ``assumed`` (§3.4, §4.1)."""
     if tool not in HOSTED_TOOLS or not isinstance(entry, Mapping):
-        raise ValueError("not a hosted tool entry")
-    mode = entry.get("mode")
-    keys = _HOSTED_ENTRY_KEYS.get(mode) if isinstance(mode, str) else None
-    if keys is None:
-        raise ValueError(f"unknown mode {mode!r}")
-    if set(entry) != keys:
-        raise ValueError(f"a {mode} entry has exactly {', '.join(sorted(keys))}")
-    executor = entry["executor"]
-    if executor is not None:
-        if (
-            not isinstance(executor, Mapping)
-            or set(executor) != {"source_id", "model_id"}
-            or not isinstance(executor["source_id"], str)
-            or not _SOURCE_ID.fullmatch(executor["source_id"])
-        ):
-            raise ValueError("the executor is a Source id and a model id, or null")
-        executor = HostedExecutor(executor["source_id"], executor["model_id"])
-    if tool == "image_generation" and entry["replay"] is not False:
-        raise ValueError("an image_generation call is never replayed")
+        raise ValueError("not a search tool entry")
+    native, replay = entry.get("native"), entry.get("replay")
+    if native not in _FACTS or replay not in _FACTS:
+        raise ValueError("native and replay are each assumed or unsupported")
+    if set(entry) != _SEARCH_KEYS[native]:
+        raise ValueError(f"a {native} entry has exactly {', '.join(sorted(_SEARCH_KEYS[native]))}")
     include = entry.get("include", [])
     if not isinstance(include, list):
         raise ValueError("include must be a list")
     return HostedToolRoute(
-        mode=mode,
-        executor=executor,
-        replay=entry["replay"],
+        mode="native" if native == "assumed" else "proxy",
+        replay=replay == "assumed",
         declaration=entry.get("declaration"),
         include=tuple(include),
     )
+
+
+def _image_models(entry: Any) -> ImageModels:
+    """``image_generate``'s models, default first, exactly as the hop schema allows them (§7.2)."""
+    if not isinstance(entry, Mapping) or set(entry) != {"models", "default"}:
+        raise ValueError("an image_generate entry has exactly models and default")
+    raw_models, default = entry["models"], entry["default"]
+    if not isinstance(raw_models, list) or not raw_models:
+        raise ValueError("models is a non-empty list")
+    models = []
+    for item in raw_models:
+        if not isinstance(item, Mapping) or set(item) != _IMAGE_KEYS:
+            raise ValueError(f"an image model has exactly {', '.join(sorted(_IMAGE_KEYS))}")
+        if not isinstance(item["source_id"], str) or not _SOURCE_ID.fullmatch(item["source_id"]):
+            raise ValueError("an image model names its Source")
+        for name in ("model_id", "description"):
+            if not isinstance(item[name], str) or not item[name]:
+                raise ValueError(f"an image model has a {name}")
+        params, forms = item["params"], item["size_forms"]
+        if not isinstance(params, list) or not set(params) <= _IMAGE_PARAMS or len(set(params)) != len(params):
+            raise ValueError("params lists distinct size, images and n")
+        if not isinstance(forms, list) or not set(forms) <= _SIZE_FORMS or len(set(forms)) != len(forms):
+            raise ValueError("size_forms lists distinct pixels and ratio")
+        models.append(
+            ImageModel(item["source_id"], item["model_id"], item["description"], tuple(params), tuple(forms))
+        )
+    if not isinstance(default, Mapping) or set(default) != {"source_id", "model_id"}:
+        raise ValueError("default is a Source id and a model id")
+    if (models[0].source_id, models[0].model_id) != (default["source_id"], default["model_id"]):
+        raise ValueError("the default is the first model")
+    return ImageModels(tuple(models))
 
 
 def selection_from_hop(hop: Mapping[str, Any], *, gateway_base_url: Optional[str] = None) -> ModelSelection:
@@ -127,7 +152,7 @@ def selection_from_hop(hop: Mapping[str, Any], *, gateway_base_url: Optional[str
         isinstance(key, str) and isinstance(value, str) for key, value in headers.items()
     ):
         raise HopResolutionError("hop request_headers must map strings to strings")
-    hosted_tools = _hosted_routes(hop.get("hosted_tools"))
+    hosted_tools, image_models = _hosted_routes(hop.get("hosted_tools"))
     raw = hop.get("capabilities")
     if not isinstance(raw, Mapping):
         raise HopResolutionError("hop has no capabilities")
@@ -158,6 +183,7 @@ def selection_from_hop(hop: Mapping[str, Any], *, gateway_base_url: Optional[str
         source_id=hop["source_id"],
         source_identity=hop["source_identity"],
         hosted_tools=hosted_tools,
+        image_models=image_models,
     )
     return ModelSelection(endpoint=endpoint, capabilities=capabilities)
 
@@ -167,7 +193,7 @@ class HubModelRouter:
 
     ``first`` is the selection the adapter already resolved during preflight; the
     loop's first attempt reuses it, so a run resolves once and again only after a
-    retryable error.
+    retryable error or a refusal (``vibey-hosted-tools.md`` §3.5).
     """
 
     def __init__(
@@ -182,13 +208,18 @@ class HubModelRouter:
         self._first = first
         #: The route preflight resolved; the Turn's tool list is fixed from it.
         self.preflight = first
+        #: The hop the Turn runs on now, its latest resolution. The gateway answers the Turn's requests only on that
+        #: hop's credential (C-6 item 3), so the Turn's hosted calls go out on it too.
+        self.current = first
         self._adapters: dict[str, ProviderAdapter] = {}
 
     async def resolve(self) -> ModelSelection:
         if self._first is not None:
             selection, self._first = self._first, None
-            return selection
-        return await self._resolve()
+        else:
+            selection = await self._resolve()
+        self.current = selection
+        return selection
 
     def provider_for(self, protocol: ProtocolName) -> ProviderAdapter:
         adapter = self._adapters.get(protocol)
@@ -209,24 +240,16 @@ class HubModelRouter:
                 logger.warning("Vibey could not close its %s provider adapter", protocol, exc_info=True)
 
 
-def registry_providers(*, media_loader: Any, media_sink: Any = None, client: Any = None) -> ProviderFactory:
+def registry_providers(*, media_loader: Any, client: Any = None) -> ProviderFactory:
     """Provider adapters from the ``ai`` registry, speaking to the Model Hub gateway.
 
     In gateway mode each adapter reads the served origin from ``x-avibe-served-hop``
-    with the engine's own resolver, the one owner of that C-6 rule. ``media_sink``
-    keeps the images a Responses hop generates natively, the only protocol that does.
+    with the engine's own resolver, the one owner of that C-6 rule.
     """
 
     def create(protocol: ProtocolName) -> ProviderAdapter:
         from core.agent_core.ai.registry import create_adapter
 
-        images = {"media_sink": media_sink} if protocol == "openai_responses" else {}
-        return create_adapter(
-            protocol,
-            client=client,
-            media_loader=media_loader,
-            gateway=True,
-            **images,
-        )
+        return create_adapter(protocol, client=client, media_loader=media_loader, gateway=True)
 
     return create
