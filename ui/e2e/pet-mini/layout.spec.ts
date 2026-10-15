@@ -265,6 +265,31 @@ test('an empty activity stack takes no space while history remains usable withou
   expect(await page.locator('.pet-mini-avatar-button').boundingBox()).toEqual(avatar);
 });
 
+test('a close during a main outage lasts until the mini document reopens', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal');
+  await page.locator('.pet-mini-collapsed').click();
+  const card = page.locator('.pet-mini-card[data-session-id="ses_fixture_0"]');
+  await expect(card).toBeVisible();
+  await page.evaluate(() => {
+    window.petFixtureConnection(false);
+    window.setPetMainAvailable(false);
+    window.petFixtureConnection(true);
+  });
+  await expect(page.getByText("Couldn't open the conversation with Vibey. Try again in a moment.")).toBeVisible();
+  await card.locator('.pet-mini-dismiss').click();
+  await expect(card).toHaveCount(0);
+  await page.evaluate(() => {
+    window.petFixtureConnection(false);
+    window.setPetMainAvailable(true);
+    window.petFixtureConnection(true);
+  });
+  await expect(page.locator('.pet-mini-reply-toggle')).toBeVisible();
+  await expect(card).toHaveCount(0);
+  await page.reload();
+  await page.locator('.pet-mini-collapsed').click();
+  await expect(card).toBeVisible();
+});
+
 for (const trigger of ['reconnect', 'reactivation']) {
   test(`main resolves automatically after service recovery on ${trigger}`, async ({ page }) => {
     await page.goto('/e2e/pet-mini/fixture.html?offline=true&activities=0');

@@ -20,7 +20,6 @@ export type PetBinding = {
 
 export type PetReady = PetBinding & {
   summon_pending: { intent: PetIntent } | null;
-  dismissed_ids: string[];
 };
 
 export const PET_SUMMON_EVENT = 'avibe:pet-summon';
@@ -75,15 +74,12 @@ export const petBridge = {
 
   ready: async (): Promise<PetReady> => {
     const invoke = shellInvoke();
-    if (!invoke) return { ...readDevBinding(), summon_pending: null, dismissed_ids: [] };
+    if (!invoke) return { ...readDevBinding(), summon_pending: null };
     const result = (await invoke('pet_ready')) as { summon_pending?: { intent?: unknown } | null } | null;
     const pending = result?.summon_pending;
     return {
       ...parseBinding(result),
       summon_pending: pending && isIntent(pending.intent) ? { intent: pending.intent } : null,
-      dismissed_ids: Array.isArray((result as { dismissed_ids?: unknown } | null)?.dismissed_ids)
-        ? (result as { dismissed_ids: unknown[] }).dismissed_ids.filter((id): id is string => typeof id === 'string')
-        : [],
     };
   },
 
@@ -103,13 +99,7 @@ export const petBridge = {
     await invoke('pet_hit_regions', { rects });
   },
 
-  setDismissedIds: async (sessionId: string, ids: string[]): Promise<void> => {
-    const invoke = shellInvoke();
-    if (!invoke) return;
-    await invoke('pet_set_dismissed', { sessionId, ids });
-  },
-
-  /** Normalize native dismissal storage; callers cannot choose another session. */
+  /** Normalize the legacy binding; callers cannot choose another session. */
   bindMain: async (): Promise<PetBinding> => {
     const invoke = shellInvoke();
     if (invoke) return parseBinding(await invoke('pet_bind', { sessionId: 'ses_main' }));

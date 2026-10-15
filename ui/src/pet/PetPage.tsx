@@ -229,7 +229,8 @@ const PetSurface: React.FC = () => {
   const failure = useMemo(() => latestFailureNotice(data.messages), [data.messages]);
   const quickReplies = openQuickReplies(data.messages);
   const runningAgents = useConversationAgentSnapshot(capabilities.can_use_agents === true);
-  const repliedAgents = usePetReplyActivities(capabilities.can_use_agents === true, epoch, inbox.inboxSessions ?? EMPTY_INBOX);
+  const { rows: repliedAgents, pending: repliesPending } = usePetReplyActivities(capabilities.can_use_agents === true, epoch, inbox.inboxSessions ?? EMPTY_INBOX);
+  const activitySnapshotReady = inbox.unreadLoaded === true && !inbox.loading && runningAgents.ok && !repliesPending;
   const visibleAgentRows = useMemo(() => (
     [...(runningAgents.ok ? runningAgents.agents : []), ...repliedAgents].filter((agent) => (
         agent.session_id
@@ -363,7 +364,7 @@ const PetSurface: React.FC = () => {
   // A healthy disappearance followed by reappearance is also a new local turn,
   // including when its turn.start event was missed during a connection gap.
   useLayoutEffect(() => {
-    if (!runningAgents.ok || !activityActionsReady || !epoch.isCurrent()) return;
+    if (!activitySnapshotReady || !activityActionsReady || !epoch.isCurrent()) return;
     const present = new Set(liveCards.map((card) => card.sessionId));
     for (const id of present) {
       if (activityPresence.current.get(id) === false) advanceTurn(id);
@@ -372,7 +373,7 @@ const PetSurface: React.FC = () => {
     for (const id of activityPresence.current.keys()) {
       if (!present.has(id)) activityPresence.current.set(id, false);
     }
-  }, [liveCards, runningAgents.ok, activityActionsReady, advanceTurn, epoch]);
+  }, [liveCards, activitySnapshotReady, activityActionsReady, advanceTurn, epoch]);
   const activities = useMemo(() => [
     ...liveCards.map((card) => retainedCards[card.id] ?? card),
     ...Object.values(retainedCards).filter((card) => !liveCards.some((live) => live.id === card.id)),
@@ -390,10 +391,10 @@ const PetSurface: React.FC = () => {
     });
   }, [activities, cardsExpanded]);
   useEffect(() => {
-    if (!binding || !runningAgents.ok) return;
+    if (!activitySnapshotReady) return;
     const liveIds = new Set([...visibleAgentRows.map((row) => row.session_id), ...Object.keys(inbox.unreadBySession).filter((id) => inbox.unreadBySession[id] > 0)]);
     for (const id of dismissed) if (!liveIds.has(id)) petShell.forgetDismissed(id);
-  }, [visibleAgentRows, inbox.unreadBySession, binding, dismissed, runningAgents.ok]);
+  }, [visibleAgentRows, inbox.unreadBySession, dismissed, activitySnapshotReady]);
 
   const sortedActivities = useMemo(() => {
     const byId = new Map(activities.map((card) => [card.id, card]));
@@ -497,12 +498,12 @@ const PetSurface: React.FC = () => {
     updatePresentation(card.id, { leaving: true, retained: card });
     const remove = () => {
       if (!isCurrentCard(card)) return;
-      if (binding && manual) petShell.addDismissed(binding, card.sessionId);
+      if (manual) petShell.addDismissed(card.sessionId);
       updatePresentation(card.id, { leaving: false, retained: undefined, ...(!manual ? { phase: 'exited' as const } : {}) });
     };
     if (reducedMotion) remove();
     else dismissTimers.current[card.id] = window.setTimeout(remove, DISMISS_EXIT_MS);
-  }, [binding, reducedMotion, isCurrentCard, updatePresentation]);
+  }, [reducedMotion, isCurrentCard, updatePresentation]);
 
   const setStop = useCallback((card: PetCard) => {
     if (!isCurrentCard(card) || !card.canStop) return;

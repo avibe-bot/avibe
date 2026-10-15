@@ -14,6 +14,8 @@ export interface InboxState {
    *  each session row from this (a session with unread may sit past the first
    *  inbox page, so the feed array alone isn't a complete source). */
   unreadBySession: Record<string, number>;
+  /** A whole-account unread snapshot has applied. Missing means unknown. */
+  unreadLoaded?: boolean;
   /** Sum of ``unreadBySession`` — the Inbox nav badge. */
   totalUnread: number;
   /** Number of sessions with ≥1 unread reply — the header "N unread" count. */

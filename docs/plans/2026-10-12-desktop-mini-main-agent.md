@@ -385,7 +385,8 @@ Two beats, so the exit reads before the reflow:
 
 - The leaving row ignores the pointer.
 - A second click on the same × is a no-op.
-- A dismissed card does **not** come back on a refresh (§9.3).
+- A dismissed card stays closed through activity refreshes in the same document.
+  Reloading or reopening the mini starts fresh (§11.3).
 
 ### 7.4 No reflow jumps
 
@@ -515,7 +516,7 @@ GET /api/sessions/main
 - **No switcher.** The bubble's switch button, the entire recent-session picker,
   its "Talk to Vibey" option and the Workbench "Show in pet" action are removed.
   The only allowed binding write is `pet_bind("ses_main")` after successful main
-  resolution, to normalize native dismissal storage. No caller writes another
+  resolution, to normalize the legacy binding. No caller writes another
   session or invokes `pet_unbind`. Summons still open/listen
   through the existing shell flow and wait for a usable main.
 - **Persisted compatibility.** Existing `pet.json` shapes still load unchanged.
@@ -526,29 +527,30 @@ GET /api/sessions/main
   `builtin_agent_unavailable`, or a transport failure shows the existing localized
   unavailable message and "Open in Avibe". No arbitrary-session fallback. Pending
   resolution shows the existing loading copy; reconnect/reactivation can recover.
-- **Dismissal persistence.** After main resolves successfully, compare the legacy
+- **Main-only binding normalization.** After main resolves successfully, compare the legacy
   binding from `pet_ready` with `ses_main`. If different, make at most one
-  `pet_bind("ses_main")` attempt per surface epoch. Serialize dismissal writes
-  after this normalization, so closes made during the IPC are preserved even
-  though native binding clears the old dismissal list. An already-main file
+  `pet_bind("ses_main")` attempt per surface epoch. An already-main file
   needs no binding write. A failed normalization does not retry in a loop;
-  a later epoch may try again. This preserves §11.3 for new installs and upgrades.
-  The last successfully resolved main owns document dismissals, even during a
-  temporary lookup failure. Manual × records `add(id)` and forgetting records
-  `remove(id)` through one operation entry point. Before `pet_ready`, apply each
-  operation immediately in the UI and retain it in order. On readiness, replay
-  the log over the matching persisted main baseline (or the empty baseline after
-  legacy binding normalization), then persist only a changed result. Ready-state
-  operations update the current list and use the same serialized write queue.
-  Do not replace the persisted baseline with a pre-ready document snapshot.
-  Forget the id when it disappears from the healthy eligible activity snapshot
-  (and has no unread Inbox reply), or when its next turn starts.
+  a later epoch may try again. This does not synchronize dismissals.
+- **Document-only dismissal.** Manual × closes a card for the current document.
+  The last successfully resolved main owns these closes, including new closes
+  made during a temporary main lookup failure. Do not read or write native
+  `dismissed_ids`; `pet_ready` and binding normalization cannot restore, clear,
+  or delay document closes. Reloading or reopening starts with no closed cards.
+  Forget an id on an explicit new turn, or after it disappears from eligible
+  activities and has no unread Inbox reply. Absence-based forgetting and local
+  reappearance detection require an applied whole-account Inbox unread snapshot,
+  no initial Inbox feed load in progress, a successful running-agents snapshot,
+  and no pending reply-activity validation. Retain validated reply rows during
+  revalidation; only the latest read may replace them. A failed read stays
+  non-authoritative until a later event retries. No new polling loop or shared
+  activity-source lifecycle is introduced.
 - **Turn-scoped card presentation.** Confirmation, cancellation, stopped/failed
   notices, exits, leaving animation and retained cards use `sessionId:generation`
   keys. Increment the local generation on `turn.start` or healthy activity
   disappearance followed by reappearance. Retire that key's timers together;
   every timer/cancel callback checks its captured key and authorization epoch.
-  Old callbacks cannot alter a new turn. Stop exits never add persistent dismissals.
+  Old callbacks cannot alter a new turn. Stop exits never add manual dismissals.
 - **Standalone stop eligibility.** A foreground, chat-openable human activity
   with `platform = null` is a Web candidate, as is `platform = avibe`. Both still
   require an explicitly in-flight turn-state read; actual IM platforms stay excluded.
@@ -567,10 +569,12 @@ GET /api/sessions/main
    - **Do not guess from tool names in the client.**
 2. **No HTTP cancel for agent runs.** Hide stop on agent runs until it exists
    (§6).
-3. **Dismiss persistence.** There is no server state for dismissed cards.
-   Keep the dismissed ids in `pet.json`, so a dismissed card stays gone across
-   restarts. Forget an id when its eligible activity disappears or a new turn starts (§10). This
-   adds an optional field, so older files keep loading.
+3. **No dismissal persistence in this delivery.** A manual × lasts only for the
+   current mini document. Refreshing the page or restarting the mini lets the
+   activity sources populate cards again. Existing `pet.json` files still load,
+   but their `dismissed_ids` are ignored and no dismissal IPC writes are made.
+   Forgetting within the document follows §10. Cross-restart memory and a unified
+   readiness model for the three activity sources are deferred.
 
 ## 12. Prototype-only (do not copy)
 
