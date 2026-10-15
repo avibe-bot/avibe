@@ -196,7 +196,19 @@ def _load_image(handle: BinaryIO, head: bytes, mime_type: str) -> Union[_Image, 
 
 
 class ImageUnreadable(Exception):
-    """Why ``read_image`` cannot give the image at a path: the reason ``read`` would show."""
+    """Why ``read_image`` cannot give the image at a path: ``kind`` says which check refused it, so a caller can word
+    it; ``reason`` is the text ``read`` would show, the system's own words for a file it could not open."""
+
+    def __init__(
+        self,
+        reason: str,
+        *,
+        kind: str = "unreadable",
+        mime_type: Optional[str] = None,
+        size: Optional[int] = None,
+    ) -> None:
+        super().__init__(reason)
+        self.reason, self.kind, self.mime_type, self.size = reason, kind, mime_type, size
 
 
 def read_image(path: str, cwd: str) -> tuple[str, bytes]:
@@ -219,9 +231,10 @@ def read_image(path: str, cwd: str) -> tuple[str, bytes]:
     except ToolInputError as exc:
         raise ImageUnreadable(str(exc)) from None
     if image is None:
-        raise ImageUnreadable("it is not an image (jpg, png, gif, webp)")
+        raise ImageUnreadable("it is not an image (jpg, png, gif, webp)", kind="not_image")
     if isinstance(image, _Omitted):
-        raise ImageUnreadable(image.reason.rstrip("."))
+        kind = "too_large" if image.size is not None else "unsupported"
+        raise ImageUnreadable(image.reason.rstrip("."), kind=kind, mime_type=image.mime_type, size=image.size)
     return image.mime_type, image.data
 
 

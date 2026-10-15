@@ -1820,6 +1820,25 @@
       "failed": "失败：{error}",
       "incomplete": "未完成：{error}",
       "pending": "已中断"
+    },
+    "image": {
+      "notOffered": "{model} 不是本轮可用的图片模型。",
+      "unknownArguments": "image_generate 只接受 model、prompt、size、images 和 n，却收到了 {names}。",
+      "noPrompt": "prompt 必须写明要画的内容。",
+      "sizeForm": "size 必须是{pixels}，或{ratio}。",
+      "sizeFormUnsupported": "{model} 不支持尺寸 {size}：它只接受{form}。",
+      "badImages": "images 必须是 1 到 {max} 个参考图片路径。",
+      "badCount": "n 必须是 1 到 {max} 之间的整数。",
+      "form": {
+        "pixels": "宽x高，例如 1024x1024",
+        "ratio": "宽高比，例如 16:9"
+      },
+      "reference": {
+        "unreadable": "无法读取参考图片 {path}：{reason}。",
+        "notImage": "参考图片 {path} 不是图片（jpg、png、gif、webp）。",
+        "tooLarge": "参考图片 {path} 有 {size}，超过 {limit} 的上限。",
+        "unsupported": "参考图片 {path} 是 {mime}，无法发送。"
+      }
     }
   }
 }

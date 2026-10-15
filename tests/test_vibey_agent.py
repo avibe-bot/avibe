@@ -2688,14 +2688,14 @@ _IMAGE_MODELS = (
 )
 
 
-def _image_tool(client, *, media=None):
+def _image_tool(client, *, media=None, language="en"):
     from core.agent_core.ai.provider import ImageModel, ImageModels, ModelEndpoint
     from core.agent_core.tools.hosted import image_generate_spec
     from modules.agents.vibey.tools import ImageGenerateTool
 
     models = ImageModels(tuple(ImageModel("src_executor01", *entry) for entry in _IMAGE_MODELS))
     endpoint = ModelEndpoint("anthropic", "http://hub.invalid/vibey/v1", "claude-opus-5-5", "hub-token")
-    return ImageGenerateTool(image_generate_spec(models), models, lambda: endpoint, client, media)
+    return ImageGenerateTool(image_generate_spec(models), models, lambda: endpoint, client, media, lambda: language)
 
 
 def _tool_context(cwd: Path):
@@ -2770,40 +2770,50 @@ async def test_an_image_the_endpoint_returns_is_saved_through_the_media_sink_and
 
 
 @pytest.mark.parametrize(
-    ("arguments", "error", "code"),
+    ("arguments", "error", "code", "language"),
     [
-        ({"model": "dall-e-3", "prompt": "a cat"}, "'dall-e-3' is not an image model of this turn. Available: "
-         "gpt-image-2, gemini-3.1-flash-image.", "image_model_unavailable"),
+        ({"model": "dall-e-3", "prompt": "a cat"}, "dall-e-3 is not an image model of this turn. Available: "
+         "gpt-image-2, gemini-3.1-flash-image.", "image_model_unavailable", "en"),
         ({"model": "gemini-3.1-flash-image", "prompt": "a cat", "images": ["cat.jpg"]},
-         "gemini-3.1-flash-image does not take images. Models that take it: gpt-image-2.", "image_param_unsupported"),
+         "gemini-3.1-flash-image does not take images. Models that take it: gpt-image-2.", "image_param_unsupported",
+         "en"),
         ({"model": "gpt-image-2", "prompt": "a cat", "size": "16:9"},
          "gpt-image-2 does not take size 16:9: it takes WIDTHxHEIGHT, such as 1024x1024. Models that take it: "
-         "gemini-3.1-flash-image.", "image_param_unsupported"),
+         "gemini-3.1-flash-image.", "image_param_unsupported", "en"),
         # No model takes both: no alternative is named.
         ({"model": "gemini-3.1-flash-image", "prompt": "a cat", "size": "16:9", "n": 2},
-         "gemini-3.1-flash-image does not take n.", "image_param_unsupported"),
+         "gemini-3.1-flash-image does not take n.", "image_param_unsupported", "en"),
         # The forms the image endpoint accepts, no wider.
-        ({"model": "gpt-image-2", "prompt": "a cat", "size": "8x8"}, "size must be WIDTHxHEIGHT", None),
+        ({"model": "gpt-image-2", "prompt": "a cat", "size": "8x8"}, "size must be WIDTHxHEIGHT", None, "en"),
         ({"model": "gpt-image-2", "prompt": "a cat", "quality": "high"},
-         "image_generate takes only model, prompt, size, images, n; it was given quality", None),
+         "image_generate takes only model, prompt, size, images and n; it was given quality.", None, "en"),
         ({"model": "gpt-image-2", "prompt": "a cat", "images": ["missing.jpg"]},
-         "cannot read the reference image missing.jpg: ", None),
+         "Cannot read the reference image missing.jpg: ", None, "en"),
         ({"model": "gpt-image-2", "prompt": "a cat", "images": ["notes.txt"]},
-         "cannot read the reference image notes.txt: it is not an image", None),
-        ({"model": "gpt-image-2", "prompt": "make it blue", "images": ["cat.jpg"], "n": 2}, None, None),
+         "The reference image notes.txt is not an image (jpg, png, gif, webp).", None, "en"),
+        # Every reason is worded in the user's language, the ones the gateway also writes as the gateway does.
+        ({"model": "gemini-3.1-flash-image", "prompt": "a cat", "images": ["cat.jpg"]},
+         "gemini-3.1-flash-image 不支持 images。 支持它的模型：gpt-image-2。", "image_param_unsupported", "zh"),
+        ({"model": "gpt-image-2", "prompt": "a cat", "size": "8x8"},
+         "size 必须是宽x高，例如 1024x1024，或宽高比，例如 16:9。", None, "zh"),
+        ({"model": "gpt-image-2", "prompt": "a cat", "images": ["notes.txt"]},
+         "参考图片 notes.txt 不是图片（jpg、png、gif、webp）。", None, "zh"),
+        ({"model": "gpt-image-2", "prompt": "make it blue", "images": ["cat.jpg"], "n": 2}, None, None, "en"),
         # An empty list is no reference image: the call goes out without it.
-        ({"model": "gemini-3.1-flash-image", "prompt": "a cat", "images": [], "size": "16:9"}, None, None),
+        ({"model": "gemini-3.1-flash-image", "prompt": "a cat", "images": [], "size": "16:9"}, None, None, "en"),
     ],
     ids=["model-outside-the-turn", "param-the-model-does-not-take", "size-form-the-model-does-not-take",
          "no-model-takes-the-call", "size-in-no-form", "unknown-argument", "reference-missing",
-         "reference-not-an-image", "reference-sent", "no-reference"],
+         "reference-not-an-image", "zh-param", "zh-size-in-no-form", "zh-reference-not-an-image", "reference-sent",
+         "no-reference"],
 )
 async def test_an_image_call_is_checked_against_the_turns_models_and_its_references_read_before_it_runs(
-    tmp_path, arguments, error, code
+    tmp_path, arguments, error, code, language
 ):
     """§7.2, §7.4: Vibey refuses an argument the turn's frozen models do not take before anything runs, and names
     what does take it; a reference image is read as ``read`` reads it, relative to the session's directory, and sent
-    as base64. A path the agent could not read fails the call before it is sent."""
+    as base64. A path the agent could not read fails the call before it is sent. The reason is in the user's
+    language, which the card and the IM line show."""
     import httpx
 
     (tmp_path / "cat.jpg").write_bytes(_JPEG)
@@ -2815,7 +2825,7 @@ async def test_an_image_call_is_checked_against_the_turns_models_and_its_referen
         return httpx.Response(200, json={"record": {"status": "failed", "error": "upstream refused"}})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
-        result = await _image_tool(client).execute(arguments, _tool_context(tmp_path))
+        result = await _image_tool(client, language=language).execute(arguments, _tool_context(tmp_path))
 
     if error is None:
         (request,) = sent

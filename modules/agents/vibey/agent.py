@@ -633,7 +633,7 @@ class VibeyAgent(BaseAgent):
         # Job-backed tools receive the loop's tracking wrapper, so Stop kills foreground commands.
         tools = mark_skill_loads(
             (
-                *hosted_tools(turn.router, self._gateway_client, self.media),
+                *hosted_tools(turn.router, self._gateway_client, self.media, language=self._language),
                 *suite.create_tools(agent.jobs, self.media.image_sink(session_id)),
             )
         )

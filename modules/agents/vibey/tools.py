@@ -39,9 +39,11 @@ from core.agent_core.messages import (
 )
 from core.agent_core.tools.base import CallInstance, JobHost, Tool, ToolContext, ToolResult, ToolSpec
 from core.agent_core.tools.hosted import MAX_IMAGES, hosted_tool_spec, image_generate_spec, size_form
-from core.agent_core.tools.read import ImageUnreadable, read_image
+from core.agent_core.tools.read import MAX_INLINE_IMAGE_BYTES, ImageUnreadable, read_image
+from core.agent_core.tools.truncate import format_size
 from core.agent_core.tools.shell import default_shell
 from modules.agents.vibey.models import HubModelRouter
+from vibe.i18n import t as i18n_t
 
 ImageSink = Callable[[bytes, str, str], Awaitable[str]]
 #: Whether a job's tool call has a durable ``tool_result`` (the adapter's half of J5).
@@ -154,6 +156,8 @@ class ImageGenerateTool:
     route: Callable[[], ModelEndpoint] = field(repr=False)
     client: Optional[httpx.AsyncClient] = field(default=None, repr=False)
     media: Optional[MediaSink] = field(default=None, repr=False)
+    #: The user's language, in which the tool words the reasons it writes (the gateway words its own the same way).
+    language: Callable[[], str] = field(default=lambda: "en", repr=False)
 
     async def execute(self, arguments: Mapping[str, Any], ctx: ToolContext) -> ToolResult:
         model, prompt = arguments.get("model"), arguments.get("prompt")
@@ -165,14 +169,17 @@ class ImageGenerateTool:
         notes = (_image_facts(hosted),) if hosted.record.status == "completed" else ()
         return _result(self.spec.name, hosted, query=prompt if isinstance(prompt, str) else None, notes=notes)
 
+    def _say(self, key: str, **params: str) -> str:
+        return i18n_t(key, self.language(), **params)
+
     async def _run(self, arguments: dict[str, Any], cwd: str) -> HostedResult:
-        refusal = _image_refusal(self.models, arguments)
+        refusal = _image_refusal(self.models, arguments, self._say)
         if refusal is not None:
             return _failed(self.spec.name, *refusal)
         try:
             references = await asyncio.to_thread(_reference_images, arguments.get("images") or (), cwd)
-        except ImageUnreadable as error:
-            return _failed(self.spec.name, str(error), None)
+        except _ReferenceUnreadable as refused:
+            return _failed(self.spec.name, _reference_refusal(refused, self._say), None)
         if references:
             arguments["images"] = references
         hosted, answer = await _gateway_call(self.route(), self.client, self.spec.name, arguments)
@@ -209,51 +216,57 @@ class ImageGenerateTool:
 
 
 _IMAGE_ARGUMENTS = ("model", "prompt", "size", "images", "n")
-_SIZE_FORM_NAMES = {"pixels": "WIDTHxHEIGHT, such as 1024x1024", "ratio": "an aspect ratio, such as 16:9"}
+#: Words a reason the image tool writes, in the user's language: ``say(key, **params)``.
+Say = Callable[..., str]
 
 
-def _image_refusal(models: ImageModels, arguments: dict[str, Any]) -> Optional[tuple[str, Optional[str]]]:
-    """Why the Turn's frozen image models refuse ``arguments`` before anything runs (§7.2), with the error code Avibe
-    writes for it; None when the call may go out. It refuses what the gateway, the execution boundary, would, so a
-    bad call costs nothing; a refusal names the models that do take the call. An empty ``images`` is no reference
-    image, and is left out of the call."""
+def _image_refusal(models: ImageModels, arguments: dict[str, Any], say: Say) -> Optional[tuple[str, Optional[str]]]:
+    """Why the Turn's frozen image models refuse ``arguments`` before anything runs (§7.2), worded by ``say``, with the
+    error code Avibe writes for it; None when the call may go out. It refuses what the gateway, the execution boundary,
+    would, so a bad call costs nothing, and words the reasons the gateway also writes as the gateway does; a refusal
+    names the models that do take the call. An empty ``images`` is no reference image, and is left out of the call."""
 
     if arguments.get("images") == []:
         del arguments["images"]
     unknown = sorted(set(arguments) - set(_IMAGE_ARGUMENTS))
     if unknown:
-        return f"image_generate takes only {', '.join(_IMAGE_ARGUMENTS)}; it was given {', '.join(unknown)}", None
-    available = [model.model_id for model in models.models]
+        return say("hostedTools.image.unknownArguments", names=", ".join(unknown)), None
     chosen = next((model for model in models.models if model.model_id == arguments.get("model")), None)
     if chosen is None:
-        return (
-            f"{arguments.get('model')!r} is not an image model of this turn. Available: {', '.join(available)}.",
-            "image_model_unavailable",
-        )
+        available = ", ".join(model.model_id for model in models.models)
+        reason = say("hostedTools.image.notOffered", model=str(arguments.get("model")))
+        return f"{reason} {say('modelHub.hostedTools.imageAlternatives', models=available)}", "image_model_unavailable"
     prompt = arguments.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
-        return "prompt must be the text of what to draw", None
+        return say("hostedTools.image.noPrompt"), None
     if "size" in arguments and size_form(arguments["size"]) is None:
-        return f"size must be {_SIZE_FORM_NAMES['pixels']}, or {_SIZE_FORM_NAMES['ratio']}", None
+        forms = {form: say(f"hostedTools.image.form.{form}") for form in ("pixels", "ratio")}
+        return say("hostedTools.image.sizeForm", **forms), None
     images = arguments.get("images")
     if "images" in arguments and (
         not isinstance(images, list) or not all(isinstance(path, str) and path for path in images) or len(images) > MAX_IMAGES
     ):
-        return f"images must be 1 to {MAX_IMAGES} paths of reference images", None
+        return say("hostedTools.image.badImages", max=str(MAX_IMAGES)), None
     n = arguments.get("n", 1)
     if isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= MAX_IMAGES:
-        return f"n must be a whole number from 1 to {MAX_IMAGES}", None
+        return say("hostedTools.image.badCount", max=str(MAX_IMAGES)), None
     unsupported = _unsupported(chosen, arguments)
     if unsupported is None:
         return None
     if unsupported == "size" and "size" in chosen.params:
-        takes = " or ".join(_SIZE_FORM_NAMES[form] for form in chosen.size_forms)
-        reason = f"{chosen.model_id} does not take size {arguments['size']}: it takes {takes}."
+        # Two forms exist, so a model that refuses one takes the other.
+        (form,) = chosen.size_forms
+        reason = say(
+            "hostedTools.image.sizeFormUnsupported",
+            model=chosen.model_id,
+            size=str(arguments["size"]),
+            form=say(f"hostedTools.image.form.{form}"),
+        )
     else:
-        reason = f"{chosen.model_id} does not take {unsupported}."
+        reason = say("modelHub.hostedTools.imageParamUnsupported", model=chosen.model_id, param=unsupported)
     takers = [model.model_id for model in models.models if _unsupported(model, arguments) is None]
     if takers:
-        reason += f" Models that take it: {', '.join(takers)}."
+        reason += " " + say("modelHub.hostedTools.imageParamTakers", models=", ".join(takers))
     return reason, "image_param_unsupported"
 
 
@@ -268,6 +281,12 @@ def _unsupported(model: ImageModel, arguments: Mapping[str, Any]) -> Optional[st
     return None
 
 
+class _ReferenceUnreadable(Exception):
+    def __init__(self, path: str, error: ImageUnreadable) -> None:
+        super().__init__(path)
+        self.path, self.error = path, error
+
+
 def _reference_images(paths: Sequence[str], cwd: str) -> list[str]:
     """The reference images at ``paths``, base64, each read as ``read`` reads it (§7.4). Blocking."""
 
@@ -276,9 +295,23 @@ def _reference_images(paths: Sequence[str], cwd: str) -> list[str]:
         try:
             _, data = read_image(path, cwd)
         except ImageUnreadable as error:
-            raise ImageUnreadable(f"cannot read the reference image {path}: {error}") from None
+            raise _ReferenceUnreadable(path, error) from None
         encoded.append(base64.b64encode(data).decode("ascii"))
     return encoded
+
+
+def _reference_refusal(refused: _ReferenceUnreadable, say: Say) -> str:
+    """Why a reference image cannot be sent, worded by ``say``; the system's own words for a file it could not open."""
+
+    error, path = refused.error, refused.path
+    if error.kind == "not_image":
+        return say("hostedTools.image.reference.notImage", path=path)
+    if error.kind == "too_large" and error.size is not None:
+        limit = format_size(MAX_INLINE_IMAGE_BYTES)
+        return say("hostedTools.image.reference.tooLarge", path=path, size=format_size(error.size), limit=limit)
+    if error.kind == "unsupported":
+        return say("hostedTools.image.reference.unsupported", path=path, mime=error.mime_type or "")
+    return say("hostedTools.image.reference.unreadable", path=path, reason=error.reason)
 
 
 def _image_facts(hosted: HostedResult) -> str:
@@ -392,6 +425,8 @@ def hosted_tools(
     router: HubModelRouter,
     client: Optional[httpx.AsyncClient] = None,
     media: Optional[MediaSink] = None,
+    *,
+    language: Callable[[], str] = lambda: "en",
 ) -> tuple[Tool, ...]:
     """The Turn's hosted tools from its first resolution (§3.4): every search tool the user enabled, in Model Hub's
     order, whatever a hop runs it as, then ``image_generate`` when an image model is available. They lead the Turn's
@@ -408,5 +443,5 @@ def hosted_tools(
     tools: list[Tool] = [HostedTool(hosted_tool_spec(name), route, client) for name in frozen.hosted_tools]
     if frozen.image_models is not None:
         spec = image_generate_spec(frozen.image_models)
-        tools.append(ImageGenerateTool(spec, frozen.image_models, route, client, media))
+        tools.append(ImageGenerateTool(spec, frozen.image_models, route, client, media, language))
     return tuple(tools)

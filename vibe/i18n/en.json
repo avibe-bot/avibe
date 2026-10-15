@@ -1820,6 +1820,25 @@
       "failed": "failed: {error}",
       "incomplete": "incomplete: {error}",
       "pending": "cut off"
+    },
+    "image": {
+      "notOffered": "{model} is not an image model of this turn.",
+      "unknownArguments": "image_generate takes only model, prompt, size, images and n; it was given {names}.",
+      "noPrompt": "prompt must be the text of what to draw.",
+      "sizeForm": "size must be {pixels}, or {ratio}.",
+      "sizeFormUnsupported": "{model} does not take size {size}: it takes {form}.",
+      "badImages": "images must be 1 to {max} paths of reference images.",
+      "badCount": "n must be a whole number from 1 to {max}.",
+      "form": {
+        "pixels": "WIDTHxHEIGHT, such as 1024x1024",
+        "ratio": "an aspect ratio, such as 16:9"
+      },
+      "reference": {
+        "unreadable": "Cannot read the reference image {path}: {reason}.",
+        "notImage": "The reference image {path} is not an image (jpg, png, gif, webp).",
+        "tooLarge": "The reference image {path} is {size}, over the {limit} limit.",
+        "unsupported": "The reference image {path} is {mime}, which cannot be sent."
+      }
     }
   }
 }
