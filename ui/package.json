@@ -68,7 +68,7 @@
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
     "docx-preview": "^0.3.7",
-    "dompurify": "3.4.15",
+    "dompurify": "3.4.17",
     "framer-motion": "^12.26.2",
     "i18next": "^25.7.4",
     "i18next-browser-languagedetector": "^8.2.0",
