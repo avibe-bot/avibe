@@ -67,10 +67,6 @@
   text-align:left;
   pointer-events:auto}
 
-.pet-mini-card.is-main {
-  background:var(--pet-main);
-  border-color:color-mix(in srgb,var(--mint) 45%,transparent)}
-
 .pet-mini-card-content {
   min-width:0;
   flex:1}
@@ -173,9 +169,6 @@ to {
   min-width:0;
   perspective:900px;
   padding-bottom:8px}
-.pet-mini-row-body.is-main {
-  padding-bottom:16px}
-
 .pet-mini-row.is-leaving {
   grid-template-rows:0fr;
   pointer-events:none}
@@ -375,10 +368,40 @@ to {
   color:color-mix(in srgb,var(--pet-ink) 45%,transparent)}
 
 .pet-mini-input {
-  align-items:flex-end;
+  flex-direction:column;
+  align-items:stretch;
   gap:6px;
   border:1px solid color-mix(in srgb,var(--pet-ink) 10%,transparent);
   padding:6px 6px 6px 14px}
+.pet-mini-input-row {
+  display:flex;
+  align-items:flex-end;
+  gap:6px;
+  min-width:0}
+.pet-mini-references {
+  display:flex;
+  flex-wrap:wrap;
+  gap:4px;
+  padding-top:4px}
+.pet-mini-reference-chip {
+  display:inline-flex;
+  max-width:100%;
+  min-width:0;
+  align-items:center;
+  gap:6px;
+  padding:2px 6px;
+  border-radius:6px;
+  background:var(--mint-soft);
+  color:var(--mint-ink);
+  font-size:11px}
+.pet-mini-reference-chip > span {
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap}
+.pet-mini-reference-chip button {
+  flex:none;
+  cursor:pointer}
 .pet-mini-input textarea {
   min-width:0;
   max-height:96px;
@@ -643,17 +666,6 @@ to {
    white-space: nowrap;
    }
 
-.pet-mini-card-wrap.is-main  {
-   border: 1px solid color-mix(in srgb,var(--mint) 45%,transparent);
-   border-radius: 28px;
-   background: var(--pet-main);
-   }
-
-.pet-mini-card-wrap.is-main > .pet-mini-card  {
-   border: 0;
-   background: transparent;
-   }
-
 .pet-mini-card[role=button]  {
    cursor: pointer;
    }
@@ -745,3 +757,131 @@ to {
   color:color-mix(in srgb,var(--pet-ink) 70%,transparent);
   font-size:12px;
   line-height:16px}
+
+/* Personal-agent speech and activities share the v2 fixed mini column. */
+.pet-mini-card-reference {
+  display:block;
+  border:0;
+  background:transparent;
+  padding:0;
+  color:inherit;
+  text-align:left;
+  cursor:pointer}
+.pet-mini-card-reference .pet-mini-eyebrow {
+  display:flex;
+  align-items:center;
+  gap:6px;
+  line-height:16px;
+  color:color-mix(in srgb,var(--pet-ink) 65%,transparent)}
+.pet-mini-eyebrow > span {
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap}
+.pet-mini-card.is-needs-input {
+  border-color:var(--gold);
+  background:color-mix(in srgb,var(--gold) 8%,var(--pet-card))}
+.pet-mini-card.is-needs-input .pet-mini-subtitle {
+  color:var(--gold)}
+.pet-mini-card.is-needs-input .pet-mini-running-dot {
+  background:var(--gold)}
+.pet-mini-card-actions {
+  display:flex;
+  align-items:center;
+  flex:none;
+  gap:6px;
+  padding-top:2px;
+  margin-right:-4px;
+  margin-left:12px}
+.pet-mini-card-actions .pet-mini-stop {
+  margin:0}
+.pet-mini-open,.pet-mini-authorize {
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  gap:4px;
+  height:32px;
+  border:0;
+  border-radius:999px;
+  color:color-mix(in srgb,var(--pet-ink) 75%,transparent);
+  background:color-mix(in srgb,var(--pet-ink) 8%,transparent);
+  cursor:pointer}
+.pet-mini-open { width:32px }
+.pet-mini-authorize {
+  padding:0 10px;
+  color:var(--gold);
+  font-size:12px}
+.pet-mini-open:hover,.pet-mini-authorize:hover {
+  background:color-mix(in srgb,var(--pet-ink) 14%,transparent)}
+.pet-mini-card-reference:focus-visible,.pet-mini-reply-toggle:focus-visible {
+  outline:2px solid var(--mint);
+  outline-offset:2px;
+  border-radius:8px}
+.pet-mini-reply-bubble {
+  position:relative;
+  width:100%;
+  min-width:0;
+  border:1px solid color-mix(in srgb,var(--pet-ink) 10%,transparent);
+  border-radius:22px;
+  background:var(--pet-card)}
+.pet-mini-reply-bubble:after {
+  position:absolute;
+  bottom:-6px;
+  left:calc(50% - 7px);
+  width:14px;
+  height:14px;
+  border-right:1px solid color-mix(in srgb,var(--pet-ink) 10%,transparent);
+  border-bottom:1px solid color-mix(in srgb,var(--pet-ink) 10%,transparent);
+  border-radius:0 0 3px 0;
+  background:inherit;
+  content:"";
+  transform:rotate(45deg);
+  pointer-events:none}
+.pet-mini-reply-toggle {
+  display:block;
+  width:100%;
+  padding:10px 14px;
+  color:inherit;
+  text-align:left;
+  cursor:pointer}
+.pet-mini-bubble-speaker {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  color:var(--mint-ink);
+  font-size:11px;
+  line-height:16px;
+  font-weight:600}
+.pet-mini-bubble-speaker > span {
+  display:flex;
+  align-items:center;
+  gap:4px;
+  color:color-mix(in srgb,var(--pet-ink) 60%,transparent);
+  font-size:10px;
+  font-weight:400}
+.pet-mini-reply-toggle[aria-expanded=true] svg { transform:rotate(90deg) }
+.pet-mini-reply-toggle p {
+  display:flex;
+  align-items:center;
+  gap:6px;
+  margin-top:3px;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  font-size:13px;
+  line-height:20px}
+.pet-mini-reply-summary {
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap}
+.pet-mini-bubble-history {
+  position:relative;
+  z-index:1;
+  max-height:clamp(48px,calc(100dvh - 524px),120px);
+  overflow:auto;
+  overscroll-behavior:contain;
+  border-top:1px solid color-mix(in srgb,var(--pet-ink) 8%,transparent);
+  scrollbar-width:thin}
+.pet-mini-bubble-history .pet-mini-detail-inner { padding:8px 14px }
+.pet-mini-collapsed { margin-bottom:14px }

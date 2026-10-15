@@ -6007,6 +6007,24 @@
     "fixInAvibe": "在 Avibe 中处理",
     "talkToVibey": "和歪比对话",
     "noChatProject": "先在 Avibe 里建一个项目，和歪比的对话需要放在项目里。",
-    "vibeyUnavailable": "没能打开和歪比的对话，请稍后再试。"
+    "vibeyUnavailable": "没能打开和歪比的对话，请稍后再试。",
+    "unknownProject": "会话",
+    "unknownAgent": "Agent",
+    "needsAuthorization": "需要你授权",
+    "replied": "已回复",
+    "referenceSession": "引用会话：{{title}}",
+    "authorize": "授权",
+    "recentTurns": "最近几轮",
+    "collapseHistory": "收起记录",
+    "platform": {
+      "slack": "Slack",
+      "discord": "Discord",
+      "telegram": "Telegram",
+      "feishu": "飞书",
+      "lark": "Lark",
+      "wechat": "微信",
+      "unknown": "IM"
+    },
+    "removeReference": "移除对 {{title}} 的引用"
   }
 }

@@ -16,6 +16,11 @@ Status: ready for implementation, v2 (2026-10-12). Supersedes v1 of this file.
   #2408) stays the base for binding, IPC, the shortcut, `pet.json`, poses and
   mark-read. This spec changes the layout and interaction on top of it.
 
+> P1 amendment (2026-10-15): §§4.2, 4.3, 5.2 and 8 supersede the v2 main-card
+> and background-card descriptions elsewhere in this document. Layout, shell,
+> voice, dock, motion and timing remain v2. References to main-card detail now
+> mean the reply bubble's expandable detail.
+
 ## 1. What changes, in one walk-through
 
 1. Vibey (歪比) sits at the bottom of the mini. Above it is a **collapsed
@@ -133,64 +138,67 @@ the main agent; there is no Follow up on cards.
 - There is **no reply/return button** and **no Follow up** (owner decisions).
 - **Icons are SVG**, never Unicode glyphs. iOS renders `↩` as a blue emoji.
 
-### 4.2 Main agent card
+### 4.2 Personal Agent reply bubble
 
-- **Position:** always the first card, collapsed or expanded. It cannot be
-  dismissed and has no stop button in this version.
-- **Eyebrow:** the agent's name above the title, 2px gap: "Vibey" / "歪比"
-  as written, no forced uppercase (owner decision, 2026-10-14). The fallback
-  title and the input placeholder ("Message Vibey…" / "和歪比说…") name
-  Vibey the same way; "main agent" is never shown to the user.
-  - 11px, semibold, normal case and tracking.
-  - Light green at 80%: map to the theme's mint token; the prototype used
-    `emerald-300`.
-  - It names the card type, not the speaker.
-- **Title:** the user's last message to the main agent. No avatar or icon:
-  these are the user's own words, so nothing may suggest Vibey said them.
-- **Subtitle:**
-  - while the turn runs, the current step ("Thinking", "Reading file", "Ran
-    command", "Delegating", …) with the running dot;
-  - after the turn, the start of the reply, "已回复：…", with no dot.
-- **Distinct but quiet:**
-  - background `#34343b`, one step lighter than sub-task cards;
-  - border light green at 45% (the same mint token);
-  - 16px of row spacing after it.
-- **Click to open the conversation detail.** Clicking the main agent card in
-  the expanded list opens an inline detail region inside the card. This keeps
-  everything today's pet panel does, so nothing regresses (decided in review):
-  - the latest exchange: the last user message and the unread results (or the
-    last result), rendered with the existing Markdown renderer. Mark-read
-    follows the existing rule: what is rendered and seen is marked read; when
-    unread rows reach past the loaded tail, show "More in Avibe";
-  - quick replies for the latest result, clickable, using the existing
-    `QuickReplies` path (they never change Vibey's pose, #2408);
-  - pending vault requests, one "需要授权，在 Avibe 中打开" button each;
-  - the uncertain-send notice and the queued notice from the existing panel;
-  - an "在 Avibe 中打开" link.
+There is no main-agent card. Vibey's own progress and reply occupy the speech
+slot above the avatar: thinking, delegated-to (only when provenance is known),
+then the latest reply. The bubble names Vibey in its existing localized spelling.
+It remains available with either the collapsed or expanded stack.
 
-  The detail opens and closes with the `grid-template-rows 0fr ↔ 1fr`
-  technique: 280ms settle for the rows, opacity 200ms ease. It grows inside
-  the fixed scroll box: the box and Vibey do not move. It closes when the
-  stack collapses, and clicking the card again also closes it.
-- **Before the first send,** the card shows the main session's last exchange.
-  If there is none, it is absent.
-- **Pose:** Vibey takes the running pose while this card's turn runs.
+Click the bubble to expand recent turns from the loaded tail. Preserve all
+previous main detail behavior:
 
-### 4.3 Sub-task cards
+- Markdown for the latest exchange and recent user/result rows;
+- mark-read only for the current, fully loaded unread exchange when its result
+  is visible and the page has focus; incomplete unread tails keep More in Avibe;
+- latest quick replies, pending Vault authorization handoffs, queued and
+  uncertain-send notices, and Open in Avibe;
+- the document-wide send lock and authorization/session epoch fencing.
 
-- **Source:** the main session's turn state, `background_activities`. It
-  already unions delegated runs (`item_kind: agent_run`), watches (`watch`)
-  and scheduled tasks (`task`); this was verified live.
-- **Title:** the item's `label`, falling back to `description`.
-- **Subtitle:** "{kind} · {status}". Map the kind and raw status to readable,
-  localized text: 委派运行 / 监控 / 定时任务; Running, 排队中, 等待中…
-  Never show raw values such as `enabled`.
-- **Running** means `status` is `running` or `processing`; it shows the
-  running dot and the stop button.
-- **Order:** the main agent card first, then running sub-tasks, then the rest.
-  A sub-task the current turn just created goes directly below the main agent
-  card. Live data must not reshuffle rows under the pointer while the list is
-  expanded; apply reorders on collapse.
+Detail retains the 280ms grid / 200ms opacity transition and closes on stack
+collapse. Its own scroll region fits the existing window; opening it never
+resizes the avatar or the 292px activity scroll box. Input and dictation hide
+this detail according to §5.2, including quick replies.
+
+### 4.3 Visible activity cards
+
+Use `api.getRunningAgents()` as the activity source, shared by the card and
+team-pose derivation. Exclude the bound main session, `ses_main`, missing session
+identities, and rows without explicit foreground visibility and chat access.
+Deduplicate by session; an active row wins over an idle row. A process going
+idle or disappearing is not evidence of a completed reply.
+
+The existing Inbox supplies unread evidence. Foreground unread sessions in its
+loaded feed remain eligible after their process disappears, with visibility
+revalidated by `getSessionResult`. No separate unread counter is created.
+The card says Replied while it has unread evidence and no running process.
+Callbacks to the main session are reported in Vibey's bubble.
+
+- Heading: project · agent; for IM, platform · project · agent.
+- Title: session title, with the existing localized fallback.
+- Priority: needs authorization, running, then replied. Preserve relative order
+  within a priority group while expanded; a newly actionable card moves first.
+- Clicking the card body appends the Web marker `#<session-id>` to the main
+  draft. It appears as a removable title chip; sending uses the main binding and
+  the existing session-reference sidecar. Cards never send replies directly.
+- Actions: dismiss, authorization handoff, Open in Avibe, and supported stop.
+  A foreground Web session exposes stop only after its live turn-state confirms
+  an in-flight dispatch turn. Use `cancelSession`, with §6's two presses, 3s
+  confirmation, 2.5s success linger and §7's exit. Runtime teardown is not stop.
+  Agent runs and IM rows without this cancellation evidence hide the control.
+  A process snapshot does not identify a Watch/Task definition; never infer a
+  definition ID or pause a schedule from a runtime identifier.
+
+Known data limitations for P1:
+
+- `trigger_source` defaults to human and does not prove caller lineage. Omit
+  the delegated badge and delegated-to summary until a reliable read-only
+  relation exists; do not fabricate attribution or suppress a visible result.
+- Background/system/unknown visibility is excluded. Ordinary questions lack a
+  reliable attention field; only pending Vault requests supply this signal.
+- Replied fallback is bounded by the existing loaded Inbox feed, which covers
+  Web Inbox data. A process-free session absent from that feed cannot be
+  discovered here, including a Vault-only session with no unread Inbox row.
 
 ### 4.4 Empty
 
@@ -241,7 +249,9 @@ the main agent; there is no Follow up on cards.
 
 - **One slot** sits at the bottom of the column, between the cards and
   Vibey. By priority it holds the marquee while dictating, otherwise the
-  input bubble when it is open, otherwise nothing.
+  input bubble when it is open, otherwise Vibey's reply bubble when it has
+  progress, history, a notice, quick replies or a pending authorization.
+  Only the highest-priority content is interactive or eligible for mark-read.
 - **No margin of its own.** The last card's row spacing plus the panel's 6px
   padding separate it from the cards (about 14px).
 - **Motion:**
@@ -395,19 +405,22 @@ With `prefers-reduced-motion: reduce`, every transition and animation in this
 spec is off. States switch instantly, a dismissed card disappears at once, and
 the marquee text still updates.
 
-## 8. Busy rule (pose)
+## 8. Pose priority
 
-Vibey shows the running pose when **any** agent is working in a conversation
-the user can see: the main session, built-in role sessions, or ordinary user
-sessions.
+Use the first matching condition, following the approved prototype's `POSES`:
 
-- This keeps #2401: an `active` foreground session in the running-agents
-  snapshot.
-- It **adds the main session's own running sub-tasks**: running items in its
-  turn state's `background_activities`. They run in background sessions, which
-  #2401 excludes.
-- The main session's own needs-input, blocked and ready states still win over
-  busy (existing priority).
+1. Listening: active dictation.
+2. Needs input: pending authorization in the main session or any eligible card.
+3. Blocked: the main session failed.
+4. Running: the main session is running.
+5. Ready: main unread results or a nondismissed replied card.
+6. Team working: an eligible activity is active.
+7. Idle; sleeping after five idle minutes.
+
+Cards and team activity use the same filtered snapshot. Background definitions
+alone do not create cards or a busy pose. Quick-reply suggestions do not count
+as needs input. Keep the current static images (team uses the existing running
+image); layered pose animation is deferred. Preserve reduced-motion behavior.
 
 ## 9. Shell (Tauri) work
 

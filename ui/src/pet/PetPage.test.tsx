@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type {
   RunningAgentsResult,
+  InboxSession,
+  VaultRequest,
   WorkbenchEventHandlers,
   WorkbenchMessage,
   WorkbenchSession,
@@ -95,6 +97,7 @@ let setupDone = true;
 let sessionReads: Record<string, () => Promise<WorkbenchSessionReadResult>> = {};
 let tails: Record<string, WorkbenchMessage[]> = {};
 let switcherSessions: WorkbenchSession[] = [];
+let inboxSessions: InboxSession[] = [];
 let unreadBySession: Record<string, number> = {};
 let runningAgents: RunningAgentsResult = { ok: true, agents: [], counts: { total: 0, active: 0, idle: 0, orphan: 0, by_backend: {} } };
 const workingIn = (sessionId: string): RunningAgentsResult => ({
@@ -118,6 +121,7 @@ const markRead = vi.fn(async (): Promise<boolean> => {
 });
 
 const api = {
+  cancelSession: vi.fn(async (_payload: unknown) => ({ ok: true })),
   setHarnessWatchEnabled: vi.fn(async () => ({ ok: true })),
   setHarnessTaskEnabled: vi.fn(async () => ({ ok: true })),
   getMainSession: vi.fn(() => {
@@ -133,9 +137,9 @@ const api = {
     ? sessionReads[id]()
     : Promise.resolve({ status: 200, session: session(id), capabilities: { can_chat: true } }))),
   listSessionMessages: vi.fn(async (id: string) => ({ messages: tails[id] ?? [], next_after_id: null, next_before_id: null })),
-  getTurnState: vi.fn(async () => idleTurn),
+  getTurnState: vi.fn(async (_id?: string, _options?: unknown) => idleTurn),
   listSessions: vi.fn(async () => ({ sessions: switcherSessions, next_before_id: null })),
-  getVaultRequests: vi.fn(async () => ({ requests: [] })),
+  getVaultRequests: vi.fn(async (_filter?: { session?: string }, _options?: unknown): Promise<{ requests: VaultRequest[] }> => ({ requests: [] })),
   getRunningAgents: vi.fn(async (): Promise<RunningAgentsResult> => runningAgents),
   sendSessionMessage: vi.fn(async () => message('sent', 'S', { author: 'user', type: 'user' })),
   connectWorkbenchEvents: (h: WorkbenchEventHandlers) => {
@@ -161,7 +165,7 @@ vi.mock('@/context/WorkbenchInboxContext', async () => {
         inboxListeners.add(listener);
         return () => inboxListeners.delete(listener);
       }, () => inboxVersion);
-      return { unreadBySession: { ...unreadBySession }, markRead };
+      return { unreadBySession: { ...unreadBySession }, inboxSessions, markRead };
     },
   };
 });
@@ -206,12 +210,12 @@ const shellBound = (sessionId: string | null, revision: number) => act(() => {
 const summon = (intent: 'listen' | 'show' | 'release') => act(() => {
   window.dispatchEvent(new CustomEvent(PET_SUMMON_EVENT, { detail: { intent } }));
 });
-// v2 puts the exchange behind the main card. Tests of the exchange explicitly
+// The speech bubble holds the exchange. Tests of the exchange explicitly
 // open it; raw summon remains available for collapsed/detail visibility tests.
 const showDetail = async () => {
   summon('show');
   await act(async () => new Promise((resolve) => setTimeout(resolve, 15)));
-  const main = document.querySelector('.pet-mini-card[role="button"]');
+  const main = document.querySelector('.pet-mini-reply-toggle');
   if (main && !document.querySelector('.pet-mini-detail.is-open')) fireEvent.click(main);
 };
 const pose = () => document.querySelector('.pet-avatar')?.getAttribute('data-pose');
@@ -232,7 +236,9 @@ beforeEach(async () => {
   sessionReads = {};
   tails = Object.fromEntries(['S', 'A', 'B', 'C'].map((id) => [id, [message(`u-${id}`, id, { author: 'user', type: 'user', text: `Session ${id}` })]]));
   switcherSessions = [];
+  inboxSessions = [];
   unreadBySession = {};
+  api.getVaultRequests.mockReset().mockResolvedValue({ requests: [] });
   markRead.mockClear();
   inboxVersion = 0;
   api.getSessionResult.mockClear();
@@ -296,8 +302,7 @@ describe('PetPage binding', () => {
     summon('listen');
     await waitFor(() => expect(api.getSessionResult).toHaveBeenCalledWith('B'));
     await act(async () => lateA.resolve({ status: 404, session: null }));
-    await showDetail();
-    expect(await screen.findAllByText('Session B')).toBeTruthy();
+    expect(await screen.findByRole('textbox')).toBeTruthy();
     expect(devBinding().binding).toBe('B');
   });
 
@@ -577,7 +582,8 @@ describe('PetPage review fixes', () => {
     await userEvent.type(input, 'hello{Enter}');
     await bound('B');
     summon('listen');
-    await screen.findByText('B only');
+    await screen.findByRole('textbox');
+    await waitFor(() => expect(api.listSessionMessages).toHaveBeenCalledWith('B', expect.anything()));
     await act(async () => pending.resolve(message('a-sent', 'A', { author: 'user', type: 'user', text: 'sent to A' })));
     // B neither shows A's row nor enters A's post-send Running grace.
     expect(screen.queryByText('sent to A')).toBeNull();
@@ -848,7 +854,7 @@ describe('PetPage review fixes, round 6', () => {
     await userEvent.type(input, 'meant for A');
     await bound('B');
     summon('listen');
-    await screen.findAllByText('Session B');
+    await screen.findByRole('textbox');
     expect((screen.getByLabelText('pet.inputPlaceholder') as HTMLTextAreaElement).value).toBe('');
   });
 
@@ -927,10 +933,10 @@ describe('PetPage review fixes, round 8', () => {
     tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('q', 'S', { content: { quick_replies: ['Yes', 'No'] } })];
     devBind('S');
     render(<PetPage />);
-    summon('listen');
-    const input = await screen.findByLabelText('pet.inputPlaceholder');
     await showDetail();
     await userEvent.click(await screen.findByText('Yes'));
+    summon('listen');
+    const input = await screen.findByLabelText('pet.inputPlaceholder');
     await userEvent.type(input, 'also this{Enter}');
     expect(api.sendSessionMessage).toHaveBeenCalledTimes(1);
     await act(async () => pending.resolve(message('sent', 'S', { author: 'user', type: 'user' })));
@@ -946,7 +952,7 @@ describe('PetPage review fixes, round 8', () => {
     await userEvent.type(input, 'continue{Enter}');
     await bound('B');
     summon('listen');
-    await screen.findAllByText('Session B');
+    await screen.findByRole('textbox');
     const inputB = screen.getByLabelText('pet.inputPlaceholder') as HTMLTextAreaElement;
     await userEvent.type(inputB, 'continue');
     await act(async () => pending.resolve(message('a-sent', 'A', { author: 'user', type: 'user' })));
@@ -955,7 +961,7 @@ describe('PetPage review fixes, round 8', () => {
 });
 
 describe('PetPage review fixes, round 9', () => {
-  it('counts own running sub-tasks in the collapsed busy pose', async () => {
+  it('does not turn background definitions into visible team activity', async () => {
     api.getTurnState.mockImplementation(async () => ({
       ...idleTurn,
       background_activities: [
@@ -966,9 +972,10 @@ describe('PetPage review fixes, round 9', () => {
     try {
       devBind('S');
       render(<PetPage />);
-      expect(await screen.findByLabelText('chat.activities.running')).toBeTruthy();
-      expect(screen.getByLabelText('chat.activities.running').textContent).toBe('2');
-      expect(pose()).toBe('running');
+      await screen.findByLabelText('pet.toggle');
+      await act(async () => {});
+      expect(screen.queryByLabelText('chat.activities.running')).toBeNull();
+      expect(pose()).toBe('idle');
     } finally {
       api.getTurnState.mockImplementation(async () => idleTurn);
     }
@@ -1293,7 +1300,7 @@ describe('PetPage live convergence', () => {
     Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
     tails.S = [message('u', 'S', { author: 'user', type: 'user' })];
     render(<PetPage />);
-    await showDetail();
+    summon('show');
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_set_expanded', { expanded: true }));
     await act(async () => first.resolve({ panel_side: 'left', panel_edge: 'bottom' }));
     await screen.findByLabelText('pet.panel');
@@ -1317,7 +1324,7 @@ describe('PetPage live convergence', () => {
     Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
     Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
     render(<PetPage />);
-    await showDetail();
+    summon('show');
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_set_expanded', { expanded: true }));
     await settle();
     expect(screen.queryByLabelText('pet.panel')).toBeNull();
@@ -1442,7 +1449,7 @@ describe('PetPage review fixes, round 14', () => {
     Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
     tails.S = [message('u', 'S', { author: 'user', type: 'user' })];
     render(<PetPage />);
-    await showDetail();
+    summon('show');
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_set_expanded', { expanded: true }));
     expect(order).toEqual([true]);
     // Collapse while expand is still in flight: Esc is not listening yet
@@ -1479,18 +1486,26 @@ describe('PetPage review fixes, round 14', () => {
 
 
 describe('desktop mini v2 interaction contract', () => {
-  // Match derive_session_harness_activities(): definitions carry durable
-  // enabled/scheduled states, while delegated executions carry running.
-  const activity = (id: string, item_kind: 'watch' | 'task' | 'agent_run', status = { watch: 'enabled', task: 'scheduled', agent_run: 'running' }[item_kind]) => ({
+  // Visible process rows replace background definitions; stopping keeps v2 timing.
+  const activity = (id: string, item_kind: 'watch' | 'task' | 'agent_run', status = 'running') => ({
     id, item_kind, status, label: id, description: id, backend: 'codex',
     runtime_key: id, session_id: 'S', kind: item_kind, started_at: '', updated_at: '',
   });
   const turn = (items: ReturnType<typeof activity>[]) => {
-    api.getTurnState.mockResolvedValue({ ...idleTurn, background_activities: items } as never);
+    canUseAgents = true;
+    api.getTurnState.mockImplementation(async (id: string) => ({ ...idleTurn, in_flight: items.some((item) => item.id === id && item.status === 'running') }));
+    runningAgents = {
+      ok: true,
+      agents: items.map((item) => ({
+        ...workingIn(item.id).agents[0], backend: 'codex', title: item.label,
+        state: item.status === 'running' ? 'active' : 'idle',
+        trigger_source: item.item_kind === 'agent_run' ? 'agent' : 'human',
+      })),
+      counts: { total: items.length, active: items.length, idle: 0, orphan: 0, by_backend: {} },
+    };
   };
   beforeEach(() => {
-    api.setHarnessWatchEnabled.mockReset().mockResolvedValue({ ok: true });
-    api.setHarnessTaskEnabled.mockReset().mockResolvedValue({ ok: true });
+    api.cancelSession.mockReset().mockResolvedValue({ ok: true });
   });
   afterEach(() => {
     vi.useRealTimers();
@@ -1503,22 +1518,22 @@ describe('desktop mini v2 interaction contract', () => {
     const id = `${kind}:private`;
     turn([activity(id, kind)]);
     const pending = deferred<{ ok: boolean }>();
-    const pause = kind === 'watch' ? api.setHarnessWatchEnabled : api.setHarnessTaskEnabled;
+    const pause = api.cancelSession;
     pause.mockImplementationOnce(() => pending.promise);
     devBind('S'); render(<PetPage />); await showDetail();
-    const stop = await screen.findByLabelText('pet.stop.confirmPause');
+    const stop = await screen.findByLabelText('pet.stop.confirmStop');
     vi.useFakeTimers();
     fireEvent.click(stop); fireEvent.click(stop);
-    expect(screen.getByText('pet.stop.pausing')).toBeTruthy();
+    expect(screen.getByText('pet.stop.stopping')).toBeTruthy();
     turn([]);
     await emit((h) => h.onAuthorizationChanged?.({}));
     expect(screen.queryByText(id)).toBeNull();
-    expect(screen.queryByText('pet.stop.pausing')).toBeNull();
+    expect(screen.queryByText('pet.stop.stopping')).toBeNull();
     // An authorized new version with the same id must not inherit old phases.
     turn([{ ...activity(id, kind), label: 'Allowed replacement' }]);
-    await emit((h) => h.onDefinitionsUpdated?.({}));
+    await emit((h) => h.onRunsUpdated?.({}));
     expect(screen.getByText('Allowed replacement')).toBeTruthy();
-    const freshStop = screen.getByLabelText('pet.stop.confirmPause');
+    const freshStop = screen.getByLabelText('pet.stop.confirmStop');
     expect(freshStop.hasAttribute('disabled')).toBe(false);
     fireEvent.click(freshStop);
     expect(freshStop.classList.contains('is-confirm')).toBe(true);
@@ -1527,7 +1542,7 @@ describe('desktop mini v2 interaction contract', () => {
       else pending.reject(new Error('old pause failed'));
     });
     expect(freshStop.classList.contains('is-confirm')).toBe(true);
-    expect(screen.queryByText('pet.stop.paused')).toBeNull();
+    expect(screen.queryByText('pet.stop.stopped')).toBeNull();
     expect(screen.queryByText('pet.stop.failed')).toBeNull();
     await act(async () => vi.advanceTimersByTime(4000));
     expect(screen.getByText('Allowed replacement')).toBeTruthy();
@@ -1551,7 +1566,7 @@ describe('desktop mini v2 interaction contract', () => {
     expect(screen.queryByText(id)).toBeNull();
     expect(document.querySelector('.is-leaving')).toBeNull();
     turn([{ ...activity(id, 'watch'), label: 'New authorized card' }]);
-    await emit((h) => h.onDefinitionsUpdated?.({}));
+    await emit((h) => h.onRunsUpdated?.({}));
     await act(async () => { (remove as () => void)(); });
     await act(async () => vi.advanceTimersByTime(500));
     expect(screen.getByText('New authorized card')).toBeTruthy();
@@ -1563,20 +1578,22 @@ describe('desktop mini v2 interaction contract', () => {
     const id = 'watch:private';
     turn([activity(id, 'watch')]);
     const pending = deferred<{ ok: boolean }>();
-    api.setHarnessWatchEnabled.mockImplementationOnce(() => pending.promise);
+    api.cancelSession.mockImplementationOnce(() => pending.promise);
     devBind('S'); render(<PetPage />); await showDetail();
-    const stop = await screen.findByLabelText('pet.stop.confirmPause');
+    const stop = await screen.findByLabelText('pet.stop.confirmStop');
     fireEvent.click(stop); fireEvent.click(stop);
     turn([]);
     await bound('B');
+    await emit((h) => h.onRunsUpdated?.({}));
     expect(screen.queryByText(id)).toBeNull();
     turn([{ ...activity(id, 'watch'), label: 'Fresh S card' }]);
+    await emit((h) => h.onRunsUpdated?.({}));
     await bound('S');
     await showDetail();
     expect(await screen.findByText('Fresh S card')).toBeTruthy();
     await act(async () => pending.resolve({ ok: true }));
-    expect(screen.queryByText('pet.stop.paused')).toBeNull();
-    expect(screen.getByLabelText('pet.stop.confirmPause').hasAttribute('disabled')).toBe(false);
+    expect(screen.queryByText('pet.stop.stopped')).toBeNull();
+    expect(screen.getByLabelText('pet.stop.confirmStop').hasAttribute('disabled')).toBe(false);
   });
 
   it.each(['success', 'uncertain'])('preserves user text while fencing a late send %s after authorization changes', async (outcome) => {
@@ -1599,7 +1616,7 @@ describe('desktop mini v2 interaction contract', () => {
     expect(screen.queryByText('Old authorized response')).toBeNull();
     // The async completion cannot clear the user's draft or open old detail.
     if (outcome === 'success') expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('my own words');
-    else expect(document.querySelector('.pet-mini-title')?.textContent).toBe('my own words');
+    else expect(petComposer.isUncertain('S')).toBe(true);
     expect(document.querySelector('.pet-mini-detail.is-open')).toBeNull();
   });
 
@@ -1621,7 +1638,7 @@ describe('desktop mini v2 interaction contract', () => {
     expect(petComposer.isUncertain('S')).toBe(true);
     expect(petComposer.isSending()).toBe(false);
     expect(screen.queryByRole('textbox')).toBeNull();
-    expect(document.querySelector('.pet-mini-title')?.textContent).toBe('preserve this');
+    expect(petComposer.isUncertain('S')).toBe(true);
     await userEvent.keyboard('{Enter}');
     expect(api.sendSessionMessage).toHaveBeenCalledTimes(1);
   });
@@ -1648,7 +1665,7 @@ describe('desktop mini v2 interaction contract', () => {
     expect(invoke.mock.calls.filter(([command]) => command === 'pet_bind')).toEqual([['pet_bind', { sessionId: 'A' }]]);
     const { petShell } = await import('./petShell');
     expect(petShell.currentBinding()).toBe('A');
-    expect(await screen.findAllByText('Session A')).toHaveLength(2);
+    expect(await screen.findAllByText('Session A')).toHaveLength(1);
     expect(screen.queryByText('Session B')).toBeNull();
   });
 
@@ -1871,9 +1888,10 @@ describe('desktop mini v2 interaction contract', () => {
     tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('q', 'S', { content: { quick_replies: ['Yes'] } })];
     const pending = deferred<WorkbenchMessage>();
     api.sendSessionMessage.mockImplementationOnce(() => pending.promise);
-    devBind('S'); render(<PetPage />); await showDetail(); summon('listen');
-    await userEvent.type(await screen.findByRole('textbox'), 'my draft');
+    devBind('S'); render(<PetPage />); await showDetail();
     await userEvent.click(screen.getByText('Yes'));
+    summon('listen');
+    await userEvent.type(await screen.findByRole('textbox'), 'my draft');
     await emit((h) => h.onAuthorizationChanged?.({}));
     await userEvent.keyboard('{Enter}');
     expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', { text: 'Yes', metadata: { quick_reply_for: 'q' } });
@@ -1889,9 +1907,9 @@ describe('desktop mini v2 interaction contract', () => {
     const pending = deferred<WorkbenchMessage>();
     api.sendSessionMessage.mockImplementationOnce(() => pending.promise);
     devBind('S'); render(<PetPage />); await showDetail();
+    await userEvent.click(await screen.findByText('Yes'));
     summon('listen');
     const input = await screen.findByRole('textbox');
-    await userEvent.click(await screen.findByText('Yes'));
     const chosen = { ...asking, content: { ...asking.content, quick_reply_chosen: 'Yes' } };
     const update = () => {
       tails.S = tails.S.map((row) => row.id === chosen.id ? chosen : row);
@@ -1917,6 +1935,8 @@ describe('desktop mini v2 interaction contract', () => {
     expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', { text: 'Yes', metadata: { quick_reply_for: 'q1' } });
     expect(screen.queryByRole('button', { name: 'Yes', exact: true })).toBeNull();
     expect(screen.queryByRole('button', { name: 'No', exact: true })).toBeNull();
+    await userEvent.keyboard('{Escape}');
+    await showDetail();
     // An older update must never reclaim a newer result's quick-reply group.
     await emit((h) => h.onMessageNew?.(message('q2', 'S', { content: { quick_replies: ['Continue', 'Wait'] } })));
     expect(await screen.findByRole('button', { name: 'Continue', exact: true })).toBeTruthy();
@@ -1941,20 +1961,14 @@ describe('desktop mini v2 interaction contract', () => {
     expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', { text: 'Yes', metadata: { quick_reply_for: 'q1' } });
   });
 
-  it('keeps waiting definitions pausable without marking them as executing', async () => {
-    turn([activity('watch:w1', 'watch'), activity('task:t1', 'task')]);
+  it('does not label idle processes as working or completed, and hides unsupported run stops', async () => {
+    turn([activity('watch:w1', 'watch', 'idle'), activity('task:t1', 'task', 'idle')]);
     devBind('S'); render(<PetPage />); await showDetail();
-    expect(screen.getAllByLabelText('pet.stop.confirmPause')).toHaveLength(2);
-    expect(screen.getByText('pet.activityKind.watch · pet.activityStatus.waiting')).toBeTruthy();
-    expect(screen.getByText('pet.activityKind.task · pet.activityStatus.waiting')).toBeTruthy();
-    expect(document.querySelector('.pet-mini-running-dot')).toBeNull();
+    expect(document.querySelectorAll('.pet-mini-card')).toHaveLength(0);
     expect(pose()).toBe('idle');
-    expect(document.querySelector('[data-busy]')?.getAttribute('data-busy')).toBe('false');
-    turn([activity('watch:w1', 'watch'), activity('task:t1', 'task'), activity('agent_run:r1', 'agent_run')]);
+    turn([activity('run:r1', 'agent_run')]);
     await emit((h) => h.onRunsUpdated?.({}));
     await waitFor(() => expect(pose()).toBe('running'));
-    expect(document.querySelectorAll('.pet-mini-running-dot')).toHaveLength(1);
-    expect(screen.getAllByLabelText('pet.stop.confirmPause')).toHaveLength(2);
     expect(screen.queryByLabelText('pet.stop.confirmStop')).toBeNull();
   });
 
@@ -1971,7 +1985,7 @@ describe('desktop mini v2 interaction contract', () => {
     fireEvent.click(await screen.findByText('pet.switchSession'));
     fireEvent.click(await screen.findByText('Another session'));
     await waitFor(() => expect(devBinding().binding).toBe('B'));
-    expect(await screen.findAllByText('Session B')).toHaveLength(2);
+    expect(await screen.findAllByText('Session B')).toHaveLength(1);
   });
 
   it('picking a session with nothing to show leaves the switcher instead of reopening it', async () => {
@@ -1998,7 +2012,7 @@ describe('desktop mini v2 interaction contract', () => {
     expect(await screen.findByText('Another session')).toBeTruthy();
     fireEvent.click(screen.getByText('common.back'));
     await waitFor(() => expect(screen.queryByText('Another session')).toBeNull());
-    expect(document.querySelector('.pet-mini-card.is-main')).toBeTruthy();
+    expect(document.querySelector('.pet-mini-reply-bubble')).toBeTruthy();
     expect(devBinding().binding).toBe('S');
 
     fireEvent.click(screen.getByText('pet.switchSession'));
@@ -2008,7 +2022,7 @@ describe('desktop mini v2 interaction contract', () => {
     fireEvent.click(screen.getByLabelText('pet.toggle'));
     await waitFor(() => expect(screen.getByLabelText('pet.toggle').getAttribute('aria-expanded')).toBe('true'));
     expect(screen.queryByText('Another session')).toBeNull();
-    expect(document.querySelector('.pet-mini-card.is-main')).toBeTruthy();
+    expect(document.querySelector('.pet-mini-reply-bubble')).toBeTruthy();
   });
 
   it('offers no back control when nothing is bound', async () => {
@@ -2056,13 +2070,13 @@ describe('desktop mini v2 interaction contract', () => {
     render(<PetPage />);
     await screen.findByText('Question');
     expect(markRead).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByLabelText('pet.stack.expand'));
+    summon('show');
     await waitFor(() => expect(document.querySelector('.pet-mini-detail')).toBeTruthy());
     expect(markRead).not.toHaveBeenCalled();
-    fireEvent.click(document.querySelector('.pet-mini-card[role=button]')!);
+    fireEvent.click(document.querySelector('.pet-mini-reply-toggle')!);
     await waitFor(() => expect(markRead).toHaveBeenCalledWith('S', 'r'));
     fireEvent.click(screen.getByLabelText('pet.toggle'));
-    await waitFor(() => expect(document.querySelector('.pet-mini-detail')).toBeNull());
+    await waitFor(() => expect(document.querySelector('.pet-mini-detail.is-open')).toBeNull());
   });
 
   it('marks detail read only after its result intersects the fixed scroll viewport', async () => {
@@ -2088,18 +2102,18 @@ describe('desktop mini v2 interaction contract', () => {
   it('requires a second press, uses the native watch id, and retains the stopped row through linger and both exit beats', async () => {
     turn([activity('watch:w1', 'watch'), activity('run:r1', 'agent_run')]);
     devBind('S'); render(<PetPage />); await showDetail();
-    const stop = await screen.findByLabelText('pet.stop.confirmPause');
-    expect(screen.queryByLabelText('pet.stop.confirmStop')).toBeNull();
+    const stop = await screen.findByLabelText('pet.stop.confirmStop');
+    expect(screen.getAllByLabelText('pet.stop.confirmStop')).toHaveLength(1);
     const pending = deferred<{ ok: boolean }>();
-    api.setHarnessWatchEnabled.mockImplementationOnce(() => pending.promise);
+    api.cancelSession.mockImplementationOnce(() => pending.promise);
     vi.useFakeTimers();
     fireEvent.click(stop);
-    expect(api.setHarnessWatchEnabled).not.toHaveBeenCalled();
+    expect(api.cancelSession).not.toHaveBeenCalled();
     fireEvent.click(stop);
-    expect(api.setHarnessWatchEnabled).toHaveBeenCalledExactlyOnceWith('w1', false);
+    expect(api.cancelSession).toHaveBeenCalledExactlyOnceWith('watch:w1');
     expect(stop.hasAttribute('disabled')).toBe(true);
     await act(async () => pending.resolve({ ok: true }));
-    expect(screen.getByText('pet.stop.paused')).toBeTruthy();
+    expect(screen.getByText('pet.stop.stopped')).toBeTruthy();
     turn([]);
     // Server removal during the linger cannot cut off the local exit.
     await act(async () => { handlers.forEach((h) => h.onRunsUpdated?.({})); });
@@ -2116,18 +2130,18 @@ describe('desktop mini v2 interaction contract', () => {
 
   it('expires confirmation at 3s and lets a failed pause be retried', async () => {
     turn([activity('task:t1', 'task')]); devBind('S'); render(<PetPage />); await showDetail();
-    const stop = await screen.findByLabelText('pet.stop.confirmPause');
+    const stop = await screen.findByLabelText('pet.stop.confirmStop');
     vi.useFakeTimers(); fireEvent.click(stop);
     await act(async () => vi.advanceTimersByTime(3000));
     expect(stop.classList.contains('is-confirm')).toBe(false);
-    api.setHarnessTaskEnabled.mockRejectedValueOnce(new Error('offline'));
+    api.cancelSession.mockRejectedValueOnce(new Error('offline'));
     fireEvent.click(stop); fireEvent.click(stop);
     await act(async () => {});
     expect(screen.getByText('pet.stop.failed')).toBeTruthy();
     fireEvent.click(stop); fireEvent.click(stop);
     await act(async () => {});
-    expect(api.setHarnessTaskEnabled).toHaveBeenNthCalledWith(2, 't1', false);
-    expect(screen.getByText('pet.stop.paused')).toBeTruthy();
+    expect(api.cancelSession).toHaveBeenNthCalledWith(2, 'task:t1');
+    expect(screen.getByText('pet.stop.stopped')).toBeTruthy();
   });
 
   it('holds for exactly 320ms, cancels a departed press, and falls back to text without voice support', async () => {
@@ -2146,5 +2160,65 @@ describe('desktop mini v2 interaction contract', () => {
     expect(screen.queryByLabelText('pet.voice.open')).toBeNull();
     fireEvent.pointerUp(avatar, { pointerId: 2 });
     expect(api.sendSessionMessage).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('Personal Agent mini', () => {
+  it('uses the same visible sessions for cards and attention, excluding the main and unknown visibility', async () => {
+    canUseAgents = true;
+    const row = workingIn('running').agents[0];
+    runningAgents = { ...workingIn('running'), agents: [
+      { ...row, session_id: 'S' },
+      { ...row, session_id: 'ses_main' },
+      { ...row, session_id: 'hidden', visibility: 'background' },
+      { ...row, session_id: 'system', visibility: 'system' },
+      { ...row, session_id: 'unknown', visibility: null },
+      { ...row, session_id: 'closed', openable_in_chat: false },
+      { ...row, session_id: 'reply', state: 'idle' },
+      { ...row, session_id: 'running', state: 'idle' },
+      row,
+      { ...row, session_id: 'approval', state: 'idle' },
+    ] };
+    unreadBySession = { reply: 1 };
+    api.getVaultRequests.mockImplementation(async (filter) => ({ requests: filter?.session === 'approval' ? [{ id: 'request', request_type: 'access', session: { id: 'approval' } } as VaultRequest] : [] }));
+    devBind('S'); render(<PetPage />); await showDetail();
+    await waitFor(() => expect(pose()).toBe('needs_input'));
+    expect(Array.from(document.querySelectorAll('.pet-mini-card'), (node) => node.getAttribute('data-session-id'))).toEqual(['approval', 'running', 'reply']);
+    expect(document.querySelector('.pet-mini-card.is-main')).toBeNull();
+    expect(api.getVaultRequests).not.toHaveBeenCalledWith(expect.objectContaining({ session: 'hidden' }), expect.anything());
+    api.getVaultRequests.mockResolvedValue({ requests: [] });
+    await emit((h) => h.onVaultsUpdated?.({}));
+    await waitFor(() => expect(pose()).toBe('ready'));
+    expect(Array.from(document.querySelectorAll('.pet-mini-card'), (node) => node.getAttribute('data-session-id'))).toEqual(['running', 'reply']);
+  });
+
+  it('keeps unread Inbox replies after their process ends and rechecks visibility', async () => {
+    canUseAgents = true;
+    inboxSessions = [{ session_id: 'reply', unread: true, project_name: 'Project' } as InboxSession];
+    unreadBySession = { reply: 1 };
+    devBind('S'); render(<PetPage />); await showDetail();
+    await waitFor(() => expect(document.querySelector('[data-session-id="reply"]')).not.toBeNull());
+    expect(screen.getByText('pet.replied')).toBeTruthy();
+    expect(pose()).toBe('ready');
+    sessionReads.reply = async () => ({ status: 200, session: session('reply', { visibility: 'background' }) });
+    await emit((h) => h.onSessionActivity?.({ session_id: 'reply', scope_id: null, event: 'visibility', visibility: 'background' }));
+    await waitFor(() => expect(document.querySelector('[data-session-id="reply"]')).toBeNull());
+    expect(pose()).toBe('idle');
+  });
+
+  it('appends a removable reference to the draft and sends it only to the main binding', async () => {
+    canUseAgents = true;
+    runningAgents = workingIn('other');
+    api.sendSessionMessage.mockResolvedValueOnce(message('sent-ref', 'S', { author: 'user', type: 'user' }));
+    devBind('S'); render(<PetPage />); summon('listen');
+    await userEvent.type(await screen.findByRole('textbox'), 'Check this');
+    await userEvent.click(await screen.findByRole('button', { name: 'pet.referenceSession' }));
+    expect(screen.getByRole('textbox').getAttribute('placeholder')).toBe('pet.inputPlaceholder');
+    expect(api.sendSessionMessage).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('button', { name: 'pet.send' }));
+    expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', {
+      text: 'Check this #<other>', content: { references: [{ kind: 'session', session_id: 'other', title: 'pet.untitledTask' }] },
+    });
   });
 });

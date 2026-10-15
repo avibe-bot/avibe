@@ -66,7 +66,7 @@ for (const main of [true, false]) {
         const x = (first.left + first.right) / 2;
         return { card: covers(x, (first.top + first.bottom) / 2), gap: covers(x, (first.bottom + second.top) / 2) };
       })).toEqual({ card: true, gap: false });
-      if (main) await page.locator('.pet-mini-card[role=button]').click();
+      if (main) await page.locator('.pet-mini-reply-toggle').click();
       // A long nowrap title and long detail must remain inside the fixed list.
       const widths = await page.locator('.pet-mini-scroll').evaluate((scroll) => ({
         client: scroll.clientWidth, content: scroll.scrollWidth,
@@ -83,7 +83,7 @@ for (const main of [true, false]) {
 test('the session picker keeps every row at its text height and scrolls', async ({ page }) => {
   await page.goto('/e2e/pet-mini/fixture.html?main=true&layers=0&sessions=14');
   await page.locator('.pet-mini-collapsed').click();
-  await page.locator('.pet-mini-card[role=button]').click();
+  await page.locator('.pet-mini-reply-toggle').click();
   const toggle = page.getByRole('button', { name: 'Switch session' });
   await expect(toggle).toBeVisible();
   // The switcher is a real button, not a text link.
@@ -123,7 +123,7 @@ test('no mini surface casts a shadow the transparent window would clip', async (
     .map((node) => node.className.toString()));
   expect(await shadowed()).toEqual([]);
   await page.locator('.pet-mini-collapsed').click();
-  await page.locator('.pet-mini-card[role=button]').click();
+  await page.locator('.pet-mini-reply-toggle').click();
   await page.getByRole('button', { name: 'Switch session' }).click();
   await expect(page.locator('.pet-mini-session-option')).toHaveCount(5);
   expect(await shadowed()).toEqual([]);
@@ -132,14 +132,14 @@ test('no mini surface casts a shadow the transparent window would clip', async (
 test('the switcher goes back to the cards', async ({ page }) => {
   await page.goto('/e2e/pet-mini/fixture.html?main=true&layers=0&sessions=3');
   await page.locator('.pet-mini-collapsed').click();
-  await page.locator('.pet-mini-card[role=button]').click();
+  await page.locator('.pet-mini-reply-toggle').click();
   await page.getByRole('button', { name: 'Switch session' }).click();
   await expect(page.locator('.pet-mini-session-option')).toHaveCount(4);
   const back = page.getByRole('button', { name: 'Back' });
   expect(await back.evaluate((node) => getComputedStyle(node).borderTopStyle)).toBe('solid');
   await back.click();
   await expect(page.locator('.pet-mini-session-option')).toHaveCount(0);
-  await expect(page.locator('.pet-mini-card.is-main')).toBeVisible();
+  await expect(page.locator('.pet-mini-reply-bubble')).toBeVisible();
 });
 
 test('Vibey and its dock are reported as the hover zone, and a shell hover shows the dock', async ({ page }) => {
@@ -167,10 +167,44 @@ test('Vibey and its dock are reported as the hover zone, and a shell hover shows
   await expect(dock).toHaveCSS('opacity', '0');
 });
 
-test('the main card names Vibey as written', async ({ page }) => {
+test('the reply bubble names Vibey as written', async ({ page }) => {
   await page.goto('/e2e/pet-mini/fixture.html?main=true&layers=0');
-  const eyebrow = page.locator('.pet-mini-collapsed .pet-mini-eyebrow');
+  const eyebrow = page.locator('.pet-mini-bubble-speaker');
   await expect(eyebrow).toBeVisible();
   // innerText applies text-transform, so this is what the user reads.
-  expect(await eyebrow.evaluate((node) => node.innerText)).toBe('Vibey');
+  expect(await eyebrow.evaluate((node) => node.innerText)).toContain('Vibey');
+});
+
+
+test('attention leads the list and referencing sends only through the main composer', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal');
+  await page.locator('.pet-mini-collapsed').click();
+  const first = page.locator('.pet-mini-card').first();
+  await expect(first).toHaveAttribute('data-session-id', 'ses_fixture_0');
+  await expect(first).toHaveClass(/is-needs-input/);
+  await first.getByRole('button', { name: 'Open in Avibe', exact: true }).click();
+  await expect(page.getByRole('textbox')).toHaveCount(0);
+  await first.locator('.pet-mini-card-reference').click();
+  await expect(page.locator('.pet-mini-reference-chip')).toHaveCount(1);
+  await expect(page.locator('.pet-mini-reply-bubble')).toHaveCount(0);
+  await page.getByRole('textbox').fill('请总结进展');
+  await page.getByRole('textbox').press('Enter');
+  await expect.poll(() => page.evaluate(() => window.petFixtureSends)).toEqual([{
+    sessionId: 'pet-layout', payload: { text: '#<ses_fixture_0> 请总结进展', content: { references: [{ kind: 'session', session_id: 'ses_fixture_0', title: '修复桌宠语音输入' }] } },
+  }]);
+  await expect(page.locator('.pet-mini-reply-bubble')).toBeVisible();
+});
+
+test('reply history and input remain within the fixed window with reduced motion', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal');
+  await page.locator('.pet-mini-collapsed').click();
+  const avatar = await page.locator('.pet-mini-avatar-button').boundingBox();
+  await page.locator('.pet-mini-reply-toggle').click();
+  await expect(page.locator('.pet-mini-detail')).toHaveClass(/is-open/);
+  const history = await page.locator('.pet-mini-bubble-history').boundingBox();
+  expect(history!.y).toBeGreaterThanOrEqual(0);
+  expect(history!.y + history!.height).toBeLessThanOrEqual(600);
+  expect(await page.locator('.pet-mini-avatar-button').boundingBox()).toEqual(avatar);
+  expect(await page.locator('.pet-mini-detail').evaluate((node) => parseFloat(getComputedStyle(node).transitionDuration))).toBeLessThan(0.01);
 });

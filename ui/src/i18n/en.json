@@ -6007,6 +6007,24 @@
     "fixInAvibe": "Fix it in Avibe",
     "talkToVibey": "Talk to Vibey",
     "noChatProject": "Create a project in Avibe first, so Vibey has a place for this conversation.",
-    "vibeyUnavailable": "Couldn't open the conversation with Vibey. Try again in a moment."
+    "vibeyUnavailable": "Couldn't open the conversation with Vibey. Try again in a moment.",
+    "unknownProject": "Conversation",
+    "unknownAgent": "Agent",
+    "needsAuthorization": "Needs your approval",
+    "replied": "Replied",
+    "referenceSession": "Reference session: {{title}}",
+    "authorize": "Review",
+    "recentTurns": "Recent turns",
+    "collapseHistory": "Hide history",
+    "platform": {
+      "slack": "Slack",
+      "discord": "Discord",
+      "telegram": "Telegram",
+      "feishu": "Feishu",
+      "lark": "Lark",
+      "wechat": "WeChat",
+      "unknown": "IM"
+    },
+    "removeReference": "Remove reference to {{title}}"
   }
 }
