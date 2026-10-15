@@ -32,6 +32,7 @@ from core.agent_core.messages import (
     ToolCallBlock,
 )
 from core.hosted_activity import hosted_line, native_activities, proxy_activity
+from modules.im.formatters.discord_formatter import DiscordFormatter
 from vibe.i18n import t as i18n_t
 
 FIXTURE = json.loads(
@@ -372,14 +373,35 @@ def test_a_proxied_calls_cost_counts_every_billed_attempt(failed, last, cost, li
     assert line.endswith(f" · {line_tail}") if line_tail else "$" not in line
 
 
-def test_the_im_line_escapes_a_fallback_sources_name_for_its_destination():
-    """MH-HOSTED-UI-010: a Source name is the user's own text, so the destination's escape applies to it as to the
-    subject; a Slack Source named with ``<!channel>`` must not mention the channel."""
+HOSTILE = ("@everyone", "<@123456789>", "[Models](https://example.invalid)")
 
-    activity = replace(proxy_fallback(), fallback_source_name="relay <!channel>")
-    line = hosted_line(activity, "en", escape=lambda text: text.replace("<", "&lt;").replace(">", "&gt;"))
-    assert "relay &lt;!channel&gt; doesn't support it, now using Anthropic" in line
-    assert "<!channel>" not in line
+
+def _slots(text: str):
+    """The IM line's untrusted slots, each carrying *text*: what a model, a provider or a user wrote."""
+    fallback = replace(proxy_fallback(), fallback_source_name=text)
+    return {
+        "subject": proxy_activity(
+            _x_call("call_s1", text), HostedResult(record=HostedRecord(status="completed"), execution=XAI)
+        ),
+        "error": proxy_activity(
+            _x_call("call_e1", "q"), HostedResult(record=HostedRecord(status="failed", error=f"refused: {text}"))
+        ),
+        "fallback source": fallback,
+        "executor model": replace(proxy_x_search(), model=text),
+        "image model": replace(direct_image(), model=text),
+    }
+
+
+@pytest.mark.parametrize("text", HOSTILE)
+@pytest.mark.parametrize("slot", ["subject", "error", "fallback source", "executor model", "image model"])
+def test_the_im_line_leaves_no_mention_or_masked_link_live_in_untrusted_text(slot, text):
+    """MH-HOSTED-UI-010: a query, a provider's error, and a user's Source or model name are not Avibe's words. The
+    line neutralizes their mentions and masked links before the platform escape, which alone leaves Discord's
+    ``@everyone``, ``<@id>`` and ``[label](url)`` live (DiscordBot sends without ``allowed_mentions``)."""
+
+    line = hosted_line(_slots(text)[slot], "en", escape=DiscordFormatter().escape_special_chars)
+    assert text not in line
+    assert "@everyone" not in line and "<@1" not in line and "](" not in line
 
 
 def test_the_im_line_escapes_the_quoted_subject_for_its_destination():

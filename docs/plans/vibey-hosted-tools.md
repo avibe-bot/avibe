@@ -749,8 +749,13 @@ hop whose C-6 facts say `refused`), both surfaces say so, so the switch is never
   模型 › 工具 中清除" for anyone else, who cannot open Models;
 - the IM line names it in place of how the call ran: "🔎 网页搜索 “…” · relay-gpt 不支持，已改用 Anthropic · 6 个来源 · $0.01".
 Like every claim about how a call ran, the note shows only for a completed call. The refusing Source is named by
-its current name (`source_names`), escaped for the IM destination's markup as the subject is, and the note
+its current name (`source_names`), and the note
 disappears once the refusal is cleared and the hop is native again.
+
+**Untrusted text on the IM line.** The subject (a model's query or prompt), a provider's error, and a user's Source or
+model name are not Avibe's words. `hosted_line` passes each through `core.message_output.plain_untrusted_text`
+(mentions and masked links made inert on every platform) and then the destination's escape. A platform escape alone
+leaves Discord's `@everyone`, `<@id>` and `[label](url)` live.
 
 ## 9. Defaults, cost and privacy
 

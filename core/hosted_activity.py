@@ -31,6 +31,7 @@ from core.agent_core.messages import (
     ProxyExecution,
     ToolCallBlock,
 )
+from core.message_output import plain_untrusted_text
 from vibe.i18n import t as i18n_t
 
 HOSTED_ACTIVITY_VERSION = 1
@@ -335,6 +336,14 @@ def _clip(text: str, limit: int = LINE_SUBJECT_MAX_CHARS) -> str:
     return flat if len(flat) <= limit else flat[: limit - 1].rstrip() + "…"
 
 
+def _untrusted(text: str, escape: Callable[[str], str]) -> str:
+    """Text Avibe did not write (a model's query, a provider's error, a user's Source or model name), as the IM line
+    carries it: its mentions and masked links made inert for every platform, then escaped for the destination's
+    markup. A platform escape alone leaves Discord's ``@everyone`` and ``[label](url)`` live."""
+
+    return escape(plain_untrusted_text(text))
+
+
 def _ran(activity: HostedActivity, lang: str, escape: Callable[[str], str]) -> list[Optional[str]]:
     """How a completed call ran and what it produced, as the IM line names them.
 
@@ -346,17 +355,16 @@ def _ran(activity: HostedActivity, lang: str, escape: Callable[[str], str]) -> l
         first = activity.images[0] if activity.images else None
         size = f"{first.width}×{first.height}" if first is not None and first.width and first.height else None
         more = _count(activity, lang) if len(activity.images) > 1 else None
-        return [activity.model, size, more]
+        return [_untrusted(activity.model, escape) if activity.model else None, size, more]
     vendor = _vendor_label(activity.provider)
     if not vendor:
         mode = None
     elif activity.mode == "proxy" and activity.fallback_source_id is not None:
         # Why it ran by proxy: the turn's own Source refused the native tool (§8.3, mockup 06).
-        # A Source name is the user's own text: escaped for the destination's markup, as the subject is.
-        refused_by = escape(activity.fallback_source_name or activity.fallback_source_id)
+        refused_by = _untrusted(activity.fallback_source_name or activity.fallback_source_id, escape)
         mode = i18n_t("hostedTools.mode.fallback", lang, source=refused_by, provider=vendor)
     elif activity.mode == "proxy" and activity.model:
-        mode = i18n_t("hostedTools.mode.proxyModel", lang, provider=vendor, model=activity.model)
+        mode = i18n_t("hostedTools.mode.proxyModel", lang, provider=vendor, model=_untrusted(activity.model, escape))
     else:
         mode = i18n_t(f"hostedTools.mode.{activity.mode}", lang, provider=vendor)
     return [mode, _count(activity, lang)]
@@ -418,10 +426,12 @@ def hosted_line(activity: HostedActivity, lang: str, *, escape: Callable[[str], 
     emoji = "🖼" if activity.tool == "image_generate" else "🔎"
     parts: list[Optional[str]] = [f"{emoji} {i18n_t(f'hostedTools.tool.{activity.tool}', lang)}"]
     if activity.subject:
-        parts[0] += " " + i18n_t("hostedTools.quoted", lang, subject=escape(_clip(activity.subject)))
+        parts[0] += " " + i18n_t("hostedTools.quoted", lang, subject=_untrusted(_clip(activity.subject), escape))
     if activity.completed:
         parts.extend(_ran(activity, lang, escape))
     else:
-        parts.append(i18n_t(f"hostedTools.status.{activity.status}", lang, error=escape(_error_text(activity, lang))))
+        parts.append(
+            i18n_t(f"hostedTools.status.{activity.status}", lang, error=_untrusted(_error_text(activity, lang), escape))
+        )
     parts.append(_cost(activity, lang))
     return " · ".join(part for part in parts if part)

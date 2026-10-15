@@ -266,7 +266,7 @@ scenarios:
     test: tests/test_hosted_activity.py::test_the_im_line_states_tool_query_mode_count_and_known_cost
     related_tests:
       - tests/test_hosted_activity.py::test_the_im_line_names_a_subscription_and_a_shared_response_cost
-      - tests/test_hosted_activity.py::test_the_im_line_escapes_a_fallback_sources_name_for_its_destination
+      - tests/test_hosted_activity.py::test_the_im_line_leaves_no_mention_or_masked_link_live_in_untrusted_text
   - id: MH-HOSTED-UI-012
     name: A turn whose image_generate call completed reaches the user with the image as an attachment, and a final that says nothing after it is still a reply, never the empty-reply error; the turn keeps its first hop's image models
     status: covered
