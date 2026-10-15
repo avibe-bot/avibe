@@ -246,7 +246,9 @@ warning per stream without the patch's per-line framing details.
 
 The exact v8.0.29 source plus these patches builds with Go 1.26.9. The executor,
 helper, management and focused Antigravity tests pass, as do the five hosted
-passthrough cases on the native darwin-arm64 trial binary. The full SDK suite
+passthrough cases on the native darwin-arm64 trial binary. The engine contract
+and wire suites report 26 passed and 1 skipped; the fixed OAuth callback-port
+case still needs an isolated network. The full SDK suite
 is **not green**: its registration-concurrency test also fails intermittently
 on stock v8.0.29. The v8.0.28 timing measurements above remain historical,
 not v8.0.29 measurements. See `docs/plans/model-hub-cpa-v8.0.29.md` for trial

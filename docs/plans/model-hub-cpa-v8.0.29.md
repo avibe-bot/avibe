@@ -83,8 +83,12 @@ trial is complete; the following checks must pass before adoption is proposed.
   downloaded into a separate temporary directory and verified against the
   unchanged packaged manifest. This checks that the new suite remains usable
   by the nightly workflow before adoption.
-- The existing engine contract and wire suites are being run against the
-  same offline binary; their result is still pending.
+- The existing engine contract and wire suites completed against the same
+  offline binary: **26 passed, 1 skipped** in 917.76 seconds. The skipped
+  `test_oauth_callback_forwarder_is_loopback_only_and_optional` binds vendors'
+  fixed callback ports and requires `AVIBE_E2E_ISOLATED_NETWORK=1`. It was not
+  forced on the host; that callback test remains an isolated-network adoption
+  gate. Passing these suites does not clear the SDK concurrency failure below.
 
 ### Adoption blocker: intermittent upstream registration failure
 
