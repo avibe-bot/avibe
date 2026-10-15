@@ -420,7 +420,8 @@ class Agent:
         The input is still passed to ``before_run`` so existing hook setup remains
         unchanged; it is a control value, not a second transcript message. A fresh
         Agent can provide the source Turn's input sequence numbers so compaction
-        pins only that Turn's inputs.
+        pins only that Turn's inputs. Within the same Turn, newly admitted inputs
+        extend the existing pins rather than replacing them.
         """
         input = deepcopy(input)
         resume_turn_inputs = None if turn_inputs is None else set(turn_inputs)
@@ -446,19 +447,16 @@ class Agent:
                 raise RuntimeError("this Agent already has an active run")
             if self._steers or self._follow_ups:
                 raise RuntimeError("return unconsumed inputs with take_pending_inputs() before starting another run")
+            continuing_turn = preserve_turn_inputs and self._ctx.turn_id == turn_id
             self._running = True
             self._open = True
             self._consumer_closed = False
             self._ctx = RunContext(self.session_id, turn_id, CancelToken())
             self._scope = RunScope(self._ctx.cancel)
             self._outcome = OutcomeOwner()
-            self._seq = previous_seq if preserve_turn_inputs else 0
+            self._seq = previous_seq if continuing_turn else 0
             if preserve_turn_inputs:
-                self._turn_inputs = (
-                    set(resume_turn_inputs)
-                    if resume_turn_inputs is not None
-                    else previous_turn_inputs
-                )
+                self._turn_inputs = (previous_turn_inputs if continuing_turn else set()) | set(resume_turn_inputs or ())
 
         # Bounded delivery applies backpressure to provider streaming. No emit
         # awaits this queue while holding the input-admission lock.

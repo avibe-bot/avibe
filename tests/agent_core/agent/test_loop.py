@@ -142,6 +142,25 @@ async def test_resume_uses_only_explicit_source_turn_inputs_for_a_fresh_agent():
     assert agent._turn_inputs == {first.context_seq}
 
 
+async def test_resume_merges_newly_admitted_inputs_into_same_turn_pins():
+    provider = ScriptedProvider([
+        [ProviderError("invalid_request", "failed", False)],
+        [Done(assistant("recovered"))],
+    ])
+    agent = make_agent(provider)
+    await collect(agent)
+    [initial] = [row for row in await agent.store.load("session") if row.kind == "input"]
+    returned = await agent.store.consume_input("session", "returned-steer", user("不要删文件"))
+
+    events = [event async for event in agent.resume(
+        input_row("retry", "ignored"), turn_id="turn", turn_inputs={returned.context_seq}
+    )]
+
+    assert events[-1].reason == "completed"
+    assert agent._turn_inputs == {initial.context_seq, returned.context_seq}
+    assert user_texts(provider.requests[-1]) == ["hello", "不要删文件"]
+
+
 async def test_resume_preserves_images_committed_by_an_earlier_tool_call():
     from core.agent_core.messages import HostedResult, ProxyExecution
 
@@ -167,6 +186,7 @@ async def test_resume_preserves_images_committed_by_an_earlier_tool_call():
     assert agent._generated_images == [HostedImage(path="/media/winner.png", mime="image/png")]
 
 
+async def test_C1_tool_set_is_captured_per_request_and_unavailable_calls_are_errors():
     old, new = FakeTool("old"), FakeTool("new")
     entered, release = asyncio.Event(), asyncio.Event()
 

@@ -48,6 +48,10 @@ and usage) or
 - Inputs already exist as rows when they are submitted. The loop sets `context_seq` and `content_json.model` on that
   row when it consumes the input. Each entry is its own transaction; an input accepted by `steer` but not yet
   consumed when a crash happens is admitted into the context by the adapter at resume (`recovery.md` T3).
+- The adapter binds live writes to the durable Turn ID independently of input consumption. A transcript-only
+  retry therefore writes tool results, context edits, state, and audits against its new retry Turn, not the last
+  consumed input's Turn. Response metadata records that Turn ID at commit time; T2 recovery and job handover use
+  the response's identity after restart. Legacy responses without it retain the input-order fallback.
 - A response row is inserted at `message_end` with both `content_json.model` and its commit-time display
   `content_text`.
 - A tool result row is inserted at `tool_finished`. The `tool_call` trace row is inserted at tool start without a
