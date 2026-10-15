@@ -4885,6 +4885,29 @@ def test_coalescing_treats_cross_stream_timestamp_ties_as_invalidating(tmp_path)
     assert "success candidate" not in output
 
 
+def test_coalescing_preserves_cross_stream_tie_invalidations_across_polls(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
+    timestamp = "2026-10-15T08:00:01Z"
+    finding = _review_comment(501, body="Race allows duplicate notifications", created_at=timestamp)
+    clean = {**_clean_codex_comment(602), "created_at": timestamp}
+    first = _success_state(pending, review_comments=[finding])
+    second = _success_state(pending, review_comments=[finding], issue_comments=[clean])
+    rc, output, _ = _ci_cycle(module, path, [first], extra_args=("--coalesce-success",))
+    assert rc == 0 and "review_comment #501" in output
+    rc, output, _ = _ci_cycle(
+        module, path, [second], delivery="2", extra_args=("--coalesce-success",),
+    )
+    assert "success candidate" not in output
+    green = _success_state(_ci_run(head=COALESCED_HEAD), review_comments=[finding], issue_comments=[clean])
+    rc, output, _ = _ci_cycle(
+        module, path, [green], delivery="3", extra_args=("--coalesce-success",),
+    )
+    assert "success candidate" not in output
+
+
 def test_coalescing_rejects_contradictory_reviewed_shas(tmp_path):
     module = _load_module()
     path = tmp_path / "ci.json"

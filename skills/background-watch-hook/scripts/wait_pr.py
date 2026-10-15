@@ -735,14 +735,13 @@ def _should_adopt_review_outcome(
     last_outcome: dict[str, Any] | None,
     batch: dict[str, Any],
 ) -> bool:
-    if last_outcome is None or tuple(outcome["order"]) > tuple(last_outcome["order"]):
+    if last_outcome is None:
         return True
-    if (
-        not clean
-        and batch.get("review") is not None
-        and outcome["order"][0] == last_outcome["order"][0]
-        and outcome["kind"] != last_outcome["kind"]
-    ):
+    same_timestamp = outcome["order"][0] == last_outcome["order"][0]
+    if same_timestamp and outcome["kind"] != last_outcome["kind"]:
+        last_clean = batch.get("review") is not None
+        return clean != last_clean and not clean
+    if tuple(outcome["order"]) > tuple(last_outcome["order"]):
         return True
     return (
         outcome["order"] == last_outcome["order"]
