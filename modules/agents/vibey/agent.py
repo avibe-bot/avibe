@@ -243,7 +243,7 @@ class VibeyAgent(BaseAgent):
             environment=self._environment,
             on_response=self._on_response,
         )
-        self._providers = providers or registry_providers(media_loader=self.media, media_sink=self.media)
+        self._providers = providers or registry_providers(media_loader=self.media)
         # The client of the Turn's other gateway calls (the hosted-tool executor); None opens one per call.
         self._gateway_client = gateway_client
         # C-9: the Session parts a checkpoint carries (context.md section 9).
@@ -631,7 +631,7 @@ class VibeyAgent(BaseAgent):
         # Job-backed tools receive the loop's tracking wrapper, so Stop kills foreground commands.
         tools = mark_skill_loads(
             (
-                *hosted_tools(turn.router.preflight, self._gateway_client, self.media),
+                *hosted_tools(turn.router, self._gateway_client, self.media),
                 *suite.create_tools(agent.jobs, self.media.image_sink(session_id)),
             )
         )

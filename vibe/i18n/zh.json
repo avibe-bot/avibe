@@ -1140,8 +1140,7 @@
       "upstream_error": "供应商返回错误。"
     },
     "hostedTools": {
-      "noExecutor": "没有已验证可运行 {tool} 的来源。请在「模型」中为某个来源验证它。",
-      "executorUnavailable": "本轮绑定运行 {tool} 的来源已不可用。",
+      "noExecutor": "当前没有可运行 {tool} 的来源。添加以下任一供应商的来源即可使用：{vendors}。",
       "providerRefused": "执行方的供应商拒绝了此次调用（{detail}）。",
       "timedOut": "执行方调用超时。",
       "unreachable": "无法连接执行方。",
@@ -1150,9 +1149,7 @@
       "didNotRun": "执行方没有运行 {tool}。",
       "responseEnded": "执行方的响应以 {status} 结束。",
       "callFailed": "供应商的 {tool} 调用失败。",
-      "callEnded": "供应商的 {tool} 调用以 {status} 结束。",
-      "imageFormat": "供应商返回了不支持的图片格式：{format}。",
-      "imageUnreadable": "供应商返回的图片无法使用。"
+      "triedSources": "已尝试：{sources}。"
     },
     "events": {
       "sourceFallback": "供应商",
@@ -1761,6 +1758,7 @@
       "unclassified": "请求模型时出现了 {backend} 无法归类的错误。可以重试，或换一个模型。",
       "outputLimit": "模型在生成可用的答案或工具调用前达到了输出上限。请让它分成更小的步骤，或换用输出上限更大的模型。",
       "internal": "{backend} 因内部错误而停止。可以重试；如果再次出现，服务日志里记录了原因。",
+      "historyUnreadable": "这个会话的历史记录无法加载，{backend} 无法继续它。请发送 /new 开始一个新会话。",
       "generic": "{backend} 运行失败。"
     }
   },
@@ -1782,17 +1780,20 @@
       "executor_no_image": "代理执行者没有返回图片",
       "gateway_unreachable": "无法连接模型网关",
       "gateway_refused": "模型网关拒绝了这次调用",
-      "gateway_no_result": "模型网关没有返回结果"
+      "gateway_no_result": "模型网关没有返回结果",
+      "image_param_unsupported": "所选图片模型不支持其中一个参数",
+      "image_model_unavailable": "所选图片模型当前不可用"
     },
     "tool": {
       "web_search": "网页搜索",
       "x_search": "X 搜索",
-      "image_generation": "图片生成"
+      "image_generate": "图片生成"
     },
     "quoted": "“{subject}”",
     "mode": {
       "native": "原生（{provider}）",
-      "proxy": "由 {provider} 代理"
+      "proxy": "由 {provider} 代理",
+      "direct": "{provider} 直连"
     },
     "count": {
       "sourceOne": "1 个来源",

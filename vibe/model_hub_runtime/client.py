@@ -1719,6 +1719,7 @@ def _reduce_protocol_observation(
             stream_started=stream_started,
             usage=observation.usage,
             recovery_verified=observation.recovery_verified,
+            hosted_tools=observation.hosted_tools,
         )
     if observation.outcome == "failed_terminal":
         projected_types = tuple(
@@ -1891,6 +1892,7 @@ def _outcome(
     upstream_detail: str | None = None,
     os_errno: int | None = None,
     rejection: UpstreamRejection | None = None,
+    hosted_tools: frozenset[str] = frozenset(),
 ) -> RawCallOutcome:
     return RawCallOutcome(
         kind=kind,
@@ -1907,6 +1909,7 @@ def _outcome(
         upstream_detail=upstream_detail,
         os_errno=os_errno,
         rejection=rejection,
+        hosted_tools=hosted_tools,
     )
 
 

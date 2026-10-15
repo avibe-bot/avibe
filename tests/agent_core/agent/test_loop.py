@@ -1206,27 +1206,18 @@ async def test_reasoning_effort_must_be_declared_by_the_route():
 
 
 @pytest.mark.parametrize("stop_reason", ["stop", "length", "refusal", "safety"])
-@pytest.mark.parametrize("shape", ["empty", "whitespace", "thinking", "visible", "image", "search"])
+@pytest.mark.parametrize("shape", ["empty", "whitespace", "thinking", "visible", "search"])
 @pytest.mark.parametrize("continuation", ["final", "steer", "follow_up"])
 async def test_tool_free_final_reply_is_committed_and_empty_success_is_an_error(stop_reason, shape, continuation):
     # The old refusal/safety-only table missed empty successful finals.
     # Pending-input responses are non-final and must still be allowed to continue.
-    # A generated image is a reply on its own; a search with no answer is not.
+    # A native search with no answer is no reply.
     native = HostedNative(source_id="src_testsrc1", payload=({"type": "provider_item"},))
     content = {
         "empty": (),
         "whitespace": (text(" \n"),),
         "thinking": (ThinkingBlock("private reasoning"),),
         "visible": (ThinkingBlock("private reasoning"), text("visible reply")),
-        "image": (
-            HostedToolBlock(
-                id="ig_1",
-                tool="image_generation",
-                action=HostedAction(type="generate", prompt="a laptop at night"),
-                record=HostedRecord(status="completed", images=(HostedImage(path="/media/ig_1.png", mime="image/png"),)),
-                native=native,
-            ),
-        ),
         "search": (
             HostedToolBlock(
                 id="ws_1",
@@ -1237,7 +1228,7 @@ async def test_tool_free_final_reply_is_committed_and_empty_success_is_an_error(
             ),
         ),
     }[shape]
-    hosted = shape in ("image", "search")
+    hosted = shape == "search"
     message = replace(
         assistant(stop_reason=stop_reason), content=content, hosted_summary=HostedSummary() if hosted else None
     )
@@ -1263,7 +1254,7 @@ async def test_tool_free_final_reply_is_committed_and_empty_success_is_an_error(
         ["input"] if continuation == "final" else ["input", "pending"]
     )
     errors = [event for event in events if isinstance(event, AgentError)]
-    if continuation != "final" or (shape in ("visible", "image") and stop_reason != "length"):
+    if continuation != "final" or (shape == "visible" and stop_reason != "length"):
         assert errors == []
         assert events[-1].reason == "completed"
     else:

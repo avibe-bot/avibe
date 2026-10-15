@@ -113,21 +113,24 @@ The evidence store, its record and its owner are the capability model's §3. v2 
   classifier (`evidence_rules.py`) from a real request, and only for the exact (Source, model, feature) it names.
 - **Positive (`verified`, display only).** A served response that carries the provider's own completed item for a
   tool the request declared natively: Responses `web_search_call` with `status: completed`, or a `custom_tool_call`
-  named `x_keyword_search`, `x_semantic_search`, `x_user_search` or `x_thread_fetch`; Anthropic `server_tool_use`
-  named `web_search` with a `web_search_tool_result` whose `content` is a result list, not the error object
-  (`web_search_tool_result_error`), which arrives under the same block type. A proxy executor call is itself a native call on the executor Source, so it writes the
+  named `x_keyword_search`, `x_semantic_search`, `x_user_search` or `x_thread_fetch`; Anthropic a
+  `web_search_tool_result` whose `content` is a result list, not the error object
+  (`web_search_tool_result_error`), which arrives under the same block type. The block type is web search's own,
+  so the `server_tool_use` that precedes it is not read. A proxy executor call is itself a native call on the executor Source, so it writes the
   same record for the executor's (Source, model). A successful `image_generate` writes it for (Source, image model).
   - **Where the gateway sees it.** The served-stream observer (`ProtocolSSEState` / `ProtocolFactProjector`) keeps
     only bounded scalar projections today, and no item types. It gains projection paths: Responses
     `response.output_item.done` → `item.type`, `item.name`, `item.status`, and the buffered `output[*].type` and
-    `output[*].name` and `output[*].status`; Anthropic `content_block_start.content_block.type`, `.name` and
-    `.content.type`. Buffered responses take the same paths through `observe_buffered_protocol_response`.
+    `output[*].name` and `output[*].status`; Anthropic `content_block_start.content_block.type`, `.content` (whether it
+    is a list) and `.content.type`, and the buffered `content[*]` the same. Buffered responses take the same paths
+    through `observe_buffered_protocol_response`, keeping a few short fields for at most 256 members.
   - **Bounded writes, off the response path.** Each write rewrites the evidence file, so a positive record is written
     at settlement, off the loop, after the response completes, and only when there is no record or the existing
     positive record is older than one hour, never on every response. **A positive write never replaces a negative
     record:** a success that settles after a concurrent refusal must not re-enable native routing, so only a clear
     or a stamp change removes a refusal. It is keyed on
-    the serving Source's identity from the final admission snapshot.
+    the serving Source's identity from the final admission snapshot: a Source re-identified while the response ran is
+    not vouched for.
   - `resolve()` reads a record by its `status`, no longer by its `basis`: today it reads every `observed` record as
     a refusal.
   - **A positive record carries the observed `mode`** (`native`, `executor` or `direct`) and is never retired by the
@@ -238,11 +241,14 @@ The evidence store, its record and its owner are the capability model's §3. v2 
     - `image_generate`: `default_model` (saved, null when default; a saved model no longer available, or whose pair
       is refused, stays saved, flagged `available: false`); `effective_default` (the saved default if available,
       else the same `model_id` on another Source that serves it, since the user picked a model, not a relay, else
-      the first available model in catalog order); `models: [{source_id, model_id, description, price}]`, where
-      `price` is `{usd, basis: "list" | "estimated"}` per image or null ("暂无单价"), exactly
+      the first available model in catalog order); `models: [{source_id, model_id, description, billing, price}]`,
+      where `billing` is the serving Source's (`monthly` | `metered`, as executor candidates carry it, so the card
+      prices a subscription's images as included without another read) and `price` is
+      `{usd, basis: "list" | "estimated"}` per image or null ("暂无单价"), exactly
       the enum's candidate pairs, so a refused pair leaves it and the card's refusal line says why (clearing the
       refusal brings the pair back, and a saved default with it, with no write); and `image_offered_by: [vendor]`,
-      the vendors whose overlay lists image models, for the empty state.
+      a catalog fact independent of configuration: the vendors whose bundled overlay lists image models, sorted,
+      which the empty state names as the keys that would add one.
   - `PUT /api/models/hosted-tools/<tool>` is per field: an absent field is unchanged, and an explicit `null` resets
     `executor_order` to automatic or `default_model` to the default. `enabled` is a boolean. It answers the same
     read.
@@ -463,7 +469,8 @@ These rules are C-1 rows in `cross-provider.md` and per-protocol rows in `conver
   `request_headers`, and the body `{"arguments": <canonical arguments>}`. There is no executor in the body: the
   gateway resolves the chain from the caller's live turn (`x-avibe-turn-id`). A call without a live turn, or from a
   turn that no longer admits work, is 409 `turn_not_live`; a tool outside the turn's frozen tool set (§3.4) is 409
-  `tool_not_enabled`. Nothing runs. v1's `executor_not_bound` is retired with the binding.
+  `tool_not_enabled`. Nothing runs. The gateway answers `turn_not_live` before it validates the body, and
+  `tool_not_enabled` after. v1's `executor_not_bound` is retired with the binding.
 - **The frozen tool set lives on the turn.** The turn's first resolution writes its tool set, each search tool's
   effective executor order, and the `image_generate` enum, once to the turn trace (`hosted_tools`, replacing the
   write-once `hosted_executors`). The endpoint authorizes every call against it, and a settings or Source-order change
@@ -488,7 +495,8 @@ These rules are C-1 rows in `cross-provider.md` and per-protocol rows in `conver
      Anthropic is asked in the message alone), a fixed instruction to search and list numbered results with one or
      two cited sentences each, a small output cap, and no reasoning effort.
   4. On a failure that normal routing fails over from, or a narrow-rule refusal (which also writes negative
-     evidence), it tries the next candidate. A model refusal (404 `model_not_found`, "model not supported") skips
+     evidence), it tries the next candidate. A model refusal (the upstream's machine code naming the model, such as
+     `model_not_found`, or a 404 `not_found_error`, as routing's classifier reads it; L1 hands no prose to it) skips
      that Source for this call without settling its health, as `_InvocationUnsupported` does, and, because it names
      the executor model, writes negative `call` evidence for (Source, `executor_model`, tool), so the Source leaves
      the chain until the refusal is cleared or its wire stamp changes, and shows and clears like any refusal. A failure mid-stream moves on too: nothing
@@ -496,13 +504,15 @@ These rules are C-1 rows in `cross-provider.md` and per-protocol rows in `conver
      returned, and the partial call is still metered on its Source. A completed response that never ran the tool
      (the model chose not to; Anthropic is asked in the message alone) ends the chain with a `failed` record: it is
      a model choice, not a Source failure, and moving on would double the cost. Any other outcome ends the chain.
-  5. With no candidate, the call returns a `failed` record naming what to add ("add an xAI Source to use X search").
-     With candidates that were all tried and failed, it returns the last failure's reason and names the Sources
-     tried, so the user sees that retrying, or those Sources, is the issue.
+  5. With no admitted candidate, the call returns a `failed` record naming the providers whose Sources can run the
+     tool ("add a Source from one of these providers: xAI"). With candidates that were all tried and failed, it
+     returns the last failure's reason and names the Sources tried, so the user sees that retrying, or those
+     Sources, is the issue.
   - **One deadline for the whole chain**, the tool's call timeout (180 s for search), not one per candidate.
   - Each candidate tried is metered on its own Source. The result's `execution` names the Source whose response the
     record came from (the last one tried when all failed), with that attempt's `executor_billing` and `cost`; earlier
-    billable attempts are listed in `execution.failed_attempts: [{source_id, billing, cost?}]`, each with its own
+    billable attempts (those that reported tokens or produced a response; a refusal before output that reported
+    none is not billed) are listed in `execution.failed_attempts: [{source_id, billing, cost?}]`, each with its own
     billing and cost basis, so a metered failure before a subscription success keeps both. A subscription attempt
     carries `cost: {basis: "included"}`, so an absent `cost` always means unpriced.
   - **The total is computed once**, in `core/hosted_activity`'s projected `cost`, which the Web card and the IM line
@@ -510,7 +520,8 @@ These rules are C-1 rows in `cross-provider.md` and per-protocol rows in `conver
     attempt `included` gives `included`; the basis is `reported` only when every summed figure is reported, else
     `list` (shown with ≈); an attempt without a `cost` makes the total a lower bound, shown as "at least $X" /
     "至少 $X", never as complete. With `failed_attempts`, the card also names the attempt count ("3 attempts" /
-    "尝试 3 次").
+    "尝试 3 次"). B1 ships the sum, its basis and the attempt count (as the projection's `calls`); until D2 adds the
+    lower-bound form, an attempt without a `cost` leaves the total unknown rather than shown as complete.
   - The executor request is a short model request because no vendor exposes search without a model: Anthropic,
     OpenAI's public API, xAI and Google all run search inside a model call.
 - **The result is the canonical record** (v1's rules, unchanged): a `HostedRecord` with `sources[]` in the
@@ -681,10 +692,17 @@ Unchanged from v1 §7.3 (owner decision, 2026-10-13 19:14), with the producer no
   pricing, marked "≈", where the image's tokens are known: the pricing module values the overlay's
   `tokens_per_image` at the model's output token rate (Nano Banana "≈$0.067"); "暂无单价" / "no unit price" where
   neither is (gpt-image-2, which OpenAI prices per image token at a varying count). It has a default-model picker over `default_model` / `effective_default`; a saved default that is no longer available
-  shows as itself, "(unavailable)". Image-endpoint refusals (§3.2) show and clear like search refusals; the image card
+  shows as itself, "(unavailable)", with a note naming the model in use (`effective_default`), and stays visible and
+  resettable even when no model is offered. The picker's "Automatic" option saves `null`; it names the model in use
+  while nothing is saved, and otherwise says how automatic picks (the first available in catalog order), since the
+  read does not say which model that would be. A model on a subscription Source (`billing: monthly`) shows "订阅内含". Each shipped model
+  has its own description in every locale (UI copy keyed by model id, guarded by a test over the bundled overlay);
+  the overlay's `description`, which is model-facing, shows only for a model without copy. Image-endpoint refusals (§3.2) show and clear like search refusals; the image card
   gets an Advanced section only when its clears move there (two or more Sources refused), holding only those; any other
-  failed image call shows only on its tool card in chat, since passive evidence keeps no other image failures. With no image model available, the card names the vendors from
-  `image_offered_by` ("Add an OpenAI or Google API key").
+  failed image call shows only on its tool card in chat, since passive evidence keeps no other image failures. With no image model available,
+  the card says why from the read: with a current image refusal, a neutral line ("No image model is available
+  now; clear a refusal to try it again"), the refusal lines and their clears saying the rest; otherwise the vendors
+  from `image_offered_by` as the keys that would add one ("图片生成需要 OpenAI、Google 其中一家的 API Key").
 - **Removed:** check and check-all, the confirm and result dialogs, Re-verify, the probe estimate, the executor
   picker, and "engine upgraded" headers (§11).
 
@@ -799,7 +817,7 @@ under the freeze protocol (`model-hub-contracts/README.md`).
 | Area | Removed or changed |
 | --- | --- |
 | Model Hub | `core/handlers/model_hub/hosted_probe.py`; `ModelHubService.probe_hosted_tool`, `_record_probe_evidence`, `_probe_estimate`, `_probe_rejection`, `_probe_aspect`; the RPC and UI-server routes for `POST /api/models/hosted-tools/<tool>/probe`; `MODEL_HUB_RPC_TIMEOUT_SECONDS`' probe dependency (it moves back to `vibe/model_hub_client.py`); `HOSTED_PROBE_SHAPE` and every `shape` parameter; the evidence `probe` basis and probe staleness; `engine_stamp()`'s `hosted_wire` branch (#2623); the per-turn executor binding and `_executor`; `UserTestCall`'s probe-only callers |
-| Gateway | `stream_wire`'s `response.image_generation_call.partial_image` model-output envelope; the executor's native image path (`ResponsesStreamReader(partial_images=…)`, the 32 MiB image line cap, the image event and byte budget, `_image_result`, the `_IMAGE_*` constants, the 300 s image `call_timeout`), replaced by what the images endpoint needs; the OpenAI `image_generation` overlay declaration (#2580's JPEG q90 becomes the images-endpoint request parameters); `executor` in the proxy body; `executor_request`'s image branch (its `include`/`partial_images` read of the overlay image declaration); the `hosted_executor_bindings` / `turn_hosted_executors` plumbing, replaced by the turn's frozen `hosted_tools` (§6); the `hosted_tools_status` candidates and bound-executor projection. `_own_turn_call` stays. Kept: `disable-image-generation: passthrough`; `hosted_admission`'s "image calls are never replayed" rule until no transcript can carry a native image call; #2616's per-turn identity binding and #2586's turn id. |
+| Gateway | `stream_wire`'s `response.image_generation_call.partial_image` model-output envelope; the executor's native image path (`ResponsesStreamReader(partial_images=…)`, the 32 MiB image line cap, the image event and byte budget, `_image_result`, the `_IMAGE_*` constants, the 300 s image `call_timeout`, and the image-sized 128 MiB response budget, now 16 MiB for a search answer), replaced by what the images endpoint needs; the OpenAI `image_generation` overlay declaration (#2580's JPEG q90 becomes the images-endpoint request parameters); `executor` in the proxy body; `executor_request`'s image branch (its `include`/`partial_images` read of the overlay image declaration); the `hosted_executor_bindings` / `turn_hosted_executors` plumbing, replaced by the turn's frozen `hosted_tools` (§6); the `hosted_tools_status` candidates and bound-executor projection. `_own_turn_call` stays. Kept: `disable-image-generation: passthrough`; `hosted_admission`'s "image calls are never replayed" rule until no transcript can carry a native image call; #2616's per-turn identity binding and #2586's turn id. |
 | Vibey | the native `image_generation` declaration, its parsing (`responses_hosted_tool`'s `image_generation_call` mapping, `image=`/`image_error=` in `responses_hosted_block`), `_ImageBudget`, `_saved_image`, `_PARTIAL_IMAGE_EVENT`, `IMAGE_STREAM_LINE_BYTES`, the large-event JSON offload, `drive_sse_stream`'s `max_line_size` and `iter_sse_events`' offload (every stream returns to 8 MiB); `ModelRequest.tool_choice` and `_common.forced_tool`; `registry.build_wire_request` (its tests move to each adapter's `wire_request`); the adapters' probe-only `media_sink` parameter and the `media_sink` argument of `registry_providers(media_loader=…, media_sink=…)`; `HostedTool`'s `executor` field and its `executor` body; the agent's `_with_hosted_images` / `_emit_orphan_images` path for native images (`agent.py`), kept for `image_generate` results. `HostedRecord.images`, `HostedImage`, `generate_action` and the `generate` action stay, on `ToolResultMessage.hosted` only. |
 | UI | `ProbeAnswerNote.tsx` (with `ReplayNote`); in `ToolsTab.tsx` `ProbeCell`, the executor picker and its notes, the `needsCheck`/`needsExecutor` states, the "unchecked" chip and the probe column; in `HostedCapabilityChips.tsx` the recheck action, the recheck-only keyboard path (every chip keeps its keyboard path into the detail), and the reverify, engineUpgraded and unsupportedAged states; `useEstimateLabel.ts`; the `probeHostedTool` wiring in `SettingsModelsPage.tsx` and its Sources re-read after a probe (no clear needs one: §8.2); in `useHostedTools` `probe`, `probing`, `lostProbeOutcome`, `recordedOutcome` and `PROBE_NOT_RECORDED` (the serialized writes, identity fencing and re-read after Source mutations stay); in `hostedTools.ts` `ProbeTarget`, `probeKey`, `probeUnanswered`, `verifiedCandidates`, `sameExecutor` and the `aged`/`engineUpgraded` branches of `evidenceChip`; `modelsApi.probeHostedTool`; the types `HostedToolProbeResult`, `HostedProbeAspect`, `HostedCostEstimate`, `probe_estimate`, `HostedToolCandidate`, `bound`, and `executor` in `HostedToolPut`. Rebuilt on the new read rather than only trimmed: `modelCapabilities` and the Tools-tab rows on `status`; `cost.imageTokens` ("no per-image price yet") by per-image prices; `capability.chip.viaProxy` and `explain.viaProxy` go with the "via proxy" chip. Check-all is removed by the UI lane's pending PR. |
 | i18n (`settings.models`) | `tools.probe.*`; `tools.state.needsCheck` and `needsExecutor`; `tools.executor.*`; `tools.chip.unchecked`, `reverify`, `engineUpgraded`, `unsupportedAged`; `tools.reverify.*`; `capability.recheck`, `recheckCost`; `capability.chip.*` and `capability.explain.*` for reverify, engineUpgraded, viaProxy, viaProxyAged and unsupportedAged; `capability.expiryProbe`; `tools.col.*` and `tools.chip.native`/`unsupported`/`executor` (the candidate table goes). Rewritten: `tools.subtitle` (§8.1), `tools.empty` and `tools.noNative` against the new read; `tools.footnote` keeps its relay and subscription sentences. |

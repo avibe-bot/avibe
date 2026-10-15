@@ -84,8 +84,6 @@ def responses_hosted_tool(item: Mapping[str, Any]) -> Optional[str]:
     kind = item.get("type")
     if kind == "web_search_call":
         return "web_search"
-    if kind == "image_generation_call":
-        return "image_generation"
     if kind == "custom_tool_call" and str(item.get("name") or "").startswith("x_"):
         return "x_search"
     return None
@@ -97,16 +95,12 @@ def responses_hosted_block(
     source_id: str,
     call_id: str,
     finished: bool = True,
-    image: HostedImage | None = None,
-    image_error: tuple[str, str] | None = None,
 ) -> HostedToolBlock:
-    """One Responses hosted-call item (a ``web_search_call``, an ``image_generation_call``, or xAI's X-search
-    ``custom_tool_call``) as its block.
+    """One Responses hosted-call item (a ``web_search_call``, or xAI's X-search ``custom_tool_call``) as its block.
 
     ``call_id`` names the block when the item carries no id of its own. An item that has only been added
-    (``finished`` false) holds the call's place in the output order as a pending call. A generated image is the file
-    the adapter saved, ``image``: the item's base64 ``result`` is never kept (§7.3), and a finished call that saved no
-    image failed, for ``image_error``, a reason and its code, when the adapter knows why.
+    (``finished`` false) holds the call's place in the output order as a pending call. An ``image_generation_call``
+    is no hosted item: Vibey never declares a native image tool (§4.2).
     """
 
     tool = responses_hosted_tool(item)
@@ -123,18 +117,7 @@ def responses_hosted_block(
     else:
         record_status = "pending"
     error, error_code = _item_error(item, record_status) if record_status in ("failed", "incomplete") else (None, None)
-    images: tuple[HostedImage, ...] | None = None
-    if tool == "image_generation":
-        if record_status == "completed" and image is None:
-            record_status = "failed"
-            error, error_code = failure(*(image_error or ("the provider returned no image", "provider_no_image")))
-        images = (image,) if image is not None and record_status == "completed" else ()
-        action, sources = generate_action(item), ()
-        # The transcript's copy names the saved file in place of the base64 image.
-        item = {key: value for key, value in item.items() if key != "result"}
-        if images:
-            item["result"] = images[0].path
-    elif tool == "web_search":
+    if tool == "web_search":
         action, sources = _web_search_action(item)
     else:
         action, sources = _x_search_action(item), ()
@@ -142,23 +125,22 @@ def responses_hosted_block(
         id=_text(item.get("id")) or _text(item.get("call_id")) or call_id,
         tool=tool,  # type: ignore[arg-type]
         action=action,
-        record=HostedRecord(
-            status=record_status, error=error, sources=sources, images=images, error_code=error_code  # type: ignore[arg-type]
-        ),
+        record=HostedRecord(status=record_status, error=error, sources=sources, error_code=error_code),  # type: ignore[arg-type]
         native=HostedNative(source_id=source_id, payload=_payload(item)),
     )
 
 
 def generate_action(item: Mapping[str, Any]) -> HostedAction:
-    """An image generation as it ran: the prompt the provider rendered (its revision of the model's), and the output's
-    resolved size and quality, which pricing reads (§7.3, item 22). ``item`` is a native ``image_generation_call`` or
-    a proxy executor's ``generation`` facts, which carry the same names."""
+    """An ``image_generate`` call as it ran: the image model, the prompt the endpoint rendered (its revision of the
+    model's), and the output's resolved size and quality, which pricing reads (§7.3). ``item`` is the executor's
+    ``generation`` facts."""
 
     return HostedAction(
         "generate",
         prompt=_text(item.get("revised_prompt")),
         size=_text(item.get("size")),
         quality=_text(item.get("quality")),
+        model=_text(item.get("model")),
     )
 
 

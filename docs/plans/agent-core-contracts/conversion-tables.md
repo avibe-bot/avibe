@@ -642,17 +642,18 @@ Responses terminal states:
 | `incomplete_details.reason=content_filter` or `safety` | `safety` |
 | Failed/cancelled | terminal `ProviderError` (classified `unknown` when no provider error code is present) |
 
-## Hosted tools (planned)
+## Hosted tools
 
-Planned by [`../vibey-hosted-tools.md`](../vibey-hosted-tools.md) (Phase 1: `web_search`, `x_search`,
-`image_generation`). These rows describe the wire mapping the `ai` lane implements with that phase. Implemented so
-far:
+Designed by [`../vibey-hosted-tools.md`](../vibey-hosted-tools.md) (v2: the search tools `web_search` and `x_search`
+run natively or through the gateway's executor chain; `image_generate` is always a function tool, executed directly).
+These rows describe the wire mapping the `ai` lane implements.
 
-- **Requests.** A hosted tool's canonical spec is sent as the native declaration on a hop whose route is native, with
-  its Responses `include` values and the pin header on that request.
-- **Parsing** for `web_search`, `x_search` and `image_generation`: native results become `HostedToolBlock`s, text
-  citations become `TextBlock.citations`, and response-level facts go to `hosted_summary`. A generated image is saved
-  to a file through the adapter's `MediaSink` as its done item is parsed (Images row).
+- **Requests.** A search tool's canonical spec is sent as the native declaration on a hop whose facts say `native:
+  assumed`, with its Responses `include` values and the pin header on that request; otherwise as the same-named
+  function. No request declares a hosted image tool.
+- **Parsing** for `web_search` and `x_search`: native results become `HostedToolBlock`s, text citations become
+  `TextBlock.citations`, and response-level facts go to `hosted_summary`. An `image_generation_call` is no hosted item:
+  it is ignored like any undeclared item.
 - **Portable history.** A finished response's hosted calls become synthetic same-named calls and results, split around
   the assistant message. There is one call per hosted block, and nothing folds. Each result shows its status line
   first and then every line attached to it. A response its
@@ -661,8 +662,8 @@ far:
   that call from its result.
 - **Native replay and pins.** A response's hosted calls go back verbatim, their `native.payload` in place, only to
   the hop the request goes to, and only when that hop's Source served them on the same origin. The protocol must be
-  Anthropic or Responses, the hop must still have each tool they called, and `image_generation` never goes back
-  verbatim. Such a request is pinned to the hop's Source.
+  Anthropic or Responses, and the hop must still declare each tool they called natively. Such a request is pinned to
+  the hop's Source.
   - The response a request continues within its turn needs no replay evidence, and its request also names the
     model that served it (`x-avibe-pin-model`, when that id is ASCII). That response is the request's last assistant
     message, stopped for tools, with only tool results after it.
@@ -671,28 +672,29 @@ far:
   - Otherwise the calls take the portable form above. A continuation whose fresh hop is another Source therefore
     goes in place as text: one hop builds and serves each request.
 - **`pin_unavailable`.** The gateway's `409` `model_hub_pin_unavailable` / `pin_unavailable` answer to a pinned
-  request is never shown and never reaches the loop's retry: the adapter renders the same request once more in
-  portable form (proxy declarations, synthetic history, in-place text) and sends it unpinned. Whatever answers that
-  request reaches the loop as usual.
+  request, matched on `type` and `code`, is never shown and never the generic retry. It ends the send with a refusal
+  and no output, and the loop renders the request again for a fresh hop within the bounds in `provider.md`, in
+  portable form (proxy declarations, synthetic history, in-place text, unpinned) only as the last resort. xAI's
+  decrypt refusal of a replayed ciphertext is answered the same way, without that Source identity's opaque payloads
+  for the rest of the run.
 
-- **Proxy.** A hosted tool that a hop does not run natively is its canonical function, and a call to it runs on the
-  gateway's executor bound for the Turn. The result keeps the record on `ToolResultMessage.hosted`. A proxied image's
-  base64 comes back beside its record and is saved through the same `MediaSink` as a native one; the record lists the
-  file.
+- **Proxy.** A search tool that a hop does not run natively is its canonical function, and a call to it runs on the
+  gateway's executor chain, which the gateway resolves from the live Turn. The result keeps the record on
+  `ToolResultMessage.hosted`, with `execution.mode: proxy`. An `image_generate` call is an ordinary tool call and
+  result everywhere, with `execution.mode: direct`; its images are files the record lists.
 
 An Anthropic citation covers its whole text block, so it carries no range.
 
 | Concern | Anthropic Messages | OpenAI Responses (OpenAI, xAI) | OpenAI Chat Completions |
 | --- | --- | --- | --- |
-| Native declaration (mode from `HopResolution.hosted_tools`) | `{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}` | `{"type": "web_search"}`; xAI also `{"type": "x_search"}`; OpenAI `{"type": "image_generation", "partial_images": 2, "output_format": "jpeg", "output_compression": 90}`; plus the overlay entry's `include` values (OpenAI web search: `web_search_call.action.sources`) | none. A `google` hop is reached over this Chat form, and the engine translates it to Gemini. |
+| Native declaration (mode from `HopResolution.hosted_tools`) | `{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}` | `{"type": "web_search"}`; xAI also `{"type": "x_search"}`; plus the overlay entry's `include` values (OpenAI web search: `web_search_call.action.sources`) | none. A `google` hop is reached over this Chat form, and the engine translates it to Gemini. |
 | Proxy declaration | `{"name": <tool>, "input_schema": <canonical>}` | `{"type": "function", "name": <tool>, "parameters": <canonical>}` | `{"type": "function", "function": {...}}` |
 | Native result → `HostedToolBlock` | every item under a declared hosted tool, one block each, in stream order, mapped to a provider-neutral `action` by the rule in `../vibey-hosted-tools.md` §4.2. `server_tool_use` plus its `web_search_tool_result` → `search`; `encrypted_content` only in `native.payload`. | `web_search_call` `search` (`queries[]`, else `query`) / `open_page` / `find_in_page`; xAI `custom_tool_call` `x_keyword_search` / `x_semantic_search` / `x_user_search` / `x_thread_fetch`. The `tco_…` `reasoning` items stay thinking blocks. Unknown items become `other`, never dropped. | — |
 | Response-level facts → `AssistantMessage.hosted_summary` | `usage.server_tool_use` counts | xAI `cost_in_usd_ticks` (reported once per response), `server_side_tool_usage_details` counts, and the X-search `url_citation`s as `cited_sources` | — |
 | Citations → `TextBlock.citations` | text-block `citations[]` (`web_search_result_location`: `url`, `title`, `cited_text`) | `output_text.annotations[]` of type `url_citation` (`url`, `title`, `start_index`, `end_index`) | — |
-| Same-Source replay (target hop is `native.source_id`, same origin, and `hosted_tools[tool].replay` is true now) | `native.payload` blocks verbatim, in place; citations not sent | `native.payload` items verbatim, in place; annotations not sent; never for `image_generation` | — |
-| Images | — | `image_generation_call` → a file saved through the `MediaSink` from its `output_item.done`. The record lists it as a `HostedImage`: absolute path, mime type sniffed from its bytes, the item's size as width and height, and the file's byte count. The action is `generate` with the revised prompt and the resolved size and quality. `native.payload` holds the path in place of `result`, so no base64 is ever stored. `partial_image` previews are skipped before parsing. The duplicate `result` in the terminal response is never decoded, and a call that saved no image is `failed`. The model reads the path record, and a file over `read`'s inline limit says so. A stream that declares `image_generation` gets the 32 MiB event cap as its line cap; others keep 8 MiB. | — |
+| Same-Source replay (target hop is `native.source_id` under the identity that minted it, same origin, and `hosted_tools[tool].replay` is `assumed` now) | `native.payload` blocks verbatim, in place; citations not sent | `native.payload` items verbatim, in place; annotations not sent | — |
 | Other-origin replay | assistant `tool_use(name=<tool>, input=<per-action arguments>)` + user `tool_result(record as text)`, splitting the assistant message; a `failed`/`incomplete` record sets `is_error: true` | `function_call(name=<tool>, arguments)` + `function_call_output(record as text)`; a failed record's text starts `[<tool> failed: <error>]` | assistant `tool_calls` + `tool` message, failure as in Responses |
-| Pinning (any protocol) | a request with a native declaration or a verbatim `native.payload` carries `x-avibe-pin-source: <hop source_id>`. A continuation whose calls go back verbatim also carries `x-avibe-pin-model: <its served model>`, the hop's own model. A `409` `model_hub_pin_unavailable` / `pin_unavailable` answer is not shown: the same request is rendered again in portable form (proxy declarations, synthetic history, in-place text) and sent unpinned, exactly once. A `pause_turn` continuation is the exception (below). | same | — |
+| Pinning (any protocol) | a request with a native declaration or a verbatim `native.payload` carries `x-avibe-pin-source: <hop source_id>`. A continuation whose calls go back verbatim also carries `x-avibe-pin-model: <its served model>`, the hop's own model. A `409` `model_hub_pin_unavailable` / `pin_unavailable` answer is not shown: the loop renders the request again for a fresh hop, portable only as the last resort (`provider.md`). A `pause_turn` continuation is the exception (below). | same | — |
 | Citations at delivery | `TextBlock.citations` → `core/citations.py` builder → Markdown links + Web sidecar | same | — |
 | `pause_turn` | not a stop. The adapter sends the request again with the paused content appended as the last assistant message, with no new user message. That continuation goes to the same hop, pinned to the Source and model that served the paused response, and its output streams on as the same response. A continuation block's index follows the paused ones, and a result finalizes its pending call by id. The hosted counters and cost are summed over every response. `usage` is the final request's, whose input already holds every paused part, so the context estimate stays right; billing comes from the gateway's per-call metering. After 5 continuations, a sixth pause ends the response with one `interrupted` error whose partial keeps everything assembled. A continuation is never sent in portable form. One that Source answers `pin_unavailable`, or a pause of a send that carried no pin, ends the response the same way. The merged message is verified only when every response in it was verified and reported the same origin; otherwise it is sanitized as any unverified response. | — | — |
-| In-flight replay (same turn, pinned Source) | verbatim when the fresh hop is the Source that served it, else in place as text. On `pin_unavailable`, which the gateway also answers for a narrow rejection of the replayed content (§3.5), each server block pair is replaced in place by one text block; signed thinking is kept on the same origin. | same | — |
+| In-flight replay (same turn, pinned Source) | verbatim while the fresh hop is the Source that served it and still declares each tool natively, else in place as text: each server block pair is replaced in place by one text block, and signed thinking is kept on the same origin. After a `pin_unavailable`, the fresh hop's facts decide the same way. | same | — |

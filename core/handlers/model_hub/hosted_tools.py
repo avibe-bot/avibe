@@ -37,8 +37,10 @@ from config.v2_config import (
 from vibe.backend_model_catalog import (
     HostedToolSpec,
     ImageModelSpec,
+    bundled_provider_vendors,
     provider_executor_model,
     provider_image_models,
+    provider_overlay_entry,
 )
 
 from .capability_evidence import (
@@ -50,6 +52,7 @@ from .capability_evidence import (
     utc_text,
     wire_stamp,
 )
+from .hosted_turn import IMAGE_TOOL, ExecutorSlot, TurnHostedTools
 
 SpecLookup = Callable[[str, str, str, str], Optional[HostedToolSpec]]
 # The engine release when the engine manifest cannot be read. It names no release, so a refusal learned under it
@@ -230,6 +233,17 @@ def executor_candidates(
     return tuple(first + [candidate for source_id, candidate in candidates.items() if source_id not in order])
 
 
+def executor_vendors(tool: str) -> tuple[str, ...]:
+    """The vendors whose Sources can run a proxied search ``tool``: their executor model's family declares it."""
+
+    vendors = []
+    for vendor, entry in bundled_provider_vendors().items():
+        family = provider_overlay_entry(vendor, entry.executor_model) if entry.executor_model else None
+        if family is not None and any(tool in specs for specs in family.hosted_tools.values()):
+            vendors.append(vendor)
+    return tuple(sorted(vendors))
+
+
 @dataclass(frozen=True)
 class ImageChoice:
     """One image model ``image_generate`` may name, on the Source that serves it."""
@@ -296,44 +310,61 @@ def image_choices(config: ModelHubConfig, *, evidence: HostedEvidence) -> ImageC
     return ImageChoices((default, *rest), default, saved, saved_choice is not None)
 
 
-def resolve_hosted_tools(
-    config: ModelHubConfig,
-    *,
+def freeze_turn_tools(config: ModelHubConfig, *, evidence: HostedEvidence, spec_for: SpecLookup) -> TurnHostedTools:
+    """What a Vibey turn's first resolution freezes (§3.4). With no image model, ``image_generate`` is not declared."""
+
+    enabled = enabled_tools(config)
+    images = image_choices(config, evidence=evidence).models if IMAGE_TOOL in enabled else ()
+    tools = frozenset(tool for tool in enabled if tool != IMAGE_TOOL or images)
+    executors = {
+        tool: tuple(
+            ExecutorSlot(candidate.source.id, candidate.model_id, identity_digest(candidate.source))
+            for candidate in executor_candidates(config, tool, evidence=evidence, spec_for=spec_for)
+        )
+        for tool in tools
+        if tool != IMAGE_TOOL
+    }
+    return TurnHostedTools(tools, executors, images)
+
+
+def hop_hosted_tools(
+    turn: TurnHostedTools,
     source: ModelHubSourceConfig,
     model_id: str,
+    *,
     evidence: HostedEvidence,
     spec_for: SpecLookup,
-    frozen: Mapping[str, Optional[tuple[str, str]]] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """``HopResolution.hosted_tools`` for a Vibey hop, in the C-6 shape the consumer reads today.
+    """``HopResolution.hosted_tools`` for one hop of a turn (C-6 item 7).
 
-    The facts are v2's: native when assumed, replay when assumed. The executor
-    is the first candidate of the chain. ``frozen`` is the turn's tool set and
-    executors from its first resolution. The image tool is not part of this
-    shape; it arrives with the HopResolution change.
+    A search tool's entry is the hop's own facts; the image entry is the
+    turn's frozen enum, with ``params`` and ``size_forms`` as sorted lists so
+    the tool schema Vibey renders from them is stable across turns.
     """
 
-    resolved: dict[str, dict[str, Any]] = {}
-    for tool in MODEL_HUB_SEARCH_TOOLS:
-        if frozen is not None:
-            if tool not in frozen:
-                continue
-        elif not hosted_tool_setting(config, tool).enabled:
-            continue
+    entries: dict[str, dict[str, Any]] = {}
+    for tool in sorted(turn.tools - {IMAGE_TOOL}):
         facts = hosted_tool_facts(source, model_id, tool, evidence=evidence, spec_for=spec_for)
-        entry: dict[str, Any] = {"mode": "native" if facts.native == "assumed" else "proxy"}
+        entry: dict[str, Any] = {"native": facts.native, "replay": facts.replay}
         if facts.native == "assumed":
             entry["declaration"] = dict(facts.declaration or {})
             entry["include"] = list(facts.include)
-        if frozen is not None:
-            bound = frozen[tool]
-            entry["executor"] = {"source_id": bound[0], "model_id": bound[1]} if bound is not None else None
-        else:
-            chain = executor_candidates(config, tool, evidence=evidence, spec_for=spec_for)
-            entry["executor"] = {"source_id": chain[0].source.id, "model_id": chain[0].model_id} if chain else None
-        entry["replay"] = facts.replay == "assumed"
-        resolved[tool] = entry
-    return resolved
+        entries[tool] = entry
+    if turn.images:
+        entries[IMAGE_TOOL] = {
+            "models": [
+                {
+                    "source_id": choice.source_id,
+                    "model_id": choice.model_id,
+                    "description": choice.description,
+                    "params": sorted(choice.params),
+                    "size_forms": sorted(choice.size_forms),
+                }
+                for choice in turn.images
+            ],
+            "default": {"source_id": turn.images[0].source_id, "model_id": turn.images[0].model_id},
+        }
+    return entries
 
 
 # --- The Tools read (§3.3) ---------------------------------------------------------------------------------------
@@ -455,12 +486,14 @@ def hosted_tools_status(
                     "source_id": choice.source_id,
                     "model_id": choice.model_id,
                     "description": choice.description,
+                    "billing": sources[choice.source_id].billing,
                     "price": image_price(sources[choice.source_id], choice.spec),
                 }
                 for choice in choices.models
             ]
+            # A catalog fact, not the user's Sources: the vendors a key could add an image model from.
             entry["image_offered_by"] = sorted(
-                {source.vendor for source in config.sources if provider_image_models(source.vendor)}
+                vendor for vendor in bundled_provider_vendors() if provider_image_models(vendor)
             )
         tools.append(entry)
     return {"tools": tools}

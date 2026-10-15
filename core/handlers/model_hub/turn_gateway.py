@@ -11,7 +11,7 @@ import socket
 import tempfile
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Mapping
-from contextlib import AsyncExitStack, asynccontextmanager, contextmanager, nullcontext, suppress
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import BinaryIO, Final, Optional
@@ -46,6 +46,7 @@ from .provenance import (
     render_turn_outcome_copy,
 )
 from .hosted_admission import PIN_MODEL_HEADER, PIN_SOURCE_HEADER, PIN_UNAVAILABLE_CODE
+from .hosted_turn import TurnHostedTools
 from .request import FORWARDED_CALLER_HEADERS, ModelHubRequest
 from .retry import RECOVERY_EXHAUSTED_CODE, RECOVERY_EXHAUSTED_MESSAGE
 from .resolver import parse_model_hub_timestamp
@@ -562,7 +563,7 @@ class ModelHubTurnGateway:
         gateway_request_model_id: Optional[str] = None,
         request_scoped: bool = False,
         primary_origin: HopOrigin | None = None,
-        hosted_executors: tuple[tuple[str, tuple[str, str, str] | None], ...] = (),
+        hosted_tools: TurnHostedTools | None = None,
     ) -> tuple[str, str]:
         if backend not in MODEL_HUB_BACKENDS:
             raise ModelHubError("mapping_target_unavailable", status=409)
@@ -596,7 +597,7 @@ class ModelHubTurnGateway:
                     via_mapping=via_mapping,
                     gateway_request_model_id=gateway_request_model_id,
                     primary_origin=primary_origin,
-                    hosted_executors=hosted_executors,
+                    hosted_tools=hosted_tools,
                 )
             except PreparedGatewayRouteConflict:
                 raise ModelHubError("mapping_target_unavailable", status=409) from None
@@ -690,11 +691,13 @@ class ModelHubTurnGateway:
         return None
 
     async def _handle_hosted_tool(self, request: web.Request) -> web.StreamResponse:
-        """Run one proxied hosted call for a Vibey turn (``vibey-hosted-tools.md`` §3.4).
+        """Run one hosted call for a live Vibey turn (``vibey-hosted-tools.md`` §6).
 
-        Authenticated with the turn's gateway token. Every outcome of a
-        well-formed call is a 200 carrying its canonical record; only a
-        malformed call is an error status.
+        Authenticated with the turn's gateway token and authorized by what the
+        turn froze. Every outcome of a well-formed, authorized call is a 200
+        carrying its canonical record; only a malformed call, or one its turn
+        cannot make (``turn_not_live``, ``tool_not_enabled``), is an error
+        status, and nothing runs.
         """
 
         def refused(status: int, code: str) -> web.Response:
@@ -707,6 +710,15 @@ class ModelHubTurnGateway:
         token = self._authorized_token(request, "vibey")
         if token is None:
             return refused(401, "authentication_error")
+
+        def live_turn() -> tuple[str, TurnHostedTools | None] | None:
+            return self.correlation.live_hosted_turn(
+                backend="vibey", token=token, request_metadata=_request_metadata("vibey", request),
+            )
+
+        # A turn that admits no more work is answered first, before its body is read.
+        if live_turn() is None:
+            return refused(409, "turn_not_live")
         # Every step proportional to the request or the answer runs off the
         # controller loop; the call's arguments are small, so the body is bounded.
         # The bound is on the bytes parsed: an encoded body would be inflated
@@ -722,23 +734,22 @@ class ModelHubTurnGateway:
             payload = await asyncio.to_thread(json.loads, raw)
         except (ValueError, RecursionError):
             return refused(400, "invalid_request_error")
-        # Checked and owned with no await between them: once admitted, the
+        # Checked again and owned with no await between them: once admitted, the
         # call belongs to its turn, and stopping or finalizing the turn ends it.
-        live = self.correlation.hosted_executor_bindings(
-            backend="vibey", token=token, request_metadata=_request_metadata("vibey", request),
-        )
+        live = live_turn()
+        if live is None:
+            return refused(409, "turn_not_live")
         try:
-            with self._own_turn_call(live[0]) if live is not None else nullcontext():
+            with self._own_turn_call(live[0]):
                 result = await self.service.run_hosted_tool(
                     request.match_info["tool"],
                     payload,
-                    # Only the executor the caller's live turn bound may run.
-                    bindings=live[1] if live is not None else None,
+                    # Only what the caller's live turn froze may run.
+                    turn=live[1],
                     language=self._language_provider() or "en",
                 )
         except ModelHubError as exc:
             return refused(exc.status, exc.code)
-        # An image answer carries megabytes of base64: encode it off the loop.
         body = await asyncio.to_thread(lambda: json.dumps(result).encode("utf-8"))
         return web.Response(
             body=body,
@@ -1157,8 +1168,12 @@ class ModelHubTurnGateway:
                 # Never shown to the user: Vibey re-renders the request in
                 # portable form and sends it again unpinned in this same turn.
                 terminalizer.hand_back()
+                error = {"type": "model_hub_pin_unavailable", "code": PIN_UNAVAILABLE_CODE}
+                if "reason" in exc.data:
+                    # Which hosted feature a narrow rule refused on the pinned hop.
+                    error["reason"] = exc.data["reason"]
                 return web.json_response(
-                    {"type": "error", "error": {"type": "model_hub_pin_unavailable", "code": PIN_UNAVAILABLE_CODE}},
+                    {"type": "error", "error": error},
                     status=409,
                     headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
                 )

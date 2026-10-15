@@ -112,3 +112,9 @@ export const executorOrderAfterMove = (
   return [...merged, ...next];
 };
 
+/**
+ * The copy key under `settings.models.tools.image.description` for an image model
+ * id. A dot separates i18n key segments, so the id's dots become underscores.
+ */
+export const imageModelCopyKey = (modelId: string): string => modelId.replaceAll('.', '_');
+

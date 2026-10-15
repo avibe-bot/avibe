@@ -15,7 +15,7 @@ from typing import Any, Callable
 import httpx
 import pytest
 
-from core.agent_core.ai._common import PIN_MODEL_HEADER, PIN_SOURCE_HEADER
+from core.agent_core.ai._common import PIN_MODEL_HEADER, PIN_SOURCE_HEADER, portable_endpoint
 from core.agent_core.ai.anthropic import MAX_PAUSE_CONTINUATIONS, PAUSE_LIMIT_MESSAGE, PAUSE_UNSERVED_MESSAGE
 from core.agent_core.ai.provider import Done, HostedToolRoute, ModelEndpoint, ModelRequest, ProviderError
 from core.agent_core.ai.registry import create_adapter
@@ -36,7 +36,7 @@ _PIN_UNAVAILABLE = {"type": "error", "error": {"type": "model_hub_pin_unavailabl
 
 
 def _request(*, cache: str = "none", base_url: str = "http://hub.invalid/vibey/v1") -> ModelRequest:
-    route = HostedToolRoute("native", None, False, declaration=DECLARATION)
+    route = HostedToolRoute("native", False, declaration=DECLARATION)
     return ModelRequest(
         endpoint=ModelEndpoint(
             "anthropic",
@@ -204,17 +204,18 @@ async def test_a_response_paused_past_the_bound_ends_interrupted_and_keeps_every
 
 
 @pytest.mark.parametrize(
-    ("unavailable", "reported", "sends", "kept"),
-    [(2, True, 2, "part 1"), (1, True, 2, "part 2"), (None, False, 1, "part 1")],
+    ("unavailable", "reported", "portable", "sends"),
+    [(2, True, False, 2), (None, True, True, 1), (None, False, False, 1)],
     ids=["continuation-pin-unavailable", "paused-unpinned-send", "paused-unverified-response"],
 )
 async def test_a_paused_response_its_source_cannot_continue_ends_interrupted_and_keeps_what_it_has(
-    unavailable, reported, sends, kept
+    unavailable, reported, portable, sends
 ):
     """§4.3 as implemented: a continuation goes only to the Source that served the paused response, pinned, so the
     response stays one origin's message. It ends without another send when:
-    - that Source answers the continuation ``pin_unavailable``;
-    - the paused send carried no pin (the turn's portable resend);
+    - that Source answers the continuation ``pin_unavailable``: the response has output, so the loop never renders it
+      again (§3.5);
+    - the paused send carried no pin (a portable request);
     - the paused response named no Source, so its hosted calls could not be kept to send back."""
 
     def answer(number: int) -> httpx.Response:
@@ -223,12 +224,16 @@ async def test_a_paused_response_its_source_cannot_continue_ends_interrupted_and
         body = _response(_text(f"part {number}"), stop_reason="pause_turn", input_tokens=10, output_tokens=1)
         return httpx.Response(200, headers=_served(reported=reported), text=body)
 
-    sent, events = await _stream(answer)
+    request = _request()
+    if portable:
+        request = replace(request, endpoint=portable_endpoint(request.endpoint))
+    sent, events = await _stream(answer, request)
 
     assert len(sent) == sends
     error = events[-1]
     assert isinstance(error, ProviderError) and error.kind == "interrupted" and error.message == PAUSE_UNSERVED_MESSAGE
-    assert [block.text for block in error.partial.content if isinstance(block, TextBlock)] == [kept]
+    assert error.refusal is None
+    assert [block.text for block in error.partial.content if isinstance(block, TextBlock)] == ["part 1"]
     assert sum(isinstance(event, (Done, ProviderError)) for event in events) == 1
 
 

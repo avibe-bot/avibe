@@ -29,9 +29,9 @@ from core.agent_core.ai._common import (
     hosted_pin,
     PAUSE_TURN,
     PIN_SOURCE_HEADER,
-    PIN_UNAVAILABLE,
+    PinUnavailable,
     REFUSED,
-    portable_request,
+    pin_refusal,
     join_endpoint_url,
     json_object,
     native_declaration,
@@ -853,12 +853,13 @@ class AnthropicAdapter(ProviderAdapter):
                     # The endpoint refused the lifetime before answering: sent again below, with nothing lost.
                     refused=_rejects_ttl if prefix_ttl is not None else None,
                 )
-                rejected = unavailable = continued = paused = message_started = message_stopped = False
+                rejected = continued = paused = message_started = message_stopped = False
+                unavailable: PinUnavailable | None = None
                 stop_reason = None
                 try:
                     async for event in driver:
-                        if event is PIN_UNAVAILABLE:
-                            unavailable = True
+                        if isinstance(event, PinUnavailable):
+                            unavailable = event
                             break
                         if event is PAUSE_TURN:
                             continued = True
@@ -869,11 +870,14 @@ class AnthropicAdapter(ProviderAdapter):
                         yield event
                 finally:
                     await driver.aclose()
-                if unavailable and sending is request:
-                    # The pinned Source cannot serve this content: the same request once more, in portable form and
-                    # unpinned, which the gateway fails over as any other (§3.5). Never the generic retry.
-                    sending = portable_request(request)
-                elif unavailable or (
+                if unavailable is not None and continuations == 0:
+                    # The pinned Source cannot serve this content; nothing reached a model. The loop renders the
+                    # request again for a fresh hop (§3.5).
+                    terminal = assembler.terminal(pin_refusal(assembler, request.endpoint, unavailable))
+                    if terminal is not None:
+                        yield terminal
+                    return
+                elif unavailable is not None or (
                     continued
                     and self._gateway
                     and (PIN_SOURCE_HEADER not in wire.headers or not assembler.verified_origin)
@@ -983,10 +987,6 @@ def build_messages_payload(
         tools[functions[-1]]["cache_control"] = _cache_control(prefix_ttl)
     if tools:
         payload["tools"] = tools
-    if request.tool_choice is not None:
-        # Current Claude models refuse a forced `tool` or `any` choice, as does extended thinking, so a request that
-        # forces one would test the refusal instead of the tool. A hosted-tool probe asks in its message instead.
-        raise ValueError("an Anthropic request never forces a tool")
     effort = (request.reasoning_effort or "").lower()
     if effort in {"none", "off", "disabled"}:
         payload["thinking"] = {"type": "disabled"}

@@ -1140,8 +1140,7 @@
       "upstream_error": "The upstream service returned an error."
     },
     "hostedTools": {
-      "noExecutor": "No Source is verified to run {tool}. Verify it on a Source in Models.",
-      "executorUnavailable": "The Source bound to run {tool} for this turn is no longer available.",
+      "noExecutor": "No Source can run {tool} right now. Add a Source from one of these providers to use it: {vendors}.",
       "providerRefused": "The executor's provider refused the call ({detail}).",
       "timedOut": "The executor call timed out.",
       "unreachable": "The executor could not be reached.",
@@ -1150,9 +1149,7 @@
       "didNotRun": "The executor did not run {tool}.",
       "responseEnded": "The executor's response ended as {status}.",
       "callFailed": "The provider's {tool} call failed.",
-      "callEnded": "The provider's {tool} call ended as {status}.",
-      "imageFormat": "The provider returned an unsupported image format: {format}.",
-      "imageUnreadable": "The provider returned an image that could not be used."
+      "triedSources": "Tried: {sources}."
     },
     "events": {
       "sourceFallback": "source",
@@ -1761,6 +1758,7 @@
       "unclassified": "The request to the model failed with an error {backend} could not classify. Try again, or choose another model.",
       "outputLimit": "The model reached its output limit before producing a usable answer or tool call. Ask for smaller steps, or choose a model with a larger output limit.",
       "internal": "{backend} stopped because of an internal error. Try again; if it happens again, the service log names the cause.",
+      "historyUnreadable": "This session's history can't be loaded, so {backend} can't continue it. Start a new session with /new.",
       "generic": "{backend}'s run failed."
     }
   },
@@ -1782,17 +1780,20 @@
       "executor_no_image": "the proxy executor returned no image",
       "gateway_unreachable": "couldn't reach the model gateway",
       "gateway_refused": "the model gateway refused the call",
-      "gateway_no_result": "the model gateway returned no result"
+      "gateway_no_result": "the model gateway returned no result",
+      "image_param_unsupported": "the chosen image model doesn't take one of the arguments",
+      "image_model_unavailable": "the chosen image model isn't available"
     },
     "tool": {
       "web_search": "Web search",
       "x_search": "X search",
-      "image_generation": "Image generation"
+      "image_generate": "Image generation"
     },
     "quoted": "“{subject}”",
     "mode": {
       "native": "native ({provider})",
-      "proxy": "via {provider} proxy"
+      "proxy": "via {provider} proxy",
+      "direct": "direct ({provider})"
     },
     "count": {
       "sourceOne": "1 source",

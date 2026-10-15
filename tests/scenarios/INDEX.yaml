@@ -62,7 +62,6 @@ capabilities:
       - tests/agent_core/ai/test_hosted_parsing.py
       - tests/agent_core/ai/test_hosted_transform.py
       - tests/agent_core/ai/test_hosted_replay.py
-      - tests/agent_core/ai/test_hosted_images.py
       - tests/agent_core/ai/test_hosted_pause_turn.py
       - tests/test_vibey_agent.py
       - tests/test_model_hub_evidence_rules.py
@@ -101,6 +100,7 @@ capabilities:
       - tests/test_model_hub_declared_tools.py
       - tests/test_model_hub_l3.py
       - tests/test_model_hub_hosted_executor.py
+      - tests/test_model_hub_hosted_evidence.py
       - tests/test_model_hub_usage.py
       - tests/test_ui_server_fastapi.py
       - tests/test_model_hub_quota.py
@@ -119,6 +119,7 @@ capabilities:
       - ui/src/components/settings/models/AgentCard.test.tsx
       - ui/src/components/workbench/HostedToolRow.test.tsx
       - ui/src/components/settings/models/ToolsTab.test.tsx
+      - ui/src/components/settings/models/imageModelCopy.test.ts
       - ui/src/components/settings/models/hostedTools.test.ts
       - ui/src/components/settings/models/useHostedTools.test.tsx
       - ui/src/components/settings/models/SourceDetailPanel.test.tsx
