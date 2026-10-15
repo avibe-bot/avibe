@@ -39,6 +39,7 @@ BUILTIN_SKILLS_ROOT_ENV = "AVIBE_BUILTIN_SKILLS_ROOT"
 SKILL_HOME_ENV = "AVIBE_SKILL_HOME"
 SKILL_CODEX_HOME_ENV = "AVIBE_SKILL_CODEX_HOME"
 SKILL_CLAUDE_HOME_ENV = "AVIBE_SKILL_CLAUDE_HOME"
+CLAUDE_PLUGIN_CACHE_DIR_ENV = "CLAUDE_CODE_PLUGIN_CACHE_DIR"
 SKILL_CLAUDE_CLI_PATH_ENV = "AVIBE_SKILL_CLAUDE_CLI_PATH"
 SKILL_XDG_CONFIG_HOME_ENV = "AVIBE_SKILL_XDG_CONFIG_HOME"
 
@@ -1099,7 +1100,6 @@ def _claude_plugin_record_applies(
     *,
     working_directory: Path,
     project_base: str | Path | None,
-    overrides: dict[str, bool],
 ) -> bool:
     scope = _claude_plugin_scope(record)
     if scope is None:
@@ -1123,9 +1123,9 @@ def _claude_plugin_record_applies(
         current_root = _claude_plugin_project_root(working_directory, project_base)
         return current_root is not None and current_root == project_root
 
-    # Older registry records may not retain the project path. An explicit
-    # enablement in the current project's settings is the only safe fallback.
-    return overrides.get(plugin_id) is True
+    # A project/local record without an explicit project binding is ambiguous;
+    # never let a user-scope enablement authorize it globally.
+    return False
 
 
 def _claude_plugin_skill_roots_from_manifest(
@@ -1160,6 +1160,48 @@ def _claude_plugin_skill_roots_from_manifest(
         seen.add(candidate)
         roots.append(candidate)
     return roots
+
+
+def _claude_plugin_manifest_path_is_supported(raw_path: str) -> bool:
+    value = raw_path.strip()
+    if value not in {".", "./"} and not value.startswith("./"):
+        return False
+    path = Path(value)
+    return not path.is_absolute() and ".." not in path.parts
+
+
+def _claude_plugin_manifest_is_supported(manifest: dict[str, Any]) -> bool:
+    name = manifest.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return False
+    if "defaultEnabled" in manifest and not isinstance(manifest["defaultEnabled"], bool):
+        return False
+    if "skills" not in manifest:
+        return True
+    raw_paths = manifest["skills"]
+    if isinstance(raw_paths, str):
+        raw_paths = [raw_paths]
+    if not isinstance(raw_paths, list):
+        return False
+    return all(
+        isinstance(raw_path, str)
+        and raw_path.strip()
+        and _claude_plugin_manifest_path_is_supported(raw_path)
+        for raw_path in raw_paths
+    )
+
+
+def _claude_plugin_registry_path(claude_home: Path) -> Path | None:
+    raw_cache_root = os.environ.get(CLAUDE_PLUGIN_CACHE_DIR_ENV)
+    if raw_cache_root is None:
+        return claude_home / "plugins" / "installed_plugins.json"
+    try:
+        cache_root = Path(raw_cache_root).expanduser()
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return None
+    if not cache_root.is_absolute() or not _path_is_utf8(cache_root):
+        return None
+    return _absolute_path(cache_root) / "installed_plugins.json"
 
 
 def _claude_plugin_record_updated_at(record: dict[str, Any]) -> float | None:
@@ -1203,7 +1245,9 @@ def _claude_plugin_skill_roots(
     claude_home: Path,
     project_base: str | Path | None,
 ) -> list[Path]:
-    registry = claude_home / "plugins" / "installed_plugins.json"
+    registry = _claude_plugin_registry_path(claude_home)
+    if registry is None:
+        return []
     payload = _read_bounded_json(registry, max_bytes=CLAUDE_PLUGIN_REGISTRY_MAX_BYTES)
     records = _claude_plugin_registry_records(payload)
     if not records:
@@ -1247,7 +1291,9 @@ def _claude_plugin_skill_roots(
             plugin_root / ".claude-plugin" / "plugin.json",
             max_bytes=CLAUDE_PLUGIN_MANIFEST_MAX_BYTES,
         )
-        if manifest_present and not isinstance(manifest, dict):
+        if manifest_present and (
+            not isinstance(manifest, dict) or not _claude_plugin_manifest_is_supported(manifest)
+        ):
             continue
         if not manifest_present:
             manifest = {}
@@ -1257,7 +1303,6 @@ def _claude_plugin_skill_roots(
                 record,
                 working_directory=working_directory,
                 project_base=project_base,
-                overrides=overrides,
             )
         except (OSError, RuntimeError, ValueError):
             continue

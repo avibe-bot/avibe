@@ -13,6 +13,7 @@ from core import managed_skills
 from core.managed_skills import (
     BUILTIN_SKILLS_ROOT_ENV,
     BUILTIN_SKILLS_SNAPSHOT_ENV,
+    CLAUDE_PLUGIN_CACHE_DIR_ENV,
     CATALOG_DESCRIPTION_MAX_CHARS,
     CATALOG_PAGE_MAX_BYTES,
     CATALOG_PAGE_SIZE,
@@ -40,6 +41,7 @@ from modules.im import MessageContext
 
 @pytest.fixture(autouse=True)
 def _isolate_native_claude_managed_settings(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv(CLAUDE_PLUGIN_CACHE_DIR_ENV, raising=False)
     monkeypatch.setattr(
         managed_skills,
         "_claude_plugin_managed_settings_sources",
@@ -1158,7 +1160,7 @@ def test_enabled_claude_plugin_skills_are_read_from_registry_and_manifest(
     _write_skill(plugin / "extra-skills", "lint-code", "lint-code", "Lint code")
     (plugin / ".claude-plugin").mkdir(parents=True)
     (plugin / ".claude-plugin" / "plugin.json").write_text(
-        json.dumps({"name": "formatter", "skills": ["extra-skills"]}),
+        json.dumps({"name": "formatter", "skills": ["./extra-skills/"]}),
         encoding="utf-8",
     )
     disabled = tmp_path / "plugin-cache" / "disabled"
@@ -1305,7 +1307,14 @@ def test_claude_plugin_same_scope_selects_newest_install_by_time_then_stable_pat
 
 @pytest.mark.parametrize(
     ("scope", "manifest_text"),
-    (("workspace", None), ("user", "not-json")),
+    (
+        ("workspace", None),
+        ("user", "not-json"),
+        ("user", "{}"),
+        ("user", json.dumps({"name": "candidate", "skills": {}})),
+        ("user", json.dumps({"name": "candidate", "skills": ["bare-path"]})),
+        ("user", json.dumps({"name": "candidate", "defaultEnabled": "yes"})),
+    ),
 )
 def test_claude_plugin_discovery_fails_closed_on_unknown_scope_or_present_invalid_manifest(
     tmp_path: Path,
@@ -1346,6 +1355,68 @@ def test_claude_plugin_discovery_fails_closed_on_unknown_scope_or_present_invali
     ) == []
 
 
+@pytest.mark.parametrize(
+    ("cache_mode", "expected_skill"),
+    (("absent", "default"), ("absolute", "override"), ("relative", None), ("empty", None)),
+)
+def test_claude_plugin_cache_root_override_has_bounded_semantics(
+    tmp_path: Path,
+    monkeypatch,
+    cache_mode: str,
+    expected_skill: str | None,
+) -> None:
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    claude_home = home / ".claude"
+    default_registry = claude_home / "plugins" / "installed_plugins.json"
+    default_plugin = tmp_path / "plugin-cache" / "default"
+    override_root = tmp_path / "override-cache"
+    override_registry = override_root / "installed_plugins.json"
+    override_plugin = tmp_path / "plugin-cache" / "override"
+    _write_skill(default_plugin / "skills", "default", "default", "Default")
+    _write_skill(override_plugin / "skills", "override", "override", "Override")
+
+    def write_registry(path: Path, plugin_id: str, plugin_root: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "plugins": {
+                        plugin_id: [
+                            {
+                                "scope": "user",
+                                "installPath": str(plugin_root),
+                                "enabled": True,
+                            }
+                        ]
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    write_registry(default_registry, "default@example", default_plugin)
+    write_registry(override_registry, "override@example", override_plugin)
+    if cache_mode == "absolute":
+        monkeypatch.setenv(CLAUDE_PLUGIN_CACHE_DIR_ENV, str(override_root))
+    elif cache_mode == "relative":
+        monkeypatch.setenv(CLAUDE_PLUGIN_CACHE_DIR_ENV, "relative-cache")
+    elif cache_mode == "empty":
+        monkeypatch.setenv(CLAUDE_PLUGIN_CACHE_DIR_ENV, "")
+    else:
+        monkeypatch.delenv(CLAUDE_PLUGIN_CACHE_DIR_ENV, raising=False)
+
+    skills = _isolated_resolve(
+        cwd,
+        tmp_path,
+        home=home,
+        claude_home=claude_home,
+    )
+    assert [skill.name for skill in skills] == ([expected_skill] if expected_skill else [])
+
+
 def test_claude_plugin_project_scope_uses_non_git_working_directory(tmp_path: Path) -> None:
     home = tmp_path / "home"
     cwd = tmp_path / "standalone"
@@ -1383,6 +1454,45 @@ def test_claude_plugin_project_scope_uses_non_git_working_directory(tmp_path: Pa
             claude_home=claude_home,
         )
     ] == ["standalone"]
+
+
+@pytest.mark.parametrize("scope", ("project", "local"))
+def test_claude_plugin_pathless_project_scope_does_not_use_user_enablement(
+    tmp_path: Path,
+    scope: str,
+) -> None:
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    claude_home = home / ".claude"
+    registry = claude_home / "plugins" / "installed_plugins.json"
+    registry.parent.mkdir(parents=True)
+    plugin = tmp_path / "plugin-cache" / scope
+    _write_skill(plugin / "skills", "pathless", "pathless", "Pathless")
+    registry.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "pathless@example": [
+                        {"scope": scope, "installPath": str(plugin), "enabled": True}
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (claude_home / "settings.json").write_text(
+        json.dumps({"enabledPlugins": {"pathless@example": True}}),
+        encoding="utf-8",
+    )
+
+    assert _isolated_resolve(
+        cwd,
+        tmp_path,
+        home=home,
+        claude_home=claude_home,
+    ) == []
 
 
 @pytest.mark.skipif(os.name == "nt", reason="symlink loop fixture requires POSIX semantics")
@@ -1439,7 +1549,10 @@ def test_claude_plugin_manifest_skill_directory_can_be_direct_skill_root(
     _write_skill(plugin / "direct-skill", "direct-skill", "direct-skill", "Direct")
     manifest = plugin / ".claude-plugin" / "plugin.json"
     manifest.parent.mkdir(parents=True)
-    manifest.write_text(json.dumps({"skills": ["./direct-skill/"]}), encoding="utf-8")
+    manifest.write_text(
+        json.dumps({"name": "direct", "skills": ["./direct-skill/"]}),
+        encoding="utf-8",
+    )
     registry.write_text(
         json.dumps(
             {
