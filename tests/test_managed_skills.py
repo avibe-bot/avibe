@@ -1530,6 +1530,49 @@ def test_publication_reclaims_stale_live_links_when_umbrella_exceeds_root_limit(
     assert not (destination / "retired").exists()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Live links are skipped when symlink creation is unavailable")
+def test_publication_reclaims_stale_live_link_whose_name_looks_like_a_snapshot_id(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "builtin-skills"
+    hashed_name = "a" * 64
+    _write_skill(source, hashed_name, hashed_name, "Hashed")
+    publish_builtin_skills(source_root=source, destination_root=destination)
+    assert (destination / hashed_name).is_symlink()
+
+    for path in sorted((source / hashed_name).rglob("*"), reverse=True):
+        path.unlink() if path.is_file() else path.rmdir()
+    (source / hashed_name).rmdir()
+    _write_skill(source, "current", "current", "Current")
+
+    publish_builtin_skills(source_root=source, destination_root=destination)
+
+    assert (destination / "current").is_symlink()
+    assert not (destination / hashed_name).is_symlink()
+
+
+def test_publication_fails_when_live_catalog_cannot_be_enumerated(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "builtin-skills"
+    _write_skill(source, "alpha", "alpha", "Alpha")
+
+    original_scandir = os.scandir
+
+    def deny_umbrella_listing(path):
+        if Path(path) == destination:
+            raise PermissionError("listing denied")
+        return original_scandir(path)
+
+    monkeypatch.setattr(managed_skills.os, "scandir", deny_umbrella_listing)
+
+    with pytest.raises(RuntimeError, match="Cannot enumerate built-in Skill live catalog"):
+        publish_builtin_skills(source_root=source, destination_root=destination)
+
+
 def test_publication_removes_stale_live_link_when_symlink_refresh_is_skipped(
     tmp_path: Path,
     monkeypatch,

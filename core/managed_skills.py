@@ -1705,25 +1705,29 @@ def _umbrella_children(umbrella: Path) -> list[tuple[str, Path, os.stat_result]]
                     raise RuntimeError("Built-in Skill live catalog exceeds the enumeration budget")
                 try:
                     entry_stat = os.stat(entry.path, follow_symlinks=False)
-                except OSError:
-                    continue
+                except OSError as exc:
+                    raise RuntimeError(
+                        f"Cannot inspect built-in Skill live catalog entry: {entry.path}"
+                    ) from exc
                 children.append((entry.name, Path(entry.path), entry_stat))
-    except OSError:
-        return []
+    except RuntimeError:
+        raise
+    except OSError as exc:
+        raise RuntimeError(f"Cannot enumerate built-in Skill live catalog: {umbrella}") from exc
     children.sort(key=lambda item: item[0])
     return children
 
 
 def _reclaim_stale_live_skill_links(umbrella: Path, keep_names: set[str]) -> None:
     for name, child, child_stat in _umbrella_children(umbrella):
-        if name in keep_names or name.startswith(".") or _SNAPSHOT_ID_RE.fullmatch(name):
+        if name in keep_names or name.startswith("."):
             continue
         if not stat.S_ISLNK(child_stat.st_mode) or not _is_builtin_live_link(child):
             continue
         try:
             child.unlink()
-        except OSError:
-            logger.warning("Could not remove stale live built-in Skill path: %s", child, exc_info=True)
+        except OSError as exc:
+            raise RuntimeError(f"Cannot remove stale live built-in Skill path: {child}") from exc
 
 
 def _publish_live_skill_links(umbrella: Path, snapshot: Path) -> None:

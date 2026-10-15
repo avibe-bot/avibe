@@ -343,7 +343,9 @@ and omits retired ones as one coherent set.
 Publication is atomic and content-addressed so overlapping old and new Avibe
 processes can keep using the snapshot each one advertised. After a snapshot is
 in place, Avibe atomically updates `builtin-skills/<name>` to the current
-snapshot and removes named live links that no longer exist in that snapshot.
+snapshot and removes named live links that no longer exist in that snapshot,
+including Skill names that look like snapshot hashes. If the live catalog
+cannot be enumerated, publication fails rather than leaving retired aliases.
 Live-link publication is serialized across snapshot IDs so overlapping
 publishers cannot mix catalogs. Snapshot materialization still takes the
 legacy per-snapshot lock and stages under `.snapshots/`, so a still-running
