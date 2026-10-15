@@ -303,7 +303,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          binary="target/release/bundle/macos/Avibe.app/Contents/MacOS/Avibe"
+          app="target/release/bundle/macos/Avibe.app"
+          executable="$(plutil -extract CFBundleExecutable raw -o - "$app/Contents/Info.plist")"
+          binary="$app/Contents/MacOS/$executable"
+          [ -x "$binary" ] || {
+            echo "Avibe executable not found at $binary" >&2
+            exit 1
+          }
           launch_log="$RUNNER_TEMP/avibe-desktop-launch.log"
           smoke_home="$(mktemp -d)"
           mkdir -p "$smoke_home/tmp"
