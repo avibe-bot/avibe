@@ -1366,37 +1366,33 @@ Required behaviour:
   outage off the failure of one read is the same mistake in the other direction as
   reading health off a stale value: both state a fact the payload did not carry.
 
-**The runtime control is a total rendering of `health`, and the states above are how it
-gets there** `[contract]`. The pill names the state; the adjacent switch owns activation.
-Every value `runtime-dependency.schema.json` admits is rendered, and no state is inferred
-from an empty relationship array. One value splits on a second field — the same shape
-frame 06's bar has when it splits `active` on adoption:
+**Runtime status and recovery** `[contract]`. Model Hub is enabled by default. The
+experimental on/off switch is retired: the pill reports health, and **Retry** uses
+the existing install/start path when a supported runtime is unavailable. No page
+control calls the lifecycle stop API. Per-backend Direct/Gateway choices remain
+independent of this runtime status.
 
-| `RuntimeDependency.status.health` `[contract]` | State | Pill | Treatment | Activation |
-| --- | --- | --- | --- | --- |
-| `ok` | Ready | `shell.running` | idle | on switch; stop only when every Agent backend is Direct (`POST /api/models/runtime/stop` `[contract]`) |
-| `degraded` | Impaired | `shell.degraded` | error | on switch; same guarded stop rule |
-| `down` | Closed | `shell.stopped` | error | off switch; start (`POST /api/models/runtime/start` `[contract]`) |
-| `not_started` | Closed | `shell.notStarted` | idle | off switch; start |
-| `installing` | Installing | `install.progress` | idle / busy | none; status reads own progress |
-| `not_installed`, `error_key` non-null `[contract]` | Install failed | `install.fail.title` / `settings.models.install.fail.detail` | error | retry `POST /api/models/runtime/install` |
-| `not_installed`, `error_key: null`, exact asset for `host_platform` `[contract]` | Not installed | `shell.notInstalled` | idle | the non-switching install confirm — **never** the start route |
-| `not_installed`, `error_key: null`, no exact asset for `host_platform` `[contract]` | Unsupported host | `shell.unsupported` | idle | none — 直连 (§1.8) is the escape hatch |
+| `RuntimeDependency.status.health` `[contract]` | Pill | Recovery |
+| --- | --- | --- |
+| `ok` | `shell.running` (or the all-direct summary) | none |
+| `degraded` | `shell.degraded` | none; the engine is still running |
+| `down` | `shell.unavailable` when enabled, otherwise `shell.stopped` | Retry starts the engine |
+| `not_started` | `shell.unavailable` when enabled, otherwise `shell.notStarted` | Retry starts the engine |
+| `installing` | `shell.starting` | status reads own progress; no duplicate install |
+| `not_installed`, supported manifest | `shell.unavailable` when enabled, otherwise `shell.notInstalled` | Retry installs and starts inline |
+| `not_installed`, unsupported manifest | unavailable/unsupported status | no install/start action |
 
-The runtime is a page-level gate. Only `ok` and `degraded` expose the tabs, Sources,
-Agent gateway-model rows, route controls, supply graph and internal dialogs. Every other
-authoritative health renders a closed/setup surface instead. Turning the gateway off is
-not a bulk routing mutation: while any backend remains in Hub mode, the switch is disabled
-and names those backends; the server independently rejects the same race with
-`runtime_in_use`. Configuration is preserved while hidden and reappears unchanged after a
-successful start.
+A running runtime, or retained enabled intent outside installation, keeps the
+configuration surface reachable. Legacy disabled intent has a closed recovery
+surface with Retry, so removing the switch does not strand an old installation.
+Unknown runtime reads keep their existing read-recovery behavior and do not
+pretend the engine is off. Starting is client-owned pending state until the next
+authoritative payload. The backend lifecycle API, in-use stop guard, deployment
+capability gate, and corrupt-config/custody recovery protections are unchanged.
 
-Starting is the one pill with no `health` behind it: it is the client's own optimistic
-state between accepting the press and the next payload. A transport failure — the status
-request not returning at all — renders Status unread and disables the switch because the
-page has no authoritative action basis. And `degraded` here is the *engine* speaking about
-itself, unrelated to `supply_status: degraded` above, which is a backend speaking about
-its arbitration; the two hold independently and D-24's rule applies to both words.
+On mobile, title/status and actions use separate rows. All five tabs retain their
+icons and full labels on one line; the tab strip scrolls horizontally rather than
+shrinking its content or widening the whole page.
 
 **Shared copy** — namespace `models.hub.shell.*` / `.upstream.*` / `.gateway.*` /
 `.legend.*`. Both `ui/src/i18n/zh.json` and `en.json` must carry every key. The
@@ -1481,33 +1477,27 @@ unable to outlive its surface, which is the cheaper answer wherever it is availa
 | --- | --- | --- |
 | `shell.title` | 模型 | Models |
 | `shell.running` | 网关运行中 | Gateway running |
-| `shell.stopped` `[derived]` | 网关已关闭 | Gateway off |
+| `shell.stopped` `[derived]` | 模型网关暂不可用 | Gateway unavailable |
+| `shell.unavailable` `[derived]` | 模型网关暂不可用 | Gateway currently unavailable |
 | `shell.degraded` `[derived]` | 网关降级运行 | Gateway running degraded |
-| `shell.notStarted` `[derived]` | 网关已关闭 | Gateway off |
+| `shell.notStarted` `[derived]` | 模型网关尚未就绪 | Gateway not ready |
 | `shell.notInstalled` `[derived]` | 网关组件未安装 | Gateway component not installed |
 | `shell.allDirect_one` `[frame]` | {{count}} 个后端都在直连 | The only backend is direct |
 | `shell.allDirect_other` `[frame]` | {{count}} 个后端都在直连 | All {{count}} backends are direct |
 | `shell.starting` `[derived]` | 正在启动… | Starting… |
-| `shell.stopping` `[derived]` | 正在关闭… | Stopping… |
 | `shell.unsupported` `[derived]` | 这个平台还没有网关组件 | No gateway component for this platform yet |
-| `shell.toggle.turnOn` `[derived]` | 开启模型网关 | Turn model gateway on |
-| `shell.toggle.turnOff` `[derived]` | 关闭模型网关 | Turn model gateway off |
-| `shell.toggle.stopBlocked` `[derived]` | 请先将 {{names}} 切换为直连，再关闭模型网关 | Switch {{names}} to Direct before turning the model gateway off |
-| `shell.toggle.stopUnavailable` `[derived]` | 暂时无法读取 Agent 路由状态，当前不能关闭模型网关 | Agent routing status is unavailable; the model gateway cannot be turned off yet |
-| `shell.closed.off.title` `[frame]` | 模型网关已关闭 | Model gateway is off |
-| `shell.closed.off.body` `[frame]` | 开启后才会显示和编辑来源、路由与网关模型。 | Turn it on to view and edit sources, routes, and gateway models. |
-| `shell.closed.down.title` `[derived]` | 模型网关已关闭 | Model gateway is off |
-| `shell.closed.down.body` `[derived]` | 上一次启动没有就绪。开启网关即可重试。 | The previous start did not become ready. Turn it on to try again. |
+| `shell.closed.off.title` `[frame]` | 模型网关尚未就绪 | Model gateway is not ready |
+| `shell.closed.off.body` `[frame]` | 点击重试，恢复供应商、路由和模型配置。 | Retry to restore access to sources, routes, and gateway models. |
+| `shell.closed.down.title` `[derived]` | 模型网关暂不可用 | Model gateway is unavailable |
+| `shell.closed.down.body` `[derived]` | 上一次启动没有就绪，点击重试可重新启动模型网关。 | The previous start did not become ready. Retry to start the gateway again. |
 | `shell.closed.notInstalled.title` `[derived]` | 模型网关尚未安装 | Model gateway is not installed |
-| `shell.closed.notInstalled.body` `[derived]` | 开启后会安装由 Avibe 管理的网关组件。 | Turn it on to install the managed gateway component. |
+| `shell.closed.notInstalled.body` `[derived]` | 点击重试可安装并启动由 Avibe 管理的模型网关组件。 | Retry to install and start the managed gateway component. |
 | `shell.closed.unsupported.title` `[derived]` | 模型网关不可用 | Model gateway is unavailable |
 | `shell.closed.unsupported.body` `[derived]` | 当前平台没有兼容的托管网关组件。 | This platform does not have a compatible managed gateway component. |
 | `shell.closed.installing.title` `[derived]` | 正在安装模型网关 | Installing model gateway |
 | `shell.closed.installing.body` `[derived]` | 安装并启动完成后才会显示来源与路由。 | Sources and routing will appear after installation and startup complete. |
 | `shell.closed.starting.title` `[derived]` | 正在启动模型网关 | Starting model gateway |
 | `shell.closed.starting.body` `[derived]` | 网关就绪后才会显示来源与路由。 | Sources and routing will appear when the gateway is ready. |
-| `shell.closed.stopping.title` `[derived]` | 正在关闭模型网关 | Turning model gateway off |
-| `shell.closed.stopping.body` `[derived]` | 运行时停止期间会隐藏网关配置。 | Gateway configuration is hidden while the runtime stops. |
 | `shell.closed.unread.title` `[derived]` | 暂时无法读取网关状态 | Model gateway status unavailable |
 | `shell.closed.unread.body` `[derived]` | 确认运行状态前不会显示网关配置。 | Configuration stays hidden until the runtime state can be confirmed. |
 | `shell.modelsInfo.label` `[derived]` | 什么是模型 | What a model is |
