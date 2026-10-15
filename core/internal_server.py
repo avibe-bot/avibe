@@ -228,17 +228,36 @@ def create_app(
     # Falling through admission's transaction, as opposed to answering from inside it.
     _ADMITTED = object()
 
-    async def _off_loop(operation: Callable[[], Any]) -> Any:
-        """Run scheduled-turn store work on the runtime-work executor, the door the
-        scheduler's own store work uses: the loop awaits it, and a cancelled caller
-        still waits until the transaction has committed or rolled back."""
-
+    async def _run_store_step(operation: Callable[[], Any]) -> Any:
         from core.runtime_work import RuntimeWorkSupervisor
 
         supervisor = getattr(controller, "runtime_work_supervisor", None)
         if isinstance(supervisor, RuntimeWorkSupervisor):
             return await supervisor.run_sync(operation)
         return await asyncio.to_thread(operation)
+
+    async def _off_loop(operation: Callable[[], Any]) -> tuple[Any, bool]:
+        """Run one scheduled-turn store step on the runtime-work executor, the door the
+        scheduler's own store work uses, so its write-lock wait and commit never hold
+        the loop (#2630).
+
+        Cancellation cannot split the step, as it could not while the step ran
+        synchronously on the loop: one that arrives meanwhile waits for the step to
+        land. Returns ``(result, cancelled)``, and the caller answers the cancellation
+        from what the step committed. Once a Run's ownership has moved to its Delivery,
+        the answer is recovery, never an escaping cancellation that would let the
+        executor settle the Run and drop the turn.
+        """
+
+        step = asyncio.ensure_future(_run_store_step(operation))
+        cancelled = False
+        while True:
+            try:
+                return await asyncio.shield(step), cancelled
+            except asyncio.CancelledError:
+                if step.cancelled():
+                    raise
+                cancelled = True
 
     async def _submit_scheduled_turn(
         session_id: str,
@@ -509,9 +528,13 @@ def create_app(
                     delivery_owner_transferred = True
             return _ADMITTED
 
-        admission = await _off_loop(_admit_delivery)
+        admission, admission_cancelled = await _off_loop(_admit_delivery)
         if admission is not _ADMITTED:
+            if admission_cancelled and not getattr(admission, "delivery_owner_transferred", False):
+                raise asyncio.CancelledError
             return admission
+        if admission_cancelled and not delivery_owner_transferred:
+            raise asyncio.CancelledError
 
         if delivery_request is None:
             from core.message_priority import priority_for_delivery_intent
@@ -567,7 +590,8 @@ def create_app(
         async def _defer_transferred_delivery() -> TurnSubmissionResult:
             delivery_status = "reserved"
             try:
-                delivery_status, recorded = await _off_loop(_record_deferred_outcome)
+                # Already answering a cancellation: a further one cannot change the answer.
+                (delivery_status, recorded), _cancelled = await _off_loop(_record_deferred_outcome)
                 if not recorded:
                     logger.warning(
                         "Agent Run deferred Delivery outcome lost its exact CAS: "
@@ -590,6 +614,15 @@ def create_app(
                 delivery_status=delivery_status,
                 delivery_owner_transferred=True,
             )
+
+        if admission_cancelled:
+            logger.warning(
+                "Delivery admission canceled after Agent Run ownership transfer; "
+                "deferring to recovery: run=%s delivery=%s",
+                execution_id,
+                delivery_id,
+            )
+            return await _defer_transferred_delivery()
 
         try:
             result = await manager.deliver(
@@ -654,7 +687,9 @@ def create_app(
                     )
 
             try:
-                recorded = await _off_loop(_record_outcome)
+                # Ownership has moved to the Delivery: the submission's answer must reach
+                # the executor, so a cancellation here does not escape it.
+                recorded, _cancelled = await _off_loop(_record_outcome)
                 if not recorded:
                     logger.warning(
                         "Agent Run Delivery outcome lost its exact CAS after ownership "

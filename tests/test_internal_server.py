@@ -5565,7 +5565,10 @@ def test_scheduled_send_now_recovers_transferred_reservation(monkeypatch, tmp_pa
     resumed_owner = asyncio.run(_go())
     assert isinstance(resumed_owner, session_turns.TurnSubmissionResult)
     assert resumed_owner.route == "ran"
-    assert resumed_owner.delivery_status == "claimed"
+    # The duplicate answers with the Delivery's state when its admission reads it. Admission
+    # now yields the loop while it waits for SQLite (#2630), so the recovered turn may have
+    # moved its Delivery from claimed to accepted by then; either way the turn owns it.
+    assert resumed_owner.delivery_status in {"claimed", "accepted"}
     assert resumed_owner.delivery_owner_transferred is True
     assert dispatched == ["original send-now prompt"]
 
@@ -8590,3 +8593,83 @@ def test_a_scheduled_turns_admission_never_holds_the_loop(monkeypatch, tmp_path)
 
     asyncio.run(_go())
     assert released_in_time == [True]
+
+
+def test_a_cancellation_during_admission_keeps_the_runs_delivery_ownership(monkeypatch, tmp_path):
+    """#2630: admission runs on a thread now, so a cancellation can arrive while it waits for SQLite's write lock.
+    Once its transaction moves the Run's ownership to the Delivery, the submission must hand the turn to recovery,
+    as a cancellation during delivery does, instead of letting the Run be terminalized and the turn dropped."""
+    import sqlite3
+    import threading
+
+    from core import session_turns
+    from core.scheduled_tasks import TaskExecutionStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(tmp_path, native_id="proj_admission_cancel")
+    session_id = session["id"]
+    request_store = TaskExecutionStore()
+    run = request_store.enqueue_definition_run(
+        definition_id="scheduled-admission-cancel",
+        run_type="scheduled",
+        source_kind="scheduler",
+        session_key="",
+        session_id=session_id,
+        post_to=None,
+        deliver_key=None,
+        prompt="digest please",
+        agent_name="worker",
+        session_policy="existing",
+    )
+    assert request_store.claim(run.id) is not None
+
+    async def _fake_dispatch_turn(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None, **_kwargs):
+        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
+
+    monkeypatch.setattr(session_turns, "dispatch_turn_with_outcome", _fake_dispatch_turn)
+    controller = _build_controller_double()
+    internal_server.create_app(controller)
+    ctx = MessageContext(
+        user_id="workbench",
+        channel_id=session_id,
+        platform="avibe",
+        message_id=f"scheduled:scheduled-admission-cancel:{run.id}",
+        platform_specific={
+            "agent_session_id": session_id,
+            "agent_session_target": {"agent_backend": "claude"},
+            "task_execution_id": run.id,
+            "task_trigger_kind": "scheduled",
+            "task_definition_id": "scheduled-admission-cancel",
+        },
+    )
+    held, release = threading.Event(), threading.Event()
+
+    def _hold_write_lock() -> None:
+        holder = sqlite3.connect(engine.url.database, timeout=10)
+        try:
+            holder.execute("BEGIN IMMEDIATE")
+            held.set()
+            release.wait(5)
+            holder.rollback()
+        finally:
+            holder.close()
+
+    async def _go():
+        holder = threading.Thread(target=_hold_write_lock)
+        holder.start()
+        assert await asyncio.to_thread(held.wait, 5)
+        submitting = asyncio.create_task(
+            controller.session_turn_gate.submit_scheduled(session_id, ctx, "digest please", delivery_intent="queue")
+        )
+        await asyncio.sleep(0.1)
+        submitting.cancel()
+        release.set()
+        try:
+            return await submitting
+        finally:
+            await asyncio.to_thread(holder.join, 5)
+
+    result = asyncio.run(_go())
+    assert result.delivery_owner_transferred is True
+    stored = request_store.get_run(run.id)
+    assert stored["delivery_id"] and stored["status"] in {"running", "queued"}
