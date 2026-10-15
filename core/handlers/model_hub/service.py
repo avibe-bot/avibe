@@ -6496,7 +6496,7 @@ class ModelHubService:
         refused: str | None = None
 
         async def invoke() -> None:
-            nonlocal handle, outcome, admitted, refused, cancelled_observed
+            nonlocal handle, outcome, admitted, refused, cancelled_observed, source
             while True:
                 await self._prepare_engine_for_demand()
                 await self._mutation_lock.acquire()
@@ -6514,9 +6514,12 @@ class ModelHubService:
                     release_owner()
 
                 try:
-                    # Admitted again on the snapshot the call is made on, under the lock.
-                    if await asyncio.to_thread(self._admitted_executor, slot, tool) is None:
+                    # Admitted again on the snapshot the call is made on, under the lock. The call and
+                    # everything it reports (billing, cost, the Source's name) follow that snapshot.
+                    final = await asyncio.to_thread(self._admitted_executor, slot, tool)
+                    if final is None:
                         return
+                    source = final.source
                     if not self._engine_synced:
                         continue
                     try:

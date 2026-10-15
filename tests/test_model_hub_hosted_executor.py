@@ -473,6 +473,30 @@ async def test_the_chain_moves_on_only_past_a_source_failure(
 
 
 @pytest.mark.asyncio
+async def test_a_call_reports_the_source_as_its_final_admission_saw_it(tmp_path):
+    """MH-HOSTED-GATEWAY-005: a Source edited while the engine is prepared runs and is billed as it now stands."""
+
+    service = _vibey_service(tmp_path, _sources(), handles=[
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=XAI), _responses(WEB_CALL, WEB_ANSWER)),
+    ])
+    _bind(service, "web_search", (XAI, "grok-4.6"))
+    prepare = service._prepare_engine_for_demand
+
+    async def edited_meanwhile(*args, **kwargs):
+        # Billing and the name are not the Source's identity, so it is still admitted.
+        service.store.config.sources = [
+            replace(item, billing="monthly", display_name="xAI team plan") if item.id == XAI else item
+            for item in service.store.config.sources
+        ]
+        await prepare(*args, **kwargs)
+
+    service._prepare_engine_for_demand = edited_meanwhile
+    status, answer = await _call(service, "web_search", {"arguments": {"query": "q"}})
+    assert status == 200 and answer["record"]["status"] == "completed"
+    assert (answer["execution"]["executor_billing"], answer["execution"]["cost"]) == ("monthly", {"basis": "included"})
+
+
+@pytest.mark.asyncio
 async def test_failure_text_is_in_the_users_language(tmp_path):
     """MH-HOSTED-GATEWAY-005: the record's error is user-visible on the tool card, so it is localized."""
 
