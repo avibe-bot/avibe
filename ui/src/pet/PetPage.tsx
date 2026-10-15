@@ -175,13 +175,23 @@ function useVisibleActivityActions(enabled: boolean, epoch: PetSurfaceEpoch, ses
     },
     fail: (key) => { if (key.isCurrent()) setValue(null); },
   }), [api, sessionIds, cancellableIds]);
+  const initiallyRead = useRef(false);
   useEffect(() => {
+    initiallyRead.current = false;
     source.setKey(enabled ? epoch : null);
-    if (enabled) source.refresh();
     return () => source.setKey(null);
   }, [source, enabled, epoch]);
-  const refresh = useCallback(() => source.refresh(), [source]);
+  const refresh = useCallback(() => {
+    if (!enabled || !epoch.isCurrent()) return;
+    initiallyRead.current = true;
+    source.refresh();
+  }, [source, enabled, epoch]);
   useVaultRequestRefresh(refresh);
+  // The fallback hook performs the first visible read. When the bridge is
+  // already healthy it does not poll, so a new source/epoch still needs one.
+  useEffect(() => {
+    if (!initiallyRead.current) refresh();
+  }, [refresh]);
   const requests = enabled && value?.epoch === epoch && value.sessionIds === sessionIds ? value.requests : [];
   useEffect(() => {
     const nextExpiry = Math.min(...requests.map((request) => Date.parse(request.expires_at ?? '')).filter((time) => time > Date.now()));
@@ -200,7 +210,7 @@ const PetSurface: React.FC = () => {
   const { capabilities } = useInstanceAuthorization();
   const inbox = useWorkbenchInbox();
   const { expanded, setPanel } = usePetPanel();
-  const { draft, uncertain, sending, listenPending, setDraft, setUncertain } = usePetComposer(binding);
+  const { draft, references: draftReferences, uncertain, sending, listenPending, setDraft, setUncertain } = usePetComposer(binding);
   const data = usePetSession(binding, petShell.unbind);
   const epoch = data.epoch;
   const canChat = capabilities.can_chat && data.canChat === true;
@@ -253,12 +263,6 @@ const PetSurface: React.FC = () => {
   const othersWorking = visibleAgentRows.some(isRunning);
   const busy = data.running || othersWorking;
   const [asleep, setAsleep] = useState(false);
-  useEffect(() => {
-    setAsleep(false);
-    if (state !== 'idle' || busy || visibleVaultRequests.length > 0 || Object.values(inbox.unreadBySession).some((count) => count > 0)) return;
-    const timer = window.setTimeout(() => { if (epoch.isCurrent()) setAsleep(true); }, 5 * 60 * 1000);
-    return () => window.clearTimeout(timer);
-  }, [state, busy, epoch, visibleVaultRequests.length, inbox.unreadBySession]);
   const [detailOpen, setDetailOpen] = useState(false);
   const [composing, setComposing] = useState(false);
   const [stops, setStops] = useState<Record<string, StopPhase>>({});
@@ -373,6 +377,12 @@ const PetSurface: React.FC = () => {
   );
   const cardNeedsInput = liveCards.some((card) => card.needsInput);
   const cardUnread = visibleCards.reduce((total, card) => total + (inbox.unreadBySession[card.sessionId] ?? 0), 0);
+  useEffect(() => {
+    setAsleep(false);
+    if (state !== 'idle' || busy || cardNeedsInput || cardUnread > 0) return;
+    const timer = window.setTimeout(() => { if (epoch.isCurrent()) setAsleep(true); }, 5 * 60 * 1000);
+    return () => window.clearTimeout(timer);
+  }, [state, busy, epoch, cardNeedsInput, cardUnread]);
   const pose: PetPose = cardNeedsInput ? 'needs_input'
     : state === 'idle' && cardUnread > 0 ? 'ready'
       : derivePetPose(state, { othersWorking: liveCards.some((card) => card.running), asleep });
@@ -381,9 +391,9 @@ const PetSurface: React.FC = () => {
     setComposing(false);
     setDraft('');
   }, [setDraft]);
-  const openComposer = useCallback((text = '') => {
+  const openComposer = useCallback((text = '', selected?: SessionReference[]) => {
     if (!epoch.isCurrent()) return;
-    setDraft(text);
+    setDraft(text, selected);
     setComposing(true);
     window.setTimeout(() => { if (epoch.isCurrent()) inputRef.current?.focus(); }, 0);
   }, [setDraft, epoch]);
@@ -393,8 +403,7 @@ const PetSurface: React.FC = () => {
     if (petComposer.isSending() || petComposer.isUncertain(binding)) return false;
     petComposer.setSending(true);
     try {
-      const references: SessionReference[] = liveCards.filter((card) => text.includes(referenceToMarker({ kind: 'session', session_id: card.sessionId })))
-        .map((card) => ({ kind: 'session', session_id: card.sessionId, title: card.title }));
+      const references = draftReferences.filter((reference) => text.includes(referenceToMarker(reference)));
       const row = await api.sendSessionMessage(binding, {
         text: text.trim(),
         ...(references.length ? { content: { references } } : {}),
@@ -422,7 +431,7 @@ const PetSurface: React.FC = () => {
       // Release this request's document-wide lock, not a new surface's state.
       petComposer.setSending(false);
     }
-  }, [api, binding, canChat, data, setPanel, setUncertain, epoch, liveCards]);
+  }, [api, binding, canChat, data, setPanel, setUncertain, epoch, draftReferences]);
   const submit = async () => {
     const submitted = draft;
     if (!(await send(submitted)) || !epoch.isCurrent()) return;
@@ -433,10 +442,11 @@ const PetSurface: React.FC = () => {
     if (!canChat || uncertain) return;
     const marker = referenceToMarker({ kind: 'session', session_id: card.sessionId });
     const next = draft.includes(marker) ? draft : [draft.trim(), marker].filter(Boolean).join(' ');
-    openComposer(next);
-  }, [draft, openComposer, canChat, uncertain]);
-  const draftReferences = liveCards.filter((card) => draft.includes(referenceToMarker({ kind: 'session', session_id: card.sessionId })));
-  const draftMarkers = draftReferences.map((card) => referenceToMarker({ kind: 'session', session_id: card.sessionId }));
+    const selected = draftReferences.some((reference) => reference.session_id === card.sessionId)
+      ? draftReferences : [...draftReferences, { kind: 'session' as const, session_id: card.sessionId, title: card.title }];
+    openComposer(next, selected);
+  }, [draft, draftReferences, openComposer, canChat, uncertain]);
+  const draftMarkers = draftReferences.map(referenceToMarker);
   const inputDraft = draftMarkers.length ? draftMarkers.reduce((text, marker) => text.replaceAll(marker, ''), draft).trimStart() : draft;
 
   const dismiss = useCallback((id: string) => {
@@ -652,7 +662,7 @@ const PetSurface: React.FC = () => {
   return (
     <div ref={rootRef} className="pet-mini-stage" data-pet-root data-busy={busy} data-state={state}>
       <div className={clsx('pet-mini-column', voice.listening && 'is-voice-active')}>
-        <div className={clsx('pet-mini-cards', voice.listening && 'is-hidden')} inert={voice.listening || undefined} aria-label={expanded ? t('pet.panel') : undefined} style={{ height: expanded ? STACK_HEIGHT : collapsedHeight }}>
+        <div className={clsx('pet-mini-cards', voice.listening && 'is-hidden')} inert={voice.listening || undefined} aria-label={expanded ? t('pet.panel') : undefined} style={{ height: expanded ? (!binding || switcherOpen || visibleCards.length > 0 ? STACK_HEIGHT : 'auto') : collapsedHeight }}>
           <div ref={collapsedRef} key={expanded ? 'expanded' : 'collapsed'} className="pet-mini-swap is-switching" onAnimationEnd={(event) => { if (event.target === event.currentTarget) event.currentTarget.classList.remove('is-switching'); }}>
           {expanded && (!binding || switcherOpen) ? (
             <SessionPicker canStartVibey={capabilities.can_chat} onBack={binding ? () => setSwitcherOpen(false) : undefined} onPick={(sessionId) => {
@@ -661,7 +671,9 @@ const PetSurface: React.FC = () => {
               setSwitcherOpen(false);
             }} />
           ) : (expanded || visibleCards.length > 0) && (
-            expanded ? (
+            expanded ? visibleCards.length === 0 ? (
+              !showReplyBubble && <div className="pet-mini-action-row"><SwitchSessionButton onClick={() => setSwitcherOpen(true)} label={t('pet.switchSession')} /></div>
+            ) : (
               <ExpandedCards
                 cards={visibleCards}
                 leaving={leaving}
@@ -684,9 +696,9 @@ const PetSurface: React.FC = () => {
           {voice.error && <p className="pet-mini-input-note" role="status">{t(`pet.voice.${voice.error}`)}</p>}
           <form className="pet-mini-input" data-pet-hit onSubmit={(event) => { event.preventDefault(); void submit(); }}>
             {draftReferences.length > 0 && <div className="pet-mini-references">
-              {draftReferences.map((card) => <span key={card.id} className="pet-mini-reference-chip">
-                <span title={card.title}># {card.title}</span>
-                <button type="button" aria-label={t('pet.removeReference', { title: card.title })} onClick={() => setDraft(draft.replaceAll(referenceToMarker({ kind: 'session', session_id: card.sessionId }), '').trim())}><X size={12} /></button>
+              {draftReferences.map((reference) => <span key={reference.session_id} className="pet-mini-reference-chip">
+                <span title={reference.title ?? reference.session_id}># {reference.title ?? reference.session_id}</span>
+                <button type="button" aria-label={t('pet.removeReference', { title: reference.title ?? reference.session_id })} onClick={() => setDraft(draft.replaceAll(referenceToMarker(reference), '').trim())}><X size={12} /></button>
               </span>)}
             </div>}
             <div className="pet-mini-input-row">

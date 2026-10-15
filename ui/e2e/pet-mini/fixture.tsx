@@ -48,7 +48,7 @@ const messages = hasMain ? [{
   metadata: {}, content: {}, read_at: '2026-10-12T00:00:01Z',
   created_at: '2026-10-12T00:00:01Z', updated_at: '2026-10-12T00:00:01Z',
 }] : [];
-const agents = Array.from({ length: layers + 1 }, (_, i) => ({
+const agents = Array.from({ length: Number(params.get('activities') ?? layers + 1) }, (_, i) => ({
   backend: i === 1 ? 'claude' : 'codex', state: personal && i === 2 ? 'idle' : 'active',
   session_id: `ses_fixture_${i}`, base_session_id: `native_${i}`, composite_key: null,
   pid: null, pid_shared: false, workdir: null, native_session_id: null, model: null, elapsed_seconds: 10,

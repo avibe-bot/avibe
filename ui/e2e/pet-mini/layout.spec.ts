@@ -208,3 +208,20 @@ test('reply history and input remain within the fixed window with reduced motion
   expect(await page.locator('.pet-mini-avatar-button').boundingBox()).toEqual(avatar);
   expect(await page.locator('.pet-mini-detail').evaluate((node) => parseFloat(getComputedStyle(node).transitionDuration))).toBeLessThan(0.01);
 });
+
+
+test('an empty activity stack takes no space while history and switching remain usable', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&activities=0');
+  await page.locator('.pet-mini-reply-toggle').waitFor();
+  const avatar = await page.locator('.pet-mini-avatar-button').boundingBox();
+  await page.locator('.pet-mini-avatar-button').click();
+  await expect(page.locator('.pet-mini-cards')).toHaveCSS('height', '0px');
+  await expect(page.locator('.pet-mini-panel')).toHaveCount(0);
+  await page.locator('.pet-mini-reply-toggle').click();
+  await page.getByRole('button', { name: 'Switch session' }).click();
+  await expect(page.locator('.pet-mini-session-option')).not.toHaveCount(0);
+  await expect(page.locator('.pet-mini-cards')).toHaveCSS('height', '304px');
+  await page.getByRole('button', { name: 'Back', exact: true }).click();
+  await expect(page.locator('.pet-mini-cards')).toHaveCSS('height', '0px');
+  expect(await page.locator('.pet-mini-avatar-button').boundingBox()).toEqual(avatar);
+});

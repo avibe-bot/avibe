@@ -2222,3 +2222,84 @@ describe('Personal Agent mini', () => {
     });
   });
 });
+
+
+describe('Personal Agent review invariants', () => {
+  it.each(['ended', 'hidden', 'unreachable', 'remount'])('keeps selected reference metadata when the activity is %s', async (reason) => {
+    canUseAgents = true;
+    runningAgents = workingIn('other');
+    api.sendSessionMessage.mockResolvedValueOnce(message('sent-ref', 'S', { author: 'user', type: 'user' }));
+    devBind('S'); const view = render(<PetPage />); summon('listen');
+    await userEvent.type(await screen.findByRole('textbox'), 'Check this');
+    await userEvent.click(await screen.findByRole('button', { name: 'pet.referenceSession' }));
+    runningAgents = reason === 'hidden'
+      ? { ...workingIn('other'), agents: workingIn('other').agents.map((row) => ({ ...row, visibility: 'background' })) }
+      : { ok: false, unreachable: true, agents: [], counts: {} };
+    if (reason === 'ended' || reason === 'remount') runningAgents = { ...workingIn('other'), agents: [] };
+    await emit((h) => h.onRunsUpdated?.({}));
+    if (reason === 'remount') {
+      view.unmount(); render(<PetPage />); summon('listen');
+    }
+    const input = await screen.findByRole('textbox');
+    expect((input as HTMLTextAreaElement).value).toBe('Check this ');
+    expect(screen.getByRole('button', { name: 'pet.removeReference' })).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: 'pet.send' }));
+    expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', {
+      text: 'Check this #<other>', content: { references: [{ kind: 'session', session_id: 'other', title: 'pet.untitledTask' }] },
+    });
+    summon('listen');
+    await screen.findByRole('textbox');
+    expect(screen.queryByRole('button', { name: 'pet.removeReference' })).toBeNull();
+  });
+
+  it.each(['remove', 'escape', 'binding'])('clears draft references on %s', async (action) => {
+    canUseAgents = true; runningAgents = workingIn('other');
+    devBind('S'); render(<PetPage />); summon('show');
+    await userEvent.click(await screen.findByRole('button', { name: 'pet.referenceSession' }));
+    if (action === 'remove') await userEvent.click(screen.getByRole('button', { name: 'pet.removeReference' }));
+    else if (action === 'escape') await userEvent.keyboard('{Escape}');
+    else await bound('B');
+    summon('listen');
+    expect((await screen.findByRole('textbox') as HTMLTextAreaElement).value).toBe('');
+    expect(screen.queryByRole('button', { name: 'pet.removeReference' })).toBeNull();
+  });
+
+  it('sleeps despite unread sessions excluded from the visible activity model', async () => {
+    vi.useFakeTimers();
+    try {
+      canUseAgents = true;
+      const row = workingIn('hidden').agents[0];
+      runningAgents = { ...workingIn('hidden'), agents: [
+        { ...row, session_id: 'hidden', visibility: 'background' },
+        { ...row, session_id: 'system', visibility: 'system' },
+        { ...row, session_id: 'unknown', visibility: null },
+        { ...row, session_id: 'closed', openable_in_chat: false },
+      ] };
+      unreadBySession = { hidden: 1, system: 1, unknown: 1, closed: 1 };
+      devBind('S'); render(<PetPage />);
+      await act(async () => {});
+      expect(pose()).toBe('idle');
+      await act(async () => vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1));
+      expect(pose()).toBe('sleeping');
+      runningAgents = workingIn('visible');
+      await emit((h) => h.onRunsUpdated?.({}));
+      expect(pose()).toBe('running');
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('reads each activity action source once on mount and when IDs change with a healthy bridge', async () => {
+    canUseAgents = true; runningAgents = workingIn('other');
+    api.getTurnState.mockClear();
+    devBind('S'); render(<PetPage />); await showDetail();
+    await waitFor(() => expect(api.getTurnState).toHaveBeenCalledWith('other', expect.anything()));
+    expect(api.getVaultRequests.mock.calls.filter(([filter]) => filter?.session === 'other')).toHaveLength(1);
+    expect(api.getTurnState.mock.calls.filter(([id]) => id === 'other')).toHaveLength(1);
+    await emit((h) => h.onEventBridgeStatus?.({ connected: true }));
+    runningAgents = { ...workingIn('other'), agents: [...workingIn('other').agents, ...workingIn('new').agents] };
+    await emit((h) => h.onRunsUpdated?.({}));
+    await waitFor(() => expect(api.getTurnState).toHaveBeenCalledWith('new', expect.anything()));
+    expect(api.getVaultRequests.mock.calls.filter(([filter]) => filter?.session === 'other')).toHaveLength(2);
+    expect(api.getVaultRequests.mock.calls.filter(([filter]) => filter?.session === 'new')).toHaveLength(1);
+    expect(api.getTurnState.mock.calls.filter(([id]) => id === 'new')).toHaveLength(1);
+  });
+});
