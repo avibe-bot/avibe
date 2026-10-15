@@ -7,7 +7,7 @@
   "errors": {
     "agentModelRequired": "Select a model for the {backend} Agent or Session in Avibe before running it.",
     "modelHubDisabled": "Model Hub is disabled on this instance, so {backend} has no model to run on.",
-    "modelGatewayOff": "The model gateway is off, so {backend} has no model to run on. Turn it on in Models, then choose a model.",
+    "modelGatewayOff": "The model gateway is off, so {backend} has no model to run on. Open Models and click Retry, then choose a model.",
     "modelSourceRequired": "{backend} has no model source yet. Add an API key or a subscription in Models.",
     "modelsNextStepImUrl": "Someone who manages this Avibe can fix it in Models: {url}",
     "modelsNextStepIm": "Someone who manages this Avibe can fix it in Models, in the Avibe Workbench.",

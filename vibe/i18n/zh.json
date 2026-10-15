@@ -7,7 +7,7 @@
   "errors": {
     "agentModelRequired": "请先在 Avibe 中为 {backend} Agent 或会话选择模型。",
     "modelHubDisabled": "本实例已停用模型网关，{backend} 没有可用的模型。",
-    "modelGatewayOff": "模型网关已关闭，{backend} 没有可用的模型。请在「模型」页开启网关并选择模型。",
+    "modelGatewayOff": "模型网关已关闭，{backend} 没有可用的模型。请前往「模型」页点击「重试」，然后选择模型。",
     "modelSourceRequired": "{backend} 还没有模型来源。请在「模型」页添加 API Key 或订阅。",
     "modelsNextStepImUrl": "管理这个 Avibe 的人可以在「模型」页处理：{url}",
     "modelsNextStepIm": "管理这个 Avibe 的人可以在 Avibe 工作台的「模型」页处理。",
