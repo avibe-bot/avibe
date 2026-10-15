@@ -936,38 +936,13 @@
         "desktopLeaseLost": "Computer Use 完成前桌面租约已丢失。",
         "focusShortcutForbidden": "不允许使用可能切换焦点的快捷键，请改用带 URL 的 launch。",
         "foregroundForbidden": "不允许使用前台输入。",
-        "foregroundAttentionPending": "在你通过 Avibe 原生桌面菜单解除恢复提醒前，前台控制已暂停。",
-        "foregroundConsentRequired": "前台控制需要通过 Avibe 原生桌面菜单授权。",
-        "foregroundDisabled": "前台控制未在 Avibe 原生桌面菜单中启用。",
-        "foregroundRestoreFailed": "前台控制已执行，但 Avibe 无法恢复并验证操作前的桌面状态。详情：{detail}",
-        "restorationDetailUnavailable": "恢复详情不可用",
-        "restoration": {
-          "priorFrontmost": {
-            "notAttempted": "操作前的前台精确窗口未执行恢复",
-            "notVerified": "操作前的前台精确窗口恢复无法验证",
-            "failed": "操作前的前台精确窗口恢复失败"
-          },
-          "pointer": {
-            "notAttempted": "硬件指针未执行恢复",
-            "notVerified": "硬件指针恢复无法验证",
-            "failed": "硬件指针恢复失败"
-          },
-          "activeSpace": {
-            "notAttempted": "活动 Space 未执行恢复",
-            "notVerified": "活动 Space 恢复无法验证",
-            "failed": "活动 Space 恢复失败"
-          }
-        },
-        "foregroundShellUnavailable": "Avibe 原生桌面应用当前不可用于前台控制。",
+        "foregroundConsentRequired": "前台输入需要所有者确认。",
         "genericDriverError": "Computer Use driver 返回了错误。",
         "invalidDriverArguments": "Computer Use 参数无效。",
         "observeFirst": "发送输入前，请重新观察精确窗口。",
         "platformUnsupported": "此平台不支持 Computer Use。",
         "sessionArchived": "当前 Avibe Session 已归档或正在归档，Computer Use 不可用。",
         "sessionUnavailable": "Computer Use driver 无法准备当前 Session。",
-        "targetMissing": "精确目标窗口已不存在。",
-        "targetNotAdmissible": "无法安全准入该窗口进行前台控制。",
-        "targetOffActiveSpace": "目标窗口不在当前活动 Space。",
         "unknownTool": "未知的 Computer Use 工具：{tool}。",
         "upstreamError": "Computer Use driver 拒绝了请求。",
         "upstreamProtocolError": "Computer Use driver 返回了无效响应。",

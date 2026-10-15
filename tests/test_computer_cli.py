@@ -18,7 +18,6 @@ import pytest
 from core import internal_server, session_turns
 from core.computer_cli import (
     _COMPUTER_ERROR_I18N_KEYS,
-    _RESTORATION_FAILURE_I18N_KEYS,
     COMPUTER_CLI_TOOLS,
     build_driver_arguments,
     format_human_result,
@@ -369,11 +368,6 @@ def test_cmd_computer_run_localizes_sdk_error_details(
 def test_computer_cli_error_translations_exist_in_all_supported_languages() -> None:
     keys = {
         *_COMPUTER_ERROR_I18N_KEYS.values(),
-        *(
-            key
-            for states in _RESTORATION_FAILURE_I18N_KEYS.values()
-            for key in states.values()
-        ),
         "computer.cli.error.screenshotMissing",
         "computer.cli.error.scriptArgNameValue",
         "computer.cli.error.scriptArgDuplicate",
@@ -388,7 +382,6 @@ def test_computer_cli_error_translations_exist_in_all_supported_languages() -> N
         "computer.cli.error.scriptRuntimeInvalid",
         "computer.cli.error.scriptTimedOut",
         "computer.cli.error.scriptFailed",
-        "computer.cli.error.restorationDetailUnavailable",
     }
     for catalog_path in sorted(Path("vibe/i18n").glob("*.json")):
         catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
@@ -402,184 +395,6 @@ def test_computer_cli_error_translations_exist_in_all_supported_languages() -> N
             assert isinstance(value, str) and value.strip(), (
                 f"{catalog_path.stem} has an empty translation for {key}"
             )
-
-
-@pytest.mark.parametrize(
-    ("language", "expected"),
-    [
-        (
-            "en",
-            "Foreground control is paused until you dismiss the restoration warning "
-            "from the native Avibe desktop menu.",
-        ),
-        (
-            "zh",
-            "在你通过 Avibe 原生桌面菜单解除恢复提醒前，前台控制已暂停。",
-        ),
-    ],
-)
-def test_human_attention_pending_error_is_localized(
-    language: str,
-    expected: str,
-) -> None:
-    result = {
-        "isError": True,
-        "structuredContent": {
-            "code": "foreground_attention_pending",
-            "params": {"foreground_outcome": "unattempted"},
-        },
-        "content": [],
-    }
-
-    output = format_human_result(
-        "click",
-        result,
-        translate=lambda key, **kwargs: i18n_t(key, language, **kwargs),
-    )
-
-    assert expected in output
-
-
-@pytest.mark.parametrize(
-    ("language", "expected"),
-    [
-        (
-            "en",
-            "Foreground control is disabled in the native Avibe desktop menu.",
-        ),
-        (
-            "zh",
-            "前台控制未在 Avibe 原生桌面菜单中启用。",
-        ),
-    ],
-)
-def test_human_foreground_disabled_error_is_localized(
-    language: str,
-    expected: str,
-) -> None:
-    result = {
-        "isError": True,
-        "structuredContent": {
-            "code": "foreground_disabled",
-            "params": {"foreground_outcome": "unattempted"},
-        },
-        "content": [],
-    }
-
-    output = format_human_result(
-        "click",
-        result,
-        translate=lambda key, **kwargs: i18n_t(key, language, **kwargs),
-    )
-
-    assert expected in output
-
-
-def test_human_restore_failure_renders_structured_component_details() -> None:
-    restoration = {
-        "components": {
-            "prior_frontmost": {
-                "recorded": {"pid": 3, "window_id": 30},
-                "attempted": True,
-                "verified": False,
-                "failure_detail": "prior exact window was not restored",
-            },
-            "pointer": {
-                "recorded": {"x": 10.0, "y": 20.0},
-                "attempted": True,
-                "verified": True,
-                "failure_detail": None,
-            },
-            "active_space": {
-                "recorded": {
-                    "prior_frontmost_display": 1,
-                    "target_display": 1,
-                },
-                "attempted": True,
-                "verified": False,
-                "failure_detail": "active Space was not restored",
-            },
-        },
-        "restoration_ok": False,
-    }
-    result = {
-        "isError": True,
-        "structuredContent": {
-            "code": "foreground_restore_failed",
-            "params": {"restoration": restoration},
-        },
-        "content": [],
-    }
-
-    output = format_human_result(
-        "click",
-        result,
-        translate=lambda key, **kwargs: i18n_t(key, "zh", **kwargs),
-    )
-
-    assert "操作前的前台精确窗口恢复无法验证" in output
-    assert "活动 Space 恢复无法验证" in output
-    assert "prior exact window was not restored" not in output
-    assert "active Space was not restored" not in output
-    assert "恢复详情不可用" not in output
-
-
-def test_json_restore_failure_keeps_the_complete_restoration_result(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys,
-) -> None:
-    monkeypatch.setenv("AVIBE_SESSION_ID", "ses-cli")
-    restoration = {
-        "components": {
-            "prior_frontmost": {
-                "recorded": {"pid": 3, "window_id": 30},
-                "attempted": True,
-                "verified": False,
-                "failure_detail": "prior exact window was not restored",
-            },
-            "pointer": {
-                "recorded": {"x": 10.0, "y": 20.0},
-                "attempted": True,
-                "verified": True,
-                "failure_detail": None,
-            },
-            "active_space": {
-                "recorded": {
-                    "prior_frontmost_display": 1,
-                    "target_display": 1,
-                },
-                "attempted": True,
-                "verified": False,
-                "failure_detail": "active Space was not restored",
-            },
-        },
-        "restoration_ok": False,
-    }
-    body = {
-        "ok": False,
-        "tool": "click",
-        "result": {
-            "isError": True,
-            "structuredContent": {
-                "code": "foreground_restore_failed",
-                "params": {"restoration": restoration},
-            },
-            "content": [],
-        },
-    }
-
-    with patch(
-        "vibe.internal_client.computer_use_sync",
-        lambda **_kwargs: {"status_code": 200, "body": body},
-    ):
-        args = cli.build_parser().parse_args(["computer", "click", "--json"])
-        assert cli.cmd_computer(args) == 1
-
-    payload = json.loads(capsys.readouterr().out)
-    assert (
-        payload["result"]["structuredContent"]["params"]["restoration"]
-        == restoration
-    )
 
 
 @pytest.mark.parametrize(

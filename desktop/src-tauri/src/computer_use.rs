@@ -1,7 +1,6 @@
 //! macOS adapter for the desktop-owned computer-use lifecycle.
 
-use std::collections::{BTreeMap, HashMap};
-use std::ffi::{c_char, c_void, CString};
+use std::ffi::c_void;
 use std::fs::File;
 use std::io::{self, Read};
 use std::os::unix::ffi::OsStrExt;
@@ -24,20 +23,18 @@ use block2::RcBlock;
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyClass, AnyObject, NSObjectProtocol, ProtocolObject};
 use objc2::{msg_send, sel, MainThreadMarker};
-use objc2_app_kit::{NSApplicationActivationOptions, NSApplicationDidBecomeActiveNotification, NSRunningApplication};
+use objc2_app_kit::NSApplicationDidBecomeActiveNotification;
 use objc2_foundation::{
     NSArray, NSError, NSNotification, NSNotificationCenter, NSOperationQueue, NSPoint, NSRect, NSSize,
 };
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tauri::plugin::{Builder as PluginBuilder, TauriPlugin};
 use tauri::{AppHandle, Manager, RunEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
-use tokio::io::{split, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, Command};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout, timeout_at};
 
@@ -58,15 +55,7 @@ const DARWIN_SOCKET_PATH_MAX_BYTES: usize = 103;
 const SOCKET_DIRECTORY_MODE: u32 = 0o700;
 const SOCKET_FLAVOR_HEX_BYTES: usize = 12;
 const DAEMON_STDERR_TAIL_BYTES: usize = 8 * 1024;
-const FOREGROUND_CONTROL_SOCKET_FILE: &str = "foreground-control.sock";
-const FOREGROUND_CONTROL_PREFERENCE_FILE: &str = "foreground-control.json";
-const FOREGROUND_TITLE_LIMIT: usize = 256;
-const FOREGROUND_STOP_TIMEOUT: Duration = Duration::from_secs(5);
-const AX_MESSAGING_TIMEOUT_SECONDS: f32 = 1.0;
-const K_AX_ERROR_SUCCESS: i32 = 0;
-const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
 
-type AXUIElementRef = *mut c_void;
 fn driver_command(driver: &Path) -> Command {
     let mut command = Command::new(driver);
     command
@@ -81,16 +70,6 @@ fn driver_command(driver: &Path) -> Command {
 unsafe extern "C" {
     fn AXIsProcessTrusted() -> u8;
     fn AXIsProcessTrustedWithOptions(options: *const c_void) -> u8;
-    fn AXUIElementCreateApplication(pid: i32) -> AXUIElementRef;
-    fn AXUIElementCopyAttributeValue(
-        element: AXUIElementRef,
-        attribute: *const c_void,
-        value: *mut *const c_void,
-    ) -> i32;
-    fn AXUIElementPerformAction(element: AXUIElementRef, action: *const c_void) -> i32;
-    fn AXUIElementSetAttributeValue(element: AXUIElementRef, attribute: *const c_void, value: *const c_void) -> i32;
-    fn AXUIElementSetMessagingTimeout(element: AXUIElementRef, timeout_in_seconds: f32) -> i32;
-    fn _AXUIElementGetWindow(element: AXUIElementRef, window_id: *mut u32) -> i32;
     static kAXTrustedCheckOptionPrompt: *const c_void;
 }
 
@@ -105,10 +84,6 @@ unsafe extern "C" {
         value_callbacks: *const c_void,
     ) -> *const c_void;
     fn CFRelease(value: *const c_void);
-    fn CFStringCreateWithCString(allocator: *const c_void, c_string: *const c_char, encoding: u32) -> *const c_void;
-    fn CFArrayGetCount(array: *const c_void) -> isize;
-    fn CFArrayGetValueAtIndex(array: *const c_void, index: isize) -> *const c_void;
-    static kCFBooleanFalse: *const c_void;
     static kCFBooleanTrue: *const c_void;
 }
 
@@ -116,77 +91,14 @@ unsafe extern "C" {
 unsafe extern "C" {
     fn CGPreflightScreenCaptureAccess() -> bool;
     fn CGRequestScreenCaptureAccess() -> bool;
-    fn CGWarpMouseCursorPosition(point: NSPoint) -> i32;
 }
 
 #[link(name = "ScreenCaptureKit", kind = "framework")]
 unsafe extern "C" {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ForegroundAttention {
-    pub target: String,
-    pub restoration: Value,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ForegroundAttentionEvent {
-    RequestConsent,
-    SetActive,
-    ComputerUseToggle,
-    ForegroundSettingChange,
-    ConsentChange,
-    SessionChange,
-    ComputerUseStopStart,
-    OwnerDismiss,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ForegroundAttentionOutcome {
-    NoAttention,
-    Refused,
-    Kept,
-    Dismissed,
-}
-
-#[derive(Default)]
-struct ForegroundAttentionLatch {
-    attention: Option<ForegroundAttention>,
-}
-
-impl ForegroundAttentionLatch {
-    fn latch(&mut self, attention: ForegroundAttention) {
-        self.attention = Some(attention);
-    }
-
-    fn current(&self) -> Option<&ForegroundAttention> {
-        self.attention.as_ref()
-    }
-
-    fn transition(&mut self, event: ForegroundAttentionEvent) -> ForegroundAttentionOutcome {
-        if self.attention.is_none() {
-            return ForegroundAttentionOutcome::NoAttention;
-        }
-        match event {
-            ForegroundAttentionEvent::RequestConsent | ForegroundAttentionEvent::SetActive => {
-                ForegroundAttentionOutcome::Refused
-            }
-            ForegroundAttentionEvent::OwnerDismiss => {
-                self.attention = None;
-                ForegroundAttentionOutcome::Dismissed
-            }
-            ForegroundAttentionEvent::ComputerUseToggle
-            | ForegroundAttentionEvent::ForegroundSettingChange
-            | ForegroundAttentionEvent::ConsentChange
-            | ForegroundAttentionEvent::SessionChange
-            | ForegroundAttentionEvent::ComputerUseStopStart => ForegroundAttentionOutcome::Kept,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct MenuView {
     pub enabled: bool,
-    pub foreground_enabled: bool,
     pub phase: ComputerUsePhase,
     pub reason: Option<String>,
     pub invalid_state: bool,
@@ -194,17 +106,12 @@ pub(crate) struct MenuView {
     pub initialization_error: bool,
     pub save_failed: bool,
     pub runtime_refused: bool,
-    pub foreground_pending: Option<String>,
-    pub foreground_granted: Option<String>,
-    pub foreground_active: Option<String>,
-    pub foreground_attention: Option<ForegroundAttention>,
 }
 
 impl Default for MenuView {
     fn default() -> Self {
         Self {
             enabled: false,
-            foreground_enabled: false,
             phase: ComputerUsePhase::Off,
             reason: None,
             invalid_state: false,
@@ -212,113 +119,19 @@ impl Default for MenuView {
             initialization_error: false,
             save_failed: false,
             runtime_refused: false,
-            foreground_pending: None,
-            foreground_granted: None,
-            foreground_active: None,
-            foreground_attention: None,
         }
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct ForegroundControlRequest {
-    operation: String,
-    session: String,
-    title: String,
-    target: Option<Value>,
-    restoration: Option<Value>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ForegroundExitReason {
-    ToggleOff,
-    ForegroundDisabled,
-    ComputerUseStop,
-    ConsentRevoke,
-    SessionEndOrArchive,
-    AppQuit,
-    MacOsSessionEnd,
-    ControllerDisconnect,
-    DriverDisconnect,
-}
-
-impl ForegroundExitReason {
-    #[allow(dead_code)]
-    const ALL: [Self; 9] = [
-        Self::ToggleOff,
-        Self::ForegroundDisabled,
-        Self::ComputerUseStop,
-        Self::ConsentRevoke,
-        Self::SessionEndOrArchive,
-        Self::AppQuit,
-        Self::MacOsSessionEnd,
-        Self::ControllerDisconnect,
-        Self::DriverDisconnect,
-    ];
-
-    const fn code(self) -> &'static str {
-        match self {
-            Self::ToggleOff => "toggle_off",
-            Self::ForegroundDisabled => "foreground_disabled",
-            Self::ComputerUseStop => "computer_use_stop",
-            Self::ConsentRevoke => "consent_revoke",
-            Self::SessionEndOrArchive => "session_end_or_archive",
-            Self::AppQuit => "app_quit",
-            Self::MacOsSessionEnd => "macos_session_end",
-            Self::ControllerDisconnect => "controller_disconnect",
-            Self::DriverDisconnect => "driver_disconnect",
-        }
-    }
-}
-
-enum ForegroundStopAction {
-    ApplyDirective {
-        directive: LifecycleDirective,
-        completion: Option<oneshot::Sender<()>>,
-    },
-    RevokeConsent {
-        session: String,
-        reply: Option<oneshot::Sender<Value>>,
-    },
-    DisableForeground,
-    Shutdown {
-        reason: ForegroundExitReason,
-        reply: oneshot::Sender<()>,
-    },
 }
 
 enum Event {
     Toggle,
-    RuntimeReady {
-        origin: LoopbackOrigin,
-        adoption: bool,
-    },
+    RuntimeReady { origin: LoopbackOrigin, adoption: bool },
     RuntimeLost,
-    RuntimeStopped(oneshot::Sender<()>),
+    RuntimeStopped,
     Activated,
-    RetryStart {
-        id: u64,
-    },
-    PermissionProbeFinished {
-        id: u64,
-        result: PermissionChildRun,
-    },
-    ForegroundControl {
-        request: ForegroundControlRequest,
-        reply: oneshot::Sender<Value>,
-    },
-    ForegroundStopReady {
-        call_id: u64,
-        reached_terminal: bool,
-        reason: ForegroundExitReason,
-    },
-    ToggleForegroundConsent,
-    ToggleForegroundEnabled,
-    DismissForegroundAttention,
-    Shutdown {
-        reason: ForegroundExitReason,
-        reply: oneshot::Sender<()>,
-    },
+    RetryStart { id: u64 },
+    PermissionProbeFinished { id: u64, result: PermissionChildRun },
+    Shutdown(oneshot::Sender<()>),
 }
 
 pub(crate) struct Controller {
@@ -368,36 +181,21 @@ impl Controller {
         let _ = self.sender.send(Event::RuntimeLost);
     }
 
-    pub(crate) async fn runtime_stopped(&self) {
-        let (sender, receiver) = oneshot::channel();
-        if self.sender.send(Event::RuntimeStopped(sender)).is_ok() {
-            let _ = receiver.await;
-        }
+    pub(crate) fn runtime_stopped(&self) {
+        let _ = self.sender.send(Event::RuntimeStopped);
     }
 
     pub(crate) fn activated(&self) {
         let _ = self.sender.send(Event::Activated);
     }
 
-    pub(crate) fn toggle_foreground_consent(&self) {
-        let _ = self.sender.send(Event::ToggleForegroundConsent);
-    }
-
-    pub(crate) fn toggle_foreground_enabled(&self) {
-        let _ = self.sender.send(Event::ToggleForegroundEnabled);
-    }
-
-    pub(crate) fn dismiss_foreground_attention(&self) {
-        let _ = self.sender.send(Event::DismissForegroundAttention);
-    }
-
-    pub(crate) async fn shutdown(&self, reason: ForegroundExitReason) {
+    pub(crate) async fn shutdown(&self) {
         if self.shutdown_started.swap(true, Ordering::SeqCst) {
             return;
         }
         self.shutdown_requested.store(true, Ordering::SeqCst);
         let (sender, receiver) = oneshot::channel();
-        if self.sender.send(Event::Shutdown { reason, reply: sender }).is_ok() {
+        if self.sender.send(Event::Shutdown(sender)).is_ok() {
             let _ = receiver.await;
         }
     }
@@ -410,8 +208,6 @@ struct Paths {
     driver: PathBuf,
     policy: PathBuf,
     snapshot: PathBuf,
-    foreground_control_socket: PathBuf,
-    foreground_control_preference: PathBuf,
 }
 
 impl Paths {
@@ -420,16 +216,12 @@ impl Paths {
         std::fs::create_dir_all(&state_dir)?;
         let owner_uid = std::fs::metadata(&state_dir)?.uid();
         let socket = short_socket_path(&state_dir, owner_uid);
-        let socket_directory = socket.parent().expect("socket directory");
-        ensure_private_socket_directory(socket_directory, owner_uid)?;
-        let foreground_control_socket = short_foreground_control_socket_path(&state_dir, owner_uid);
-        socket_path_preflight(&foreground_control_socket).map_err(io::Error::other)?;
+        ensure_private_socket_directory(socket.parent().expect("socket directory"), owner_uid)?;
         let executable = std::env::current_exe()?;
         let resource_dir = app.path().resource_dir()?;
         let driver = configured_path(bundled_driver_path(&executable), DRIVER_PATH_ENV);
         let policy = configured_path(resource_dir.join("computer-use/policy.yaml"), POLICY_PATH_ENV);
         let snapshot = configured_path(resource_dir.join("computer-use/tools-v0.31.0.json"), SNAPSHOT_PATH_ENV);
-        let foreground_control_preference = state_dir.join(FOREGROUND_CONTROL_PREFERENCE_FILE);
         Ok(Self {
             state_file: state_dir.join(COMPUTER_USE_STATE_FILE),
             socket,
@@ -437,8 +229,6 @@ impl Paths {
             driver,
             policy,
             snapshot,
-            foreground_control_socket,
-            foreground_control_preference,
         })
     }
 
@@ -449,31 +239,6 @@ impl Paths {
     }
 }
 
-#[derive(Deserialize, Serialize)]
-struct ForegroundPreference {
-    enabled: bool,
-}
-
-fn read_foreground_preference(path: &Path) -> bool {
-    std::fs::read(path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<ForegroundPreference>(&bytes).ok())
-        .is_some_and(|preference| preference.enabled)
-}
-
-fn write_foreground_preference(path: &Path, enabled: bool) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let bytes = serde_json::to_vec(&ForegroundPreference { enabled })?;
-    let temporary = path.with_extension("tmp");
-    let result = std::fs::write(&temporary, bytes).and_then(|()| std::fs::rename(&temporary, path));
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-    result
-}
-
 fn short_socket_path(state_dir: &Path, owner_uid: u32) -> PathBuf {
     let mut digest = Sha256::new();
     digest.update(state_dir.as_os_str().as_bytes());
@@ -482,13 +247,6 @@ fn short_socket_path(state_dir: &Path, owner_uid: u32) -> PathBuf {
     PathBuf::from("/tmp")
         .join(format!("avibe-cua-{owner_uid}-{flavor}"))
         .join(COMPUTER_USE_SOCKET_FILE)
-}
-
-fn short_foreground_control_socket_path(state_dir: &Path, owner_uid: u32) -> PathBuf {
-    short_socket_path(state_dir, owner_uid)
-        .parent()
-        .expect("short Computer Use socket directory")
-        .join(FOREGROUND_CONTROL_SOCKET_FILE)
 }
 
 fn ensure_private_socket_directory(path: &Path, owner_uid: u32) -> io::Result<()> {
@@ -568,7 +326,6 @@ struct RuntimeState {
     view: Arc<Mutex<MenuView>>,
     diagnostics: BootstrapLog,
     paths: Paths,
-    foreground_control_listener: UnixListener,
     store: ComputerUseStateStore,
     _shell_lock: ComputerUseShellLock,
     shutdown_requested: Arc<AtomicBool>,
@@ -585,12 +342,6 @@ struct RuntimeState {
     assets_valid: bool,
     pending_write: Option<ComputerUseRecord>,
     started_at: Instant,
-    foreground_enabled: bool,
-    foreground_consent_sessions: HashMap<String, String>,
-    pending_foreground: Option<(String, String)>,
-    foreground_activity: Option<ForegroundActivity>,
-    foreground_attention: ForegroundAttentionLatch,
-    next_foreground_transaction_id: u64,
 }
 
 impl RuntimeState {
@@ -608,24 +359,12 @@ impl RuntimeState {
         let stored = store.read();
         let assets_valid = paths.assets_valid();
         let lifecycle = restored_lifecycle(&stored, assets_valid);
-        match std::fs::remove_file(&paths.foreground_control_socket) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        let foreground_control_listener = UnixListener::bind(&paths.foreground_control_socket)?;
-        std::fs::set_permissions(&paths.foreground_control_socket, std::fs::Permissions::from_mode(0o600))?;
-        let foreground_enabled = read_foreground_preference(&paths.foreground_control_preference);
-        if let Ok(mut current) = view.lock() {
-            current.foreground_enabled = foreground_enabled;
-        }
         let mut runtime = Self {
             app,
             events,
             view,
             diagnostics,
             paths,
-            foreground_control_listener,
             store,
             _shell_lock: shell_lock,
             shutdown_requested,
@@ -642,12 +381,6 @@ impl RuntimeState {
             assets_valid,
             pending_write: None,
             started_at: Instant::now(),
-            foreground_enabled,
-            foreground_consent_sessions: HashMap::new(),
-            pending_foreground: None,
-            foreground_activity: None,
-            foreground_attention: ForegroundAttentionLatch::default(),
-            next_foreground_transaction_id: 0,
         };
         runtime.host_bundle_id = runtime.app.config().identifier.clone();
         match stored {
@@ -676,7 +409,7 @@ impl RuntimeState {
                 _ = tick.tick() => self.tick().await,
                 event = receiver.recv() => {
                     let Some(event) = event else {
-                        self.shutdown_after_controller_disconnect().await;
+                        self.shutdown().await;
                         break;
                     };
                     match event {
@@ -685,44 +418,14 @@ impl RuntimeState {
                             self.runtime_ready(origin, adoption).await;
                         }
                         Event::RuntimeLost => self.runtime_lost().await,
-                        Event::RuntimeStopped(reply) => self.runtime_stopped(reply).await,
+                        Event::RuntimeStopped => self.runtime_stopped().await,
                         Event::Activated => self.activated().await,
                         Event::RetryStart { id } => self.retry_start(id).await,
                         Event::PermissionProbeFinished { id, result } => {
                             self.permission_probe_finished(id, result);
                         }
-                        Event::ForegroundControl { request, reply } => {
-                            self.dispatch_foreground_control(request, reply).await;
-                        }
-                        Event::ForegroundStopReady {
-                            call_id,
-                            reached_terminal,
-                            reason,
-                        } => {
-                            if self
-                                .complete_foreground_stop(call_id, reached_terminal, reason)
-                                .await
-                            {
-                                let RuntimeState {
-                                    _shell_lock: shell_lock,
-                                    ..
-                                } = self;
-                                drop(shell_lock);
-                                return;
-                            }
-                        }
-                        Event::ToggleForegroundConsent => self.toggle_foreground_consent(),
-                        Event::ToggleForegroundEnabled => self.toggle_foreground_enabled(),
-                        Event::DismissForegroundAttention => self.dismiss_foreground_attention(),
-                        Event::Shutdown { reason, reply } => {
-                            if self.foreground_activity.is_some() {
-                                self.await_foreground_stop(
-                                    reason,
-                                    ForegroundStopAction::Shutdown { reason, reply },
-                                );
-                                continue;
-                            }
-                            self.shutdown_now(reason).await;
+                        Event::Shutdown(reply) => {
+                            self.shutdown().await;
                             let RuntimeState {
                                 _shell_lock: shell_lock,
                                 ..
@@ -733,20 +436,11 @@ impl RuntimeState {
                         }
                     }
                 }
-                accepted = self.foreground_control_listener.accept() => {
-                    if let Ok((stream, _)) = accepted {
-                        let events = self.events.clone();
-                        tauri::async_runtime::spawn(serve_foreground_control(stream, events));
-                    }
-                }
             }
         }
     }
 
     async fn toggle(&mut self) {
-        let _ = self
-            .foreground_attention
-            .transition(ForegroundAttentionEvent::ComputerUseToggle);
         self.update_view(|view| {
             view.runtime_refused = false;
             view.invalid_state = false;
@@ -754,18 +448,6 @@ impl RuntimeState {
         if self.lifecycle.enabled() {
             self.invalidate_start_retry();
             let directive = self.lifecycle.toggle_off();
-            if self.foreground_activity.is_some() {
-                self.await_foreground_stop(
-                    ForegroundExitReason::ToggleOff,
-                    ForegroundStopAction::ApplyDirective {
-                        directive,
-                        completion: None,
-                    },
-                );
-                self.publish_view();
-                return;
-            }
-            self.expire_foreground_authorization();
             self.apply(directive).await;
             return;
         }
@@ -786,35 +468,6 @@ impl RuntimeState {
         }
         let directive = self.lifecycle.toggle_on(self.capabilities.current(), grants);
         self.apply(directive).await;
-    }
-
-    fn toggle_foreground_enabled(&mut self) {
-        let _ = self
-            .foreground_attention
-            .transition(ForegroundAttentionEvent::ForegroundSettingChange);
-        if !self.foreground_enabled && self.foreground_activity.is_some() {
-            return;
-        }
-        let enabled = !self.foreground_enabled;
-        if let Err(error) = write_foreground_preference(&self.paths.foreground_control_preference, enabled) {
-            eprintln!("The foreground control preference could not be saved: {error}");
-            return;
-        }
-        self.foreground_enabled = enabled;
-        self.update_view(|view| view.foreground_enabled = enabled);
-        if enabled {
-            self.publish_view();
-            return;
-        }
-
-        self.expire_foreground_grants();
-        if self.foreground_activity.is_some() {
-            self.await_foreground_stop(
-                ForegroundExitReason::ForegroundDisabled,
-                ForegroundStopAction::DisableForeground,
-            );
-        }
-        self.publish_view();
     }
 
     async fn runtime_ready(&mut self, origin: LoopbackOrigin, adoption: bool) {
@@ -844,40 +497,21 @@ impl RuntimeState {
     }
 
     async fn runtime_lost(&mut self) {
-        self.set_runtime_lost(false, ForegroundExitReason::DriverDisconnect, None)
-            .await;
+        self.set_runtime_lost(false).await;
     }
 
-    async fn runtime_stopped(&mut self, completion: oneshot::Sender<()>) {
-        self.set_runtime_lost(true, ForegroundExitReason::ComputerUseStop, Some(completion))
-            .await;
+    async fn runtime_stopped(&mut self) {
+        self.set_runtime_lost(true).await;
     }
 
-    async fn set_runtime_lost(
-        &mut self,
-        clear_origin: bool,
-        reason: ForegroundExitReason,
-        completion: Option<oneshot::Sender<()>>,
-    ) {
-        let _ = self
-            .foreground_attention
-            .transition(ForegroundAttentionEvent::ComputerUseStopStart);
+    async fn set_runtime_lost(&mut self, clear_origin: bool) {
         self.invalidate_start_retry();
         if clear_origin {
             self.origin = None;
         }
         self.capabilities.begin_adoption();
         let directive = self.lifecycle.capabilities(RuntimeSupport::Unknown, silent_grants());
-        if self.foreground_activity.is_some() {
-            self.await_foreground_stop(reason, ForegroundStopAction::ApplyDirective { directive, completion });
-            self.publish_view();
-            return;
-        }
-        self.expire_foreground_authorization();
         self.apply(directive).await;
-        if let Some(completion) = completion {
-            let _ = completion.send(());
-        }
     }
 
     async fn activated(&mut self) {
@@ -903,13 +537,8 @@ impl RuntimeState {
             return;
         }
         if self.lifecycle.phase() == ComputerUsePhase::NeedsRuntime {
-            if let Some(directive) = runtime_reprobe_directive(
-                &mut self.lifecycle,
-                &mut self.capabilities,
-                self.origin.as_ref(),
-                silent_grants(),
-            )
-            .await
+            if let Some(directive) =
+                runtime_reprobe_directive(&mut self.lifecycle, &mut self.capabilities, self.origin.as_ref()).await
             {
                 self.apply(directive).await;
             }
@@ -1174,31 +803,14 @@ impl RuntimeState {
         self.diagnostics.record("computer-use.permission-child", &fields);
     }
 
-    async fn shutdown_now(&mut self, reason: ForegroundExitReason) {
+    async fn shutdown(&mut self) {
         self.invalidate_start_retry();
-        self.expire_foreground_grants();
-        self.diagnostics.record(
-            "computer-use.foreground-shutdown",
-            &[("reason", reason.code().to_owned())],
-        );
         let directive = self.lifecycle.quit();
         if directive.write_state {
             let _ = self.write_current_state();
         }
         self.stop_permission_probe().await;
         self.stop_daemon().await;
-        let _ = std::fs::remove_file(&self.paths.foreground_control_socket);
-    }
-
-    async fn shutdown_after_controller_disconnect(&mut self) {
-        if let Some(call) = self.foreground_activity.as_ref() {
-            let call_id = call.id;
-            let reached_terminal = call.finish_and_await_terminal(FOREGROUND_STOP_TIMEOUT).await;
-            let _ = self
-                .complete_foreground_stop(call_id, reached_terminal, ForegroundExitReason::ControllerDisconnect)
-                .await;
-        }
-        self.shutdown_now(ForegroundExitReason::ControllerDisconnect).await;
     }
 
     fn current_record(&self) -> ComputerUseRecord {
@@ -1257,825 +869,6 @@ impl RuntimeState {
         });
         crate::refresh_computer_use_control(&self.app);
     }
-
-    async fn publish_view_and_wait(&self) -> Result<(), String> {
-        self.update_view(|view| {
-            view.enabled = self.lifecycle.enabled();
-            view.phase = self.lifecycle.phase();
-            view.reason = self.lifecycle.reason().map(str::to_owned);
-            view.asset_error = !self.assets_valid;
-        });
-        crate::refresh_computer_use_control_and_wait(&self.app).await
-    }
-
-    async fn dispatch_foreground_control(&mut self, request: ForegroundControlRequest, reply: oneshot::Sender<Value>) {
-        let session = request.session.trim().to_owned();
-        if request.operation == "revoke_session" {
-            let _ = self
-                .foreground_attention
-                .transition(ForegroundAttentionEvent::SessionChange);
-        }
-        if request.operation == "revoke_session"
-            && self
-                .foreground_activity
-                .as_ref()
-                .is_some_and(|call| call.session == session)
-        {
-            self.await_foreground_stop(
-                ForegroundExitReason::SessionEndOrArchive,
-                ForegroundStopAction::RevokeConsent {
-                    session,
-                    reply: Some(reply),
-                },
-            );
-            return;
-        }
-        let _ = reply.send(self.handle_foreground_control(request).await);
-    }
-
-    fn await_foreground_stop(&mut self, reason: ForegroundExitReason, action: ForegroundStopAction) {
-        let Some(call) = self.foreground_activity.as_mut() else {
-            return;
-        };
-        call.finish_actions.push(action);
-        if call.exit_wait_started {
-            return;
-        }
-        call.exit_wait_started = true;
-        let call_id = call.id;
-        let wait = call.finish_and_await_terminal(FOREGROUND_STOP_TIMEOUT);
-        let events = self.events.clone();
-        tauri::async_runtime::spawn(async move {
-            let reached_terminal = wait.await;
-            let _ = events.send(Event::ForegroundStopReady {
-                call_id,
-                reached_terminal,
-                reason,
-            });
-        });
-    }
-
-    async fn complete_foreground_stop(
-        &mut self,
-        call_id: u64,
-        reached_terminal: bool,
-        reason: ForegroundExitReason,
-    ) -> bool {
-        if self.foreground_activity.as_ref().is_none_or(|call| call.id != call_id) {
-            return false;
-        }
-        if !reached_terminal {
-            self.mark_foreground_attention_incomplete(reason);
-        }
-
-        let Some(call) = self.foreground_activity.take() else {
-            return false;
-        };
-
-        let actions = call.finish_actions;
-        for action in actions {
-            match action {
-                ForegroundStopAction::ApplyDirective { directive, completion } => {
-                    self.expire_foreground_grants();
-                    self.apply(directive).await;
-                    if let Some(completion) = completion {
-                        let _ = completion.send(());
-                    }
-                }
-                ForegroundStopAction::RevokeConsent { session, reply } => {
-                    self.foreground_consent_sessions.remove(&session);
-                    if self
-                        .pending_foreground
-                        .as_ref()
-                        .is_some_and(|(pending_session, _)| pending_session == &session)
-                    {
-                        self.pending_foreground = None;
-                        self.update_view(|view| view.foreground_pending = None);
-                    }
-                    self.refresh_granted_view();
-                    self.publish_view();
-                    if let Some(reply) = reply {
-                        let _ = reply.send(json!({"ok": true}));
-                    }
-                }
-                ForegroundStopAction::DisableForeground => {
-                    self.expire_foreground_grants();
-                    self.publish_view();
-                }
-                ForegroundStopAction::Shutdown { reason, reply } => {
-                    self.shutdown_now(reason).await;
-                    let _ = reply.send(());
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    fn mark_foreground_attention_incomplete(&mut self, reason: ForegroundExitReason) {
-        let (attention, target_pid, target_window_id) = {
-            let Some(call) = self.foreground_activity.as_mut() else {
-                return;
-            };
-            let mut restoration = call.restoration.clone();
-            let detail = format!("foreground restoration was incomplete before {}", reason.code());
-            fail_restoration(&mut restoration, &detail);
-            call.restoration = restoration.clone();
-            call.mark_terminal();
-            let target = call.target_label.clone();
-            let target_pid = call.target.pid;
-            let target_window_id = call.target.window_id;
-            let restoration = serde_json::to_value(&restoration).unwrap_or_else(|_| json!({"restoration_ok": false}));
-            (
-                ForegroundAttention { target, restoration },
-                target_pid,
-                target_window_id,
-            )
-        };
-        self.update_view(|view| view.foreground_active = None);
-        self.latch_foreground_attention(attention);
-        self.diagnostics.record(
-            "computer-use.foreground-terminal-failure",
-            &[
-                ("reason", reason.code().to_owned()),
-                ("target_pid", target_pid.to_string()),
-                ("target_window_id", target_window_id.to_string()),
-            ],
-        );
-        self.publish_view();
-    }
-
-    async fn handle_foreground_control(&mut self, request: ForegroundControlRequest) -> Value {
-        let session = request.session.trim();
-        if session.is_empty() || session.len() > FOREGROUND_TITLE_LIMIT {
-            return json!({"ok": false, "error": "invalid_session"});
-        }
-        let title = foreground_display_title(session, &request.title);
-        match request.operation.as_str() {
-            "request_consent" => {
-                if !self.foreground_enabled {
-                    return json!({"ok": false, "error": "foreground_disabled"});
-                }
-                if self
-                    .foreground_attention
-                    .transition(ForegroundAttentionEvent::RequestConsent)
-                    == ForegroundAttentionOutcome::Refused
-                {
-                    return json!({"ok": false, "error": "foreground_attention_pending"});
-                }
-                if !self.lifecycle.enabled() || self.lifecycle.phase() != ComputerUsePhase::Ready {
-                    return json!({"ok": false, "error": "computer_use_unavailable"});
-                }
-                if self.foreground_consent_sessions.contains_key(session) {
-                    self.update_view(|view| view.foreground_granted = Some(title.clone()));
-                    self.publish_view();
-                    return json!({"ok": true, "allowed": true});
-                }
-                self.pending_foreground = Some((session.to_owned(), title.clone()));
-                self.update_view(|view| view.foreground_pending = Some(title.clone()));
-                self.publish_view();
-                json!({"ok": true, "allowed": false})
-            }
-            "set_active" => {
-                if !self.foreground_enabled {
-                    return json!({"ok": false, "error": "foreground_disabled"});
-                }
-                if self
-                    .foreground_attention
-                    .transition(ForegroundAttentionEvent::SetActive)
-                    == ForegroundAttentionOutcome::Refused
-                {
-                    return json!({"ok": false, "error": "foreground_attention_pending"});
-                }
-                if !self.lifecycle.enabled() || self.lifecycle.phase() != ComputerUsePhase::Ready {
-                    return json!({"ok": false, "error": "computer_use_unavailable"});
-                }
-                if !self.foreground_consent_sessions.contains_key(session) {
-                    return json!({"ok": false, "error": "foreground_consent_required"});
-                }
-                if self.foreground_activity.is_some() {
-                    return json!({"ok": false, "error": "foreground_transaction_active"});
-                }
-                let target_identity = match parse_window_identity(request.target.as_ref()) {
-                    Ok(identity) => identity,
-                    Err(error) => return json!({"ok": false, "error": error}),
-                };
-                if let Err(error) = verify_process_identity(&target_identity, process_start_stamp) {
-                    return json!({"ok": false, "error": "target_not_admissible", "detail": error});
-                }
-                let restoration = match parse_foreground_restoration(request.restoration.as_ref()) {
-                    Ok(restoration) => restoration,
-                    Err(error) => return json!({"ok": false, "error": error}),
-                };
-                let target = request.target.as_ref().and_then(foreground_target_label);
-                let target_label = target
-                    .map(|target| format!("{title}: {target}"))
-                    .unwrap_or_else(|| title.clone());
-                self.next_foreground_transaction_id = self.next_foreground_transaction_id.wrapping_add(1);
-                let activity = ForegroundActivity::new(
-                    self.next_foreground_transaction_id,
-                    session.to_owned(),
-                    target_identity,
-                    target_label,
-                    restoration,
-                );
-                self.foreground_activity = Some(activity);
-                self.update_view(|view| {
-                    view.foreground_pending = None;
-                    view.foreground_active = self
-                        .foreground_activity
-                        .as_ref()
-                        .map(|transaction| transaction.target_label.clone());
-                });
-                if let Err(error) = self.publish_view_and_wait().await {
-                    self.foreground_activity = None;
-                    self.update_view(|view| view.foreground_active = None);
-                    self.publish_view();
-                    return json!({"ok": false, "error": error});
-                }
-                json!({"ok": true})
-            }
-            "restore" => {
-                let requested = match parse_foreground_restoration(request.restoration.as_ref()) {
-                    Ok(restoration) => restoration,
-                    Err(error) => return json!({"ok": false, "error": error}),
-                };
-                {
-                    let Some(call) = self.foreground_activity.as_ref() else {
-                        return json!({"ok": false, "error": "foreground_transaction_mismatch"});
-                    };
-                    if call.session != session || !same_restoration_contract(&call.restoration, &requested) {
-                        return json!({"ok": false, "error": "foreground_transaction_mismatch"});
-                    }
-                }
-                let restoration = attempt_native_foreground_restoration(requested);
-                if let Some(call) = self.foreground_activity.as_mut() {
-                    call.restoration = restoration.clone();
-                }
-                json!({"ok": true, "restoration": restoration})
-            }
-            "terminal" => {
-                let attention = {
-                    let Some(call) = self.foreground_activity.as_mut() else {
-                        return json!({"ok": false, "error": "foreground_transaction_mismatch"});
-                    };
-                    if call.session != session {
-                        return json!({"ok": false, "error": "foreground_transaction_mismatch"});
-                    }
-                    let restoration = match parse_foreground_restoration(request.restoration.as_ref()) {
-                        Ok(restoration) => restoration,
-                        Err(error) => return json!({"ok": false, "error": error}),
-                    };
-                    if !same_restoration_contract(&call.restoration, &restoration) {
-                        return json!({"ok": false, "error": "foreground_transaction_mismatch"});
-                    }
-                    call.restoration = restoration;
-                    call.mark_terminal();
-                    if call.restoration.restoration_ok {
-                        None
-                    } else {
-                        let target = call.target_label.clone();
-                        let restoration = serde_json::to_value(&call.restoration)
-                            .unwrap_or_else(|_| json!({"restoration_ok": false}));
-                        Some(ForegroundAttention { target, restoration })
-                    }
-                };
-                self.update_view(|view| view.foreground_active = None);
-                if let Some(attention) = attention {
-                    self.latch_foreground_attention(attention);
-                }
-                self.publish_view();
-                self.remove_terminal_foreground_transaction_if_unblocked();
-                json!({"ok": true})
-            }
-            "revoke_session" => {
-                self.foreground_consent_sessions.remove(session);
-                if self
-                    .pending_foreground
-                    .as_ref()
-                    .is_some_and(|(pending_session, _)| pending_session == session)
-                {
-                    self.pending_foreground = None;
-                    self.update_view(|view| view.foreground_pending = None);
-                }
-                self.refresh_granted_view();
-                self.publish_view();
-                json!({"ok": true})
-            }
-            _ => json!({"ok": false, "error": "unknown_operation"}),
-        }
-    }
-
-    fn dismiss_foreground_attention(&mut self) {
-        if self
-            .foreground_attention
-            .transition(ForegroundAttentionEvent::OwnerDismiss)
-            == ForegroundAttentionOutcome::Dismissed
-        {
-            self.sync_foreground_attention_view();
-            self.publish_view();
-        }
-    }
-
-    fn toggle_foreground_consent(&mut self) {
-        if !self.foreground_enabled {
-            return;
-        }
-        if self
-            .foreground_attention
-            .transition(ForegroundAttentionEvent::ConsentChange)
-            == ForegroundAttentionOutcome::Kept
-        {
-            return;
-        }
-        if !self.lifecycle.enabled() || self.lifecycle.phase() != ComputerUsePhase::Ready {
-            return;
-        }
-        if let Some((session, title)) = self.pending_foreground.take() {
-            self.foreground_consent_sessions.insert(session, title.clone());
-            self.update_view(|view| {
-                view.foreground_pending = None;
-                view.foreground_granted = Some(title);
-            });
-            self.publish_view();
-            return;
-        }
-        let selected = self
-            .foreground_activity
-            .as_ref()
-            .map(|transaction| &transaction.session)
-            .filter(|session| self.foreground_consent_sessions.contains_key(*session))
-            .cloned()
-            .or_else(|| self.foreground_consent_sessions.keys().min().cloned());
-        if let Some(session) = selected {
-            if self
-                .foreground_activity
-                .as_ref()
-                .is_some_and(|transaction| transaction.session == session)
-            {
-                self.await_foreground_stop(
-                    ForegroundExitReason::ConsentRevoke,
-                    ForegroundStopAction::RevokeConsent { session, reply: None },
-                );
-                return;
-            }
-            self.foreground_consent_sessions.remove(&session);
-            self.refresh_granted_view();
-            self.publish_view();
-        }
-    }
-
-    fn refresh_granted_view(&self) {
-        let title = self
-            .foreground_consent_sessions
-            .iter()
-            .min_by_key(|(session, _)| *session)
-            .map(|(_, title)| title.clone());
-        self.update_view(|view| view.foreground_granted = title);
-    }
-
-    fn expire_foreground_grants(&mut self) {
-        self.foreground_consent_sessions.clear();
-        self.pending_foreground = None;
-        self.update_view(|view| {
-            view.foreground_pending = None;
-            view.foreground_granted = None;
-        });
-    }
-
-    fn remove_terminal_foreground_transaction_if_unblocked(&mut self) {
-        let remove = self
-            .foreground_activity
-            .as_ref()
-            .is_some_and(|activity| *activity.terminal.borrow() && !activity.exit_wait_started);
-        if remove {
-            self.foreground_activity = None;
-        }
-    }
-
-    fn latch_foreground_attention(&mut self, attention: ForegroundAttention) {
-        self.foreground_attention.latch(attention);
-        self.sync_foreground_attention_view();
-    }
-
-    fn sync_foreground_attention_view(&self) {
-        let attention = self.foreground_attention.current().cloned();
-        self.update_view(move |view| view.foreground_attention = attention);
-    }
-
-    fn expire_foreground_authorization(&mut self) {
-        self.expire_foreground_grants();
-        self.publish_view();
-    }
-}
-
-fn foreground_target_label(target: &Value) -> Option<String> {
-    let object = target.as_object()?;
-    let app = object.get("app_name").and_then(Value::as_str).unwrap_or("");
-    let title = object.get("title").and_then(Value::as_str).unwrap_or("");
-    let label = if app.is_empty() { title } else { app };
-    (!label.is_empty()).then(|| label.to_owned())
-}
-
-fn foreground_display_title(session: &str, title: &str) -> String {
-    let candidate = match title.trim() {
-        "" => session,
-        title => title,
-    };
-    if candidate.len() <= FOREGROUND_TITLE_LIMIT {
-        return candidate.to_owned();
-    }
-    let mut end = FOREGROUND_TITLE_LIMIT;
-    while !candidate.is_char_boundary(end) {
-        end -= 1;
-    }
-    let truncated = candidate[..end].trim_end();
-    if truncated.is_empty() {
-        session.to_owned()
-    } else {
-        truncated.to_owned()
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-struct WindowIdentity {
-    pid: i32,
-    process_start_stamp: String,
-    window_id: u32,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-struct ForegroundPointer {
-    x: f64,
-    y: f64,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-struct ForegroundRestorationComponent<T> {
-    recorded: T,
-    attempted: bool,
-    verified: bool,
-    failure_detail: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-struct ForegroundRestorationComponents {
-    prior_frontmost: ForegroundRestorationComponent<WindowIdentity>,
-    pointer: ForegroundRestorationComponent<ForegroundPointer>,
-    active_space: ForegroundRestorationComponent<BTreeMap<String, u64>>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-struct ForegroundRestoration {
-    components: ForegroundRestorationComponents,
-    restoration_ok: bool,
-}
-
-struct ForegroundActivity {
-    id: u64,
-    session: String,
-    target: WindowIdentity,
-    target_label: String,
-    restoration: ForegroundRestoration,
-    terminal: watch::Sender<bool>,
-    exit_wait_started: bool,
-    finish_actions: Vec<ForegroundStopAction>,
-}
-
-impl ForegroundActivity {
-    fn new(
-        id: u64,
-        session: String,
-        target: WindowIdentity,
-        target_label: String,
-        restoration: ForegroundRestoration,
-    ) -> Self {
-        let (terminal, _receiver) = watch::channel(false);
-        Self {
-            id,
-            session,
-            target,
-            target_label,
-            restoration,
-            terminal,
-            exit_wait_started: false,
-            finish_actions: Vec::new(),
-        }
-    }
-
-    fn mark_terminal(&mut self) {
-        let _ = self.terminal.send(true);
-    }
-
-    fn finish_and_await_terminal(&self, limit: Duration) -> impl std::future::Future<Output = bool> + Send + 'static {
-        let mut terminal = self.terminal.subscribe();
-        async move {
-            if *terminal.borrow() {
-                return true;
-            }
-            timeout(limit, async {
-                loop {
-                    if terminal.changed().await.is_err() {
-                        return false;
-                    }
-                    if *terminal.borrow() {
-                        return true;
-                    }
-                }
-            })
-            .await
-            .unwrap_or(false)
-        }
-    }
-}
-
-fn process_start_stamp(pid: i32) -> Option<String> {
-    if pid <= 0 {
-        return None;
-    }
-    let mut info = unsafe { std::mem::zeroed::<libc::proc_bsdinfo>() };
-    let expected_size = std::mem::size_of::<libc::proc_bsdinfo>();
-    let read = unsafe {
-        libc::proc_pidinfo(
-            pid,
-            libc::PROC_PIDTBSDINFO,
-            0,
-            (&raw mut info).cast(),
-            expected_size as i32,
-        )
-    };
-    if read != expected_size as i32 {
-        return None;
-    }
-    info.pbi_start_tvsec
-        .checked_mul(1_000_000)
-        .and_then(|seconds| seconds.checked_add(info.pbi_start_tvusec))
-        .filter(|stamp| *stamp > 0)
-        .map(|stamp| stamp.to_string())
-}
-
-fn verify_process_identity(
-    target: &WindowIdentity,
-    read_start_stamp: impl FnOnce(i32) -> Option<String>,
-) -> Result<(), String> {
-    match read_start_stamp(target.pid) {
-        Some(stamp) if stamp == target.process_start_stamp => Ok(()),
-        Some(_) => Err(format!(
-            "process identity changed before restoring window {}:{}",
-            target.pid, target.window_id
-        )),
-        None => Err(format!(
-            "process identity could not be verified for window {}:{}",
-            target.pid, target.window_id
-        )),
-    }
-}
-
-fn cf_string(value: &str) -> Result<*const c_void, String> {
-    let value = CString::new(value).map_err(|_| "invalid AX string".to_owned())?;
-    let string = unsafe { CFStringCreateWithCString(ptr::null(), value.as_ptr(), K_CF_STRING_ENCODING_UTF8) };
-    if string.is_null() {
-        Err("could not allocate AX string".to_owned())
-    } else {
-        Ok(string)
-    }
-}
-
-fn with_exact_ax_window(
-    target: &WindowIdentity,
-    operation: impl FnOnce(AXUIElementRef) -> Result<(), String>,
-) -> Result<(), String> {
-    if target.pid <= 0 || target.window_id == 0 {
-        return Err("foreground window identity is invalid".to_owned());
-    }
-    verify_process_identity(target, process_start_stamp)?;
-    unsafe {
-        let windows_attribute = cf_string("AXWindows")?;
-        let application = AXUIElementCreateApplication(target.pid);
-        if application.is_null() {
-            CFRelease(windows_attribute);
-            return Err(format!("application {} has no accessibility object", target.pid));
-        }
-        let _ = AXUIElementSetMessagingTimeout(application, AX_MESSAGING_TIMEOUT_SECONDS);
-        let mut windows: *const c_void = ptr::null();
-        let copy_result = AXUIElementCopyAttributeValue(application, windows_attribute, &mut windows);
-        CFRelease(windows_attribute);
-        if copy_result != K_AX_ERROR_SUCCESS || windows.is_null() {
-            CFRelease(application);
-            return Err(format!("could not enumerate windows for application {}", target.pid));
-        }
-        let mut matching_window = ptr::null_mut();
-        for index in 0..CFArrayGetCount(windows) {
-            let window = CFArrayGetValueAtIndex(windows, index) as AXUIElementRef;
-            if window.is_null() {
-                continue;
-            }
-            let mut window_id = 0_u32;
-            if _AXUIElementGetWindow(window, &mut window_id) == K_AX_ERROR_SUCCESS && window_id == target.window_id {
-                matching_window = window;
-                break;
-            }
-        }
-        let result = if matching_window.is_null() {
-            Err(format!(
-                "exact window {}:{} is no longer accessible",
-                target.pid, target.window_id
-            ))
-        } else {
-            verify_process_identity(target, process_start_stamp)?;
-            let _ = AXUIElementSetMessagingTimeout(matching_window, AX_MESSAGING_TIMEOUT_SECONDS);
-            operation(matching_window)
-        };
-        CFRelease(windows);
-        CFRelease(application);
-        result
-    }
-}
-
-fn set_exact_window_minimized(target: &WindowIdentity, minimized: bool) -> Result<(), String> {
-    with_exact_ax_window(target, |window| {
-        let attribute = cf_string("AXMinimized")?;
-        let value = unsafe {
-            if minimized {
-                kCFBooleanTrue
-            } else {
-                kCFBooleanFalse
-            }
-        };
-        let result = unsafe { AXUIElementSetAttributeValue(window, attribute, value) };
-        unsafe { CFRelease(attribute) };
-        if result == K_AX_ERROR_SUCCESS {
-            Ok(())
-        } else {
-            Err(format!(
-                "could not restore minimized state for {}:{} ({result})",
-                target.pid, target.window_id
-            ))
-        }
-    })
-}
-
-fn raise_exact_window(target: &WindowIdentity) -> Result<(), String> {
-    with_exact_ax_window(target, |window| {
-        let action = cf_string("AXRaise")?;
-        let result = unsafe { AXUIElementPerformAction(window, action) };
-        unsafe { CFRelease(action) };
-        if result == K_AX_ERROR_SUCCESS {
-            Ok(())
-        } else {
-            Err(format!(
-                "could not restore exact frontmost window {}:{} ({result})",
-                target.pid, target.window_id
-            ))
-        }
-    })
-}
-
-fn running_application(target: &WindowIdentity) -> Result<Retained<NSRunningApplication>, String> {
-    verify_process_identity(target, process_start_stamp)?;
-    NSRunningApplication::runningApplicationWithProcessIdentifier(target.pid)
-        .ok_or_else(|| format!("application {} is no longer running", target.pid))
-}
-
-fn combine_restoration_failures(failures: Vec<String>) -> Result<(), String> {
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(failures.join("; "))
-    }
-}
-
-fn restore_prior_frontmost(target: &WindowIdentity) -> Result<(), String> {
-    let mut failures = Vec::new();
-    match running_application(target) {
-        Ok(application) => {
-            if let Err(error) = set_exact_window_minimized(target, false) {
-                failures.push(error);
-            }
-            if !application.unhide() {
-                failures.push("could not reveal the prior frontmost application".to_owned());
-            }
-            if !application.activateWithOptions(NSApplicationActivationOptions::empty()) {
-                failures.push("could not restore prior frontmost application".to_owned());
-            }
-        }
-        Err(error) => failures.push(error),
-    }
-    if let Err(error) = raise_exact_window(target) {
-        failures.push(error);
-    }
-    combine_restoration_failures(failures)
-}
-
-fn restore_pointer(pointer: &ForegroundPointer) -> Result<(), String> {
-    if !pointer.x.is_finite() || !pointer.y.is_finite() {
-        return Err("hardware pointer contract is invalid".to_owned());
-    }
-    let pointer_result = unsafe {
-        CGWarpMouseCursorPosition(NSPoint {
-            x: pointer.x,
-            y: pointer.y,
-        })
-    };
-    if pointer_result != 0 {
-        Err(format!("could not restore hardware pointer ({pointer_result})"))
-    } else {
-        Ok(())
-    }
-}
-
-fn record_restoration_attempt<T>(component: &mut ForegroundRestorationComponent<T>, result: Result<(), String>) {
-    component.attempted = true;
-    component.verified = false;
-    component.failure_detail = result.err();
-}
-
-fn attempt_native_foreground_restoration(mut restoration: ForegroundRestoration) -> ForegroundRestoration {
-    let prior_result = restore_prior_frontmost(&restoration.components.prior_frontmost.recorded);
-    record_restoration_attempt(&mut restoration.components.prior_frontmost, prior_result);
-
-    let pointer_result = restore_pointer(&restoration.components.pointer.recorded);
-    record_restoration_attempt(&mut restoration.components.pointer, pointer_result);
-
-    restoration.components.active_space.attempted = restoration.components.prior_frontmost.attempted;
-    restoration.components.active_space.verified = false;
-    restoration.components.active_space.failure_detail = None;
-    restoration.restoration_ok = false;
-    restoration
-}
-
-fn parse_foreground_restoration(restoration: Option<&Value>) -> Result<ForegroundRestoration, String> {
-    restoration
-        .cloned()
-        .ok_or_else(|| "missing restoration contract".to_owned())
-        .and_then(|value| {
-            serde_json::from_value::<ForegroundRestoration>(value)
-                .map_err(|_| "invalid restoration contract".to_owned())
-        })
-}
-
-fn parse_window_identity(target: Option<&Value>) -> Result<WindowIdentity, String> {
-    let target = target
-        .cloned()
-        .ok_or_else(|| "missing foreground target identity".to_owned())?;
-    let identity = serde_json::from_value::<WindowIdentity>(target)
-        .map_err(|_| "invalid foreground target identity".to_owned())?;
-    if identity.pid <= 0 || identity.window_id == 0 || identity.process_start_stamp.is_empty() {
-        return Err("invalid foreground target identity".to_owned());
-    }
-    Ok(identity)
-}
-
-fn same_restoration_contract(left: &ForegroundRestoration, right: &ForegroundRestoration) -> bool {
-    left.components.prior_frontmost.recorded == right.components.prior_frontmost.recorded
-        && left.components.pointer.recorded == right.components.pointer.recorded
-        && left.components.active_space.recorded == right.components.active_space.recorded
-}
-
-fn fail_restoration(restoration: &mut ForegroundRestoration, detail: &str) {
-    fail_restoration_component(&mut restoration.components.prior_frontmost, detail);
-    fail_restoration_component(&mut restoration.components.pointer, detail);
-    fail_restoration_component(&mut restoration.components.active_space, detail);
-    restoration.restoration_ok = false;
-}
-
-fn fail_restoration_component<T>(component: &mut ForegroundRestorationComponent<T>, detail: &str) {
-    component.attempted = true;
-    component.verified = false;
-    if component.failure_detail.is_none() {
-        component.failure_detail = Some(detail.to_owned());
-    } else if component
-        .failure_detail
-        .as_deref()
-        .is_some_and(|existing| !existing.contains(detail))
-    {
-        let existing = component.failure_detail.take().unwrap_or_default();
-        component.failure_detail = Some(format!("{existing}; {detail}"));
-    }
-}
-
-async fn serve_foreground_control(stream: UnixStream, events: mpsc::UnboundedSender<Event>) {
-    let (reader, mut writer) = split(stream);
-    let mut reader = BufReader::new(reader);
-    let mut line = String::new();
-    let response = match reader.read_line(&mut line).await {
-        Ok(size) if size > 0 && size <= 32 * 1024 => match serde_json::from_str::<ForegroundControlRequest>(&line) {
-            Ok(request) => {
-                let (reply, result) = oneshot::channel();
-                if events.send(Event::ForegroundControl { request, reply }).is_err() {
-                    json!({"ok": false, "error": "shell_stopped"})
-                } else {
-                    result
-                        .await
-                        .unwrap_or_else(|_| json!({"ok": false, "error": "shell_stopped"}))
-                }
-            }
-            Err(_) => json!({"ok": false, "error": "invalid_request"}),
-        },
-        _ => json!({"ok": false, "error": "invalid_request"}),
-    };
-    let encoded = serde_json::to_string(&response).unwrap_or_else(|_| "{\"ok\":false}".to_owned());
-    let _ = writer.write_all(format!("{encoded}\n").as_bytes()).await;
 }
 
 fn restored_lifecycle(stored: &StoredComputerUseState, assets_valid: bool) -> ComputerUseLifecycle {
@@ -2096,7 +889,6 @@ async fn runtime_reprobe_directive(
     lifecycle: &mut ComputerUseLifecycle,
     capabilities: &mut CapabilityCache,
     origin: Option<&LoopbackOrigin>,
-    grants: Grants,
 ) -> Option<LifecycleDirective> {
     if !lifecycle.enabled() || lifecycle.phase() != ComputerUsePhase::NeedsRuntime {
         return None;
@@ -2104,7 +896,7 @@ async fn runtime_reprobe_directive(
     let origin = origin?;
     let support = capabilities.observe(probe_capabilities(origin).await);
     let grants = if support == RuntimeSupport::Supported {
-        grants
+        silent_grants()
     } else {
         Grants {
             accessibility: false,
@@ -3784,7 +2576,6 @@ done
     fn socket_path_is_short_and_isolated_by_state_directory_flavor() {
         let first = short_socket_path(Path::new("/tmp/first-computer-use-state"), 501);
         let second = short_socket_path(Path::new("/tmp/second-computer-use-state"), 501);
-        let foreground = short_foreground_control_socket_path(Path::new("/tmp/first-computer-use-state"), 501);
 
         assert_ne!(first, second);
         assert_eq!(
@@ -3797,12 +2588,6 @@ done
             .and_then(Path::to_str)
             .unwrap()
             .starts_with("/tmp/avibe-cua-"));
-        assert_eq!(foreground.parent(), first.parent());
-        assert_eq!(
-            foreground.file_name().and_then(|name| name.to_str()),
-            Some(FOREGROUND_CONTROL_SOCKET_FILE)
-        );
-        assert!(foreground.as_os_str().as_bytes().len() <= DARWIN_SOCKET_PATH_MAX_BYTES);
     }
 
     #[test]
@@ -3829,276 +2614,6 @@ done
     fn over_limit_socket_paths_are_classified_before_spawn() {
         let path = PathBuf::from("/tmp").join("x".repeat(DARWIN_SOCKET_PATH_MAX_BYTES));
         assert_eq!(socket_path_preflight(&path), Err("socket_path_too_long"));
-    }
-
-    #[test]
-    fn foreground_display_titles_are_utf8_safe_and_never_block_admission() {
-        assert_eq!(foreground_display_title("ses-a", "  "), "ses-a");
-        let title = "前台控制".repeat(80);
-        let truncated = foreground_display_title("ses-a", &title);
-        assert!(truncated.len() <= FOREGROUND_TITLE_LIMIT);
-        assert!(title.starts_with(&truncated));
-        assert!(std::str::from_utf8(truncated.as_bytes()).is_ok());
-    }
-
-    #[test]
-    fn foreground_restoration_contract_requires_three_component_entries() {
-        let contract = json!({
-            "components": {
-                "prior_frontmost": {
-                    "recorded": {"pid": 3, "process_start_stamp": "start-3", "window_id": 30},
-                    "attempted": false,
-                    "verified": false,
-                    "failure_detail": null
-                },
-                "pointer": {
-                    "recorded": {"x": 10.0, "y": 20.0},
-                    "attempted": false,
-                    "verified": false,
-                    "failure_detail": null
-                },
-                "active_space": {
-                    "recorded": {
-                        "prior_frontmost_display": 1,
-                        "target_display": 1
-                    },
-                    "attempted": false,
-                    "verified": false,
-                    "failure_detail": null
-                }
-            },
-            "restoration_ok": false
-        });
-        let parsed = parse_foreground_restoration(Some(&contract)).expect("complete restoration contract");
-        assert_eq!(
-            (
-                parsed.components.prior_frontmost.recorded.pid,
-                parsed.components.prior_frontmost.recorded.window_id
-            ),
-            (3, 30)
-        );
-        assert_eq!(
-            (
-                parsed.components.pointer.recorded.x,
-                parsed.components.pointer.recorded.y
-            ),
-            (10.0, 20.0)
-        );
-        assert_eq!(
-            parsed.components.active_space.recorded,
-            BTreeMap::from([
-                ("prior_frontmost_display".to_owned(), 1),
-                ("target_display".to_owned(), 1),
-            ])
-        );
-        assert!(!parsed.restoration_ok);
-
-        for missing in ["prior_frontmost", "pointer", "active_space"] {
-            let mut incomplete = contract.clone();
-            incomplete["components"]
-                .as_object_mut()
-                .expect("component object")
-                .remove(missing);
-            assert!(parse_foreground_restoration(Some(&incomplete)).is_err());
-        }
-        let mut incomplete = contract.clone();
-        incomplete
-            .as_object_mut()
-            .expect("contract object")
-            .remove("restoration_ok");
-        assert!(parse_foreground_restoration(Some(&incomplete)).is_err());
-    }
-
-    #[test]
-    fn foreground_exit_inventory_routes_every_reason_through_bounded_stop_wait() {
-        let codes: Vec<_> = ForegroundExitReason::ALL
-            .into_iter()
-            .map(ForegroundExitReason::code)
-            .collect();
-        let mut unique = codes.clone();
-        unique.sort_unstable();
-        unique.dedup();
-
-        assert_eq!(codes.len(), 9);
-        assert_eq!(unique.len(), codes.len());
-        assert!(codes.iter().all(|code| !code.is_empty()));
-    }
-
-    #[test]
-    fn foreground_preference_defaults_off_and_persists_only_explicit_owner_choices() {
-        let directory = tempfile::tempdir().expect("foreground preference directory");
-        let path = directory.path().join(FOREGROUND_CONTROL_PREFERENCE_FILE);
-
-        assert!(!read_foreground_preference(&path));
-        write_foreground_preference(&path, true).expect("enable foreground preference");
-        assert!(read_foreground_preference(&path));
-        write_foreground_preference(&path, false).expect("disable foreground preference");
-        assert!(!read_foreground_preference(&path));
-
-        std::fs::write(&path, "invalid").expect("invalid foreground preference");
-        assert!(!read_foreground_preference(&path));
-    }
-
-    #[test]
-    fn foreground_attention_is_latched_until_owner_dismissal() {
-        let cases = [
-            (
-                ForegroundAttentionEvent::RequestConsent,
-                ForegroundAttentionOutcome::Refused,
-                true,
-            ),
-            (
-                ForegroundAttentionEvent::SetActive,
-                ForegroundAttentionOutcome::Refused,
-                true,
-            ),
-            (
-                ForegroundAttentionEvent::ComputerUseToggle,
-                ForegroundAttentionOutcome::Kept,
-                true,
-            ),
-            (
-                ForegroundAttentionEvent::ForegroundSettingChange,
-                ForegroundAttentionOutcome::Kept,
-                true,
-            ),
-            (
-                ForegroundAttentionEvent::ConsentChange,
-                ForegroundAttentionOutcome::Kept,
-                true,
-            ),
-            (
-                ForegroundAttentionEvent::SessionChange,
-                ForegroundAttentionOutcome::Kept,
-                true,
-            ),
-            (
-                ForegroundAttentionEvent::ComputerUseStopStart,
-                ForegroundAttentionOutcome::Kept,
-                true,
-            ),
-            (
-                ForegroundAttentionEvent::OwnerDismiss,
-                ForegroundAttentionOutcome::Dismissed,
-                false,
-            ),
-        ];
-
-        for (event, expected_outcome, remains_latched) in cases {
-            let mut latch = ForegroundAttentionLatch::default();
-            latch.latch(ForegroundAttention {
-                target: "QQ conversation: QQ".to_owned(),
-                restoration: json!({"restoration_ok": false}),
-            });
-
-            assert_eq!(latch.transition(event), expected_outcome);
-            assert_eq!(latch.current().is_some(), remains_latched);
-        }
-    }
-
-    #[test]
-    fn window_identity_verification_rejects_process_reuse() {
-        let identity = WindowIdentity {
-            pid: 7,
-            process_start_stamp: "start-7".to_owned(),
-            window_id: 9,
-        };
-        for (stamp, expected_ok) in [(Some("start-7"), true), (Some("replacement-7"), false), (None, false)] {
-            let result = verify_process_identity(&identity, |_| stamp.map(str::to_owned));
-            assert_eq!(result.is_ok(), expected_ok);
-        }
-    }
-
-    #[test]
-    fn terminal_failure_preserves_existing_component_details_and_marks_all_components() {
-        let contract = json!({
-            "components": {
-                "prior_frontmost": {
-                    "recorded": {
-                        "pid": 3,
-                        "process_start_stamp": "start-3",
-                        "window_id": 30
-                    },
-                    "attempted": true,
-                    "verified": false,
-                    "failure_detail": "identity changed"
-                },
-                "pointer": {
-                    "recorded": {"x": 10.0, "y": 20.0},
-                    "attempted": false,
-                    "verified": false,
-                    "failure_detail": null
-                },
-                "active_space": {
-                    "recorded": {
-                        "prior_frontmost_display": 1,
-                        "target_display": 1
-                    },
-                    "attempted": false,
-                    "verified": false,
-                    "failure_detail": null
-                }
-            },
-            "restoration_ok": false
-        });
-        let mut restoration = parse_foreground_restoration(Some(&contract)).expect("restoration contract");
-
-        fail_restoration(&mut restoration, "teardown timed out");
-
-        assert_eq!(
-            restoration.components.prior_frontmost.failure_detail.as_deref(),
-            Some("identity changed; teardown timed out")
-        );
-        assert!(restoration.components.pointer.attempted);
-        assert!(restoration.components.active_space.attempted);
-        assert!(!restoration.restoration_ok);
-    }
-
-    #[tokio::test]
-    async fn foreground_transaction_waiter_observes_terminal_transition() {
-        let target = WindowIdentity {
-            pid: 7,
-            process_start_stamp: "start-7".to_owned(),
-            window_id: 9,
-        };
-        let restoration = parse_foreground_restoration(Some(&json!({
-            "components": {
-                "prior_frontmost": {
-                    "recorded": {
-                        "pid": 3,
-                        "process_start_stamp": "start-3",
-                        "window_id": 30
-                    },
-                    "attempted": false,
-                    "verified": false,
-                    "failure_detail": null
-                },
-                "pointer": {
-                    "recorded": {"x": 10.0, "y": 20.0},
-                    "attempted": false,
-                    "verified": false,
-                    "failure_detail": null
-                },
-                "active_space": {
-                    "recorded": {
-                        "prior_frontmost_display": 1,
-                        "target_display": 1
-                    },
-                    "attempted": false,
-                    "verified": false,
-                    "failure_detail": null
-                }
-            },
-            "restoration_ok": false
-        })))
-        .expect("restoration contract");
-        let mut transaction =
-            ForegroundActivity::new(1, "session".to_owned(), target, "session: App".to_owned(), restoration);
-        let wait = transaction.finish_and_await_terminal(Duration::from_secs(1));
-
-        transaction.mark_terminal();
-
-        assert!(wait.await);
     }
 
     #[tokio::test]
@@ -4228,7 +2743,7 @@ done
                 .await
                 .expect("capability response");
         });
-        let directive = runtime_reprobe_directive(&mut lifecycle, &mut capabilities, Some(&origin), Grants::all())
+        let directive = runtime_reprobe_directive(&mut lifecycle, &mut capabilities, Some(&origin))
             .await
             .expect("normal tick reprobe");
         server.await.expect("capability server");
@@ -4238,7 +2753,7 @@ done
         assert_eq!(capabilities.controller_id(), Some("restarted-runtime"));
         assert_eq!(lifecycle.phase(), ComputerUsePhase::Starting);
         assert_eq!(
-            runtime_reprobe_directive(&mut lifecycle, &mut capabilities, Some(&origin), Grants::all(),).await,
+            runtime_reprobe_directive(&mut lifecycle, &mut capabilities, Some(&origin)).await,
             None
         );
     }
@@ -4323,19 +2838,19 @@ done
             shutdown_started: AtomicBool::new(false),
         };
 
-        let first = controller.shutdown(ForegroundExitReason::AppQuit);
+        let first = controller.shutdown();
         tokio::pin!(first);
         let event = tokio::select! {
             event = receiver.recv() => event.expect("shutdown event"),
             _ = &mut first => panic!("shutdown completed before the actor acknowledged it"),
         };
-        let Event::Shutdown { reply, .. } = event else {
+        let Event::Shutdown(reply) = event else {
             panic!("unexpected computer-use event");
         };
         reply.send(()).expect("shutdown acknowledgement receiver");
         first.await;
 
-        controller.shutdown(ForegroundExitReason::AppQuit).await;
+        controller.shutdown().await;
         assert!(receiver.try_recv().is_err());
         assert!(controller.shutdown_requested.load(Ordering::SeqCst));
     }
