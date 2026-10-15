@@ -3,7 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from core.managed_skills import load_skill, publish_builtin_skills, resolve_skills
+from core.managed_skills import (
+    BUILTIN_SNAPSHOTS_DIRNAME,
+    load_skill,
+    publish_builtin_skills,
+    resolve_skills,
+)
 from core.prompt_registry import PROMPT_MODULES
 from core.system_prompt_injection import build_system_prompt_blocks
 from modules.agents.codex.transport import (
@@ -54,23 +59,23 @@ def test_backend_prompt_registry_has_no_always_on_computer_use_module() -> None:
     assert "computer-use-prompt" not in {block.module_id for block in blocks}
 
 
-def test_builtin_computer_use_skill_loads_through_the_managed_resolver() -> None:
+def test_builtin_computer_use_skill_loads_through_the_managed_resolver(tmp_path: Path) -> None:
     """The Skill is discoverable and its body remains out of the stable prompt."""
 
     root = Path(__file__).resolve().parents[1] / "skills"
-    avibe_home = Path("/tmp/computer-use-test-avibe-home")
+    avibe_home = tmp_path / "avibe-home"
     snapshot_id = publish_builtin_skills(
         source_root=root,
         destination_root=avibe_home / "builtin-skills",
     )
     skills = resolve_skills(
-        home=Path("/tmp/computer-use-test-home"),
+        home=tmp_path / "home",
         avibe_home=avibe_home,
-        codex_home=Path("/tmp/computer-use-test-codex-home"),
-        claude_home=Path("/tmp/computer-use-test-claude-home"),
-        xdg_config_home=Path("/tmp/computer-use-test-xdg-home"),
+        codex_home=tmp_path / "codex-home",
+        claude_home=tmp_path / "claude-home",
+        xdg_config_home=tmp_path / "xdg-home",
         builtin_snapshot_id=snapshot_id,
-        builtin_snapshot_root=avibe_home / "builtin-skills" / snapshot_id,
+        builtin_snapshot_root=avibe_home / "builtin-skills" / BUILTIN_SNAPSHOTS_DIRNAME / snapshot_id,
     )
     resolved = next(skill for skill in skills if skill.name == "computer-use")
     loaded = load_skill("computer-use", resolved_skills=skills)

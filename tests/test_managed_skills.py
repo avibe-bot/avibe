@@ -12,6 +12,7 @@ from core import managed_skills
 from core.managed_skills import (
     BUILTIN_SKILLS_ROOT_ENV,
     BUILTIN_SKILLS_SNAPSHOT_ENV,
+    BUILTIN_SNAPSHOTS_DIRNAME,
     CATALOG_DESCRIPTION_MAX_CHARS,
     CATALOG_PAGE_MAX_BYTES,
     CATALOG_PAGE_SIZE,
@@ -52,6 +53,13 @@ def _write_skill(
         encoding="utf-8",
     )
     return skill_file
+
+
+def _published_snapshot(destination: Path, snapshot_id: str) -> Path:
+    nested = destination / BUILTIN_SNAPSHOTS_DIRNAME / snapshot_id
+    if nested.is_dir():
+        return nested
+    return destination / snapshot_id
 
 
 def _isolated_resolve(cwd: Path, tmp_path: Path, **kwargs):
@@ -1340,7 +1348,7 @@ def test_publication_keeps_complete_versioned_snapshots_and_executable_modes(
     helper.chmod(0o755)
 
     old_id = publish_builtin_skills(source_root=source, destination_root=destination)
-    old_snapshot = destination / old_id
+    old_snapshot = _published_snapshot(destination, old_id)
     assert (old_snapshot / "retired" / "SKILL.md").is_file()
     if os.name != "nt":
         assert (old_snapshot / "retired" / "run.sh").stat().st_mode & 0o111
@@ -1353,8 +1361,48 @@ def test_publication_keeps_complete_versioned_snapshots_and_executable_modes(
 
     assert new_id != old_id
     assert (old_snapshot / "retired" / "SKILL.md").is_file()
-    assert not (destination / new_id / "retired").exists()
-    assert (destination / new_id / "current" / "SKILL.md").is_file()
+    assert not (_published_snapshot(destination, new_id) / "retired").exists()
+    assert (_published_snapshot(destination, new_id) / "current" / "SKILL.md").is_file()
+    if os.name != "nt":
+        assert (destination / "current").is_symlink()
+        assert Path(os.readlink(destination / "current")) == Path(
+            f"{BUILTIN_SNAPSHOTS_DIRNAME}/{new_id}/current"
+        )
+        assert not (destination / "retired").exists()
+
+
+def test_publication_keeps_legacy_hash_snapshots_and_exposes_named_live_paths(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "builtin-skills"
+    _write_skill(source, "alpha", "alpha", "Alpha")
+    snapshot_id = snapshot_tree_digest(source)
+    legacy = destination / snapshot_id
+    _write_skill(legacy, "alpha", "alpha", "Alpha")
+
+    assert publish_builtin_skills(source_root=source, destination_root=destination) == snapshot_id
+    assert (legacy / "alpha" / "SKILL.md").is_file()
+    assert not (destination / BUILTIN_SNAPSHOTS_DIRNAME / snapshot_id).exists()
+    if os.name != "nt":
+        assert (destination / "alpha").is_symlink()
+        assert Path(os.readlink(destination / "alpha")) == Path(f"{snapshot_id}/alpha")
+        project = tmp_path / "project"
+        project.mkdir()
+        loaded = load_skill(
+            "alpha",
+            resolved_skills=_isolated_resolve(
+                project,
+                tmp_path,
+                avibe_home=tmp_path,
+                builtin_snapshot_id=snapshot_id,
+            ),
+        )
+        assert loaded is not None
+        output = render_skill_content(loaded)
+        assert 'name="alpha"' in output
+        assert str(destination / "alpha") in output
+        assert snapshot_id not in output
 
 
 def test_publication_opens_snapshot_files_in_binary_mode_when_available(
@@ -1383,7 +1431,7 @@ def test_publication_opens_snapshot_files_in_binary_mode_when_available(
 
     assert destination_flags
     assert all(flags & binary_flag for flags in destination_flags)
-    assert (destination / snapshot_id / "alpha" / "SKILL.md").read_bytes().endswith(
+    assert (_published_snapshot(destination, snapshot_id) / "alpha" / "SKILL.md").read_bytes().endswith(
         b"Line one\r\nLine two\n"
     )
 
@@ -1398,7 +1446,7 @@ def test_publication_preserves_each_executable_bit(tmp_path: Path) -> None:
 
     snapshot_id = publish_builtin_skills(source_root=source, destination_root=destination)
 
-    assert (destination / snapshot_id / "alpha" / "run.sh").stat().st_mode & 0o111 == 0o100
+    assert (_published_snapshot(destination, snapshot_id) / "alpha" / "run.sh").stat().st_mode & 0o111 == 0o100
 
 
 def test_publication_ignores_install_generated_python_bytecode(tmp_path: Path) -> None:
@@ -1412,7 +1460,7 @@ def test_publication_ignores_install_generated_python_bytecode(tmp_path: Path) -
 
     snapshot_id = publish_builtin_skills(source_root=source, destination_root=destination)
 
-    assert not (destination / snapshot_id / "alpha" / "scripts" / "__pycache__").exists()
+    assert not (_published_snapshot(destination, snapshot_id) / "alpha" / "scripts" / "__pycache__").exists()
 
 
 def test_publication_rejects_empty_companion_directories(tmp_path: Path) -> None:
@@ -1441,7 +1489,7 @@ def test_concurrent_publication_reuses_one_snapshot(tmp_path: Path) -> None:
         )
 
     assert ids[0] == ids[1]
-    assert (destination / ids[0] / "alpha" / "SKILL.md").is_file()
+    assert (_published_snapshot(destination, ids[0]) / "alpha" / "SKILL.md").is_file()
 
 
 def test_publication_reclaims_interrupted_staging_and_retries(tmp_path: Path) -> None:
@@ -1455,7 +1503,7 @@ def test_publication_reclaims_interrupted_staging_and_retries(tmp_path: Path) ->
 
     assert publish_builtin_skills(source_root=source, destination_root=destination) == snapshot_id
     assert not staging.exists()
-    assert (destination / snapshot_id / "alpha" / "SKILL.md").is_file()
+    assert (_published_snapshot(destination, snapshot_id) / "alpha" / "SKILL.md").is_file()
 
 
 def test_publication_rejects_nonportable_and_wrong_type_paths(tmp_path: Path) -> None:
@@ -1469,7 +1517,10 @@ def test_publication_rejects_nonportable_and_wrong_type_paths(tmp_path: Path) ->
     _write_skill(valid_source, "alpha", "alpha", "Alpha")
     snapshot_id = snapshot_tree_digest(valid_source)
     destination.mkdir(parents=True)
-    (destination / snapshot_id).write_text("not a directory", encoding="utf-8")
+    (destination / BUILTIN_SNAPSHOTS_DIRNAME).mkdir(parents=True, exist_ok=True)
+    (destination / BUILTIN_SNAPSHOTS_DIRNAME / snapshot_id).write_text(
+        "not a directory", encoding="utf-8"
+    )
     with pytest.raises(RuntimeError, match="not a directory|unavailable"):
         publish_builtin_skills(source_root=valid_source, destination_root=destination)
 
@@ -1595,7 +1646,7 @@ def test_publication_copies_only_the_bounded_enumeration(
     snapshot_id = publish_builtin_skills(source_root=source, destination_root=destination)
 
     assert source_enumerations == 3
-    assert not (destination / snapshot_id / "late.bin").exists()
+    assert not (_published_snapshot(destination, snapshot_id) / "late.bin").exists()
 
 
 def test_publication_charges_file_growth_at_copy_time(
@@ -1715,7 +1766,12 @@ def test_bound_working_directory_and_snapshot_are_inherited(monkeypatch, tmp_pat
         SKILL_WORKING_DIR_ENV: str(advertised_cwd.resolve()),
         BUILTIN_SKILLS_SNAPSHOT_ENV: snapshot_id,
         BUILTIN_SKILLS_ROOT_ENV: str(
-            (Path(os.environ["AVIBE_HOME"]) / "builtin-skills" / snapshot_id).resolve()
+            (
+                Path(os.environ["AVIBE_HOME"])
+                / "builtin-skills"
+                / BUILTIN_SNAPSHOTS_DIRNAME
+                / snapshot_id
+            ).resolve()
         ),
         SKILL_HOME_ENV: str(home.resolve()),
         SKILL_CODEX_HOME_ENV: str((home / ".codex").resolve()),

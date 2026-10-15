@@ -148,7 +148,7 @@ assert source.name == "builtin_skills_source"
 snapshot = prepare_builtin_skills()
 skill = load_skill("use-avibe")
 assert skill is not None and skill.body and skill.directory.name == "use-avibe"
-root = Path(os.environ["AVIBE_HOME"]) / "builtin-skills" / snapshot
+root = Path(os.environ["AVIBE_HOME"]) / "builtin-skills" / ".snapshots" / snapshot
 files = {}
 for path in root.rglob("*"):
     if path.is_file():

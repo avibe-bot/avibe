@@ -61,6 +61,8 @@ CLAUDE_PLUGIN_LIST_TIMEOUT_SECONDS = 1
 
 _SNAPSHOT_DOMAIN = b"avibe-builtin-snapshot-v1\0"
 _SNAPSHOT_ID_RE = re.compile(r"^[0-9a-f]{64}$")
+BUILTIN_SKILLS_DIRNAME = "builtin-skills"
+BUILTIN_SNAPSHOTS_DIRNAME = ".snapshots"
 _PORTABLE_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _TOP_LEVEL_FIELD_RE = re.compile(r"^[^ \t#][^:]*:")
 _BLOCK_SCALAR_RE = re.compile(r"^[|>][+-]?[1-9]?$|^[|>][1-9]?[+-]?$")
@@ -789,6 +791,35 @@ def _working_directory(cwd: str | Path | None) -> Path:
     return Path(bound or Path.cwd()).expanduser().resolve()
 
 
+def _readable_snapshot_dir(path: Path) -> Path | None:
+    try:
+        value = path.stat(follow_symlinks=False)
+    except OSError:
+        return None
+    if not stat.S_ISDIR(value.st_mode):
+        return None
+    try:
+        with os.scandir(path):
+            pass
+    except OSError:
+        return None
+    return path
+
+
+def _builtin_umbrella(avibe_home: Path) -> Path:
+    return avibe_home / BUILTIN_SKILLS_DIRNAME
+
+
+def _builtin_snapshot_path(umbrella: Path, snapshot_id: str) -> Path:
+    nested = umbrella / BUILTIN_SNAPSHOTS_DIRNAME / snapshot_id
+    if _readable_snapshot_dir(nested) is not None:
+        return nested
+    legacy = umbrella / snapshot_id
+    if _readable_snapshot_dir(legacy) is not None:
+        return legacy
+    return nested
+
+
 def _selected_builtin_root(
     avibe_home: Path,
     *,
@@ -810,14 +841,14 @@ def _selected_builtin_root(
         root = None
     if selected is None:
         try:
-            selected = publish_builtin_skills(destination_root=avibe_home / "builtin-skills")
+            selected = publish_builtin_skills(destination_root=_builtin_umbrella(avibe_home))
         except Exception:
             logger.warning("Failed to publish Avibe built-in Skills", exc_info=True)
             return None
     if _SNAPSHOT_ID_RE.fullmatch(selected or "") is None:
         return None
     if root is None:
-        root = avibe_home / "builtin-skills" / selected
+        root = _builtin_snapshot_path(_builtin_umbrella(avibe_home), selected)
     try:
         root_stat = root.stat(follow_symlinks=False)
     except OSError:
@@ -1189,11 +1220,37 @@ def render_skill_catalog_blocks(skills: Sequence[ManagedSkill]) -> list[Rendered
     return blocks
 
 
+def _agent_visible_skill_directory(skill: ManagedSkill) -> Path:
+    """Prefer the named live built-in path when it currently points at this Skill."""
+
+    snapshot_dir = skill.directory.parent
+    if _SNAPSHOT_ID_RE.fullmatch(snapshot_dir.name) is None:
+        return skill.directory
+    umbrella = (
+        snapshot_dir.parent.parent
+        if snapshot_dir.parent.name == BUILTIN_SNAPSHOTS_DIRNAME
+        else snapshot_dir.parent
+    )
+    live = umbrella / skill.directory.name
+    try:
+        live_stat = live.stat()
+        skill_stat = skill.directory.stat(follow_symlinks=False)
+    except OSError:
+        return skill.directory
+    if (
+        stat.S_ISDIR(live_stat.st_mode)
+        and stat.S_ISDIR(skill_stat.st_mode)
+        and _directory_identity(live_stat) == _directory_identity(skill_stat)
+    ):
+        return _absolute_path(live)
+    return skill.directory
+
+
 def render_skill_content(skill: ManagedSkill) -> str:
     if skill.body is None:
         raise ValueError("Skill body was not loaded")
     name = html.escape(skill.name, quote=True)
-    directory = html.escape(str(skill.directory), quote=True)
+    directory = html.escape(str(_agent_visible_skill_directory(skill)), quote=True)
     directory = "".join(
         f"&#x{ord(char):X};" if unicodedata.category(char).startswith("C") else char for char in directory
     )
@@ -1586,6 +1643,110 @@ def _remove_snapshot_staging(path: Path) -> None:
         path.unlink()
 
 
+def _relative_live_skill_target(umbrella: Path, snapshot: Path, skill_name: str) -> str:
+    return f"{snapshot.relative_to(umbrella).as_posix()}/{skill_name}"
+
+
+def _is_builtin_live_link(path: Path) -> bool:
+    try:
+        value = path.lstat()
+        if not stat.S_ISLNK(value.st_mode):
+            return False
+        target = Path(os.readlink(path))
+    except OSError:
+        return False
+    if target.is_absolute() or ".." in target.parts:
+        return False
+    parts = target.parts
+    if (
+        len(parts) == 3
+        and parts[0] == BUILTIN_SNAPSHOTS_DIRNAME
+        and _SNAPSHOT_ID_RE.fullmatch(parts[1])
+        and parts[2] == path.name
+    ):
+        return True
+    return (
+        len(parts) == 2
+        and _SNAPSHOT_ID_RE.fullmatch(parts[0]) is not None
+        and parts[1] == path.name
+    )
+
+
+def _live_skill_link_matches(path: Path, umbrella: Path, snapshot: Path, skill_name: str) -> bool:
+    expected = Path(_relative_live_skill_target(umbrella, snapshot, skill_name))
+    try:
+        value = path.lstat()
+        if not stat.S_ISLNK(value.st_mode):
+            return False
+        return Path(os.readlink(path)) == expected
+    except OSError:
+        return False
+
+
+def _install_live_skill_link(umbrella: Path, snapshot: Path, skill_name: str) -> None:
+    live = umbrella / skill_name
+    target = _relative_live_skill_target(umbrella, snapshot, skill_name)
+    if _live_skill_link_matches(live, umbrella, snapshot, skill_name):
+        return
+    if os.path.lexists(live) and not _is_builtin_live_link(live):
+        logger.warning("Leaving existing built-in Skill path in place: %s", live)
+        return
+    staging = umbrella / f".live-{skill_name}.{snapshot.name}.staging"
+    _remove_snapshot_staging(staging)
+    try:
+        os.symlink(target, staging, target_is_directory=True)
+        os.replace(staging, live)
+    except OSError as exc:
+        if os.path.lexists(staging):
+            _remove_snapshot_staging(staging)
+        if os.name == "nt":
+            logger.warning("Skipping live built-in Skill path on this platform: %s", skill_name)
+            return
+        raise RuntimeError(f"Cannot publish live built-in Skill path: {skill_name}") from exc
+
+
+def _reclaim_stale_live_skill_links(umbrella: Path, keep_names: set[str]) -> None:
+    children = _root_children(umbrella)
+    if children is None:
+        return
+    for name, child, child_stat in children:
+        if name in keep_names or name.startswith(".") or _SNAPSHOT_ID_RE.fullmatch(name):
+            continue
+        if not stat.S_ISLNK(child_stat.st_mode) or not _is_builtin_live_link(child):
+            continue
+        try:
+            child.unlink()
+        except OSError:
+            logger.warning("Could not remove stale live built-in Skill path: %s", child, exc_info=True)
+
+
+def _publish_live_skill_links(umbrella: Path, snapshot: Path) -> None:
+    children = _root_children(snapshot)
+    if children is None:
+        raise RuntimeError("Avibe packages at most 1,024 built-in Skills")
+    keep_names: set[str] = set()
+    for name, _child, child_stat in children:
+        if not stat.S_ISDIR(child_stat.st_mode):
+            continue
+        keep_names.add(name)
+        _install_live_skill_link(umbrella, snapshot, name)
+    _reclaim_stale_live_skill_links(umbrella, keep_names)
+
+
+def _ensure_readable_snapshot(destination: Path) -> None:
+    try:
+        destination_stat = destination.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise RuntimeError(f"Built-in Skill snapshot is unavailable: {destination}") from exc
+    if not stat.S_ISDIR(destination_stat.st_mode):
+        raise RuntimeError(f"Built-in Skill snapshot is not a directory: {destination}")
+    try:
+        with os.scandir(destination):
+            pass
+    except OSError as exc:
+        raise RuntimeError(f"Built-in Skill snapshot is unreadable: {destination}") from exc
+
+
 def publish_builtin_skills(
     *,
     source_root: str | Path | None = None,
@@ -1597,32 +1758,34 @@ def publish_builtin_skills(
     umbrella = (
         Path(destination_root).expanduser().resolve()
         if destination_root is not None
-        else (paths.get_vibe_remote_dir() / "builtin-skills").expanduser().resolve()
+        else (paths.get_vibe_remote_dir() / BUILTIN_SKILLS_DIRNAME).expanduser().resolve()
     )
     _snapshot_entries(source)
     _validate_builtin_catalog(source)
     snapshot_id = snapshot_tree_digest(source)
-    destination = umbrella / snapshot_id
+    snapshots_root = umbrella / BUILTIN_SNAPSHOTS_DIRNAME
+    destination = snapshots_root / snapshot_id
+    legacy_destination = umbrella / snapshot_id
 
     from storage.lock import MigrationFileLock
 
     umbrella.mkdir(parents=True, exist_ok=True)
+    snapshots_root.mkdir(mode=0o700, exist_ok=True)
     lock_path = umbrella / f".publish-{snapshot_id}.lock"
     with MigrationFileLock(lock_path, timeout_seconds=None):
+        if _readable_snapshot_dir(destination) is not None:
+            _ensure_readable_snapshot(destination)
+            _publish_live_skill_links(umbrella, destination)
+            return snapshot_id
+        if _readable_snapshot_dir(legacy_destination) is not None:
+            _ensure_readable_snapshot(legacy_destination)
+            _publish_live_skill_links(umbrella, legacy_destination)
+            return snapshot_id
         staging = umbrella / f".snapshot-{snapshot_id}.staging"
         _remove_snapshot_staging(staging)
         if os.path.lexists(destination):
-            try:
-                destination_stat = destination.stat(follow_symlinks=False)
-            except OSError as exc:
-                raise RuntimeError(f"Built-in Skill snapshot is unavailable: {destination}") from exc
-            if not stat.S_ISDIR(destination_stat.st_mode):
-                raise RuntimeError(f"Built-in Skill snapshot is not a directory: {destination}")
-            try:
-                with os.scandir(destination):
-                    pass
-            except OSError as exc:
-                raise RuntimeError(f"Built-in Skill snapshot is unreadable: {destination}") from exc
+            _ensure_readable_snapshot(destination)
+            _publish_live_skill_links(umbrella, destination)
             return snapshot_id
         staging.mkdir(mode=0o700)
         try:
@@ -1638,6 +1801,10 @@ def publish_builtin_skills(
         finally:
             if os.path.lexists(staging):
                 _remove_snapshot_staging(staging)
+        if _readable_snapshot_dir(destination) is None:
+            raise RuntimeError(f"Built-in Skill snapshot is unavailable: {destination}")
+        _ensure_readable_snapshot(destination)
+        _publish_live_skill_links(umbrella, destination)
     return snapshot_id
 
 
@@ -1647,7 +1814,10 @@ def prepare_builtin_skills() -> str:
     snapshot_id = publish_builtin_skills()
     os.environ[BUILTIN_SKILLS_SNAPSHOT_ENV] = snapshot_id
     os.environ[BUILTIN_SKILLS_ROOT_ENV] = str(
-        (paths.get_vibe_remote_dir() / "builtin-skills" / snapshot_id).expanduser().resolve()
+        _builtin_snapshot_path(
+            (paths.get_vibe_remote_dir() / BUILTIN_SKILLS_DIRNAME).expanduser().resolve(),
+            snapshot_id,
+        )
     )
     return snapshot_id
 
@@ -1711,8 +1881,9 @@ def managed_skill_environment(
         elif not explicit_builtin_snapshot:
             env[BUILTIN_SKILLS_SNAPSHOT_ENV] = snapshot_id
             env[BUILTIN_SKILLS_ROOT_ENV] = str(
-                (paths.get_vibe_remote_dir() / "builtin-skills" / snapshot_id)
-                .expanduser()
-                .resolve()
+                _builtin_snapshot_path(
+                    (paths.get_vibe_remote_dir() / BUILTIN_SKILLS_DIRNAME).expanduser().resolve(),
+                    snapshot_id,
+                )
             )
     return env
