@@ -128,9 +128,10 @@ class MessageOutput:
 
 # Mention neutralizers for text Avibe republishes into a channel on someone else's
 # behalf (a Harness prompt echo, an upstream provider's error message). Quoting does
-# not stop a renderer from resolving a broadcast, a username, or an id mention, and
-# the Discord adapter sends without ``allowed_mentions``, so an echoed ``@everyone``
-# would really ping the channel. A zero-width space after the sigil keeps the text
+# not stop a renderer from resolving a broadcast, a username, or an id mention. The
+# Discord client now resolves only user mentions (``USERS_ONLY_MENTIONS``), but other
+# platforms have no such switch and a quoted ``<@user>`` would still ping that user,
+# so the guard stays platform-agnostic. A zero-width space after the sigil keeps the text
 # readable while leaving nothing for any renderer to resolve. Deliberately
 # platform-agnostic: every adapter renders the same body, so ``@`` before a word
 # character covers the Slack/Discord broadcasts AND a bare Telegram ``@username``
