@@ -426,9 +426,11 @@ const ImageModels: React.FC<{ tool: HostedImageToolStatus; lookup: SourceLookup;
         ? (
             <p className="flex items-start gap-2 text-muted">
               <Info className="mt-0.5 size-[14px] shrink-0" aria-hidden />
-              <span>{vendors.length > 0
-                ? t('settings.models.tools.image.empty', { vendors: new Intl.ListFormat(i18n.language, { style: 'long', type: 'disjunction' }).format(vendors) })
-                : t('settings.models.tools.image.emptyNoVendor')}</span>
+              <span>{vendors.length === 0
+                ? t('settings.models.tools.image.emptyNoVendor')
+                : vendors.length === 1
+                  ? t('settings.models.tools.image.emptyOne', { vendor: vendors[0] })
+                  : t('settings.models.tools.image.emptyMany', { vendors: formatNameList(vendors, i18n.language) })}</span>
             </p>
           )
         : (

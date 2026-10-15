@@ -2438,7 +2438,8 @@
           "defaultNote": "Used when Vibey doesn't name a model. Vibey can also pick another model from the list when it needs to.",
           "unavailableNote": "The saved default isn't available now, so {{pair}} is used.",
           "unavailableNoteNone": "The saved default isn't available now.",
-          "empty": "Image generation needs an API key from {{vendors}}.",
+          "emptyOne": "Image generation needs an API key from {{vendor}}.",
+          "emptyMany": "Image generation needs an API key from one of {{vendors}}.",
           "emptyNoVendor": "None of your Sources offers an image model yet.",
           "description": {
             "gpt-image-2": "Photorealistic images and legible text in them; edits from reference images.",

@@ -481,7 +481,7 @@ describe('ToolsTab image card', () => {
     const user = userEvent.setup();
     const onSave = renderImage({ models: [], default_model: { source_id: RELAY.id, model_id: 'gpt-image-2', available: false }, effective_default: null });
     const imageCard = card('Image generation');
-    expect(within(imageCard).getByText('Image generation needs an API key from OpenAI or Google.')).toBeTruthy();
+    expect(within(imageCard).getByText('Image generation needs an API key from one of OpenAI, Google.')).toBeTruthy();
     const picker = within(imageCard).getByRole('combobox', { name: 'Default image model' }) as HTMLSelectElement;
     expect(picker.selectedOptions[0].textContent).toBe('gpt-image-2 · relay-gpt (unavailable)');
     expect(within(imageCard).getByText('The saved default isn\'t available now.')).toBeTruthy();
@@ -502,8 +502,15 @@ describe('ToolsTab image card', () => {
 
   it('MH-HOSTED-UI-022: with no image model offered, names the vendors whose key would add one', () => {
     renderImage({ models: [], image_offered_by: ['openai', 'gemini'] });
-    expect(within(card('Image generation')).getByText('Image generation needs an API key from OpenAI or Google.')).toBeTruthy();
+    expect(within(card('Image generation')).getByText('Image generation needs an API key from one of OpenAI, Google.')).toBeTruthy();
     expect(within(card('Image generation')).queryByRole('combobox')).toBeNull();
+    cleanup();
+    // The locale joins the names; no list punctuation runs Latin names into Chinese.
+    renderImage({ models: [], image_offered_by: ['openai', 'gemini'] }, 'zh');
+    expect(within(card('图片生成')).getByText('图片生成需要 OpenAI、Google 其中一家的 API Key。')).toBeTruthy();
+    cleanup();
+    renderImage({ models: [], image_offered_by: ['openai'] }, 'zh');
+    expect(within(card('图片生成')).getByText('图片生成需要 OpenAI 的 API Key。')).toBeTruthy();
   });
 });
 
