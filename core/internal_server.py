@@ -797,13 +797,32 @@ def create_app(
                 )
             controller.computer_use_server = computer_server
 
-        result = await computer_server.call_tool(
-            tool,
-            {
-                **arguments,
-                "session": admission.session_id,
-            },
-        )
+        call_arguments = {
+            **arguments,
+            "session": admission.session_id,
+        }
+        if arguments.get("delivery_mode") == "foreground":
+            from storage.sessions_service import read_session_display_meta
+
+            session_title = admission.session_id
+            try:
+                metadata = read_session_display_meta([admission.session_id]).get(
+                    admission.session_id
+                )
+            except Exception:
+                logger.exception(
+                    "failed to read Session display metadata for foreground Computer Use"
+                )
+            else:
+                if isinstance(metadata, dict):
+                    session_title = str(metadata.get("title") or "").strip() or session_title
+            result = await computer_server.call_tool(
+                tool,
+                call_arguments,
+                session_title=session_title,
+            )
+        else:
+            result = await computer_server.call_tool(tool, call_arguments)
         return {
             "ok": result.get("isError") is not True,
             "tool": tool,

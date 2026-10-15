@@ -178,8 +178,12 @@ _COMPUTER_ERROR_I18N_KEYS = {
     "element_not_actionable": "computer.cli.error.scriptElementNotActionable",
     "element_not_found": "computer.cli.error.scriptTargetNotFound",
     "focus_shortcut_forbidden": "computer.cli.error.focusShortcutForbidden",
+    "foreground_attention_pending": "computer.cli.error.foregroundAttentionPending",
     "foreground_consent_required": "computer.cli.error.foregroundConsentRequired",
+    "foreground_disabled": "computer.cli.error.foregroundDisabled",
     "foreground_forbidden": "computer.cli.error.foregroundForbidden",
+    "foreground_restore_failed": "computer.cli.error.foregroundRestoreFailed",
+    "foreground_shell_unavailable": "computer.cli.error.foregroundShellUnavailable",
     "invalid_arguments": "computer.cli.error.invalidDriverArguments",
     "invalid_computer_use_request": "computer.cli.error.requestRejected",
     "invalid_computer_use_response": "computer.cli.error.scriptInvalidControllerResponse",
@@ -200,6 +204,9 @@ _COMPUTER_ERROR_I18N_KEYS = {
     "stale_app_handle": "computer.cli.error.scriptStaleAppHandle",
     "stale_window_handle": "computer.cli.error.scriptStaleWindowHandle",
     "timeout": "computer.cli.error.scriptOperationTimedOut",
+    "target_missing": "computer.cli.error.targetMissing",
+    "target_not_admissible": "computer.cli.error.targetNotAdmissible",
+    "target_off_active_space": "computer.cli.error.targetOffActiveSpace",
     "unknown_tool": "computer.cli.error.unknownTool",
     "upstream_error": "computer.cli.error.upstreamError",
     "upstream_protocol_error": "computer.cli.error.upstreamProtocolError",
@@ -249,6 +256,53 @@ _COMPUTER_REASON_I18N_KEYS = {
 }
 
 
+_RESTORATION_FAILURE_I18N_KEYS = {
+    "prior_frontmost": {
+        "not_attempted": "computer.cli.error.restoration.priorFrontmost.notAttempted",
+        "not_verified": "computer.cli.error.restoration.priorFrontmost.notVerified",
+        "failed": "computer.cli.error.restoration.priorFrontmost.failed",
+    },
+    "pointer": {
+        "not_attempted": "computer.cli.error.restoration.pointer.notAttempted",
+        "not_verified": "computer.cli.error.restoration.pointer.notVerified",
+        "failed": "computer.cli.error.restoration.pointer.failed",
+    },
+    "active_space": {
+        "not_attempted": "computer.cli.error.restoration.activeSpace.notAttempted",
+        "not_verified": "computer.cli.error.restoration.activeSpace.notVerified",
+        "failed": "computer.cli.error.restoration.activeSpace.failed",
+    },
+}
+
+
+def _restoration_failure_details(
+    restoration: Any,
+    *,
+    translate: Callable[..., str],
+) -> list[str]:
+    if not isinstance(restoration, Mapping):
+        return []
+    components = restoration.get("components")
+    if not isinstance(components, Mapping):
+        return []
+    details: list[str] = []
+    for name, state_keys in _RESTORATION_FAILURE_I18N_KEYS.items():
+        component = components.get(name)
+        if not isinstance(component, Mapping):
+            continue
+        if component.get("attempted") is not True:
+            state = "not_attempted"
+        elif component.get("verified") is not True:
+            state = "not_verified"
+        else:
+            detail = component.get("failure_detail")
+            if not isinstance(detail, str) or not detail.strip():
+                continue
+            state = "failed"
+        details.append(translate(state_keys[state]))
+    return details
+
+
 def translate_computer_error(
     error: Mapping[str, Any],
     *,
@@ -293,6 +347,15 @@ def translate_computer_error(
             reasonCode=reason_code,
             reason=translate(reason_key, code=reason_code),
         )
+    if code == "foreground_restore_failed" and isinstance(params, Mapping):
+        details = _restoration_failure_details(
+            params.get("restoration"),
+            translate=translate,
+        )
+        detail = "; ".join(details) if details else translate(
+            "computer.cli.error.restorationDetailUnavailable"
+        )
+        return translate(key, detail=detail)
     return translate(key)
 
 

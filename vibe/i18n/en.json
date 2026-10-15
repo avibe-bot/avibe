@@ -936,13 +936,38 @@
         "desktopLeaseLost": "The desktop lease was lost before Computer Use completed.",
         "focusShortcutForbidden": "This focus shortcut is not allowed. Use launch with a URL instead.",
         "foregroundForbidden": "Foreground input is not allowed.",
-        "foregroundConsentRequired": "Foreground input requires owner consent.",
+        "foregroundAttentionPending": "Foreground control is paused until you dismiss the restoration warning from the native Avibe desktop menu.",
+        "foregroundConsentRequired": "Foreground control needs approval from the native Avibe desktop menu.",
+        "foregroundDisabled": "Foreground control is disabled in the native Avibe desktop menu.",
+        "foregroundRestoreFailed": "Foreground control ran, but Avibe could not restore and verify the prior desktop state. Details: {detail}",
+        "restorationDetailUnavailable": "restoration details were unavailable",
+        "restoration": {
+          "priorFrontmost": {
+            "notAttempted": "the prior frontmost exact window restoration was not attempted",
+            "notVerified": "the prior frontmost exact window restoration could not be verified",
+            "failed": "the prior frontmost exact window restoration failed"
+          },
+          "pointer": {
+            "notAttempted": "the hardware pointer restoration was not attempted",
+            "notVerified": "the hardware pointer restoration could not be verified",
+            "failed": "the hardware pointer restoration failed"
+          },
+          "activeSpace": {
+            "notAttempted": "the active Space restoration was not attempted",
+            "notVerified": "the active Space restoration could not be verified",
+            "failed": "the active Space restoration failed"
+          }
+        },
+        "foregroundShellUnavailable": "The native Avibe desktop shell is unavailable for foreground control.",
         "genericDriverError": "The Computer Use driver returned an error.",
         "invalidDriverArguments": "The Computer Use arguments are invalid.",
         "observeFirst": "Observe the exact window again before sending input.",
         "platformUnsupported": "Computer Use is unavailable on this platform.",
         "sessionArchived": "Computer Use is unavailable because this Avibe Session is archived or being archived.",
         "sessionUnavailable": "The Computer Use driver could not prepare the Session.",
+        "targetMissing": "The exact target window is no longer present.",
+        "targetNotAdmissible": "The target window could not be admitted safely for foreground control.",
+        "targetOffActiveSpace": "The target window is not on the active Space.",
         "unknownTool": "Unknown Computer Use tool: {tool}.",
         "upstreamError": "The Computer Use driver rejected the request.",
         "upstreamProtocolError": "The Computer Use driver returned an invalid response.",
