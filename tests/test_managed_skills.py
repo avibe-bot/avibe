@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -35,6 +36,15 @@ from core.managed_skills import (
 )
 from core.system_prompt_injection import build_system_prompt_injection
 from modules.im import MessageContext
+
+
+@pytest.fixture(autouse=True)
+def _isolate_native_claude_managed_settings(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        managed_skills,
+        "_claude_plugin_managed_settings_sources",
+        lambda: (tmp_path / "managed-settings.json", tmp_path / "managed-settings.d"),
+    )
 
 
 def _write_skill(
@@ -1197,7 +1207,7 @@ def test_enabled_claude_plugin_skills_are_read_from_registry_and_manifest(
     assert [skill.name for skill in skills] == ["format-code", "lint-code"]
 
 
-def test_claude_plugin_same_scope_selects_newest_install_by_time_then_version(
+def test_claude_plugin_same_scope_selects_newest_install_by_time_then_stable_path(
     tmp_path: Path,
 ) -> None:
     """Duplicate same-scope records must select deterministically, not abort discovery."""
@@ -1263,13 +1273,13 @@ def test_claude_plugin_same_scope_selects_newest_install_by_time_then_version(
                         {
                             "scope": "user",
                             "installPath": str(same_time_older),
-                            "version": "1.0.0",
+                            "version": "9.0.0",
                             "lastUpdated": "2026-10-03T00:00:00Z",
                         },
                         {
                             "scope": "user",
                             "installPath": str(same_time_newer),
-                            "version": "2.0.0",
+                            "version": "1.0.0",
                             "lastUpdated": "2026-10-03T00:00:00Z",
                         },
                     ]
@@ -1291,6 +1301,396 @@ def test_claude_plugin_same_scope_selects_newest_install_by_time_then_version(
 
     assert [skill.name for skill in skills] == ["demo-version-new"]
     assert skills[0].directory == (same_time_newer / "skills" / "demo-version-new").resolve()
+
+
+@pytest.mark.parametrize(
+    ("scope", "manifest_text"),
+    (("workspace", None), ("user", "not-json")),
+)
+def test_claude_plugin_discovery_fails_closed_on_unknown_scope_or_present_invalid_manifest(
+    tmp_path: Path,
+    scope: str,
+    manifest_text: str | None,
+) -> None:
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    claude_home = home / ".claude"
+    registry = claude_home / "plugins" / "installed_plugins.json"
+    registry.parent.mkdir(parents=True)
+    plugin = tmp_path / "plugin-cache" / "candidate"
+    _write_skill(plugin / "skills", "candidate", "candidate", "Candidate")
+    if manifest_text is not None:
+        manifest_path = plugin / ".claude-plugin" / "plugin.json"
+        manifest_path.parent.mkdir(parents=True)
+        manifest_path.write_text(manifest_text, encoding="utf-8")
+    registry.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "candidate@example": [
+                        {"scope": scope, "installPath": str(plugin), "enabled": True}
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _isolated_resolve(
+        cwd,
+        tmp_path,
+        home=home,
+        claude_home=claude_home,
+    ) == []
+
+
+def test_claude_plugin_project_scope_uses_non_git_working_directory(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    cwd = tmp_path / "standalone"
+    cwd.mkdir()
+    claude_home = home / ".claude"
+    registry = claude_home / "plugins" / "installed_plugins.json"
+    registry.parent.mkdir(parents=True)
+    plugin = tmp_path / "plugin-cache" / "project"
+    _write_skill(plugin / "skills", "standalone", "standalone", "Standalone")
+    registry.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "project@example": [
+                        {
+                            "scope": "project",
+                            "projectPath": str(cwd),
+                            "installPath": str(plugin),
+                            "enabled": True,
+                        }
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert [
+        skill.name
+        for skill in _isolated_resolve(
+            cwd,
+            tmp_path,
+            home=home,
+            claude_home=claude_home,
+        )
+    ] == ["standalone"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink loop fixture requires POSIX semantics")
+def test_claude_plugin_project_symlink_loop_is_omitted_without_aborting(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    loop = tmp_path / "project-loop"
+    loop.symlink_to(loop, target_is_directory=True)
+    claude_home = home / ".claude"
+    registry = claude_home / "plugins" / "installed_plugins.json"
+    registry.parent.mkdir(parents=True)
+    plugin = tmp_path / "plugin-cache" / "loop"
+    _write_skill(plugin / "skills", "loop", "loop", "Loop")
+    registry.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "loop@example": [
+                        {
+                            "scope": "project",
+                            "projectPath": str(loop),
+                            "installPath": str(plugin),
+                            "enabled": True,
+                        }
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _isolated_resolve(
+        cwd,
+        tmp_path,
+        home=home,
+        claude_home=claude_home,
+    ) == []
+
+
+def test_claude_plugin_manifest_skill_directory_can_be_direct_skill_root(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    claude_home = home / ".claude"
+    registry = claude_home / "plugins" / "installed_plugins.json"
+    registry.parent.mkdir(parents=True)
+    plugin = tmp_path / "plugin-cache" / "direct"
+    _write_skill(plugin / "direct-skill", "direct-skill", "direct-skill", "Direct")
+    manifest = plugin / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"skills": ["./direct-skill/"]}), encoding="utf-8")
+    registry.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "direct@example": [
+                        {"scope": "user", "installPath": str(plugin), "enabled": True}
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert [skill.name for skill in _isolated_resolve(
+        cwd,
+        tmp_path,
+        home=home,
+        claude_home=claude_home,
+    )] == ["direct-skill"]
+
+
+def test_claude_plugin_roots_keep_stable_cross_plugin_precedence(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    claude_home = home / ".claude"
+    registry = claude_home / "plugins" / "installed_plugins.json"
+    registry.parent.mkdir(parents=True)
+    first = tmp_path / "plugin-cache" / "a-plugin"
+    second = tmp_path / "plugin-cache" / "z-plugin"
+    _write_skill(first / "skills", "shared", "shared", "A plugin")
+    _write_skill(second / "skills", "shared", "shared", "Z plugin")
+    registry.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "z@example": [
+                        {"scope": "user", "installPath": str(second), "enabled": True}
+                    ],
+                    "a@example": [
+                        {"scope": "user", "installPath": str(first), "enabled": True}
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    skills = _isolated_resolve(
+        cwd,
+        tmp_path,
+        home=home,
+        claude_home=claude_home,
+    )
+    assert skills[0].description == "A plugin"
+
+
+def test_claude_managed_plugin_deny_overrides_lower_scope_enablement(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    claude_home = home / ".claude"
+    registry = claude_home / "plugins" / "installed_plugins.json"
+    registry.parent.mkdir(parents=True)
+    plugin = tmp_path / "plugin-cache" / "managed-deny"
+    _write_skill(plugin / "skills", "managed-deny", "managed-deny", "Managed deny")
+    registry.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "managed@example": [
+                        {"scope": "user", "installPath": str(plugin), "enabled": True}
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (claude_home / "settings.json").write_text(
+        json.dumps({"enabledPlugins": {"managed@example": True}}),
+        encoding="utf-8",
+    )
+    managed_path = tmp_path / "managed-settings.json"
+    managed_path.write_text(
+        json.dumps({"enabledPlugins": {"managed@example": False}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        managed_skills,
+        "_claude_plugin_managed_settings_sources",
+        lambda: (managed_path, tmp_path / "managed-settings.d"),
+    )
+
+    assert _isolated_resolve(
+        cwd,
+        tmp_path,
+        home=home,
+        claude_home=claude_home,
+    ) == []
+
+
+def test_claude_unreadable_managed_settings_do_not_fail_open(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    claude_home = home / ".claude"
+    registry = claude_home / "plugins" / "installed_plugins.json"
+    registry.parent.mkdir(parents=True)
+    plugin = tmp_path / "plugin-cache" / "managed-unknown"
+    _write_skill(plugin / "skills", "managed-unknown", "managed-unknown", "Managed unknown")
+    registry.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "managed@example": [
+                        {"scope": "user", "installPath": str(plugin), "enabled": True}
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (claude_home / "settings.json").write_text(
+        json.dumps({"enabledPlugins": {"managed@example": True}}),
+        encoding="utf-8",
+    )
+    managed_path = tmp_path / "managed-settings.json"
+    managed_path.mkdir()
+    monkeypatch.setattr(
+        managed_skills,
+        "_claude_plugin_managed_settings_sources",
+        lambda: (managed_path, tmp_path / "managed-settings.d"),
+    )
+
+    _write_skill(cwd / ".claude" / "skills", "static", "static", "Static")
+    assert [
+        skill.name
+        for skill in _isolated_resolve(
+            cwd,
+            tmp_path,
+            home=home,
+            claude_home=claude_home,
+        )
+    ] == ["static"]
+
+def test_empty_managed_settings_dropin_directory_is_ignored(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    claude_home = home / ".claude"
+    registry = claude_home / "plugins" / "installed_plugins.json"
+    registry.parent.mkdir(parents=True)
+    plugin = tmp_path / "plugin-cache" / "empty-dropins"
+    _write_skill(plugin / "skills", "empty-dropins", "empty-dropins", "Empty drop-ins")
+    registry.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "empty@example": [
+                        {"scope": "user", "installPath": str(plugin), "enabled": True}
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    managed_dropins = tmp_path / "managed-settings.d"
+    managed_dropins.mkdir()
+    monkeypatch.setattr(
+        managed_skills,
+        "_claude_plugin_managed_settings_sources",
+        lambda: (tmp_path / "managed-settings.json", managed_dropins),
+    )
+
+    assert [
+        skill.name
+        for skill in _isolated_resolve(
+            cwd,
+            tmp_path,
+            home=home,
+            claude_home=claude_home,
+        )
+    ] == ["empty-dropins"]
+
+
+def test_managed_settings_dropins_over_budget_fail_closed(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    claude_home = home / ".claude"
+    registry = claude_home / "plugins" / "installed_plugins.json"
+    registry.parent.mkdir(parents=True)
+    plugin = tmp_path / "plugin-cache" / "too-many-dropins"
+    _write_skill(plugin / "skills", "too-many-dropins", "too-many-dropins", "Too many drop-ins")
+    registry.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "many@example": [
+                        {"scope": "user", "installPath": str(plugin), "enabled": True}
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    managed_dropins = tmp_path / "managed-settings.d"
+    managed_dropins.mkdir()
+    (managed_dropins / "01-first.json").write_text("{}", encoding="utf-8")
+    (managed_dropins / "02-second.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(managed_skills, "CLAUDE_PLUGIN_MANAGED_SETTINGS_MAX_FILES", 1)
+    monkeypatch.setattr(
+        managed_skills,
+        "_claude_plugin_managed_settings_sources",
+        lambda: (tmp_path / "managed-settings.json", managed_dropins),
+    )
+
+    assert _isolated_resolve(
+        cwd,
+        tmp_path,
+        home=home,
+        claude_home=claude_home,
+    ) == []
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO fixture requires POSIX semantics")
+def test_bounded_json_rejects_fifo_without_blocking(tmp_path: Path) -> None:
+    fifo = tmp_path / "managed-settings.json"
+    os.mkfifo(fifo)
+
+    started = time.monotonic()
+    assert managed_skills._read_bounded_json_with_presence(fifo, max_bytes=1024) == (True, None)
+    assert time.monotonic() - started < 1
 
 
 def test_claude_plugin_enablement_obeys_scope_and_defaults(tmp_path: Path) -> None:

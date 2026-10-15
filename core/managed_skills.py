@@ -12,8 +12,10 @@ import re
 import shutil
 import stat
 import struct
+import sys
 import unicodedata
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -57,6 +59,7 @@ CLAUDE_PLUGIN_REGISTRY_MAX_ENTRIES = 256
 CLAUDE_PLUGIN_SETTINGS_MAX_BYTES = 1024 * 1024
 CLAUDE_PLUGIN_MANIFEST_MAX_BYTES = 256 * 1024
 CLAUDE_PLUGIN_SKILL_PATHS_MAX = 64
+CLAUDE_PLUGIN_MANAGED_SETTINGS_MAX_FILES = 64
 
 _SNAPSHOT_DOMAIN = b"avibe-builtin-snapshot-v1\0"
 _SNAPSHOT_ID_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -676,6 +679,57 @@ def _resolved_candidate_directory(
     return _absolute_path(target), source_identity, _directory_identity(target_stat)
 
 
+def _scan_root_or_skill(
+    root: Path,
+    *,
+    priority: tuple[int, int, int],
+    budget: _DiscoveryBudget,
+    seen_directory_identities: set[tuple[int, int]] | None = None,
+    ignored_names: frozenset[str] = frozenset(),
+) -> list[ManagedSkill]:
+    try:
+        root_stat = root.stat(follow_symlinks=False)
+    except (OSError, RuntimeError):
+        return []
+    if not stat.S_ISDIR(root_stat.st_mode):
+        return []
+
+    direct_skill = root / "SKILL.md"
+    try:
+        direct_skill_stat = direct_skill.stat(follow_symlinks=False)
+    except (OSError, RuntimeError):
+        direct_skill_stat = None
+    if direct_skill_stat is None or not stat.S_ISREG(direct_skill_stat.st_mode):
+        return _scan_root(
+            root,
+            priority=priority,
+            budget=budget,
+            seen_directory_identities=seen_directory_identities,
+            ignored_names=ignored_names,
+        )
+    if budget.parse_exhausted or budget.remaining_children <= 0:
+        return []
+
+    directory_identity = _directory_identity(root_stat)
+    if seen_directory_identities is not None:
+        if directory_identity in seen_directory_identities:
+            return []
+        seen_directory_identities.add(directory_identity)
+    budget.candidates += 1
+    budget.direct_children += 1
+    skill, consumed = _read_skill_path(
+        direct_skill,
+        priority=(*priority, str(_absolute_path(root))),
+        include_body=False,
+        frontmatter_limit=min(FRONTMATTER_MAX_BYTES, budget.remaining_frontmatter),
+        source_directory=root,
+        source_directory_identity=directory_identity,
+        expected_directory_identity=directory_identity,
+    )
+    budget.frontmatter_bytes += consumed
+    return [skill] if skill is not None else []
+
+
 def _scan_root(
     root: Path,
     *,
@@ -751,7 +805,10 @@ def _project_base_for_working_directory(
     raw = Path(project_base).expanduser()
     if not raw.is_absolute():
         return None
-    resolved = raw.resolve()
+    try:
+        resolved = raw.resolve()
+    except (OSError, RuntimeError):
+        return None
     try:
         relative = working_directory.relative_to(resolved)
     except ValueError:
@@ -824,28 +881,104 @@ def _selected_builtin_root(
     return root if stat.S_ISDIR(root_stat.st_mode) else None
 
 
-def _read_bounded_json(path: Path, *, max_bytes: int) -> Any | None:
+@dataclass(frozen=True)
+class _ClaudePluginEnablement:
+    overrides: dict[str, bool]
+    managed_authority_unknown: bool = False
+
+
+@dataclass(frozen=True)
+class _ClaudePluginCandidate:
+    plugin_id: str
+    plugin_root: Path
+    manifest: dict[str, Any]
+    scope_rank: int
+    updated_at: float | None
+
+
+def _read_bounded_json_with_presence(
+    path: Path,
+    *,
+    max_bytes: int,
+) -> tuple[bool, Any | None]:
     try:
-        if not path.is_file():
-            return None
-        with path.open("rb") as stream:
-            raw = stream.read(max_bytes + 1)
-    except OSError:
-        return None
-    if len(raw) > max_bytes:
-        return None
+        path.lstat()
+    except FileNotFoundError:
+        return False, None
+    except (OSError, RuntimeError):
+        return True, None
+
+    flags = (
+        os.O_RDONLY
+        | int(getattr(os, "O_BINARY", 0))
+        | int(getattr(os, "O_CLOEXEC", 0))
+        | int(getattr(os, "O_NONBLOCK", 0))
+    )
     try:
-        return json.loads(raw.decode("utf-8"))
+        fd = os.open(os.fspath(path), flags)
+    except (OSError, RuntimeError, ValueError):
+        return True, None
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            return True, None
+        raw = bytearray()
+        while len(raw) <= max_bytes:
+            chunk = os.read(fd, min(64 * 1024, max_bytes + 1 - len(raw)))
+            if not chunk:
+                break
+            raw.extend(chunk)
+        if len(raw) > max_bytes:
+            return True, None
+    except (OSError, RuntimeError):
+        return True, None
+    finally:
+        os.close(fd)
+    try:
+        return True, json.loads(bytes(raw).decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
-        return None
+        return True, None
+
+
+def _read_bounded_json(path: Path, *, max_bytes: int) -> Any | None:
+    _, payload = _read_bounded_json_with_presence(path, max_bytes=max_bytes)
+    return payload
+
+
+def _claude_plugin_managed_settings_sources() -> tuple[Path, Path]:
+    if os.name == "nt":
+        program_files = os.environ.get("ProgramFiles") or r"C:\Program Files"
+        root = Path(program_files) / "ClaudeCode"
+    elif sys.platform == "darwin":
+        root = Path("/Library/Application Support/ClaudeCode")
+    else:
+        root = Path("/etc/claude-code")
+    return root / "managed-settings.json", root / "managed-settings.d"
+
+
+def _merge_enabled_plugins(payload: Any, overrides: dict[str, bool]) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    enabled_plugins = payload.get("enabledPlugins")
+    if enabled_plugins is None:
+        return True
+    if not isinstance(enabled_plugins, dict):
+        return False
+    valid = True
+    for plugin_id, enabled in enabled_plugins.items():
+        if isinstance(plugin_id, str) and plugin_id and isinstance(enabled, bool):
+            overrides[plugin_id] = enabled
+        else:
+            valid = False
+    return valid
 
 
 def _claude_plugin_enabled_overrides(
     working_directory: Path,
     claude_home: Path,
     project_base: str | Path | None,
-) -> dict[str, bool]:
-    """Read Claude's plugin enablement without starting the Claude CLI."""
+) -> _ClaudePluginEnablement:
+    """Read bounded Claude plugin enablement without starting the Claude CLI."""
 
     directories = _project_directories(working_directory, project_base=project_base)
     settings_paths = [claude_home / "settings.json"]
@@ -854,16 +987,68 @@ def _claude_plugin_enabled_overrides(
 
     overrides: dict[str, bool] = {}
     for path in settings_paths:
-        payload = _read_bounded_json(path, max_bytes=CLAUDE_PLUGIN_SETTINGS_MAX_BYTES)
-        if not isinstance(payload, dict):
+        present, payload = _read_bounded_json_with_presence(
+            path,
+            max_bytes=CLAUDE_PLUGIN_SETTINGS_MAX_BYTES,
+        )
+        if not present or not isinstance(payload, dict):
             continue
-        enabled_plugins = payload.get("enabledPlugins")
-        if not isinstance(enabled_plugins, dict):
-            continue
-        for plugin_id, enabled in enabled_plugins.items():
-            if isinstance(plugin_id, str) and plugin_id and isinstance(enabled, bool):
-                overrides[plugin_id] = enabled
-    return overrides
+        _merge_enabled_plugins(payload, overrides)
+
+    managed_authority_unknown = False
+    managed_path, managed_dropins = _claude_plugin_managed_settings_sources()
+    managed_present, managed_payload = _read_bounded_json_with_presence(
+        managed_path,
+        max_bytes=CLAUDE_PLUGIN_SETTINGS_MAX_BYTES,
+    )
+    if managed_present and not _merge_enabled_plugins(managed_payload, overrides):
+        managed_authority_unknown = True
+
+    try:
+        dropins_present = managed_dropins.lstat()
+    except FileNotFoundError:
+        dropins_present = None
+    except (OSError, RuntimeError):
+        managed_authority_unknown = True
+        dropins_present = None
+    if dropins_present is not None:
+        try:
+            if not managed_dropins.is_dir():
+                managed_authority_unknown = True
+                dropin_paths = []
+            else:
+                dropin_paths = sorted(
+                    (
+                        path
+                        for path in managed_dropins.iterdir()
+                        if not path.name.startswith(".") and path.suffix == ".json"
+                    ),
+                    key=lambda path: path.name,
+                )
+                if len(dropin_paths) > CLAUDE_PLUGIN_MANAGED_SETTINGS_MAX_FILES:
+                    managed_authority_unknown = True
+        except (OSError, RuntimeError):
+            managed_authority_unknown = True
+            dropin_paths = []
+        for path in dropin_paths[:CLAUDE_PLUGIN_MANAGED_SETTINGS_MAX_FILES]:
+            present, payload = _read_bounded_json_with_presence(
+                path,
+                max_bytes=CLAUDE_PLUGIN_SETTINGS_MAX_BYTES,
+            )
+            if not present or not _merge_enabled_plugins(payload, overrides):
+                managed_authority_unknown = True
+
+    return _ClaudePluginEnablement(overrides, managed_authority_unknown)
+
+
+def _claude_plugin_scope(record: dict[str, Any]) -> str | None:
+    raw_scope = record.get("scope")
+    if raw_scope is None or raw_scope == "":
+        return "user"
+    if not isinstance(raw_scope, str):
+        return None
+    scope = raw_scope.strip().lower()
+    return scope if scope in {"local", "project", "user", "managed"} else None
 
 
 def _claude_plugin_registry_records(payload: Any) -> list[tuple[str, dict[str, Any]]]:
@@ -897,12 +1082,15 @@ def _claude_plugin_project_root(
     project_base: str | Path | None,
 ) -> Path | None:
     if project_base is not None:
-        resolved = _project_base_for_working_directory(working_directory, project_base)
-        return resolved
+        return _project_base_for_working_directory(working_directory, project_base)
     for directory in _project_directories(working_directory):
-        if (directory / ".git").exists():
+        try:
+            is_git_root = (directory / ".git").exists()
+        except (OSError, RuntimeError):
+            is_git_root = False
+        if is_git_root:
             return directory
-    return None
+    return working_directory
 
 
 def _claude_plugin_record_applies(
@@ -913,7 +1101,9 @@ def _claude_plugin_record_applies(
     project_base: str | Path | None,
     overrides: dict[str, bool],
 ) -> bool:
-    scope = str(record.get("scope") or "user").strip().lower()
+    scope = _claude_plugin_scope(record)
+    if scope is None:
+        return False
     if scope not in {"project", "local"}:
         return True
 
@@ -928,7 +1118,7 @@ def _claude_plugin_record_applies(
     if isinstance(raw_project, str):
         try:
             project_root = _absolute_path(raw_project).resolve()
-        except OSError:
+        except (OSError, RuntimeError):
             return False
         current_root = _claude_plugin_project_root(working_directory, project_base)
         return current_root is not None and current_root == project_root
@@ -950,7 +1140,7 @@ def _claude_plugin_skill_roots_from_manifest(
 
     try:
         resolved_root = plugin_root.resolve()
-    except OSError:
+    except (OSError, RuntimeError):
         return []
     roots: list[Path] = []
     seen: set[Path] = set()
@@ -972,6 +1162,42 @@ def _claude_plugin_skill_roots_from_manifest(
     return roots
 
 
+def _claude_plugin_record_updated_at(record: dict[str, Any]) -> float | None:
+    for field in ("lastUpdated", "installedAt"):
+        raw_value = record.get(field)
+        if not isinstance(raw_value, str) or not raw_value.strip():
+            continue
+        value = raw_value.strip()
+        if value.endswith("Z"):
+            value = f"{value[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            continue
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        try:
+            return parsed.timestamp()
+        except (OverflowError, OSError, ValueError):
+            continue
+    return None
+
+
+def _claude_plugin_candidate_precedes(
+    candidate: _ClaudePluginCandidate,
+    current: _ClaudePluginCandidate,
+) -> bool:
+    if candidate.scope_rank != current.scope_rank:
+        return candidate.scope_rank < current.scope_rank
+    if candidate.updated_at != current.updated_at:
+        if candidate.updated_at is None:
+            return False
+        if current.updated_at is None:
+            return True
+        return candidate.updated_at > current.updated_at
+    return str(candidate.plugin_root) < str(current.plugin_root)
+
+
 def _claude_plugin_skill_roots(
     working_directory: Path,
     claude_home: Path,
@@ -983,20 +1209,30 @@ def _claude_plugin_skill_roots(
     if not records:
         return []
 
-    overrides = _claude_plugin_enabled_overrides(
-        working_directory,
-        claude_home,
-        project_base,
-    )
-    selected: dict[str, tuple[tuple[int, str, str, str], Path, dict[str, Any]]] = {}
+    try:
+        enablement = _claude_plugin_enabled_overrides(
+            working_directory,
+            claude_home,
+            project_base,
+        )
+    except (OSError, RuntimeError):
+        return []
+    if enablement.managed_authority_unknown:
+        return []
+    overrides = enablement.overrides
+
+    selected: dict[str, _ClaudePluginCandidate] = {}
     scope_ranks = {"local": 0, "project": 1, "user": 2, "managed": 3}
     for plugin_id, record in records:
+        scope = _claude_plugin_scope(record)
+        if scope is None:
+            continue
         raw_path = record.get("installPath")
         if not isinstance(raw_path, str) or not raw_path.strip():
             continue
         try:
             plugin_root = Path(raw_path).expanduser()
-        except (OSError, TypeError):
+        except (OSError, TypeError, ValueError):
             continue
         if not plugin_root.is_absolute() or not _path_is_utf8(plugin_root):
             continue
@@ -1004,22 +1240,28 @@ def _claude_plugin_skill_roots(
         try:
             if not plugin_root.is_dir():
                 continue
-        except OSError:
+        except (OSError, RuntimeError, ValueError):
             continue
 
-        manifest = _read_bounded_json(
+        manifest_present, manifest = _read_bounded_json_with_presence(
             plugin_root / ".claude-plugin" / "plugin.json",
             max_bytes=CLAUDE_PLUGIN_MANIFEST_MAX_BYTES,
         )
-        if not isinstance(manifest, dict):
+        if manifest_present and not isinstance(manifest, dict):
+            continue
+        if not manifest_present:
             manifest = {}
-        if not _claude_plugin_record_applies(
-            plugin_id,
-            record,
-            working_directory=working_directory,
-            project_base=project_base,
-            overrides=overrides,
-        ):
+        try:
+            applies = _claude_plugin_record_applies(
+                plugin_id,
+                record,
+                working_directory=working_directory,
+                project_base=project_base,
+                overrides=overrides,
+            )
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if not applies:
             continue
 
         enabled = overrides.get(plugin_id)
@@ -1030,23 +1272,23 @@ def _claude_plugin_skill_roots(
         if not enabled:
             continue
 
-        scope = str(record.get("scope") or "user").strip().lower()
-        selection_key = (
-            scope_ranks.get(scope, 4),
-            str(record.get("lastUpdated") or record.get("installedAt") or ""),
-            str(record.get("version") or ""),
-            str(plugin_root),
+        candidate = _ClaudePluginCandidate(
+            plugin_id=plugin_id,
+            plugin_root=plugin_root,
+            manifest=manifest,
+            scope_rank=scope_ranks[scope],
+            updated_at=_claude_plugin_record_updated_at(record),
         )
         current = selected.get(plugin_id)
-        if current is None or (
-            selection_key[0] < current[0][0]
-            or selection_key[0] == current[0][0] and selection_key[1:] > current[0][1:]
-        ):
-            selected[plugin_id] = (selection_key, plugin_root, manifest)
+        if current is None or _claude_plugin_candidate_precedes(candidate, current):
+            selected[plugin_id] = candidate
 
     roots: list[Path] = []
-    for _, plugin_root, manifest in sorted(selected.values(), key=lambda item: item[0]):
-        roots.extend(_claude_plugin_skill_roots_from_manifest(plugin_root, manifest))
+    for candidate in sorted(
+        selected.values(),
+        key=lambda item: (str(item.plugin_root), item.plugin_id),
+    ):
+        roots.extend(_claude_plugin_skill_roots_from_manifest(candidate.plugin_root, candidate.manifest))
     return roots
 
 
@@ -1177,7 +1419,7 @@ def resolve_skills(
         if compatibility_budget.exhausted:
             break
         candidates.extend(
-            _scan_root(
+            _scan_root_or_skill(
                 root,
                 priority=(2, 0, 5),
                 budget=compatibility_budget,

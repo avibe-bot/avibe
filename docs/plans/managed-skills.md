@@ -126,12 +126,40 @@ ${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills
 ${CODEX_HOME:-$HOME/.codex}/skills/.system
 ```
 
-When Claude has an installed plugin registry, Avibe reads the registry and
-Claude's `enabledPlugins` settings directly. It then resolves each enabled
-plugin's installation directory, reads its manifest, and scans the default
-`skills/` directory plus any manifest-declared Skill directories. Plugin
-registry or settings lookup failure omits only plugin roots; it never prevents
-static discovery or a backend Turn.
+When Claude has an installed plugin registry, Avibe reads only bounded local JSON
+artifacts and never starts the Claude CLI. The supported local source contract is:
+
+- `plugins/installed_plugins.json` contains a dictionary of plugin IDs to record
+  objects or record lists. Records must have an absolute `installPath` and a
+  known scope (`local`, `project`, `user`, or `managed`). Unknown scopes are
+  omitted rather than treated as global.
+- User, project, and project-local `enabledPlugins` settings are read from the
+  corresponding `settings.json` files. File-based managed settings are also
+  read from the platform system directory, including `managed-settings.json`
+  and `managed-settings.d/*.json` in alphabetical order. A managed deny wins
+  over lower-scope enablement. If a present managed file or drop-in is
+  unreadable or malformed, Avibe omits Claude plugin roots rather than treating
+  lower-scope `enabled: true` as permission; static Skill roots are unaffected.
+- An installed plugin manifest is a JSON object at
+  `.claude-plugin/plugin.json`. A missing manifest retains the registry-only
+  fallback; a present malformed, oversized, or unreadable manifest omits that
+  plugin record. The default `skills/` path and relative manifest-declared
+  paths are bounded and containment-checked. Each declared path may be either
+  a Skill directory containing `SKILL.md` or a collection of Skill directories.
+
+Plugin records are selected by scope, valid `lastUpdated`/`installedAt` metadata,
+and a stable absolute-path tie-break; `version` is not treated as recency. The
+selected plugin roots are emitted in stable path order. Path-resolution errors
+omit only the affected optional plugin. A standalone non-Git working directory
+is the project-scope fallback boundary.
+
+This is best-effort local compatibility, not Claude's complete effective-config
+interpreter. Avibe does not execute the Claude CLI, access the network or
+marketplaces, read MDM/registry/server-managed policy, or reconstruct plugin
+dependency closure. Marketplace and dependency-dependent cases remain explicit
+compatibility limits; Avibe only advertises roots supported by the bounded local
+artifacts above and never lets optional plugin discovery break static roots or a
+Turn.
 
 Native locations are read in place. Avibe does not migrate or rename them, and
 the Catalog never annotates their source. A successful load still includes the
