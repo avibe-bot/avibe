@@ -36,6 +36,10 @@ for (const lang of ['zh', 'en'] as const) {
     for (const width of widths) {
       await page.setViewportSize({ width, height: 900 });
       for (const label of [title, status, migration, ...await tabs.all()]) await expectSingleLine(label);
+      for (const tab of await tabs.all()) await expect(tab.locator('svg')).toBeVisible();
+      if (testInfo.project.name === 'mobile') {
+        expect(await page.getByRole('tablist').evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
+      }
       await expect(refresh).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
       const titleBox = (await title.boundingBox())!;
@@ -45,8 +49,10 @@ for (const lang of ['zh', 'en'] as const) {
       // tabs still renders its real panel rather than clipping navigation away.
       await tabs.last().click();
       await expect(tabs.last()).toHaveAttribute('aria-selected', 'true');
+      await expect(tabs.last()).toBeInViewport();
       await tabs.first().click();
       await expect(tabs.first()).toHaveAttribute('aria-selected', 'true');
+      await expect(tabs.first()).toBeInViewport();
       if (width === widths[0]) await page.screenshot({ path: testInfo.outputPath('models-shell.png'), scale: 'css', animations: 'disabled' });
     }
   });

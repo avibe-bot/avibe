@@ -34,7 +34,8 @@ Collection starts no browser, web server or fixture.
 
 `shell-layout.spec.ts` renders the complete Models page with synthetic API data.
 It checks the always-on surface (no runtime switch), single-line title/status/tab
-labels, reachable last-tab navigation, and no page-level horizontal overflow in
+labels with all icons retained, horizontally scrollable mobile tabs, reachable
+last-tab navigation, and no page-level horizontal overflow in
 EN/ZH at 320–402px mobile widths and desktop/tablet widths. This is browser layout
 coverage, not evidence of a live provider connection.
 

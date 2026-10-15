@@ -357,8 +357,6 @@
 @media (max-width: 639px) {
   .model-hub-shell-identity { flex-basis: 100%; }
   .model-hub-shell-actions { width: 100%; }
-  .model-hub-tabs [role="tab"] { padding-inline: 10px; }
-  .model-hub-tabs svg { display: none; }
 }
 
 .model-hub-shell-head h1 {
