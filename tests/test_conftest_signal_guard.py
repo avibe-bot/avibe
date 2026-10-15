@@ -221,11 +221,16 @@ def test_a_detached_process_naming_this_tests_tmp_path_stays_signalable(stop, tm
             _REAL_OS_KILL(detached, signal.SIGKILL)
 
 
-def test_a_detached_process_naming_a_directory_the_test_claimed_stays_signalable(tmp_path_factory):
-    # A harness root outside tmp_path, such as the Model Hub e2e app's under /tmp.
-    claimed = tmp_path_factory.mktemp("harness-root")
+@pytest.mark.parametrize("spelling", ["as-claimed", "resolved"])
+def test_a_detached_process_naming_a_directory_the_test_claimed_stays_signalable(tmp_path_factory, spelling):
+    # A harness root outside tmp_path, such as the Model Hub e2e app's under /tmp,
+    # which macOS resolves to /private/tmp: the app's helpers may name either spelling.
+    real = tmp_path_factory.mktemp("harness-root")
+    claimed = tmp_path_factory.mktemp("links") / "root"
+    claimed.symlink_to(real, target_is_directory=True)
     claim_test_directory(claimed)
-    _, detached = _spawn_detached(sleeper_session=True, sleeper=[*_SLEEP, str(claimed / "runtime" / "ui.log")])
+    named = claimed if spelling == "as-claimed" else real
+    _, detached = _spawn_detached(sleeper_session=True, sleeper=[*_SLEEP, str(named / "runtime" / "ui.log")])
     try:
         os.killpg(detached, signal.SIGTERM)
         assert _wait_until_gone(detached)

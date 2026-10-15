@@ -800,11 +800,14 @@ def claim_test_directory(path: Path) -> None:
     For a harness that roots its runtime in a fresh directory of its own outside
     ``tmp_path``, such as the Model Hub e2e app under ``/tmp``, whose socket
     paths would not fit under ``tmp_path``. Claim only a directory this test
-    just created with a unique name, never a shared root.
+    just created with a unique name, never a shared root. Both spellings are
+    claimed, as written and as resolved: on macOS ``/tmp`` is ``/private/tmp``,
+    and what the app starts names whichever spelling it was handed.
     """
 
     if _active_signal_guard is not None:
-        _active_signal_guard.names_own_directory.append(process_reaper.names_path(path))
+        for spelling in dict.fromkeys((os.path.abspath(path), os.path.realpath(path))):
+            _active_signal_guard.names_own_directory.append(process_reaper.names_path(Path(spelling)))
 
 
 def _called_from_product(caller) -> bool:
