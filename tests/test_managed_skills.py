@@ -1197,6 +1197,102 @@ def test_enabled_claude_plugin_skills_are_read_from_registry_and_manifest(
     assert [skill.name for skill in skills] == ["format-code", "lint-code"]
 
 
+def test_claude_plugin_same_scope_selects_newest_install_by_time_then_version(
+    tmp_path: Path,
+) -> None:
+    """Duplicate same-scope records must select deterministically, not abort discovery."""
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    claude_home = home / ".claude"
+    registry = claude_home / "plugins" / "installed_plugins.json"
+    registry.parent.mkdir(parents=True)
+
+    older = tmp_path / "plugin-cache" / "older"
+    newer = tmp_path / "plugin-cache" / "newer"
+    _write_skill(older / "skills", "demo-old", "demo-old", "Older install")
+    _write_skill(newer / "skills", "demo-new", "demo-new", "Newer install")
+    registry.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "demo@example": [
+                        {
+                            "scope": "user",
+                            "installPath": str(older),
+                            "version": "9.0.0",
+                            "lastUpdated": "2026-10-01T00:00:00Z",
+                        },
+                        {
+                            "scope": "user",
+                            "installPath": str(newer),
+                            "version": "1.0.0",
+                            "lastUpdated": "2026-10-02T00:00:00Z",
+                        },
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    skills = resolve_skills(
+        cwd,
+        home=home,
+        avibe_home=tmp_path / "avibe",
+        codex_home=home / ".codex",
+        claude_home=claude_home,
+        xdg_config_home=home / ".config",
+        builtin_snapshot_id="",
+    )
+
+    assert [skill.name for skill in skills] == ["demo-new"]
+    assert skills[0].directory == (newer / "skills" / "demo-new").resolve()
+
+    same_time_older = tmp_path / "plugin-cache" / "same-time-older"
+    same_time_newer = tmp_path / "plugin-cache" / "same-time-newer"
+    _write_skill(same_time_older / "skills", "demo-version-old", "demo-version-old", "Older version")
+    _write_skill(same_time_newer / "skills", "demo-version-new", "demo-version-new", "Newer version")
+    registry.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "demo@example": [
+                        {
+                            "scope": "user",
+                            "installPath": str(same_time_older),
+                            "version": "1.0.0",
+                            "lastUpdated": "2026-10-03T00:00:00Z",
+                        },
+                        {
+                            "scope": "user",
+                            "installPath": str(same_time_newer),
+                            "version": "2.0.0",
+                            "lastUpdated": "2026-10-03T00:00:00Z",
+                        },
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    skills = resolve_skills(
+        cwd,
+        home=home,
+        avibe_home=tmp_path / "avibe",
+        codex_home=home / ".codex",
+        claude_home=claude_home,
+        xdg_config_home=home / ".config",
+        builtin_snapshot_id="",
+    )
+
+    assert [skill.name for skill in skills] == ["demo-version-new"]
+    assert skills[0].directory == (same_time_newer / "skills" / "demo-version-new").resolve()
+
+
 def test_claude_plugin_enablement_obeys_scope_and_defaults(tmp_path: Path) -> None:
     home = tmp_path / "home"
     project = tmp_path / "project"

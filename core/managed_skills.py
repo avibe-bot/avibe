@@ -1040,7 +1040,7 @@ def _claude_plugin_skill_roots(
         current = selected.get(plugin_id)
         if current is None or (
             selection_key[0] < current[0][0]
-            or selection_key[0] == current[0][0] and selection_key[1:] > current[0][1][1:]
+            or selection_key[0] == current[0][0] and selection_key[1:] > current[0][1:]
         ):
             selected[plugin_id] = (selection_key, plugin_root, manifest)
 
