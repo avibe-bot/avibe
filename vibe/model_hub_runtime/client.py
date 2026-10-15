@@ -71,10 +71,11 @@ _ENGINE_TRANSPORT_FAILURE = re.compile(
 # This threshold only selects memory or a temporary file; it never rejects or
 # truncates upstream response bytes.
 _PRELUDE_MEMORY_BYTES = 256 * 1024
-# A buffered answer is spooled whole before it is read. An image answer is bounded while it downloads, so a
-# relay that never stops cannot fill the disk before the image call rejects it (vibey-hosted-tools.md §7.4).
+# A buffered answer is spooled whole before it is read. An image answer, served or refused, is bounded while it
+# downloads, so a relay that never stops cannot fill the disk before the image call rejects it
+# (vibey-hosted-tools.md §7.4).
 _BUFFERED_RESPONSE_MAX_BYTES: Mapping[str, int] = {"openai_images": IMAGE_RESPONSE_MAX_BYTES}
-# The machine code of a buffered answer cut at that bound; L1's own, never an upstream's.
+# The machine code of an answer cut at that bound; L1's own, never an upstream's.
 RESPONSE_TOO_LARGE = "response_too_large"
 _ERROR_OBSERVATION_BYTES = 256 * 1024
 # Projecting a response body that has already arrived is local work. It has
@@ -511,6 +512,9 @@ class EngineClient:
         # bound, and one that runs out closes the engine connection, which
         # cancels the upstream request. A buffered response sends nothing until
         # it is complete, so it has none.
+        bound = _BUFFERED_RESPONSE_MAX_BYTES.get(request_protocol)
+        # A body can carry megabytes of images: encoded off the controller loop.
+        encoded = await run_owned_in_thread(lambda: json.dumps(body).encode("utf-8"))
         trace_configs: list[aiohttp.TraceConfig] = []
         if on_request_sent is not None:
             # CPA resolves the route as soon as it reads the body, while a
@@ -561,10 +565,21 @@ class EngineClient:
                 )
             return completed_handle(outcome)
 
+        def cut(status: int) -> EngineInvokeHandle:
+            # A local cut, like a transport failure: nothing past the bound was read or observed.
+            return ended(_outcome(
+                kind=RawOutcomeKind.NETWORK_ERROR,
+                source=source,
+                model_id=model_id,
+                http_status=status,
+                error_code=RESPONSE_TOO_LARGE,
+                message="upstream response exceeded its bound",
+            ))
+
         try:
             response = await session.post(
                 self._url(endpoint),
-                json=body,
+                data=encoded,
                 headers=headers,
                 allow_redirects=False,
             )
@@ -576,7 +591,7 @@ class EngineClient:
                 error_body = _StreamPrelude()
                 try:
                     await asyncio.wait_for(
-                        _read_response_into(response.content, error_body),
+                        _read_response_into(response.content, error_body, max_bytes=bound),
                         timeout=self.timeout,
                     )
                     observed_payload = await _observe_buffered_protocol_response_async(
@@ -590,6 +605,10 @@ class EngineClient:
                 except (asyncio.TimeoutError, aiohttp.ClientError):
                     payload = b""
                     observed_payload = ProtocolObservation()
+                except _ResponseTooLarge:
+                    response.close()
+                    await session.close()
+                    return cut(response.status)
                 finally:
                     error_body.close()
                 if retry_after is None:
@@ -648,7 +667,6 @@ class EngineClient:
                 buffered_body = _StreamPrelude()
                 prelude = buffered_body
                 await buffered_body.write_async(first)
-                bound = _BUFFERED_RESPONSE_MAX_BYTES.get(request_protocol)
                 try:
                     await _read_response_into(
                         response.content, buffered_body, max_bytes=None if bound is None else bound - len(first),
@@ -657,15 +675,7 @@ class EngineClient:
                     buffered_body.close()
                     response.close()
                     await session.close()
-                    # A local cut, like a transport failure: nothing past the bound was read or observed.
-                    return ended(_outcome(
-                        kind=RawOutcomeKind.NETWORK_ERROR,
-                        source=source,
-                        model_id=model_id,
-                        http_status=response.status,
-                        error_code=RESPONSE_TOO_LARGE,
-                        message="upstream response exceeded its bound",
-                    ))
+                    return cut(response.status)
                 observation = await _observe_buffered_protocol_response_async(
                     observe_buffered_protocol_response,
                     request_protocol,
@@ -1542,7 +1552,7 @@ def _project_raw_error_fields(
 
 
 class _ResponseTooLarge(Exception):
-    """A buffered response grew past the bound its request protocol sets."""
+    """A response grew past the bound its request protocol sets."""
 
 
 async def _read_response_into(

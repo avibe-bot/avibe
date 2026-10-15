@@ -7542,8 +7542,8 @@ def test_slow_source_prelude_is_bounded_without_blocking_other_routes(
                 return None
 
         class Session:
-            async def post(self, *_args, json=None, **_kwargs):
-                source_id = "src_slow0001" if str(json["model"]).startswith("slow/") else "src_fast0001"
+            async def post(self, *_args, data=None, **_kwargs):
+                source_id = "src_slow0001" if str(json.loads(data)["model"]).startswith("slow/") else "src_fast0001"
                 return Response(source_id)
 
             async def close(self) -> None:

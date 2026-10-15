@@ -14,18 +14,17 @@ import json
 from dataclasses import dataclass
 from typing import Any, Final, Mapping
 
-# The one size grammar: Vibey checks a call with it before sending, so nothing it sends is refused here.
-from core.agent_core.tools.hosted import size_form
+from core.agent_core.messages import IMAGE_MIME_TYPES
+# Vibey checks a call by the same bounds and size grammar before sending, so nothing it sends is refused here.
+from core.agent_core.tools.hosted import MAX_IMAGES, size_form
 from core.agent_core.tools.read import MAX_INLINE_IMAGE_BYTES, detect_supported_image_mime_type
 from vibe.backend_model_catalog import ImageModelSpec
 
 from .hosted_executor import ExecutorCallRefused, Say, failed_record, failure
 
 IMAGE_TIMEOUT_SECONDS: Final = 300.0
-MAX_REFERENCE_IMAGES: Final = 4
-MAX_IMAGES_PER_CALL: Final = 4
 # The call's body: its reference images, each within read's inline limit as base64, plus the rest.
-IMAGE_CALL_MAX_BYTES: Final = MAX_REFERENCE_IMAGES * ((MAX_INLINE_IMAGE_BYTES + 2) // 3 * 4) + 1024 * 1024
+IMAGE_CALL_MAX_BYTES: Final = MAX_IMAGES * ((MAX_INLINE_IMAGE_BYTES + 2) // 3 * 4) + 1024 * 1024
 # One delivered image, decoded, and every image of one answer.
 IMAGE_MAX_BYTES: Final = 24 * 1024 * 1024
 IMAGES_TOTAL_MAX_BYTES: Final = 64 * 1024 * 1024
@@ -67,8 +66,8 @@ def parse_image_call(payload: object) -> ImageCall:
         not isinstance(model, str) or not model
         or not isinstance(prompt, str) or not prompt.strip()
         or (size is not None and size_form(size) is None)
-        or (n is not None and (isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= MAX_IMAGES_PER_CALL))
-        or (images is not None and (not isinstance(images, list) or not 1 <= len(images) <= MAX_REFERENCE_IMAGES))
+        or (n is not None and (isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= MAX_IMAGES))
+        or (images is not None and (not isinstance(images, list) or not 1 <= len(images) <= MAX_IMAGES))
     ):
         raise ExecutorCallRefused("invalid_request_error", 400)
     references = []
@@ -78,11 +77,21 @@ def parse_image_call(payload: object) -> ImageCall:
             data = base64.b64decode(encoded, validate=True) if isinstance(encoded, str) else b""
         except (binascii.Error, ValueError):
             data = b""
-        mime = detect_supported_image_mime_type(data) if 0 < len(data) <= MAX_INLINE_IMAGE_BYTES else None
+        mime = _image_mime(data) if 0 < len(data) <= MAX_INLINE_IMAGE_BYTES else None
         if mime is None:
             raise ExecutorCallRefused("invalid_request_error", 400)
         references.append((mime, encoded))
     return ImageCall(model, prompt, size, n, tuple(references))
+
+
+def _image_mime(data: bytes) -> str | None:
+    """The type of an image a context holds as ``read`` attaches it and the media sink saves it, else None.
+
+    Checked over every byte: an animated PNG's ``acTL`` may sit past any prefix.
+    """
+
+    mime = detect_supported_image_mime_type(data)
+    return mime if mime in IMAGE_MIME_TYPES else None
 
 
 def unsupported_argument(call: ImageCall, spec: ImageModelSpec) -> str | None:
@@ -137,7 +146,7 @@ def image_result(body: bytes | bytearray, say: Say) -> ImageResult:
     data = answer.get("data") if isinstance(answer, dict) else None
     if not isinstance(data, list) or not data or not all(isinstance(item, dict) for item in data):
         return ImageResult(failed_record(failure(say, "modelHub.hostedTools.imageMissing")))
-    if len(data) > MAX_IMAGES_PER_CALL:
+    if len(data) > MAX_IMAGES:
         # A call asks for at most four; more is not what was asked for, and none of it is kept.
         return ImageResult(failed_record(failure(say, "modelHub.hostedTools.tooLarge")))
     images: list[str] = []
@@ -153,7 +162,7 @@ def image_result(body: bytes | bytearray, say: Say) -> ImageResult:
         total += len(decoded)
         if not decoded or len(decoded) > IMAGE_MAX_BYTES or total > IMAGES_TOTAL_MAX_BYTES:
             return ImageResult(failed_record(failure(say, "modelHub.hostedTools.tooLarge")))
-        if detect_supported_image_mime_type(decoded[:4100]) is None:
+        if _image_mime(decoded) is None:
             return ImageResult(failed_record(failure(say, "modelHub.hostedTools.imageUnreadable")))
         images.append(encoded)
     generation = {

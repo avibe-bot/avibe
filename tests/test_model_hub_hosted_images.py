@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import json
+import struct
 from dataclasses import replace
 
 import aiohttp
@@ -23,6 +24,7 @@ from core.handlers.model_hub.capability_evidence import EvidenceFeature
 from core.handlers.model_hub.stream_wire import ProtocolUsageReport
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 from modules.agents.model_hub import ModelHubRuntimeRouter
+from tests.agent_core.tools.test_read import _png
 from tests.test_model_hub_hosted_evidence import latest_ok
 from tests.test_model_hub_l3 import InvokeHandle, LiveInvokeHandle, _outcome, _source, _usage_of
 from tests.test_model_hub_vibey_consumer import _vibey_service
@@ -173,6 +175,9 @@ async def test_a_model_gone_mid_turn_is_unavailable_and_the_record_names_the_oth
 
 
 NOT_AN_IMAGE = base64.b64encode(b"plain text, not an image").decode()
+# Images read and the media sink do not take: a BMP, and an animated PNG whose acTL sits past any sniffed prefix.
+BMP = base64.b64encode(struct.pack("<2sIHHIIiiHH", b"BM", 58, 0, 0, 54, 40, 1, 1, 1, 24) + bytes(28)).decode()
+LATE_APNG = base64.b64encode(_png(animated=True, padding=10_000)).decode()
 
 
 @pytest.mark.parametrize(("answer_body", "error"), [
@@ -180,6 +185,8 @@ NOT_AN_IMAGE = base64.b64encode(b"plain text, not an image").decode()
     ({"created": 1, "data": []}, "returned no image data"),
     ({"created": 1, "data": [{"b64_json": "not base64!"}]}, "could not be used"),
     ({"created": 1, "data": [{"b64_json": NOT_AN_IMAGE}]}, "could not be used"),
+    ({"created": 1, "data": [{"b64_json": BMP}]}, "could not be used"),
+    ({"created": 1, "data": [{"b64_json": LATE_APNG}]}, "could not be used"),
     ({"created": 1, "data": [{"b64_json": PNG}, {"b64_json": PNG}], "oversized": True}, "larger than allowed"),
     # A call asks for at most four images: an answer with more is not kept at all.
     ({"created": 1, "data": [{"b64_json": PNG}] * 5}, "larger than allowed"),
@@ -241,6 +248,7 @@ async def test_only_an_upstream_refusal_of_the_model_or_endpoint_is_learned(tmp_
     {"model": "gpt-image-2", "prompt": "a cat", "images": [PNG] * 5},
     {"model": "gpt-image-2", "prompt": "a cat", "images": ["not base64!"]},
     {"model": "gpt-image-2", "prompt": "a cat", "images": [NOT_AN_IMAGE]},
+    {"model": "gpt-image-2", "prompt": "a cat", "images": [BMP]},
 ])
 async def test_a_malformed_image_call_is_refused_before_anything_runs(tmp_path, arguments):
     """MH-HOSTED-GATEWAY-007: Vibey checks the same before calling; the gateway is the execution boundary."""
@@ -287,7 +295,8 @@ async def test_an_image_call_costs_its_delivered_images_at_their_list_price(tmp_
     assert answer["execution"].get("cost") == cost
 
 
-async def test_an_image_answer_is_bounded_while_it_downloads(monkeypatch):
+@pytest.mark.parametrize("status", [200, 502], ids=["served", "refused"])
+async def test_an_image_answer_is_bounded_while_it_downloads(monkeypatch, status):
     """MH-HOSTED-GATEWAY-007: a relay that never stops is cut at the bound, before it reaches the disk spool."""
 
     from aiohttp import web
@@ -299,7 +308,7 @@ async def test_an_image_answer_is_bounded_while_it_downloads(monkeypatch):
     sent = []
 
     async def respond(request):
-        response = web.StreamResponse(headers={"Content-Type": "application/json"})
+        response = web.StreamResponse(status=status, headers={"Content-Type": "application/json"})
         await response.prepare(request)
         try:
             for _ in range(64):
@@ -318,5 +327,7 @@ async def test_an_image_answer_is_bounded_while_it_downloads(monkeypatch):
         outcome = await handle.outcome()
         await handle.close_stream()
     assert requests[0][0] == "/v1/images/generations"
-    assert (outcome.kind, outcome.error_code) == (RawOutcomeKind.NETWORK_ERROR, "response_too_large")
+    assert (outcome.kind, outcome.error_code, outcome.http_status) == (
+        RawOutcomeKind.NETWORK_ERROR, "response_too_large", status,
+    )
     assert handle.stream is None

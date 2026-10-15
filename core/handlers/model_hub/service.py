@@ -6597,7 +6597,8 @@ class ModelHubService:
         source = await admitted()
         if source is None:
             return failed(unavailable)
-        request = ModelHubRequest(image_request(call, choice.spec), protocol="openai_images")
+        # Its reference images become data URLs: megabytes, built off the controller loop.
+        request = ModelHubRequest(await asyncio.to_thread(image_request, call, choice.spec), protocol="openai_images")
         body = bytearray()
 
         async def feed(chunk: bytes) -> None:
