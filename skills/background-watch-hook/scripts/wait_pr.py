@@ -341,6 +341,20 @@ def _is_codex_summary_shape(body: str) -> bool:
     return closing is not None and not any(suffix[closing + 1:])
 
 
+def _is_codex_clean_pass_body(body: str) -> bool:
+    lines = [line.strip() for line in body.splitlines() if line.strip()]
+    if not lines or not re.fullmatch(
+        r"Codex Review:\s*Didn['’]t find any major issues\.?", lines[0], re.IGNORECASE,
+    ):
+        return False
+    if len(lines) == 1:
+        return True
+    return len(lines) == 2 and bool(re.fullmatch(
+        r"\*{0,2}Reviewed commit\*{0,2}:\*{0,2}\s*`[0-9a-f]{7,40}`",
+        lines[1], re.IGNORECASE,
+    ))
+
+
 def _is_codex_clean_pass(item: dict[str, Any], head_sha: str) -> bool:
     """Recognize a success shape, not a substitute for the Agent's review gate."""
 
@@ -349,10 +363,7 @@ def _is_codex_clean_pass(item: dict[str, Any], head_sha: str) -> bool:
     if str(item.get("state") or "").lower() in {"changes_requested", "dismissed"}:
         return False
     body = str(item.get("body") or "")
-    if (
-        not re.search(r"Codex Review:\s*Didn['’]t find any major issues\b", body, re.IGNORECASE)
-        or _has_codex_problem_text(body)
-    ):
+    if not _is_codex_clean_pass_body(body):
         return False
     reviewed = item.get("commit_id")
     if not isinstance(reviewed, str) or not reviewed:

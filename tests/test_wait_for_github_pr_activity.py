@@ -4797,7 +4797,12 @@ def test_coalescing_does_not_restore_old_reactions_when_report_head_differs(tmp_
     assert "success candidate" not in output
 
 
-@pytest.mark.parametrize("suffix", ["Something went wrong. Please try again.", "P1: fix the race", "Changes requested"])
+@pytest.mark.parametrize("suffix", [
+    "Something went wrong. Please try again.",
+    "P1: fix the race",
+    "Changes requested",
+    "## Review findings\nRace allows duplicate notifications",
+])
 def test_coalescing_surfaces_mixed_clean_and_error_text(tmp_path, suffix):
     module = _load_module()
     path = tmp_path / "ci.json"
