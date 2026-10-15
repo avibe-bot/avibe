@@ -23,7 +23,7 @@
     "request_headers": { "type": "object", "additionalProperties": { "type": "string" } },
     "capabilities": {
       "type": "object",
-      "required": ["context_window", "input_limit", "max_output_tokens", "supports_tools", "supports_images", "supports_reasoning", "reasoning_efforts"],
+      "required": ["context_window", "input_limit", "max_output_tokens", "supports_tools", "supports_images", "supports_reasoning", "reasoning_efforts", "context_price_steps"],
       "additionalProperties": false,
       "properties": {
         "context_window": { "type": ["integer", "null"], "minimum": 1 },
@@ -32,7 +32,12 @@
         "supports_tools": { "type": ["boolean", "null"] },
         "supports_images": { "type": ["boolean", "null"] },
         "supports_reasoning": { "type": ["boolean", "null"] },
-        "reasoning_efforts": { "type": "array", "items": { "type": "string" } }
+        "reasoning_efforts": { "type": "array", "items": { "type": "string" } },
+        "context_price_steps": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 1 },
+          "description": "Where the target model's list price rises with its context, ascending, from the price table the usage writer holds; empty when flat or unknown."
+        }
       }
     },
     "hosted_tools": {

@@ -194,6 +194,8 @@ class ModelHubLaunch:
     hosted_tools: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     # Vibey only: the Source's credential-free identity, from the snapshot its origin came from (C-6).
     source_identity: Optional[str] = None
+    # Vibey only: where the target model's list price steps up with its context, ascending (C-6, C-9 section 1).
+    context_price_steps: tuple[int, ...] = ()
 
     def to_hop_resolution(self) -> dict[str, Any]:
         """Project C-6 from the same launch that owns routing and credentials."""
@@ -223,6 +225,7 @@ class ModelHubLaunch:
                 "supports_images": self.supports_images,
                 "supports_reasoning": self.supports_reasoning,
                 "reasoning_efforts": list(self.reasoning_efforts),
+                "context_price_steps": list(self.context_price_steps),
             },
             "hosted_tools": copy.deepcopy({tool: dict(entry) for tool, entry in self.hosted_tools.items()}),
         }
@@ -1398,6 +1401,9 @@ class ModelHubRuntimeRouter:
                 ),
                 hosted_tools=hosted_tools,
                 source_identity=identity,
+                context_price_steps=(
+                    self.service.context_price_steps(target_model) if backend == "vibey" else ()
+                ),
             )
         self._emit_transition(launch, config)
         return launch

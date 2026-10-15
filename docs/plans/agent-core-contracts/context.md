@@ -1,7 +1,8 @@
 # C-9 Context management
 
 Frozen 2026-10-04 by owner decision; amended 2026-10-13 by owner decision (the estimate of opaque reasoning payloads
-and the anchor's validity, §2; the cache lifetime per route, §3; the checkpoint request's output budget, §1 and §6).
+and the anchor's validity, §2; the cache lifetime per route, §3; the checkpoint request's output budget, §1 and §6);
+amended 2026-10-15 by owner decision (the threshold stays below the route's context price step, §1).
 The `harness` owns the rules (`core/agent_core/harness/context.py`, `projection.py`); the loop applies them before
 every model request (`core/agent_core/agent/loop.py`); the adapter supplies the Session-specific parts (§9). Row
 shapes: [`transcript-rows.schema.json`](transcript-rows.schema.json); events:
@@ -21,7 +22,7 @@ projects the full original context (C-5 §4).
 
 The hop capabilities Model Hub returns for the route resolved for the request (C-6) give the limits. `O` is set
 when the request is built, as its `max_tokens` (`output_tokens()`, `checkpoint_max_tokens()`). One pure function,
-`harness/context.budget(request, capabilities, transcript, anchor)`, derives `W, L_in, M, T, keep` and the request's
+`harness/context.budget(request, capabilities, transcript, anchor)`, derives `W, L_in, M, P, T, keep` and the request's
 `est` (§2) and reads `O` from the request, once per request (§10, invariant 1). No state keeps these values between
 requests, so a route change is picked up at once; a smaller window than expected is handled by the overflow path
 (§8). Every fit decision is `budget()` on a request actually composed (§10, invariant 1), including the two the
@@ -33,7 +34,8 @@ L_in = input_limit                                 (W when unknown)
 O    = the request's max_tokens: for a conversation request max_output_tokens (8,192 when unknown), capped by the
        Agent's output budget; for a checkpoint request min(64,000, that)
 M    = min(max(8,000, ceil(0.03 * W)), floor(W / 8))
-T    = min(L_in - O - M, floor(0.9 * W))           the compaction threshold
+P    = the smallest context_price_steps size of at least 100,000   (none when there is none)
+T    = min(L_in - O - M, floor(0.9 * W), floor(0.9 * P))     the compaction threshold; without P, the first two
 keep = min(20,000, floor(0.25 * T))                the verbatim tail of a normal checkpoint
 ```
 
@@ -44,8 +46,23 @@ be sent), and 296 more would leave `T < 0.25 * W`. The adapter therefore asks fo
 `min(max_output_tokens, floor(W / 4))` on every hop it resolves (a retry's fallback included), the maximum 8,192 when
 unknown, so the output never takes more than a quarter of any window; the limits themselves still come from Model
 Hub. `M` is at most an eighth of the window, so with `O <= W / 4` the threshold stays positive on every window:
-`T >= 0.625 * W` (with `L_in = W`). Windows of 64,000 tokens and more are unchanged (`M = max(8,000, 3% W)`); on an
-8,000-token route `O = 2,000`, `M = 1,000`, and `T = 5,000`.
+`T >= 0.625 * W` (with `L_in = W`), and `T >= min(0.625 * W, 90,000)` with a price step `P` (below). Windows of
+64,000 tokens and more are unchanged (`M = max(8,000, 3% W)`); on an 8,000-token route `O = 2,000`, `M = 1,000`, and
+`T = 5,000`.
+
+`P` is where the route's price steps up. `context_price_steps` (C-6) lists the input sizes past which the target
+model's list price rises, from Model Hub's price table (the user's override file, then models.dev's first-party
+`cost.tiers`). Past 272,000 input tokens, OpenAI's GPT-5.4 and later models bill the whole request at twice the input
+and cache rates and 1.5 times the output, on a 1,050,000-token window; Gemini and Grok models step at 200,000. A long
+request is slower as well: on the gpt-6-astra Sessions recorded from 2026-10-10 to 2026-10-15, with about the same
+output, the median request took 23 s under 100,000 tokens, 43 s at 200,000 to 300,000, and 78 s past 800,000, and
+65% of the requests were past the step (86% of their input tokens) at `T = 890,500`. Replaying those requests with
+`T = 244,800` costs about a quarter at list price, checkpoints included, with 126 checkpoints instead of 9. So
+`T` stays a tenth below the step, the window's ratio: the tenth leaves room for one tool batch and the checkpoint
+request, so the checkpoint is written below the step too. A step under 100,000 tokens is not kept below: a
+checkpoint's own context (system prompt, tools, checkpoint, `keep`) is some 30,000 tokens, so a lower threshold would
+compact almost every request, and a dearer step above it still counts. The step is the model's list price whatever
+the Source bills (a subscription's request is as slow). With no price, or a flat one, `T` is as before.
 
 A conversation request **fits** when `est + O + M <= L_in`, where `est` is its estimate (§2); `M` absorbs the
 estimate's error. A request **can fit** when `est + O <= L_in`. A checkpoint request (§6) is sent only when it can

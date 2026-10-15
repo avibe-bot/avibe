@@ -181,7 +181,14 @@ from .oauth import (
     OAuthFlowRegistry,
     UnavailableNativeOAuthAdapter,
 )
-from .pricing import VALUE_WINDOW_DAYS, PriceTable, hosted_response_cost, load_price_table, quota_values
+from .pricing import (
+    VALUE_WINDOW_DAYS,
+    PriceTable,
+    context_price_steps,
+    hosted_response_cost,
+    load_price_table,
+    quota_values,
+)
 from .quota import QuotaSourceRef, SubscriptionQuotaCache, SubscriptionQuotaError
 from .provenance import (
     REQUEST_NONFALLBACK_TURN_OUTCOME,
@@ -6429,6 +6436,16 @@ class ModelHubService:
             return None
         basis, usd = priced
         return HostedCost(basis=basis, usd=None if usd is None else round(usd, 6))
+
+    def context_price_steps(self, model_id: str) -> tuple[int, ...]:
+        """Where ``model_id``'s list price steps up with its context (``pricing.context_price_steps``), ascending.
+
+        Memory-only, like ``hosted_call_cost``: read from the table the usage writer already holds, so a hop resolved
+        before the first table is read, or for a model with no price, reports none.
+        """
+
+        prices = self.usage_writer.held_prices
+        return context_price_steps(prices.price(model_id)) if prices is not None else ()
 
     def _admitted_executor(self, slot: ExecutorSlot, tool: str) -> ExecutorCandidate | None:
         """The chain's candidate as the current snapshot admits it, else None (``vibey-hosted-tools.md`` §6).

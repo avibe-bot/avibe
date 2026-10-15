@@ -15,6 +15,8 @@ before it ships.
   and `POST /api/models/sources/<source_id>/evidence/clear` clear refusals; the PUT is per field.
 - The provider overlay gains a vendor's `executor_model` and `image_models[]`, and loses the native `image_generation`
   declaration.
+- `HopResolution.capabilities` gains `context_price_steps` (`hop-resolution.schema.json`): where the target model's
+  list price rises with its context, from the price table, which Vibey's compaction threshold stays below.
 
 It builds on v14 (2026-10-14): opaque history is bound to the account that issued it, the Source
 identity, not only to the origin (#2620): a provider refuses another account's encrypted reasoning.

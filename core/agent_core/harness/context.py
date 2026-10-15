@@ -55,6 +55,9 @@ MARGIN_RATIO = 0.03
 #: The margin is at most an eighth of the window: with ``O <= W / 4`` (the Avibe Agent's budget), ``T >= 0.625 * W``.
 MARGIN_CAP_RATIO = 0.125
 THRESHOLD_RATIO = 0.9
+#: A context price step (``ModelCapabilities.context_price_steps``) smaller than this is not kept below (section 1): a
+#: checkpoint's own context is some 30,000 tokens, so a lower threshold would compact almost every request.
+PRICE_STEP_MIN = 100_000
 KEEP_MAX = 20_000
 KEEP_RATIO = 0.25
 IMAGE_TOKENS = 1_600
@@ -497,7 +500,7 @@ def budget(
 ) -> Budget:
     """``W, L_in, O, M, T, keep`` and ``est`` of a composed ``request`` on the route resolved for it.
 
-    Sections 1 and 2: it derives ``W, L_in, M, T, keep`` and ``est`` and reads ``O`` from ``request.max_tokens``,
+    Sections 1 and 2: it derives ``W, L_in, M, P, T, keep`` and ``est`` and reads ``O`` from ``request.max_tokens``,
     which ``output_tokens`` or ``checkpoint_max_tokens`` set when the request was built. ``transcript`` is the part
     of the request's messages that comes from the rows, which is what an anchor is checked against.
     """
@@ -506,6 +509,9 @@ def budget(
     output = request.max_tokens
     margin = min(max(MARGIN_MIN, math.ceil(MARGIN_RATIO * window)), math.floor(MARGIN_CAP_RATIO * window))
     threshold = min(limit - output - margin, math.floor(THRESHOLD_RATIO * window))
+    step = min((size for size in capabilities.context_price_steps if size >= PRICE_STEP_MIN), default=None)
+    if step is not None:
+        threshold = min(threshold, math.floor(THRESHOLD_RATIO * step))
     keep = max(0, min(KEEP_MAX, math.floor(KEEP_RATIO * threshold)))
     return Budget(window, limit, output, margin, threshold, keep, _estimate(request, transcript, anchor))
 
