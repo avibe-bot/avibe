@@ -7,6 +7,7 @@ fixture the Web card tests render, so producer and consumer read one shape.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ import pytest
 from core.agent_core.messages import (
     HOSTED_ERROR_CODES,
     AssistantMessage,
+    FailedAttempt,
     HostedAction,
     HostedCost,
     HostedImage,
@@ -106,28 +108,26 @@ def proxy_x_search():
     )
 
 
-def native_image():
-    [activity] = native_activities(
-        _message(
-            HostedToolBlock(
-                id="ig_01",
-                tool="image_generation",
-                action=HostedAction(type="generate", prompt=PROMPT, size="1536x1024", quality="medium"),
-                record=HostedRecord(
-                    status="completed",
-                    images=(HostedImage(path="/media/3f2a.png", mime="image/png", width=1536, height=1024, bytes=1993000),),
-                ),
-                native=_native("src_relaygpt1"),
+def direct_image():
+    """An ``image_generate`` call, run directly on the image endpoint (§7.4)."""
+    return proxy_activity(
+        ToolCallBlock(id="call_ig1", name="image_generate", arguments={"model": "gpt-image-2", "prompt": PROMPT}),
+        HostedResult(
+            record=HostedRecord(
+                status="completed",
+                images=(HostedImage(path="/media/3f2a.png", mime="image/png", width=1536, height=1024, bytes=1993000),),
             ),
-            # Phase 1 knows no image price, so the response carries no cost at all.
-            summary=HostedSummary(),
-            provider="openai",
-            api="openai_responses",
-            model="gpt-6.1-sol",
+            # No image price is known here, so the call carries no cost at all.
+            execution=ProxyExecution(
+                executor_origin=Origin(provider="openai", api="openai_responses", model="gpt-image-2"),
+                executor_source_id="src_relaygpt1",
+                executor_billing="metered",
+                mode="direct",
+            ),
+            action=HostedAction(type="generate", prompt=PROMPT, size="1536x1024", quality="medium", model="gpt-image-2"),
         ),
         source_names=NAMES,
     )
-    return activity
 
 
 def proxy_failed():
@@ -142,7 +142,7 @@ def test_a_proxied_image_shows_what_its_executor_rendered_as_a_native_one_does()
     """A proxied image's card reads the executor's rendered prompt and resolved size and quality from the result's
     action, as a native image's reads its block's action: one reading, no mode branch."""
 
-    call = ToolCallBlock(id="call_i1", name="image_generation", arguments={"prompt": "a lighthouse", "size": "auto"})
+    call = ToolCallBlock(id="call_i1", name="image_generate", arguments={"prompt": "a lighthouse", "size": "auto"})
     activity = proxy_activity(
         call,
         HostedResult(
@@ -171,7 +171,7 @@ def proxy_unreachable():
     )
 
 
-@pytest.mark.parametrize("build", [native_web_search, proxy_x_search, native_image, proxy_failed, proxy_unreachable])
+@pytest.mark.parametrize("build", [native_web_search, proxy_x_search, direct_image, proxy_failed, proxy_unreachable])
 def test_payloads_match_the_shape_the_web_card_renders(build):
     """MH-HOSTED-UI-009: every mode and outcome the card distinguishes, from the canonical records each producer writes.
 
@@ -233,10 +233,10 @@ def test_a_response_scoped_summary_is_shown_once():
         ),
         (proxy_x_search, "zh", "🔎 X 搜索 “from:OpenAI within_time:7d” · 由 xAI 代理 · 2 条帖子 · $0.11"),
         (
-            native_image,
+            direct_image,
             "en",
             "🖼 Image generation “A wide photo of an open laptop on a desk at night, empty da…”"
-            " · native (OpenAI) · 1 image",
+            " · direct (OpenAI) · 1 image",
         ),
         (proxy_failed, "zh", "🔎 X 搜索 “from:OpenAI” · 失败：no Source is verified for X search"),
     ],
@@ -293,6 +293,40 @@ def test_the_im_line_names_a_subscription_and_a_shared_response_cost():
         )
     )[-1]
     assert hosted_line(shared, "en") == "🔎 Web search “b” · native (Anthropic) · 1 source · ≈ $0.02 for 2 calls"
+
+
+def _attempt(source_id: str, billing: str, cost: HostedCost | None):
+    return FailedAttempt(source_id=source_id, billing=billing, cost=cost)
+
+
+@pytest.mark.parametrize(
+    ("failed", "last", "cost", "line_cost"),
+    [
+        # A metered failure before the call that ran: both charges, and how many calls they cover.
+        ((("src_relaygpt1", "metered", HostedCost(basis="list", usd=0.02)),), HostedCost(basis="reported", usd=0.11),
+         {"basis": "list", "usd": 0.13, "calls": 2}, "≈ $0.13 for 2 calls"),
+        ((("src_relaygpt1", "metered", HostedCost(basis="reported", usd=0.02)),), HostedCost(basis="reported", usd=0.11),
+         {"basis": "reported", "usd": 0.13, "calls": 2}, "$0.13 for 2 calls"),
+        # A subscription attempt adds no money.
+        ((("src_chatgpt01", "monthly", HostedCost(basis="included")),), HostedCost(basis="reported", usd=0.11),
+         {"basis": "reported", "usd": 0.11, "calls": 2}, "$0.11 for 2 calls"),
+        # A billed attempt with no known price: the total is unknown, never shown smaller than it was.
+        ((("src_relaygpt1", "metered", None),), HostedCost(basis="reported", usd=0.11), None, None),
+    ],
+)
+def test_a_proxied_calls_cost_counts_every_billed_attempt(failed, last, cost, line_cost):
+    """MH-HOSTED-GATEWAY-005: the card and the IM line show what the whole executor chain cost, never less."""
+
+    activity = proxy_activity(
+        _x_call("call_x5", "from:OpenAI"),
+        HostedResult(
+            record=HostedRecord(status="completed", sources=POSTS[:1]),
+            execution=replace(XAI, cost=last, failed_attempts=tuple(_attempt(*item) for item in failed)),
+        ),
+    )
+    assert activity.to_payload().get("cost") == cost
+    line = hosted_line(activity, "en")
+    assert line.endswith(f" · {line_cost}") if line_cost else "$" not in line
 
 
 def test_the_im_line_escapes_the_quoted_subject_for_its_destination():

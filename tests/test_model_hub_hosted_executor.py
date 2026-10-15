@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import gzip
 import json
+import threading
 from dataclasses import replace
 from datetime import timedelta
 
@@ -21,7 +22,8 @@ import pytest
 from config.v2_config import ModelHubHostedToolConfig
 from core.agent_core.messages import HostedCost, message_from_dict
 from core.handlers.model_hub import service as service_module
-from core.handlers.model_hub.adapter import InvokeCancelledError, RawOutcomeKind
+from core.handlers.model_hub.adapter import InvokeCancelledError, RawOutcomeKind, UpstreamRejection
+from core.handlers.model_hub.capability_evidence import EvidenceFeature
 from core.handlers.model_hub.hosted_executor import ResponsesReadout, anthropic_result, excerpt, responses_result
 from core.handlers.model_hub import hosted_tools as hosted_tools_module
 from core.handlers.model_hub.pricing import PriceTable
@@ -39,6 +41,7 @@ from tests.test_model_hub_l3 import (
     _source,
     _usage_of,
 )
+from tests.test_model_hub_hosted_evidence import latest_ok
 from tests.test_model_hub_vibey_consumer import _vibey_service
 
 XAI = "src_xaikey0001"
@@ -185,22 +188,32 @@ def _hosted_result(tool, answer):
 async def test_a_proxied_search_runs_one_native_request_and_answers_its_canonical_record(
     tmp_path, tool, executor, arguments, frames, body_fields, sources,
 ):
-    """MH-HOSTED-GATEWAY-004: the bound executor only, no effort, the overlay declaration forced, excerpts, metering."""
+    """MH-HOSTED-GATEWAY-004: the chain's first executor, no effort, the overlay declaration forced, excerpts,
+    metering, and the same positive evidence a native call writes."""
 
     usage = ProtocolUsageReport.of(input_tokens=5369, cached_input_tokens=256, output_tokens=307)
-    service = _vibey_service(tmp_path, _sources(), handles=[
-        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=executor[0], usage=usage), frames),
-    ])
+    served = replace(
+        _outcome(RawOutcomeKind.SUCCESS, source_id=executor[0], usage=usage), hosted_tools=frozenset({tool}),
+    )
+    service = _vibey_service(tmp_path, _sources(), handles=[LiveInvokeHandle(served, frames)])
     _bind(service, tool, executor)
-    status, answer = await _call(service, tool, {
-        "arguments": arguments, "executor": {"source_id": executor[0], "model_id": executor[1]},
-    })
+    admitting_threads = []
+    admit = service._admitted_executor
+
+    def recorded(*args):
+        admitting_threads.append(threading.current_thread())
+        return admit(*args)
+
+    service._admitted_executor = recorded
+    status, answer = await _call(service, tool, {"arguments": arguments})
     assert status == 200, answer
+    # Admission reads the config, which grows with use: at the chain step and again under the lock, off the loop.
+    assert len(admitting_threads) == 2 and threading.main_thread() not in admitting_threads
     assert service.adapter.invocations == [(executor[0], executor[1], "vibey")]
     sent = service.adapter.requests[0]
     assert sent.protocol == "openai_responses"
     assert "reasoning" not in sent
-    # Forced, as the call probe that verified it forces it.
+    # Forced: a model answering from memory runs no search.
     assert sent["tool_choice"] == "required"
     assert {key: sent[key] for key in body_fields} == body_fields
     assert set(sent) - set(body_fields) == {
@@ -223,6 +236,7 @@ async def test_a_proxied_search_runs_one_native_request_and_answers_its_canonica
     assert _hosted_result(tool, answer).execution.executor_source_id == executor[0]
     # Metered on the executor Source, like any gateway call.
     assert _usage_of(service, executor[0])
+    assert latest_ok(service, tool) == (executor[0], executor[1], "executor")
 
 
 @pytest.mark.asyncio
@@ -251,7 +265,6 @@ async def test_an_anthropic_executor_is_buffered_and_keeps_the_providers_results
     _bind(service, "web_search", (ANTHROPIC, "claude-haiku-4-5"))
     status, answer = await _call(service, "web_search", {
         "arguments": {"query": "CLIProxyAPI latest release"},
-        "executor": {"source_id": ANTHROPIC, "model_id": "claude-haiku-4-5"},
     })
     assert status == 200
     sent = service.adapter.requests[0]
@@ -318,7 +331,6 @@ async def test_a_proxied_call_carries_the_pricing_modules_cost(tmp_path, tool, e
     _bind(service, tool, executor)
     status, answer = await _call(service, tool, {
         "arguments": {"query": "CLIProxyAPI latest release"},
-        "executor": {"source_id": executor[0], "model_id": executor[1]},
     })
     assert status == 200, answer
     assert answer["record"]["status"] == "completed"
@@ -333,13 +345,15 @@ FAILED_WITH_PARTIAL = {**WEB_CALL, "status": "failed"}
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("case", "bound", "handles", "error", "sources", "executed"), [
-    ("none_verified", None, [], "No Source is verified to run web_search", [], False),
-    ("source_removed", (XAI, "grok-4.6"), [], "no longer available", [], False),
-    # A new base URL or credential is a new identity: never verified, so never run.
-    ("source_identity_changed", (XAI, "grok-4.6"), [], "no longer available", [], False),
+    # No Source can run it: the record says which providers' Sources could.
+    ("no_candidate", None, [], "No Source can run web_search right now", [], False),
+    ("source_removed", (XAI, "grok-4.6"), [], "No Source can run web_search right now", [], False),
+    # A new base URL or credential is a new identity, which the turn's chain was not built for.
+    ("source_identity_changed", (XAI, "grok-4.6"), [], "No Source can run web_search right now", [], False),
+    # The only candidate failed: its failure, and the Sources tried.
     ("provider_refused", (XAI, "grok-4.6"),
      [InvokeHandle(_outcome(RawOutcomeKind.HTTP_ERROR, status=429, code="rate_limit_error", source_id=XAI))],
-     "refused the call (HTTP 429 rate_limit_error)", [], True),
+     "refused the call (HTTP 429 rate_limit_error). Tried: xAI key.", [], True),
     ("tool_never_ran", (XAI, "grok-4.6"),
      [LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=XAI), _responses(WEB_ANSWER))],
      "did not run web_search", [], True),
@@ -372,9 +386,8 @@ async def test_a_proxied_call_that_cannot_complete_is_a_failed_record(
                 for item in service.store.config.sources
             ]
 
-    executor = {"source_id": bound[0], "model_id": bound[1]} if bound else None
     status, answer = await _call(
-        service, "web_search", {"arguments": {"query": "q"}, "executor": executor}, after_launch=remove_executor,
+        service, "web_search", {"arguments": {"query": "q"}}, after_launch=remove_executor,
     )
     assert status == 200
     assert answer["record"]["status"] == "failed"
@@ -385,6 +398,104 @@ async def test_a_proxied_call_that_cannot_complete_is_a_failed_record(
     assert _hosted_result("web_search", answer).record.status == "failed"
 
 
+def _chain(service, tool, *executors):
+    """Turn the tool on with these Sources as its executor chain, in this order, each on its executor model."""
+
+    config = service.store.config
+    config.hosted_tools[tool] = ModelHubHostedToolConfig(enabled=True, executor_order=tuple(e[0] for e in executors))
+    for source_id, model_id in executors:
+        _EXECUTOR_MODELS[next(item for item in config.sources if item.id == source_id).vendor] = model_id
+
+
+def _refusal(status, code, source_id, **fields):
+    return _outcome(RawOutcomeKind.HTTP_ERROR, status=status, code=code, source_id=source_id, **fields)
+
+
+def _served_by_openai():
+    return LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=OPENAI), _responses(WEB_CALL, WEB_ANSWER))
+
+
+BILLED = ProtocolUsageReport.of(input_tokens=900, cached_input_tokens=0, output_tokens=40)
+NARROW = replace(
+    _refusal(400, "invalid_request_error", XAI),
+    rejection=UpstreamRejection(status=400, code="invalid_request_error", unsupported_tool_type="web_search"),
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("case", "handles", "invoked", "status", "served_by", "failed_attempts"), [
+    # A failure normal routing fails over from moves on; a refusal before output that reported no tokens is unbilled.
+    ("rate_limited", lambda: [InvokeHandle(_refusal(429, "rate_limit_error", XAI)), _served_by_openai()],
+     [XAI, OPENAI], "completed", OPENAI, []),
+    # A failure mid-response moves on too, since nothing reached Vibey yet, and it was billed.
+    ("failed_mid_response", lambda: [
+        LiveInvokeHandle(_refusal(200, "server_error", XAI, stream_started=True, usage=BILLED), _responses(WEB_CALL)[:-1]),
+        _served_by_openai(),
+    ], [XAI, OPENAI], "completed", OPENAI, [XAI]),
+    # A refusal of the executor model, or a narrow rule's: the Source leaves the chain until the refusal is cleared.
+    ("executor_model_refused", lambda: [InvokeHandle(_refusal(404, "model_not_found", XAI)), _served_by_openai()],
+     [XAI, OPENAI], "completed", OPENAI, []),
+    ("narrow_rule_refused", lambda: [InvokeHandle(NARROW), _served_by_openai()], [XAI, OPENAI], "completed", OPENAI, []),
+    # The model chose not to search: no Source failed, and moving on would double the cost.
+    ("model_chose_not_to_run", lambda: [
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=XAI), _responses(WEB_ANSWER)),
+    ], [XAI], "failed", XAI, []),
+    # Any other outcome ends the chain.
+    ("request_rejected", lambda: [InvokeHandle(_refusal(400, "invalid_request_error", XAI, message="Bad field"))],
+     [XAI], "failed", XAI, []),
+    ("every_candidate_failed", lambda: [
+        InvokeHandle(_refusal(429, "rate_limit_error", XAI)), InvokeHandle(_refusal(503, "server_error", OPENAI)),
+    ], [XAI, OPENAI], "failed", OPENAI, []),
+])
+async def test_the_chain_moves_on_only_past_a_source_failure(
+    tmp_path, case, handles, invoked, status, served_by, failed_attempts,
+):
+    """MH-HOSTED-GATEWAY-005: the executor chain (§6 step 4), each attempt metered and listed with its own billing."""
+
+    service = _vibey_service(tmp_path, _sources(), handles=handles())
+    _chain(service, "web_search", (XAI, "grok-4.6"), (OPENAI, "gpt-6-astra"))
+    answer_status, answer = await _call(service, "web_search", {"arguments": {"query": "q"}})
+    assert answer_status == 200
+    assert [entry[0] for entry in service.adapter.invocations] == invoked
+    assert answer["record"]["status"] == status
+    assert answer["execution"]["executor_source_id"] == served_by
+    assert [attempt["source_id"] for attempt in answer["execution"].get("failed_attempts", [])] == failed_attempts
+    assert all(attempt["billing"] == "metered" for attempt in answer["execution"].get("failed_attempts", []))
+    assert _hosted_result("web_search", answer).record.status == status
+    if case == "every_candidate_failed":
+        assert answer["record"]["error"].endswith("Tried: xAI key, OpenAI key.")
+    xai = next(item for item in service.store.config.sources if item.id == XAI)
+    refused = service.hosted_evidence().unsupported(xai, "grok-4.6", EvidenceFeature.hosted("web_search", "call"))
+    assert refused is (case in {"executor_model_refused", "narrow_rule_refused"})
+    # The next turn's chain leaves a refused Source out.
+    chain = service.freeze_turn_hosted_tools(service.store.config).executors["web_search"]
+    assert [slot.source_id for slot in chain] == ([OPENAI] if refused else [XAI, OPENAI])
+
+
+@pytest.mark.asyncio
+async def test_a_call_reports_the_source_as_its_final_admission_saw_it(tmp_path):
+    """MH-HOSTED-GATEWAY-005: a Source edited while the engine is prepared runs and is billed as it now stands."""
+
+    service = _vibey_service(tmp_path, _sources(), handles=[
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=XAI), _responses(WEB_CALL, WEB_ANSWER)),
+    ])
+    _bind(service, "web_search", (XAI, "grok-4.6"))
+    prepare = service._prepare_engine_for_demand
+
+    async def edited_meanwhile(*args, **kwargs):
+        # Billing and the name are not the Source's identity, so it is still admitted.
+        service.store.config.sources = [
+            replace(item, billing="monthly", display_name="xAI team plan") if item.id == XAI else item
+            for item in service.store.config.sources
+        ]
+        await prepare(*args, **kwargs)
+
+    service._prepare_engine_for_demand = edited_meanwhile
+    status, answer = await _call(service, "web_search", {"arguments": {"query": "q"}})
+    assert status == 200 and answer["record"]["status"] == "completed"
+    assert (answer["execution"]["executor_billing"], answer["execution"]["cost"]) == ("monthly", {"basis": "included"})
+
+
 @pytest.mark.asyncio
 async def test_failure_text_is_in_the_users_language(tmp_path):
     """MH-HOSTED-GATEWAY-005: the record's error is user-visible on the tool card, so it is localized."""
@@ -392,39 +503,25 @@ async def test_failure_text_is_in_the_users_language(tmp_path):
     service = _vibey_service(tmp_path, _sources())
     _bind(service, "x_search", None)
     status, answer = await _call(
-        service, "x_search", {"arguments": {"query": "q"}, "executor": None}, language="zh",
+        service, "x_search", {"arguments": {"query": "q"}}, language="zh",
     )
     assert status == 200
-    assert answer["record"]["error"] == "没有已验证可运行 x_search 的来源。请在「模型」中为某个来源验证它。"
+    assert answer["record"]["error"] == "当前没有可运行 x_search 的来源。添加以下任一供应商的来源即可使用：xAI。"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ["another_executor", "a_claude_subscription", "tool_not_enabled_this_turn"])
-async def test_only_the_executor_the_live_turn_bound_may_run(tmp_path, case):
-    """MH-HOSTED-GATEWAY-005: the token's turn bound one executor per tool; any other is refused, unrun."""
+async def test_a_call_runs_only_a_tool_its_live_turn_froze(tmp_path):
+    """MH-HOSTED-GATEWAY-005: a tool the turn did not declare is refused, unrun; turning it on mid-turn changes nothing."""
 
-    subscription = replace(
-        _source("src_claudesub01", "Claude subscription", vendor="anthropic", protocol="anthropic",
-                model_id="claude-haiku-4-5"),
-        kind="subscription", billing="monthly",
-    )
-    service = _vibey_service(tmp_path, _sources(subscription))
-    if case != "tool_not_enabled_this_turn":
+    service = _vibey_service(tmp_path, _sources())
+    service.store.config.hosted_tools["web_search"] = ModelHubHostedToolConfig(enabled=False)
+
+    def turned_on(_hop):
         _bind(service, "web_search", (XAI, "grok-4.6"))
-    named = {
-        "another_executor": (OPENAI, "gpt-6-astra"),
-        "a_claude_subscription": ("src_claudesub01", "claude-haiku-4-5"),
-        "tool_not_enabled_this_turn": (XAI, "grok-4.6"),
-    }[case]
-    status, answer = await _call(service, "web_search", {
-        "arguments": {"query": "q"}, "executor": {"source_id": named[0], "model_id": named[1]},
-    })
-    assert (status, answer) == (409, {"type": "error", "error": {"type": "executor_not_bound", "code": "executor_not_bound"}})
+
+    status, answer = await _call(service, "web_search", {"arguments": {"query": "q"}}, after_launch=turned_on)
+    assert (status, answer) == (409, {"type": "error", "error": {"type": "tool_not_enabled", "code": "tool_not_enabled"}})
     assert service.adapter.invocations == []
-
-
-
-
 
 
 @pytest.mark.asyncio
@@ -448,7 +545,7 @@ async def test_a_call_is_metered_in_the_slice_it_ended_in(tmp_path):
     service.usage_writer = UsageWriter(service.usage)
     _bind(service, "web_search", (XAI, "grok-4.6"))
     status, _answer = await _call(service, "web_search", {
-        "arguments": {"query": "q"}, "executor": {"source_id": XAI, "model_id": "grok-4.6"},
+        "arguments": {"query": "q"},
     })
     assert status == 200
     rows = json.loads(service.usage.path.read_text(encoding="utf-8"))
@@ -501,7 +598,7 @@ async def test_one_failed_anthropic_search_fails_the_call_and_keeps_the_results_
     ])
     _bind(service, "web_search", (ANTHROPIC, "claude-haiku-4-5"))
     status, answer = await _call(service, "web_search", {
-        "arguments": {"query": "q"}, "executor": {"source_id": ANTHROPIC, "model_id": "claude-haiku-4-5"},
+        "arguments": {"query": "q"},
     })
     assert status == 200
     assert answer["record"]["status"] == "failed" and "too_many_requests" in answer["record"]["error"]
@@ -517,7 +614,7 @@ async def test_a_turn_owns_its_proxied_calls(tmp_path):
     _bind(service, "web_search", (XAI, "grok-4.6"))
     gateway = ModelHubTurnGateway(service)
     router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
-    body = json.dumps({"arguments": {"query": "q"}, "executor": {"source_id": XAI, "model_id": "grok-4.6"}})
+    body = json.dumps({"arguments": {"query": "q"}})
     try:
         hop = await router.resolve_hop("menu-alias", process_scope="vibey:own", turn_id="turn-own")
         async with aiohttp.ClientSession() as client:
@@ -532,13 +629,15 @@ async def test_a_turn_owns_its_proxied_calls(tmp_path):
             await asyncio.wait_for(completion, timeout=5)
             assert blocked.cancelled.is_set() and finished == [1]
             pending.cancel()
-            # The turn no longer admits work: a new call is refused before anything runs.
-            async with client.post(
-                f'{hop["base_url"]}/hosted-tools/web_search',
-                headers={"Authorization": f'Bearer {hop["token"]}', **hop["request_headers"]}, data=body,
-            ) as response:
-                assert response.status == 409
-                assert (await response.json())["error"]["code"] == "executor_not_bound"
+            # The turn no longer admits work: a new call is refused before anything runs, and before its body is
+            # read, so even a malformed one is answered as the closed turn it came from.
+            for data in (body, b"not json"):
+                async with client.post(
+                    f'{hop["base_url"]}/hosted-tools/web_search',
+                    headers={"Authorization": f'Bearer {hop["token"]}', **hop["request_headers"]}, data=data,
+                ) as response:
+                    assert response.status == 409
+                    assert (await response.json())["error"]["code"] == "turn_not_live"
     finally:
         await gateway.close()
     assert len(service.adapter.invocations) == 1
@@ -605,7 +704,7 @@ async def test_only_a_response_that_completed_completes_the_call(tmp_path, case,
     ])
     _bind(service, "web_search", executor)
     answer_status, answer = await _call(service, "web_search", {
-        "arguments": {"query": "q"}, "executor": {"source_id": executor[0], "model_id": executor[1]},
+        "arguments": {"query": "q"},
     })
     assert answer_status == 200
     assert answer["record"]["status"] == status
@@ -615,40 +714,47 @@ async def test_only_a_response_that_completed_completes_the_call(tmp_path, case,
 
 
 @pytest.mark.asyncio
-async def test_a_turn_keeps_its_hosted_binding_until_the_next_turn(tmp_path):
-    """MH-HOSTED-GATEWAY-005: settings apply from the next turn; later attempts of a turn keep its executors."""
+async def test_a_turn_keeps_its_tools_and_executor_order_until_the_next_turn(tmp_path):
+    """MH-HOSTED-GATEWAY-005: settings apply from the next turn; later hops of a turn keep its tools and chain."""
 
     service = _vibey_service(tmp_path, _sources(), handles=[
         LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=XAI), _responses(WEB_CALL, WEB_ANSWER)),
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=OPENAI), _responses(WEB_CALL, WEB_ANSWER)),
     ])
     _bind(service, "web_search", (XAI, "grok-4.6"))
     service.store.config.hosted_tools["x_search"] = ModelHubHostedToolConfig(enabled=False)
     gateway = ModelHubTurnGateway(service)
     router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+
+    async def search(hop, tool):
+        async with aiohttp.ClientSession() as client:
+            async with client.post(
+                f'{hop["base_url"]}/hosted-tools/{tool}',
+                headers={"Authorization": f'Bearer {hop["token"]}', **hop["request_headers"]},
+                data=json.dumps({"arguments": {"query": "q"}}),
+            ) as response:
+                return response.status, await response.json()
+
     try:
         first = await router.resolve_hop("menu-alias", process_scope="vibey:freeze", turn_id="turn-freeze")
-        # Mid-turn, the user moves web search to another executor and turns X search on.
+        # Mid-turn, the user puts OpenAI first for web search and turns X search on.
         _bind(service, "web_search", (OPENAI, "gpt-6-astra"))
         _bind(service, "x_search", (XAI, "grok-4.6"))
         again = await router.resolve_hop("menu-alias", process_scope="vibey:freeze", turn_id="turn-freeze")
         assert again["hosted_tools"].keys() == first["hosted_tools"].keys() == {"web_search"}
-        assert again["hosted_tools"]["web_search"]["executor"] == {"source_id": XAI, "model_id": "grok-4.6"}
-        async with aiohttp.ClientSession() as client:
-            async with client.post(
-                f'{again["base_url"]}/hosted-tools/web_search',
-                headers={"Authorization": f'Bearer {again["token"]}', **again["request_headers"]},
-                data=json.dumps({"arguments": {"query": "q"}, "executor": again["hosted_tools"]["web_search"]["executor"]}),
-            ) as response:
-                assert response.status == 200
-                assert (await response.json())["execution"]["executor_source_id"] == XAI
+        status, answer = await search(again, "web_search")
+        assert status == 200 and answer["execution"]["executor_source_id"] == XAI
+        assert (await search(again, "x_search"))[0] == 409
         completion = router.settle_turn("turn-freeze", settled_by=SETTLED_BY_STOPPED, ts=NOW.isoformat())
         if completion is not None:
             await completion
         nxt = await router.resolve_hop("menu-alias", process_scope="vibey:freeze", turn_id="turn-next")
-        assert nxt["hosted_tools"]["web_search"]["executor"] == {"source_id": OPENAI, "model_id": "gpt-6-astra"}
-        assert "x_search" in nxt["hosted_tools"]
+        assert {"web_search", "x_search"} <= nxt["hosted_tools"].keys()
+        status, answer = await search(nxt, "web_search")
+        assert status == 200 and answer["execution"]["executor_source_id"] == OPENAI
     finally:
         await gateway.close()
+    assert [entry[0] for entry in service.adapter.invocations] == [XAI, OPENAI]
 
 
 @pytest.mark.asyncio
@@ -658,7 +764,7 @@ async def test_a_proxy_call_body_is_bounded(tmp_path):
     service = _vibey_service(tmp_path, _sources())
     _bind(service, "web_search", None)
     status, answer = await _call(service, "web_search", json.dumps(
-        {"arguments": {"query": "q" * (1024 * 1024)}, "executor": None},
+        {"arguments": {"query": "q" * (1024 * 1024)}},
     ).encode())
     assert (status, answer["error"]["code"]) == (400, "invalid_request_error")
     assert service.adapter.invocations == []
@@ -697,11 +803,7 @@ async def test_a_call_cancelled_before_its_handle_is_still_metered(tmp_path, mon
     try:
         hop = await router.resolve_hop("menu-alias", process_scope="vibey:cancel", turn_id="turn-cancel")
         call = service.run_hosted_tool(
-            "web_search",
-            {"arguments": {"query": "q"}, "executor": {"source_id": XAI, "model_id": "grok-4.6"}},
-            bindings=gateway.correlation.hosted_executor_bindings(
-                backend="vibey", token=hop["token"], request_metadata={"avibe_turn_id": "turn-cancel"},
-            )[1],
+            "web_search", {"arguments": {"query": "q"}}, turn=gateway.correlation.turn_hosted_tools("turn-cancel"),
         )
         if ended_by == "caller":
             with pytest.raises(asyncio.CancelledError):
@@ -727,8 +829,8 @@ async def test_an_encoded_proxy_call_body_is_refused(tmp_path):
         async with aiohttp.ClientSession(auto_decompress=False) as client:
             async with client.post(
                 f'{hop["base_url"]}/hosted-tools/web_search',
-                headers={"Authorization": f'Bearer {hop["token"]}', "Content-Encoding": "gzip"},
-                data=gzip.compress(json.dumps({"arguments": {"query": "q"}, "executor": None}).encode()),
+                headers={"Authorization": f'Bearer {hop["token"]}', **hop["request_headers"], "Content-Encoding": "gzip"},
+                data=gzip.compress(json.dumps({"arguments": {"query": "q"}}).encode()),
             ) as response:
                 assert response.status == 400
     finally:
@@ -753,35 +855,37 @@ class _CountedHandle(LiveInvokeHandle):
 
 @pytest.mark.asyncio
 async def test_a_buffered_executor_response_is_bounded(tmp_path, monkeypatch):
-    """MH-HOSTED-GATEWAY-005: an oversized buffered body fails the call instead of growing without bound.
+    """MH-HOSTED-GATEWAY-005: an oversized buffered body fails the attempt instead of growing without bound.
 
-    Once refused, the response is not read any further, and the call is still metered from its outcome.
+    Once refused, the response is not read any further, and the attempt is still metered from its outcome. Nothing
+    reached Vibey, so the chain tries its next candidate; the oversized attempt is listed as billed.
     """
 
     monkeypatch.setattr(service_module, "EXECUTOR_RESPONSE_MAX_BYTES", 64)
     oversized = b"{" + b" " * 128
     usage = ProtocolUsageReport.of(input_tokens=900, cached_input_tokens=0, output_tokens=40)
     handle = _CountedHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=ANTHROPIC, usage=usage), (oversized, b"}"))
-    service = _vibey_service(tmp_path, _sources(), handles=[handle])
-    _bind(service, "web_search", (ANTHROPIC, "claude-haiku-4-5"))
-    status, answer = await _call(service, "web_search", {
-        "arguments": {"query": "q"}, "executor": {"source_id": ANTHROPIC, "model_id": "claude-haiku-4-5"},
-    })
+    service = _vibey_service(tmp_path, _sources(), handles=[handle, _served_by_openai()])
+    _chain(service, "web_search", (ANTHROPIC, "claude-haiku-4-5"), (OPENAI, "gpt-6-astra"))
+    status, answer = await _call(service, "web_search", {"arguments": {"query": "q"}})
     assert status == 200
-    assert answer["record"]["status"] == "failed" and "larger than allowed" in answer["record"]["error"]
-    assert "execution" in answer
+    assert [entry[0] for entry in service.adapter.invocations] == [ANTHROPIC, OPENAI]
+    assert answer["record"]["status"] == "completed"
+    assert answer["execution"]["executor_source_id"] == OPENAI
+    assert [attempt["source_id"] for attempt in answer["execution"]["failed_attempts"]] == [ANTHROPIC]
     assert handle.read == [oversized]
     assert _usage_of(service, ANTHROPIC)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("tool", "body", "status", "code"), [
-    ("web_search", {"arguments": {"query": "q", "count": 3}, "executor": None}, 400, "invalid_request_error"),
-    ("web_search", {"arguments": {"query": " "}, "executor": None}, 400, "invalid_request_error"),
-    ("x_search", {"arguments": {"query": "q", "mode": "Oldest"}, "executor": None}, 400, "invalid_request_error"),
-    ("web_search", {"arguments": {"query": "q"}}, 400, "invalid_request_error"),
+    ("web_search", {"arguments": {"query": "q", "count": 3}}, 400, "invalid_request_error"),
+    ("web_search", {"arguments": {"query": " "}}, 400, "invalid_request_error"),
+    ("x_search", {"arguments": {"query": "q", "mode": "Oldest"}}, 400, "invalid_request_error"),
+    # v1's executor field is gone: the turn's chain decides.
+    ("web_search", {"arguments": {"query": "q"}, "executor": None}, 400, "invalid_request_error"),
     ("web_search", b"not json", 400, "invalid_request_error"),
-    ("code_interpreter", {"arguments": {}, "executor": None}, 404, "not_found_error"),
+    ("code_interpreter", {"arguments": {}}, 404, "not_found_error"),
 ])
 async def test_a_malformed_proxy_call_is_refused_before_anything_runs(tmp_path, tool, body, status, code):
     """MH-HOSTED-GATEWAY-005: only a malformed call is an error status; nothing is invoked."""
@@ -798,7 +902,7 @@ async def test_a_proxy_call_needs_the_turns_gateway_token(tmp_path):
 
     service = _vibey_service(tmp_path, _sources())
     status, answer = await _call(
-        service, "web_search", {"arguments": {"query": "q"}, "executor": None}, token="not-the-turn-token",
+        service, "web_search", {"arguments": {"query": "q"}}, token="not-the-turn-token",
     )
     assert (status, answer["error"]["code"]) == (401, "authentication_error")
 

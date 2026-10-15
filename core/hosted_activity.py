@@ -28,6 +28,7 @@ from core.agent_core.messages import (
     HostedResult,
     HostedSource,
     HostedToolBlock,
+    ProxyExecution,
     ToolCallBlock,
 )
 from vibe.i18n import t as i18n_t
@@ -50,7 +51,8 @@ class HostedActivity:
 
     call_id: str
     tool: str
-    mode: Literal["native", "proxy"]
+    # How it ran: natively by the model's provider, by a search executor, or by an image endpoint directly.
+    mode: Literal["native", "proxy", "direct"]
     status: str
     # Model-facing English; ``error_code`` names the reasons Avibe worded itself.
     error: Optional[str]
@@ -228,7 +230,8 @@ def proxy_activity(
     source_names: SourceNames = _no_names,
     duration_ms: Optional[int] = None,
 ) -> HostedActivity:
-    """A proxied hosted call: the model's own call, and the record its executor returned."""
+    """A hosted call that ran outside the model: the model's own call, and the record its search executor
+    (``proxy``) or image endpoint (``direct``) returned."""
 
     arguments = call.arguments if isinstance(call.arguments, dict) else {}
     subject = next(
@@ -237,13 +240,14 @@ def proxy_activity(
     )
     size = arguments.get("size") if isinstance(arguments.get("size"), str) else None
     execution = result.execution
+    cost, cost_calls = _chain_cost(execution)
     # What the executor reports it did (an image's rendered prompt and resolved size and quality), read as a native
     # call's block action is.
     ran = result.action if result.action is not None and result.action.type == "generate" else None
     return HostedActivity(
         call_id=call.id,
         tool=call.name,
-        mode="proxy",
+        mode=execution.mode if execution is not None else "proxy",
         status=result.record.status,
         error=result.record.error,
         error_code=result.record.error_code,
@@ -259,10 +263,30 @@ def proxy_activity(
         size=(ran.size if ran is not None and ran.size else size),
         quality=ran.quality if ran is not None else None,
         revised_prompt=ran.prompt if ran is not None else None,
-        cost=execution.cost if execution is not None else None,
-        cost_calls=1,
+        cost=cost,
+        cost_calls=cost_calls,
         duration_ms=duration_ms,
     )
+
+
+def _chain_cost(execution: Optional[ProxyExecution]) -> tuple[Optional[HostedCost], int]:
+    """What a proxied call cost over every executor attempt it billed, and how many attempts that is (§6).
+
+    ``execution.cost`` is the last attempt's own, and ``failed_attempts`` the earlier billed ones. Every attempt
+    included is ``included``; otherwise the known figures are summed, ``reported`` only when each is. An attempt
+    without a cost leaves the total unknown rather than understated.
+    """
+
+    if execution is None:
+        return None, 1
+    costs = [*(attempt.cost for attempt in execution.failed_attempts), execution.cost]
+    if any(cost is None for cost in costs):
+        return None, len(costs)
+    if all(cost.basis == "included" for cost in costs):
+        return HostedCost(basis="included"), len(costs)
+    priced = [cost for cost in costs if cost.basis != "included"]
+    basis = "reported" if all(cost.basis == "reported" for cost in priced) else "list"
+    return HostedCost(basis=basis, usd=round(sum(cost.usd or 0.0 for cost in priced), 6)), len(costs)
 
 
 def _vendor_label(provider: Optional[str]) -> Optional[str]:
@@ -286,7 +310,7 @@ def _clip(text: str, limit: int = LINE_SUBJECT_MAX_CHARS) -> str:
 
 
 def _count(activity: HostedActivity, lang: str) -> Optional[str]:
-    if activity.tool == "image_generation":
+    if activity.tool == "image_generate":
         count, unit = len(activity.images), "image"
     elif activity.tool == "x_search":
         count, unit = len(activity.sources), "post"
@@ -335,7 +359,7 @@ def hosted_line(activity: HostedActivity, lang: str, *, escape: Callable[[str], 
     subject safe for the destination's markup.
     """
 
-    emoji = "🖼" if activity.tool == "image_generation" else "🔎"
+    emoji = "🖼" if activity.tool == "image_generate" else "🔎"
     parts: list[Optional[str]] = [f"{emoji} {i18n_t(f'hostedTools.tool.{activity.tool}', lang)}"]
     if activity.subject:
         parts[0] += " " + i18n_t("hostedTools.quoted", lang, subject=escape(_clip(activity.subject)))

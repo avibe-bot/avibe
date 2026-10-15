@@ -17,7 +17,7 @@ import time
 from collections import deque
 from contextlib import asynccontextmanager, suppress
 from copy import deepcopy
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, AsyncIterator, Awaitable, Callable, Iterable, Literal, Mapping, Optional, Sequence, TypeVar
 
 from core.agent_core.agent.events import (
@@ -67,12 +67,13 @@ from core.agent_core.agent.lifecycle import RunAborted as _Aborted, RunScope
 from core.agent_core.agent.models import ModelRouter, ModelSelection, RetryPolicy
 from core.agent_core.agent.outcome import OutcomeOwner
 from core.agent_core.agent.state import HookStateError, state_representation
-from core.agent_core.ai._common import endpoint_origin, native_hosted_tools
+from core.agent_core.ai._common import endpoint_origin, native_hosted_tools, portable_endpoint
 from core.agent_core.ai.provider import (
     Done,
     ModelEndpoint,
     ModelRequest,
     ProviderError,
+    Refusal,
     TextDelta,
     ThinkingDelta,
 )
@@ -187,6 +188,60 @@ async def _silent(*_: Any, **__: Any) -> None:
     """A side turn's emit: it shows nothing (C-10 section 7)."""
 
 
+#: The fresh hops a run resolves to answer refusals before any output (``vibey-hosted-tools.md`` §3.5).
+MAX_REFUSAL_RESOLVES = 2
+
+
+@dataclass
+class _Refusals:
+    """A run's refusals before any output, and how the requests after them render (``vibey-hosted-tools.md`` §3.5).
+
+    A refusal is answered by a fresh hop, rendered normally: at most once per (Source, tool, aspect) a narrow hosted
+    rule names, and at most ``MAX_REFUSAL_RESOLVES`` times in the run. Past a bound, or when a gateway hand-back's
+    fresh hop is the refused one again, the request goes portable instead. A Source identity whose provider refused
+    an opaque payload sends none for the rest of the run; that refusal is answered once per identity.
+    """
+
+    resolves: int = 0
+    rules: set[tuple[Optional[str], str, Optional[str]]] = field(default_factory=set)
+    identities: set[Optional[str]] = field(default_factory=set)
+
+    def answer(self, refusal: Refusal) -> Optional[Literal["resolve", "portable"]]:
+        """How the next attempt answers ``refusal``, counted; None when the refusal stands as the error."""
+        if refusal.kind == "opaque_refused":
+            if refusal.source_identity in self.identities:
+                return None
+            self.identities.add(refusal.source_identity)
+        rule = (refusal.source_id, refusal.tool, refusal.aspect) if refusal.tool is not None else None
+        if self.resolves >= MAX_REFUSAL_RESOLVES or rule in self.rules:
+            return "portable"
+        self.resolves += 1
+        if rule is not None:
+            self.rules.add(rule)
+        return "resolve"
+
+    def render(self, selection: ModelSelection, *, portable: bool) -> ModelSelection:
+        """``selection`` as the next request goes out: without the refused identities' opaque payloads, and portable
+        when the refusal it answers asked for that."""
+        endpoint = selection.endpoint
+        if self.identities:
+            endpoint = replace(endpoint, opaque_refused=frozenset(self.identities))
+        if portable:
+            endpoint = portable_endpoint(endpoint)
+        return selection if endpoint is selection.endpoint else replace(selection, endpoint=endpoint)
+
+
+def _same_hop(fresh: ModelEndpoint, refused: ModelEndpoint) -> bool:
+    """A fresh hop that would send the refused request again: the same Source, account and model, with the same
+    hosted-tool facts (§3.5)."""
+    return (fresh.source_id, fresh.source_identity, fresh.model_id, fresh.hosted_tools) == (
+        refused.source_id,
+        refused.source_identity,
+        refused.model_id,
+        refused.hosted_tools,
+    )
+
+
 @dataclass
 class _Ladder:
     """One model request's progress through C-9 sections 3 and 8."""
@@ -290,6 +345,7 @@ class Agent:
         self._turn_inputs: set[int] = set()
         # The run's attempt ledger (C-9): every model attempt, in order.
         self._attempts: list[_Attempt] = []
+        self._refusals = _Refusals()
         # When each upstream prompt cache was last used in this Agent: the end of its latest model call, by the provider
         # and model that served it (``_cache_of``, C-9 section 3).
         self._last_model_at: dict[tuple[str, str], float] = {}
@@ -503,6 +559,7 @@ class Agent:
                 self._unproductive = 0
                 self._turn_inputs = set()
                 self._attempts = []
+                self._refusals = _Refusals()
                 loaded = True
                 system = self.system
                 self._run_tools = dict(self._tools)
@@ -712,6 +769,10 @@ class Agent:
             # A response that dropped after thinking alone is retried once per request (C-2 ``provider.md``): some
             # prompts drop at the same point every time.
             thinking_retried = False
+            # A refusal before any output is answered by rendering the request again (§3.5, ``_Refusals``): the hop a
+            # gateway hand-back refused, and whether the next request goes portable.
+            refused: Optional[ModelEndpoint] = None
+            portable = False
             while True:
                 self._scope.check()
                 if retry_error is not None and time.monotonic() - started >= self.retry.max_elapsed_s:
@@ -719,6 +780,7 @@ class Agent:
                     return
                 if selected is None:
                     selected = await self._scope.call(self.models.resolve)
+                    portable = portable or (refused is not None and _same_hop(selected.endpoint, refused))
                 # Resolution is the last async stage before request admission.
                 # Expiry wins before route validation, projection, rehydration or
                 # hooks can replace the original error or persist new side effects.
@@ -726,8 +788,8 @@ class Agent:
                     yield retry_error, {}
                     return
                 route = selected
-                request, tools = await compose(selected)
-                selected = None
+                request, tools = await compose(self._refusals.render(selected, portable=portable))
+                selected, refused, portable = None, None, False
                 if retry_error is not None and time.monotonic() - started >= self.retry.max_elapsed_s:
                     yield retry_error, tools
                     return
@@ -773,16 +835,24 @@ class Agent:
                         and not streamed
                         and (terminal.partial is None or not terminal.partial.content)
                     )
+                    rerender = (
+                        self._refusals.answer(terminal.refusal)
+                        if isinstance(terminal, ProviderError)
+                        and terminal.refusal is not None
+                        and not streamed
+                        and (terminal.partial is None or not terminal.partial.content)
+                        else None
+                    )
                     delay = (
                         self.retry.delay(terminal, retries=retries, streamed=streamed, elapsed_s=time.monotonic() - started)
-                        if isinstance(terminal, ProviderError) and not relieve
+                        if isinstance(terminal, ProviderError) and not relieve and rerender is None
                         else None
                     )
                     if delay is not None and terminal.after_thinking:
                         if thinking_retried:
                             delay = None
                         thinking_retried = True
-                    if delay is None and not relieve:
+                    if delay is None and not relieve and rerender is None:
                         # Admitted here; the caller commits it inside the scope,
                         # BEFORE aclose. Never retry an accepted terminal.
                         admitted = terminal.message if isinstance(terminal, Done) else terminal.partial
@@ -799,6 +869,13 @@ class Agent:
                 # ladder step (section 8).
                 await self._settle_attempts(first)
                 terminal = replace(terminal, partial=None)
+                if rerender == "portable":
+                    selected, portable = route, True
+                    continue
+                if rerender == "resolve":
+                    if terminal.refusal.kind == "pin_unavailable":
+                        refused = route.endpoint
+                    continue
                 if relieve:
                     ladder.overflows += 1
                     ladder.refused = True

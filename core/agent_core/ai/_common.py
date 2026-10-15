@@ -53,6 +53,7 @@ from core.agent_core.ai.provider import (
     ModelEndpoint,
     ModelRequest,
     ProviderError,
+    Refusal,
     TextDelta,
     ThinkingDelta,
     ToolCallDelta,
@@ -1616,8 +1617,8 @@ PIN_MODEL_HEADER = "x-avibe-pin-model"
 
 
 class HandOff:
-    """A send that ends without a terminal, because the adapter sends again (§3.5, §4.3). ``drive_sse_stream`` yields
-    it in place of a terminal and commits nothing."""
+    """A send that ends without a terminal, because the adapter decides what follows (§3.5, §4.3).
+    ``drive_sse_stream`` yields it in place of a terminal and commits nothing."""
 
     def __init__(self, reason: str) -> None:
         self.reason = reason
@@ -1626,36 +1627,66 @@ class HandOff:
         return f"HandOff({self.reason!r})"
 
 
-#: The gateway's answer to a pinned request it cannot serve from the pinned Source (§3.5): HTTP 409
-#: ``pin_unavailable``, before anything reached a model.
-PIN_UNAVAILABLE = HandOff("pin_unavailable")
+class PinUnavailable(HandOff):
+    """The gateway's answer to a pinned request it cannot serve from the pinned Source (§3.5): HTTP 409
+    ``pin_unavailable``, before anything reached a model. ``tool`` and ``aspect`` name the narrow hosted rule that
+    fired, when one did (``error.reason``)."""
+
+    def __init__(self, tool: str | None = None, aspect: str | None = None) -> None:
+        super().__init__("pin_unavailable")
+        self.tool = tool
+        self.aspect = aspect
+
+
 #: A response the provider paused (Anthropic ``pause_turn``, §4.3): the adapter continues it as the same response.
 PAUSE_TURN = HandOff("pause_turn")
 #: An HTTP error the adapter answers by sending again (``drive_sse_stream``'s ``refused``).
 REFUSED = HandOff("refused")
 
 
-def _pin_unavailable(body: str) -> bool:
+def _pin_unavailable(body: str) -> PinUnavailable | None:
+    """The gateway's ``pin_unavailable`` answer, matched on ``type`` and ``code`` alone, with its narrow-rule reason
+    when it carries one; None for any other body."""
     try:
         value = json.loads(body)
     except (TypeError, ValueError):
-        return False
+        return None
     error = value.get("error") if isinstance(value, Mapping) else None
-    return (
+    if not (
         isinstance(error, Mapping)
         and error.get("type") == "model_hub_pin_unavailable"
         and error.get("code") == "pin_unavailable"
+    ):
+        return None
+    reason = error.get("reason")
+    if isinstance(reason, Mapping) and reason.get("kind") == "hosted_unsupported":
+        tool, aspect = reason.get("tool"), reason.get("aspect")
+        return PinUnavailable(tool if isinstance(tool, str) else None, aspect if isinstance(aspect, str) else None)
+    return PinUnavailable()
+
+
+#: xAI's plain-text refusal of a replayed ciphertext it cannot read (§3.2); it does not say which one.
+_DECRYPT_REFUSAL = re.compile(r"could not decrypt the provided encrypted_content", re.IGNORECASE)
+
+
+def pin_refusal(assembler: StreamAssembler, endpoint: ModelEndpoint, handed_back: PinUnavailable) -> ProviderError:
+    """The terminal of a pinned request the gateway handed back, which the loop answers by rendering the request again
+    (§3.5). Nothing reached a model, so nothing is lost."""
+
+    error = assembler.error("the gateway handed the pinned request back (pin_unavailable)", kind="server", status=409)
+    refusal = Refusal(
+        "pin_unavailable", endpoint.source_id, endpoint.source_identity, handed_back.tool, handed_back.aspect
     )
+    return replace(error, retryable=False, refusal=refusal)
 
 
-def portable_request(request: ModelRequest) -> ModelRequest:
-    """The same request in portable form (§3.5): never pinned, and every hosted tool as its function, so it carries no
-    native declaration and replays no native payload. The hop's Source and identity stay for attribution: a response
+def portable_endpoint(endpoint: ModelEndpoint) -> ModelEndpoint:
+    """``endpoint`` in portable form (§3.5): never pinned, and every hosted tool as its function, so a request carries
+    no native declaration and replays no native payload. The hop's Source and identity stay for attribution: a response
     that Source serves is still its own, and its opaque payloads are bound to that identity."""
 
-    endpoint = request.endpoint
-    routes = {name: HostedToolRoute("proxy", route.executor, False) for name, route in endpoint.hosted_tools.items()}
-    return replace(request, endpoint=replace(endpoint, portable=True, hosted_tools=routes))
+    routes = {name: HostedToolRoute("proxy", False) for name in endpoint.hosted_tools}
+    return replace(endpoint, portable=True, hosted_tools=routes)
 
 
 @dataclass(frozen=True)
@@ -1719,42 +1750,13 @@ def _header_value(value: str) -> bool:
     return bool(value) and value == value.strip() and all(" " <= char <= "~" for char in value)
 
 
-def forced_tool(request: ModelRequest) -> tuple[str, HostedToolRoute | None] | None:
-    """``request.tool_choice`` with its native hosted route (None when it is sent as a function); None when nothing
-    is forced. The forced tool must be one the request declares."""
-
-    name = request.tool_choice
-    if name is None:
-        return None
-    if not any(tool.name == name for tool in request.tools):
-        raise ValueError(f"tool_choice names {name!r}, which the request does not declare")
-    return name, native_hosted_tools(request).get(name)
-
-
-def required_only_tool(tools: list[Any]) -> str:
-    """OpenAI's forced choice of a hosted tool: ``required`` over a request that declares only that tool.
-
-    The Responses and Chat named choices name a function, and their hosted-tool choice types have no
-    ``web_search`` or ``x_search``, so ``required`` is the one form that forces any hosted tool.
-    """
-
-    if len(tools) != 1:
-        raise ValueError("forcing a hosted tool on this protocol needs it to be the request's only tool")
-    return "required"
-
-
 async def iter_sse_events(
     response: httpx.Response,
     cancel: CancelToken,
-    *,
-    max_line_size: int | None = None,
 ) -> AsyncIterator[SSEEvent]:
-    """Yield SSE events while allowing a CancelToken to interrupt a stalled read. ``max_line_size`` overrides the
-    parser's default line cap; a stream allowed lines that long (a generated image's) is parsed off the controller
-    loop, because one event can be many MiB."""
+    """Yield SSE events while allowing a CancelToken to interrupt a stalled read."""
 
-    parser = SSEParser(max_line_size=max_line_size)
-    offload = max_line_size is not None
+    parser = SSEParser()
     iterator = response.aiter_bytes().__aiter__()
     while True:
         if cancel.cancelled:
@@ -1769,9 +1771,9 @@ async def iter_sse_events(
             break
         if chunk is None:
             return
-        for event in await asyncio.to_thread(parser.feed, chunk) if offload else parser.feed(chunk):
+        for event in parser.feed(chunk):
             yield event
-    for event in await asyncio.to_thread(parser.finish) if offload else parser.finish():
+    for event in parser.finish():
         yield event
 
 
@@ -1788,7 +1790,6 @@ async def drive_sse_stream(
     resolver: ServedHopResolver | None,
     gateway: bool,
     translate: WireTranslator,
-    max_line_size: int | None = None,
     refused: Callable[[ProviderError], bool] | None = None,
 ) -> AsyncIterator[Any]:
     """Own the complete request/stream/terminal/cleanup lifecycle.
@@ -1846,10 +1847,15 @@ async def drive_sse_stream(
                     else:
                         if body is None:
                             candidate = assembler.aborted(cancel.reason)
-                        elif gateway and response.status_code == 409 and PIN_SOURCE_HEADER in headers and _pin_unavailable(body):
-                            # The pinned Source cannot serve this content; nothing reached a model. The adapter sends
-                            # the same request once more in portable form (§3.5), so no terminal is committed here.
-                            yield PIN_UNAVAILABLE
+                        elif (
+                            gateway
+                            and response.status_code == 409
+                            and PIN_SOURCE_HEADER in headers
+                            and (handed_back := _pin_unavailable(body)) is not None
+                        ):
+                            # The pinned Source cannot serve this content; nothing reached a model. The adapter
+                            # decides what follows (§3.5, §4.3), so no terminal is committed here.
+                            yield handed_back
                             return
                         else:
                             candidate = assembler.error(
@@ -1860,6 +1866,11 @@ async def drive_sse_stream(
                             if refused is not None and refused(candidate):
                                 yield REFUSED
                                 return
+                            if response.status_code == 400 and _DECRYPT_REFUSAL.search(body or ""):
+                                # A replayed ciphertext this account cannot read, refused before any output: the
+                                # loop renders the request again without that identity's opaque payloads (§3.5).
+                                refusal = Refusal("opaque_refused", endpoint.source_id, endpoint.source_identity)
+                                candidate = replace(candidate, retryable=False, refusal=refusal)
                 else:
                     resolved_origin = await resolve_served_origin(
                         endpoint,
@@ -1877,7 +1888,7 @@ async def drive_sse_stream(
                             resolved_origin.source_id,
                             resolved_origin.source_identity,
                         )
-                        async for item in translate(iter_sse_events(response, cancel, max_line_size=max_line_size)):
+                        async for item in translate(iter_sse_events(response, cancel)):
                             if isinstance(item, (Done, ProviderError)):
                                 candidate = item
                                 break

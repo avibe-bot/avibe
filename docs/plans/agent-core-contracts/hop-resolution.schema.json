@@ -126,58 +126,168 @@
     },
     "hosted_tools": {
       "type": "object",
-      "description": "One entry per hosted tool the user enabled (vibey-hosted-tools.md §3.5). `mode` is the primary hop's; `declaration` and `include` are the overlay's wire declaration, present exactly for native; `executor` is the proxy executor bound for this turn, present for every entry because a native request answered pin_unavailable is re-rendered with the proxy in the same turn; `replay` is true only for the primary hop Source's positive replay evidence taken on the current engine and probe shape. A request carrying native content is pinned with x-avibe-pin-source: source_id.",
-      "propertyNames": {
-        "enum": [
-          "web_search",
-          "x_search",
-          "image_generation"
-        ]
-      },
-      "additionalProperties": {
-        "type": "object",
-        "required": [
-          "mode",
-          "executor",
-          "replay"
-        ],
-        "additionalProperties": false,
-        "properties": {
-          "mode": {
-            "enum": [
-              "native",
-              "proxy"
-            ]
-          },
-          "declaration": {
-            "type": "object",
-            "required": [
-              "type"
-            ],
-            "properties": {
-              "type": {
+      "description": "One entry per hosted tool the turn declares (vibey-hosted-tools.md §3.4). A search tool's entry is the primary hop's facts: `native` is `assumed` when the tool runs on the hop (`runs_on`) and no current negative `call` evidence exists, else `unsupported`; `declaration` and `include` (the overlay's wire declaration and Responses include values) are present exactly when `native` is `assumed`; `replay` is `assumed` when `native` is, the protocol replays natively and no current negative `replay` evidence exists. `image_generate` lists the image models the user's Sources make available, default first, and is absent when the tool is off or no model is available. The turn's first resolution freezes the tool set and the image models; later hops change only `native` and `replay`. A request carrying native content is pinned with x-avibe-pin-source: source_id.",
+      "additionalProperties": false,
+      "properties": {
+        "web_search": {
+          "type": "object",
+          "required": [
+            "native",
+            "replay"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "native": {
+              "enum": [
+                "assumed",
+                "unsupported"
+              ]
+            },
+            "declaration": {
+              "type": "object",
+              "required": [
+                "type"
+              ],
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "include": {
+              "type": "array",
+              "items": {
                 "type": "string",
                 "minLength": 1
               }
+            },
+            "replay": {
+              "enum": [
+                "assumed",
+                "unsupported"
+              ]
             }
           },
-          "include": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "minLength": 1
+          "if": {
+            "properties": {
+              "native": {
+                "const": "assumed"
+              }
             }
           },
-          "executor": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
+          "then": {
+            "required": [
+              "declaration",
+              "include"
+            ]
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "declaration"
+                  ]
+                },
+                {
+                  "required": [
+                    "include"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        "x_search": {
+          "type": "object",
+          "required": [
+            "native",
+            "replay"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "native": {
+              "enum": [
+                "assumed",
+                "unsupported"
+              ]
+            },
+            "declaration": {
+              "type": "object",
+              "required": [
+                "type"
+              ],
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "include": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "replay": {
+              "enum": [
+                "assumed",
+                "unsupported"
+              ]
+            }
+          },
+          "if": {
+            "properties": {
+              "native": {
+                "const": "assumed"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "declaration",
+              "include"
+            ]
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "declaration"
+                  ]
+                },
+                {
+                  "required": [
+                    "include"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        "image_generate": {
+          "type": "object",
+          "required": [
+            "models",
+            "default"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "models": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
                 "type": "object",
                 "required": [
                   "source_id",
-                  "model_id"
+                  "model_id",
+                  "description",
+                  "params",
+                  "size_forms"
                 ],
                 "additionalProperties": false,
                 "properties": {
@@ -188,149 +298,54 @@
                   "model_id": {
                     "type": "string",
                     "minLength": 1
-                  }
-                }
-              }
-            ]
-          },
-          "replay": {
-            "type": "boolean"
-          }
-        },
-        "if": {
-          "properties": {
-            "mode": {
-              "const": "native"
-            }
-          }
-        },
-        "then": {
-          "required": [
-            "declaration",
-            "include"
-          ]
-        },
-        "else": {
-          "not": {
-            "anyOf": [
-              {
-                "required": [
-                  "declaration"
-                ]
-              },
-              {
-                "required": [
-                  "include"
-                ]
-              }
-            ]
-          }
-        }
-      },
-      "properties": {
-        "image_generation": {
-          "allOf": [
-            {
-              "type": "object",
-              "required": [
-                "mode",
-                "executor",
-                "replay"
-              ],
-              "additionalProperties": false,
-              "properties": {
-                "mode": {
-                  "enum": [
-                    "native",
-                    "proxy"
-                  ]
-                },
-                "declaration": {
-                  "type": "object",
-                  "required": [
-                    "type"
-                  ],
-                  "properties": {
-                    "type": {
-                      "type": "string",
-                      "minLength": 1
-                    }
-                  }
-                },
-                "include": {
-                  "type": "array",
-                  "items": {
+                  },
+                  "description": {
                     "type": "string",
                     "minLength": 1
-                  }
-                },
-                "executor": {
-                  "oneOf": [
-                    {
-                      "type": "null"
-                    },
-                    {
-                      "type": "object",
-                      "required": [
-                        "source_id",
-                        "model_id"
-                      ],
-                      "additionalProperties": false,
-                      "properties": {
-                        "source_id": {
-                          "type": "string",
-                          "pattern": "^src_[a-z0-9]{8,}$"
-                        },
-                        "model_id": {
-                          "type": "string",
-                          "minLength": 1
-                        }
-                      }
-                    }
-                  ]
-                },
-                "replay": {
-                  "type": "boolean"
-                }
-              },
-              "if": {
-                "properties": {
-                  "mode": {
-                    "const": "native"
-                  }
-                }
-              },
-              "then": {
-                "required": [
-                  "declaration",
-                  "include"
-                ]
-              },
-              "else": {
-                "not": {
-                  "anyOf": [
-                    {
-                      "required": [
-                        "declaration"
-                      ]
-                    },
-                    {
-                      "required": [
-                        "include"
+                  },
+                  "params": {
+                    "type": "array",
+                    "uniqueItems": true,
+                    "items": {
+                      "enum": [
+                        "size",
+                        "images",
+                        "n"
                       ]
                     }
-                  ]
+                  },
+                  "size_forms": {
+                    "type": "array",
+                    "uniqueItems": true,
+                    "items": {
+                      "enum": [
+                        "pixels",
+                        "ratio"
+                      ]
+                    }
+                  }
                 }
               }
             },
-            {
+            "default": {
+              "type": "object",
+              "required": [
+                "source_id",
+                "model_id"
+              ],
+              "additionalProperties": false,
               "properties": {
-                "replay": {
-                  "const": false
+                "source_id": {
+                  "type": "string",
+                  "pattern": "^src_[a-z0-9]{8,}$"
+                },
+                "model_id": {
+                  "type": "string",
+                  "minLength": 1
                 }
               }
             }
-          ]
+          }
         }
       }
     }
@@ -363,12 +378,33 @@
       },
       "hosted_tools": {
         "web_search": {
-          "mode": "proxy",
-          "executor": {
-            "source_id": "src_xai00001",
-            "model_id": "grok-4.6"
+          "native": "assumed",
+          "declaration": {
+            "type": "web_search_20250305",
+            "name": "web_search",
+            "max_uses": 5
           },
-          "replay": false
+          "include": [],
+          "replay": "assumed"
+        },
+        "x_search": {
+          "native": "unsupported",
+          "replay": "unsupported"
+        },
+        "image_generate": {
+          "models": [
+            {
+              "source_id": "src_openai0001",
+              "model_id": "gpt-image-2",
+              "description": "OpenAI's image model; follows long prompts closely",
+              "params": ["size", "images", "n"],
+              "size_forms": ["pixels"]
+            }
+          ],
+          "default": {
+            "source_id": "src_openai0001",
+            "model_id": "gpt-image-2"
+          }
         }
       }
     }

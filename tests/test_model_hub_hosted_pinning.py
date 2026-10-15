@@ -39,6 +39,13 @@ from vibe.backend_model_catalog import hosted_tool_spec
 PIN = "x-avibe-pin-source"
 PIN_MODEL = "x-avibe-pin-model"
 PIN_UNAVAILABLE = {"type": "error", "error": {"type": "model_hub_pin_unavailable", "code": "pin_unavailable"}}
+
+
+def _refused(tool, aspect, source_id):
+    """The 409 a narrow hosted rule's handback answers: it names what was refused, and where."""
+
+    reason = {"kind": "hosted_unsupported", "tool": tool, "aspect": aspect, "source_id": source_id}
+    return {"type": "error", "error": {**PIN_UNAVAILABLE["error"], "reason": reason}}
 SHELL = {"type": "function", "name": "shell", "parameters": {"type": "object", "properties": {}}}
 PORTABLE_X_SEARCH = {"type": "function", "name": "x_search", "parameters": {"type": "object", "properties": {}}}
 SIGNED_REASONING = {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "opaque-signed"}
@@ -447,7 +454,7 @@ async def test_a_handed_back_refusal_does_not_end_the_turn(tmp_path):
     turn_id = "turn-withdraw"
     try:
         hop = await router.resolve_hop("menu-alias", process_scope="vibey:withdraw", turn_id=turn_id)
-        assert await _post(hop, _native(hop), pin=primary.id) == (409, PIN_UNAVAILABLE)
+        assert await _post(hop, _native(hop), pin=primary.id) == (409, _refused("x_search", "call", primary.id))
         # The turn ends before any resend (the user stops it): the handed-back
         # refusal must not stand as the turn's terminal error.
         completion = router.settle_turn(turn_id, settled_by=SETTLED_BY_STOPPED, ts=NOW.isoformat())
@@ -486,7 +493,7 @@ async def test_a_pinned_hop_must_speak_the_requests_protocol(tmp_path):
 
 @pytest.mark.asyncio
 async def test_a_refusal_naming_the_pinned_hosted_content_is_handed_back_and_learned(tmp_path):
-    """MH-HOSTED-GATEWAY-002: case 3, a narrow hosted-content rule (#2551) turns the pinned 400 into a handback."""
+    """MH-HOSTED-GATEWAY-002: case 3, a narrow hosted-content rule (#2551) turns the pinned 400 into a handback with its reason."""
 
     primary, fallback = _sources()
     refusal = replace(
@@ -500,7 +507,8 @@ async def test_a_refusal_naming_the_pinned_hosted_content_is_handed_back_and_lea
     router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
     try:
         hop = await router.resolve_hop("menu-alias", process_scope="vibey:learn", turn_id="turn-learn")
-        assert await _post(hop, _native(hop), pin=primary.id) == (409, PIN_UNAVAILABLE)
+        # The 409 names the refused feature; only a narrow rule's handback carries a reason.
+        assert await _post(hop, _native(hop), pin=primary.id) == (409, _refused("x_search", "call", primary.id))
     finally:
         await gateway.close()
     assert [entry[0] for entry in service.adapter.invocations] == [primary.id]

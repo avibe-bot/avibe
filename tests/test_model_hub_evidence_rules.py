@@ -310,7 +310,7 @@ async def test_no_request_path_reads_a_bundled_file_after_startup(tmp_path, monk
     config = service.store.load()
     assert service._effort_refused(source, "shared-model", request) is False
     await service._learn_capability_evidence(source, "shared-model", request, rejected)
-    service.hosted_tools_for_hop(config, source, "shared-model")
+    service.hosted_tools_for_hop(source, "shared-model", service.freeze_turn_hosted_tools(config))
     service.agent_chain("codex", model)
     service.list_sources()
     service.hosted_tools_status()

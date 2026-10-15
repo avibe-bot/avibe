@@ -20,9 +20,14 @@ class ModelEndpoint:            # built by the adapter layer from C-6 HopResolut
     provider: str               # vendor identity of the hop (HopResolution.provider); with protocol and model it
                                 # forms the target origin for the cross-provider rules
     source_id: str | None       # HopResolution.source_id: the pin of a request with native hosted content
+    source_identity: str | None # HopResolution.source_identity: the account its opaque payloads are bound to
+    portable: bool              # never pinned, and no native hosted content (vibey-hosted-tools.md §3.5)
+    opaque_refused: frozenset[str | None]   # identities whose provider refused an opaque payload in this run; the
+                                # messages they served are sent as a different origin's (cross-provider.md)
     hosted_tools: Mapping[str, HostedToolRoute]   # HopResolution.hosted_tools, in Model Hub's order: per enabled
-                                # tool its mode, and for native its declaration and Responses include values,
-                                # plus the turn's executor and replay (vibey-hosted-tools.md §3.5)
+                                # search tool its mode and replay, and for native its declaration and Responses
+                                # include values (vibey-hosted-tools.md §3.4)
+    image_models: ImageModels | None   # the models image_generate may call; None when the tool is off
 
 
 @dataclass(frozen=True)
@@ -55,7 +60,6 @@ class ModelRequest:
     cache: Literal["default", "none"]    # "default": the protocol's cache breakpoints and their lifetimes
                                          # (conversion-tables.md); "none" for the compaction summarizer
     supports_images: bool                # resolved by the loop; unknown capability counts as False
-    tool_choice: str | None              # the one tool the response must call; set only by a hosted-tool probe
 ```
 
 `tools` is the one owner of what a request declares. A hosted tool is its canonical `ToolSpec`
@@ -63,17 +67,28 @@ class ModelRequest:
 route's `declaration` verbatim in the spec's place, merges a Responses route's `include` values into `include`, and
 pins the request with `x-avibe-pin-source: <source_id>`; on any other hop the spec is an ordinary function. Vibey
 lists its hosted tools first, so Anthropic's tools breakpoint, which goes on the last function tool, never moves.
-`registry.build_wire_request` returns the URL, headers and body the adapter would send, without sending it; a
-hosted-tool probe sends exactly that request (`vibey-hosted-tools.md` §3.2). On Responses and Chat a forced function
-is named, and a native hosted tool is forced with `"required"`, which needs it to be the request's only tool. An
-Anthropic request is never forced: current Claude models and extended thinking refuse a forced `tool` or `any`
-choice.
 
 History follows the same Source rule. A response's hosted calls go back verbatim only to the hop the request goes to,
 when that hop's Source served them on the same origin (`conversion-tables.md`, Hosted tools): within their turn as a
-continuation, later with the hop's current `replay`, and pinned to that Source either way. The gateway answers a pinned request it cannot serve from that Source with
-`409 pin_unavailable`. That answer is not a `ProviderError`: the adapter sends the same request exactly once more in
-portable form and unpinned, so the loop's retry never sees it.
+continuation, later with the hop's current `replay`, and pinned to that Source either way.
+
+**Refusals before any output** (`vibey-hosted-tools.md` §3.5). The gateway answers a pinned request it cannot serve
+from that Source with `409 pin_unavailable`, matched on its `type` and `code`, and names the narrow hosted rule that
+fired in `error.reason` when one did. xAI answers a replayed ciphertext it cannot read with a plain-text 400, `Could
+not decrypt the provided encrypted_content`, on any request. The adapter ends either send with a `ProviderError` that
+has no output, is not `retryable`, and carries a `refusal`: `pin_unavailable` with the hop's Source and the rule's
+tool and aspect, or `opaque_refused` with the hop's Source identity. The loop answers it by rendering the request
+again, never by the generic retry:
+
+- by a fresh hop, rendered normally, at most once per (Source, tool, aspect) a narrow rule names and at most twice
+  per run, whatever the reason;
+- in portable form on the hop it has, past either bound, or at once when a hand-back's fresh hop is the refused one
+  again (the same Source, identity, model and hosted-tool facts). A portable request is never pinned, so the gateway
+  never hands it back;
+- after `opaque_refused`, with that identity in `opaque_refused` for the rest of the run, so none of its opaque
+  payloads is sent again. That is answered once per identity: refused again, the error ends the run.
+
+A `pause_turn` continuation's `pin_unavailable` comes after output, so it is no refusal (`conversion-tables.md`).
 
 The loop's `ModelRouter` returns the `ModelEndpoint` together with its `ModelCapabilities`. Every capability has a
 defined effect, including when it is unknown:
@@ -86,9 +101,7 @@ defined effect, including when it is unknown:
 | `supports_images` | images sent | placeholders | placeholders |
 | `supports_reasoning` | `reasoning_effort` sent if it is one of `reasoning_efforts` | `reasoning_effort = None` | `reasoning_effort = None` | Adapters are constructed with a
 `MediaLoader` and resolve each `ImageBlock`'s bytes at request time; the canonical message never carries bytes. The
-token names an immutable snapshot (`message.schema.json`), so the bytes never change for a committed block. The
-Responses adapter also takes a `MediaSink`. It saves each image a native `image_generation` call returns as it parses
-the call's done item, and the call's record names the file (`vibey-hosted-tools.md` §7.3).
+token names an immutable snapshot (`message.schema.json`), so the bytes never change for a committed block.
 
 `stream` yields `ProviderEvent`s (`provider-event.schema.json`) and always ends with exactly one `done` or one
 `error`. `done.message` is the complete canonical `AssistantMessage`; its `origin` comes from the served-hop report

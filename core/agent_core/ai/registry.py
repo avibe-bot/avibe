@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+from typing import Any
 
 from core.agent_core.ai import anthropic, openai_chat, openai_responses
-from core.agent_core.ai._common import WireRequest, endpoint_origin, prepare_messages
 from core.agent_core.ai.anthropic import AnthropicAdapter
 from core.agent_core.ai.openai_chat import OpenAIChatAdapter
 from core.agent_core.ai.openai_responses import OpenAIResponsesAdapter
-from core.agent_core.ai.provider import MediaLoader, ModelRequest, ProviderAdapter, ProviderError
-from core.agent_core.cancel import CancelToken
+from core.agent_core.ai.provider import ProviderAdapter
 from core.agent_core.messages import ProtocolName
 
 ADAPTERS: dict[ProtocolName, type[ProviderAdapter]] = {
@@ -18,13 +16,6 @@ ADAPTERS: dict[ProtocolName, type[ProviderAdapter]] = {
     "openai_chat": OpenAIChatAdapter,
     "openai_responses": OpenAIResponsesAdapter,
 }
-
-_WIRE_REQUESTS: dict[ProtocolName, Callable[..., WireRequest]] = {
-    "anthropic": anthropic.wire_request,
-    "openai_chat": openai_chat.wire_request,
-    "openai_responses": openai_responses.wire_request,
-}
-
 
 def sent_effort(protocol: str, model_id: str, effort: str) -> str | None:
     """The effort token a request on ``protocol`` to ``model_id`` carries for ``effort``, exactly as the adapter sends
@@ -55,34 +46,3 @@ def create_adapter(protocol: ProtocolName, **kwargs: Any) -> ProviderAdapter:
 
 
 get_adapter = create_adapter
-
-
-async def build_wire_request(
-    request: ModelRequest,
-    *,
-    gateway: bool,
-    media_loader: Optional[MediaLoader] = None,
-    cancel: Optional[CancelToken] = None,
-) -> WireRequest:
-    """The request ``request.endpoint.protocol``'s adapter would send for ``request``, without sending it.
-
-    The adapter's ``stream`` sends exactly this, so a hosted-tool probe built here is the production request
-    (``vibey-hosted-tools.md`` §3.2). Raises ``ValueError`` when the request cannot be built.
-    """
-
-    protocol = request.endpoint.protocol
-    if protocol not in _WIRE_REQUESTS:
-        raise ValueError(f"unsupported provider protocol: {protocol}")
-    prepared = await prepare_messages(
-        request.messages,
-        target=endpoint_origin(request.endpoint),
-        supports_images=request.supports_images,
-        protocol=protocol,
-        media_loader=media_loader,
-        cancel=cancel or CancelToken(),
-        endpoint=request.endpoint,
-    )
-    if isinstance(prepared, ProviderError):
-        raise ValueError(prepared.message)
-    messages, loaded_images = prepared
-    return _WIRE_REQUESTS[protocol](request, messages, gateway=gateway, loaded_images=loaded_images)

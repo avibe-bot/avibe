@@ -435,7 +435,7 @@
             "record"
           ],
           "additionalProperties": false,
-          "description": "Set only on the result of a proxied hosted call. `execution` is present exactly when an executor ran; without it the record failed. `action` is what the executor reports it did, such as a generated image's rendered prompt and resolved size and quality.",
+          "description": "Set only on the result of a proxied search or an `image_generate` call. `execution` is present exactly when an executor or image endpoint ran; without it the record failed. `action` is what the executor reports it did: for `image_generate`, the model it ran on, the prompt it rendered, and the resolved size and quality.",
           "properties": {
             "record": {
               "$ref": "#/definitions/HostedRecord"
@@ -477,7 +477,7 @@
           "then": {
             "properties": {
               "tool_name": {
-                "$ref": "#/definitions/HostedToolName"
+                "$ref": "#/definitions/HostedResultToolName"
               }
             }
           }
@@ -549,7 +549,7 @@
             ],
             "properties": {
               "tool_name": {
-                "const": "image_generation"
+                "const": "image_generate"
               }
             }
           },
@@ -590,6 +590,43 @@
                       "required": [
                         "images"
                       ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "hosted"
+            ],
+            "properties": {
+              "tool_name": {
+                "enum": [
+                  "web_search",
+                  "x_search"
+                ]
+              },
+              "hosted": {
+                "required": [
+                  "action"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "hosted": {
+                "properties": {
+                  "action": {
+                    "properties": {
+                      "type": {
+                        "not": {
+                          "const": "generate"
+                        }
+                      }
                     }
                   }
                 }
@@ -638,10 +675,9 @@
     "HostedToolName": {
       "enum": [
         "web_search",
-        "x_search",
-        "image_generation"
+        "x_search"
       ],
-      "description": "Catalog name of a hosted tool (`vibey-hosted-tools.md` §2)."
+      "description": "Catalog name of a tool a provider runs natively, a `hosted_tool` block (`vibey-hosted-tools.md` §4.2)."
     },
     "HostedAction": {
       "description": "What a hosted call did, provider-neutral (`vibey-hosted-tools.md` §4.2 mapping rule). An item the mapping does not know is `other`, never dropped.",
@@ -786,7 +822,7 @@
             "type"
           ],
           "additionalProperties": false,
-          "description": "An image generation. `prompt` is the provider's revised prompt, required for a completed record; `size` and `quality` are the resolved output settings.",
+          "description": "An `image_generate` call. `model` is the image model it ran on; `prompt` is the rendered prompt, required for a completed record; `size` and `quality` are the resolved output settings.",
           "properties": {
             "type": {
               "const": "generate"
@@ -800,6 +836,10 @@
               "minLength": 1
             },
             "quality": {
+              "type": "string",
+              "minLength": 1
+            },
+            "model": {
               "type": "string",
               "minLength": 1
             }
@@ -889,7 +929,7 @@
         "sources"
       ],
       "additionalProperties": false,
-      "description": "Per-call facts of one hosted call. `images` is present exactly for `image_generation`.",
+      "description": "Per-call facts of one hosted call. `images` is present exactly for `image_generate`.",
       "properties": {
         "status": {
           "enum": [
@@ -1068,63 +1108,6 @@
               }
             }
           }
-        },
-        {
-          "if": {
-            "properties": {
-              "tool": {
-                "const": "image_generation"
-              }
-            }
-          },
-          "then": {
-            "properties": {
-              "action": {
-                "properties": {
-                  "type": {
-                    "enum": [
-                      "generate",
-                      "other"
-                    ]
-                  }
-                }
-              },
-              "record": {
-                "required": [
-                  "images"
-                ]
-              }
-            }
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "action": {
-                "properties": {
-                  "type": {
-                    "const": "generate"
-                  }
-                }
-              },
-              "record": {
-                "properties": {
-                  "status": {
-                    "const": "completed"
-                  }
-                }
-              }
-            }
-          },
-          "then": {
-            "properties": {
-              "action": {
-                "required": [
-                  "prompt"
-                ]
-              }
-            }
-          }
         }
       ]
     },
@@ -1209,10 +1192,13 @@
         "executor_billing"
       ],
       "additionalProperties": false,
-      "description": "Which executor ran a proxied hosted call. `cost` is absent when no price is known.",
+      "description": "What ran a hosted call outside the model: a search executor (`proxy`) or an image endpoint (`direct`). `cost` is this attempt's own, absent when no price is known; `failed_attempts` lists the earlier billed attempts, and the display totals them (`core/hosted_activity`).",
       "properties": {
         "mode": {
-          "const": "proxy"
+          "enum": [
+            "proxy",
+            "direct"
+          ]
         },
         "executor_origin": {
           "$ref": "#/definitions/Origin"
@@ -1229,8 +1215,43 @@
         },
         "cost": {
           "$ref": "#/definitions/HostedCost"
+        },
+        "failed_attempts": {
+          "type": "array",
+          "description": "The earlier billable attempts of a search chain, in order, before the executor that ran the call.",
+          "items": {
+            "type": "object",
+            "required": [
+              "source_id",
+              "billing"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "source_id": {
+                "type": "string",
+                "pattern": "^src_[a-z0-9]{8,}$"
+              },
+              "billing": {
+                "enum": [
+                  "monthly",
+                  "metered"
+                ]
+              },
+              "cost": {
+                "$ref": "#/definitions/HostedCost"
+              }
+            }
+          }
         }
       }
+    },
+    "HostedResultToolName": {
+      "enum": [
+        "web_search",
+        "x_search",
+        "image_generate"
+      ],
+      "description": "A tool whose result carries `hosted`: a proxied search, or an `image_generate` call (`vibey-hosted-tools.md` §4.2, §7)."
     }
   },
   "examples": [

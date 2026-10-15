@@ -219,6 +219,15 @@ def machine_error_codes(outcome: RawCallOutcome) -> tuple[str, ...]:
     )
 
 
+def names_model_refusal(outcome: RawCallOutcome) -> bool:
+    """Whether the upstream's machine code says it does not serve the requested model."""
+
+    return bool(_MODEL_SURFACE_PATTERNS.search(_error_text(outcome))) or (
+        outcome.http_status == 404
+        and any(code in _MODEL_NOT_FOUND_ERROR_CODES for code in machine_error_codes(outcome))
+    )
+
+
 def _classify_unstreamed(
     outcome: RawCallOutcome,
     *,
@@ -264,11 +273,7 @@ def _classify_unstreamed(
             "fallback",
             reason="balance_exhausted",
         )
-    model_not_found = _MODEL_SURFACE_PATTERNS.search(error_text) or (
-        outcome.http_status == 404
-        and any(code in _MODEL_NOT_FOUND_ERROR_CODES for code in machine_error_codes(outcome))
-    )
-    if _SURFACE_PATTERNS.search(error_text) or model_not_found:
+    if _SURFACE_PATTERNS.search(error_text) or names_model_refusal(outcome):
         return ResolutionDecision("surface", error_code="upstream_request_invalid")
 
     if _QUOTA_PATTERNS.search(error_text):

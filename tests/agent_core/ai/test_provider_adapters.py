@@ -30,7 +30,8 @@ from core.agent_core.ai.provider import (
     ToolCallDelta,
     ToolCallStart,
 )
-from core.agent_core.ai.registry import ADAPTERS, adapter_class, build_wire_request, sent_effort
+from core.agent_core.ai.registry import ADAPTERS, adapter_class, sent_effort
+from tests.agent_core.ai._wire import build_wire_request
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
     AssistantMessage,
