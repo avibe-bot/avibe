@@ -20283,9 +20283,12 @@ def test_a_claim_cancelled_before_it_runs_is_settled_off_the_loop(tmp_path: Path
         service._spawn_execution(claimed, None)
         service._inflight_executions[claimed.id].cancel()
         await asyncio.sleep(0.1)
+        # Until its settlement lands the claim stays live, so recovery cannot reclaim the
+        # still-running row and have the settlement terminalize the new claim.
+        assert claimed.id in service._live_claimed_run_ids
         release.set()
         for _ in range(100):
-            if request_store.get_run(claimed.id)["status"] == "queued":
+            if request_store.get_run(claimed.id)["status"] == "queued" and not service._cancel_settlements:
                 break
             await asyncio.sleep(0.05)
         await asyncio.to_thread(holder.join, 5)
@@ -20293,6 +20296,7 @@ def test_a_claim_cancelled_before_it_runs_is_settled_off_the_loop(tmp_path: Path
     asyncio.run(_go())
     assert released_in_time == [True]
     assert request_store.get_run(claimed.id)["status"] == "queued"
+    assert claimed.id not in service._live_claimed_run_ids
 
 
 def test_a_mirror_read_never_waits_for_a_writer_and_never_sees_its_unwritten_edit(tmp_path: Path, monkeypatch) -> None:
@@ -20329,3 +20333,129 @@ def test_a_mirror_read_never_waits_for_a_writer_and_never_sees_its_unwritten_edi
             release_write.set()
         stamping.result(timeout=5)
     assert store.get_task(task.id).enabled is False
+
+
+def test_a_reset_rebind_persists_its_whole_recovery_whatever_the_mirror_publishes_meanwhile(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """#2649: binding recovery now runs on a worker while the mirror stays published to the loop. A reset rebind's
+    recorded choice (follow the rebound session, drop the stale Agent pin) is written with the binding by the store,
+    so a reload that republishes the mirror between the recovery and its write cannot drop it, and the definition the
+    loop reads is never edited before the database accepts it."""
+    from core.vibe_agents import VibeAgentStore
+    from storage.models import agent_sessions
+    from storage.sessions_service import SQLiteSessionsService
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+    agent_store = VibeAgentStore(db_path)
+    try:
+        agent_store.create(name="nightly", backend="claude", model="legacy-model")
+    finally:
+        agent_store.close()
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        pinned = sessions.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="claude",
+            session_anchor="slack_C123:definition_republish",
+            native_session_id="native-republish",
+        )
+    finally:
+        sessions.close()
+    engine = create_sqlite_engine(db_path)
+    with engine.begin() as conn:
+        conn.execute(
+            agent_sessions.update().where(agent_sessions.c.id == pinned).values(agent_name="nightly", model="legacy-model")
+        )
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        name="digest",
+        session_key="",
+        session_id=pinned,
+        session_policy="create_once",
+        agent_name="nightly",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        assert sessions.delete_agent_sessions(scope_key="slack::channel::C123", session_anchor_prefix="slack_C123")
+    finally:
+        sessions.close()
+    agent_store = VibeAgentStore(db_path)
+    try:
+        assert agent_store.remove("nightly")
+    finally:
+        agent_store.close()
+
+    store = ScheduledTaskStore()
+    store.set_enabled(task.id, True)
+    service = _dispatching_binding_service(tmp_path, store, db_path=db_path)
+    published = store.get_task(task.id)
+    rebind = store.rebind_session
+
+    def rebind_after_a_republish(*args, **kwargs):
+        # Another executor's reload lands between the recovery and its write.
+        store.load()
+        return rebind(*args, **kwargs)
+
+    monkeypatch.setattr(store, "rebind_session", rebind_after_a_republish)
+    asyncio.run(service._execute_task(published, execution_id="exec-1", disable_one_shot=False))
+
+    rebound = ScheduledTaskStore().get_task(task.id)
+    assert rebound.session_id and rebound.session_id != pinned
+    assert rebound.agent_name is None
+    assert rebound.metadata.get(BINDING_FOLLOWS_SESSION_METADATA_KEY) is True
+    # The object the loop read before the fire was never edited in place.
+    assert published.agent_name == "nightly" and published.session_id == pinned
+
+
+
+def test_a_reservation_a_cancellation_strands_is_given_back(tmp_path: Path, monkeypatch) -> None:
+    """#2649: a per-run session is reserved off the loop. A cancellation that arrives while it is being reserved waits
+    for the reservation to land, then gives the session back before it propagates: nothing was dispatched to it, and a
+    per-run reservation carries no definition stamp the orphan sweep could find it by."""
+
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = store.add_task(
+        session_key="slack::channel::C123",
+        session_policy="create_per_run",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+    )
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={"slack": object()}, im_clients={}),
+        store=store,
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+    )
+    entered, release = threading.Event(), threading.Event()
+    released: list[str] = []
+
+    def slow_reservation(**_kwargs) -> str:
+        entered.set()
+        assert release.wait(5)
+        return "ses-reserved-1"
+
+    monkeypatch.setattr(service, "_reserve_runtime_session", slow_reservation)
+    monkeypatch.setattr(
+        service, "_release_reserved_session", lambda session_id, *, reason: released.append(session_id) or True
+    )
+
+    async def _go() -> None:
+        fire = asyncio.create_task(service._execute_task(task, execution_id="exec-1", disable_one_shot=False))
+        assert await asyncio.to_thread(entered.wait, 5)
+        fire.cancel()
+        await asyncio.sleep(0.05)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await fire
+
+    asyncio.run(_go())
+    assert released == ["ses-reserved-1"]

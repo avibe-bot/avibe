@@ -1735,11 +1735,24 @@ class ScheduledTaskStore:
         return task
 
     @_serialize_task_mirror
-    def rebind_session(self, task_id: str, session_id: str) -> None:
-        """Host recovery changes only the binding, retaining authenticated metadata."""
+    def rebind_session(self, task_id: str, session_id: str, *, follows_session: bool = False) -> None:
+        """Host recovery changes the binding, retaining authenticated metadata.
+
+        ``follows_session`` is a reset rebind's recorded choice: the definition follows
+        its rebound session's Agent from now on, so its own Agent pin is dropped and the
+        marker that keeps an unrelated edit from re-pinning it is set. Applied to the
+        store's copy in the same write as the binding, so neither lands without the other.
+        """
+
         task = self._required_working_copy(task_id)
         expect = self._read_state(task)
         task.session_id = session_id
+        if follows_session:
+            task.metadata = {
+                **(task.metadata if isinstance(task.metadata, dict) else {}),
+                BINDING_FOLLOWS_SESSION_METADATA_KEY: True,
+            }
+            task.agent_name = None
         task.updated_at = _utc_now_iso()
         if not self._write_task(task, expect):
             raise DefinitionWriteConflict(task_id, definition_type="scheduled task")
@@ -4050,8 +4063,11 @@ class ScheduledTaskService:
         # job ids are unique per registration so a queued event from a replaced
         # DateTrigger cannot be mistaken for its successor.
         self._job_ids: Dict[str, str] = {}
-        # Settlements of claims cancelled before they ran, started by their done-callback.
+        # Settlements of claims cancelled before they ran, started by their done-callback,
+        # and the claims they settle: a claim stays live, so recovery cannot reclaim it,
+        # until its settlement has landed.
         self._cancel_settlements: set["asyncio.Task[None]"] = set()
+        self._settling_claim_ids: set[str] = set()
         # Mirror reads for ``reconcile_jobs``, numbered, and the newest one applied.
         self._job_reconcile_reads = 0
         self._job_reconcile_applied = 0
@@ -5348,6 +5364,7 @@ class ScheduledTaskService:
                 self._request_recovery_unregistration_task = None
         self._inflight_executions.clear()
         self._request_capacity_reservations.clear()
+        self._settling_claim_ids.clear()
         self._live_claimed_run_ids = frozenset()
         self._inflight_requests.clear()
         self._inflight_cancellation_causes.clear()
@@ -8050,18 +8067,23 @@ class ScheduledTaskService:
             self._session_lock_owners[lock_key] = request.id
         task = asyncio.create_task(self._execute_claimed_request(request))
         self._inflight_executions[request.id] = task
-        self._live_claimed_run_ids = frozenset(self._inflight_executions)
+        self._refresh_live_claims()
         self._inflight_requests[request.id] = request
         task.add_done_callback(
             lambda finished, rid=request.id, key=lock_key: self._on_execution_done(rid, key, finished)
         )
 
+    def _refresh_live_claims(self) -> None:
+        self._live_claimed_run_ids = frozenset(self._inflight_executions) | frozenset(self._settling_claim_ids)
+
     def _on_execution_done(
         self, request_id: str, lock_key: Optional[str], task: "asyncio.Task[Any]"
     ) -> None:
         self._inflight_executions.pop(request_id, None)
-        self._live_claimed_run_ids = frozenset(self._inflight_executions)
         request = self._inflight_requests.pop(request_id, None)
+        if task.cancelled() and request is not None:
+            self._settling_claim_ids.add(request_id)
+        self._refresh_live_claims()
         interruption = self._inflight_cancellation_causes.pop(
             request_id,
             SETTLED_BY_INTERRUPTED,
@@ -8107,6 +8129,12 @@ class ScheduledTaskService:
         except Exception:
             logger.exception("Failed to terminalize canceled claimed request %s", request.id)
             return
+        finally:
+            # Settled (or given up): the claim stops being live, and the request lane
+            # may now pick up the run this settlement requeued.
+            self._settling_claim_ids.discard(request.id)
+            self._refresh_live_claims()
+            self._wake_runtime_work(RuntimeWorkLane.REQUESTS)
         if retired is _NOT_PROJECTED:
             return
         if retired is not None:
@@ -8449,8 +8477,8 @@ class ScheduledTaskService:
                     raise ValueError("hook request requires prompt")
                 user_context = self._resource_user_context(request.metadata)
                 if request.session_policy == "create_per_run":
-                    session_id = await self._run_runtime_sync(
-                        self._reserve_runtime_session,
+                    session_id = await self._reserve_runtime_session_for_fire(
+                        run_id=request.id,
                         agent_name=request.agent_name,
                         agent_id=request.agent_id,
                         deliver_key=request.deliver_key,
@@ -9152,6 +9180,10 @@ class ScheduledTaskService:
             metadata_allows_harness_runtime,
         )
 
+        # The fire's own copy of the definition: binding recovery edits it in place for
+        # this fire's retry, and the published mirror must never show an edit the
+        # database has not accepted (the store persists what it accepts itself).
+        task = ScheduledTask.from_dict(task.to_dict())
         error: Optional[str] = None
         complete_on_return = True
         reconcile_delivery_on_return = False
@@ -9194,8 +9226,8 @@ class ScheduledTaskService:
             )
         try:
             if task.session_policy == "create_per_run":
-                session_id = await self._run_runtime_sync(
-                    self._reserve_runtime_session,
+                session_id = await self._reserve_runtime_session_for_fire(
+                    run_id=execution_id,
                     agent_name=task.agent_name,
                     agent_id=agent_id,
                     deliver_key=task.deliver_key,
@@ -10051,7 +10083,9 @@ class ScheduledTaskService:
                         task.agent_name,
                     )
                     task.agent_name = None
-                if not self._persist_task_session_id(task, new_session_id):
+                if not self._persist_task_session_id(
+                    task, new_session_id, follows_session=not settings_preserved
+                ):
                     # THE REBIND DID NOT LAND (HFR-268). ``new_session_id`` is left
                     # unset on purpose: it is what ``_execute_task`` reads to decide
                     # whether to retry the fire, so an unstored rebind cannot dispatch
@@ -10256,7 +10290,9 @@ class ScheduledTaskService:
                 return session_id, preserved
         return None
 
-    def _persist_task_session_id(self, task: ScheduledTask, session_id: str) -> bool:
+    def _persist_task_session_id(
+        self, task: ScheduledTask, session_id: str, *, follows_session: bool = False
+    ) -> bool:
         """Store the rebind. ``False`` means the guard refused it — do NOT act on it.
 
         HFR-268. This used to swallow the conflict and return ``None``, and the comment
@@ -10271,14 +10307,16 @@ class ScheduledTaskService:
         """
 
         try:
-            self._write_task_session_id(task, session_id)
+            self._write_task_session_id(task, session_id, follows_session=follows_session)
         except DefinitionWriteConflict as exc:
             logger.warning("Could not persist the rebind for task %s: %s", task.id, exc)
             return False
         return True
 
-    def _write_task_session_id(self, task: ScheduledTask, session_id: str) -> None:
-        self.store.rebind_session(task.id, session_id)
+    def _write_task_session_id(
+        self, task: ScheduledTask, session_id: str, *, follows_session: bool = False
+    ) -> None:
+        self.store.rebind_session(task.id, session_id, follows_session=follows_session)
 
     def _pause_task(self, task: ScheduledTask) -> None:
         try:
@@ -10595,6 +10633,27 @@ class ScheduledTaskService:
             service.close()
         if not session_id:
             raise ValueError("failed to reserve runtime session")
+        return session_id
+
+    async def _reserve_runtime_session_for_fire(self, *, run_id: str, **reservation: Any) -> str:
+        """Reserve a per-run session off the loop, answering a cancellation from what landed.
+
+        The reservation is one store step a cancellation cannot split. If one arrived
+        while it ran, the session it reserved was never dispatched to and nothing adopts
+        it (a per-run reservation carries no definition stamp for the orphan sweep to
+        find), so it is given back before the cancellation propagates.
+        """
+
+        session_id, cancelled = await self._run_runtime_sync_settled(
+            self._reserve_runtime_session, **reservation
+        )
+        if cancelled:
+            await self._run_runtime_sync_settled(
+                self._release_reserved_session,
+                session_id,
+                reason=f"run {run_id} was canceled before it used its reserved session",
+            )
+            raise asyncio.CancelledError
         return session_id
 
     def _release_reserved_session(self, session_id: str, *, reason: str) -> bool:
