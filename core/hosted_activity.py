@@ -54,7 +54,8 @@ class HostedActivity:
     # How it ran: natively by the model's provider, by a search executor, or by an image endpoint directly.
     mode: Literal["native", "proxy", "direct"]
     status: str
-    # Model-facing English; ``error_code`` names the reasons Avibe worded itself.
+    # The reason as text: the provider's own, or Avibe's, which always carries ``error_code``, the display key this
+    # module and the Web card render in the viewer's language (#2589).
     error: Optional[str]
     # What the call was about: the query, prompt, page or thread it named.
     subject: Optional[str]
@@ -251,7 +252,8 @@ def proxy_activity(
     return HostedActivity(
         call_id=call.id,
         tool=call.name,
-        mode=execution.mode if execution is not None else "proxy",
+        # An image call is direct even when it was refused before it ran, with no execution to say so.
+        mode=execution.mode if execution is not None else ("direct" if call.name == "image_generate" else "proxy"),
         status=result.record.status,
         error=result.record.error,
         error_code=result.record.error_code,
@@ -261,7 +263,12 @@ def proxy_activity(
         provider=execution.executor_origin.provider if execution is not None else None,
         source_id=execution.executor_source_id if execution is not None else None,
         source_name=source_names(execution.executor_source_id) if execution is not None else None,
-        model=execution.executor_origin.model if execution is not None else None,
+        model=(
+            execution.executor_origin.model
+            if execution is not None
+            # The model a refused image call named: it never moves to another (§7.4).
+            else ran.model if ran is not None else None
+        ),
         sources=tuple(result.record.sources),
         images=tuple(result.record.images or ()),
         size=(ran.size if ran is not None and ran.size else size),

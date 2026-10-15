@@ -220,12 +220,18 @@ def machine_error_codes(outcome: RawCallOutcome) -> tuple[str, ...]:
 
 
 def names_model_refusal(outcome: RawCallOutcome) -> bool:
-    """Whether the upstream's machine code says it does not serve the requested model."""
+    """Whether the upstream says it does not serve the requested model: a code naming it, or a 404 not_found_error."""
 
-    return bool(_MODEL_SURFACE_PATTERNS.search(_error_text(outcome))) or (
+    return machine_codes_name_model(outcome) or (
         outcome.http_status == 404
         and any(code in _MODEL_NOT_FOUND_ERROR_CODES for code in machine_error_codes(outcome))
     )
+
+
+def machine_codes_name_model(outcome: RawCallOutcome) -> bool:
+    """Whether a machine code itself names the model as not served (``model_not_found``, ``unknown_model``)."""
+
+    return bool(_MODEL_SURFACE_PATTERNS.search(_error_text(outcome)))
 
 
 def _classify_unstreamed(

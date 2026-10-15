@@ -33,6 +33,7 @@ from core.handlers.model_hub.adapter import (
 from core.handlers.model_hub.async_owner import run_owned_in_thread
 from core.handlers.model_hub.classification import UPSTREAM_MACHINE_ERROR_CODES
 from core.handlers.model_hub.events import bounded_diagnostic_detail
+from core.handlers.model_hub.hosted_images import IMAGE_RESPONSE_MAX_BYTES
 from core.handlers.model_hub.json_wire import (
     JSONEvent,
     JSONPath,
@@ -70,6 +71,12 @@ _ENGINE_TRANSPORT_FAILURE = re.compile(
 # This threshold only selects memory or a temporary file; it never rejects or
 # truncates upstream response bytes.
 _PRELUDE_MEMORY_BYTES = 256 * 1024
+# A buffered answer is spooled whole before it is read. An image answer, served or refused, is bounded while it
+# downloads, so a relay that never stops cannot fill the disk before the image call rejects it
+# (vibey-hosted-tools.md §7.4).
+_BUFFERED_RESPONSE_MAX_BYTES: Mapping[str, int] = {"openai_images": IMAGE_RESPONSE_MAX_BYTES}
+# The machine code of an answer cut at that bound; L1's own, never an upstream's.
+RESPONSE_TOO_LARGE = "response_too_large"
 _ERROR_OBSERVATION_BYTES = 256 * 1024
 # Projecting a response body that has already arrived is local work. It has
 # its own budget so the client's connection budget never limits it.
@@ -466,6 +473,11 @@ class EngineClient:
                 endpoint += "?alt=sse"
             body.pop("model", None)
             body.pop("stream", None)
+        elif request_protocol == "openai_images":
+            # Reference images make an edit (vibey-hosted-tools.md §7.4). An images call is
+            # always buffered, and names no stream: not every images endpoint reads one.
+            endpoint = "/v1/images/edits" if "images" in body else "/v1/images/generations"
+            body["model"] = routed_model
         else:
             endpoint = _endpoint_for_protocol(request_protocol)
             body["model"] = routed_model
@@ -500,6 +512,9 @@ class EngineClient:
         # bound, and one that runs out closes the engine connection, which
         # cancels the upstream request. A buffered response sends nothing until
         # it is complete, so it has none.
+        bound = _BUFFERED_RESPONSE_MAX_BYTES.get(request_protocol)
+        # A body can carry megabytes of images: encoded off the controller loop.
+        encoded = await run_owned_in_thread(lambda: json.dumps(body).encode("utf-8"))
         trace_configs: list[aiohttp.TraceConfig] = []
         if on_request_sent is not None:
             # CPA resolves the route as soon as it reads the body, while a
@@ -550,10 +565,21 @@ class EngineClient:
                 )
             return completed_handle(outcome)
 
+        def cut(status: int) -> EngineInvokeHandle:
+            # A local cut, like a transport failure: nothing past the bound was read or observed.
+            return ended(_outcome(
+                kind=RawOutcomeKind.NETWORK_ERROR,
+                source=source,
+                model_id=model_id,
+                http_status=status,
+                error_code=RESPONSE_TOO_LARGE,
+                message="upstream response exceeded its bound",
+            ))
+
         try:
             response = await session.post(
                 self._url(endpoint),
-                json=body,
+                data=encoded,
                 headers=headers,
                 allow_redirects=False,
             )
@@ -565,7 +591,7 @@ class EngineClient:
                 error_body = _StreamPrelude()
                 try:
                     await asyncio.wait_for(
-                        _read_response_into(response.content, error_body),
+                        _read_response_into(response.content, error_body, max_bytes=bound),
                         timeout=self.timeout,
                     )
                     observed_payload = await _observe_buffered_protocol_response_async(
@@ -579,6 +605,10 @@ class EngineClient:
                 except (asyncio.TimeoutError, aiohttp.ClientError):
                     payload = b""
                     observed_payload = ProtocolObservation()
+                except _ResponseTooLarge:
+                    response.close()
+                    await session.close()
+                    return cut(response.status)
                 finally:
                     error_body.close()
                 if retry_after is None:
@@ -637,7 +667,15 @@ class EngineClient:
                 buffered_body = _StreamPrelude()
                 prelude = buffered_body
                 await buffered_body.write_async(first)
-                await _read_response_into(response.content, buffered_body)
+                try:
+                    await _read_response_into(
+                        response.content, buffered_body, max_bytes=None if bound is None else bound - len(first),
+                    )
+                except _ResponseTooLarge:
+                    buffered_body.close()
+                    response.close()
+                    await session.close()
+                    return cut(response.status)
                 observation = await _observe_buffered_protocol_response_async(
                     observe_buffered_protocol_response,
                     request_protocol,
@@ -1351,10 +1389,18 @@ def _is_local_model_registration_failure(
         return False
     error = decoded.get("error")
     error_type, _, _ = _raw_error_fields(payload)
+    message = error.get("message") if isinstance(error, dict) else None
     return (
-        isinstance(error, dict)
-        and error_type == "invalid_request_error"
-        and error.get("message") == f"unknown provider for model {routed_model}"
+        error_type == "invalid_request_error"
+        and isinstance(message, str)
+        and (
+            message == f"unknown provider for model {routed_model}"
+            # Its images handler refuses, before any upstream, a model it does not route
+            # there (sdk/api/handlers/openai/openai_images_handlers.go at d318bcc3).
+            or message.startswith(
+                f"Model {routed_model} is not supported on /v1/images/generations or /v1/images/edits."
+            )
+        )
     )
 
 
@@ -1505,11 +1551,22 @@ def _project_raw_error_fields(
     return types[0] if types else None, codes[0] if codes else None, candidates
 
 
+class _ResponseTooLarge(Exception):
+    """A response grew past the bound its request protocol sets."""
+
+
 async def _read_response_into(
     content: aiohttp.StreamReader,
     target: _StreamPrelude,
+    *,
+    max_bytes: int | None = None,
 ) -> None:
+    received = 0
     while chunk := await content.read(_STREAM_CHUNK_BYTES):
+        received += len(chunk)
+        if max_bytes is not None and received > max_bytes:
+            # Stop reading: what is past the bound is never written anywhere.
+            raise _ResponseTooLarge
         await target.write_async(chunk)
 
 

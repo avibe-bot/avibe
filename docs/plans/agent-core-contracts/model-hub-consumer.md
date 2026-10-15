@@ -158,7 +158,16 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
        model (`model_not_found`) also writes negative `call` evidence for (Source, `executor_model`, tool). A
        completed response that never ran the tool ends the chain. One deadline covers the whole chain (180 s).
      - **An `image_generate` call** runs directly on the image endpoint of the (Source, model) the turn's frozen
-       models name (`vibey-hosted-tools.md` §7.4).
+       models name (`vibey-hosted-tools.md` §7.4), admitted on the final snapshot; there is no chain and no
+       fallback. Its arguments are `{model, prompt, size?, images?, n?}`, `images` being at most 4 base64 strings,
+       each a supported image within `read`'s inline limit. An argument the model does not take, or a `size` in a
+       form it does not accept, is a `failed` record with `error_code: "image_param_unsupported"` naming the models
+       that take it; a model the snapshot no longer admits is one with `"image_model_unavailable"`. Nothing runs in
+       either case. The answer is `{"record", "execution"?, "images"?, "generation"?}`: `execution.mode` is
+       `direct`, with no `failed_attempts`; `images` is `[{"data": <base64>}]`, in order, only on a completed call,
+       and Vibey saves each one through its media sink and fills `record.images`; `generation` holds the
+       endpoint's own `size`, `quality` and `revised_prompt` when it reported them. A failed record names the
+       turn's other models. An endpoint that answers with URLs only is `failed`: the gateway never fetches one.
      - Every outcome of a well-formed call is a 200 with `{"record", "execution"?}` in the
        `ToolResultMessage.hosted` encoding. `execution` names the attempt whose response the record came from (the
        last one tried when all failed), with its billing and cost; earlier billable attempts are listed in
@@ -167,7 +176,11 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
      - Success is an allow-list: a call is `completed` only when the response says it completed (Responses
        `status: completed`; Anthropic `end_turn` or `stop_sequence`) and nothing failed; a response that stopped
        early is `incomplete`; any reported failure, or any other or missing ending, is `failed`. An unreadable
-       response is `failed`. The record's `error` is in the user's language.
+       response is `failed`. The record's `error` is in the user's language, and every reason the gateway words
+       carries its `error_code` (`HOSTED_ERROR_CODES`), the key the surfaces show it by in their reader's language;
+       the provider's own detail, the Sources tried and an image call's other models stay in `error`. One reason has
+       no code: with no candidate, the record names the providers to add, which only that call knows, so it is shown
+       as written.
      - The record's search `sources` keep the executor's order. A snippet is the answer text its citation belongs
        to: the list item when that item cites only that source, else its sentence, with the citation markers
        removed. An Anthropic result keeps its `cited_text`. X search lists the cited posts. A response's first 256

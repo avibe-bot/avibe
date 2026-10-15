@@ -245,8 +245,10 @@ MODEL_OUTPUT_ENVELOPE_FIXTURES = (
     ("openai_chat", None, ("choices", "*", "delta", "function_call"), None, True),
 )
 BUFFERED_ERROR_TRUST_ROOT_FIXTURES = {
-    protocol: (("error",),) for protocol in ("anthropic", "openai_responses", "openai_chat", "google")
+    protocol: (("error",),) for protocol in ("anthropic", "openai_responses", "openai_chat", "google", "openai_images")
 }
+# Answered only buffered (image_generate's images endpoints): no stream envelope is ever read.
+BUFFERED_ONLY_PROTOCOLS = frozenset({"openai_images"})
 ACCEPTED_SSE_LINE_ENDINGS = (b"\r\n", b"\n", b"\r")
 STREAM_BOUNDARY_DIMENSIONS = {
     "transport_event": ("eof", "client_error"),
@@ -708,7 +710,7 @@ def test_usage_metering_has_one_owner_per_call_population() -> None:
     # than forwarding a Turn to the gateway. They reuse the same metering owner,
     # exactly once.
     consumers = (
-        invoke, _functions(service_tree)["_user_test_call"], _functions(service_tree)["_executor_attempt"],
+        invoke, _functions(service_tree)["_user_test_call"], _functions(service_tree)["_hosted_upstream_call"],
     )
     assert len(meter_calls) == len(consumers)
     assert all(
@@ -1400,7 +1402,9 @@ def _assert_stream_taxonomy_matches(
 
 
 def test_stream_authority_and_acceptance_fixtures_match_both_ways() -> None:
-    assert set(PROTOCOL_STREAM_TAXONOMY) == {str(fixture["protocol"]) for fixture in STREAM_ENVELOPE_FIXTURES}
+    assert set(PROTOCOL_STREAM_TAXONOMY) - BUFFERED_ONLY_PROTOCOLS == {
+        str(fixture["protocol"]) for fixture in STREAM_ENVELOPE_FIXTURES
+    }
     assert set(SSE_LINE_ENDINGS) == set(ACCEPTED_SSE_LINE_ENDINGS)
     assert all(str(fixture["source"]).startswith("https://") for fixture in STREAM_ENVELOPE_FIXTURES)
     for protocol, taxonomy in PROTOCOL_STREAM_TAXONOMY.items():

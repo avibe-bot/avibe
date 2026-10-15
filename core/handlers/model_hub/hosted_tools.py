@@ -35,6 +35,7 @@ from config.v2_config import (
     model_hub_executor_order,
 )
 from vibe.backend_model_catalog import (
+    IMAGE_PROTOCOLS,
     HostedToolSpec,
     ImageModelSpec,
     bundled_provider_vendors,
@@ -246,15 +247,15 @@ def executor_vendors(tool: str) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class ImageChoice:
-    """One image model ``image_generate`` may name, on the Source that serves it."""
+    """One image model ``image_generate`` may name, on the Source that serves it, under that Source's identity."""
 
     source_id: str
     model_id: str
     description: str
-    endpoint: Literal["images", "chat_image"]
     params: tuple[str, ...]
     size_forms: tuple[str, ...]
     spec: ImageModelSpec
+    identity: str = ""
 
 
 @dataclass(frozen=True)
@@ -267,8 +268,20 @@ class ImageChoices:
     saved_default_available: bool = False
 
 
-def _serves_image(source: ModelHubSourceConfig, model_id: str) -> bool:
-    return source.supply_channel == "hub" and credential_eligible(source) and _serves(source, model_id)
+def _serves_image(source: ModelHubSourceConfig, spec: ImageModelSpec) -> bool:
+    """The image model's route was verified on this kind of credential, and the Source serves the model.
+
+    Only a Source whose protocol's engine entry serves the images endpoints is offered one: the engine refuses the
+    rest on its own, and that refusal is never learned, so it would be offered on every turn.
+    """
+
+    return (
+        source.supply_channel == "hub"
+        and source.protocol in IMAGE_PROTOCOLS
+        and source.kind in spec.kinds
+        and credential_eligible(source)
+        and _serves(source, spec.id)
+    )
 
 
 def image_choices(config: ModelHubConfig, *, evidence: HostedEvidence) -> ImageChoices:
@@ -284,13 +297,13 @@ def image_choices(config: ModelHubConfig, *, evidence: HostedEvidence) -> ImageC
     available: list[ImageChoice] = []
     for source in _vibey_order(config):
         for spec in provider_image_models(source.vendor):
-            if not _serves_image(source, spec.id) or evidence.unsupported(
+            if not _serves_image(source, spec) or evidence.unsupported(
                 source, spec.id, EvidenceFeature.hosted("image_generate", "call")
             ):
                 continue
-            available.append(
-                ImageChoice(source.id, spec.id, spec.description, spec.endpoint, spec.params, spec.size_forms, spec)
-            )
+            available.append(ImageChoice(
+                source.id, spec.id, spec.description, spec.params, spec.size_forms, spec, identity_digest(source),
+            ))
     if not available:
         return ImageChoices((), None, saved, False)
     saved_choice = next(
@@ -308,6 +321,24 @@ def image_choices(config: ModelHubConfig, *, evidence: HostedEvidence) -> ImageC
     default = saved_choice or (by_id.get(saved.model_id) if saved is not None else None) or by_id[available[0].model_id]
     rest = sorted((choice for model_id, choice in by_id.items() if model_id != default.model_id), key=lambda c: c.model_id)
     return ImageChoices((default, *rest), default, saved, saved_choice is not None)
+
+
+def admitted_image(config: ModelHubConfig, choice: ImageChoice, *, evidence: HostedEvidence) -> ModelHubSourceConfig | None:
+    """The Source a frozen enum entry runs on, if this snapshot still admits it (§7.4): None otherwise.
+
+    The same Source under the same identity, still serving the model on a verified credential kind, with no
+    current refusal of the pair.
+    """
+
+    source = next((item for item in config.sources if item.id == choice.source_id), None)
+    if (
+        source is None
+        or identity_digest(source) != choice.identity
+        or not _serves_image(source, choice.spec)
+        or evidence.unsupported(source, choice.model_id, EvidenceFeature.hosted("image_generate", "call"))
+    ):
+        return None
+    return source
 
 
 def freeze_turn_tools(config: ModelHubConfig, *, evidence: HostedEvidence, spec_for: SpecLookup) -> TurnHostedTools:

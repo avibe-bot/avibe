@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional
 
 from config.v2_config import ModelHubSourceConfig
+from vibe.backend_model_catalog import OVERLAY_SEARCH_TOOLS
 
 from .adapter import UpstreamRejection
 from .capability_evidence import EvidenceFeature
@@ -81,7 +82,7 @@ def learn(
 
     rejected_type = rejection.unsupported_tool_type
     if rejected_type is not None and rejected_type in declared_tool_types(request):
-        for tool in ("web_search", "x_search", "image_generation"):
+        for tool in OVERLAY_SEARCH_TOOLS:
             spec = spec_for(source.vendor, source.protocol, model_id, tool)
             if spec is not None and spec.declaration_type == rejected_type:
                 return LearnedEvidence(EvidenceFeature.hosted(tool, "call"), _detail(rejection))

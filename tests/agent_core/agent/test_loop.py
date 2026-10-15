@@ -66,6 +66,7 @@ from core.agent_core.messages import (
 )
 from core.agent_core.tools.base import CallInstance, ToolResult
 from tests.agent_core.fakes import (
+    ORIGIN,
     FakeJobHost,
     FakeModelRouter,
     FakeTool,
@@ -446,11 +447,11 @@ async def test_C4_pending_steer_prevents_finality_and_late_steer_is_refused_duri
             super().__init__()
             self.final_entered, self.final_release = asyncio.Event(), asyncio.Event()
 
-        async def append_response(self, session_id, message, *, final):
+        async def append_response(self, session_id, message, *, final, replied=None, images=()):
             if final:
                 self.final_entered.set()
                 await self.final_release.wait()
-            return await super().append_response(session_id, message, final=final)
+            return await super().append_response(session_id, message, final=final, replied=replied, images=images)
 
     entered, release = asyncio.Event(), asyncio.Event()
 
@@ -785,7 +786,7 @@ async def test_retry_keeps_a_usage_only_partial_out_of_the_context():
 
 
 class _FailingResponses(InMemoryTranscriptStore):
-    async def append_response(self, session_id, message, *, final, request=None):
+    async def append_response(self, session_id, message, *, final, request=None, replied=None, images=()):
         raise RuntimeError("disk full")
 
 
@@ -1379,7 +1380,7 @@ async def test_failed_queued_input_commit_keeps_pending_input_and_announces_prio
 
 async def test_partial_response_commit_failure_still_emits_a_terminal_error():
     class Store(InMemoryTranscriptStore):
-        async def append_response(self, session_id, message, *, final):
+        async def append_response(self, session_id, message, *, final, replied=None, images=()):
             raise OSError("response persistence unavailable")
 
     provider = ScriptedProvider(
@@ -1921,3 +1922,38 @@ async def test_a_terminating_call_ends_the_run_after_its_whole_group_commits():
 
     assert await committed_results(agent) == [("a", "a", False), ("b", "b", False)]
     assert events[-1].reason == "completed" and len(agent.models.provider.requests) == 1
+
+
+def _image_result(call_id: str, *, completed: bool) -> ToolResultMessage:
+    from core.agent_core.messages import HostedResult, ProxyExecution
+
+    if completed:
+        record = HostedRecord(status="completed", images=(HostedImage(path="/media/winner.png", mime="image/png"),))
+        execution = ProxyExecution(ORIGIN, "src_executor01", "metered", mode="direct")
+        return ToolResultMessage(call_id, "image_generate", (text("saved"),), hosted=HostedResult(record, execution))
+    record = HostedRecord(status="failed", error="refused", images=())
+    return ToolResultMessage(call_id, "image_generate", (text("failed"),), True, hosted=HostedResult(record))
+
+
+@pytest.mark.parametrize(("ours", "theirs"), [(False, True), (True, False)], ids=["they-saved-it", "they-failed-it"])
+async def test_a_reply_counts_the_images_of_the_tool_result_that_committed_not_the_writer_that_lost(ours, theirs):
+    """MH-HOSTED-UI-012: a call instance is settled once, whoever writes (a recovery pass may settle it first), and the
+    store returns the row that committed. Whether a final that says nothing after it replies with an image follows
+    that row, never the result this execution produced and lost."""
+
+    store = InMemoryTranscriptStore()
+
+    async def execute(arguments, ctx):
+        # Another writer settles the call while it runs: its result is the one that commits.
+        await store.append_tool_result(ctx.session_id, _image_result(ctx.tool_call_id, completed=theirs), details={})
+        mine = _image_result(ctx.tool_call_id, completed=ours)
+        return ToolResult(mine.content, mine.is_error, hosted=mine.hosted)
+
+    tool = FakeTool("image_generate", execute=execute)
+    provider = ScriptedProvider(
+        [[Done(assistant("", calls=[ToolCallBlock("call_img", "image_generate", {})]))], [Done(assistant(""))]]
+    )
+    events = await collect(make_agent(provider, store=store, tools=[tool]))
+
+    ended = events[-1]
+    assert isinstance(ended, RunEnded) and ended.reason == ("completed" if theirs else "error")

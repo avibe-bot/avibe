@@ -37,8 +37,7 @@ HOSTED_STATUSES: tuple[str, ...] = ("completed", "failed", "incomplete", "pendin
 HOSTED_ERROR_MAX_CHARS = 400
 #: The stable code of each hosted failure Avibe words itself (``HostedRecord.error_code``), by which a display localizes
 #: it; a provider's own reason has none. A record loads with any snake_case code, so one a newer build wrote still reads.
-#: ``provider_no_image`` and ``image_not_streamed`` have no producer since native images went (v2); they stay for the
-#: records already written.
+#: ``image_not_streamed`` has no producer since native images went (v2); it stays for the records already written.
 HOSTED_ERROR_CODES: tuple[str, ...] = (
     "provider_no_reason",
     "provider_no_image",
@@ -51,6 +50,18 @@ HOSTED_ERROR_CODES: tuple[str, ...] = (
     "gateway_no_result",
     "image_param_unsupported",
     "image_model_unavailable",
+    "image_argument_invalid",
+    "image_reference_unreadable",
+    # The gateway's search executor and image endpoint (vibey-hosted-tools.md §6, §7.4).
+    "provider_refused",
+    "provider_timed_out",
+    "provider_unreachable",
+    "provider_unreadable",
+    "provider_too_large",
+    "provider_image_unusable",
+    "search_not_run",
+    "search_failed",
+    "response_ended_early",
 )
 COST_BASES: tuple[str, ...] = ("reported", "list", "included")
 SOURCE_BILLINGS: tuple[str, ...] = ("monthly", "metered")
@@ -350,8 +361,11 @@ class HostedImage:
 class HostedRecord:
     """Per-call facts. ``images`` is set exactly for ``image_generate`` (possibly empty).
 
-    ``error`` is model-facing English. ``error_code`` names a reason Avibe wrote (``HOSTED_ERROR_CODES``), only beside
-    an ``error``.
+    ``error`` carries the reason as text, which the model reads: the provider's own, or one Avibe wrote. Every reason
+    Avibe writes carries an ``error_code`` (``HOSTED_ERROR_CODES``, #2589), only beside an ``error``: the display key,
+    which the Web card and the IM line render as that code's copy in the viewer's language. A reason without one is
+    shown as written: the provider's own, or the one reason whose useful part is that call's own fact (the gateway's
+    "no provider can run this search; add an API key from …"), which Avibe writes in the user's language.
     """
 
     status: HostedStatus
@@ -670,14 +684,18 @@ def text(value: str) -> TextBlock:
     return TextBlock(text=value)
 
 
-def has_reply(message: AssistantMessage) -> bool:
-    """Whether a response says something to the user: non-blank text.
+def has_reply(message: AssistantMessage, *, generated_images: bool = False) -> bool:
+    """Whether a turn's final response gives the user something: non-blank text, or, when it ended normally, the images
+    the turn's calls generated (``generated_images``), which are delivered with it. A refusal, safety or length stop
+    without text stays a failure, whatever the turn generated.
 
-    The one rule for "the model replied", read by the loop's empty-reply test and
-    by a final row's outcome. A generated image is an ``image_generate`` tool
-    result, delivered with the turn, never part of the response itself.
+    The one rule for "the model replied". The loop decides it once for each response it commits, and the store's row
+    type and live settlement take that decision. A generated image is an ``image_generate`` tool result, never part of
+    the response itself, so only the turn knows of it.
     """
-    return any(isinstance(block, TextBlock) and block.text and block.text.strip() for block in message.content)
+    if any(isinstance(block, TextBlock) and block.text and block.text.strip() for block in message.content):
+        return True
+    return generated_images and message.stop_reason == "stop"
 
 
 # --- persisted form ---------------------------------------------------------

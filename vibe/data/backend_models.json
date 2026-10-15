@@ -81,6 +81,39 @@
             }
           }
         }
+      ],
+      "image_models": [
+        {
+          "id": "gpt-image-2",
+          "description": "GPT Image 2: precise prompts, legible text, edits",
+          "params": ["images", "n", "size"],
+          "size_forms": ["pixels"],
+          "kinds": ["api_key"],
+          "request": {"output_format": "jpeg", "output_compression": 90}
+        }
+      ]
+    },
+    "gemini": {
+      "models": [],
+      "image_models": [
+        {
+          "id": "gemini-2.5-flash-image",
+          "description": "Gemini 2.5 Flash Image (Nano Banana): fast generation",
+          "params": ["n", "size"],
+          "size_forms": ["ratio"],
+          "kinds": ["api_key"],
+          "request": {"response_format": "b64_json"},
+          "tokens_per_image": 1290
+        },
+        {
+          "id": "gemini-3-pro-image-preview",
+          "description": "Gemini 3 Pro Image (Nano Banana Pro): high fidelity, text rendering",
+          "params": ["n", "size"],
+          "size_forms": ["ratio"],
+          "kinds": ["api_key"],
+          "request": {"response_format": "b64_json"},
+          "tokens_per_image": 1120
+        }
       ]
     },
     "xai": {
