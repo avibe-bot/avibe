@@ -283,8 +283,15 @@ def test_candidate_mode_writes_real_digests_and_owned_urls_without_pinned_hashes
     manifest = _candidate_manifest(tmp_path, source_sha=source_sha, patches=patches)
     monkeypatch.setattr(builder, "REPO_ROOT", tmp_path)
     for name, value in {
+        "GO386": "softfloat",
         "GOAMD64": "v4",
+        "GOARM": "7,hardfloat",
         "GOARM64": "v9.5,lse,crypto",
+        "GOMIPS": "softfloat",
+        "GOMIPS64": "softfloat",
+        "GOPPC64": "power10",
+        "GORISCV64": "rva23u64",
+        "GOWASM": "satconv",
         "GOFLAGS": "-tags=hostile",
         "GOEXPERIMENT": "hostile",
         "GOFIPS140": "v1.0.0",
@@ -367,6 +374,17 @@ def test_candidate_mode_writes_real_digests_and_owned_urls_without_pinned_hashes
     assert {env["GOENV"] for command, env in commands if command[:2] == ["go", "build"]} == {"off"}
     assert {env["GOTOOLCHAIN"] for command, env in commands if command[:2] == ["go", "build"]} == {"local"}
     assert {env["GOWORK"] for command, env in commands if command[:2] == ["go", "build"]} == {"off"}
+    for command, env in commands:
+        if command[:2] != ["go", "build"]:
+            continue
+        expected_level = "GOAMD64" if env["GOARCH"] == "amd64" else "GOARM64"
+        expected_value = "v1" if expected_level == "GOAMD64" else "v8.0"
+        assert env[expected_level] == expected_value
+        assert all(
+            env.get(name) is None
+            for name in builder._GO_ARCHITECTURE_LEVEL_VARS
+            if name != expected_level
+        )
     version_envs = [
         env for command, env in commands if command[:2] == ["go", "version"]
     ]

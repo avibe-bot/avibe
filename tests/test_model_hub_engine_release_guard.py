@@ -4,6 +4,8 @@ import gzip
 import hashlib
 import io
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -135,7 +137,7 @@ def test_manifest_go_version_cli_rejects_missing_or_nonstable_pin(tmp_path: Path
     assert "exact stable Go version" in result.stderr
 
 
-def test_publication_workflow_reads_go_pin_from_packaged_manifest() -> None:
+def _run_workflow_go_pin_step(tmp_path: Path, build: dict | None) -> tuple[subprocess.CompletedProcess[str], bytes, bytes]:
     import yaml
 
     workflow = yaml.safe_load(
@@ -144,16 +146,75 @@ def test_publication_workflow_reads_go_pin_from_packaged_manifest() -> None:
         )
     )
     steps = workflow["jobs"]["build-patched-source"]["steps"]
-    resolve = next(step for step in steps if step.get("id") == "go_pin")
-    setup = next(step for step in steps if str(step.get("uses", "")).startswith("actions/setup-go@"))
+    producer = next(step for step in steps if step.get("id") == "go_pin")["run"]
+    staged = tmp_path / "workflow"
+    (staged / "scripts").mkdir(parents=True)
+    (staged / "vibe/model_hub_runtime").mkdir(parents=True)
+    shutil.copy2(
+        guard.REPO_ROOT / "scripts/model_hub_engine_release_guard.py",
+        staged / "scripts/model_hub_engine_release_guard.py",
+    )
+    manifest = staged / "vibe/model_hub_runtime/cliproxyapi_manifest.json"
+    payload = {"build": build} if build is not None else {}
+    manifest.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    before = manifest.read_bytes()
+    output = staged / "github-output"
+    environment = os.environ.copy()
+    environment["GITHUB_OUTPUT"] = str(output)
+    result = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", producer],
+        cwd=staged,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result, output.read_bytes() if output.exists() else b"", before
 
-    assert "go-version" in resolve["run"]
-    assert "model_hub_engine_release_guard.py" in resolve["run"]
-    assert "go-version" in resolve["run"]
+
+def test_publication_workflow_produces_bare_go_semver_for_setup_go(tmp_path: Path) -> None:
+    import yaml
+
+    workflow = yaml.safe_load(
+        (guard.REPO_ROOT / ".github/workflows/model-hub-engine-release-guard.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    steps = workflow["jobs"]["build-patched-source"]["steps"]
+    resolve_index = next(index for index, step in enumerate(steps) if step.get("id") == "go_pin")
+    resolve = steps[resolve_index]
+    setup_index = next(
+        index for index, step in enumerate(steps) if str(step.get("uses", "")).startswith("actions/setup-go@")
+    )
+    setup = steps[setup_index]
+
+    assert resolve_index < setup_index
+    assert "raw_go_version" in resolve["run"]
+    assert "${raw_go_version#go}" in resolve["run"]
     assert setup["with"]["go-version"] == "${{ steps.go_pin.outputs.go_version }}"
     assert 'go-version: "1.26.9"' not in (guard.REPO_ROOT / ".github/workflows/model-hub-engine-release-guard.yml").read_text(
         encoding="utf-8"
     )
+
+    for raw_version, expected in (("go1.26.9", "1.26.9"), ("go1.27.1", "1.27.1")):
+        result, output, before = _run_workflow_go_pin_step(tmp_path / raw_version, {"go_version": raw_version})
+        assert result.returncode == 0, result.stderr
+        assert output == f"go_version={expected}\n".encode()
+        assert before == (tmp_path / raw_version / "workflow/vibe/model_hub_runtime/cliproxyapi_manifest.json").read_bytes()
+
+
+@pytest.mark.parametrize(
+    "build",
+    [None, {}, {"go_version": "1.27.1"}, {"go_version": "go1.27"}, {"go_version": "go1.27.1-beta1"}],
+)
+def test_publication_workflow_rejects_invalid_go_pin_without_consumer_output(
+    tmp_path: Path,
+    build: dict | None,
+) -> None:
+    result, output, before = _run_workflow_go_pin_step(tmp_path, build)
+    assert result.returncode != 0
+    assert output == b""
+    assert before == (tmp_path / "workflow/vibe/model_hub_runtime/cliproxyapi_manifest.json").read_bytes()
 
 
 def test_fetch_owned_release_materializes_exact_verified_assets(

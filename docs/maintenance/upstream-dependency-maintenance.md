@@ -103,8 +103,10 @@ Preparation:
    (`GOAMD64=v1` or `GOARM64=v8.0`, with other architecture-level variables
    cleared). It preserves only cache/download settings that do not change build
    identity. The exact Go version is recorded in the candidate manifest and is
-   the same pin consumed by the publication workflow; the workflow fails closed
-   if that manifest pin is missing or malformed.
+   validated in its `goX.Y.Z` form. The publication workflow keeps that form
+   for manifest/builder comparison, then strips only the `go` prefix at the
+   `setup-go` adapter so the action receives bare `X.Y.Z`; it fails closed if
+   the validated value is missing or malformed.
 
    ```bash
    python3 scripts/build_model_hub_engine.py \
