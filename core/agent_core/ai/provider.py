@@ -221,6 +221,9 @@ class ProviderError:
     #: A refusal before any output, which the loop answers by rendering the request again (``vibey-hosted-tools.md``
     #: §3.5), never by the generic retry.
     refusal: Optional["Refusal"] = None
+    #: Permission to continue from the committed transcript, not replay this request. False by default:
+    #: only a classified transient failure grants it, even when streaming makes ``retryable`` false.
+    continuable: bool = False
 
 
 @dataclass(frozen=True)

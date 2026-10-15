@@ -53,7 +53,6 @@ from core.agent_core.agent.events import (
 )
 from core.agent_core.agent.hooks import AgentInput
 from core.agent_core.agent.loop import Agent
-from core.agent_core.ai.provider import RETRYABLE_ERROR_KINDS
 from core.agent_core.agent.models import ModelSelection
 from core.agent_core.agent.recovery import settle_open_calls
 from core.agent_core.harness.context import ContextConfig
@@ -126,7 +125,6 @@ BACKEND = "vibey"
 # Final responses whose empty text is explained by the stop itself (loop-control.md section 2).
 _EXPLAINED_STOPS = ("length", "refusal", "safety")
 _COMPLETED = ("completed", "ended_by_hook")
-_AUTO_CONTINUATION_KINDS = frozenset((*RETRYABLE_ERROR_KINDS, "unknown"))
 _MAX_AUTO_CONTINUATIONS = 5
 _JOB_PRUNE_INTERVAL_S = 3600.0
 
@@ -206,7 +204,10 @@ class _Run:
     # Automatic transcript-only continuations already spent by this Turn. The
     # initial model call is not counted; the limit is five additional attempts.
     continuations: int = 0
+    # One elapsed window from the first continuable failure, shared by every outer continuation.
+    continuation_started_at: Optional[float] = None
     stop_requested: bool = False
+    stop_event: asyncio.Event = field(default_factory=asyncio.Event)
     # When each tool call started (monotonic), for a proxied hosted call's duration.
     tool_started: dict[str, float] = field(default_factory=dict)
     # Images the run's hosted calls generated, as (path, label), attached to its final reply.
@@ -387,17 +388,20 @@ class VibeyAgent(BaseAgent):
             async for event in stream:
                 await self._on_event(turn, event)
             if self._can_auto_continue(turn) and turn.continuations < _MAX_AUTO_CONTINUATIONS:
+                if turn.continuation_started_at is None:
+                    turn.continuation_started_at = time.monotonic()
                 # Finish T2 before asking the same Agent to build its next request.
                 # Accepted P1 inputs are admitted into the transcript, but never
                 # become an implicit user-visible continuation message.
                 await self._settle_left_open(runtime)
                 resume_turn_inputs = await self._admit_returned_inputs(turn)
-                turn.continuations += 1
-                turn.reason = None
-                turn.cause = None
-                turn.final_row = None
-                transcript_resume = True
-                continue
+                if await self._wait_auto_continue(turn):
+                    turn.continuations += 1
+                    turn.reason = None
+                    turn.cause = None
+                    turn.final_row = None
+                    transcript_resume = True
+                    continue
             agent_input = await self._continuing_input(turn)
         if turn.reason not in _COMPLETED:
             await self._settle_left_open(runtime)
@@ -446,8 +450,34 @@ class VibeyAgent(BaseAgent):
             and not run.final_row
             and cause is not None
             and cause.origin == "source"
-            and cause.kind in _AUTO_CONTINUATION_KINDS
+            and cause.continuable
         )
+
+    async def _wait_auto_continue(self, run: _Run) -> bool:
+        """Honor the provider's delay floor and one elapsed budget, with Stop owning the wait.
+
+        The initial run is not in this window. Subsequent runs and recovery work spend it, not just backoff.
+        Expiry prevents another continuation, but never interrupts a run already doing useful work.
+        """
+        if run.stop_requested:
+            run.reason = "aborted"
+            return False
+        if not self._can_auto_continue(run):
+            return False
+        policy = run.agent.retry
+        elapsed = time.monotonic() - run.continuation_started_at
+        backoff = min(policy.max_delay_s, policy.initial_delay_s * 2**run.continuations)
+        delay = max(backoff, run.cause.retry_after_s or 0.0)
+        if elapsed + delay >= policy.max_elapsed_s:
+            return False
+        try:
+            await asyncio.wait_for(run.stop_event.wait(), timeout=delay)
+        except asyncio.TimeoutError:
+            pass
+        if run.stop_requested:
+            run.reason = "aborted"
+            return False
+        return time.monotonic() - run.continuation_started_at < policy.max_elapsed_s
 
     async def _settle_stopped(self, turn: _Run) -> None:
         """A Stop before the loop started: the Turn settles as stopped, nothing dispatched."""
@@ -460,6 +490,7 @@ class VibeyAgent(BaseAgent):
             request.stop_failure_reason = "not_active"
             return False
         run.stop_requested = True
+        run.stop_event.set()
         if run.agent is not None:
             run.agent.abort("stopped by user")
         return True
@@ -486,6 +517,7 @@ class VibeyAgent(BaseAgent):
             run = runtime.run
             if run is not None and run.request.session_key == session_key:
                 run.stop_requested = True
+                run.stop_event.set()
                 if run.agent is not None:
                     run.agent.abort("session cleared")
                 cleared += 1

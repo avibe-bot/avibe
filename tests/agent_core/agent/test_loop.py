@@ -725,6 +725,27 @@ async def test_retry_obeys_provider_flag_and_allows_usage_only_partial(streamed,
         assert events[-1].reason == "completed"
 
 
+@pytest.mark.parametrize("failure", ["before output", "after output", "recovery exhausted"])
+async def test_provider_permissions_and_delay_reach_the_terminal_cause(failure):
+    """C-3: consumers need the producer's decision, which the old kind/message-only event dropped."""
+    from core.agent_core.ai.errors import classify_error
+
+    error = classify_error(
+        status=424 if failure == "recovery exhausted" else 429,
+        body='{"error":{"code":"model_hub_recovery_exhausted","cause":"rate_limited"}}'
+        if failure == "recovery exhausted" else "busy",
+        headers={"retry-after": "17"},
+        streamed=failure == "after output",
+    )
+    agent = make_agent(ScriptedProvider([[error]]), retry=RetryPolicy(max_retries=0))
+    events = await collect(agent)
+    [announced] = [event for event in events if isinstance(event, AgentError)]
+    assert events[-1].cause == announced
+    assert (announced.kind, announced.origin, announced.retryable, announced.continuable, announced.retry_after_s) == (
+        "rate_limit", "source", failure == "before output", failure != "recovery exhausted", 17.0
+    )
+
+
 # OpenAI Responses streams, as the real adapter reads them: reasoning, then how the response ended.
 _REASONING = (
     'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1"}}\n\n'

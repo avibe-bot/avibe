@@ -2964,8 +2964,10 @@ class _FailingLoader(MediaLoader):
 
 
 @pytest.mark.asyncio
-async def test_media_loader_failure_is_a_provider_error() -> None:
-    message = UserMessage((ImageBlock("image/png", "missing", "missing.png"),))
+@pytest.mark.parametrize("token,kind", [("missing", "unknown"), ("rate limit", "rate_limit"), ("server error", "server")])
+async def test_media_loader_failure_is_a_provider_error(token, kind) -> None:
+    # Local preparation must not acquire replay/continuation permission from upstream-looking diagnostic text.
+    message = UserMessage((ImageBlock("image/png", token, "missing.png"),))
     adapter = OpenAIChatAdapter(
         httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(500))),
         media_loader=_FailingLoader(),
@@ -2977,7 +2979,8 @@ async def test_media_loader_failure_is_a_provider_error() -> None:
     )
 
     assert isinstance(events[-1], ProviderError)
-    assert events[-1].kind == "unknown"
+    assert events[-1].kind == kind
+    assert not events[-1].retryable and not events[-1].continuable
 
 
 @pytest.mark.asyncio
@@ -4717,7 +4720,7 @@ async def test_model_hubs_recovery_exhausted_ending_names_its_cause(adapter_type
 
     error = events[-1]
     assert isinstance(error, ProviderError)
-    assert (error.kind, error.retryable) == (kind, False)
+    assert (error.kind, error.retryable, error.continuable) == (kind, False, False)
 
 
 # CLIProxyAPI nests the class under `error`; OpenAI's reference carries it at the root.
@@ -4766,6 +4769,61 @@ async def test_only_a_drop_after_thinking_alone_is_marked_after_thinking(
     assert error.after_thinking is flagged
     # Before any output a server error was always retryable; after text it never is.
     assert error.retryable is (flagged or not streamed)
+    assert error.continuable is True
+
+
+@pytest.mark.parametrize("output", ["none", "thinking", "text"])
+@pytest.mark.parametrize(
+    "failure,continuable",
+    [
+        ("classified transient", True),
+        ("explicit transient", True),
+        ("eof", True),
+        ("stalled", True),
+        ("recovery exhausted", False),
+        ("pin refusal", False),
+        ("malformed", False),
+        ("unknown wire", False),
+        ("local exception", False),
+    ],
+)
+def test_stream_error_producers_preserve_continuation_permission(output, failure, continuable):
+    """C-2: terminal sanitization must not resurrect exhausted/refused/local failures after thinking.
+
+    Prior tests covered kinds and replay only, so the outer adapter could undo their decision.
+    """
+    from core.agent_core.ai._common import PinUnavailable, pin_refusal
+    from core.agent_core.ai.errors import ProviderStalled
+
+    endpoint = _request("openai_responses").endpoint
+    assembler = StreamAssembler(origin=Origin("test", "openai_responses", "model"), protocol="openai_responses")
+    if output == "thinking":
+        assembler.thinking_delta(0, "reasoning")
+    elif output == "text":
+        assembler.text_delta(0, "partial")
+    if failure == "classified transient":
+        error = assembler.error("busy", status=503)
+    elif failure == "explicit transient":
+        error = assembler.error("busy", kind="server")
+    elif failure == "eof":
+        error = assembler.incomplete()
+    elif failure == "stalled":
+        error = assembler.exception(ProviderStalled(600))
+    elif failure == "recovery exhausted":
+        error = assembler.error(json.dumps({"error": {"code": "model_hub_recovery_exhausted", "cause": "server_error"}}))
+    elif failure == "pin refusal":
+        error = pin_refusal(assembler, endpoint, PinUnavailable())
+    elif failure == "malformed":
+        error = assembler.error("bad wire shape", kind="invalid_request")
+    elif failure == "unknown wire":
+        error = assembler.error("unclassified failure")
+    else:
+        error = assembler.exception(RuntimeError("local failure"))
+    terminal = assembler.terminal(error)
+    assert terminal.continuable is continuable
+    expected_retry = (continuable and output != "text") or (failure == "unknown wire" and output == "thinking")
+    assert terminal.retryable is expected_retry
+    assert terminal.after_thinking is (expected_retry and output == "thinking")
 
 
 @pytest.mark.asyncio
@@ -4901,6 +4959,7 @@ async def test_eof_without_protocol_terminal_is_not_success(
 
     assert isinstance(events[-1], ProviderError)
     assert events[-1].retryable is False
+    assert events[-1].continuable is True
     assert events[-1].partial is not None
     assert not any(isinstance(event, Done) for event in events)
 

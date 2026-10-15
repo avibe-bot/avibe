@@ -1239,12 +1239,27 @@ async def test_output_limited_final_is_a_failed_row_with_length_cause(
     assert "kind=length" in caplog.text
 
 
+@pytest.fixture
+def continuation_policy(monkeypatch):
+    """Configure the real loop's existing retry policy, without replacing continuation behavior."""
+    from functools import partial
+
+    from core.agent_core.agent.loop import Agent
+    from core.agent_core.agent.models import RetryPolicy
+
+    def configure(**settings):
+        monkeypatch.setattr("modules.agents.vibey.agent.Agent", partial(Agent, retry=RetryPolicy(**settings)))
+
+    return configure
+
+
 async def test_a_transient_failure_continues_from_the_same_transcript_without_a_notice(
-    engine, session, tmp_path, published
+    engine, session, tmp_path, published, continuation_policy
 ) -> None:
     from core.agent_core.ai.provider import ProviderError
 
-    failure = ProviderError("server", "temporary upstream failure", False)
+    continuation_policy(initial_delay_s=0)
+    failure = ProviderError("server", "temporary upstream failure", False, continuable=True)
     harness = _Harness(
         engine,
         tmp_path,
@@ -1273,7 +1288,7 @@ async def test_a_continuation_reuses_a_committed_tool_result_without_rerunning_t
         "telegram",
         [
             [Done(assistant("", calls=(call,)))],
-            [ProviderError("server", "temporary upstream failure", False)],
+            [ProviderError("server", "temporary upstream failure", False, continuable=True)],
             [Done(assistant("done"))],
         ],
         tools=[tool],
@@ -1389,11 +1404,12 @@ async def test_user_metadata_cannot_trigger_vibey_resume(
 
 
 async def test_a_transient_failure_shows_one_notice_after_five_continuations(
-    engine, session, tmp_path, published
+    engine, session, tmp_path, published, continuation_policy
 ) -> None:
     from core.agent_core.ai.provider import ProviderError
 
-    failure = ProviderError("server", "temporary upstream failure", False)
+    continuation_policy(initial_delay_s=0)
+    failure = ProviderError("server", "temporary upstream failure", False, continuable=True)
     harness = _Harness(engine, tmp_path, "telegram", [[failure]] * 6)
 
     await harness.agent.handle_message(harness.request("finish the task"))
@@ -1404,6 +1420,145 @@ async def test_a_transient_failure_shows_one_notice_after_five_continuations(
     assert harness.controller.terminals[-1]["is_error"] is True
 
 
+@pytest.mark.parametrize(
+    "failure,continues",
+    [
+        ("streamed server", True),
+        ("streamed eof", True),
+        ("streamed rate limit", True),
+        ("rate limit past budget", False),
+        ("recovery exhausted", False),
+        ("recovery exhausted after thinking", False),
+        ("unknown", False),
+        ("malformed", False),
+    ],
+)
+async def test_provider_continuation_decision_reaches_vibey(
+    engine, session, tmp_path, published, continuation_policy, failure, continues
+):
+    """Classification -> loop -> adapter: neither an exhausted Hub nor a permanent stream fault may be retried.
+
+    Kind-only scripted tests missed real producers and erased Retry-After before the consumer saw it.
+    """
+    import httpx
+
+    from modules.agents.vibey.models import registry_providers
+
+    continuation_policy(initial_delay_s=0)
+    text_prefix = (
+        'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1"}}\n\n'
+        'data: {"type":"response.output_text.delta","output_index":0,"delta":"Working"}\n\n'
+    )
+    thinking_prefix = (
+        'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1"}}\n\n'
+        'data: {"type":"response.reasoning_summary_text.delta","output_index":0,"delta":"Thinking"}\n\n'
+    )
+    exhausted = {"code": "model_hub_recovery_exhausted", "cause": "server_error", "message": "recovery ended"}
+    sent = []
+
+    def gateway(request):
+        sent.append(json.loads(request.content))
+        if len(sent) > 1:
+            return httpx.Response(200, text=_TEXT_STREAMS["openai_responses"][1])
+        if failure == "rate limit past budget":
+            return httpx.Response(429, headers={"retry-after": "121"}, json={"error": {"message": "busy"}})
+        if failure == "recovery exhausted":
+            return httpx.Response(424, json={"error": exhausted})
+        if failure == "recovery exhausted after thinking":
+            body = thinking_prefix + "data: " + json.dumps({"type": "error", "error": exhausted}) + "\n\n"
+        elif failure == "streamed eof":
+            body = text_prefix
+        elif failure == "malformed":
+            body = text_prefix + 'data: {"type":"response.output_text.delta","output_index":0,"delta":[]}\n\n'
+        else:
+            code = {"streamed server": "server_error", "streamed rate limit": "rate_limit_error"}.get(failure, "new_code")
+            body = text_prefix + "data: " + json.dumps({"type": "error", "code": code, "message": "failed"}) + "\n\n"
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        harness = _Harness(engine, tmp_path, "avibe", [], providers=registry_providers(media_loader=None, client=client))
+        harness.controller.hub_protocol = "openai_responses"
+        await harness.agent.handle_message(harness.request("finish the task"))
+
+    assert len(sent) == (2 if continues else 1)
+    assert harness.controller.terminals[-1]["is_error"] is not continues
+    assert len(harness.rows("notify")) == (0 if continues else 1)
+    assert len(harness.rows("user")) == 1
+
+
+@pytest.mark.parametrize("stop", [False, True])
+async def test_continuation_honors_retry_after_without_delaying_stop(
+    engine, session, tmp_path, published, continuation_policy, stop
+):
+    """The outer wait must honor the provider's floor; a Stop during it must settle without another request."""
+    from core.agent_core.ai.errors import classify_error
+
+    continuation_policy(initial_delay_s=0)
+    failed = asyncio.Event()
+    times = []
+
+    async def fail(request, cancel):
+        times.append(time.monotonic())
+        failed.set()
+        yield classify_error(status=429, streamed=True, headers={"retry-after": "30" if stop else "0.15"})
+
+    async def recover(request, cancel):
+        times.append(time.monotonic())
+        yield Done(assistant("recovered"))
+
+    harness = _Harness(engine, tmp_path, "avibe", [fail, recover])
+    request = harness.request("finish the task")
+    task = asyncio.create_task(harness.agent.handle_message(request))
+    try:
+        await asyncio.wait_for(failed.wait(), timeout=2)
+        if stop:
+            await _until(
+                lambda: harness.agent._runtimes[SESSION].run.continuation_started_at is not None,
+                "the run never reached continuation backoff",
+            )
+            assert await harness.agent.handle_stop(request)
+        await asyncio.wait_for(task, timeout=2)
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    assert harness.rows("notify") == []
+    if stop:
+        assert len(times) == 1
+        assert harness.controller.terminals[-1]["settled_by"] == "stopped"
+    else:
+        assert len(times) == 2 and times[1] - times[0] >= 0.15
+        assert harness.controller.terminals[-1]["is_error"] is False
+
+
+@pytest.mark.parametrize("retry_after", [None, "61"])
+async def test_continuations_share_one_elapsed_budget(
+    engine, session, tmp_path, published, continuation_policy, monkeypatch, retry_after
+):
+    """Run time, not just backoff, spends the outer budget; restarting Agent.resume must not reset it."""
+    from core.agent_core.ai.errors import ProviderStalled, classify_error
+
+    continuation_policy(initial_delay_s=0)
+    now = [0.0]
+    monkeypatch.setattr("modules.agents.vibey.agent.time", SimpleNamespace(monotonic=lambda: now[0]))
+
+    async def fail(request, cancel):
+        # The initial stall is allowed to continue, but two 60s failed continuations spend the 120s window.
+        now[0] += 60
+        yield classify_error(
+            exc=ProviderStalled(600), streamed=True,
+            headers={"retry-after": retry_after} if retry_after and now[0] > 60 else None,
+        )
+
+    harness = _Harness(engine, tmp_path, "avibe", [fail] * 6)
+    await harness.agent.handle_message(harness.request("finish the task"))
+    assert len(harness.provider.requests) == (2 if retry_after else 3)
+    assert len(harness.rows("notify")) == 1
+    assert harness.controller.terminals[-1]["is_error"] is True
+    assert json.loads(harness.rows("notify")[0]["metadata_json"])["error_kind"] == "stalled"
+
+
 @pytest.mark.parametrize("language", ["en", "zh"])
 async def test_a_provider_stall_is_not_shown_as_a_connection_failure(
     engine, session, tmp_path, published, language
@@ -1412,7 +1567,7 @@ async def test_a_provider_stall_is_not_shown_as_a_connection_failure(
     from core.agent_core.ai.provider import ProviderError
 
     stall = ProviderError("stalled", "provider sent no data for 600s", False)
-    harness = _Harness(engine, tmp_path, "telegram", [[stall]] * 6, language=language)
+    harness = _Harness(engine, tmp_path, "telegram", [[stall]], language=language)
 
     await harness.agent.handle_message(harness.request("write the page"))
 
@@ -1436,7 +1591,7 @@ async def test_a_failed_run_logs_its_kind_and_redacted_diagnostic_and_its_notice
     failure = ProviderError(
         "unknown", f"upstream refused\nAuthorization: Bearer {secret}", False, partial=partial
     )
-    harness = _Harness(engine, tmp_path, "telegram", [[failure]] * 6, language="zh")
+    harness = _Harness(engine, tmp_path, "telegram", [[failure]], language="zh")
     request = harness.request("dispatch it")
 
     with caplog.at_level(logging.WARNING, logger="modules.agents.vibey.agent"):
@@ -1483,7 +1638,7 @@ async def test_model_hub_records_a_source_stall_as_the_backend_reported_it(engin
     from tests.test_model_hub_l3 import _assert_valid
 
     stall = ProviderError("stalled", "provider sent no data for 600s\n\u202e上游 key=sk-proj-stall0secret0value", False)
-    harness = _Harness(engine, tmp_path, "telegram", [[stall]] * 6)
+    harness = _Harness(engine, tmp_path, "telegram", [[stall]])
     registry = TurnCorrelationRegistry(BoundedProvenanceStore(tmp_path / "provenance.json"))
     router = ModelHubRuntimeRouter(
         service=SimpleNamespace(), turn_gateway=SimpleNamespace(correlation=registry), overlay_path=tmp_path / "overlay.json"

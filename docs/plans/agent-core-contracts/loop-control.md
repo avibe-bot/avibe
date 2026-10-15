@@ -35,6 +35,15 @@ sequence numbers through `turn_inputs`; an Agent continuing its own run preserve
 its in-memory Turn-input set when the argument is omitted. Retry eligibility and
 retry budgets are adapter policy, not loop policy.
 
+A provider-caused `AgentError` preserves `retryable`, `continuable`, and `retry_after_s`; other errors default
+to false/false/None. Vibey continues only a source error explicitly marked `continuable`, with no committed final
+and no Stop. It permits at most five additional runs on the same Agent, with exponential backoff bounded by the
+loop's delay settings and Retry-After as a floor. One elapsed window (the loop policy's `max_elapsed_s`, at most
+120 seconds) starts at the first eligible failed run and includes all subsequent recovery work, waits, and runs;
+it is not restarted by `resume`. A delay that does not fit denies another continuation. Expiry prevents new
+continuations without interrupting a run already doing useful work. Stop wakes backoff immediately and settles
+the Turn as stopped without another provider request or a failure notice.
+
 
 ```text
 commit input → loop:

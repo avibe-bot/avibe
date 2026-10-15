@@ -668,14 +668,20 @@ class Agent:
         await emit(RunEnded, reason=self._outcome.reason, cause=self._outcome.cause)
 
     async def _error(
-        self, emit: Callable[..., Awaitable[Any]], kind: str, message: str, origin: ErrorOrigin, *, cause: bool
+        self, emit: Callable[..., Awaitable[Any]], kind: str, message: str, origin: ErrorOrigin, *, cause: bool,
+        provider_error: Optional[ProviderError] = None,
     ) -> None:
         """The one place the loop announces an error: ``origin`` as its caller states it, where the error is raised.
 
         ``cause``: the error decided the run's outcome (``OutcomeOwner.primary``), so ``RunEnded`` names it; a
         diagnostic never does.
         """
-        event = await emit(AgentError, kind=kind, message=message, origin=origin)
+        event = await emit(
+            AgentError, kind=kind, message=message, origin=origin,
+            retryable=provider_error.retryable if provider_error is not None else False,
+            continuable=provider_error.continuable if provider_error is not None else False,
+            retry_after_s=provider_error.retry_after_s if provider_error is not None else None,
+        )
         if cause:
             self._outcome.cause = event
 
@@ -1037,7 +1043,9 @@ class Agent:
                     # ``aborted`` is the loop's own cancellation and ``overflow`` says our request was too large;
                     # every other provider error is the source's.
                     origin = "local" if terminal.kind in {"aborted", "overflow"} else "source"
-                    await self._error(emit, terminal.kind, terminal.message, origin, cause=decided)
+                    await self._error(
+                        emit, terminal.kind, terminal.message, origin, cause=decided, provider_error=terminal
+                    )
                     if terminal.partial is not None:
                         row = await self._response(terminal.partial, final=False)
                         await emit(MessageCommitted, message_id=row.row_id, context_seq=row.context_seq, final=False)
