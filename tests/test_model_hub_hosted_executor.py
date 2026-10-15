@@ -346,10 +346,10 @@ FAILED_WITH_PARTIAL = {**WEB_CALL, "status": "failed"}
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("case", "bound", "handles", "error", "sources", "executed"), [
     # No Source can run it: the record says which providers' Sources could.
-    ("no_candidate", None, [], "No Source can run web search right now. Add an API key from one of Anthropic, OpenAI, xAI as a Source under Models, not as a secret.", [], False),
-    ("source_removed", (XAI, "grok-4.6"), [], "No Source can run web search right now. Add an API key from one of Anthropic, OpenAI, xAI as a Source under Models, not as a secret.", [], False),
+    ("no_candidate", None, [], "No Source can run web search right now. Add an API key from one of Anthropic, OpenAI, xAI as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.", [], False),
+    ("source_removed", (XAI, "grok-4.6"), [], "No Source can run web search right now. Add an API key from one of Anthropic, OpenAI, xAI as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.", [], False),
     # A new base URL or credential is a new identity, which the turn's chain was not built for.
-    ("source_identity_changed", (XAI, "grok-4.6"), [], "No Source can run web search right now. Add an API key from one of Anthropic, OpenAI, xAI as a Source under Models, not as a secret.", [], False),
+    ("source_identity_changed", (XAI, "grok-4.6"), [], "No Source can run web search right now. Add an API key from one of Anthropic, OpenAI, xAI as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.", [], False),
     # The only candidate failed: its failure, and the Sources tried.
     ("provider_refused", (XAI, "grok-4.6"),
      [InvokeHandle(_outcome(RawOutcomeKind.HTTP_ERROR, status=429, code="rate_limit_error", source_id=XAI))],
@@ -365,7 +365,7 @@ FAILED_WITH_PARTIAL = {**WEB_CALL, "status": "failed"}
     ("stream_failed_after_items", (XAI, "grok-4.6"),
      [LiveInvokeHandle(_outcome(RawOutcomeKind.HTTP_ERROR, status=200, code="server_error", source_id=XAI,
                                 stream_started=True), _responses(WEB_CALL, WEB_ANSWER)[:-1])],
-     "is overloaded or failing (HTTP 200 server_error)",
+     "is unavailable right now (HTTP 200 server_error)",
      [{"url": PAGE_B, "snippet": "v8.0.27 is the latest release. It adds a streaming keepalive."}, {"url": PAGE_A}],
      True),
 ])
@@ -398,7 +398,7 @@ async def test_a_proxied_call_that_cannot_complete_is_a_failed_record(
         "no_candidate": None, "source_removed": None,
         "source_identity_changed": None, "provider_refused": "provider_refused",
         "tool_never_ran": "search_not_run", "call_failed_with_partial_results": "search_failed",
-        "stream_failed_after_items": "provider_overloaded",
+        "stream_failed_after_items": "provider_unavailable",
     }[case]
     assert answer["record"]["sources"] == sources
     assert ("execution" in answer) is executed
@@ -564,7 +564,7 @@ async def test_failure_text_is_in_the_users_language(tmp_path):
         service, "x_search", {"arguments": {"query": "q"}}, language="zh",
     )
     assert status == 200
-    assert answer["record"]["error"] == "当前没有能运行 X 搜索的供应商。请在“模型”中把 xAI 的 API Key 添加为供应商，而不是存为密钥。"
+    assert answer["record"]["error"] == "当前没有能运行 X 搜索的供应商。请在 模型 › 供应商与路由 中把 xAI 的 API Key 添加为供应商；存在 Vaults 里的密钥不会用于这里。"
 
 
 @pytest.mark.asyncio

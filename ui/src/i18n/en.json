@@ -4959,7 +4959,7 @@
           "image_argument_invalid": "The image call had an argument it can't send.",
           "image_reference_unreadable": "A reference image couldn't be read.",
           "provider_refused": "The provider refused the call.",
-          "provider_overloaded": "The provider is overloaded. Try again later.",
+          "provider_unavailable": "The provider is unavailable right now. Try again later.",
           "provider_timed_out": "The call timed out.",
           "provider_unreachable": "Couldn't reach the provider.",
           "provider_unreadable": "The provider's response couldn't be read.",

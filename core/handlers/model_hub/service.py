@@ -875,7 +875,7 @@ def _executor_failure(outcome: RawCallOutcome | None, say: Callable[..., str], *
         detail = f"{detail}: {outcome.upstream_detail}" if detail else outcome.upstream_detail
     if classify_outcome(replace(outcome, stream_started=False)).reason == "server_error":
         # An overload or server error is transient: the provider did not refuse the call.
-        return failure(say, "modelHub.hostedTools.providerOverloaded", detail=detail or outcome.kind.value)
+        return failure(say, "modelHub.hostedTools.providerUnavailable", detail=detail or outcome.kind.value)
     return failure(say, "modelHub.hostedTools.providerRefused", detail=detail or outcome.kind.value)
 
 
