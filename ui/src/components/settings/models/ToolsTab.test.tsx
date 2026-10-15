@@ -16,6 +16,7 @@ import { readyRegion } from './regionRead';
 import { ToolsTab } from './ToolsTab';
 import type {
   HostedExecutorCandidate,
+  HostedImageModel,
   HostedImageToolStatus,
   HostedRefusal,
   HostedSearchToolStatus,
@@ -422,15 +423,15 @@ describe('ToolsTab executor order', () => {
 describe('ToolsTab image card', () => {
   const GOOGLE = source('src_google01', 'Google AI Studio', { vendor: 'gemini', protocol: 'google' });
   const models = [
-    { source_id: RELAY.id, model_id: 'gpt-image-2', description: 'GPT Image 2: precise prompts, legible text, edits', price: null },
-    { source_id: GROK.id, model_id: 'grok-imagine-image', description: 'Grok Imagine: fast drafts', price: { usd: 0.02, basis: 'list' as const } },
-    { source_id: GOOGLE.id, model_id: 'gemini-2.5-flash-image', description: 'Nano Banana: fast generation', price: { usd: 0.067, basis: 'estimated' as const } },
-  ];
-  const renderImage = (over: Partial<HostedImageToolStatus>, lng: 'en' | 'zh' = 'en') => {
+    { source_id: RELAY.id, model_id: 'gpt-image-2', description: 'GPT Image 2: precise prompts, legible text, edits', billing: 'metered', price: null },
+    { source_id: GROK.id, model_id: 'grok-imagine-image', description: 'Grok Imagine: fast drafts', billing: 'metered', price: { usd: 0.02, basis: 'list' } },
+    { source_id: GOOGLE.id, model_id: 'gemini-2.5-flash-image', description: 'Nano Banana: fast generation', billing: 'metered', price: { usd: 0.067, basis: 'estimated' } },
+  ] satisfies HostedImageModel[];
+  const renderImage = (over: Partial<HostedImageToolStatus>, lng: 'en' | 'zh' = 'en', sources: readonly Source[] = [...SOURCES, GOOGLE]) => {
     const onSave = vi.fn();
     render(
       <I18nextProvider i18n={translator(lng)}>
-        <ToolsTab read={readyRegion({ tools: [image(over)] })} sources={[...SOURCES, GOOGLE]} pending={new Set()} onSave={onSave} onClear={() => {}} onRetry={() => {}} />
+        <ToolsTab read={readyRegion({ tools: [image(over)] })} sources={sources} pending={new Set()} onSave={onSave} onClear={() => {}} onRetry={() => {}} />
       </I18nextProvider>,
     );
     return onSave;
@@ -460,7 +461,8 @@ describe('ToolsTab image card', () => {
   });
 
   it('MH-HOSTED-UI-022: shows an image model on a subscription Source as included, whatever its list price', () => {
-    renderImage({ models: [{ ...models[1], source_id: SUBSCRIPTION.id }] }, 'zh');
+    // The billing is the read's own, so it holds while the Sources read has not landed.
+    renderImage({ models: [{ ...models[1], source_id: SUBSCRIPTION.id, billing: 'monthly' }] }, 'zh', []);
     const [row] = within(card('图片生成')).getAllByRole('listitem');
     expect(row.textContent).toContain('订阅内含不另计费');
     expect(row.textContent).not.toContain('$0.02');
@@ -498,6 +500,14 @@ describe('ToolsTab image card', () => {
     const picker = within(card('Image generation')).getByRole('combobox', { name: 'Default image model' }) as HTMLSelectElement;
     expect(picker.selectedOptions[0].textContent).toBe('gpt-image-2 · relay-gpt (unavailable)');
     expect(within(card('Image generation')).getByText('The saved default isn\'t available now, so grok-imagine-image · Grok is used.')).toBeTruthy();
+  });
+
+  it('MH-HOSTED-UI-022: with every offered model refused, points at the clears rather than asking for a key', () => {
+    renderImage({ models: [], status: run({ refused: [refusal(RELAY.id, 'gpt-image-2', '2026-10-14T09:00:00Z')] }), image_offered_by: ['openai'] });
+    const imageCard = card('Image generation');
+    expect(within(imageCard).getByText('No image model is available now. Clear a refusal above to try it again.')).toBeTruthy();
+    expect(within(imageCard).queryByText(/API key/)).toBeNull();
+    expect(within(imageCard).getByRole('button', { name: 'Clear relay-gpt\'s refusal of image generation' })).toBeTruthy();
   });
 
   it('MH-HOSTED-UI-022: with no image model offered, names the vendors whose key would add one', () => {

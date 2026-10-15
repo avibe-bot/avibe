@@ -170,12 +170,13 @@
           "description": "Exactly the image_generate enum's candidate pairs, the default first; a refused pair is left out.",
           "items": {
             "type": "object",
-            "required": ["source_id", "model_id", "description", "price"],
+            "required": ["source_id", "model_id", "description", "billing", "price"],
             "additionalProperties": false,
             "properties": {
               "source_id": { "$ref": "#/definitions/SourceId" },
               "model_id": { "type": "string", "minLength": 1 },
               "description": { "type": "string", "minLength": 1, "maxLength": 80 },
+              "billing": { "enum": ["monthly", "metered"], "description": "The serving Source's billing, as executor candidates carry it: a monthly Source's images are included in its subscription, whatever the list price." },
               "price": {
                 "description": "One image: the vendor's list price, or an estimate from the image's tokens at the model's output rate; null when neither is known (shown as no unit price), never zero.",
                 "oneOf": [
@@ -191,7 +192,7 @@
             }
           }
         },
-        "image_offered_by": { "type": "array", "items": { "type": "string", "minLength": 1 }, "description": "The vendors of the user's Sources whose overlay lists image models, for the empty state." }
+        "image_offered_by": { "type": "array", "items": { "type": "string", "minLength": 1 }, "description": "A catalog fact, independent of configuration: the vendors whose bundled overlay lists image models, sorted. With no model available and no current refusal, the card names them as the keys that would add one." }
       }
     }
   }

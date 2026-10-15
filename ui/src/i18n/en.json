@@ -2440,7 +2440,8 @@
           "unavailableNoteNone": "The saved default isn't available now.",
           "emptyOne": "Image generation needs an API key from {{vendor}}.",
           "emptyMany": "Image generation needs an API key from one of {{vendors}}.",
-          "emptyNoVendor": "None of your Sources offers an image model yet.",
+          "emptyRefused": "No image model is available now. Clear a refusal above to try it again.",
+          "emptyNoVendor": "No image model is available.",
           "description": {
             "gpt-image-2": "Photorealistic images and legible text in them; edits from reference images.",
             "gemini-2_5-flash-image": "Fast generation and edits, keeping characters and style consistent.",

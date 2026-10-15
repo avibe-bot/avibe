@@ -529,6 +529,7 @@ scenarios:
       - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-022: says how automatic picks, not which model, once a model is saved'
       - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-022: keeps an unavailable saved default visible and resettable when no model is offered'
       - 'ui/src/components/settings/models/imageModelCopy.test.ts::MH-HOSTED-UI-022: every bundled image model has a description in each locale'
+      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-022: with every offered model refused, points at the clears rather than asking for a key'
       - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-022: with no image model offered, names the vendors whose key would add one'
   - id: MH-VIBEY-007
     name: Vibey starts once with the user's Sources and built-in Agent models, seeded when its first Source exists

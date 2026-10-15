@@ -19,6 +19,7 @@ import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
 import { ACCENT_ICON, ACCENT_PILL, ACCENT_TILE, sourceVisual } from './vendorMeta';
 import type {
   HostedExecutorCandidate,
+  HostedImageModel,
   HostedImagePrice,
   HostedImageToolStatus,
   HostedModelRef,
@@ -386,9 +387,9 @@ const Advanced: React.FC<{ tool: HostedToolStatus; summary: RefusalSummary; look
  * One image's price: included on a subscription Source, else the vendor's list
  * price, an estimate from token pricing (≈), or none known; unknown is never zero.
  */
-const ImagePrice: React.FC<{ price: HostedImagePrice | null; source: Source | undefined }> = ({ price, source }) => {
+const ImagePrice: React.FC<{ price: HostedImagePrice | null; billing: HostedImageModel['billing'] }> = ({ price, billing }) => {
   const { t } = useTranslation();
-  if (source?.billing === 'monthly') {
+  if (billing === 'monthly') {
     return <span className="flex flex-col"><span className="font-semibold text-foreground">{t('settings.models.tools.cost.included')}</span><span className="model-hub-tool-cost-note">{t('settings.models.tools.cost.includedNote')}</span></span>;
   }
   if (!price) return <span className="model-hub-tool-cost-note">{t('settings.models.tools.image.noUnitPrice')}</span>;
@@ -420,17 +421,22 @@ const ImageModels: React.FC<{ tool: HostedImageToolStatus; lookup: SourceLookup;
   const saved = tool.default_model;
   const inUse = tool.effective_default;
   const vendors = tool.image_offered_by.map((vendor) => t(`settings.models.tools.image.vendor.${vendor}`, { defaultValue: vendor }) as string);
+  // With a current refusal, the list is empty because of it, and the refusal lines with their clears say so; a key
+  // is the remedy only when nothing was refused.
+  const refused = tool.status.refused.length > 0;
   return (
     <div className="model-hub-tool-image flex flex-col gap-3 border-t border-border">
       {tool.models.length === 0
         ? (
             <p className="flex items-start gap-2 text-muted">
               <Info className="mt-0.5 size-[14px] shrink-0" aria-hidden />
-              <span>{vendors.length === 0
-                ? t('settings.models.tools.image.emptyNoVendor')
-                : vendors.length === 1
-                  ? t('settings.models.tools.image.emptyOne', { vendor: vendors[0] })
-                  : t('settings.models.tools.image.emptyMany', { vendors: formatNameList(vendors, i18n.language) })}</span>
+              <span>{refused
+                ? t('settings.models.tools.image.emptyRefused')
+                : vendors.length === 0
+                  ? t('settings.models.tools.image.emptyNoVendor')
+                  : vendors.length === 1
+                    ? t('settings.models.tools.image.emptyOne', { vendor: vendors[0] })
+                    : t('settings.models.tools.image.emptyMany', { vendors: formatNameList(vendors, i18n.language) })}</span>
             </p>
           )
         : (
@@ -455,7 +461,7 @@ const ImageModels: React.FC<{ tool: HostedImageToolStatus; lookup: SourceLookup;
                         <span className="truncate font-semibold text-foreground" title={name}>{name}</span>
                         {source && <span className={cn('model-hub-pill border', ACCENT_PILL[source.kind === 'api_key' ? 'cyan' : sourceVisual(source).accent])}>{t(`settings.models.upstream.kind.${source.kind === 'subscription' ? 'subscription' : 'apiKey'}`)}</span>}
                       </span>
-                      <ImagePrice price={model.price} source={source} />
+                      <ImagePrice price={model.price} billing={model.billing} />
                     </li>
                   );
                 })}

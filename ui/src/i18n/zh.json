@@ -2440,7 +2440,8 @@
           "unavailableNoteNone": "已保存的默认模型暂不可用。",
           "emptyOne": "图片生成需要 {{vendor}} 的 API Key。",
           "emptyMany": "图片生成需要 {{vendors}} 其中一家的 API Key。",
-          "emptyNoVendor": "你的供应商目前都没有图片模型。",
+          "emptyRefused": "目前没有可用的图片模型。清除上面的拒绝记录后会再试。",
+          "emptyNoVendor": "目前没有可用的图片模型。",
           "description": {
             "gpt-image-2": "写实照片、图中文字准确，支持按参考图编辑",
             "gemini-2_5-flash-image": "出图快，人物和风格前后一致，适合多图合成与局部修改",
