@@ -295,9 +295,34 @@ def _has_codex_problem_text(body: str) -> bool:
     ))
 
 
-def _is_codex_summary_table_line(line: str) -> bool:
+def _codex_summary_cells(line: str) -> list[str] | None:
     stripped = line.strip()
-    return stripped.startswith("|") and len(stripped.split("|")) >= 5
+    if not stripped.startswith("|") or not stripped.endswith("|"):
+        return None
+    cells = stripped.split("|")
+    return cells if len(cells) == 6 else None
+
+
+def _is_codex_summary_table_line(line: str) -> bool:
+    return _codex_summary_cells(line) is not None
+
+
+def _is_codex_summary_separator(line: str) -> bool:
+    cells = _codex_summary_cells(line)
+    return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell.strip()) for cell in cells[1:-1])
+
+
+def _is_codex_summary_review_row(line: str) -> bool:
+    cells = _codex_summary_cells(line)
+    if cells is None:
+        return False
+    label = re.sub(r"^[^\w]+", "", cells[1].strip()).replace("*", "").strip()
+    return (
+        label in {"Code Review", "Security Review"}
+        and bool(cells[2].strip())
+        and re.fullmatch(r"`[0-9a-f]{7,40}`", cells[3].strip(), re.IGNORECASE) is not None
+        and bool(cells[4].strip())
+    )
 
 
 def _is_codex_summary_state_line(line: str) -> bool:
@@ -343,24 +368,34 @@ def _is_codex_summary_shape(body: str) -> bool:
     table_end = table_start
     while table_end + 1 < len(lines) and _is_codex_summary_table_line(lines[table_end + 1]):
         table_end += 1
+    table_lines = lines[table_start:table_end + 1]
+    if (
+        len(table_lines) < 3
+        or not _is_codex_summary_separator(table_lines[1])
+        or not all(_is_codex_summary_review_row(line) for line in table_lines[2:])
+    ):
+        return False
     suffix = [line.strip() for line in lines[table_end + 1:] if line.strip()]
     if not suffix:
         return True
     return tuple(suffix) == CODEX_STANDARD_SUMMARY_FOOTER
 
 
-def _is_codex_clean_pass_body(body: str) -> bool:
+def _codex_clean_pass_body_sha(body: str) -> str | None:
     lines = [line.strip() for line in body.splitlines() if line.strip()]
     if not lines or not re.fullmatch(
         r"Codex Review:\s*Didn['’]t find any major issues\.?", lines[0], re.IGNORECASE,
     ):
-        return False
+        return None
     if len(lines) == 1:
-        return True
-    return len(lines) == 2 and bool(re.fullmatch(
-        r"\*{0,2}Reviewed commit\*{0,2}:\*{0,2}\s*`[0-9a-f]{7,40}`",
+        return ""
+    if len(lines) != 2:
+        return None
+    match = re.fullmatch(
+        r"\*{0,2}Reviewed commit\*{0,2}:\*{0,2}\s*`([0-9a-f]{7,40})`",
         lines[1], re.IGNORECASE,
-    ))
+    )
+    return match.group(1) if match else None
 
 
 def _is_codex_clean_pass(item: dict[str, Any], head_sha: str) -> bool:
@@ -370,13 +405,17 @@ def _is_codex_clean_pass(item: dict[str, Any], head_sha: str) -> bool:
         return False
     if str(item.get("state") or "").lower() in {"changes_requested", "dismissed"}:
         return False
-    body = str(item.get("body") or "")
-    if not _is_codex_clean_pass_body(body):
+    body_sha = _codex_clean_pass_body_sha(str(item.get("body") or ""))
+    if body_sha is None:
         return False
-    reviewed = item.get("commit_id")
-    if not isinstance(reviewed, str) or not reviewed:
-        match = re.search(r"Reviewed commit[\s*:`]*([0-9a-f]{7,40})\b", body, re.IGNORECASE)
-        reviewed = match.group(1) if match else ""
+    item_sha = item.get("commit_id")
+    item_sha = item_sha if isinstance(item_sha, str) else ""
+    if item_sha and body_sha and not (
+        item_sha.casefold().startswith(body_sha.casefold())
+        or body_sha.casefold().startswith(item_sha.casefold())
+    ):
+        return False
+    reviewed = item_sha or body_sha
     return len(reviewed) >= 7 and head_sha.casefold().startswith(reviewed.casefold())
 
 
@@ -679,6 +718,40 @@ def _review_observation(kind: str, item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _select_review_outcome(
+    outcomes: list[tuple[dict[str, Any], bool]],
+) -> tuple[dict[str, Any], bool]:
+    latest_timestamp = max(observation["order"][0] for observation, _clean in outcomes)
+    latest = [pair for pair in outcomes if pair[0]["order"][0] == latest_timestamp]
+    kinds = {observation["kind"] for observation, _clean in latest}
+    if len(kinds) > 1 and any(not clean for _observation, clean in latest) and any(clean for _observation, clean in latest):
+        latest = [pair for pair in latest if not pair[1]]
+    return max(latest, key=lambda pair: tuple(pair[0]["order"]))
+
+
+def _should_adopt_review_outcome(
+    outcome: dict[str, Any],
+    clean: bool,
+    last_outcome: dict[str, Any] | None,
+    batch: dict[str, Any],
+) -> bool:
+    if last_outcome is None or tuple(outcome["order"]) > tuple(last_outcome["order"]):
+        return True
+    if (
+        not clean
+        and batch.get("review") is not None
+        and outcome["order"][0] == last_outcome["order"][0]
+        and outcome["kind"] != last_outcome["kind"]
+    ):
+        return True
+    return (
+        outcome["order"] == last_outcome["order"]
+        and outcome["kind"] == last_outcome["kind"]
+        and outcome["id"] == last_outcome["id"]
+        and outcome["fingerprint"] != last_outcome["fingerprint"]
+    )
+
+
 def _coalesced_review_state(
     state: dict[str, Any],
     previous: dict[str, Any] | None,
@@ -745,16 +818,9 @@ def _coalesced_review_state(
             if _is_codex_pass_reaction(item) and int(item["id"]) > reaction_floor
         )
     if outcomes:
-        outcome, clean = max(outcomes, key=lambda pair: tuple(pair[0]["order"]))
+        outcome, clean = _select_review_outcome(outcomes)
         last_outcome = batch.get("outcome")
-        if (
-            last_outcome is None or tuple(outcome["order"]) > tuple(last_outcome["order"])
-            or (
-                outcome["order"] == last_outcome["order"]
-                and outcome["kind"] == last_outcome["kind"] and outcome["id"] == last_outcome["id"]
-                and outcome["fingerprint"] != last_outcome["fingerprint"]
-            )
-        ):
+        if _should_adopt_review_outcome(outcome, clean, last_outcome, batch):
             batch["outcome"] = outcome
             batch["review"] = outcome if clean else None
             if not clean:

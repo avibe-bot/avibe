@@ -4639,6 +4639,29 @@ def test_coalescing_surfaces_an_unknown_codex_summary_footer(tmp_path):
     assert "success candidate" not in output
 
 
+def test_coalescing_surfaces_an_unrecognized_summary_row(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
+    footer = "\n".join(module.CODEX_STANDARD_SUMMARY_FOOTER)
+    summary = {**_clean_codex_comment(), "body": (
+        "<!-- codex-pull-request-review-summary -->\n"
+        "<!-- codex-review-state:v1 {\"code_review\":{\"status\":\"running\"}} -->\n"
+        "## Codex Review Summary\n\n"
+        "This comment shows the latest Codex review activity on this pull request.\n\n"
+        "| Review | Status | Commit | Review trigger |\n"
+        "| --- | --- | --- | --- |\n"
+        f"| Review findings: race allows duplicates | Completed | `{COALESCED_HEAD[:7]}` | New commits |\n\n"
+        f"{footer}"
+    )}
+    rc, output, _ = _ci_cycle(
+        module, path, [_success_state(pending, issue_comments=[summary])], extra_args=("--coalesce-success",),
+    )
+    assert rc == 0 and "issue_comment #601" in output
+    assert "success candidate" not in output
+
+
 def test_coalescing_policy_requires_ci_and_has_independent_cursor_ownership():
     module = _load_module()
     parser = module._build_parser()
@@ -4843,6 +4866,39 @@ def test_coalescing_surfaces_mixed_clean_and_error_text(tmp_path, suffix):
         module, path, [_success_state(pending, issue_comments=[mixed])], extra_args=("--coalesce-success",),
     )
     assert rc == 0 and "issue_comment #601" in output
+    assert "success candidate" not in output
+
+
+def test_coalescing_treats_cross_stream_timestamp_ties_as_invalidating(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
+    timestamp = "2026-10-15T08:00:01Z"
+    clean = {**_clean_codex_comment(), "created_at": timestamp}
+    finding = _review_comment(501, body="Race allows duplicate notifications", created_at=timestamp)
+    state = _success_state(
+        _ci_run(head=COALESCED_HEAD), issue_comments=[clean], review_comments=[finding],
+    )
+    rc, output, _ = _ci_cycle(module, path, [state], extra_args=("--coalesce-success",))
+    assert rc == 0 and "review_comment #501" in output
+    assert "success candidate" not in output
+
+
+def test_coalescing_rejects_contradictory_reviewed_shas(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
+    review = {
+        **_clean_codex_comment(),
+        "state": "COMMENTED",
+        "commit_id": COALESCED_HEAD,
+        "body": "Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** `bbbbbbb`",
+    }
+    state = _success_state(_ci_run(head=COALESCED_HEAD), reviews=[review])
+    rc, output, _ = _ci_cycle(module, path, [state], extra_args=("--coalesce-success",))
+    assert rc == 0 and "review #601" in output
     assert "success candidate" not in output
 
 
