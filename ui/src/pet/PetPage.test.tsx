@@ -197,9 +197,12 @@ const summon = (intent: 'listen' | 'show' | 'release') => act(() => {
 });
 // The speech bubble holds the exchange. Tests of the exchange explicitly
 // open it; raw summon remains available for collapsed/detail visibility tests.
-const showDetail = async () => {
+const showCards = async () => {
   summon('show');
   await act(async () => new Promise((resolve) => setTimeout(resolve, 15)));
+};
+const showDetail = async () => {
+  await showCards();
   const main = document.querySelector('.pet-mini-reply-toggle');
   if (main && !document.querySelector('.pet-mini-detail.is-open')) fireEvent.click(main);
 };
@@ -911,7 +914,6 @@ describe('PetPage review fixes, round 9', () => {
       render(<PetPage />);
       await screen.findByLabelText('pet.toggle');
       await act(async () => {});
-      expect(screen.queryByLabelText('pet.runningBadge')).toBeNull();
       expect(pose()).toBe('idle');
     } finally {
       api.getTurnState.mockImplementation(async () => idleTurn);
@@ -1178,7 +1180,7 @@ describe('PetPage live convergence', () => {
     await act(async () => first.resolve({ panel_side: 'left', panel_edge: 'bottom' }));
     await screen.findByLabelText('pet.panel');
 
-    await showDetail();
+    await showCards();
     await waitFor(() => expect(invoke.mock.calls.filter(([c]) => c === 'pet_set_expanded')).toHaveLength(2));
     await act(async () => second.reject(new Error('already expanded')));
     await settle();
@@ -1233,7 +1235,7 @@ describe('PetPage live convergence', () => {
     api.listSessionMessages.mockRejectedValueOnce(new Error('network'));
     mainSession('S');
     render(<PetPage />);
-    await showDetail();
+    await showCards();
     await screen.findByLabelText('pet.panel');
     await settle();
     const reads = api.listSessionMessages.mock.calls.filter(([id]) => id === 'S').length;
@@ -1246,7 +1248,7 @@ describe('PetPage live convergence', () => {
   it('re-reads the tail when the session is marked read in another window', async () => {
     mainSession('S');
     render(<PetPage />);
-    await showDetail();
+    await showCards();
     await screen.findByLabelText('pet.panel');
     await settle();
     const reads = api.listSessionMessages.mock.calls.filter(([id]) => id === 'S').length;
@@ -1393,7 +1395,7 @@ describe('desktop mini v2 interaction contract', () => {
     const pending = deferred<{ ok: boolean }>();
     const pause = api.cancelSession;
     pause.mockImplementationOnce(() => pending.promise);
-    mainSession('S'); render(<PetPage />); await showDetail();
+    mainSession('S'); render(<PetPage />); await showCards();
     const stop = await screen.findByLabelText('pet.stop.stop');
     vi.useFakeTimers();
     fireEvent.click(stop); fireEvent.click(stop);
@@ -1426,7 +1428,7 @@ describe('desktop mini v2 interaction contract', () => {
   it('drops an exiting card on authorization change and ignores its already-queued removal', async () => {
     const id = 'watch:private';
     turn([activity(id, 'watch')]);
-    mainSession('S'); render(<PetPage />); await showDetail();
+    mainSession('S'); render(<PetPage />); await showCards();
     vi.useFakeTimers();
     const timeouts = vi.spyOn(window, 'setTimeout');
     fireEvent.click(screen.getByLabelText('pet.dismiss'));
@@ -1452,7 +1454,7 @@ describe('desktop mini v2 interaction contract', () => {
     turn([activity(id, 'watch')]);
     const pending = deferred<{ ok: boolean }>();
     api.cancelSession.mockImplementationOnce(() => pending.promise);
-    mainSession('S'); render(<PetPage />); await showDetail();
+    mainSession('S'); render(<PetPage />); await showCards();
     const stop = await screen.findByLabelText('pet.stop.stop');
     fireEvent.click(stop); fireEvent.click(stop);
     turn([]);
@@ -1462,7 +1464,7 @@ describe('desktop mini v2 interaction contract', () => {
     turn([{ ...activity(id, 'watch'), label: 'Fresh S card' }]);
     await emit((h) => h.onRunsUpdated?.({}));
     await resolveMainAs('S');
-    await showDetail();
+    await showCards();
     expect(await screen.findByText('Fresh S card')).toBeTruthy();
     await act(async () => pending.resolve({ ok: true }));
     expect(screen.queryByText('pet.stop.stopped')).toBeNull();
@@ -1891,7 +1893,7 @@ describe('desktop mini v2 interaction contract', () => {
 
   it('requires a second press, uses the native watch id, and retains the stopped row through linger and both exit beats', async () => {
     turn([activity('watch:w1', 'watch'), activity('run:r1', 'agent_run')]);
-    mainSession('S'); render(<PetPage />); await showDetail();
+    mainSession('S'); render(<PetPage />); await showCards();
     const stop = await screen.findByLabelText('pet.stop.stop');
     expect(screen.getAllByLabelText('pet.stop.stop')).toHaveLength(1);
     const pending = deferred<{ ok: boolean }>();
@@ -1919,7 +1921,7 @@ describe('desktop mini v2 interaction contract', () => {
   });
 
   it('expires confirmation at 3s and lets a failed pause be retried', async () => {
-    turn([activity('task:t1', 'task')]); mainSession('S'); render(<PetPage />); await showDetail();
+    turn([activity('task:t1', 'task')]); mainSession('S'); render(<PetPage />); await showCards();
     const stop = await screen.findByLabelText('pet.stop.stop');
     vi.useFakeTimers(); fireEvent.click(stop);
     await act(async () => vi.advanceTimersByTime(3000));
@@ -1972,7 +1974,7 @@ describe('Personal Agent mini', () => {
     ] };
     unreadBySession = { reply: 1 };
     api.getVaultRequests.mockImplementation(async (filter) => ({ requests: filter?.session === 'approval' ? [{ id: 'request', request_type: 'access', session: { id: 'approval' } } as VaultRequest] : [] }));
-    mainSession('S'); render(<PetPage />); await showDetail();
+    mainSession('S'); render(<PetPage />); await showCards();
     await waitFor(() => expect(pose()).toBe('needs_input'));
     expect(Array.from(document.querySelectorAll('.pet-mini-card'), (node) => node.getAttribute('data-session-id'))).toEqual(['approval', 'running', 'reply']);
     expect(document.querySelector('.pet-mini-card.is-main')).toBeNull();
@@ -2227,5 +2229,106 @@ describe('Personal Agent review: history and lifecycle', () => {
       expect(document.querySelector('[data-session-id="T"]')).toBeTruthy();
       expect(petShell.dismissed()).not.toContain('T');
     } finally { vi.useRealTimers(); }
+  });
+});
+
+describe('Personal Agent breaker: readiness and turn generations', () => {
+  it.each([false, true])('replays closes and new turns over a slow stored baseline (forget old: %s)', async (forgetOld) => {
+    mainSession('ses_main'); canUseAgents = true;
+    runningAgents = { ...workingIn('T'), agents: ['T', 'old', 'keep'].flatMap((id) => workingIn(id).agents) };
+    const ready = deferred<unknown>();
+    const invoke = vi.fn((command: string) => command === 'pet_ready' ? ready.promise : Promise.resolve({ panel_side: 'left', panel_edge: 'bottom' }));
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    render(<PetPage />); await showCards();
+    const card = await waitFor(() => {
+      const node = document.querySelector('[data-session-id="T"]'); expect(node).toBeTruthy(); return node as HTMLElement;
+    });
+    await userEvent.click(within(card).getByLabelText('pet.dismiss'));
+    const { petShell } = await import('./petShell');
+    await waitFor(() => expect(petShell.dismissed()).toEqual(['T']));
+    if (forgetOld) await emit((h) => h.onTurnStart?.({ session_id: 'old' }));
+    expect(invoke.mock.calls.some(([command]) => command === 'pet_set_dismissed')).toBe(false);
+    await act(async () => ready.resolve({ binding: 'ses_main', revision: 5, dismissed_ids: ['old', 'keep'], summon_pending: null }));
+    const expected = forgetOld ? ['keep', 'T'] : ['old', 'keep', 'T'];
+    await waitFor(() => expect(petShell.dismissed()).toEqual(expected));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_set_dismissed', { sessionId: 'ses_main', ids: expected }));
+    expect(invoke.mock.calls.filter(([command]) => command === 'pet_set_dismissed')).toHaveLength(1);
+    expect(invoke.mock.calls.some(([command]) => command === 'pet_bind')).toBe(false);
+    expect(document.querySelector('[data-session-id="keep"]')).toBeNull();
+    expect(Boolean(document.querySelector('[data-session-id="old"]'))).toBe(forgetOld);
+  });
+
+  it('requires two fresh stop presses after confirmation, manual exit and a new turn', async () => {
+    canUseAgents = true; runningAgents = workingIn('T');
+    api.getTurnState.mockImplementation(async (id) => ({ ...idleTurn, in_flight: id === 'T' }));
+    api.cancelSession.mockReset().mockResolvedValue({ ok: true });
+    render(<PetPage />); await showCards();
+    const stop = await screen.findByLabelText('pet.stop.stop');
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(stop);
+      fireEvent.click(screen.getByLabelText('pet.dismiss'));
+      await act(async () => vi.advanceTimersByTime(500));
+      expect(document.querySelector('[data-session-id="T"]')).toBeNull();
+      await emit((h) => h.onTurnStart?.({ session_id: 'T' }));
+      const nextStop = screen.getByLabelText('pet.stop.stop');
+      fireEvent.click(nextStop);
+      expect(nextStop.getAttribute('aria-label')).toBe('pet.stop.confirmStop');
+      expect(api.cancelSession).not.toHaveBeenCalled();
+      // The old confirmation timer must not clear the new turn's confirmation.
+      await act(async () => vi.advanceTimersByTime(2500));
+      expect(nextStop.getAttribute('aria-label')).toBe('pet.stop.confirmStop');
+      fireEvent.click(nextStop);
+      expect(api.cancelSession).toHaveBeenCalledExactlyOnceWith('T');
+      await act(async () => {});
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each([
+    ['event', 'success'], ['event', 'failure'], ['reappearance', 'success'], ['reappearance', 'failure'],
+  ] as const)('fences a pending cancel across %s before late %s', async (boundary, outcome) => {
+    canUseAgents = true; runningAgents = workingIn('T');
+    api.getTurnState.mockImplementation(async (id) => ({ ...idleTurn, in_flight: id === 'T' }));
+    const pending = deferred<{ ok: boolean }>();
+    api.cancelSession.mockReset().mockImplementationOnce(() => pending.promise);
+    render(<PetPage />); await showCards();
+    const stop = await screen.findByLabelText('pet.stop.stop');
+    fireEvent.click(stop); fireEvent.click(stop);
+    expect(screen.getByText('pet.stop.stopping')).toBeTruthy();
+    if (boundary === 'event') await emit((h) => h.onTurnStart?.({ session_id: 'T' }));
+    else {
+      runningAgents = { ...runningAgents, agents: [] };
+      await emit((h) => h.onRunsUpdated?.({}));
+      runningAgents = workingIn('T');
+      await emit((h) => h.onRunsUpdated?.({}));
+    }
+    const nextStop = await screen.findByLabelText('pet.stop.stop');
+    expect(nextStop.hasAttribute('disabled')).toBe(false);
+    fireEvent.click(nextStop);
+    await act(async () => {
+      if (outcome === 'success') pending.resolve({ ok: true });
+      else pending.reject(new Error('old cancellation failed'));
+    });
+    expect(nextStop.getAttribute('aria-label')).toBe('pet.stop.confirmStop');
+    expect(screen.queryByText('pet.stop.stopped')).toBeNull();
+    expect(screen.queryByText('pet.stop.failed')).toBeNull();
+    expect(document.querySelector('.is-leaving')).toBeNull();
+    expect(api.cancelSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers stop for a scope-less Web turn but excludes IM and non-running turns', async () => {
+    canUseAgents = true;
+    runningAgents = { ...workingIn('web'), agents: [
+      { ...workingIn('web').agents[0], platform: null, scope_type: null },
+      { ...workingIn('idleweb').agents[0], platform: null, scope_type: null },
+      { ...workingIn('im').agents[0], platform: 'feishu' },
+    ] };
+    api.getTurnState.mockReset().mockImplementation(async (id) => ({ ...idleTurn, in_flight: id === 'web' || id === 'im' }));
+    render(<PetPage />); await showCards();
+    await waitFor(() => expect(document.querySelector('[data-session-id="web"] .pet-mini-stop')).toBeTruthy());
+    expect(document.querySelector('[data-session-id="idleweb"] .pet-mini-stop')).toBeNull();
+    expect(document.querySelector('[data-session-id="im"] .pet-mini-stop')).toBeNull();
+    expect(api.getTurnState).not.toHaveBeenCalledWith('im', expect.anything());
   });
 });

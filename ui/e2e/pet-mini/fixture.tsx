@@ -33,6 +33,7 @@ petBridge.open = async (link) => { window.petFixtureOpens.push(link); };
 const hasMain = params.get('main') !== 'false';
 const layers = Number(params.get('layers') ?? 3);
 const personal = params.get('scenario') === 'personal';
+const historyActions = params.get('history') === 'actions';
 const title = personal ? '检查桌宠 mini 的交互' : 'A long unbroken title '.repeat(40);
 const session = {
   id: 'ses_main', scope_id: 'fixture', title, agent_backend: 'codex',
@@ -47,7 +48,7 @@ const messages = hasMain ? [{
   id: 'result', session_id: session.id, scope_id: session.scope_id,
   author: 'agent', type: 'result',
   text: personal ? '我会帮你跟进各个项目。需要授权的事已经排在前面。' : 'Ready to help with your next task.',
-  metadata: {}, content: {}, read_at: '2026-10-12T00:00:01Z',
+  metadata: {}, content: historyActions ? { quick_replies: ['继续', '稍后'] } : {}, read_at: '2026-10-12T00:00:01Z',
   created_at: '2026-10-12T00:00:01Z', updated_at: '2026-10-12T00:00:01Z',
 }] : [];
 const agents = Array.from({ length: Number(params.get('activities') ?? layers + 1) }, (_, i) => ({
@@ -63,6 +64,10 @@ const requests = personal ? [{
   id: 'vr_fixture', request_type: 'access', status: 'pending', card: { request_type: 'access' },
   session: { id: 'ses_fixture_0' }, expires_at: null,
 }] : [];
+if (historyActions) requests.push({
+  id: 'vr_main_fixture', request_type: 'access', status: 'pending', card: { request_type: 'access' },
+  session: { id: 'ses_main' }, expires_at: null,
+});
 const unread = personal ? { ses_fixture_2: 1 } : {};
 // A legacy file must not steer reads or sends away from main.
 localStorage.setItem('avibe.pet.devBinding', JSON.stringify({ binding: 'legacy-session', revision: 1 }));

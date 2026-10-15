@@ -5952,7 +5952,6 @@
     "thinking": "Thinking",
     "waiting": "Waiting",
     "repliedPrefix": "Replied: {{text}}",
-    "runningBadge": "Working · {{count}}",
     "untitledTask": "Untitled task",
     "dismiss": "Dismiss task",
     "voiceContinue": "Continue voice input",

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useLayoutEffect, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useLayoutEffect, type CSSProperties, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 import { ChevronRight, ExternalLink, KeyRound, X } from 'lucide-react';
@@ -54,6 +54,8 @@ type PetCard = {
   canOpen: boolean;
   vaultRequestIds: string[];
 };
+
+type CardPresentation = { phase?: StopPhase; leaving?: boolean; retained?: PetCard };
 
 const isRunning = (agent: RunningAgent) => agent.state === 'active';
 
@@ -198,7 +200,7 @@ function useVisibleActivityActions(enabled: boolean, epoch: PetSurfaceEpoch, ses
     const timer = window.setTimeout(refresh, Math.min(nextExpiry - Date.now() + 250, 2_000_000_000));
     return () => window.clearTimeout(timer);
   }, [requests, refresh]);
-  return { requests, stoppable: enabled && value?.epoch === epoch && value.sessionIds === sessionIds && value.cancellableIds === cancellableIds ? value.stoppable : [] };
+  return { requests, ready: !enabled || (value?.epoch === epoch && value.sessionIds === sessionIds), stoppable: enabled && value?.epoch === epoch && value.sessionIds === sessionIds && value.cancellableIds === cancellableIds ? value.stoppable : [] };
 }
 
 const PetSurface: React.FC = () => {
@@ -238,26 +240,64 @@ const PetSurface: React.FC = () => {
       ))
   ), [binding, runningAgents, repliedAgents]);
   const activitySessionIds = JSON.stringify([...new Set(visibleAgentRows.map((row) => row.session_id!))].sort());
-  const cancellableIds = JSON.stringify(visibleAgentRows.filter((row) => row.platform === 'avibe' && row.trigger_source === 'human' && row.state === 'active').map((row) => row.session_id).sort());
-  const { requests: visibleVaultRequests, stoppable } = useVisibleActivityActions(capabilities.can_use_agents === true, epoch, activitySessionIds, cancellableIds);
+  const cancellableIds = JSON.stringify(visibleAgentRows.filter((row) => (row.platform === 'avibe' || row.platform == null) && row.trigger_source === 'human' && row.state === 'active').map((row) => row.session_id).sort());
+  const { requests: visibleVaultRequests, stoppable, ready: activityActionsReady } = useVisibleActivityActions(capabilities.can_use_agents === true, epoch, activitySessionIds, cancellableIds);
   const othersWorking = visibleAgentRows.some(isRunning);
   const busy = data.running || othersWorking;
   const [asleep, setAsleep] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
+  const cardsExpanded = expanded && !detailOpen;
+  const openCards = useCallback(() => {
+    setDetailOpen(false);
+    void setPanel(true);
+  }, [setPanel]);
+  const togglePanel = () => {
+    if (detailOpen) openCards();
+    else void setPanel(!petPanel.want());
+  };
   const [composing, setComposing] = useState(false);
-  const [stops, setStops] = useState<Record<string, StopPhase>>({});
+  const [presentations, setPresentations] = useState<Record<string, CardPresentation>>({});
+  const presentationNow = useRef<Record<string, CardPresentation>>({});
+  const [generations, setGenerations] = useState<Record<string, number>>({});
+  const generationNow = useRef<Record<string, number>>({});
+  const activityPresence = useRef(new Map<string, boolean>());
+  const stops = useMemo(() => Object.fromEntries(Object.entries(presentations)
+    .filter(([, value]) => value.phase).map(([key, value]) => [key, value.phase!])), [presentations]);
+  const leaving = useMemo(() => Object.keys(presentations).filter((key) => presentations[key].leaving), [presentations]);
+  const retainedCards = useMemo(() => Object.fromEntries(Object.entries(presentations)
+    .filter(([, value]) => value.retained).map(([key, value]) => [key, value.retained!])), [presentations]);
   const dismissed = usePetDismissed();
   const [optimisticTitle, setOptimisticTitle] = useState('');
   const reducedMotion = useReducedMotion();
-  const [leaving, setLeaving] = useState<string[]>([]);
   const [orderedIds, setOrderedIds] = useState<string[]>([]);
-  const [retainedCards, setRetainedCards] = useState<Record<string, PetCard>>({});
   const stopTimers = useRef<Record<string, number>>({});
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const pressRef = useRef<{ held: boolean; dragged: boolean; x: number; y: number; timer: number } | null>(null);
   const dismissTimers = useRef<Record<string, number>>({});
-  const stopPhases = useRef<Record<string, StopPhase>>({});
-  const leavingIds = useRef(new Set<string>());
+  const updatePresentation = useCallback((key: string, patch: CardPresentation | null) => {
+    const next = { ...presentationNow.current };
+    if (patch) next[key] = { ...next[key], ...patch };
+    else delete next[key];
+    presentationNow.current = next;
+    setPresentations(next);
+  }, []);
+  const retireCard = useCallback((key: string) => {
+    window.clearTimeout(stopTimers.current[key]);
+    window.clearTimeout(dismissTimers.current[key]);
+    delete stopTimers.current[key];
+    delete dismissTimers.current[key];
+    updatePresentation(key, null);
+  }, [updatePresentation]);
+  const isCurrentCard = useCallback((card: PetCard) => epoch.isCurrent()
+    && card.id === `${card.sessionId}:${generationNow.current[card.sessionId] ?? 0}`, [epoch]);
+  const advanceTurn = useCallback((sessionId: string) => {
+    if (!epoch.isCurrent()) return;
+    const previous = generationNow.current[sessionId] ?? 0;
+    generationNow.current = { ...generationNow.current, [sessionId]: previous + 1 };
+    retireCard(`${sessionId}:${previous}`);
+    setGenerations(generationNow.current);
+    petShell.forgetDismissed(sessionId);
+  }, [epoch, retireCard]);
   const previousBinding = useRef(binding);
   useLayoutEffect(() => {
     setDetailOpen(false);
@@ -267,12 +307,12 @@ const PetSurface: React.FC = () => {
       setOptimisticTitle('');
       previousBinding.current = binding;
     }
-    setStops({});
-    setLeaving([]);
+    presentationNow.current = {};
+    setPresentations({});
+    generationNow.current = {};
+    setGenerations({});
+    activityPresence.current.clear();
     setOrderedIds([]);
-    setRetainedCards({});
-    stopPhases.current = {};
-    leavingIds.current.clear();
     return () => {
       Object.values(stopTimers.current).forEach(window.clearTimeout);
       Object.values(dismissTimers.current).forEach(window.clearTimeout);
@@ -310,14 +350,29 @@ const PetSurface: React.FC = () => {
       t('pet.untitledTask'),
       (key, options) => String(t(key as never, options as never)),
     ))
-    .filter((card): card is PetCard => Boolean(card && (card.running || card.hasUnread || card.needsInput)));
+    .filter((card): card is PetCard => Boolean(card && (card.running || card.hasUnread || card.needsInput)))
+    .map((card) => ({ ...card, id: `${card.sessionId}:${generations[card.sessionId] ?? 0}` }));
   }, [
     inbox.unreadBySession,
     t,
     visibleAgentRows,
     visibleVaultRequests,
     stoppable,
+    generations,
   ]);
+  // A healthy disappearance followed by reappearance is also a new local turn,
+  // including when its turn.start event was missed during a connection gap.
+  useLayoutEffect(() => {
+    if (!runningAgents.ok || !activityActionsReady || !epoch.isCurrent()) return;
+    const present = new Set(liveCards.map((card) => card.sessionId));
+    for (const id of present) {
+      if (activityPresence.current.get(id) === false) advanceTurn(id);
+      activityPresence.current.set(id, true);
+    }
+    for (const id of activityPresence.current.keys()) {
+      if (!present.has(id)) activityPresence.current.set(id, false);
+    }
+  }, [liveCards, runningAgents.ok, activityActionsReady, advanceTurn, epoch]);
   const activities = useMemo(() => [
     ...liveCards.map((card) => retainedCards[card.id] ?? card),
     ...Object.values(retainedCards).filter((card) => !liveCards.some((live) => live.id === card.id)),
@@ -328,17 +383,16 @@ const PetSurface: React.FC = () => {
       const priority = (card: PetCard) => Number(card.needsInput) * 2 + Number(card.running);
       const fresh = activities.filter((card) => !current.includes(card.id)).sort((a, b) => priority(b) - priority(a)).map((card) => card.id);
       const byId = new Map(activities.map((card) => [card.id, card]));
-      const next = expanded && current.length > 0
+      const next = cardsExpanded && current.length > 0
         ? [...current.filter((id) => live.has(id)), ...fresh].sort((a, b) => priority(byId.get(b)!) - priority(byId.get(a)!))
         : [...activities].sort((a, b) => priority(b) - priority(a)).map((card) => card.id);
       return next.length === current.length && next.every((id, i) => id === current[i]) ? current : next;
     });
-  }, [activities, expanded]);
+  }, [activities, cardsExpanded]);
   useEffect(() => {
     if (!binding || !runningAgents.ok) return;
     const liveIds = new Set([...visibleAgentRows.map((row) => row.session_id), ...Object.keys(inbox.unreadBySession).filter((id) => inbox.unreadBySession[id] > 0)]);
-    const next = dismissed.filter((id) => liveIds.has(id));
-    if (next.length !== dismissed.length) petShell.setDismissed(binding, next);
+    for (const id of dismissed) if (!liveIds.has(id)) petShell.forgetDismissed(id);
   }, [visibleAgentRows, inbox.unreadBySession, binding, dismissed, runningAgents.ok]);
 
   const sortedActivities = useMemo(() => {
@@ -348,35 +402,21 @@ const PetSurface: React.FC = () => {
     return [...fresh, ...ordered];
   }, [activities, orderedIds]);
   const visibleCards = useMemo(
-    () => sortedActivities.filter((card) => !dismissed.includes(card.id) && stops[card.id] !== 'exited'),
+    () => sortedActivities.filter((card) => !dismissed.includes(card.sessionId) && stops[card.id] !== 'exited'),
     [dismissed, sortedActivities, stops],
   );
-  const clearStopExit = useCallback((id: string) => {
-    if (!epoch.isCurrent() || (!leavingIds.current.has(id) && !['stopped', 'exited'].includes(stopPhases.current[id]))) return;
-    delete stopPhases.current[id];
-    window.clearTimeout(stopTimers.current[id]);
-    window.clearTimeout(dismissTimers.current[id]);
-    leavingIds.current.delete(id);
-    setStops({ ...stopPhases.current });
-    setLeaving((current) => current.filter((item) => item !== id));
-    setRetainedCards((current) => { const next = { ...current }; delete next[id]; return next; });
-  }, [epoch]);
-  // A stop exit only hides the just-cancelled turn. Idle/disappeared rows,
-  // unread results and new turns remain eligible for the next card.
+  // A result or authorization arriving after a stopped turn still deserves
+  // a card. This releases only that key; new turns use a new key altogether.
   useEffect(() => {
-    if (!runningAgents.ok) return;
-    for (const [id, phase] of Object.entries(stops)) {
-      const card = liveCards.find((item) => item.id === id);
-      if (phase === 'exited' && (!card?.running || card.hasUnread || card.needsInput)) clearStopExit(id);
+    if (!runningAgents.ok || !activityActionsReady) return;
+    for (const [key, presentation] of Object.entries(presentations)) {
+      const card = liveCards.find((item) => item.id === key);
+      if (presentation.phase === 'exited' && (!card?.running || card.hasUnread || card.needsInput)) retireCard(key);
     }
-  }, [stops, liveCards, runningAgents.ok, clearStopExit]);
+  }, [presentations, liveCards, runningAgents.ok, activityActionsReady, retireCard]);
   useEffect(() => api.connectWorkbenchEvents({
-    onTurnStart: ({ session_id }) => {
-      if (!epoch.isCurrent()) return;
-      clearStopExit(session_id);
-      petShell.forgetDismissed(session_id);
-    },
-  }), [api, clearStopExit, epoch]);
+    onTurnStart: ({ session_id }) => advanceTurn(session_id),
+  }), [api, advanceTurn]);
   const cardNeedsInput = liveCards.some((card) => card.needsInput);
   const cardUnread = visibleCards.reduce((total, card) => total + (inbox.unreadBySession[card.sessionId] ?? 0), 0);
   useEffect(() => {
@@ -395,6 +435,7 @@ const PetSurface: React.FC = () => {
   }, [setDraft]);
   const openComposer = useCallback((text = '', selected?: SessionReference[]) => {
     if (!epoch.isCurrent()) return;
+    setDetailOpen(false);
     setDraft(text, selected);
     setComposing(true);
     window.setTimeout(() => { if (epoch.isCurrent()) inputRef.current?.focus(); }, 0);
@@ -451,37 +492,24 @@ const PetSurface: React.FC = () => {
   const draftMarkers = draftReferences.map(referenceToMarker);
   const inputDraft = draftMarkers.length ? draftMarkers.reduce((text, marker) => text.replaceAll(marker, ''), draft).trimStart() : draft;
 
-  const dismiss = useCallback((id: string, manual = true) => {
-    if (!epoch.isCurrent() || leavingIds.current.has(id)) return;
-    leavingIds.current.add(id);
-    const card = visibleCards.find((item) => item.id === id);
-    if (card) setRetainedCards((current) => ({ ...current, [id]: card }));
-    setLeaving((current) => [...current, id]);
+  const dismiss = useCallback((card: PetCard, manual = true) => {
+    if (!isCurrentCard(card) || presentationNow.current[card.id]?.leaving) return;
+    updatePresentation(card.id, { leaving: true, retained: card });
     const remove = () => {
-      if (!epoch.isCurrent() || !leavingIds.current.has(id)) return;
-      if (binding && manual) {
-        petShell.setDismissed(binding, [...new Set([...petShell.dismissed(), id])]);
-      } else if (!manual) {
-        stopPhases.current[id] = 'exited';
-        setStops({ ...stopPhases.current });
-      }
-      setLeaving((current) => current.filter((item) => item !== id));
-      leavingIds.current.delete(id);
-      setRetainedCards((current) => { const next = { ...current }; delete next[id]; return next; });
+      if (!isCurrentCard(card)) return;
+      if (binding && manual) petShell.addDismissed(binding, card.sessionId);
+      updatePresentation(card.id, { leaving: false, retained: undefined, ...(!manual ? { phase: 'exited' as const } : {}) });
     };
     if (reducedMotion) remove();
-    else dismissTimers.current[id] = window.setTimeout(remove, DISMISS_EXIT_MS);
-  }, [binding, reducedMotion, visibleCards, epoch]);
+    else dismissTimers.current[card.id] = window.setTimeout(remove, DISMISS_EXIT_MS);
+  }, [binding, reducedMotion, isCurrentCard, updatePresentation]);
 
   const setStop = useCallback((card: PetCard) => {
-    if (!epoch.isCurrent() || !card.canStop) return;
+    if (!isCurrentCard(card) || !card.canStop) return;
     const updatePhase = (phase?: StopPhase) => {
-      if (!epoch.isCurrent()) return;
-      if (phase) stopPhases.current[card.id] = phase;
-      else delete stopPhases.current[card.id];
-      setStops({ ...stopPhases.current });
+      if (isCurrentCard(card)) updatePresentation(card.id, { phase });
     };
-    const phase = stopPhases.current[card.id];
+    const phase = presentationNow.current[card.id]?.phase;
     if (!phase || phase === 'failed') {
       updatePhase('confirm');
       window.clearTimeout(stopTimers.current[card.id]);
@@ -490,19 +518,17 @@ const PetSurface: React.FC = () => {
     }
     if (phase !== 'confirm') return;
     window.clearTimeout(stopTimers.current[card.id]);
-    updatePhase('stopping');
-    setRetainedCards((current) => ({ ...current, [card.id]: card }));
+    updatePresentation(card.id, { phase: 'stopping', retained: card });
     void api.cancelSession(card.sessionId).then((result) => {
-      if (!epoch.isCurrent()) return;
+      if (!isCurrentCard(card)) return;
       if (!result.ok) throw new Error('stop failed');
       updatePhase('stopped');
-      stopTimers.current[card.id] = window.setTimeout(() => dismiss(card.id, false), STOP_LINGER_MS);
+      stopTimers.current[card.id] = window.setTimeout(() => dismiss(card, false), STOP_LINGER_MS);
     }).catch(() => {
-      if (!epoch.isCurrent()) return;
-      updatePhase('failed');
-      setRetainedCards((current) => { const next = { ...current }; delete next[card.id]; return next; });
+      if (!isCurrentCard(card)) return;
+      updatePresentation(card.id, { phase: 'failed', retained: undefined });
     });
-  }, [api, dismiss, epoch]);
+  }, [api, dismiss, isCurrentCard, updatePresentation]);
 
   const voice = usePetVoice({
     enabled: canChat && Boolean(binding) && !uncertain,
@@ -527,12 +553,13 @@ const PetSurface: React.FC = () => {
       }
       return;
     }
-    void setPanel(true);
+    if (intent === 'show') openCards();
+    else void setPanel(true);
     if (intent === 'listen') {
       hotkeyHeld.current = true;
       petComposer.requestListen();
     }
-  }, [setPanel, voice.stop, voice.listening, composing]);
+  }, [setPanel, openCards, voice.stop, voice.listening, composing]);
   useOnSummon(onSummon);
   useEffect(() => {
     if (!listenPending || !binding || !canChat || !expanded) return;
@@ -551,7 +578,7 @@ const PetSurface: React.FC = () => {
       if (event.key !== 'Escape') return;
       if (voice.listening) voice.cancel();
       else if (composing) closeComposer();
-      else if (detailOpen) setDetailOpen(false);
+      else if (detailOpen) { setDetailOpen(false); void setPanel(false); }
       else void setPanel(false);
     };
     window.addEventListener('keydown', onKey);
@@ -571,7 +598,7 @@ const PetSurface: React.FC = () => {
   const [collapsedHeight, setCollapsedHeight] = useState(0);
   useLayoutEffect(() => {
     const node = collapsedRef.current;
-    if (!node || expanded) return;
+    if (!node || cardsExpanded) return;
     // The entrance scales this wrapper; layout height must include its spacing
     // without capturing that transient transform.
     const measure = () => setCollapsedHeight(node.offsetHeight);
@@ -579,7 +606,7 @@ const PetSurface: React.FC = () => {
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
     observer?.observe(node);
     return () => observer?.disconnect();
-  }, [expanded, visibleCards.length]);
+  }, [cardsExpanded, visibleCards.length]);
 
   const queued = (data.turn?.pending_input_count ?? 0) > 0;
   const resolvingMain = data.canChat === null;
@@ -598,7 +625,7 @@ const PetSurface: React.FC = () => {
         aria-label={t('pet.toggle')}
         aria-expanded={expanded}
         data-pet-hit
-        onClick={(event) => { if (event.detail === 0) void setPanel(!petPanel.want()); }}
+        onClick={(event) => { if (event.detail === 0) togglePanel(); }}
         onPointerDown={(event) => {
           if (event.button !== 0) return;
           const target = event.currentTarget;
@@ -635,7 +662,7 @@ const PetSurface: React.FC = () => {
           if (!press) return;
           window.clearTimeout(press.timer);
           if (press.held) voice.stop(true);
-          else if (!press.dragged) void setPanel(!petPanel.want());
+          else if (!press.dragged) togglePanel();
         }}
         onPointerLeave={() => {
           const press = pressRef.current;
@@ -646,7 +673,7 @@ const PetSurface: React.FC = () => {
         }}
         onContextMenu={(event) => event.preventDefault()}
       >
-        <PetAvatar pose={voice.listening ? 'listening' : pose} badge={unreadCount + cardUnread} activities={liveCards.filter((card) => card.running).length} />
+        <PetAvatar pose={voice.listening ? 'listening' : pose} badge={unreadCount + cardUnread} />
       </button>
       <MiniDock
         enabled={canChat && Boolean(binding)}
@@ -667,11 +694,11 @@ const PetSurface: React.FC = () => {
 
   return (
     <div ref={rootRef} className="pet-mini-stage" data-pet-root data-busy={busy} data-state={state}>
-      <div className={clsx('pet-mini-column', voice.listening && 'is-voice-active')}>
-        <div className={clsx('pet-mini-cards', voice.listening && 'is-hidden')} inert={voice.listening || undefined} aria-label={expanded ? t('pet.panel') : undefined} style={{ height: expanded ? (visibleCards.length > 0 ? STACK_HEIGHT : 'auto') : collapsedHeight }}>
-          <div ref={collapsedRef} key={expanded ? 'expanded' : 'collapsed'} className="pet-mini-swap is-switching" onAnimationEnd={(event) => { if (event.target === event.currentTarget) event.currentTarget.classList.remove('is-switching'); }}>
+      <div className={clsx('pet-mini-column', voice.listening && 'is-voice-active')} style={{ '--pet-collapsed-height': `${collapsedHeight}px` } as CSSProperties}>
+        <div className={clsx('pet-mini-cards', voice.listening && 'is-hidden')} inert={voice.listening || undefined} aria-label={cardsExpanded ? t('pet.panel') : undefined} style={{ height: cardsExpanded ? (visibleCards.length > 0 ? STACK_HEIGHT : 'auto') : collapsedHeight }}>
+          <div ref={collapsedRef} key={cardsExpanded ? 'expanded' : 'collapsed'} className="pet-mini-swap is-switching" onAnimationEnd={(event) => { if (event.target === event.currentTarget) event.currentTarget.classList.remove('is-switching'); }}>
           {visibleCards.length > 0 && (
-            expanded ? (
+            cardsExpanded ? (
               <ExpandedCards
                 cards={visibleCards}
                 leaving={leaving}
@@ -682,7 +709,7 @@ const PetSurface: React.FC = () => {
                 t={(key, options) => String(t(key as never, options as never))}
               />
             ) : (
-              <CollapsedCards cards={visibleCards} onOpen={() => void setPanel(true)} t={(key) => String(t(key as never))} />
+              <CollapsedCards cards={visibleCards} onOpen={openCards} t={(key) => String(t(key as never))} />
             )
           )}
           </div>
@@ -720,8 +747,8 @@ const PetSurface: React.FC = () => {
           </>
           ) : showReplyBubble && binding ? (
             <MainReplyBubble
-              open={detailOpen}
-              onToggle={() => setDetailOpen((open) => !open)}
+              open={detailOpen && expanded}
+              onToggle={() => { setDetailOpen(!detailOpen); void setPanel(!detailOpen); }}
               epoch={epoch}
               voiceNeedsCloud={voice.cloudRequired}
               canChat={canChat}
@@ -968,7 +995,7 @@ const CollapsedCards: React.FC<{ cards: PetCard[]; onOpen: () => void; t: (key: 
   );
 };
 
-const ExpandedCards: React.FC<{ cards: PetCard[]; leaving: string[]; onReference: (card: PetCard) => void; onDismiss: (id: string) => void; stops: Record<string, StopPhase>; onStop: (card: PetCard) => void; t: (key: string, options?: Record<string, unknown>) => string }> = ({ cards, leaving, onReference, onDismiss, stops, onStop, t }) => {
+const ExpandedCards: React.FC<{ cards: PetCard[]; leaving: string[]; onReference: (card: PetCard) => void; onDismiss: (card: PetCard) => void; stops: Record<string, StopPhase>; onStop: (card: PetCard) => void; t: (key: string, options?: Record<string, unknown>) => string }> = ({ cards, leaving, onReference, onDismiss, stops, onStop, t }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [edges, setEdges] = useState({ top: 0, bottom: 0 });
   const measure = useCallback(() => {
@@ -998,7 +1025,7 @@ const ExpandedCards: React.FC<{ cards: PetCard[]; leaving: string[]; onReference
               <li key={card.id} className={clsx('pet-mini-row', leaving.includes(card.id) && 'is-leaving')}>
                 <div className="pet-mini-row-inner"><div className="pet-mini-row-body">
                   <div className="pet-mini-card-wrap" data-pet-hit>
-                    <CardBody card={card} expanded t={t} phase={phase} onDismiss={() => onDismiss(card.id)} onStop={() => onStop(card)} onClick={() => onReference(card)} />
+                    <CardBody card={card} expanded t={t} phase={phase} onDismiss={() => onDismiss(card)} onStop={() => onStop(card)} onClick={() => onReference(card)} />
                   </div>
                 </div></div>
               </li>

@@ -5952,7 +5952,6 @@
     "thinking": "思考中",
     "waiting": "等待中",
     "repliedPrefix": "已回复：{{text}}",
-    "runningBadge": "正在干活 · {{count}}",
     "untitledTask": "未命名任务",
     "dismiss": "移除任务",
     "voiceContinue": "继续语音输入",

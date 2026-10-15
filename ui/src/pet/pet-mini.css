@@ -793,7 +793,9 @@ to {
 .pet-mini-bubble-history {
   position:relative;
   z-index:1;
-  max-height:clamp(48px,calc(100dvh - 524px),120px);
+  /* Share the list's 292px box, bounded by the fixed avatar/dock reservation
+     (147px), bubble header (62px), top inset (16px), and measured stack. */
+  max-height:min(292px,max(0px,calc(100dvh - 225px - var(--pet-collapsed-height,0px))));
   overflow:auto;
   overscroll-behavior:contain;
   border-top:1px solid color-mix(in srgb,var(--pet-ink) 8%,transparent);

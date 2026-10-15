@@ -11,7 +11,9 @@ let legacyDismissed: string[] = [];
 let pendingSummon: PetIntent | null = null;
 let dismissedSession: string | null = null;
 let dismissedIds: string[] = [];
-let dismissedEdited = false;
+type DismissalOperation = { kind: 'add' | 'remove'; id: string };
+let dismissalLog: DismissalOperation[] = [];
+let readyLoaded = false;
 let changes: Promise<void> = Promise.resolve();
 let readyPromise: Promise<void> = Promise.resolve();
 const normalizationAttempts = new WeakSet<PetSurfaceEpoch>();
@@ -20,14 +22,39 @@ let liveSummons = 0;
 const storeListeners = new Set<() => void>();
 const summonListeners = new Set<() => void>();
 
+const applyOperation = (ids: string[], operation: DismissalOperation) => operation.kind === 'add'
+  ? [...new Set([...ids, operation.id])] : ids.filter((id) => id !== operation.id);
+
+const persistDismissed = async (sessionId: string) => {
+  if (!readyLoaded || sessionId !== dismissedSession || sessionId !== legacyBinding?.binding) return;
+  const ids = dismissedIds;
+  if (ids.length === legacyDismissed.length && ids.every((id) => legacyDismissed.includes(id))) return;
+  await petBridge.setDismissedIds(sessionId, ids);
+  legacyDismissed = ids;
+};
+
+const queueDismissalWrite = (sessionId: string) => {
+  changes = changes.then(() => persistDismissed(sessionId)).catch(() => undefined);
+};
+
+const loadDismissalBaseline = () => {
+  if (!dismissedSession) return;
+  const baseline = dismissedSession === legacyBinding?.binding ? legacyDismissed : [];
+  dismissedIds = dismissalLog.reduce(applyOperation, baseline);
+  if (readyLoaded) {
+    dismissalLog = [];
+    queueDismissalWrite(dismissedSession);
+  }
+};
+
 const setMain = (next: string | null) => {
   if (binding === next) return;
   binding = next;
   // A failed lookup withdraws the conversation, not the user's preferences.
   if (next && next !== dismissedSession) {
+    if (dismissedSession) dismissalLog = [];
     dismissedSession = next;
-    dismissedEdited = false;
-    dismissedIds = next === legacyBinding?.binding ? legacyDismissed : [];
+    loadDismissalBaseline();
   }
   storeListeners.forEach((listener) => listener());
 };
@@ -50,26 +77,19 @@ const start = () => {
   readyPromise = petBridge.ready().then((ready) => {
     legacyBinding = ready;
     legacyDismissed = ready.dismissed_ids ?? [];
-    if (dismissedSession && dismissedSession === ready.binding && !dismissedEdited) {
-      dismissedIds = legacyDismissed;
-      storeListeners.forEach((listener) => listener());
-    }
+    readyLoaded = true;
+    loadDismissalBaseline();
+    storeListeners.forEach((listener) => listener());
     if (ready.summon_pending && liveSummons === liveSummonsAtRequest) noteSummon(ready.summon_pending.intent);
   }).catch(() => undefined);
 };
 
-const setDismissed = (sessionId: string, ids: string[]) => {
-  if (sessionId !== dismissedSession) return;
-  dismissedEdited = true;
-  dismissedIds = ids;
+const recordDismissal = (operation: DismissalOperation) => {
+  // Keep even a remove of an unknown id: it may exist in the pending baseline.
+  if (!readyLoaded || !dismissedSession) dismissalLog.push(operation);
+  dismissedIds = applyOperation(dismissedIds, operation);
   storeListeners.forEach((listener) => listener());
-  // Normalization and preference writes share one queue. A temporary failed
-  // main lookup does not change the owner of these document preferences.
-  changes = changes.then(async () => {
-    if (sessionId !== dismissedSession || sessionId !== legacyBinding?.binding) return;
-    legacyDismissed = ids;
-    await petBridge.setDismissedIds(sessionId, ids);
-  }).catch(() => undefined);
+  if (readyLoaded && dismissedSession) queueDismissalWrite(dismissedSession);
 };
 
 export const petShell = {
@@ -82,16 +102,13 @@ export const petShell = {
     start();
     changes = changes.then(async () => {
       await readyPromise;
-      if (!epoch.isCurrent() || legacyBinding?.binding === 'ses_main') return;
+      if (!readyLoaded || !epoch.isCurrent() || legacyBinding?.binding === 'ses_main') return;
       const confirmed = await petBridge.bindMain();
       // An IPC already sent may finish after authorization changes. It only
       // writes main; mirror the native storage owner without selecting a session.
       legacyBinding = confirmed;
       legacyDismissed = [];
-      if (epoch.isCurrent() && dismissedIds.length > 0) {
-        legacyDismissed = dismissedIds;
-        await petBridge.setDismissedIds('ses_main', dismissedIds);
-      }
+      await persistDismissed('ses_main');
     }).catch(() => undefined); // A later epoch may retry; never loop in this one.
   },
 
@@ -105,15 +122,11 @@ export const petShell = {
   /** The binding now, for callbacks that must not read a stale render. */
   currentBinding: (): string | null => binding,
   dismissed: (): string[] => dismissedIds,
-  setDismissed: (sessionId: string, ids: string[]) => {
+  addDismissed: (sessionId: string, id: string) => {
     if (sessionId !== binding) return;
-    setDismissed(sessionId, ids);
+    recordDismissal({ kind: 'add', id });
   },
-  forgetDismissed: (id: string) => {
-    if (dismissedSession && dismissedIds.includes(id)) {
-      setDismissed(dismissedSession, dismissedIds.filter((item) => item !== id));
-    }
-  },
+  forgetDismissed: (id: string) => recordDismissal({ kind: 'remove', id }),
 };
 
 export function usePetBinding(): string | null {

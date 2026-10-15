@@ -18,7 +18,6 @@ for (const theme of ['light', 'dark']) {
       expect(gap).toBeGreaterThanOrEqual(13);
       expect(gap).toBeLessThanOrEqual(15);
       await expect(page.locator('.pet-mini-reply-toggle')).toContainText(lang === 'zh' ? /已回复：\S/ : /Replied: \S/);
-      await expect(page.locator('.pet-avatar [aria-label]').last()).toHaveAttribute('aria-label', lang === 'zh' ? /正在干活 · \d/ : /Working · \d/);
       await page.locator('.pet-mini-collapsed').click();
       const stop = page.locator('.pet-mini-stop').first();
       await expect(stop).toHaveAttribute('aria-label', lang === 'zh' ? /^停止：.+/ : /^Stop: .+/);
@@ -95,7 +94,6 @@ for (const main of [true, false]) {
         const x = (first.left + first.right) / 2;
         return { card: covers(x, (first.top + first.bottom) / 2), gap: covers(x, (first.bottom + second.top) / 2) };
       })).toEqual({ card: true, gap: false });
-      if (main) await page.locator('.pet-mini-reply-toggle').click();
       // A long nowrap title and long detail must remain inside the fixed list.
       const widths = await page.locator('.pet-mini-scroll').evaluate((scroll) => ({
         client: scroll.clientWidth, content: scroll.scrollWidth,
@@ -103,6 +101,7 @@ for (const main of [true, false]) {
       }));
       expect(widths.content).toBe(widths.client);
       expect(widths.cards.every((width) => width <= widths.client)).toBe(true);
+      if (main) await page.locator('.pet-mini-reply-toggle').click();
       expect(await page.locator('.pet-mini-avatar-button').boundingBox()).toEqual(avatar);
       expect(errors).toEqual([]);
     });
@@ -205,6 +204,50 @@ test('reply history and input remain within the fixed window with reduced motion
   expect(await page.locator('.pet-mini-avatar-button').boundingBox()).toEqual(avatar);
   expect(await page.locator('.pet-mini-detail').evaluate((node) => parseFloat(getComputedStyle(node).transitionDuration))).toBeLessThan(0.01);
 });
+
+for (const theme of ['light', 'dark']) {
+  for (const reduced of [false, true]) {
+    test(`history and cards share expansion with reachable actions (${theme}, reduced=${reduced})`, async ({ page }) => {
+      await page.emulateMedia({ reducedMotion: reduced ? 'reduce' : 'no-preference' });
+      await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=actions');
+      await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
+      const avatar = page.locator('.pet-mini-avatar-button');
+      await expect(avatar).toBeVisible();
+      const anchor = await avatar.boundingBox();
+      await page.locator('.pet-mini-collapsed').click();
+      await expect(page.locator('.pet-mini-scroll')).toBeVisible();
+      await page.locator('.pet-mini-reply-toggle').click();
+      await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
+      await expect(page.locator('.pet-mini-scroll')).toHaveCount(0);
+      await expect(page.locator('.pet-mini-detail')).toHaveClass(/is-open/);
+      await page.evaluate(async () => {
+        await Promise.all(document.getAnimations()
+          .filter((animation) => animation.effect?.getTiming().iterations !== Infinity)
+          .map((animation) => animation.finished.catch(() => {})));
+      });
+      const history = page.locator('.pet-mini-bubble-history');
+      for (const name of ['在 Avibe 中打开', '需要授权，在 Avibe 中打开', '继续']) {
+        const button = history.getByRole('button', { name, exact: true });
+        await expect(button).toBeVisible();
+        const bounds = await button.boundingBox(), box = await history.boundingBox();
+        expect(bounds!.y).toBeGreaterThanOrEqual(box!.y);
+        expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(box!.y + box!.height + 1);
+      }
+      expect(await history.evaluate((node) => node.scrollHeight <= node.clientHeight + 1)).toBe(true);
+      expect((await page.locator('.pet-mini-collapsed').boundingBox())!.y).toBeGreaterThanOrEqual(0);
+      expect(await avatar.boundingBox()).toEqual(anchor);
+      await page.locator('.pet-mini-collapsed').click();
+      await expect(page.locator('.pet-mini-scroll')).toBeVisible();
+      await expect(page.locator('.pet-mini-detail')).not.toHaveClass(/is-open/);
+      await page.locator('.pet-mini-reply-toggle').click();
+      await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
+      await avatar.click();
+      await expect(page.locator('.pet-mini-scroll')).toBeVisible();
+      await expect(page.locator('.pet-mini-detail')).not.toHaveClass(/is-open/);
+      expect(await avatar.boundingBox()).toEqual(anchor);
+    });
+  }
+}
 
 
 test('an empty activity stack takes no space while history remains usable without a switcher', async ({ page }) => {

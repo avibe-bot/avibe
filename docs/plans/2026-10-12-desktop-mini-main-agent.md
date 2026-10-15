@@ -80,6 +80,14 @@ the main agent; there is no Follow up on cards.
 
 ### 3.2 Expanded box
 
+- **Shared expansion (owner decision, 2026-10-15).** The card list and Vibey's
+  recent-turn history share the expanded space; they never expand together.
+  History retains the collapsed stack above it and uses up to the list's 292px
+  height, bounded by the measured stack, bubble header and fixed window. On the
+  460×600 frame this leaves about 240px with four cards. Only overflowing history
+  scrolls; ordinary replies and their Open in Avibe/approval/quick-reply actions
+  fit without scrolling. Vibey and the dock keep their fixed anchors.
+
 - **No backing panel on the desktop (owner decision, 2026-10-12).** The
   expanded list sits in a transparent wrapper with 6px padding (kept so the
   widths in §3.1 hold). Cards float directly over the desktop, separated by
@@ -253,6 +261,11 @@ Known data limitations for P1:
   input bubble when it is open, otherwise Vibey's reply bubble when it has
   progress, history, a notice, quick replies or a pending authorization.
   Only the highest-priority content is interactive or eligible for mark-read.
+- **Mutually exclusive expansion.** Opening "Recent turns" collapses the cards
+  into their layered stack. Opening the card stack or clicking Vibey expands
+  the cards and closes history. Closing history returns to the collapsed mini.
+  Both transitions reuse the v2 height/content motion (§7.1, §7.4); reduced
+  motion switches directly. There is no separate 48–120px history cap.
 - **No margin of its own.** The last card's row spacing plus the panel's 6px
   padding separate it from the cards (about 14px).
 - **Motion:**
@@ -422,6 +435,8 @@ Cards and team activity use the same filtered snapshot. Background definitions
 alone do not create cards or a busy pose. Quick-reply suggestions do not count
 as needs input. Keep the current static images (team uses the existing running
 image); layered pose animation is deferred. Preserve reduced-motion behavior.
+The lower-left green activity-count badge is removed; the stack and team pose
+already communicate activity. Keep the upper-right red unread badge.
 
 ## 9. Shell (Tauri) work
 
@@ -519,10 +534,24 @@ GET /api/sessions/main
   needs no binding write. A failed normalization does not retry in a loop;
   a later epoch may try again. This preserves §11.3 for new installs and upgrades.
   The last successfully resolved main owns document dismissals, even during a
-  temporary lookup failure. Only a manual × adds an id; stop exits are transient
-  presentation state. Forget the id when it disappears from the healthy eligible
-  activity snapshot (and has no unread Inbox reply), or when its next turn starts.
-  New turns also cancel pending exit animations, so an old close cannot hide them.
+  temporary lookup failure. Manual × records `add(id)` and forgetting records
+  `remove(id)` through one operation entry point. Before `pet_ready`, apply each
+  operation immediately in the UI and retain it in order. On readiness, replay
+  the log over the matching persisted main baseline (or the empty baseline after
+  legacy binding normalization), then persist only a changed result. Ready-state
+  operations update the current list and use the same serialized write queue.
+  Do not replace the persisted baseline with a pre-ready document snapshot.
+  Forget the id when it disappears from the healthy eligible activity snapshot
+  (and has no unread Inbox reply), or when its next turn starts.
+- **Turn-scoped card presentation.** Confirmation, cancellation, stopped/failed
+  notices, exits, leaving animation and retained cards use `sessionId:generation`
+  keys. Increment the local generation on `turn.start` or healthy activity
+  disappearance followed by reappearance. Retire that key's timers together;
+  every timer/cancel callback checks its captured key and authorization epoch.
+  Old callbacks cannot alter a new turn. Stop exits never add persistent dismissals.
+- **Standalone stop eligibility.** A foreground, chat-openable human activity
+  with `platform = null` is a Web candidate, as is `platform = avibe`. Both still
+  require an explicitly in-flight turn-state read; actual IM platforms stay excluded.
 - **Turn failures remain visible.** A foreground terminal failure notice is shown
   in the reply bubble/detail, with "Fix in Avibe" when it names a next step. Detached
   completions and replayed failures do not replace the current exchange. Live step
