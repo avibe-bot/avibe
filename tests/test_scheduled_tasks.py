@@ -20588,3 +20588,88 @@ def test_an_older_mirror_capture_never_undoes_a_newer_one(tmp_path: Path) -> Non
 
     asyncio.run(_go())
     assert service.scheduler.get_job(task.id) is None, "an older mirror capture undid the disable a newer one applied"
+
+
+class _TaskWithoutCancelCount:
+    """A running task as Python 3.10 presents it: ``cancel``, but no ``uncancel`` to count requests with."""
+
+    def __init__(self, task: "asyncio.Task[Any]") -> None:
+        self._task = task
+
+    def cancel(self, *args) -> bool:
+        return self._task.cancel(*args)
+
+
+@pytest.mark.parametrize(
+    ("door", "step_raises", "python310"),
+    [("_store_step", True, False), ("_run_runtime_sync", True, False), ("_store_step", False, True)],
+)
+def test_a_cancellation_caught_by_a_store_step_is_answered_at_the_next_await(
+    tmp_path: Path, monkeypatch, door: str, step_raises: bool, python310: bool
+) -> None:
+    """#2649: a store step on the runtime-work door holds a cancellation that arrives while it runs until it lands, then
+    hands it back for the caller's next await -- also when the step raised (its error must not swallow the cancellation
+    and let the caller settle an ordinary failure), and on Python 3.10, whose tasks keep no cancellation count."""
+
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}, im_clients={}),
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+    )
+    entered, release = threading.Event(), threading.Event()
+    outcomes: list[str] = []
+
+    def step() -> str:
+        entered.set()
+        assert release.wait(5)
+        if step_raises:
+            raise RuntimeError("step error")
+        return "step result"
+
+    if python310:
+        current_task = asyncio.current_task
+        monkeypatch.setattr(
+            scheduled_tasks.asyncio, "current_task", lambda *args: _TaskWithoutCancelCount(current_task(*args))
+        )
+
+    async def caller() -> None:
+        try:
+            outcomes.append(await getattr(service, door)(step))
+        except RuntimeError as exc:
+            outcomes.append(str(exc))
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            outcomes.append("cancelled at the next await")
+            raise
+
+    async def _go() -> None:
+        run = asyncio.create_task(caller())
+        assert await asyncio.to_thread(entered.wait, 5)
+        run.cancel()
+        await asyncio.sleep(0.05)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await run
+
+    asyncio.run(_go())
+    assert outcomes == ["step error" if step_raises else "step result", "cancelled at the next await"]
+
+
+def test_a_timeout_that_expires_during_a_store_step_still_reads_as_a_timeout(tmp_path: Path) -> None:
+    """#2649: a cancellation a store step holds and re-arms is counted once, so an ``asyncio.timeout`` around the caller
+    still turns its own expiry into ``TimeoutError`` instead of letting a bare cancellation escape the caller."""
+
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}, im_clients={}),
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+    )
+
+    async def _go() -> None:
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0.05):
+                await service._store_step(time.sleep, 0.2)
+                await asyncio.sleep(5)
+
+    asyncio.run(_go())

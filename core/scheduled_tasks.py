@@ -4031,6 +4031,22 @@ class _ScheduledRuntimeWorkHandler(RuntimeWorkHandler):
         return True
 
 
+def _rearm_cancellation() -> None:
+    """Deliver a cancellation the current task caught, but did not answer, at its next await.
+
+    ``uncancel`` first (Python 3.11+, absent on 3.10, which counts no requests), so the
+    request is counted once, as an ``asyncio.timeout`` around the caller expects.
+    """
+
+    current = asyncio.current_task()
+    if current is None:
+        return
+    uncancel = getattr(current, "uncancel", None)
+    if uncancel is not None:
+        uncancel()
+    current.cancel()
+
+
 class ScheduledTaskService:
     """Controller-owned runtime that executes persisted scheduled tasks."""
 
@@ -5036,13 +5052,17 @@ class ScheduledTaskService:
 
         A store step cannot be split by cancellation, as it could not while it ran on
         the loop: a cancellation that arrives meanwhile waits for the step to land and
-        is raised after it, so the caller sees exactly what committed.
+        is raised after it, so the caller sees exactly what committed. A step that
+        raised raises its own error, with the cancellation re-armed behind it.
         """
 
-        result, cancelled = await self._run_runtime_sync_settled(operation, *args, **kwargs)
-        if cancelled:
+        step, cancelled = await self._land_runtime_step(operation, *args, **kwargs)
+        if cancelled and not step.cancelled():
+            if step.exception() is not None:
+                _rearm_cancellation()
+                return step.result()
             raise asyncio.CancelledError
-        return result
+        return step.result()
 
     async def _store_step(self, operation, /, *args, **kwargs):  # noqa: ANN001, ANN202
         """One store step of a claimed execution: on the runtime-work door, with the
@@ -5050,27 +5070,24 @@ class ScheduledTaskService:
 
         These steps ran synchronously on the loop before #2649, so a cancellation could
         land only at the execution's next real await -- the dispatch, the command, a
-        delivery -- with every step before it complete and its result in hand. It still
+        delivery -- with every step before it complete and its outcome in hand. It still
         does: a cancellation that arrives while a step runs waits for the step to land,
-        the step's result is returned, and the cancellation is re-armed for the next
-        await that is not itself a store step. So a result a step committed (a
-        reservation, a binding recovery, a settlement) is never dropped between steps,
-        and each cancellation is answered where the execution always answered it.
+        the step's result is returned (or its error raised), and the cancellation is
+        re-armed for the next await that is not itself a store step. So a result a step
+        committed (a reservation, a binding recovery, a settlement) is never dropped
+        between steps, and each cancellation is answered where the execution always
+        answered it.
         """
 
-        result, cancelled = await self._run_runtime_sync_settled(operation, *args, **kwargs)
-        if cancelled:
-            current = asyncio.current_task()
-            if current is not None:
-                # Caught, not answered: take its request back and re-arm it, so it is
-                # delivered once, with the count an ``asyncio.timeout`` around it expects.
-                current.uncancel()
-                current.cancel()
-        return result
+        step, cancelled = await self._land_runtime_step(operation, *args, **kwargs)
+        if cancelled and not step.cancelled():
+            _rearm_cancellation()
+        return step.result()
 
-    async def _run_runtime_sync_settled(self, operation, /, *args, **kwargs):  # noqa: ANN001, ANN202
-        """``_run_runtime_sync`` for a caller that answers a cancellation itself, from what
-        the step committed: returns ``(result, cancelled)`` and raises nothing for it."""
+    async def _land_runtime_step(self, operation, /, *args, **kwargs):  # noqa: ANN001, ANN202
+        """Run one store step on the runtime-work door and wait for it to land, whatever
+        cancels the caller meanwhile. Returns ``(step, cancelled)``: the finished step,
+        whose ``result()`` gives its outcome, and whether a cancellation was caught."""
 
         call = partial(operation, *args, **kwargs)
         supervisor = getattr(self.controller, "runtime_work_supervisor", None)
@@ -5080,16 +5097,13 @@ class ScheduledTaskService:
         else:
             step = asyncio.ensure_future(asyncio.to_thread(call))
         cancelled = False
-        while True:
+        while not step.done():
             try:
-                result = await asyncio.shield(step)
+                # ``wait`` never cancels the step, and raises only the caller's cancellation.
+                await asyncio.wait((step,))
             except asyncio.CancelledError:
-                if step.cancelled():
-                    raise
                 cancelled = True
-                continue
-            # ``run_sync`` itself raises a cancellation it absorbed once its step landed.
-            return result, cancelled
+        return step, cancelled
 
     def _start_legacy_runtime_work_probes(self) -> None:
         if self.store.sqlite_backend is None:
