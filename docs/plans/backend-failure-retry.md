@@ -122,6 +122,39 @@ Scenario contracts: `MESSAGE-DELIVERY-026` through `MESSAGE-DELIVERY-028`.
 Restart notification binding and continuation: `MESSAGE-DELIVERY-030`.
 Harness-owned notification binding and continuation: `MESSAGE-DELIVERY-320`.
 
+## Review-boundary correction contract
+
+The second findings-bearing head exposed the same ownership class in new paths:
+resume is control-plane work, not another model input. The orchestrator stops
+path-by-path patching and retains the existing Delivery/Turn/Agent model, with
+these complete boundary fixes (no new retry service or state machine):
+
+- Internal dispatch derives resume permission only from the durable Delivery's
+  `type`, `author`, `source`, and server marker. Admission, FIFO claim, and final
+  dispatch must reject that control Delivery on any resolved non-Vibey backend.
+- Provider errors distinguish replay permission (`retryable`) from transcript
+  continuation permission (`continuable`, default false). Transient streamed
+  failures can allow continuation without request replay; Model Hub recovery
+  exhaustion, explicit refusals, permanent errors, and local errors allow neither.
+  AgentError preserves these permissions and Retry-After. Automatic continuation
+  honors the delay and one bounded elapsed budget across all five continuations.
+- The adapter supplies the active durable Turn ID to transcript writes, separately
+  from input consumption. T2 recovery keeps the originating failed call's Turn;
+  retry execution writes new events against the retry Turn.
+- Resume pins include every accepted input of the failed task, including returned
+  steers and inputs inherited through retry ancestry. Automatic resume unions
+  newly admitted sequence numbers with the same Agent's current pins.
+- Hidden control rows stay out of model context and out of the indexed population
+  of recoverable inputs. Recovery must not resolve attachments or fetch Delivery
+  snapshots for historical hidden rows. Query-plan and migration tests protect
+  this storage boundary.
+
+Validation uses real Web-to-internal dispatch, FIFO backend changes, provider
+classification through continuation, returned steers, repeated user retries,
+event attribution, and recovery query plans. The existing CI failure in
+`tests/test_vibey_agent_context.py` reproduces the lost provider permission and
+must pass without weakening its source-failure attribution assertions.
+
 ## Known by design
 
 Native backend APIs do not provide one verified retry operation for all terminal
