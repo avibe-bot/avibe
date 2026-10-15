@@ -89,6 +89,17 @@ def _manifest(tmp_path: Path, *, source_sha: str, patches: list[Path]) -> Path:
     return path
 
 
+def _candidate_manifest(tmp_path: Path, *, source_sha: str, patches: list[Path]) -> Path:
+    path = _manifest(tmp_path, source_sha=source_sha, patches=patches)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["assets"] = [
+        {"platform": asset["platform"], "url": asset["url"]}
+        for asset in payload["assets"]
+    ]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
 @pytest.mark.parametrize(
     ("patch_mode", "wrong_pinned_size"),
     [("pinned", False), ("pinned", True), ("changed", False)],
@@ -224,3 +235,109 @@ def test_build_source_release_applies_patches_in_order_and_materializes_six_targ
     )
 
     guard.verify_release_assets(manifest, output)
+
+
+def test_candidate_mode_writes_real_digests_and_owned_urls_without_pinned_hashes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source"
+    (source / "cmd" / "server").mkdir(parents=True)
+    for name, data in FIXTURE_DOCUMENTS.items():
+        (source / name).write_bytes(data)
+    subprocess.run(["git", "init", "--quiet", str(source)], check=True)
+    subprocess.run(
+        ["git", "-C", str(source), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(source), "config", "user.name", "Test"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "--quiet", "-m", "fixture"], check=True)
+    source_sha = subprocess.check_output(
+        ["git", "-C", str(source), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+    patches = [
+        _patch(
+            tmp_path / "first.patch",
+            "diff --git a/patched-marker.txt b/patched-marker.txt",
+            "new file mode 100644",
+            "--- /dev/null",
+            "+++ b/patched-marker.txt",
+            "@@ -0,0 +1 @@",
+            "+patched",
+        ),
+        _patch(
+            tmp_path / "second.patch",
+            "diff --git a/patched-marker.txt b/patched-marker.txt",
+            "--- a/patched-marker.txt",
+            "+++ b/patched-marker.txt",
+            "@@ -1 +1 @@",
+            "-patched",
+            "+patched twice",
+        ),
+    ]
+    manifest = _candidate_manifest(tmp_path, source_sha=source_sha, patches=patches)
+    monkeypatch.setattr(builder, "REPO_ROOT", tmp_path)
+    real_run = builder._run
+
+    def fake_run(command, *, cwd=None, env=None):
+        if command[:2] == ["go", "version"]:
+            return "go version go1.26.0 darwin/arm64\n"
+        if command[:2] == ["go", "build"]:
+            assert (cwd / "patched-marker.txt").read_text(encoding="utf-8") == "patched twice\n"
+            binary = Path(command[command.index("-o") + 1])
+            binary.write_bytes(FIXTURE_BINARY)
+            return ""
+        if Path(command[0]).name.startswith("cli-proxy-api") and command[1:] == ["--help"]:
+            return "CLIProxyAPI Version: v7.3.16, Commit: fixture\n"
+        return real_run(command, cwd=cwd, env=env)
+
+    monkeypatch.setattr(builder, "_run", fake_run)
+    candidate_bytes = manifest.read_bytes()
+    malformed = json.loads(candidate_bytes)
+    malformed["assets"][0]["sha256"] = "0" * 64
+    manifest.write_text(json.dumps(malformed), encoding="utf-8")
+    with pytest.raises(builder.BuildError, match="must not contain pinned asset digests"):
+        builder.build_source_release(
+            manifest,
+            tmp_path / "rejected-candidate-output",
+            candidate=True,
+            source_repository=str(source),
+            go_binary="go",
+        )
+    manifest.write_bytes(candidate_bytes)
+
+    output = tmp_path / "candidate-output"
+    generated_manifest = builder.build_source_release(
+        manifest,
+        output,
+        candidate=True,
+        source_repository=str(source),
+        go_binary="go",
+    )
+
+    candidate_payload = json.loads(manifest.read_text(encoding="utf-8"))
+    generated_payload = json.loads(generated_manifest.read_text(encoding="utf-8"))
+    assert all(
+        not any(key in asset for key in ("size_bytes", "sha256", "binary_sha256"))
+        for asset in candidate_payload["assets"]
+    )
+    assert {asset["platform"] for asset in generated_payload["assets"]} == set(FIXTURE_TARGETS)
+    assert generated_payload["assets"] != candidate_payload["assets"]
+    for asset in generated_payload["assets"]:
+        archive = output / Path(asset["url"]).name
+        assert asset["url"].startswith(
+            f"{guard.OWNED_RELEASE_ROOT}/{generated_payload['asset_release_tag']}/"
+        )
+        assert asset["size_bytes"] == archive.stat().st_size
+        assert asset["sha256"] == hashlib.sha256(archive.read_bytes()).hexdigest()
+        with tarfile.open(archive, "r:gz") as bundle:
+            binary = bundle.extractfile(asset["bin_path"])
+            assert binary is not None
+            assert asset["binary_sha256"] == hashlib.sha256(binary.read()).hexdigest()
+
+    assert guard.verify_release_assets(generated_manifest, output).version == "v7.3.16"

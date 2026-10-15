@@ -21,6 +21,7 @@ from typing import Any, Mapping, Sequence
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = REPO_ROOT / "vibe" / "model_hub_runtime" / "cliproxyapi_manifest.json"
 DEFAULT_SOURCE_REPOSITORY = "https://github.com/router-for-me/CLIProxyAPI.git"
+OWNED_RELEASE_ROOT = "https://github.com/avibe-bot/avibe/releases/download"
 
 TARGETS = {
     "darwin-arm64": ("darwin", "arm64", "darwin_aarch64"),
@@ -193,6 +194,42 @@ def _asset_name(version: str, platform: str) -> str:
     return f"CLIProxyAPI_{version.removeprefix('v')}_{TARGETS[platform][2]}.tar.gz"
 
 
+def _candidate_asset_urls(payload: Mapping[str, Any]) -> dict[str, str]:
+    """Validate candidate asset identity without accepting untrusted digests."""
+
+    raw_assets = payload.get("assets")
+    if not isinstance(raw_assets, list):
+        raise BuildError("candidate Model Hub engine manifest assets must be a list")
+    expected_tag = payload.get("asset_release_tag")
+    version = payload.get("version")
+    if not isinstance(expected_tag, str) or not expected_tag:
+        raise BuildError("candidate Model Hub engine manifest asset release tag is missing")
+    if not isinstance(version, str) or not version:
+        raise BuildError("candidate Model Hub engine manifest version is missing")
+
+    urls: dict[str, str] = {}
+    for item in raw_assets:
+        if not isinstance(item, dict):
+            raise BuildError("candidate Model Hub engine manifest asset is invalid")
+        platform = item.get("platform")
+        if platform not in TARGETS or platform in urls:
+            raise BuildError("candidate Model Hub engine manifest platform set is invalid")
+        if any(key in item for key in ("size_bytes", "sha256", "binary_sha256")):
+            raise BuildError(
+                "candidate Model Hub engine manifest must not contain pinned asset digests"
+            )
+        expected_url = (
+            f"{OWNED_RELEASE_ROOT}/{expected_tag}/{_asset_name(version, platform)}"
+        )
+        url = item.get("url", expected_url)
+        if url != expected_url:
+            raise BuildError(f"candidate Model Hub engine asset URL is not Avibe-owned: {platform}")
+        urls[platform] = url
+    if set(urls) != set(TARGETS):
+        raise BuildError("candidate Model Hub engine manifest platform set is invalid")
+    return urls
+
+
 def _native_target() -> str | None:
     goos = {"Darwin": "darwin", "Linux": "linux", "Windows": "windows"}.get(platform.system())
     goarch = {
@@ -242,12 +279,19 @@ def build_source_release(
     manifest_path: Path,
     output_dir: Path,
     *,
+    candidate: bool = False,
     source_repository: str = DEFAULT_SOURCE_REPOSITORY,
     go_binary: str = "go",
 ) -> Path:
-    """Build all pinned targets and return the checked-in manifest path."""
+    """Build a pinned release or a freshly-digested candidate manifest.
 
+    Candidate mode accepts source/patch metadata and owned planned asset URLs,
+    but never trusts or requires asset digests from the input. It writes a new
+    manifest containing the bytes produced by this build before running the
+    same release guard used by strict pinned mode.
+    """
     payload = _load_manifest(manifest_path)
+    candidate_urls = _candidate_asset_urls(payload) if candidate else None
     output_dir = output_dir.resolve()
     if output_dir.exists():
         if not output_dir.is_dir() or output_dir.is_symlink() or any(output_dir.iterdir()):
@@ -326,10 +370,14 @@ def build_source_release(
             generated_assets.append(
                 {
                     "platform": platform,
-                    "url": next(
-                        item["url"]
-                        for item in payload["assets"]
-                        if isinstance(item, dict) and item.get("platform") == platform
+                    "url": (
+                        candidate_urls[platform]
+                        if candidate_urls is not None
+                        else next(
+                            item["url"]
+                            for item in payload["assets"]
+                            if isinstance(item, dict) and item.get("platform") == platform
+                        )
                     ),
                     "size_bytes": archive_path.stat().st_size,
                     "sha256": _sha256(archive_path),
@@ -343,7 +391,21 @@ def build_source_release(
             )
 
     generated_manifest = output_dir / "model-hub-engine-manifest.json"
-    generated_manifest.write_bytes(manifest_path.read_bytes())
+    if candidate:
+        candidate_payload = dict(payload)
+        candidate_payload["assets"] = generated_assets
+        generated_manifest.write_text(
+            json.dumps(candidate_payload, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        verification_manifest = generated_manifest
+    else:
+        # The checked-in manifest is the publication contract. A generated
+        # manifest may describe what this runner produced, but it must not
+        # replace the pinned sizes, digests, or metadata used by installed
+        # clients.
+        generated_manifest.write_bytes(manifest_path.read_bytes())
+        verification_manifest = manifest_path
 
     # Import lazily so the builder can be unit-tested without importing the
     # network-facing release guard during source preparation.
@@ -354,10 +416,9 @@ def build_source_release(
             raise
         from model_hub_engine_release_guard import verify_release_assets
 
-    # The checked-in manifest is the publication contract. A generated
-    # manifest may describe what this runner produced, but it must not replace
-    # the pinned sizes, digests, or metadata used by installed clients.
-    verify_release_assets(manifest_path, output_dir)
+    # Candidate mode uses the same release guard, but verifies the freshly
+    # generated manifest rather than the checked-in pinned contract.
+    verify_release_assets(verification_manifest, output_dir)
     return generated_manifest
 
 
@@ -366,6 +427,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--source-repository", default=DEFAULT_SOURCE_REPOSITORY)
     parser.add_argument("--go", default="go", dest="go_binary")
+    parser.add_argument(
+        "--candidate",
+        action="store_true",
+        help="write a freshly-digested candidate manifest instead of checking pinned digests",
+    )
     parser.add_argument("output_dir", type=Path)
     return parser
 
@@ -376,6 +442,7 @@ def main(argv: list[str] | None = None) -> int:
         generated_manifest = build_source_release(
             args.manifest,
             args.output_dir,
+            candidate=args.candidate,
             source_repository=args.source_repository,
             go_binary=args.go_binary,
         )
