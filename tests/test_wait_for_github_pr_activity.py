@@ -4579,15 +4579,23 @@ def test_coalescing_resets_old_head_evidence_without_mixing_ci(tmp_path):
     assert f"@{new_head[:12]}" in output
 
 
+@pytest.mark.parametrize("footer_layout", ["split", "inline"])
 @pytest.mark.parametrize("status", [
     "Running", "Completed", "Something went wrong", "Unavailable",
     "Completed with errors", "Completed / findings", "Running slowly",
 ])
-def test_coalescing_ignores_codex_summary_progress_but_not_errors(tmp_path, status):
+def test_coalescing_ignores_codex_summary_progress_but_not_errors(tmp_path, status, footer_layout):
     module = _load_module()
     path = tmp_path / "ci.json"
     pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
     _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
+    footer_intro = {
+        "split": (
+            "[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general).\n"
+            "Codex reviews are triggered when you"
+        ),
+        "inline": "[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you",
+    }[footer_layout]
     summary = {**_clean_codex_comment(), "body": (
         "<!-- codex-pull-request-review-summary -->\n"
         "<!-- codex-review-state:v1 {\"code_review\":{\"status\":\"running\"}} -->\n"
@@ -4598,8 +4606,7 @@ def test_coalescing_ignores_codex_summary_progress_but_not_errors(tmp_path, stat
         f"| 📝 **Code Review** | ✅ **{status}** | `{COALESCED_HEAD[:7]}` | New commits |\n\n"
         "<details> <summary>ℹ️ About Codex in GitHub</summary>\n"
         "<br/>\n"
-        "[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general).\n"
-        "Codex reviews are triggered when you\n"
+        f"{footer_intro}\n"
         "- Open a pull request for review\n"
         "- Mark a draft as ready\n"
         "- Comment \"@codex review\" or \"@codex security review\".\n"
@@ -4869,43 +4876,61 @@ def test_coalescing_surfaces_mixed_clean_and_error_text(tmp_path, suffix):
     assert "success candidate" not in output
 
 
-def test_coalescing_treats_cross_stream_timestamp_ties_as_invalidating(tmp_path):
+@pytest.mark.parametrize("finding_kind", ["review_comments", "issue_comments"])
+@pytest.mark.parametrize("arrival", ["same-poll", "finding-first", "clean-first"])
+def test_coalescing_preserves_invalidations_between_distinct_resources_at_one_timestamp(tmp_path, finding_kind, arrival):
     module = _load_module()
     path = tmp_path / "ci.json"
     pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
     _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
+    options = ("--coalesce-success",)
     timestamp = "2026-10-15T08:00:01Z"
-    clean = {**_clean_codex_comment(), "created_at": timestamp}
-    finding = _review_comment(501, body="Race allows duplicate notifications", created_at=timestamp)
-    state = _success_state(
-        _ci_run(head=COALESCED_HEAD), issue_comments=[clean], review_comments=[finding],
-    )
-    rc, output, _ = _ci_cycle(module, path, [state], extra_args=("--coalesce-success",))
-    assert rc == 0 and "review_comment #501" in output
-    assert "success candidate" not in output
-
-
-def test_coalescing_preserves_cross_stream_tie_invalidations_across_polls(tmp_path):
-    module = _load_module()
-    path = tmp_path / "ci.json"
-    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
-    _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
-    timestamp = "2026-10-15T08:00:01Z"
-    finding = _review_comment(501, body="Race allows duplicate notifications", created_at=timestamp)
     clean = {**_clean_codex_comment(602), "created_at": timestamp}
-    first = _success_state(pending, review_comments=[finding])
-    second = _success_state(pending, review_comments=[finding], issue_comments=[clean])
-    rc, output, _ = _ci_cycle(module, path, [first], extra_args=("--coalesce-success",))
-    assert rc == 0 and "review_comment #501" in output
-    rc, output, _ = _ci_cycle(
-        module, path, [second], delivery="2", extra_args=("--coalesce-success",),
+    older = {**_clean_codex_comment(501), "created_at": "2026-10-15T08:00:00Z"}
+    finding = (
+        _review_comment(501, body="Race allows duplicate notifications", created_at=timestamp)
+        if finding_kind == "review_comments" else {
+            **older, "body": "Something went wrong", "updated_at": timestamp,
+        }
     )
-    assert "success candidate" not in output
-    green = _success_state(_ci_run(head=COALESCED_HEAD), review_comments=[finding], issue_comments=[clean])
-    rc, output, _ = _ci_cycle(
-        module, path, [green], delivery="3", extra_args=("--coalesce-success",),
+
+    def snapshot(run, finding_item=None, clean_item=clean):
+        items = {"issue_comments": [clean_item] if clean_item else []}
+        if finding_item is not None:
+            items.setdefault(finding_kind, []).append(finding_item)
+        return _success_state(run, **items)
+
+    first_finding = finding if arrival != "clean-first" else (
+        older if finding_kind == "issue_comments" else None
     )
+    first = snapshot(pending, first_finding, None if arrival == "finding-first" else clean)
+    event = "review_comment #501" if finding_kind == "review_comments" else "issue_comment #501"
+    rc, output, _ = _ci_cycle(module, path, [first], extra_args=options)
+    if arrival == "clean-first":
+        assert (rc, output) == (124, "")
+    else:
+        assert rc == 0 and event in output
     assert "success candidate" not in output
+
+    both = snapshot(pending, finding)
+    rc, output, _ = _ci_cycle(module, path, [both], delivery="2", extra_args=options)
+    if arrival == "clean-first":
+        assert rc == 0 and event in output
+    assert "success candidate" not in output
+    green = _ci_run(head=COALESCED_HEAD)
+    rc, output, payload = _ci_cycle(
+        module, path, [snapshot(green, finding)], delivery="3", extra_args=options,
+    )
+    assert (rc, output) == (124, "")
+    assert payload[module.SUCCESS_BATCH_KEY]["review"] is None
+    assert payload[module.SUCCESS_BATCH_KEY]["outcome"]["id"] == 501
+
+    # An observed edit of that exact resource is ordered; unrelated IDs are not.
+    recovered = snapshot(green, finding, _clean_codex_comment(603))
+    if finding_kind == "issue_comments":
+        recovered = snapshot(green, {**finding, "body": older["body"]})
+    rc, output, _ = _ci_cycle(module, path, [recovered], delivery="3", extra_args=options)
+    assert rc == 0 and "success candidate" in output
 
 
 def test_coalescing_rejects_contradictory_reviewed_shas(tmp_path):
@@ -5138,7 +5163,8 @@ def test_coalescing_binds_a_new_reaction_after_restart_to_the_latest_observed_he
     assert rc == 0 and "success candidate" in output
 
 
-def test_coalescing_reawakens_for_stronger_review_evidence_with_unchanged_ci(tmp_path):
+@pytest.mark.parametrize("same_timestamp", [False, True])
+def test_coalescing_reawakens_for_stronger_review_evidence_with_unchanged_ci(tmp_path, same_timestamp):
     module = _load_module()
     path = tmp_path / "ci.json"
     pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
@@ -5152,7 +5178,10 @@ def test_coalescing_reawakens_for_stronger_review_evidence_with_unchanged_ci(tmp
     rc, output, _ = _ci_cycle(module, path, [state], extra_args=options)
     assert rc == 0 and "success candidate" in output and "pr_reaction #701" in output
     # The Agent rejected the reaction's epoch proof and requested a SHA verdict.
-    state = {**state, "issue_comments": [_clean_codex_comment()]}
+    clean = _clean_codex_comment()
+    if same_timestamp:
+        clean = {**clean, "created_at": reaction["created_at"]}
+    state = {**state, "issue_comments": [clean]}
     rc, output, _ = _ci_cycle(module, path, [state], delivery="2", extra_args=options)
     assert rc == 0 and "success candidate" in output and "issue_comment #601" in output
     rc, output, _ = _ci_cycle(module, path, [state], delivery="3", extra_args=options)

@@ -378,7 +378,13 @@ def _is_codex_summary_shape(body: str) -> bool:
     suffix = [line.strip() for line in lines[table_end + 1:] if line.strip()]
     if not suffix:
         return True
-    return tuple(suffix) == CODEX_STANDARD_SUMMARY_FOOTER
+    standard_footer = "\n".join(CODEX_STANDARD_SUMMARY_FOOTER)
+    return "\n".join(suffix) in {
+        standard_footer,
+        standard_footer.replace(
+            "\nCodex reviews are triggered when you", " Reviews are triggered when you", 1,
+        ),
+    }
 
 
 def _codex_clean_pass_body_sha(body: str) -> str | None:
@@ -721,12 +727,11 @@ def _review_observation(kind: str, item: dict[str, Any]) -> dict[str, Any]:
 def _select_review_outcome(
     outcomes: list[tuple[dict[str, Any], bool]],
 ) -> tuple[dict[str, Any], bool]:
-    latest_timestamp = max(observation["order"][0] for observation, _clean in outcomes)
-    latest = [pair for pair in outcomes if pair[0]["order"][0] == latest_timestamp]
-    kinds = {observation["kind"] for observation, _clean in latest}
-    if len(kinds) > 1 and any(not clean for _observation, clean in latest) and any(clean for _observation, clean in latest):
-        latest = [pair for pair in latest if not pair[1]]
-    return max(latest, key=lambda pair: tuple(pair[0]["order"]))
+    # IDs break equivalent ties, never conflicting updates within one clock tick.
+    return max(
+        outcomes,
+        key=lambda pair: (pair[0]["order"][0], not pair[1], pair[0]["id"]),
+    )
 
 
 def _should_adopt_review_outcome(
@@ -737,18 +742,12 @@ def _should_adopt_review_outcome(
 ) -> bool:
     if last_outcome is None:
         return True
-    same_timestamp = outcome["order"][0] == last_outcome["order"][0]
-    if same_timestamp and outcome["kind"] != last_outcome["kind"]:
-        last_clean = batch.get("review") is not None
-        return clean != last_clean and not clean
-    if tuple(outcome["order"]) > tuple(last_outcome["order"]):
-        return True
-    return (
-        outcome["order"] == last_outcome["order"]
-        and outcome["kind"] == last_outcome["kind"]
-        and outcome["id"] == last_outcome["id"]
-        and outcome["fingerprint"] != last_outcome["fingerprint"]
-    )
+    timestamp, last_timestamp = outcome["order"][0], last_outcome["order"][0]
+    if timestamp != last_timestamp:
+        return timestamp > last_timestamp
+    if outcome["kind"] == last_outcome["kind"] and outcome["id"] == last_outcome["id"]:
+        return outcome["fingerprint"] != last_outcome["fingerprint"]
+    return not clean or batch.get("review") is not None
 
 
 def _coalesced_review_state(
