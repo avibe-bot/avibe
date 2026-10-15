@@ -18,6 +18,7 @@ from core.agent_core.messages import (
     FailedAttempt,
     HostedAction,
     HostedCost,
+    HostedFallback,
     HostedImage,
     HostedNative,
     HostedRecord,
@@ -183,8 +184,27 @@ def proxy_retried():
     )
 
 
+def proxy_fallback():
+    """A web search on a hop whose own Source (relay-gpt) refused it natively, so relay-claude ran it by proxy."""
+    return proxy_activity(
+        ToolCallBlock(id="call_w7", name="web_search", arguments={"query": "Anthropic announcements October 2026"}),
+        HostedResult(
+            record=HostedRecord(status="completed", sources=(DEVDAY,)),
+            execution=ProxyExecution(
+                executor_origin=Origin(provider="anthropic", api="anthropic", model="claude-haiku-5-5"),
+                executor_source_id="src_relayclaude",
+                executor_billing="metered",
+                cost=HostedCost(basis="list", usd=0.01),
+            ),
+            fallback_from=HostedFallback("src_relaygpt1"),
+        ),
+        source_names=NAMES,
+    )
+
+
 @pytest.mark.parametrize(
-    "build", [native_web_search, proxy_x_search, direct_image, proxy_failed, proxy_unreachable, proxy_retried]
+    "build",
+    [native_web_search, proxy_x_search, direct_image, proxy_failed, proxy_unreachable, proxy_retried, proxy_fallback],
 )
 def test_payloads_match_the_shape_the_web_card_renders(build):
     """MH-HOSTED-UI-009: every mode and outcome the card distinguishes, from the canonical records each producer writes.
@@ -253,6 +273,9 @@ def test_a_response_scoped_summary_is_shown_once():
             " · gpt-image-2 · 1536×1024",
         ),
         (proxy_failed, "zh", "🔎 X 搜索 “from:OpenAI” · 失败：no Source is verified for X search"),
+        # A proxy that ran because the turn's own Source refused the tool says so, in place of how it ran.
+        (proxy_fallback, "zh", "🔎 网页搜索 “Anthropic announcements October 2026” · relay-gpt 不支持，已改用 Anthropic · 1 个来源 · ≈ $0.01"),
+        (proxy_fallback, "en", "🔎 Web search “Anthropic announcements October 2026” · relay-gpt doesn't support it, now using Anthropic · 1 source · ≈ $0.01"),
     ],
 )
 def test_the_im_line_states_tool_query_mode_count_and_known_cost(build, lang, line):

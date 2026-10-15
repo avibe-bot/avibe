@@ -85,6 +85,10 @@ class HostedActivity:
     # The committed response row a native call came in. Its card is ordered just
     # before that row, as the call happened before the text that reads its result.
     response_id: Optional[str] = None
+    # The Source that refused to run this search natively, so it ran by proxy instead (``hosted.fallback_from``),
+    # with its current name.
+    fallback_source_id: Optional[str] = None
+    fallback_source_name: Optional[str] = None
 
     @property
     def completed(self) -> bool:
@@ -127,6 +131,11 @@ class HostedActivity:
         payload.update({key: value for key, value in optional.items() if value is not None})
         if self.extra_queries:
             payload["extra_queries"] = list(self.extra_queries)
+        if self.fallback_source_id is not None:
+            fallback: dict[str, Any] = {"source_id": self.fallback_source_id}
+            if self.fallback_source_name is not None:
+                fallback["source_name"] = self.fallback_source_name
+            payload["fallback_from"] = fallback
         if self.cost is not None:
             cost: dict[str, Any] = {"basis": self.cost.basis, "calls": self.cost_calls}
             if self.cost.usd is not None:
@@ -277,6 +286,10 @@ def proxy_activity(
         cost=cost,
         cost_calls=1,
         duration_ms=duration_ms,
+        fallback_source_id=result.fallback_from.source_id if result.fallback_from is not None else None,
+        fallback_source_name=(
+            source_names(result.fallback_from.source_id) if result.fallback_from is not None else None
+        ),
         cost_at_least=at_least,
     )
 
@@ -337,6 +350,10 @@ def _ran(activity: HostedActivity, lang: str) -> list[Optional[str]]:
     vendor = _vendor_label(activity.provider)
     if not vendor:
         mode = None
+    elif activity.mode == "proxy" and activity.fallback_source_id is not None:
+        # Why it ran by proxy: the turn's own Source refused the native tool (§8.3, mockup 06).
+        refused_by = activity.fallback_source_name or activity.fallback_source_id
+        mode = i18n_t("hostedTools.mode.fallback", lang, source=refused_by, provider=vendor)
     elif activity.mode == "proxy" and activity.model:
         mode = i18n_t("hostedTools.mode.proxyModel", lang, provider=vendor, model=activity.model)
     else:

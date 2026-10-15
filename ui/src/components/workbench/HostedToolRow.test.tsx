@@ -113,6 +113,20 @@ describe('hosted tool cards', () => {
     within(row('call_x6')).getByText('at least $0.11');
   });
 
+  it('MH-HOSTED-UI-008: says why a search ran by proxy when the turn\'s Source refused it, and how to undo that', () => {
+    renderGroup(['proxy_fallback'], 'zh');
+    const card = row('call_w7');
+    within(card).getByText('由 Anthropic 代理 · claude-haiku-5-5');
+    // In view while the card is collapsed.
+    within(card).getByText('relay-gpt 不支持网页搜索，已改用 Anthropic（relay-claude）');
+    within(card).getByText('之后自动沿用，可在 模型 › 工具 中清除');
+    cleanup();
+
+    // A call that did not complete claims nothing about who ran it.
+    renderGroup([{ ...fixture.proxy_fallback, status: 'failed', error: 'upstream timeout' }]);
+    expect(document.querySelector('[data-hosted-fallback]')).toBeNull();
+  });
+
   it.each([
     ['pending', undefined, 'Cut off'],
     ['failed', 'upstream timeout', 'Failed'],

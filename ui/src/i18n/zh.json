@@ -5011,6 +5011,11 @@
         "ranNative": "原生执行：{{where}}",
         "ranProxy": "代理执行：{{where}}",
         "ranDirect": "直连执行：{{where}}",
+        "fallback": {
+          "ranOn": "{{from}} 不支持{{toolInline}}，已改用 {{provider}}（{{source}}）",
+          "ran": "{{from}} 不支持{{toolInline}}，已改用 {{provider}}",
+          "kept": "之后自动沿用，可在 模型 › 工具 中清除"
+        },
         "duration": "用时 {{seconds}} 秒",
         "alsoSearched": "还搜索了：{{queries}}",
         "image": {

@@ -109,5 +109,34 @@
       "usd": 0.11,
       "at_least": true
     }
+  },
+  "proxy_fallback": {
+    "version": 1,
+    "call_id": "call_w7",
+    "tool": "web_search",
+    "mode": "proxy",
+    "status": "completed",
+    "sources": [
+      {
+        "url": "https://openai.com/index/devday-2026",
+        "title": "DevDay 2026 recap",
+        "page_age": "2 days ago"
+      }
+    ],
+    "images": [],
+    "subject": "Anthropic announcements October 2026",
+    "provider": "anthropic",
+    "source_id": "src_relayclaude",
+    "source_name": "relay-claude",
+    "model": "claude-haiku-5-5",
+    "fallback_from": {
+      "source_id": "src_relaygpt1",
+      "source_name": "relay-gpt"
+    },
+    "cost": {
+      "basis": "list",
+      "calls": 1,
+      "usd": 0.01
+    }
   }
 }

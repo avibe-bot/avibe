@@ -232,6 +232,31 @@ const HostedDetail: React.FC<{ card: HostedActivity }> = ({ card }) => {
   );
 };
 
+/**
+ * Why a search ran by proxy: the turn's own Source refused it natively. The note
+ * stays in view, collapsed or expanded, and says the refusal lasts until it is
+ * cleared, which is where the user undoes it.
+ */
+const FallbackNote: React.FC<{ card: HostedActivity }> = ({ card }) => {
+  const { t } = useTranslation();
+  const from = card.fallback_from;
+  const vendor = vendorLabel(card.provider);
+  if (!from || !hostedCompleted(card) || !vendor) return null;
+  const refusedBy = from.source_name ?? from.source_id;
+  const toolInline = t(`settings.models.tools.tool.${card.tool}.inline`);
+  return (
+    <p className="mx-1.5 mb-1 mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 rounded-md border border-gold/40 bg-gold/10 px-2.5 py-1.5 text-[11px]" data-hosted-fallback={card.call_id}>
+      <span className="inline-flex min-w-0 items-center gap-1.5 text-foreground">
+        <TriangleAlert className="size-3 shrink-0 text-gold-ink" aria-hidden="true" />
+        {card.source_name
+          ? t('chat.agentActivity.hosted.fallback.ranOn', { from: refusedBy, toolInline, provider: vendor, source: card.source_name })
+          : t('chat.agentActivity.hosted.fallback.ran', { from: refusedBy, toolInline, provider: vendor })}
+      </span>
+      <span className="ml-auto text-muted">{t('chat.agentActivity.hosted.fallback.kept')}</span>
+    </p>
+  );
+};
+
 export const HostedToolRow: React.FC<{ card: HostedActivity }> = ({ card }) => {
   const { t } = useTranslation();
   const [open, setOpen] = React.useState(false);
@@ -257,6 +282,7 @@ export const HostedToolRow: React.FC<{ card: HostedActivity }> = ({ card }) => {
         {count && <span className="hidden shrink-0 text-[11px] text-muted sm:inline">{count}</span>}
         <ChevronRight className={clsx('size-3.5 shrink-0 text-muted transition-transform', open && 'rotate-90')} aria-hidden="true" />
       </button>
+      <FallbackNote card={card} />
       {open && <HostedDetail card={card} />}
     </div>
   );
