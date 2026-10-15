@@ -445,6 +445,20 @@
             },
             "action": {
               "$ref": "#/definitions/HostedAction"
+            },
+            "fallback_from": {
+              "type": "object",
+              "required": [
+                "source_id"
+              ],
+              "additionalProperties": false,
+              "description": "A search call that ran as its function only because the turn's own Source refused it natively (C-6 `refused`): that Source, by id only. Absent when the call ran where it was declared, or where the vendor never offers the tool natively.",
+              "properties": {
+                "source_id": {
+                  "type": "string",
+                  "pattern": "^src_[a-z0-9]{8,}$"
+                }
+              }
             }
           },
           "if": {
@@ -629,6 +643,29 @@
                       }
                     }
                   }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "hosted"
+            ],
+            "properties": {
+              "tool_name": {
+                "const": "image_generate"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "hosted": {
+                "not": {
+                  "required": [
+                    "fallback_from"
+                  ]
                 }
               }
             }

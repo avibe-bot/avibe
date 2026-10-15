@@ -384,6 +384,7 @@ scenarios:
     test: tests/test_vibey_agent.py::test_a_proxied_hosted_call_runs_on_the_turns_executor_chain_and_keeps_its_record
     related_tests:
       - tests/test_vibey_agent.py::test_a_proxied_call_after_the_turn_moved_to_another_source_runs_on_the_hop_it_now_holds
+      - tests/test_vibey_agent.py::test_a_proxied_search_names_the_source_that_refused_it
   - id: MH-HOSTED-VIBEY-005
     name: A hosted call goes back verbatim and pinned only to the Source that served it, within its turn while the hop still declares the tool natively or with current replay evidence; a refusal before any output (pin_unavailable, xAI's decrypt refusal) ends the send, and the loop renders the request again for a fresh hop within its bounds, portable only as the last resort
     status: covered

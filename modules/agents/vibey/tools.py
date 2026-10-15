@@ -30,6 +30,7 @@ from core.agent_core.ai.hosted import failure, generate_action, image_dimensions
 from core.agent_core.ai.provider import ImageModel, ImageModels, MediaSink, ModelEndpoint
 from core.agent_core.messages import (
     HostedAction,
+    HostedFallback,
     HostedImage,
     HostedRecord,
     HostedResult,
@@ -134,7 +135,13 @@ class HostedTool:
 
     async def execute(self, arguments: Mapping[str, Any], ctx: ToolContext) -> ToolResult:
         del ctx
-        hosted, _ = await _gateway_call(self.route(), self.client, self.spec.name, dict(arguments))
+        endpoint = self.route()
+        hosted, _ = await _gateway_call(endpoint, self.client, self.spec.name, dict(arguments))
+        route = endpoint.hosted_tools.get(self.spec.name)
+        if route is not None and route.refused and endpoint.source_id:
+            # The hop's own Source would run the tool but refused it, so this call is a fallback from it (C-6
+            # ``refused``): the card and the IM line say so.
+            hosted = replace(hosted, fallback_from=HostedFallback(endpoint.source_id))
         query = arguments.get("query")
         return _result(self.spec.name, hosted, query=query if isinstance(query, str) else None)
 

@@ -56,6 +56,8 @@ def _optional(value: Any, kind: type, what: str) -> Any:
 #: include values are present exactly when the tool is assumed to run natively.
 _FACTS = ("assumed", "unsupported")
 _SEARCH_KEYS = {"assumed": {"native", "replay", "declaration", "include"}, "unsupported": {"native", "replay"}}
+#: A key an ``unsupported`` entry may carry: the hop's own Source refused the tool (C-6 ``refused``).
+_REFUSED_KEY = "refused"
 _IMAGE_KEYS = {"source_id", "model_id", "description", "params", "size_forms"}
 _IMAGE_PARAMS = {"size", "images", "n"}
 _SIZE_FORMS = {"pixels", "ratio"}
@@ -88,7 +90,10 @@ def _hosted_route(tool: Any, entry: Any) -> HostedToolRoute:
     native, replay = entry.get("native"), entry.get("replay")
     if native not in _FACTS or replay not in _FACTS:
         raise ValueError("native and replay are each assumed or unsupported")
-    if set(entry) != _SEARCH_KEYS[native]:
+    refused = _REFUSED_KEY in entry
+    if refused and (native != "unsupported" or entry[_REFUSED_KEY] is not True):
+        raise ValueError("refused is true, and only on an unsupported entry")
+    if set(entry) - {_REFUSED_KEY} != _SEARCH_KEYS[native]:
         raise ValueError(f"a {native} entry has exactly {', '.join(sorted(_SEARCH_KEYS[native]))}")
     include = entry.get("include", [])
     if not isinstance(include, list):
@@ -98,6 +103,7 @@ def _hosted_route(tool: Any, entry: Any) -> HostedToolRoute:
         replay=replay == "assumed",
         declaration=entry.get("declaration"),
         include=tuple(include),
+        refused=refused,
     )
 
 

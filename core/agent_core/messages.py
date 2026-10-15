@@ -536,6 +536,19 @@ class ProxyExecution:
 
 
 @dataclass(frozen=True)
+class HostedFallback:
+    """The Source that refused to run a search tool natively, so the call ran as its function instead (C-6 ``refused``).
+    Named by id only: a surface shows its current name."""
+
+    source_id: str
+
+    def __post_init__(self) -> None:
+        _require(self.source_id, str, "fallback source id")
+        if not _SOURCE_ID_RE.fullmatch(self.source_id):
+            raise ValueError("a fallback names its Source by id")
+
+
+@dataclass(frozen=True)
 class HostedResult:
     """``ToolResultMessage.hosted``: the canonical record of a proxied search or an ``image_generate`` call.
     ``action`` is what the executor reports it did, where that differs from the model's request: for
@@ -545,11 +558,15 @@ class HostedResult:
     record: HostedRecord
     execution: Optional[ProxyExecution] = None
     action: Optional[HostedAction] = None
+    #: A search call that ran as its function only because the turn's own Source refused it natively; absent when it
+    #: ran where it was declared, or where the vendor never offers the tool natively.
+    fallback_from: Optional[HostedFallback] = None
 
     def __post_init__(self) -> None:
         _require(self.record, HostedRecord, "hosted record")
         _require(self.execution, ProxyExecution, "proxy execution", optional=True)
         _require(self.action, HostedAction, "hosted result action", optional=True)
+        _require(self.fallback_from, HostedFallback, "hosted fallback", optional=True)
         if self.execution is None and self.record.status != "failed":
             raise ValueError("a hosted result without an execution is a failed record")
 
@@ -669,6 +686,8 @@ class ToolResultMessage:
             self.hosted.record.check_tool(self.tool_name)
             if self.hosted.action is not None and not self.hosted.action.fits(self.tool_name):
                 raise ValueError(f"a {self.hosted.action.type} action does not belong to {self.tool_name}")
+            if self.hosted.fallback_from is not None and self.tool_name not in HOSTED_TOOLS:
+                raise ValueError(f"{self.tool_name} never falls back: only a search tool runs as its function")
             if self.is_error != (self.hosted.record.status in ("failed", "incomplete")):
                 raise ValueError("a hosted result is an error exactly when its record failed or is incomplete")
 
@@ -984,6 +1003,8 @@ def message_to_dict(message: Message) -> dict[str, Any]:
                     ]
             if message.hosted.action is not None:
                 hosted_result["action"] = _action_to_dict(message.hosted.action)
+            if message.hosted.fallback_from is not None:
+                hosted_result["fallback_from"] = {"source_id": message.hosted.fallback_from.source_id}
             result["hosted"] = hosted_result
         return result
     raise TypeError(f"not a message: {type(message).__name__}")
@@ -1027,7 +1048,9 @@ def message_from_dict(data: Mapping[str, Any]) -> Message:
         )
         hosted_result = None
         if "hosted" in f:
-            h = _read(f["hosted"], "hosted result", {"record": dict}, {"execution": dict, "action": dict})
+            h = _read(
+                f["hosted"], "hosted result", {"record": dict}, {"execution": dict, "action": dict, "fallback_from": dict}
+            )
             execution = None
             if "execution" in h:
                 e = _read(
@@ -1059,10 +1082,14 @@ def message_from_dict(data: Mapping[str, Any]) -> Message:
                     mode=e["mode"],
                     failed_attempts=tuple(attempts),
                 )
+            fallback = None
+            if "fallback_from" in h:
+                fallback = HostedFallback(_read(h["fallback_from"], "hosted fallback", {"source_id": str})["source_id"])
             hosted_result = HostedResult(
                 record=_record_from_dict(h["record"]),
                 execution=execution,
                 action=_action_from_dict(h["action"]) if "action" in h else None,
+                fallback_from=fallback,
             )
         return ToolResultMessage(
             tool_call_id=f["tool_call_id"],
