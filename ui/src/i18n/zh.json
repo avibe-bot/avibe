@@ -4971,7 +4971,9 @@
         "mode": {
           "native": "原生 · {{provider}}",
           "proxy": "由 {{provider}} 代理",
-          "direct": "{{provider}} 直连"
+          "direct": "{{provider}} 直连",
+          "directModel": "{{model}} · {{source}}",
+          "proxyModel": "由 {{provider}} 代理 · {{model}}"
         },
         "status": {
           "failed": "失败",
@@ -5000,7 +5002,7 @@
         "duration": "用时 {{seconds}} 秒",
         "alsoSearched": "还搜索了：{{queries}}",
         "image": {
-          "revisedPrompt": "修订后的提示词",
+          "prompt": "提示词",
           "download": "下载 {{name}}"
         }
       },

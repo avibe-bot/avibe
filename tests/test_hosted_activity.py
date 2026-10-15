@@ -245,12 +245,12 @@ def test_a_response_scoped_summary_is_shown_once():
             "zh",
             "🔎 网页搜索 “OpenAI announcements October 2026” · 原生（Anthropic） · 2 个来源 · ≈ $0.01",
         ),
-        (proxy_x_search, "zh", "🔎 X 搜索 “from:OpenAI within_time:7d” · 由 xAI 代理 · 2 条帖子 · $0.11"),
+        (proxy_x_search, "zh", "🔎 X 搜索 “from:OpenAI within_time:7d” · 由 xAI 代理（grok-4.6） · 2 条帖子 · $0.11"),
         (
             direct_image,
             "en",
             "🖼 Image generation “A wide photo of an open laptop on a desk at night, empty da…”"
-            " · direct (OpenAI) · 1 image",
+            " · gpt-image-2 · 1536×1024",
         ),
         (proxy_failed, "zh", "🔎 X 搜索 “from:OpenAI” · 失败：no Source is verified for X search"),
     ],
@@ -297,7 +297,7 @@ def test_the_im_line_names_a_subscription_and_a_shared_response_cost():
             ),
         ),
     )
-    assert hosted_line(included, "zh") == "🔎 X 搜索 “from:xai within_time:3d” · 由 OpenAI 代理 · 1 条帖子 · 订阅内含"
+    assert hosted_line(included, "zh") == "🔎 X 搜索 “from:xai within_time:3d” · 由 OpenAI 代理（gpt-6.1-sol） · 1 条帖子 · 订阅内含"
 
     shared = native_activities(
         _message(

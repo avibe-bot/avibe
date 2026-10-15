@@ -322,6 +322,28 @@ def _clip(text: str, limit: int = LINE_SUBJECT_MAX_CHARS) -> str:
     return flat if len(flat) <= limit else flat[: limit - 1].rstrip() + "…"
 
 
+def _ran(activity: HostedActivity, lang: str) -> list[Optional[str]]:
+    """How a completed call ran and what it produced, as the IM line names them.
+
+    A direct image call names the image model and the image's size rather than a vendor: the model is what the call
+    picked, and the image is the result. A proxied search names its executor's model beside the vendor.
+    """
+
+    if activity.mode == "direct":
+        first = activity.images[0] if activity.images else None
+        size = f"{first.width}×{first.height}" if first is not None and first.width and first.height else None
+        more = _count(activity, lang) if len(activity.images) > 1 else None
+        return [activity.model, size, more]
+    vendor = _vendor_label(activity.provider)
+    if not vendor:
+        mode = None
+    elif activity.mode == "proxy" and activity.model:
+        mode = i18n_t("hostedTools.mode.proxyModel", lang, provider=vendor, model=activity.model)
+    else:
+        mode = i18n_t(f"hostedTools.mode.{activity.mode}", lang, provider=vendor)
+    return [mode, _count(activity, lang)]
+
+
 def _count(activity: HostedActivity, lang: str) -> Optional[str]:
     if activity.tool == "image_generate":
         count, unit = len(activity.images), "image"
@@ -368,7 +390,8 @@ def _error_text(activity: HostedActivity, lang: str) -> str:
 def hosted_line(activity: HostedActivity, lang: str, *, escape: Callable[[str], str] = lambda text: text) -> str:
     """The one-line form IM shows per hosted call.
 
-    ``🔎 Web search "query" · native (xAI) · 6 sources · $0.01``. A call that did
+    ``🔎 Web search "query" · native (xAI) · 6 sources · $0.01``, or for an image
+    ``🖼 Image generation "prompt" · gpt-image-2 · 1536×1024 · $0.02``. A call that did
     not complete says why instead of how it ran or what it found, and keeps a
     known cost (``HostedActivity.completed``). ``escape`` makes the quoted
     subject safe for the destination's markup.
@@ -379,10 +402,7 @@ def hosted_line(activity: HostedActivity, lang: str, *, escape: Callable[[str], 
     if activity.subject:
         parts[0] += " " + i18n_t("hostedTools.quoted", lang, subject=escape(_clip(activity.subject)))
     if activity.completed:
-        vendor = _vendor_label(activity.provider)
-        if vendor:
-            parts.append(i18n_t(f"hostedTools.mode.{activity.mode}", lang, provider=vendor))
-        parts.append(_count(activity, lang))
+        parts.extend(_ran(activity, lang))
     else:
         parts.append(i18n_t(f"hostedTools.status.{activity.status}", lang, error=escape(_error_text(activity, lang))))
     parts.append(_cost(activity, lang))

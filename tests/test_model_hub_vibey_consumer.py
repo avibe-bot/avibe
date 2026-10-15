@@ -33,10 +33,12 @@ from config.v2_config import (
     ModelHubSourceStateConfig,
 )
 from core.handlers.model_hub.adapter import RawOutcomeKind
+from core.handlers.model_hub.pricing import PriceTable
 from core.handlers.model_hub.provenance import BoundedProvenanceStore, SERVED_HOP_HEADER
 from core.handlers.model_hub.request import ModelHubRequest
 from core.handlers.model_hub.service import ModelHubError
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
+from core.handlers.model_hub.usage import UsageWriter
 from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
 from modules.agents.model_hub import (
     ModelHubRuntimeRouter,
@@ -46,6 +48,7 @@ from modules.agents.model_hub import (
     claude_settings_for_launch,
     resolve_model_hub_launch,
 )
+from modules.agents.vibey.models import selection_from_hop
 from tests.test_model_hub_l3 import (
     InvokeHandle,
     LiveInvokeHandle,
@@ -75,7 +78,7 @@ MANDATORY_FIELDS = {
         ),
         ("capabilities",): (
             "context_window", "input_limit", "max_output_tokens", "supports_tools",
-            "supports_images", "supports_reasoning", "reasoning_efforts",
+            "supports_images", "supports_reasoning", "reasoning_efforts", "context_price_steps",
         ),
     },
     "turn-provenance.schema.json": {
@@ -1163,6 +1166,17 @@ async def test_hop_resolution_uses_primary_protocol_and_alias_capabilities(tmp_p
             input_modalities=["text", "image"], supports_tools=True, supports_reasoning=False,
             reasoning_efforts=["high"],
         )
+        # The target model's price, not the requested alias's: a tier no dearer than the base is no step.
+        base = {"input": 5, "output": 30, "cache_read": 0.5}
+        prices = PriceTable(
+            catalog={"openai": {"models": {"upstream-model": {"cost": {**base, "tiers": [
+                {**base, "tier": {"type": "context", "size": 128_000}},
+                {"input": 10, "output": 45, "cache_read": 1, "tier": {"type": "context", "size": 272_000}},
+            ]}}}}},
+            vendor_map={"families": [{"prefix": "upstream-", "vendor_id": "openai"}]},
+            overrides={}, price_table_date="2026-10-15",
+        )
+        service.usage_writer = UsageWriter(service.usage, price_table=lambda: prices)
     gateway = ModelHubTurnGateway(service)
     router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
     try:
@@ -1181,7 +1195,9 @@ async def test_hop_resolution_uses_primary_protocol_and_alias_capabilities(tmp_p
             "supports_images": True if known else None,
             "supports_reasoning": False if known else None,
             "reasoning_efforts": [],
+            "context_price_steps": [272_000] if known else [],
         }
+        assert selection_from_hop(hop).capabilities.context_price_steps == ((272_000,) if known else ())
         _assert_mandatory_fields("hop-resolution.schema.json", hop)
         launch = await router.resolve("vibey", "menu-alias", process_scope="vibey:test", turn_id="turn-hop")
         assert hop["token"] not in repr(launch)

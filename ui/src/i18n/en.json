@@ -4971,7 +4971,9 @@
         "mode": {
           "native": "Native · {{provider}}",
           "proxy": "Via {{provider}} proxy",
-          "direct": "Direct · {{provider}}"
+          "direct": "Direct · {{provider}}",
+          "directModel": "{{model}} · {{source}}",
+          "proxyModel": "Via {{provider}} proxy · {{model}}"
         },
         "status": {
           "failed": "Failed",
@@ -5000,7 +5002,7 @@
         "duration": "took {{seconds}} s",
         "alsoSearched": "Also searched: {{queries}}",
         "image": {
-          "revisedPrompt": "Revised prompt",
+          "prompt": "Prompt",
           "download": "Download {{name}}"
         }
       },

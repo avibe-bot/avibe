@@ -1814,6 +1814,7 @@
     "mode": {
       "native": "native ({provider})",
       "proxy": "via {provider} proxy",
+      "proxyModel": "via {provider} proxy ({model})",
       "direct": "direct ({provider})"
     },
     "count": {

@@ -245,6 +245,30 @@ def test_limits_follow_the_frozen_formula_from_the_route_capabilities(
     assert at_limit.fits and not replace(at_limit, est=at_limit.est + 1).fits
 
 
+@pytest.mark.parametrize(
+    "window,output,steps,threshold",
+    [
+        (1_050_000, 128_000, (), 890_500),  # a flat price: the window's threshold
+        (1_050_000, 128_000, (272_000,), 244_800),  # GPT-5.4 and later: a tenth below the step
+        (1_050_000, 128_000, (272_000, 600_000), 244_800),  # the smallest step
+        (1_000_000, 128_000, (100_000,), 90_000),  # a step of 100,000 is kept below
+        (1_000_000, 128_000, (32_000,), 842_000),  # a smaller one is not
+        (1_000_000, 128_000, (32_000, 128_000), 115_200),  # but a dearer step above it is
+        (128_000, 32_000, (200_000,), 88_000),  # a step past the window changes nothing
+        (1_050_000, 128_000, (10**400,), 890_500),  # nor does one past any float a hand-edited price may name
+    ],
+)
+def test_the_threshold_stays_below_the_context_price_step(window, output, steps, threshold):
+    capabilities = ModelCapabilities(context_window=window, max_output_tokens=output, context_price_steps=steps)
+    request = make_request(system="", max_tokens=output)
+    plan = budget(request, capabilities, transcript=())
+    flat = budget(request, replace(capabilities, context_price_steps=()), transcript=())
+    assert plan.threshold == threshold
+    # Only the threshold (and the tail it bounds) follows the step: the output, margin and limit are the window's.
+    assert (plan.output, plan.margin, plan.input_limit) == (flat.output, flat.margin, flat.input_limit)
+    assert plan.keep == min(20_000, threshold // 4)
+
+
 @pytest.mark.parametrize("window", [4_000, 8_000, 12_000, 32_000, 128_000, 1_000_000])
 def test_the_threshold_stays_positive_on_every_window(window):
     # With the Agent's output at most a quarter of the window and the margin at most an eighth, T >= 0.625 * W.

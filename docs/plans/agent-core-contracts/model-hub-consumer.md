@@ -23,6 +23,10 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
    and capabilities. A capability Model Hub does not know is `null`, never guessed; `input_limit` is `null` until Model
    Hub stores one. The agent treats unknown values conservatively (C-2). It resolves once per run and again after a
    retryable error.
+   - `capabilities.context_price_steps` lists the input sizes past which the target model's list price rises,
+     ascending, read from the price table Model Hub's usage writer holds (the user's override file, then models.dev's
+     first-party `cost.tiers`); it is empty when the price is flat or unknown. C-9 keeps the compaction threshold
+     below the smallest one it can (`context.md` §1).
    - `request_headers` carries `x-avibe-turn-id`, the Turn the resolution was made for, and the agent sends it on
      every gateway request: model calls and proxied hosted calls.
    - `source_identity` is the primary hop Source's credential-free identity (`identity_digest`: kind, vendor,

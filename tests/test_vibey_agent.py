@@ -2913,7 +2913,7 @@ async def test_vibeys_image_tool_runs_on_the_gateways_image_endpoint_from_the_ho
         "basis": "list", "calls": 1, "usd": 0.07,
     }
     assert "cost" not in drawn.to_payload()  # unpriced, never zero
-    assert hosted_line(edited, "en") == '🖼 Image generation “make it blue” · direct (OpenAI) · 1 image · ≈ $0.07'
+    assert hosted_line(edited, "en") == '🖼 Image generation “make it blue” · gpt-image-2 · 1536×1024 · ≈ $0.07'
     # Refused before it ran: still direct, naming the model it was refused for, and why in the user's language.
     card = refused.to_payload()
     assert (card["mode"], card["status"], card["model"], card["error_code"]) == (
@@ -4006,7 +4006,7 @@ async def test_a_proxied_hosted_result_shows_once_its_result_is_committed(engine
 
     await harness.agent._on_event(run, ToolFinished("turn", 1, call.id, entry.row_id, False))
 
-    assert harness.controller.im_client.sent[-1:] == ["🔎 X search “from:OpenAI” · via xAI proxy · 1 post · $0.11"]
+    assert harness.controller.im_client.sent[-1:] == ["🔎 X search “from:OpenAI” · via xAI proxy (grok-4.6) · 1 post · $0.11"]
 
 
 def test_an_image_is_attached_unless_the_reply_already_links_it(tmp_path) -> None:
