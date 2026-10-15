@@ -18,7 +18,7 @@ Observable invariants:
 
 Success batching must track monotonic observations, not replaceable response snapshots. The current head retains the latest ordered bot outcome, including an invalidating error/finding; a later clean verdict in the same batch supersedes an earlier error, but restoring an older row cannot supersede a newer outcome. Retain a per-resource semantic fingerprint map across omitted rows so metadata-only restoration cannot become a new verdict. Keep a reaction-ID high-water mark across head changes, initialized from the durable reaction cursor. Explicit unbound reaction replay remains ordinary activity.
 
-Advance those observations on every successful poll and settle fetch. Rendering a candidate must not commit delivery progress; the existing pending transaction still owns acknowledgement. The latest success observation has its own explicit head, independently of an older retained PR notification snapshot. Actual observed head transitions reset epoch evidence, but retaining a B event must not erase a fresh A verdict observed after returning to a stable A. The existing CI/report guard still prevents attaching A's CI verdict to B's event. A shared main-loop normalization path preserves known thread states during unauthenticated fallback, including initialization and replay.
+Advance those observations on every successful poll and settle fetch. Rendering a candidate must not commit delivery progress; the existing pending transaction still owns acknowledgement. The latest head and last authenticated thread map persist independently across process boundaries; notification adoption cannot overwrite them. Bind new reactions to that observed head, not an older notification snapshot. Actual observed head transitions reset epoch evidence, but retaining a B event must not erase a fresh A verdict observed after returning to a stable A. The existing CI/report guard still prevents attaching A's CI verdict to B's event.
 
 Fail-fast CI may tolerate missing inventory, never an older run attempt. Preserve a known terminal observation against same-attempt nonterminal regression and merge acknowledged partial failure inventories instead of replacing previously notified run IDs. Render observed unacknowledged failures even when a later raw page omits them; an emitted failure bypasses settle. These observation changes are scoped to coalescing; activity mode retains its released behavior. Preserve the existing complete-inventory requirement for a success candidate.
 
@@ -31,13 +31,17 @@ The second reviewed head exposed the same observation-retention class at additio
 ## Validation evidence
 
 - With only the new parser flag present, both arrival-order regressions failed because the unchanged waiter emitted a single success (`rc=0` instead of the expected quiet wait).
-- The focused PR waiter, Actions waiter, repository guidance, and Harness Skill guidance suite passes after the complete observation-history repair: **348 tests**. The related CLI Watch tests also passed in the earlier combined run; that run's only failure was the newly added documentation-command extractor, corrected and revalidated by the focused suite.
+- The focused PR waiter, Actions waiter, repository guidance, and Harness Skill guidance suite passes after the complete observation-history repair: **350 tests**. The related CLI Watch tests also passed in the earlier combined run; that run's only failure was the newly added documentation-command extractor, corrected and revalidated by the focused suite.
 - Changed-file Ruff, `git diff --check`, and `askill validate skills/background-watch-hook/SKILL.md` pass.
 - The normal Codex summary table shape was checked against a live read-only PR response. Its normal Running/Completed updates are quiet; failure and unrecognized statuses remain visible.
 - First-head independent review found ordered-outcome, reaction-epoch, settle, replay, and partial-CI-history regressions. Fourteen focused cases were run against the original `3c88ae3d1` waiter and failed for those intended behavioral reasons, including metadata-only invalidation. They now exercise the monotonic-observation contract rather than a collection of special-case retries.
 - GitHub first-head findings on exact summary statuses and seeded stale passes are covered by suffix-status and initialization ordering regressions. The malformed-history suggestion is intentionally not adopted for the delivery-state reason above.
 - The second-head full inventory was reproduced before the bounded repair: missing/terminal-regressed CI failures, fresh late-head reaction retention, mixed summary findings, semantic restoration with newer metadata, and three unauthenticated startup/replay variants. All repaired paths retain the existing at-least-once delivery owner and have positive recovery controls.
 - Independent read-only re-review, current-head GitHub Codex review, and required CI remain delivery gates, not waived by these local results.
+
+## Prompt surface
+
+The routine Watch Skill entry is 100 lines, down from 602 in the initial proposal and 560 on the base branch. Detailed examples and cursor mechanics live in an optional reference that is not rendered with the entry. The PR delivery Skill replaces existing observation/report clauses rather than adding a section and is shorter than its base. This task's recurring Watch message was reduced from 727 to 160 characters without changing its command, routing, lifecycle, or cursor.
 
 ## Known by design
 

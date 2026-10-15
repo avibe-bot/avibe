@@ -176,12 +176,12 @@ def test_use_avibe_harness_owns_the_extracted_harness_protocol() -> None:
 def test_background_watch_skill_defaults_to_current_session() -> None:
     body = _read("skills/background-watch-hook/SKILL.md")
 
-    assert '  --message "<what the next Agent Run should do>"' in body
+    assert '--message "PR #151 has an event.' in body
     assert "Inside an Avibe-injected Agent shell, omitting the target continues this conversation." in body
     assert "Use `--session-id <id>` only when" in body
-    assert "Use `--create-session --same-scope` when follow-ups should run in one visible sibling Session" in body
-    assert "use `--create-session-per-run --same-scope`" in body
-    assert "use `--create-session-per-run --scope-id <scopes.id>`" in body
+    assert "Use `--create-session --same-scope` for one visible sibling Session" in body
+    assert "`--create-session-per-run --same-scope` for a separate visible Session per event" in body
+    assert "Use `--scope-id <scopes.id>` instead of `--same-scope`" in body
     assert "Avibe uses the command's current working directory" in body
     assert "each follow-up should run in a visible sibling Session" not in body
     assert '  --session-id "sesk8m4q2p7x"' not in body
@@ -189,7 +189,14 @@ def test_background_watch_skill_defaults_to_current_session() -> None:
 
 
 def test_background_watch_skill_uses_bundled_waiters_and_persists_managed_pr_state() -> None:
-    body = _read("skills/background-watch-hook/SKILL.md")
+    entry = _read("skills/background-watch-hook/SKILL.md")
+    reference = _read("skills/background-watch-hook/references/waiters.md")
+    body = entry + "\n" + reference
+    skill = parse_skill_file(ROOT / "skills/background-watch-hook/SKILL.md", priority=(1, 0, 1))
+    assert skill is not None
+    rendered = render_skill_content(skill)
+    assert reference not in rendered
+    assert "Read it only for" in entry and "not for routine PR monitoring" in entry
 
     assert (
         'BACKGROUND_WATCH_HOOK_DIR="<directory containing the loaded SKILL.md>"'
@@ -215,7 +222,7 @@ def test_background_watch_skill_uses_bundled_waiters_and_persists_managed_pr_sta
     assert "Omit `--sha`" in body
     assert "Use `--forever` and one" in body
     assert "never reseed or replace its state between rounds" in body
-    preferred_section = body.split("### Preferred PR + CI watch", 1)[1]
+    preferred_section = entry.split("Preferred PR + CI watch", 1)[1]
     preferred_forever_command = preferred_section.split('vibe watch add \\\n', 1)[
         1
     ].split("```", 1)[0]
