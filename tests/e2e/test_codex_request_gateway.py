@@ -10,8 +10,8 @@ from unittest.mock import Mock
 import pytest
 
 from core.handlers.model_hub.adapter import RawOutcomeKind
-from modules.agents.codex.agent import CodexAgent
 from modules.agents.model_hub import bind_launch
+from tests.codex_generation_support import codex_agent_shell
 from tests.e2e.drivers.mock_llm_upstream import _responses_stream_frames
 from tests.e2e.test_codex_request_metadata import (
     _completed,
@@ -75,7 +75,7 @@ async def test_codex_native_gateway_keeps_concurrent_route_ownership(
         for_thread = await asyncio.gather(*(
             _thread(transport, launch.runtime_model) for launch in (first, second)
         ))
-        agent = object.__new__(CodexAgent)
+        agent = codex_agent_shell()
         agent.controller = SimpleNamespace()
         agent._prompt_state_agent_session_id = Mock(return_value=None)
         agent._resolve_codex_agent_settings = lambda request: (None, request.selected_model, None, None)

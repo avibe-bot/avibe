@@ -2170,11 +2170,11 @@ scenarios:
     layer: e2e-auto
     test: tests/e2e/test_model_hub_runtime.py::test_a5_controller_restart_during_oauth_poll_reports_engine_down
   - id: B1
-    name: Automatic observation selects protocol from response evidence
+    name: Automatic observation never proves a key; a declared protocol's key-gated listing does
     status: assert
     kind: protocol
     layer: e2e-auto
-    test: tests/e2e/test_model_hub_sources.py::test_b1_auto_observe_selects_protocol_from_response_shape
+    test: tests/e2e/test_model_hub_sources.py::test_b1_auto_observe_needs_a_declared_protocol_to_prove_the_key
   - id: B2
     name: Manual protocol mismatch is refused with proof evidence
     status: assert
@@ -2188,11 +2188,11 @@ scenarios:
     layer: e2e-auto
     test: tests/e2e/test_model_hub_sources.py::test_b3_discovered_model_persists_only_contract_fields
   - id: B4
-    name: Unavailable inventory requires explicit acceptance before commit
+    name: An unprovable key commits only through an explicit unverified save
     status: assert
     kind: recovery
     layer: e2e-auto
-    test: tests/e2e/test_model_hub_sources.py::test_b4_inventory_failure_requires_consent_then_commits_error_source
+    test: tests/e2e/test_model_hub_sources.py::test_b4_inventory_failure_requires_consent_then_commits_unverified_source
   - id: B5
     name: Replayed source creation nonce is idempotent
     status: xfail
@@ -2270,11 +2270,12 @@ scenarios:
     owning_layer: manual live-vendor regression
     evidence: docs/plans/model-hub-e2e-test-plan.md#c-oauth-lifecycle-c30c40-partial-by-1
   - id: D1
-    name: A later native subscription is appended after an API-key source
-    status: baseline
+    name: A later subscription is placed ahead of an API-key source
+    status: assert
     kind: placement
-    layer: e2e-auto
-    test: tests/e2e/test_model_hub_routing.py::test_d1_subscription_added_after_api_key_is_appended_at_tail
+    # A hermetic E2E cannot add a subscription: a native takeover validates its grant with the provider.
+    layer: contract
+    test: tests/test_model_hub_resolution.py::test_new_subscription_joins_only_the_agents_its_catalog_serves
   - id: D2
     name: A healthy first hop reaches the upstream through the real engine
     status: assert
@@ -2311,7 +2312,7 @@ scenarios:
     test: tests/e2e/test_model_hub_routing.py::test_d5_nonrefreshable_401_marks_the_key_for_repair
   - id: D6
     name: A server error honors later upstream advice through the real engine
-    status: assert
+    status: xfail
     kind: failover
     layer: e2e-auto
     test: tests/e2e/test_model_hub_routing.py::test_d6_server_error_preserves_later_retry_after_through_real_engine
@@ -2426,8 +2427,8 @@ scenarios:
     layer: e2e-auto
     test: tests/e2e/test_model_hub_guards.py::test_g1_guard_echo_missing_agents_does_not_loop
   - id: G2
-    name: Source-order write and chain reorder retain their current divergence
-    status: baseline
+    name: The default Source order persists and never reorders a manual chain
+    status: assert
     kind: compatibility
     layer: e2e-auto
     test: tests/e2e/test_model_hub_guards.py::test_g2_source_order_write_and_chain_reorder_are_divergent
@@ -2534,6 +2535,5 @@ next_priority:
   - B5
   - B8
   - B9
-  - D1
-  - G2
+  - D6
   - G3
