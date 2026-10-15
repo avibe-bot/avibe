@@ -225,6 +225,11 @@ def _append_source(
     raise EngineStateError("unsupported source protocol")
 
 
+def registered_model_ids(source: SourceRecord) -> tuple[str, ...]:
+    """The model ids an API-key Source registers in the rendered YAML, each routed as ``prefix/model``."""
+    return tuple(dict.fromkeys((*source.model_ids, *source.route_model_ids, *image_model_ids(source))))
+
+
 def expected_model_names(
     sources: Iterable[SourceRecord],
     store: EngineStateStore,
@@ -236,7 +241,7 @@ def expected_model_names(
         metadata = store.credential_metadata_if_present(source.credential_ref)
         if metadata is None or metadata.get("kind") != "api_key":
             continue
-        for model in dict.fromkeys((*source.model_ids, *source.route_model_ids, *image_model_ids(source))):
+        for model in registered_model_ids(source):
             expected[f"{source.prefix}/{model}"] = reload_display_name(model, generation)
     return expected
 

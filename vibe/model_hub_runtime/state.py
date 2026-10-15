@@ -42,6 +42,10 @@ class EngineStateError(RuntimeError):
     pass
 
 
+class EngineStateContentError(EngineStateError):
+    """A state file that was read but does not hold a JSON object: its contents, not its access, are bad."""
+
+
 @dataclass(frozen=True)
 class RuntimeSecrets:
     management_key: str
@@ -1260,10 +1264,12 @@ class EngineStateStore:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return None
-        except (OSError, ValueError) as exc:
+        except ValueError as exc:
+            raise EngineStateContentError(f"invalid engine state file: {path.name}") from exc
+        except OSError as exc:
             raise EngineStateError(f"invalid engine state file: {path.name}") from exc
         if not isinstance(payload, dict):
-            raise EngineStateError(f"invalid engine state file: {path.name}")
+            raise EngineStateContentError(f"invalid engine state file: {path.name}")
         return payload
 
     @classmethod

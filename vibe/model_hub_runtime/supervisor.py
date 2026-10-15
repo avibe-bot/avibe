@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Iterable, TypeVar
 
 from config import paths
 from config.atomic_io import write_atomic
@@ -32,10 +32,15 @@ from core.process_isolation import (
     signal_process_tree,
 )
 from vibe.model_hub_runtime.client import EngineClient, EngineClientError, EngineConnection
-from vibe.model_hub_runtime.config import expected_model_names, render_engine_config, write_engine_config
+from vibe.model_hub_runtime.config import (
+    expected_model_names,
+    registered_model_ids,
+    render_engine_config,
+    write_engine_config,
+)
 from vibe.model_hub_runtime.environment import engine_subprocess_environment
 from vibe.model_hub_runtime.installer import EngineRuntimeManager
-from vibe.model_hub_runtime.state import EngineStateStore, SourceRecord
+from vibe.model_hub_runtime.state import EngineStateContentError, EngineStateStore, SourceRecord
 
 
 logger = logging.getLogger(__name__)
@@ -196,9 +201,37 @@ class EngineSupervisor:
             # management path does not prove live streams dead. The
             # generation check decides; the process is never killed here.
         expected = expected_model_names(sources, self.state_store, generation)
-        stale = frozenset(expected_model_names(previous_sources or (), self.state_store, generation)) - set(expected)
+        stale = self._previous_model_names(previous_sources or (), generation) - set(expected)
         self._await_models_locked(client, expected, stale)
         self._last_check = _utc_now()
+
+    def _previous_model_names(self, previous_sources: Iterable[SourceRecord], generation: str) -> frozenset[str]:
+        """The routed names the previous projection registered, so the reload can await their removal.
+
+        Replacing a Source's key is how the user recovers a credential document
+        that no longer parses, so the reload must not depend on reading it.
+        Such a Source's names come from its projection record instead, the
+        names the rendered YAML registered for it, so a reload that removes it
+        still waits for them to leave, whether or not the engine acknowledged
+        the write. A replacement keeps the prefix and model ids, so those names
+        stay expected and are never awaited as stale; a Source still projected
+        with such a document fails at render, before this. Every other reader
+        still refuses the document.
+        """
+
+        names: set[str] = set()
+        for source in previous_sources:
+            try:
+                names.update(expected_model_names((source,), self.state_store, generation))
+            except EngineStateContentError as exc:
+                logger.warning(
+                    "Model Hub reload cannot read the previous credential of source=%s error=%s; "
+                    "its removal is awaited by the names its projection routes",
+                    source.source_id,
+                    type(exc.__cause__).__name__ if exc.__cause__ is not None else "NonObjectDocument",
+                )
+                names.update(f"{source.prefix}/{model}" for model in registered_model_ids(source))
+        return frozenset(names)
 
     def _await_models_locked(
         self,
