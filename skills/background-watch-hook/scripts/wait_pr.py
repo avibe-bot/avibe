@@ -289,6 +289,17 @@ def _is_codex_summary_table_line(line: str) -> bool:
     return stripped.startswith("|") and len(stripped.split("|")) >= 5
 
 
+def _is_codex_summary_state_line(line: str) -> bool:
+    match = re.fullmatch(r"<!-- codex-review-state:v1 (.+) -->", line.strip())
+    if not match:
+        return False
+    try:
+        state = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return False
+    return isinstance(state, dict)
+
+
 def _is_codex_summary_shape(body: str) -> bool:
     """Require the recognized progress table to be the whole known summary shape."""
 
@@ -310,7 +321,12 @@ def _is_codex_summary_shape(body: str) -> bool:
         "## Codex Review Summary",
         "This comment shows the latest Codex review activity on this pull request.",
     }
-    if any(line.strip() and line.strip() not in allowed_prefix for line in lines[:table_start]):
+    if any(
+        line.strip()
+        and line.strip() not in allowed_prefix
+        and not _is_codex_summary_state_line(line)
+        for line in lines[:table_start]
+    ):
         return False
 
     table_end = table_start

@@ -4590,6 +4590,7 @@ def test_coalescing_ignores_codex_summary_progress_but_not_errors(tmp_path, stat
     _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
     summary = {**_clean_codex_comment(), "body": (
         "<!-- codex-pull-request-review-summary -->\n"
+        "<!-- codex-review-state:v1 {\"code_review\":{\"status\":\"running\"}} -->\n"
         "## Codex Review Summary\n\n"
         "This comment shows the latest Codex review activity on this pull request.\n\n"
         "| Review | Status | Commit | Review trigger |\n"
