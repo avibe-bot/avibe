@@ -1080,7 +1080,8 @@ export type HostedModelRef = { source_id: string; model_id: string };
 /** One image's price: the vendor's list price, or an estimate from token pricing. */
 export type HostedImagePrice = { usd: number; basis: 'list' | 'estimated' };
 
-export type HostedImageModel = HostedModelRef & { description: string; price: HostedImagePrice | null };
+/** An image model `image_generate` offers now, with its serving Source's billing (a subscription's images are included). */
+export type HostedImageModel = HostedModelRef & { description: string; billing: 'monthly' | 'metered'; price: HostedImagePrice | null };
 
 type HostedToolBase = { enabled: boolean; status: HostedToolRunStatus };
 
@@ -1101,7 +1102,7 @@ export type HostedImageToolStatus = HostedToolBase & {
   effective_default: HostedModelRef | null;
   /** Exactly the pairs `image_generate` offers now. */
   models: HostedImageModel[];
-  /** Vendors whose overlay lists image models, for the empty state. */
+  /** A catalog fact, not the user's Sources: the vendors whose bundled overlay lists image models. */
   image_offered_by: string[];
 };
 

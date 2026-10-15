@@ -2422,6 +2422,37 @@
           "refused": "Not supported · {{date}}",
           "replay": "No replay · {{date}}"
         },
+        "image": {
+          "title": "Available image models",
+          "noUnitPrice": "No unit price",
+          "perImage": "${{usd}} / image",
+          "perImageEstimated": "≈ ${{usd}} / image",
+          "pair": "{{model}} · {{source}}",
+          "defaultBadge": "Default",
+          "defaultLabel": "Default model",
+          "defaultPick": "Default image model",
+          "automatic": "Automatic",
+          "automaticNamed": "Automatic ({{pair}})",
+          "automaticRule": "Automatic (first available in catalog order)",
+          "unavailable": "{{pair}} (unavailable)",
+          "defaultNote": "Used when Vibey doesn't name a model. Vibey can also pick another model from the list when it needs to.",
+          "unavailableNote": "The saved default isn't available now, so {{pair}} is used.",
+          "unavailableNoteNone": "The saved default isn't available now.",
+          "emptyOne": "Image generation needs an API key from {{vendor}}.",
+          "emptyMany": "Image generation needs an API key from one of {{vendors}}.",
+          "emptyRefused": "No image model is available now. Clear a refusal above to try it again.",
+          "emptyNoVendor": "No image model is available.",
+          "description": {
+            "gpt-image-2": "Photorealistic images and legible text in them; edits from reference images.",
+            "gemini-2_5-flash-image": "Fast generation and edits, keeping characters and style consistent.",
+            "gemini-3-pro-image-preview": "High-fidelity images with accurate text rendering."
+          },
+          "vendor": {
+            "openai": "OpenAI",
+            "gemini": "Google",
+            "xai": "xAI"
+          }
+        },
         "cost": {
           "included": "Included in subscription",
           "includedNote": "No extra charge",

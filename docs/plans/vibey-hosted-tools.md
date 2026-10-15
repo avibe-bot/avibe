@@ -242,11 +242,14 @@ The evidence store, its record and its owner are the capability model's §3. v2 
     - `image_generate`: `default_model` (saved, null when default; a saved model no longer available, or whose pair
       is refused, stays saved, flagged `available: false`); `effective_default` (the saved default if available,
       else the same `model_id` on another Source that serves it, since the user picked a model, not a relay, else
-      the first available model in catalog order); `models: [{source_id, model_id, description, price}]`, where
-      `price` is `{usd, basis: "list" | "estimated"}` per image or null ("暂无单价"), exactly
+      the first available model in catalog order); `models: [{source_id, model_id, description, billing, price}]`,
+      where `billing` is the serving Source's (`monthly` | `metered`, as executor candidates carry it, so the card
+      prices a subscription's images as included without another read) and `price` is
+      `{usd, basis: "list" | "estimated"}` per image or null ("暂无单价"), exactly
       the enum's candidate pairs, so a refused pair leaves it and the card's refusal line says why (clearing the
       refusal brings the pair back, and a saved default with it, with no write); and `image_offered_by: [vendor]`,
-      the vendors whose overlay lists image models, for the empty state.
+      a catalog fact independent of configuration: the vendors whose bundled overlay lists image models, sorted,
+      which the empty state names as the keys that would add one.
   - `PUT /api/models/hosted-tools/<tool>` is per field: an absent field is unchanged, and an explicit `null` resets
     `executor_order` to automatic or `default_model` to the default. `enabled` is a boolean. It answers the same
     read.
@@ -696,10 +699,17 @@ Unchanged from v1 §7.3 (owner decision, 2026-10-13 19:14), with the producer no
   pricing, marked "≈", where the image's tokens are known: the pricing module values the overlay's
   `tokens_per_image` at the model's output token rate (Nano Banana "≈$0.067"); "暂无单价" / "no unit price" where
   neither is (gpt-image-2, which OpenAI prices per image token at a varying count). It has a default-model picker over `default_model` / `effective_default`; a saved default that is no longer available
-  shows as itself, "(unavailable)". Image-endpoint refusals (§3.2) show and clear like search refusals; the image card
+  shows as itself, "(unavailable)", with a note naming the model in use (`effective_default`), and stays visible and
+  resettable even when no model is offered. The picker's "Automatic" option saves `null`; it names the model in use
+  while nothing is saved, and otherwise says how automatic picks (the first available in catalog order), since the
+  read does not say which model that would be. A model on a subscription Source (`billing: monthly`) shows "订阅内含". Each shipped model
+  has its own description in every locale (UI copy keyed by model id, guarded by a test over the bundled overlay);
+  the overlay's `description`, which is model-facing, shows only for a model without copy. Image-endpoint refusals (§3.2) show and clear like search refusals; the image card
   gets an Advanced section only when its clears move there (two or more Sources refused), holding only those; any other
-  failed image call shows only on its tool card in chat, since passive evidence keeps no other image failures. With no image model available, the card names the vendors from
-  `image_offered_by` ("Add an OpenAI or Google API key").
+  failed image call shows only on its tool card in chat, since passive evidence keeps no other image failures. With no image model available,
+  the card says why from the read: with a current image refusal, a neutral line ("No image model is available
+  now; clear a refusal to try it again"), the refusal lines and their clears saying the rest; otherwise the vendors
+  from `image_offered_by` as the keys that would add one ("图片生成需要 OpenAI、Google 其中一家的 API Key").
 - **Removed:** check and check-all, the confirm and result dialogs, Re-verify, the probe estimate, the executor
   picker, and "engine upgraded" headers (§11).
 

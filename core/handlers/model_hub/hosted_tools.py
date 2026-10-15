@@ -511,12 +511,14 @@ def hosted_tools_status(
                     "source_id": choice.source_id,
                     "model_id": choice.model_id,
                     "description": choice.description,
+                    "billing": sources[choice.source_id].billing,
                     "price": image_price(sources[choice.source_id], choice.spec),
                 }
                 for choice in choices.models
             ]
+            # A catalog fact, not the user's Sources: the vendors a key could add an image model from.
             entry["image_offered_by"] = sorted(
-                {source.vendor for source in config.sources if provider_image_models(source.vendor)}
+                vendor for vendor in bundled_provider_vendors() if provider_image_models(vendor)
             )
         tools.append(entry)
     return {"tools": tools}
