@@ -629,13 +629,15 @@ async def test_a_turn_owns_its_proxied_calls(tmp_path):
             await asyncio.wait_for(completion, timeout=5)
             assert blocked.cancelled.is_set() and finished == [1]
             pending.cancel()
-            # The turn no longer admits work: a new call is refused before anything runs.
-            async with client.post(
-                f'{hop["base_url"]}/hosted-tools/web_search',
-                headers={"Authorization": f'Bearer {hop["token"]}', **hop["request_headers"]}, data=body,
-            ) as response:
-                assert response.status == 409
-                assert (await response.json())["error"]["code"] == "turn_not_live"
+            # The turn no longer admits work: a new call is refused before anything runs, and before its body is
+            # read, so even a malformed one is answered as the closed turn it came from.
+            for data in (body, b"not json"):
+                async with client.post(
+                    f'{hop["base_url"]}/hosted-tools/web_search',
+                    headers={"Authorization": f'Bearer {hop["token"]}', **hop["request_headers"]}, data=data,
+                ) as response:
+                    assert response.status == 409
+                    assert (await response.json())["error"]["code"] == "turn_not_live"
     finally:
         await gateway.close()
     assert len(service.adapter.invocations) == 1
@@ -827,7 +829,7 @@ async def test_an_encoded_proxy_call_body_is_refused(tmp_path):
         async with aiohttp.ClientSession(auto_decompress=False) as client:
             async with client.post(
                 f'{hop["base_url"]}/hosted-tools/web_search',
-                headers={"Authorization": f'Bearer {hop["token"]}', "Content-Encoding": "gzip"},
+                headers={"Authorization": f'Bearer {hop["token"]}', **hop["request_headers"], "Content-Encoding": "gzip"},
                 data=gzip.compress(json.dumps({"arguments": {"query": "q"}}).encode()),
             ) as response:
                 assert response.status == 400
@@ -853,23 +855,24 @@ class _CountedHandle(LiveInvokeHandle):
 
 @pytest.mark.asyncio
 async def test_a_buffered_executor_response_is_bounded(tmp_path, monkeypatch):
-    """MH-HOSTED-GATEWAY-005: an oversized buffered body fails the call instead of growing without bound.
+    """MH-HOSTED-GATEWAY-005: an oversized buffered body fails the attempt instead of growing without bound.
 
-    Once refused, the response is not read any further, and the call is still metered from its outcome.
+    Once refused, the response is not read any further, and the attempt is still metered from its outcome. Nothing
+    reached Vibey, so the chain tries its next candidate; the oversized attempt is listed as billed.
     """
 
     monkeypatch.setattr(service_module, "EXECUTOR_RESPONSE_MAX_BYTES", 64)
     oversized = b"{" + b" " * 128
     usage = ProtocolUsageReport.of(input_tokens=900, cached_input_tokens=0, output_tokens=40)
     handle = _CountedHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=ANTHROPIC, usage=usage), (oversized, b"}"))
-    service = _vibey_service(tmp_path, _sources(), handles=[handle])
-    _bind(service, "web_search", (ANTHROPIC, "claude-haiku-4-5"))
-    status, answer = await _call(service, "web_search", {
-        "arguments": {"query": "q"},
-    })
+    service = _vibey_service(tmp_path, _sources(), handles=[handle, _served_by_openai()])
+    _chain(service, "web_search", (ANTHROPIC, "claude-haiku-4-5"), (OPENAI, "gpt-6-astra"))
+    status, answer = await _call(service, "web_search", {"arguments": {"query": "q"}})
     assert status == 200
-    assert answer["record"]["status"] == "failed" and "larger than allowed" in answer["record"]["error"]
-    assert "execution" in answer
+    assert [entry[0] for entry in service.adapter.invocations] == [ANTHROPIC, OPENAI]
+    assert answer["record"]["status"] == "completed"
+    assert answer["execution"]["executor_source_id"] == OPENAI
+    assert [attempt["source_id"] for attempt in answer["execution"]["failed_attempts"]] == [ANTHROPIC]
     assert handle.read == [oversized]
     assert _usage_of(service, ANTHROPIC)
 

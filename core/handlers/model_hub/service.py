@@ -6624,7 +6624,9 @@ class ModelHubService:
         if outcome is not None and tool in outcome.hosted_tools and result is not None and result.record["status"] == "completed":
             # A proxy call is a native call on the executor Source: the same positive evidence (§3.2).
             await self.record_hosted_success(source, model_id, tool, "executor")
-        moves_on = False
+        # A response that broke a bound reached nothing of Vibey's, so it is a failure before output here (§6
+        # step 4): the next candidate is tried. A timeout spent the chain's one deadline.
+        moves_on = refused is not None
         if outcome is not None and outcome.kind is not RawOutcomeKind.SUCCESS and refused is None and not timed_out:
             moves_on = await self._executor_moves_on(source, model_id, tool, request, outcome)
         return _ExecutorAttempt(
