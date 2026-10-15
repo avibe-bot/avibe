@@ -104,30 +104,102 @@ Preparation:
    Candidate mode computes all six real archive sizes, archive hashes, binary
    hashes, and owned planned URLs, then runs the same release-asset verifier.
    It does not publish, call `gh`, or modify the packaged manifest.
-4. Before the installed-service E2E, materialize the target archive locally. For
-   the arm64 Incus target, create an offline manifest outside the exact asset
-   directory and point only `linux-arm64` at the container-local archive path:
+4. Before the installed-service E2E, resolve the actual test-owned Incus
+   container platform through the existing `Runner`/`tenant_exec` helpers. Do
+   not use the host architecture. Keep `ACCEPTANCE_PYTHON` pointed at the
+   normal-wheel, test-only venv (never `/opt/avibe/venv`), and ask the installed
+   Avibe code for both its raw runtime tag and its canonical Model Hub asset:
 
-   ```bash
-   python3 - "$TMP/cpa-candidate-assets/model-hub-engine-manifest.json" \
-     "$TMP/cpa-offline-manifest.json" <<'PY'
-   import json
-   from pathlib import Path
-   import sys
+   ```python
+   import shlex
 
-   source = Path(sys.argv[1])
-   destination = Path(sys.argv[2])
-   manifest = json.loads(source.read_text())
-   target = next(item for item in manifest["assets"] if item["platform"] == "linux-arm64")
-   target["url"] = (Path("/tmp/avibe-candidate-assets") / Path(target["url"]).name).as_uri()
-   destination.write_text(json.dumps(manifest, indent=2) + "\n")
-   PY
+   probe = runner.run(
+       tenant_exec(
+           target,
+           f"{ACCEPTANCE_PYTHON} -c "
+           + shlex.quote(
+               "from core.managed_runtime import runtime_platform_tag; "
+               "from vibe.model_hub_runtime.installer import EngineRuntimeManager; "
+               "print(runtime_platform_tag()); "
+               "print(EngineRuntimeManager(offline=True).host_platform())"
+           ),
+       ),
+       capture=True,
+   )
+   raw_platform, asset_platform = probe.stdout.strip().splitlines()
+   if asset_platform not in {"linux-amd64", "linux-arm64"}:
+       raise SystemExit(f"unsupported Incus Model Hub platform: {raw_platform} -> {asset_platform}")
    ```
 
-   Use the existing `scripts/incus_regression.py` Runner/`tenant_exec` helpers
-   to transfer that offline manifest and the matching generated archive into
-   `/tmp/avibe-candidate-assets` in the test-owned Incus target. Do not publish
-   the planned Avibe URL and do not touch the runner service at `/opt/avibe/venv`.
+   The installer is the source of truth for these aliases: `linux-x64` selects
+   `linux-amd64`, and `linux-arm64` selects `linux-arm64`. Any other normalized
+   platform fails before an archive is selected or transferred. Select exactly
+   the matching generated asset, preserving its version and recorded digests;
+   never select by the host or by a hard-coded arm64 example.
+
+   Create an offline manifest outside the exact asset directory. Use one name
+   consistently from generation through transfer and installation. Set
+   `CANDIDATE_MANIFEST` to the generated manifest and `OFFLINE_MANIFEST` to
+   `$TMP/model-hub-engine-offline-manifest.json` before running this fragment:
+
+   ```python
+   import hashlib
+   import json
+   import os
+   from pathlib import Path
+
+   OFFLINE_MANIFEST_NAME = "model-hub-engine-offline-manifest.json"
+   CONTAINER_ASSET_DIR = "/tmp/avibe-candidate-assets"
+   source = Path(os.environ["CANDIDATE_MANIFEST"])
+   asset_dir = source.parent
+   destination = Path(os.environ["OFFLINE_MANIFEST"])
+   source_payload = json.loads(source.read_text(encoding="utf-8"))
+   offline_payload = json.loads(source.read_text(encoding="utf-8"))
+   selected = next(item for item in source_payload["assets"] if item["platform"] == asset_platform)
+   archive = asset_dir / Path(selected["url"]).name
+   if archive.stat().st_size != selected["size_bytes"]:
+       raise SystemExit(f"candidate archive size mismatch: {archive}")
+   if hashlib.sha256(archive.read_bytes()).hexdigest() != selected["sha256"]:
+       raise SystemExit(f"candidate archive digest mismatch: {archive}")
+   offline_selected = next(
+       item for item in offline_payload["assets"] if item["platform"] == asset_platform
+   )
+   offline_selected["url"] = (Path(CONTAINER_ASSET_DIR) / archive.name).as_uri()
+   destination.write_text(json.dumps(offline_payload, indent=2) + "\n", encoding="utf-8")
+   ```
+
+   Transfer exactly `archive` and `destination` to the same container-owned
+   directory with `Runner.run(tenant_exec(...), input_bytes=...)`, verifying
+   each input SHA-256 before writing it. For example, the existing acceptance
+   harness can use this transfer shape without raw lifecycle commands:
+
+   ```python
+   runner.run(tenant_exec(target, f"mkdir -p {shlex.quote(CONTAINER_ASSET_DIR)}"))
+   for source_path, remote_path in (
+       (archive, f"{CONTAINER_ASSET_DIR}/{archive.name}"),
+       (destination, f"{CONTAINER_ASSET_DIR}/{OFFLINE_MANIFEST_NAME}"),
+   ):
+       data = source_path.read_bytes()
+       digest = hashlib.sha256(data).hexdigest()
+       write_code = (
+           "from pathlib import Path; import hashlib, sys; "
+           f"p=Path({remote_path!r}); data=sys.stdin.buffer.read(); "
+           f"assert hashlib.sha256(data).hexdigest()=={digest!r}; p.write_bytes(data)"
+       )
+       runner.run(
+           tenant_exec(target, "python3 -c " + shlex.quote(write_code)),
+           input_bytes=data,
+       )
+   ```
+
+   The bounded procedure rehearsal must use synthetic local manifest/archive
+   metadata for all three cases before the real E2E: `linux-x64` ->
+   `linux-amd64`, `linux-arm64` -> `linux-arm64`, and an unsupported spelling
+   such as `linux-riscv64` -> explicit failure. Assert that only the selected
+   asset URL changes, the selected archive's size and SHA-256 are preserved,
+   and unsupported input performs no transfer. This is a contract check, not a
+   second live E2E. Do not publish the planned Avibe URL and do not touch the
+   runner service.
 5. Verify the generated manifest again if a separate step consumes it:
 
    ```bash
@@ -138,7 +210,7 @@ Preparation:
 
 6. Run the focused builder/guard tests, then run the existing installed-service
    acceptance once with
-   `VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH=/tmp/avibe-candidate-assets/offline-manifest.json`
+   `VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH=/tmp/avibe-candidate-assets/model-hub-engine-offline-manifest.json`
    (and the candidate normal wheel) against synthetic loopback upstreams. Record
    the real result and prepare the PR with the candidate manifest/patch
    metadata. The existing release workflow remains the publication/recovery
