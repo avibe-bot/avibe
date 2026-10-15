@@ -503,10 +503,10 @@ def test_hfr_172_task_definition_wake_follows_commit_and_not_rollback(
     release = threading.Event()
     failure: list[BaseException] = []
 
-    def blocking_save() -> None:
+    def blocking_save(*args) -> None:
         entered.set()
         assert release.wait(timeout=1)
-        original_save()
+        original_save(*args)
 
     def add_task() -> None:
         try:
@@ -536,7 +536,7 @@ def test_hfr_172_task_definition_wake_follows_commit_and_not_rollback(
 
     events.clear()
     task = store.list_tasks()[0]
-    monkeypatch.setattr(store, "_save", lambda: (_ for _ in ()).throw(OSError("disk full")))
+    monkeypatch.setattr(store, "_save", lambda *_args: (_ for _ in ()).throw(OSError("disk full")))
     with pytest.raises(OSError, match="disk full"):
         store.set_enabled(task.id, False)
     assert events == []
@@ -1899,10 +1899,10 @@ def test_hfr_282_task_reload_waits_for_result_stamp_mirror_commit(
     original_save = store._save
     original_load = store._load_unlocked
 
-    def blocked_save() -> None:
+    def blocked_save(*args) -> None:
         write_entered.set()
         assert release_write.wait(timeout=1)
-        original_save()
+        original_save(*args)
 
     def observed_load() -> None:
         load_entered.set()
@@ -13078,7 +13078,9 @@ def test_dead_accepted_owner_converges_run_session_and_persisted_fifo(
         request_store=request_store,
     )
 
-    async def _wait_for(predicate, *, timeout=1.0) -> None:
+    # Each step of the execution settles through the runtime-work executor, so allow
+    # for thread hops under a loaded suite.
+    async def _wait_for(predicate, *, timeout=5.0) -> None:
         async def _poll() -> None:
             while not predicate():
                 await asyncio.sleep(0.005)
@@ -20291,3 +20293,39 @@ def test_a_claim_cancelled_before_it_runs_is_settled_off_the_loop(tmp_path: Path
     asyncio.run(_go())
     assert released_in_time == [True]
     assert request_store.get_run(claimed.id)["status"] == "queued"
+
+
+def test_a_mirror_read_never_waits_for_a_writer_and_never_sees_its_unwritten_edit(tmp_path: Path, monkeypatch) -> None:
+    """#2649: writers hold the mirror lock across their store write, now on worker threads. The controller loop reads
+    the mirror (``get_task``, ``list_tasks``, ``reconcile_jobs``), so a read takes no lock: it answers at once, from
+    the published mirror, which a writer replaces only after its write lands."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = store.add_task(
+        session_key="slack::channel::C123",
+        prompt="run once",
+        schedule_type="at",
+        run_at="2030-01-01T00:00:00+00:00",
+        timezone_name="UTC",
+    )
+    write_entered, release_write = threading.Event(), threading.Event()
+    original_save = store._save
+
+    def slow_save(*args) -> None:
+        write_entered.set()
+        assert release_write.wait(timeout=5)
+        original_save(*args)
+
+    monkeypatch.setattr(store, "_save", slow_save)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        stamping = executor.submit(store.set_enabled, task.id, False)
+        assert write_entered.wait(timeout=1)
+        try:
+            read = executor.submit(lambda: (store.get_task(task.id), store.list_tasks()))
+            current, listed = read.result(timeout=0.5)
+            assert current.enabled is True and [item.enabled for item in listed] == [True]
+        finally:
+            release_write.set()
+        stamping.result(timeout=5)
+    assert store.get_task(task.id).enabled is False

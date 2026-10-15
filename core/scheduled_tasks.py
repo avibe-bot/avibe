@@ -1386,24 +1386,53 @@ class ScheduledTaskStore:
         self.load()
         return True
 
-    def _save(self) -> None:
+    def _save(self, tasks: Optional[Dict[str, ScheduledTask]] = None) -> None:
+        """Write the file backend's mirror: ``tasks`` when a writer is about to publish
+        them, else the published one."""
+
         if self._sqlite is not None:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"tasks": [task.to_dict() for task in self.list_tasks()]}
+        ordered = sorted(
+            (tasks if tasks is not None else self._tasks).values(),
+            key=lambda item: (item.created_at, item.id),
+        )
+        payload = {"tasks": [task.to_dict() for task in ordered]}
         write_atomic(self.path, json.dumps(payload, indent=2))
         self._signature = _path_signature(self.path)
 
+    # The mirror is PUBLISHED, never edited in place: a writer changes a private copy
+    # (``_working_copy``), writes it, and only then swaps in a new dict
+    # (``_publish``/``_unpublish``); a reload builds a new dict too. A reader therefore
+    # takes no lock -- one dict reference is one consistent mirror -- so the controller
+    # loop never waits behind a writer that holds ``_reload_lock`` across SQLite I/O
+    # on a worker thread, and never sees an edit the database has not accepted.
+
     def list_tasks(self) -> list[ScheduledTask]:
-        with self._reload_lock:
-            return sorted(
-                self._tasks.values(),
-                key=lambda item: (item.created_at, item.id),
-            )
+        tasks = self._tasks
+        return sorted(tasks.values(), key=lambda item: (item.created_at, item.id))
 
     def get_task(self, task_id: str) -> Optional[ScheduledTask]:
-        with self._reload_lock:
-            return self._tasks.get(task_id)
+        return self._tasks.get(task_id)
+
+    def _working_copy(self, task_id: str) -> Optional[ScheduledTask]:
+        """A private copy of a published definition, for a writer to change."""
+
+        task = self._tasks.get(task_id)
+        return ScheduledTask.from_dict(task.to_dict()) if task is not None else None
+
+    def _required_working_copy(self, task_id: str) -> ScheduledTask:
+        task = self._working_copy(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        return task
+
+    def _publish(self, task: ScheduledTask) -> None:
+        self._tasks = {**self._tasks, task.id: task}
+
+    def _unpublish(self, task_id: str) -> None:
+        if task_id in self._tasks:
+            self._tasks = {key: value for key, value in self._tasks.items() if key != task_id}
 
     def refresh_task(self, task_id: str) -> Optional[ScheduledTask]:
         """Reload and read one scheduler definition under the same mirror lock."""
@@ -1499,7 +1528,8 @@ class ScheduledTaskStore:
                         "a file-backed scheduled task store cannot commit a queued run "
                         "with the task row"
                     )
-                self._save()
+                self._save({**self._tasks, task.id: task})
+                self._publish(task)
                 _publish_task_definitions_updated()
                 return True
             if queued_run is None:
@@ -1526,6 +1556,7 @@ class ScheduledTaskStore:
             self._reload_after_lost_write(task.id)
             raise
         if landed:
+            self._publish(task)
             _publish_task_definitions_updated()
             return True
         self.load()
@@ -1551,7 +1582,7 @@ class ScheduledTaskStore:
                 "stale mirror entry for %s",
                 task_id,
             )
-            self._tasks.pop(task_id, None)
+            self._unpublish(task_id)
             self._signature = None
             self._reload_required = True
 
@@ -1573,7 +1604,6 @@ class ScheduledTaskStore:
         """
 
         task.updated_at = _utc_now_iso()
-        self._tasks[task.id] = task
         try:
             if self._sqlite is not None:
                 # No ``expect``: this is the create/adopt entry point (``add_task``),
@@ -1587,12 +1617,14 @@ class ScheduledTaskStore:
                     self.load()
                     _publish_task_definitions_updated()
                     return self._tasks[task.id]
+                self._publish(task)
                 _publish_task_definitions_updated()
                 return task
-            self._save()
+            self._save({**self._tasks, task.id: task})
         except Exception:
             self._reload_after_lost_write(task.id)
             raise
+        self._publish(task)
         _publish_task_definitions_updated()
         return task
 
@@ -1667,22 +1699,23 @@ class ScheduledTaskStore:
 
         if task_id not in self._tasks:
             return False
-        del self._tasks[task_id]
         try:
             if self._sqlite is not None:
                 self._sqlite.remove_task(task_id)
+                self._unpublish(task_id)
                 _publish_task_definitions_updated()
                 return True
-            self._save()
+            self._save({key: value for key, value in self._tasks.items() if key != task_id})
         except Exception:
             self._reload_after_lost_write(task_id)
             raise
+        self._unpublish(task_id)
         _publish_task_definitions_updated()
         return True
 
     @_serialize_task_mirror
     def set_enabled(self, task_id: str, enabled: bool) -> ScheduledTask:
-        task = self._tasks[task_id]
+        task = self._required_working_copy(task_id)
         if enabled and not task.enabled:
             require_task_resumable(
                 task_id,
@@ -1704,7 +1737,7 @@ class ScheduledTaskStore:
     @_serialize_task_mirror
     def rebind_session(self, task_id: str, session_id: str) -> None:
         """Host recovery changes only the binding, retaining authenticated metadata."""
-        task = self._tasks[task_id]
+        task = self._required_working_copy(task_id)
         expect = self._read_state(task)
         task.session_id = session_id
         task.updated_at = _utc_now_iso()
@@ -1747,7 +1780,7 @@ class ScheduledTaskStore:
 
         ensure_harness_definition_write(user_context)
         ensure_agent_name_access(agent_name, user_context=user_context)
-        task = self._tasks[task_id]
+        task = self._required_working_copy(task_id)
         # Captured before the first mutation: this is the state the CALLER read
         # (``vibe task update`` resolved Agents and Sessions from this very object),
         # and it is what the write below re-asserts.
@@ -1813,7 +1846,7 @@ class ScheduledTaskStore:
     ) -> bool:
         """Retire the exact one-shot schedule APScheduler reported missed."""
 
-        task = self._tasks.get(task_id)
+        task = self._working_copy(task_id)
         if (
             task is None
             or not task.enabled
@@ -1844,7 +1877,8 @@ class ScheduledTaskStore:
         task.metadata.pop(COMMAND_TIMED_OUT_METADATA_KEY, None)
         task.metadata.pop(TASK_LAST_RESULT_STATUS_METADATA_KEY, None)
         task.updated_at = task.retired_at
-        self._save()
+        self._save({**self._tasks, task.id: task})
+        self._publish(task)
         return True
 
     @_serialize_task_mirror
@@ -1865,7 +1899,7 @@ class ScheduledTaskStore:
         """
 
         self.maybe_reload()
-        task = self._tasks.get(task_id)
+        task = self._working_copy(task_id)
         if task is None:
             return False
         expect = self._read_state(task)
@@ -1887,6 +1921,7 @@ class ScheduledTaskStore:
                 self._reload_after_lost_write(task.id)
                 raise
             if landed:
+                self._publish(task)
                 return True
             self.load()
             return False
@@ -1922,7 +1957,7 @@ class ScheduledTaskStore:
         """
 
         self.maybe_reload()
-        task = self._tasks.get(task_id)
+        task = self._working_copy(task_id)
         if task is None:
             return False
         expect = self._read_state(task)
@@ -1983,7 +2018,7 @@ class ScheduledTaskStore:
         """
 
         self.maybe_reload()
-        task = self._tasks.get(task_id)
+        task = self._working_copy(task_id)
         if task is None:
             return False
         non_owner_expectation = expected_non_owner_retired_one_shot
@@ -2101,11 +2136,12 @@ class ScheduledTaskStore:
             expected_terminal_run_id=expected_terminal_run_id,
         )
 
+    @_serialize_task_mirror
     def suspend_task(self, task_id: str, *, error: str) -> bool:
         """Atomically disable a definition before an unsafe execution boundary."""
 
         self.maybe_reload()
-        task = self._tasks.get(task_id)
+        task = self._working_copy(task_id)
         if task is None:
             return False
         expect = self._read_state(task)
