@@ -5202,15 +5202,23 @@ def test_coalescing_preserves_requested_clean_verdict_replay(tmp_path, kind, ci_
     assert payload[module.STAGED_KEY]["cursors"][cursor] == 601
 
 
-@pytest.mark.parametrize("replay", [("--catch-up",), ("--since-issue-comment-id", "0")])
-def test_deliberate_replay_preserves_a_newer_invalidating_outcome(tmp_path, replay):
+@pytest.mark.parametrize("catch_up", [False, True])
+@pytest.mark.parametrize("kind", ["issue_comments", "reviews"])
+@pytest.mark.parametrize("metadata_only_update", [False, True])
+def test_deliberate_replay_preserves_a_newer_invalidating_outcome(tmp_path, catch_up, kind, metadata_only_update):
     module = _load_module()
     path = tmp_path / "ci.json"
     pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
     _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
     options = ("--coalesce-success",)
+    old_clean = _clean_codex_comment(601)
+    if kind == "reviews":
+        old_clean = {**old_clean, "state": "COMMENTED", "commit_id": COALESCED_HEAD}
 
-    _ci_cycle(module, path, [_success_state(pending, clean=True)], extra_args=options)
+    rc, output, _ = _ci_cycle(
+        module, path, [_success_state(pending, **{kind: [old_clean]})], extra_args=options,
+    )
+    assert (rc, output) == (124, "")
     error = _codex_error(602)
     rc, output, _ = _ci_cycle(
         module, path, [_success_state(pending, issue_comments=[error])], extra_args=options,
@@ -5224,21 +5232,36 @@ def test_deliberate_replay_preserves_a_newer_invalidating_outcome(tmp_path, repl
     assert payload[module.SUCCESS_BATCH_KEY]["outcome"]["id"] == 602
     assert payload[module.SUCCESS_BATCH_KEY]["review"] is None
 
-    old_clean = _clean_codex_comment(601)
-    replay_state = _success_state(pending, issue_comments=[old_clean])
+    # Replay may restore a row, but metadata alone is not a new verdict.
+    if metadata_only_update:
+        old_clean = {**old_clean, "updated_at": "2026-10-15T08:01:00Z"}
+    replay = ("--catch-up",) if catch_up else (
+        ("--since-review-id", "0") if kind == "reviews" else ("--since-issue-comment-id", "0")
+    )
+    replay_state = _success_state(pending, **{kind: [old_clean]})
     rc, output, _ = _ci_cycle(
         module, path, [replay_state], delivery="2",
         extra_args=(*options, *replay),
     )
-    assert rc == 0 and "issue_comment #601" in output
+    event = "review #601" if kind == "reviews" else "issue_comment #601"
+    assert rc == 0 and event in output
     assert "success candidate" not in output
 
     green = _ci_run(head=COALESCED_HEAD)
-    rc, output, _ = _ci_cycle(
-        module, path, [_success_state(green, issue_comments=[old_clean])],
-        delivery="3", extra_args=options,
+    restored = _success_state(green, **{kind: [old_clean]})
+    rc, output, payload = _ci_cycle(
+        module, path, [restored], delivery="3", extra_args=options,
     )
     assert (rc, output) == (124, "")
+    assert payload[module.SUCCESS_BATCH_KEY]["outcome"]["id"] == 602
+    assert payload[module.SUCCESS_BATCH_KEY]["review"] is None
+
+    fresh = _clean_codex_comment(603)
+    if kind == "reviews":
+        fresh = {**fresh, "state": "COMMENTED", "commit_id": COALESCED_HEAD}
+    restored[kind].append(fresh)
+    rc, output, _ = _ci_cycle(module, path, [restored], delivery="3", extra_args=options)
+    assert rc == 0 and "success candidate" in output
 
 
 @pytest.mark.parametrize("intermediate", ["missing", "nonterminal", "older-attempt", "partial"])

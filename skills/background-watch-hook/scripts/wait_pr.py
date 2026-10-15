@@ -807,7 +807,8 @@ def _coalesced_review_state(
                 else old_items.get(str(item.get("id"))) != normalized.get(str(item.get("id")))
             )
             seen[key] = observation["fingerprint"]
-            if initialize or changed:
+            # A replay scans old rows without renewing already-seen verdicts.
+            if changed or (initialize and previous_fingerprint is None):
                 clean = kind != "review_comments" and _is_codex_clean_pass(item, head)
                 outcomes.append((observation, clean))
 
