@@ -350,8 +350,9 @@ class HostedImage:
 class HostedRecord:
     """Per-call facts. ``images`` is set exactly for ``image_generate`` (possibly empty).
 
-    ``error`` is model-facing English. ``error_code`` names a reason Avibe wrote (``HOSTED_ERROR_CODES``), only beside
-    an ``error``.
+    ``error`` is the provider's own reason, or one Avibe wrote, which the model reads too. ``error_code`` names a reason
+    Avibe wrote (``HOSTED_ERROR_CODES``), only beside an ``error``; a surface shows a known code's copy in its reader's
+    language, so such an ``error`` may stay English. Any other reason Avibe writes is in the user's language.
     """
 
     status: HostedStatus

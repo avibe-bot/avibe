@@ -943,7 +943,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 400,
-          "description": "Bounded and redacted. Model-facing English: the provider's own reason, or one Avibe wrote."
+          "description": "Bounded and redacted: the provider's own reason, or one Avibe wrote, which the model reads too. A known error_code is shown as its copy in the reader's language; any other reason Avibe writes is in the user's language."
         },
         "error_code": {
           "type": "string",

@@ -54,7 +54,8 @@ class HostedActivity:
     # How it ran: natively by the model's provider, by a search executor, or by an image endpoint directly.
     mode: Literal["native", "proxy", "direct"]
     status: str
-    # Model-facing English; ``error_code`` names the reasons Avibe worded itself.
+    # The provider's own reason, or one Avibe wrote; a known ``error_code`` is shown as its copy in the reader's
+    # language, and any other reason Avibe writes is already in the user's language.
     error: Optional[str]
     # What the call was about: the query, prompt, page or thread it named.
     subject: Optional[str]
