@@ -189,8 +189,8 @@ def main():
         try:
             prepare_builtin_skills()
         except Exception:
-            os.environ.pop(BUILTIN_SKILLS_ROOT_ENV, None)
             os.environ.pop(BUILTIN_SKILLS_SNAPSHOT_ENV, None)
+            os.environ[BUILTIN_SKILLS_ROOT_ENV] = ""
             logger.warning("Avibe built-in Skills are unavailable", exc_info=True)
 
         apply_claude_sdk_patches()

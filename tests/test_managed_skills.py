@@ -25,6 +25,7 @@ from core.managed_skills import (
     load_skill,
     managed_skill_environment,
     parse_skill_file,
+    prepare_builtin_skills,
     publish_builtin_skills,
     render_skill_catalog_prompt,
     render_skill_content,
@@ -1674,6 +1675,91 @@ def test_missing_legacy_snapshot_bind_uses_named_catalog(
     assert [skill.name for skill in resolve_skills(cwd)] == ["builtin"]
 
 
+def test_prepare_failure_binds_an_empty_catalog_root(monkeypatch, tmp_path: Path) -> None:
+    _isolate_live_commands(monkeypatch, tmp_path)
+    monkeypatch.delenv(BUILTIN_SKILLS_ROOT_ENV, raising=False)
+    monkeypatch.setenv("AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID", "a" * 64)
+    monkeypatch.setattr(
+        managed_skills,
+        "publish_builtin_skills",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("source invalid")),
+    )
+
+    with pytest.raises(RuntimeError, match="source invalid"):
+        prepare_builtin_skills()
+
+    assert os.environ[BUILTIN_SKILLS_ROOT_ENV] == ""
+    assert "AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID" not in os.environ
+
+
+def test_empty_binding_does_not_serve_a_stale_named_catalog(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    home, cwd = _isolate_live_commands(monkeypatch, tmp_path)
+    _write_skill(home / ".avibe" / "builtin-skills", "stale", "stale", "Stale")
+    monkeypatch.setenv(BUILTIN_SKILLS_ROOT_ENV, "")
+
+    assert [skill.name for skill in resolve_skills(cwd)] == []
+    assert managed_skill_environment(cwd)[BUILTIN_SKILLS_ROOT_ENV] == ""
+
+
+def test_bound_reader_uses_previous_catalog_while_live_is_missing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    home, cwd = _isolate_live_commands(monkeypatch, tmp_path)
+    catalog = home / ".avibe" / "builtin-skills"
+    previous = catalog.parent / ".builtin-skills.previous"
+    _write_skill(previous, "previous", "previous", "Previous")
+    monkeypatch.setenv(BUILTIN_SKILLS_ROOT_ENV, str(catalog))
+
+    assert [skill.name for skill in resolve_skills(cwd)] == ["previous"]
+
+
+def test_publication_restores_live_catalog_from_previous_after_interrupted_swap(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "builtin-skills"
+    previous = destination.parent / ".builtin-skills.previous"
+    _write_skill(source, "current", "current", "Current")
+    _write_skill(previous, "previous", "previous", "Previous")
+
+    assert publish_builtin_skills(source_root=source, destination_root=destination) == destination
+    assert (destination / "current" / "SKILL.md").is_file()
+    assert not previous.exists()
+    assert not (destination / "previous").exists()
+
+
+def test_publication_restores_previous_if_live_swap_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "builtin-skills"
+    previous = destination.parent / ".builtin-skills.previous"
+    _write_skill(source, "current", "current", "Current")
+    _write_skill(destination, "previous", "previous", "Previous")
+    real_rename = os.rename
+    failed_live_swap = False
+
+    def fail_live_swap(src, dst):
+        nonlocal failed_live_swap
+        if Path(dst) == destination and not failed_live_swap:
+            failed_live_swap = True
+            raise OSError("swap failed")
+        return real_rename(src, dst)
+
+    monkeypatch.setattr(managed_skills.os, "rename", fail_live_swap)
+
+    with pytest.raises(OSError, match="swap failed"):
+        publish_builtin_skills(source_root=source, destination_root=destination)
+
+    assert (destination / "previous" / "SKILL.md").is_file()
+    assert not (destination / "current").exists()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="symlink fixture requires POSIX semantics")
 def test_publication_rejects_symlinks(tmp_path: Path) -> None:
     source = tmp_path / "source"
@@ -1696,9 +1782,7 @@ def test_bound_working_directory_and_catalog_are_inherited(monkeypatch, tmp_path
     assert [skill.name for skill in resolve_skills()] == ["advertised"]
     assert managed_skill_environment(advertised_cwd) == {
         SKILL_WORKING_DIR_ENV: str(advertised_cwd.resolve()),
-        BUILTIN_SKILLS_ROOT_ENV: str(
-            (Path(os.environ["AVIBE_HOME"]) / "builtin-skills").resolve()
-        ),
+        BUILTIN_SKILLS_ROOT_ENV: "",
         SKILL_HOME_ENV: str(home.resolve()),
         SKILL_CODEX_HOME_ENV: str((home / ".codex").resolve()),
         SKILL_CLAUDE_HOME_ENV: str((home / ".claude").resolve()),

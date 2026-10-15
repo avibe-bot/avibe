@@ -808,22 +808,14 @@ def _selected_builtin_root(
         raw_root = Path(bound_root).expanduser()
         if not raw_root.is_absolute():
             return None
-        root = _absolute_path(raw_root)
-        if (
-            _LEGACY_SNAPSHOT_ID_RE.fullmatch(root.name) is not None
-            and root.parent.name == "builtin-skills"
-            and _existing_directory(root) is None
-            and _readable_builtin_catalog(root.parent)
-        ):
-            root = root.parent
-    else:
-        root = avibe_home / "builtin-skills"
-        if not _readable_builtin_catalog(root):
-            try:
-                publish_builtin_skills(destination_root=root)
-            except Exception:
-                logger.warning("Failed to publish Avibe built-in Skills", exc_info=True)
-                return None
+        return _existing_directory(_live_or_backup_catalog(_absolute_path(raw_root)))
+    root = avibe_home / "builtin-skills"
+    if not _readable_builtin_catalog(root):
+        try:
+            publish_builtin_skills(destination_root=root)
+        except Exception:
+            logger.warning("Failed to publish Avibe built-in Skills", exc_info=True)
+            return None
     return _existing_directory(root)
 
 
@@ -833,6 +825,31 @@ def _existing_directory(path: Path) -> Path | None:
     except OSError:
         return None
     return path if stat.S_ISDIR(value.st_mode) else None
+
+
+def _catalog_backup_path(destination: Path) -> Path:
+    return destination.parent / ".builtin-skills.previous"
+
+
+def _catalog_staging_path(destination: Path) -> Path:
+    return destination.parent / ".builtin-skills.staging"
+
+
+def _live_or_backup_catalog(root: Path) -> Path:
+    named = root
+    if (
+        _LEGACY_SNAPSHOT_ID_RE.fullmatch(root.name) is not None
+        and root.parent.name == "builtin-skills"
+    ):
+        if _existing_directory(root) is not None:
+            return root
+        named = root.parent
+    if _readable_builtin_catalog(named):
+        return named
+    backup = _catalog_backup_path(named)
+    if _readable_builtin_catalog(backup):
+        return backup
+    return named
 
 
 def _is_catalog_noise(name: str, child: Path) -> bool:
@@ -1604,14 +1621,13 @@ def publish_builtin_skills(
     destination.parent.mkdir(parents=True, exist_ok=True)
     lock_path = destination.parent / ".publish-builtin-skills.lock"
     with MigrationFileLock(lock_path, timeout_seconds=None):
-        staging = destination.parent / ".builtin-skills.staging"
+        staging = _catalog_staging_path(destination)
+        backup = _catalog_backup_path(destination)
         _remove_snapshot_staging(staging)
         staging.mkdir(mode=0o700)
         try:
             _copy_snapshot_entries(entries, staging)
             _validate_builtin_catalog(staging)
-            backup = destination.parent / ".builtin-skills.previous"
-            _remove_snapshot_staging(backup)
             if os.path.lexists(destination):
                 try:
                     destination_stat = destination.stat(follow_symlinks=False)
@@ -1619,6 +1635,7 @@ def publish_builtin_skills(
                     raise RuntimeError(f"Built-in Skill catalog is unavailable: {destination}") from exc
                 if not stat.S_ISDIR(destination_stat.st_mode):
                     raise RuntimeError(f"Built-in Skill catalog is not a directory: {destination}")
+                _remove_snapshot_staging(backup)
                 os.rename(destination, backup)
             try:
                 os.rename(staging, destination)
@@ -1636,7 +1653,12 @@ def publish_builtin_skills(
 def prepare_builtin_skills() -> Path:
     """Publish and bind the running artifact's live built-in catalog."""
 
-    catalog = publish_builtin_skills()
+    try:
+        catalog = publish_builtin_skills()
+    except Exception:
+        os.environ.pop(BUILTIN_SKILLS_SNAPSHOT_ENV, None)
+        os.environ[BUILTIN_SKILLS_ROOT_ENV] = ""
+        raise
     os.environ.pop(BUILTIN_SKILLS_SNAPSHOT_ENV, None)
     os.environ[BUILTIN_SKILLS_ROOT_ENV] = str(catalog.expanduser().resolve())
     return catalog
@@ -1680,16 +1702,19 @@ def managed_skill_environment(
         env[SKILL_CLAUDE_CLI_PATH_ENV] = os.path.expanduser(
             normalized_claude_cli_path
         )
-    bound_root = (
-        builtin_catalog_root
-        if builtin_catalog_root is not None
-        else os.environ.get(BUILTIN_SKILLS_ROOT_ENV)
-    )
+    if builtin_catalog_root is not None:
+        bound_root = builtin_catalog_root
+    elif BUILTIN_SKILLS_ROOT_ENV in os.environ:
+        bound_root = os.environ.get(BUILTIN_SKILLS_ROOT_ENV)
+    else:
+        bound_root = None
     if bound_root:
         root = Path(bound_root).expanduser()
         if root.is_absolute():
             env[BUILTIN_SKILLS_ROOT_ENV] = str(_absolute_path(root))
-    elif builtin_catalog_root is None:
+    elif builtin_catalog_root is not None or BUILTIN_SKILLS_ROOT_ENV in os.environ:
+        env[BUILTIN_SKILLS_ROOT_ENV] = ""
+    else:
         env[BUILTIN_SKILLS_ROOT_ENV] = str(
             (paths.get_vibe_remote_dir() / "builtin-skills").expanduser().resolve()
         )

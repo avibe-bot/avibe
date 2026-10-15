@@ -335,19 +335,24 @@ managed discovery, the artifact publishes a complete, agent-readable catalog
 under `builtin-skills/<name>/`. A new version therefore adds new built-ins,
 replaces changed ones, and omits retired ones as one coherent set.
 
-Publication replaces that catalog atomically. Overlapping old and new Avibe
-processes share the live files after replacement; hashed per-version snapshots
-are not retained. The published catalog is not a user customization surface.
-V1 does not detect later manual tampering or repair user changes there. Leftover
-content-addressed snapshot directories from earlier Avibe versions are not
-discovered as Skills. A catalog that still contains only those hashed trees is
-not treated as published; the next unbound discovery republishes the named
-catalog in place. A bound path that still names a missing hashed snapshot falls
-back to the parent named catalog when that catalog is readable.
+Publication replaces that catalog by renaming the live directory aside and
+swapping in a staging tree. Overlapping old and new Avibe processes share the
+live files after replacement; hashed per-version snapshots are not retained.
+While the live directory is briefly absent, bound readers use
+`.builtin-skills.previous` if it is still a readable catalog. The published
+catalog is not a user customization surface. V1 does not detect later manual
+tampering or repair user changes there. Leftover content-addressed snapshot
+directories from earlier Avibe versions are not discovered as Skills. A catalog
+that still contains only those hashed trees is not treated as published; the
+next unbound discovery republishes the named catalog in place. A bound path that
+still names a missing hashed snapshot falls back to the parent named catalog
+when that catalog is readable.
 
 Wheels and source distributions include the authoritative built-in tree and
 preserve companion files and executable script modes. A publication failure
-omits built-ins without substituting a different version's content.
+binds an empty `AVIBE_BUILTIN_SKILLS_ROOT` so this process does not keep serving
+a previous catalog, and omits built-ins without substituting a different
+version's content.
 
 ## 11. Installation Defaults
 
