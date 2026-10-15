@@ -83,5 +83,13 @@ def test_copy_about_the_built_in_names_it_from_the_catalog(lang) -> None:
     ):
         text = t(key, lang, backend=name)
         assert name in text and "{backend}" not in text
+    # Legacy disabled state must name the one-way recovery action that still
+    # exists in Models, not the retired on/off switch.
+    gateway_off = t("errors.modelGatewayOff", lang, backend=name)
+    recovery_step = {
+        "en": "Open Models and click Retry, then choose a model.",
+        "zh": "请前往「模型」页点击「重试」，然后选择模型。",
+    }[lang]
+    assert recovery_step in gateway_off
     always_on = t("error.agentLifecycle.agent_always_enabled.message", lang, agent="vibey")
     assert "`vibey`" in always_on

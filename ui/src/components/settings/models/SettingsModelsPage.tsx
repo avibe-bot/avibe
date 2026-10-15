@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { ArrowDownToLine, Activity, Gauge, LoaderCircle, Power, RefreshCw, Route, ScrollText, Wrench } from 'lucide-react';
+import { ArrowDownToLine, Activity, Gauge, LoaderCircle, RefreshCw, Route, ScrollText, Wrench } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 
@@ -11,7 +11,6 @@ import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover'
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { useToast } from '@/context/ToastContext';
 import { cn } from '@/lib/utils';
-import { ToggleSwitch } from '../SettingsPrimitives';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
 import { BackendModelCatalogDialog, type CatalogFocus } from './BackendModelCatalogDialog';
 import { OAuthConnectDialog } from './OAuthConnectDialog';
@@ -189,9 +188,8 @@ type AuthorizedSurfaceLanding = {
 export const RuntimePill: React.FC<{
   read: RegionRead<RuntimeDependency>;
   starting: boolean;
-  stopping?: boolean;
   directCount?: number;
-}> = ({ read, starting, stopping = false, directCount }) => {
+}> = ({ read, starting, directCount }) => {
   const { t } = useModelsTranslation();
   const projection = foldRegionRead<RuntimeDependency, { runtime: RuntimeDependency; authoritative: boolean } | null>(read, {
     loading: () => null,
@@ -207,11 +205,9 @@ export const RuntimePill: React.FC<{
   const health = runtime.status.health;
   const unread = read.kind === 'degraded' && read.cause === 'read_failed';
   const canInstall = health === 'not_installed' && runtimeCanAttemptInstall(runtime);
-  const allDirect = authoritative && !starting && !stopping && health === 'ok' && directCount !== undefined && directCount > 0;
+  const allDirect = authoritative && !starting && health === 'ok' && directCount !== undefined && directCount > 0;
   const key = unread
     ? 'unread'
-    : stopping
-    ? 'stopping'
     : starting
     ? 'starting'
     : health === 'installing'
@@ -234,20 +230,18 @@ export const RuntimePill: React.FC<{
     (health === 'down' || health === 'degraded' || unread) && 'model-hub-runtime-pill--error',
     allDirect && 'model-hub-runtime-pill--direct',
   );
-  return <span className={className}><span className="model-hub-runtime-dot" />{(starting || stopping || health === 'installing') && <LoaderCircle className="animate-spin" />}{t(`settings.models.shell.${key}`, allDirect ? { count: directCount } : undefined)}</span>;
+  return <span className={className}><span className="model-hub-runtime-dot" />{(starting || health === 'installing') && <LoaderCircle className="animate-spin" />}{t(`settings.models.shell.${key}`, allDirect ? { count: directCount } : undefined)}</span>;
 };
 
 const RuntimeClosedState: React.FC<{
   read: RegionRead<RuntimeDependency>;
   runtime: RuntimeDependency | null;
   starting: boolean;
-  stopping: boolean;
-}> = ({ read, runtime, starting, stopping }) => {
+  onRetry?: () => void;
+}> = ({ read, runtime, starting, onRetry }) => {
   const { t } = useModelsTranslation();
   const health = runtime?.status.health ?? null;
-  const key = stopping
-    ? 'stopping'
-    : starting
+  const key = starting
       ? 'starting'
       : read.kind === 'unread'
         ? 'unread'
@@ -262,31 +256,35 @@ const RuntimeClosedState: React.FC<{
               : health === 'down'
                 ? 'down'
                 : 'off';
-  const busy = starting || stopping || health === 'installing';
+  const busy = starting || health === 'installing';
   return (
     <section className="model-hub-runtime-closed" aria-live="polite">
       <span className="model-hub-runtime-closed-icon" aria-hidden="true">
-        {busy ? <LoaderCircle className="animate-spin" /> : <Power />}
+        {busy ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}
       </span>
       <h2>{t(`settings.models.shell.closed.${key}.title`)}</h2>
       <p>{t(`settings.models.shell.closed.${key}.body`)}</p>
+      {onRetry && <Button variant="secondary" size="sm" className="mt-4" disabled={busy} onClick={onRetry}>{t('settings.models.gateway.retry')}</Button>}
     </section>
   );
 };
 
-const ModelHubShell: React.FC<{ actions?: React.ReactNode; children: React.ReactNode; rootRef?: React.Ref<HTMLDivElement> }> = ({ actions, children, rootRef }) => {
+const ModelHubShell: React.FC<{ status?: React.ReactNode; actions?: React.ReactNode; children: React.ReactNode; rootRef?: React.Ref<HTMLDivElement> }> = ({ status, actions, children, rootRef }) => {
   const { t } = useModelsTranslation();
   return (
     <div ref={rootRef} className="model-hub-shell">
       <header className="model-hub-shell-head">
-        <span className="flex items-center gap-[9px]">
-          <h1>{t('settings.models.shell.title')}</h1>
-          <ModelHubInfoHint
-            label={t('settings.models.shell.modelsInfo.label')}
-            content={t('settings.models.shell.modelsInfo.body')}
-            className="model-hub-shell-info"
-          />
-        </span>
+        <div className="model-hub-shell-identity">
+          <span className="model-hub-shell-title">
+            <h1>{t('settings.models.shell.title')}</h1>
+            <ModelHubInfoHint
+              label={t('settings.models.shell.modelsInfo.label')}
+              content={t('settings.models.shell.modelsInfo.body')}
+              className="model-hub-shell-info"
+            />
+          </span>
+          {status}
+        </div>
         {actions}
       </header>
       {children}
@@ -336,9 +334,9 @@ type HubTab = 'sources' | 'tools' | 'quota' | 'usage' | 'logs';
 const HubTabs: React.FC<{ tab: HubTab; onChange: (tab: HubTab) => void }> = ({ tab, onChange }) => {
   const { t } = useModelsTranslation();
   return (
-    <div role="tablist" className="flex h-[39px] items-end gap-1 border-b border-border">
+    <div role="tablist" className="model-hub-tabs flex min-w-0 items-end gap-1 overflow-x-auto border-b border-border">
       {(['sources', 'tools', 'quota', 'usage', 'logs'] as const).map((id) => (
-        <button key={id} type="button" role="tab" aria-selected={tab === id} onClick={() => onChange(id)} className={cn('flex h-[41px] items-center gap-[7px] border-b-2 px-3.5 text-[13px] transition-colors', tab === id ? 'border-mint font-semibold text-foreground' : 'border-transparent font-normal text-muted hover:text-foreground')}>
+        <button key={id} type="button" role="tab" aria-selected={tab === id} onClick={() => onChange(id)} className={cn('flex h-[41px] shrink-0 items-center gap-[7px] whitespace-nowrap border-b-2 px-3.5 text-[13px] transition-colors', tab === id ? 'border-mint font-semibold text-foreground' : 'border-transparent font-normal text-muted hover:text-foreground')}>
           {id === 'sources' ? <Route className="size-3.5" /> : id === 'tools' ? <Wrench className="size-3.5" /> : id === 'quota' ? <Gauge className="size-3.5" /> : id === 'usage' ? <Activity className="size-3.5" /> : <ScrollText className="size-3.5" />}
           {t(`settings.models.shell.tab.${id === 'sources' ? 'hub' : id}`)}
         </button>
@@ -429,7 +427,6 @@ export const SettingsModelsPage: React.FC = () => {
   const [quotaRead, setQuotaRead] = React.useState<RegionRead<QuotaSummary>>(loadingRegion);
   const [refreshingQuota, setRefreshingQuota] = React.useState(false);
   const [startingRuntime, setStartingRuntime] = React.useState(false);
-  const [stoppingRuntime, setStoppingRuntime] = React.useState(false);
   const [runtimeRecoveryPending, setRuntimeRecoveryPending] = React.useState(false);
   const [migrationOpen, setMigrationOpen] = React.useState(false);
   const [migrationBackend, setMigrationBackend] = React.useState<AgentBackend | null>(null);
@@ -598,9 +595,7 @@ export const SettingsModelsPage: React.FC = () => {
   const runtimeEnabled = retainedRuntime !== null
     && (retainedRuntime.enabled ?? runtimeIsRunning(retainedRuntime))
     && runtimeRead.kind !== 'unread';
-  const runtimeConfigurationVisible = (
-    runtimeRunning || (runtimeEnabled && runtimeHealth !== 'installing')
-  ) && !stoppingRuntime;
+  const runtimeConfigurationVisible = runtimeRunning || (runtimeEnabled && runtimeHealth !== 'installing');
   React.useEffect(() => {
     // Re-asked whenever the dialog closes, since applying it is what empties
     // the scan.
@@ -1102,7 +1097,7 @@ export const SettingsModelsPage: React.FC = () => {
     }
   }, [feed, showToast, t]);
   const startRuntime = async () => {
-    if (startingRuntime || stoppingRuntime) return;
+    if (startingRuntime) return;
     setStartingRuntime(true);
     try {
       if (!retainedRuntime) {
@@ -1127,23 +1122,6 @@ export const SettingsModelsPage: React.FC = () => {
       setStartingRuntime(false);
     }
   };
-  const stopRuntime = async () => {
-    if (startingRuntime || stoppingRuntime) return;
-    setStoppingRuntime(true);
-    try {
-      const stopped = await modelsApi.stopRuntime();
-      setRuntimeRead(readyRegion(stopped));
-      setRuntimeRecoveryPending(false);
-      setSelectedSourceId(null);
-      setTab('sources');
-    } catch {
-      const observed = await modelsApi.getRuntimeStatus().catch(() => null);
-      setRuntimeRead((previous) => observed ? readyRegion(observed) : failRegionRead(previous));
-      showToast(t('settings.models.errors.stopFailed') as string, 'error');
-    } finally {
-      setStoppingRuntime(false);
-    }
-  };
   const landingLoading = sourcesRead.kind === 'loading'
     && supplyRead.kind === 'loading'
     && runtimeRead.kind === 'loading';
@@ -1165,34 +1143,10 @@ export const SettingsModelsPage: React.FC = () => {
   );
   const hubBackends = agents.filter(agentUsesHubRuntime).map((agent) => agent.backend);
   const activeBackends = supplyRead.kind === 'ready' ? new Set(hubBackends) : undefined;
-  const stopBlocked = runtimeEnabled && (supplyRead.kind !== 'ready' || hubBackends.length > 0);
-  const runtimeSwitchUnsupported = !runtimeEnabled
-    && runtimeHealth === 'not_installed'
-    && retainedRuntime?.manifest.resolution === 'unsupported';
-  const runtimeSwitchDisabled = startingRuntime
-    || stoppingRuntime
-    || runtimeRead.kind !== 'ready'
-    || runtimeHealth === 'installing'
-    || runtimeSwitchUnsupported
-    || stopBlocked;
-  const builtinHubBackend = hubBackends.find((backend) => !getBackendUiMeta(backend).capabilities.supports_cli);
-  const runtimeSwitchLabel = stopBlocked
-    ? supplyRead.kind === 'ready'
-      ? builtinHubBackend
-        ? t('settings.models.shell.toggle.stopVibeyBlocked', { name: getBackendUiMeta(builtinHubBackend).label })
-        : t('settings.models.shell.toggle.stopBlocked', { names: hubBackends.join(', ') })
-      : t('settings.models.shell.toggle.stopUnavailable')
-    : runtimeEnabled
-      ? t('settings.models.shell.toggle.turnOff')
-      : t('settings.models.shell.toggle.turnOn');
-  const toggleRuntime = () => {
-    if (runtimeSwitchDisabled) return;
-    if (runtimeEnabled) {
-      void stopRuntime();
-    } else {
-      void startRuntime();
-    }
-  };
+  const canRetryRuntime = runtimeRead.kind === 'ready'
+    && !runtimeRunning
+    && runtimeHealth !== 'installing'
+    && retainedRuntime?.manifest.resolution !== 'unsupported';
   const installedSupplyRead = foldRegionRead<AgentSupply[], RegionRead<AgentSupply[]>>(supplyDisplayRead, {
     loading: () => loadingRegion(),
     ready: () => readyRegion(installedAgents),
@@ -1570,14 +1524,9 @@ export const SettingsModelsPage: React.FC = () => {
   return (
     <ModelHubShell
       rootRef={pageRef}
-      actions={!landingLoading
-        ? <span className="flex items-center gap-2">
-              <RuntimePill
-                read={runtimeRead}
-                starting={startingRuntime}
-                stopping={stoppingRuntime}
-                directCount={directEmpty ? installedNativeAgents.length : undefined}
-              />
+      status={!landingLoading && <RuntimePill read={runtimeRead} starting={startingRuntime} directCount={directEmpty ? installedNativeAgents.length : undefined} />}
+      actions={!landingLoading && runtimeConfigurationVisible
+        ? <div className="model-hub-shell-actions">
               {runtimeConfigurationVisible && migrationAvailable === true && (
                 <Button
                   type="button"
@@ -1601,20 +1550,13 @@ export const SettingsModelsPage: React.FC = () => {
                 title={t('settings.models.direct.action.refreshAgents')}
                 onClick={() => { setMigrationScanEpoch((epoch) => epoch + 1); void retrySupply(); }}
               ><RefreshCw aria-hidden className={cn('size-3.5', presenceRefreshing && 'animate-spin')} /></Button>}
-              <span title={runtimeSwitchLabel}>
-                <ToggleSwitch
-                  enabled={runtimeEnabled}
-                  disabled={runtimeSwitchDisabled}
-                  label={runtimeSwitchLabel}
-                  onClick={toggleRuntime}
-                />
-              </span>
-            </span>
+              {canRetryRuntime && <Button variant="secondary" size="sm" disabled={startingRuntime} onClick={() => void startRuntime()}>{t('settings.models.gateway.retry')}</Button>}
+            </div>
         : undefined}
     >
       {landingLoading ? <div className="text-[13px] text-muted">{t('common.loading')}</div>
         : !runtimeConfigurationVisible
-          ? <RuntimeClosedState read={runtimeRead} runtime={retainedRuntime} starting={startingRuntime} stopping={stoppingRuntime} />
+          ? <RuntimeClosedState read={runtimeRead} runtime={retainedRuntime} starting={startingRuntime} onRetry={canRetryRuntime ? () => void startRuntime() : undefined} />
           : <div className="space-y-[22px]">
                   {/* The tab strip belongs to the Hub, not to the source
                       inventory. Usage and switch history both outlive the Sources

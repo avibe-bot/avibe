@@ -35,9 +35,9 @@ Out of scope (documented, not dropped silently):
 | ID | Steps | Expect | Status |
 |---|---|---|---|
 | A1 | flag off | `/api/models/*` → 404 `feature_disabled`; UI redirects to `/settings/backends` | assert |
-| A2 | install → start → stop happy path; status polling transitions | `installing/starting/active/stopped`; engine config regenerated with hardened values (`request-retry: 0`, `disable-cooling: true`, `usage-statistics-enabled: false` …) — conservation check on CPA upgrade | assert |
-| A3 | agent in hub mode → stop runtime | 409 `runtime_in_use` with `data.backends`; **and** UI surfaces the blocking backends (B4 fix-first; baseline: generic toast) | fix-first |
-| A4 | agents read fails while runtime on | toggle must not silently disable (B5) | fix-first |
+| A2 | lifecycle API install → start → stop; UI recovery action | install/start recovery stays available without a user-facing on/off switch; API hardening and lifecycle checks remain unchanged | assert |
+| A3 | agent in hub mode → lifecycle API stop | API retains 409 `runtime_in_use` with `data.backends`; the Models page exposes no stop action | assert |
+| A4 | agents read fails while runtime on | keep runtime status readable without introducing an on/off control | assert |
 | A5 | controller restart mid OAuth poll | poll reports `engine_down` copy, never a fake materialization failure (B10) | assert |
 
 ### B. API-key sources (C16–C29)
@@ -339,7 +339,7 @@ lane-to-lane.
 ### Playwright scope (this round)
 
 Core flows against a live instance: capability gate redirect, runtime
-install/start/stop toggle incl. blocked-stop copy, add-API-key dialog full
+recovery entry point and the absence of a runtime off switch, add-API-key dialog full
 branches (auto-detect / manual protocol / pull models / empty-inventory
 add-anyway / replace key) against the mock upstream, guard refusal → confirm
 → committed toast (incl. B7 echo probe as fixme), source detail

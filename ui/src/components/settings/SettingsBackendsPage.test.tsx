@@ -122,21 +122,21 @@ describe('backend attention', () => {
 
     const vibey = await rowOf('Vibey');
     expect(await within(vibey).findByText('No model selected')).toBeTruthy();
-    expect(within(vibey).queryByText('Gateway off')).toBeNull();
+    expect(within(vibey).queryByText('Gateway unavailable')).toBeNull();
     expect(within(await rowOf('Claude Code')).queryByText('No model selected')).toBeNull();
   });
 
-  // Turning the gateway off leaves the backend enabled with nothing to run on;
-  // its status names the cause and its page leads to Models.
-  it('says the gateway is off instead, on the row and on the backend page', async () => {
+  // A legacy disabled runtime leaves the backend enabled with nothing to run on;
+  // its status names the cause and its page leads to Models for recovery.
+  it('reports an unavailable gateway on the row and leads to recovery on the backend page', async () => {
     vi.spyOn(modelsApi, 'listAgents').mockResolvedValue(withoutModel);
     mocks.api.getConfig.mockResolvedValue(modelHubConfig(false));
     renderBackends();
 
     const vibey = await rowOf('Vibey');
-    expect(await within(vibey).findByText('Gateway off')).toBeTruthy();
+    expect(await within(vibey).findByText('Gateway unavailable')).toBeTruthy();
     expect(within(vibey).queryByText('No model selected')).toBeNull();
-    expect(within(await rowOf('Claude Code')).queryByText('Gateway off')).toBeNull();
+    expect(within(await rowOf('Claude Code')).queryByText('Gateway unavailable')).toBeNull();
 
     fireEvent.click(within(vibey).getByRole('link', { name: 'Configure' }));
     expect(await screen.findByText('The model gateway is off, so Vibey has no model to run on.')).toBeTruthy();
@@ -161,7 +161,7 @@ describe('backend attention', () => {
     expect(screen.getByRole('link', { name: 'Open Models page' }).getAttribute('href')).toBe('/settings/models');
   });
 
-  // The operator's Model Hub switch leaves the always-on backend nothing to run on,
+  // The deployment capability gate leaves the built-in backend nothing to run on,
   // and there is no Models page to open.
   it('says Model Hub is disabled when the instance turns it off', async () => {
     vi.spyOn(modelsApi, 'listAgents').mockResolvedValue(withoutModel);
