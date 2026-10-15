@@ -353,10 +353,7 @@ def test_f4_shell_data_roles_allow_http_migration_without_changing_data(
         assert app.client.post("/api/models/migration/scan", {}).json()["scan"]["items"] == []
 
 
-@pytest.mark.parametrize("damage", ["missing", pytest.param("corrupt", marks=pytest.mark.xfail(strict=True, reason=(
-    "on a running engine the reload reads the previous projection's credentials to find stale model names, "
-    "and a content-corrupt old document raises there; fixed separately"
-)))])
+@pytest.mark.parametrize("damage", ["missing", "corrupt"])
 def test_f4_replace_migrated_bearer_without_old_secret_retains_cpa_transport(
     model_hub_app_factory, mock_llm_upstream, damage,
 ):

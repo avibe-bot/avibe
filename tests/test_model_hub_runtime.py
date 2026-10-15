@@ -3226,6 +3226,44 @@ def test_source_sync_waits_for_a_reload_that_removes_every_model(tmp_path: Path)
         supervisor.stop()
 
 
+@pytest.mark.parametrize(
+    ("damage", "error"),
+    [("missing", None), ("corrupt", "JSONDecodeError"), ("non_object", "NonObjectDocument")],
+)
+def test_a_key_replacement_reloads_without_reading_the_old_credential(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, damage: str, error: str | None,
+) -> None:
+    """Replacing the key is how a damaged credential is recovered, so the reload never depends on reading it."""
+
+    supervisor, store = _fixture_supervisor(tmp_path)
+    old_ref = store.store_api_key("old-secret", base_url="https://api.example.test/v1")
+    store.sync_sources([_binding(old_ref)])
+    connection = supervisor.ensure_running()
+    adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)
+    document = store.root / "credentials" / f"{old_ref}.json"
+    try:
+        if damage == "missing":
+            document.unlink()
+        else:
+            document.write_bytes(b"{fixture-corrupt" if damage == "corrupt" else b"[]")
+        new_ref = store.store_api_key("new-secret", base_url="https://api.example.test/v1")
+        with caplog.at_level(logging.WARNING, logger="vibe.model_hub_runtime.supervisor"):
+            asyncio.run(adapter.sync_sources([_binding(new_ref)]))
+        prefix = store.get_source("src_fixture123").prefix
+        assert EngineClient(connection).list_model_ids() == {f"{prefix}/model-a"}
+        warnings = [record.getMessage() for record in caplog.records if "previous credential" in record.getMessage()]
+        assert warnings == ([] if error is None else [
+            f"Model Hub reload cannot read the previous credential of source=src_fixture123 error={error}; "
+            "its removed model names are not awaited"
+        ])
+        # Every other reader still refuses the damaged document.
+        if damage != "missing":
+            with pytest.raises(EngineStateError):
+                store.credential_metadata(old_ref)
+    finally:
+        supervisor.stop()
+
+
 def test_source_sync_never_restarts_a_live_engine_that_lost_the_reload_ack(tmp_path: Path) -> None:
     supervisor, store = _fixture_supervisor(tmp_path, drop_reload_ack=True)
     credential_ref = store.store_api_key("upstream-secret", base_url="https://api.example.test/v1")
