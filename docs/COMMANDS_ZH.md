@@ -345,6 +345,7 @@ Avibe 当前有两套命令面：
 /setup claude
 /setup codex
 /setup opencode
+/setup vibey
 /setup cc
 /setup cx
 /setup oc
@@ -355,9 +356,9 @@ Avibe 当前有两套命令面：
 #### 作用
 
 - 如果没有显式 backend，就使用当前作用域绑定的 backend
-- 启动对应后端的认证修复流程
-- 把浏览器链接、device code、后续输入提示发回聊天
-- 等待流程完成后做状态校验
+- 对 Claude Code、Codex、OpenCode：启动对应后端的认证修复流程，把浏览器链接、device code、后续输入提示发回聊天，
+  等待流程完成后做状态校验
+- 对 Vibey：不启动任何流程，因为 Vibey 不需要登录；只回复它的模型从哪里来（见下文）
 
 #### 分 backend 行为
 
@@ -387,6 +388,14 @@ Avibe 当前有两套命令面：
 ```text
 /setup code <value>
 ```
+
+##### Vibey
+
+- Vibey 的模型全部来自模型网关，没有需要登录的东西
+- 回复：模型来源在「模型」页添加和管理，并说明在哪里打开「模型」页：已连接 Avibe Cloud 时给出公网
+  `/settings/models` 链接，否则指向 Avibe 工作台
+- 模型网关此刻给不了 Vibey 模型时，改为回复原因：网关已关闭，或还没有模型来源（两者都同样指向「模型」页）；或本实例停用了模型网关
+  （不给指引，因为「模型」页不可用）
 
 #### 权限
 

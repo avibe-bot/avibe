@@ -26,6 +26,7 @@ import pytest
 from core import controller as controller_module
 from core import internal_server
 from core.controller import Controller
+from core.runtime_activation import RuntimeActivationRegistry
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 #: Everything shipped to a user's machine. `tests/` is excluded deliberately:
@@ -99,6 +100,8 @@ def startup(monkeypatch):
     controller.config = SimpleNamespace()
     controller.enabled_platforms = ["slack"]
     controller.show_git_checkpoint_service = SimpleNamespace(start=lambda: events.append("show checkpoints"))
+    # `run()` binds the loop thread it starts to the activation registry itself.
+    controller.runtime_activation = RuntimeActivationRegistry()
     controller._shutdown_requested = False
     controller._im_run_exception = None
     controller.cleanup_sync = Mock()

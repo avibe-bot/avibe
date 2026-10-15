@@ -30,6 +30,7 @@ pub const SHORTCUT_PRESETS: [&str; 3] = [DEFAULT_SHORTCUT, "Control+Shift+Space"
 #[serde(rename_all = "lowercase")]
 pub enum PetIntent {
     Listen,
+    Release,
     Show,
 }
 
@@ -55,6 +56,8 @@ pub struct PetPreferences {
     pub anchor: Option<PetAnchor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binding: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dismissed_ids: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -135,6 +138,8 @@ pub struct PetReady {
     #[serde(flatten)]
     pub binding: PetBinding,
     pub summon_pending: Option<PendingSummon>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dismissed_ids: Vec<String>,
 }
 
 /// The pet's preferences and in-run state, one per shell.
@@ -225,6 +230,7 @@ impl PetStore {
     pub fn bind(&mut self, session_id: &str) -> PetBinding {
         if self.preferences.binding.as_deref() != Some(session_id) {
             self.preferences.binding = Some(session_id.to_owned());
+            self.preferences.dismissed_ids.clear();
             self.revision += 1;
             self.persist();
         }
@@ -236,10 +242,27 @@ impl PetStore {
     pub fn unbind(&mut self, session_id: &str) -> PetBinding {
         if self.preferences.binding.as_deref() == Some(session_id) {
             self.preferences.binding = None;
+            self.preferences.dismissed_ids.clear();
             self.revision += 1;
             self.persist();
         }
         self.binding()
+    }
+
+    pub fn set_dismissed_ids(&mut self, session_id: &str, ids: Vec<String>) -> std::io::Result<()> {
+        if self.preferences.binding.as_deref() != Some(session_id) {
+            return Ok(());
+        }
+        if self.preferences.dismissed_ids == ids {
+            return Ok(());
+        }
+        let next = PetPreferences {
+            dismissed_ids: ids,
+            ..self.preferences.clone()
+        };
+        write_preferences(&self.path, &next)?;
+        self.preferences = next;
+        Ok(())
     }
 
     /// A new document is loading in the pet window: summons wait for its
@@ -265,6 +288,7 @@ impl PetStore {
         PetReady {
             binding: self.binding(),
             summon_pending: self.pending_summon.take().map(|intent| PendingSummon { intent }),
+            dismissed_ids: self.preferences.dismissed_ids.clone(),
         }
     }
 
@@ -279,12 +303,15 @@ impl PetStore {
     }
 
     /// A summon while no window can exist yet, because the Workbench has no
-    /// Runtime. It waits for the next page as `show`: the pet comes up with
-    /// its composer focused once a Runtime is ready, but a key pressed during
-    /// startup never opens the microphone long after.
-    pub fn summon_before_window(&mut self) {
+    /// Runtime. A hotkey becomes a released hold, opening text when ready;
+    /// a show action still opens the stack. Startup never starts a stale mic.
+    pub fn summon_before_window(&mut self, intent: PetIntent) {
         self.page_ready = false;
-        self.pending_summon = Some(PetIntent::Show);
+        self.pending_summon = Some(if intent == PetIntent::Listen {
+            PetIntent::Release
+        } else {
+            PetIntent::Show
+        });
     }
 
     fn persist(&self) {
@@ -348,21 +375,21 @@ impl WorkArea {
 
     fn pet_at(&self, anchor: (f64, f64)) -> LogicalRect {
         LogicalRect {
-            x: anchor.0,
-            y: anchor.1,
-            width: self.pet_extent(),
-            height: self.pet_extent(),
+            x: restored_window_origin(anchor, self.unit).0,
+            y: restored_window_origin(anchor, self.unit).1,
+            width: WINDOW_WIDTH * self.unit,
+            height: WINDOW_HEIGHT * self.unit,
         }
     }
 }
 
-// These match the `/pet` route's layout: an 88 px avatar inside `p-2`, a
-// 320 px panel, and `gap-2` between them (`ui/src/pet/`).
-pub const PET_SIZE: f64 = 88.0;
-const PADDING: f64 = 8.0;
-const GAP: f64 = 8.0;
-const PANEL_WIDTH: f64 = 320.0;
-const EXPANDED_HEIGHT: f64 = 480.0;
+// Shared with pet-mini.css: image top-left (172.5, 449), dock at y=552.
+pub const PET_SIZE: f64 = 115.0;
+pub const WINDOW_WIDTH: f64 = 460.0;
+pub const WINDOW_HEIGHT: f64 = 600.0;
+const PET_BOTTOM: f64 = 36.0;
+// pet-mini.css: the dock starts 103px below the image top and is 40px high.
+const PET_AND_DOCK_HEIGHT: f64 = 143.0;
 /// Distance from the work area's corner for a pet with no saved place.
 const DEFAULT_MARGIN: f64 = 24.0;
 
@@ -398,29 +425,13 @@ impl Default for PetLayout {
     }
 }
 
-pub fn window_size(expanded: bool) -> (f64, f64) {
-    if expanded {
-        (PADDING + PANEL_WIDTH + GAP + PET_SIZE + PADDING, EXPANDED_HEIGHT)
-    } else {
-        (PET_SIZE + 2.0 * PADDING, PET_SIZE + 2.0 * PADDING)
-    }
+pub fn window_size(_expanded: bool) -> (f64, f64) {
+    (WINDOW_WIDTH, WINDOW_HEIGHT)
 }
 
-/// Where the pet image sits inside the window.
-pub fn pet_offset(expanded: bool, layout: PetLayout) -> (f64, f64) {
-    if !expanded {
-        return (PADDING, PADDING);
-    }
-    let (width, height) = window_size(true);
-    let x = match layout.panel_side {
-        PanelSide::Left => width - PADDING - PET_SIZE,
-        PanelSide::Right => PADDING,
-    };
-    let y = match layout.panel_edge {
-        PanelEdge::Bottom => height - PADDING - PET_SIZE,
-        PanelEdge::Top => PADDING,
-    };
-    (x, y)
+/// The image stays at the same position in every interaction state.
+pub fn pet_offset(_expanded: bool, _layout: PetLayout) -> (f64, f64) {
+    ((WINDOW_WIDTH - PET_SIZE) / 2.0, WINDOW_HEIGHT - PET_BOTTOM - PET_SIZE)
 }
 
 pub fn window_origin(anchor: (f64, f64), expanded: bool, layout: PetLayout) -> (f64, f64) {
@@ -442,46 +453,16 @@ pub fn rescale(point: (f64, f64), from_scale: f64, to_scale: f64) -> (f64, f64) 
     (point.0 * factor, point.1 * factor)
 }
 
-/// Opens the panel toward the room it has: left and above by default, flipped
-/// near the left or top edge, and toward the larger room when neither fits.
-pub fn choose_layout(anchor: (f64, f64), work_area: LogicalRect) -> PetLayout {
-    let (width, height) = window_size(true);
-    let fits = |start: f64, end: f64, low: f64, high: f64| (start - low, high - end);
-    let left = PetLayout {
-        panel_side: PanelSide::Left,
-        panel_edge: PanelEdge::Bottom,
-    };
-    let right = PetLayout {
-        panel_side: PanelSide::Right,
-        panel_edge: PanelEdge::Top,
-    };
-    let left_x = window_origin(anchor, true, left).0;
-    let right_x = window_origin(anchor, true, right).0;
-    let (room_left, _) = fits(left_x, left_x + width, work_area.x, work_area.right());
-    let (_, room_right) = fits(right_x, right_x + width, work_area.x, work_area.right());
-    let panel_side = if room_left >= 0.0 || room_left >= room_right {
-        PanelSide::Left
-    } else {
-        PanelSide::Right
-    };
-    let above_y = window_origin(anchor, true, left).1;
-    let below_y = window_origin(anchor, true, right).1;
-    let (room_above, _) = fits(above_y, above_y + height, work_area.y, work_area.bottom());
-    let (_, room_below) = fits(below_y, below_y + height, work_area.y, work_area.bottom());
-    let panel_edge = if room_above >= 0.0 || room_above >= room_below {
-        PanelEdge::Bottom
-    } else {
-        PanelEdge::Top
-    };
-    PetLayout { panel_side, panel_edge }
+/// The mini has one bottom-anchored column; it never flips or moves on expand.
+pub fn choose_layout(_anchor: (f64, f64), _work_area: LogicalRect) -> PetLayout {
+    PetLayout::default()
 }
 
-/// The place for a pet that has none: the work area's bottom-right corner.
 pub fn default_anchor(work_area: &WorkArea) -> PetAnchor {
-    let inset = (PET_SIZE + DEFAULT_MARGIN) * work_area.unit;
+    let (dx, dy) = pet_offset(false, PetLayout::default());
     PetAnchor {
-        x: work_area.area.right() - inset,
-        y: work_area.area.bottom() - inset,
+        x: work_area.area.right() - (WINDOW_WIDTH + DEFAULT_MARGIN) * work_area.unit + dx * work_area.unit,
+        y: work_area.area.bottom() - (WINDOW_HEIGHT + DEFAULT_MARGIN) * work_area.unit + dy * work_area.unit,
         monitor: work_area.name.clone(),
     }
 }
@@ -511,40 +492,85 @@ pub fn restored_window_origin(anchor: (f64, f64), unit: f64) -> (f64, f64) {
 /// Keeps a restored pet whole on a connected display. A pet already inside a
 /// work area stays exactly where it was. Otherwise it moves into the area it
 /// overlaps most; with no overlap, into its own display if that is still
-/// connected, else the first area (the primary display).
+/// connected, else the first area (the primary display). Use the fixed window
+/// on a display that fits it, otherwise preserve access to the image and dock.
 pub fn clamp_anchor(anchor: &PetAnchor, work_areas: &[WorkArea]) -> PetAnchor {
     let at = (anchor.x, anchor.y);
-    let usable: Vec<&WorkArea> = work_areas
-        .iter()
-        .filter(|area| area.area.width >= area.pet_extent() && area.area.height >= area.pet_extent())
-        .collect();
-    if let Some(home) = usable.iter().find(|area| area.area.contains(&area.pet_at(at))) {
+    let image = |area: &WorkArea| LogicalRect {
+        x: anchor.x,
+        y: anchor.y,
+        width: PET_SIZE * area.unit,
+        height: PET_SIZE * area.unit,
+    };
+    let footprint = |area: &WorkArea| {
+        if area.area.width >= WINDOW_WIDTH * area.unit && area.area.height >= WINDOW_HEIGHT * area.unit {
+            area.pet_at(at)
+        } else {
+            LogicalRect {
+                height: PET_AND_DOCK_HEIGHT * area.unit,
+                ..image(area)
+            }
+        }
+    };
+    if let Some(home) = work_areas.iter().find(|area| area.area.contains(&footprint(area))) {
         return PetAnchor {
             monitor: home.name.clone().or_else(|| anchor.monitor.clone()),
             ..anchor.clone()
         };
     }
-    let overlapping = usable
+    let overlapping = work_areas
         .iter()
-        .map(|area| (area.area.overlap(&area.pet_at(at)), *area))
+        .map(|area| (area.area.overlap(&image(area)), area))
         .filter(|(overlap, _)| *overlap > 0.0)
         .max_by(|a, b| a.0.total_cmp(&b.0))
         .map(|(_, area)| area);
     let named = || {
-        usable
+        work_areas
             .iter()
             .find(|area| area.name.is_some() && area.name == anchor.monitor)
-            .copied()
     };
-    let Some(target) = overlapping.or_else(named).or_else(|| usable.first().copied()) else {
+    let Some(target) = overlapping.or_else(named).or_else(|| work_areas.first()) else {
         return anchor.clone();
     };
+    let bounds = footprint(target);
+    let left = target.area.x + anchor.x - bounds.x;
+    let top = target.area.y + anchor.y - bounds.y;
     PetAnchor {
-        x: anchor.x.clamp(target.area.x, target.area.right() - target.pet_extent()),
-        y: anchor
-            .y
-            .clamp(target.area.y, target.area.bottom() - target.pet_extent()),
+        x: anchor
+            .x
+            .clamp(left, (left + target.area.width - bounds.width).max(left)),
+        y: anchor.y.clamp(top, (top + target.area.height - bounds.height).max(top)),
         monitor: target.name.clone(),
+    }
+}
+
+/// Window-local logical coordinates; shadows deliberately do not enlarge these.
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct HitRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    /// Part of the page's hover zone (Vibey and its dock). Absent from older
+    /// pages, which then get no hover events.
+    #[serde(default)]
+    pub hover: bool,
+}
+
+/// Whether the cursor is over the page's hover zone. The shell reports this to
+/// the page because a webview in a window that is not key (the pet never takes
+/// focus on its own) receives no hover on macOS.
+pub fn hovering(rects: &[HitRect], x: f64, y: f64) -> bool {
+    rects.iter().any(|rect| rect.hover && rect.contains(x, y))
+}
+impl HitRect {
+    pub fn valid(&self) -> bool {
+        [self.x, self.y, self.width, self.height].iter().all(|v| v.is_finite())
+            && self.width >= 0.0
+            && self.height >= 0.0
+    }
+    pub fn contains(&self, x: f64, y: f64) -> bool {
+        x >= self.x && x <= self.x + self.width && y >= self.y && y <= self.y + self.height
     }
 }
 
@@ -615,6 +641,80 @@ mod tests {
     }
 
     #[test]
+    fn dismissed_cards_survive_restart_and_stay_scoped_to_the_binding() {
+        let directory = TestDirectory::new();
+        // Released files without the optional field retain their binding.
+        std::fs::write(directory.file(), r#"{"version":1,"enabled":true,"binding":"s1"}"#).unwrap();
+        let mut store = PetStore::load(directory.file());
+        assert!(store.page_ready().dismissed_ids.is_empty());
+        store
+            .set_dismissed_ids("s1", vec!["watch:w1".into(), "task:t1".into()])
+            .unwrap();
+        let mut restored = PetStore::load(directory.file());
+        assert_eq!(restored.page_ready().dismissed_ids, vec!["watch:w1", "task:t1"]);
+        restored.bind("s2");
+        restored.set_dismissed_ids("s1", vec!["stale".into()]).unwrap();
+        let mut next = PetStore::load(directory.file());
+        assert_eq!(next.binding().binding.as_deref(), Some("s2"));
+        assert!(next.page_ready().dismissed_ids.is_empty());
+    }
+
+    #[test]
+    fn hit_regions_accept_only_finite_nonnegative_extents() {
+        let rect = HitRect {
+            x: 10.0,
+            y: 20.0,
+            width: 30.0,
+            height: 40.0,
+            hover: false,
+        };
+        assert!(rect.valid());
+        assert!(rect.contains(10.0, 20.0));
+        assert!(!rect.contains(9.9, 20.0));
+        assert!(!rect.contains(40.1, 20.0));
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(!HitRect { x: invalid, ..rect }.valid());
+            assert!(!HitRect { y: invalid, ..rect }.valid());
+            assert!(!HitRect { width: invalid, ..rect }.valid());
+            assert!(!HitRect {
+                height: invalid,
+                ..rect
+            }
+            .valid());
+        }
+        assert!(!HitRect { width: -1.0, ..rect }.valid());
+        assert!(!HitRect { height: -1.0, ..rect }.valid());
+    }
+
+    #[test]
+    fn only_hover_rects_make_the_cursor_hover_and_older_pages_omit_the_flag() {
+        let rects: Vec<HitRect> = serde_json::from_str(
+            r#"[{"x":0,"y":0,"width":100,"height":50},{"x":0,"y":60,"width":100,"height":50,"hover":true}]"#,
+        )
+        .unwrap();
+        assert!(!rects[0].hover);
+        assert!(!hovering(&rects, 50.0, 25.0));
+        assert!(hovering(&rects, 50.0, 80.0));
+        assert!(!hovering(&rects, 50.0, 55.0));
+        assert!(!hovering(&[], 50.0, 80.0));
+    }
+
+    #[test]
+    fn releasing_a_shortcut_during_page_load_never_replays_a_held_microphone() {
+        let directory = TestDirectory::new();
+        let mut store = PetStore::load(directory.file());
+        assert_eq!(store.summon(PetIntent::Listen), None);
+        assert_eq!(store.summon(PetIntent::Release), None);
+        assert_eq!(
+            store.page_ready().summon_pending,
+            Some(PendingSummon {
+                intent: PetIntent::Release
+            })
+        );
+        assert_eq!(store.page_ready().summon_pending, None);
+    }
+
+    #[test]
     fn an_absent_file_or_absent_enabled_follows_the_build_default() {
         let directory = TestDirectory::new();
         assert_eq!(load_preferences(&directory.file()), PreferencesLoad::Absent);
@@ -650,6 +750,7 @@ mod tests {
                     monitor: None
                 }),
                 binding: Some("s1".into()),
+                dismissed_ids: Vec::new(),
             })
         );
 
@@ -809,6 +910,7 @@ mod tests {
             summon_pending: Some(PendingSummon {
                 intent: PetIntent::Listen,
             }),
+            dismissed_ids: Vec::new(),
         };
         assert_eq!(
             serde_json::to_value(ready).unwrap(),
@@ -835,46 +937,39 @@ mod tests {
                 }
             }
         }
-        // The panel opening to the left moves the window's origin, never the pet.
-        let left = window_origin(anchor, true, PetLayout::default());
-        assert!(left.0 < anchor.0 - 300.0);
+        // Expansion changes no geometry in the fixed mini window.
+        assert_eq!(
+            window_origin(anchor, false, PetLayout::default()),
+            window_origin(anchor, true, PetLayout::default())
+        );
     }
 
     #[test]
-    fn the_panel_flips_toward_the_room_near_each_screen_edge() {
+    fn the_fixed_window_stays_whole_and_layout_never_flips() {
         let screen = LogicalRect {
             x: 0.0,
             y: 25.0,
             width: 1440.0,
             height: 875.0,
         };
-        let cases = [
-            ((1300.0, 780.0), PanelSide::Left, PanelEdge::Bottom),
-            ((20.0, 780.0), PanelSide::Right, PanelEdge::Bottom),
-            ((1300.0, 40.0), PanelSide::Left, PanelEdge::Top),
-            ((20.0, 40.0), PanelSide::Right, PanelEdge::Top),
-            ((700.0, 450.0), PanelSide::Left, PanelEdge::Bottom),
-        ];
-        for (anchor, side, edge) in cases {
+        for anchor in [(1300.0, 780.0), (20.0, 40.0), (700.0, 450.0)] {
             let layout = choose_layout(anchor, screen);
-            assert_eq!((layout.panel_side, layout.panel_edge), (side, edge), "{anchor:?}");
-            let origin = window_origin(anchor, true, layout);
-            let (width, height) = window_size(true);
-            assert!(origin.0 >= screen.x && origin.0 + width <= screen.right(), "{anchor:?}");
-            assert!(
-                origin.1 >= screen.y && origin.1 + height <= screen.bottom(),
-                "{anchor:?}"
-            );
+            assert_eq!(layout, PetLayout::default());
         }
-        // A screen too small for the panel either way opens toward the larger room.
-        let tiny = LogicalRect {
-            x: 0.0,
-            y: 0.0,
-            width: 400.0,
-            height: 400.0,
+        let area = WorkArea {
+            name: Some("primary".into()),
+            area: screen,
+            unit: 1.0,
         };
-        assert_eq!(choose_layout((300.0, 300.0), tiny).panel_side, PanelSide::Left);
-        assert_eq!(choose_layout((10.0, 10.0), tiny).panel_side, PanelSide::Right);
+        let anchor = default_anchor(&area);
+        let origin = window_origin((anchor.x, anchor.y), false, PetLayout::default());
+        assert_eq!(
+            origin,
+            (
+                screen.right() - WINDOW_WIDTH - DEFAULT_MARGIN,
+                screen.bottom() - WINDOW_HEIGHT - DEFAULT_MARGIN
+            )
+        );
     }
 
     #[test]
@@ -892,7 +987,7 @@ mod tests {
 
         // The external display is unplugged: the pet lands whole on the built-in one.
         let clamped = clamp_anchor(&on_external, &areas[..1]);
-        assert_eq!((clamped.x, clamped.y), (1440.0 - PET_SIZE, 900.0 - PET_SIZE));
+        assert_eq!((clamped.x, clamped.y), (1152.5, 749.0));
         assert_eq!(clamped.monitor.as_deref(), Some("Built-in"));
 
         // Half off an edge: pulled in on the display it overlaps.
@@ -902,7 +997,7 @@ mod tests {
             monitor: None,
         };
         let pulled = clamp_anchor(&straddling, &areas);
-        assert_eq!((pulled.x, pulled.y), (0.0, 400.0));
+        assert_eq!((pulled.x, pulled.y), (172.5, 474.0));
 
         // With no overlap, its own display wins over the primary one.
         let lost = PetAnchor {
@@ -912,7 +1007,7 @@ mod tests {
         };
         let home = clamp_anchor(&lost, &areas);
         assert_eq!(home.monitor.as_deref(), Some("External"));
-        assert_eq!((home.x, home.y), (1440.0 + 1920.0 - PET_SIZE, 1055.0 - PET_SIZE));
+        assert_eq!((home.x, home.y), (3072.5, 904.0));
 
         assert_eq!(clamp_anchor(&lost, &[]), lost, "no display information moves nothing");
 
@@ -921,24 +1016,91 @@ mod tests {
     }
 
     #[test]
-    fn a_summon_before_any_runtime_waits_for_the_first_page_as_show() {
+    fn short_display_fallback_selects_by_image_overlap_then_saved_display_then_primary() {
+        let areas = [
+            area("primary", 0.0, 0.0, 800.0, 550.0),
+            area("side", 800.0, 0.0, 800.0, 550.0),
+        ];
+        for (x, saved, expected) in [
+            (750.0, "primary", "side"), // Image overlaps side most; transparent frame overlaps primary most.
+            (9000.0, "side", "side"),
+            (9000.0, "detached", "primary"),
+        ] {
+            let restored = clamp_anchor(
+                &PetAnchor {
+                    x,
+                    y: 500.0,
+                    monitor: Some(saved.into()),
+                },
+                &areas,
+            );
+            assert_eq!(restored.monitor.as_deref(), Some(expected));
+            let target = areas
+                .iter()
+                .find(|area| area.name.as_deref() == Some(expected))
+                .unwrap();
+            assert!(target.area.contains(&LogicalRect {
+                x: restored.x,
+                y: restored.y,
+                width: PET_SIZE,
+                height: PET_AND_DOCK_HEIGHT,
+            }));
+            assert_eq!(restored.y, 407.0, "the dock, not only the image, must fit");
+        }
+    }
+
+    #[test]
+    fn a_small_laptop_keeps_its_pet_when_a_full_frame_external_display_is_connected() {
+        let areas = [
+            area("short", 0.0, 0.0, 800.0, 550.0),
+            area("full", 800.0, -100.0, 1000.0, 900.0),
+        ];
+        let on_laptop = PetAnchor {
+            x: 100.0,
+            y: 100.0,
+            monitor: Some("short".into()),
+        };
+        assert_eq!(clamp_anchor(&on_laptop, &areas), on_laptop);
+        let low_laptop = clamp_anchor(&PetAnchor { y: 500.0, ..on_laptop }, &areas);
+        assert_eq!(low_laptop.monitor.as_deref(), Some("short"));
+        assert_eq!((low_laptop.x, low_laptop.y), (100.0, 407.0));
+        assert!(areas[0].area.contains(&LogicalRect {
+            x: low_laptop.x,
+            y: low_laptop.y,
+            width: PET_SIZE,
+            height: PET_AND_DOCK_HEIGHT,
+        }));
+        let external = clamp_anchor(
+            &PetAnchor {
+                x: 900.0,
+                y: 0.0,
+                monitor: Some("full".into()),
+            },
+            &areas,
+        );
+        assert_eq!(external.monitor.as_deref(), Some("full"));
+        assert!(areas[1].area.contains(&areas[1].pet_at((external.x, external.y))));
+    }
+
+    #[test]
+    fn a_hotkey_before_any_runtime_opens_text_without_replaying_capture() {
         let directory = TestDirectory::new();
         let mut store = PetStore::load(directory.file());
         // The hotkey during Runtime startup: no window can exist yet.
-        store.summon_before_window();
+        store.summon_before_window(PetIntent::Listen);
         // The Runtime becomes ready and the window's page loads.
         store.page_loading();
         assert_eq!(
             store.page_ready().summon_pending,
             Some(PendingSummon {
-                intent: PetIntent::Show
+                intent: PetIntent::Release
             })
         );
         // Delivered once.
         store.page_loading();
         assert_eq!(store.page_ready().summon_pending, None);
         // A Runtime that goes away before any window takes the wait with it.
-        store.summon_before_window();
+        store.summon_before_window(PetIntent::Listen);
         store.window_gone();
         assert_eq!(store.page_ready().summon_pending, None);
     }
@@ -957,8 +1119,7 @@ mod tests {
         // One physical desktop: a 125% primary and a 150% display to its right.
         // The pet sits at physical (3000, 200) on the second one.
         let (primary, window) = (1.25, 1.5);
-        let in_window_points = rescale((3000.0, 200.0), 1.0, window);
-        let saved = rescale(in_window_points, window, primary);
+        let saved = rescale((3000.0, 200.0), 1.0, primary);
         let areas = [
             area("primary", 0.0, 0.0, 2560.0 / primary, 1440.0 / primary),
             WorkArea {
@@ -975,7 +1136,7 @@ mod tests {
             &areas,
         );
         let physical = rescale((restored.x, restored.y), primary, 1.0);
-        assert!((physical.0 - 3000.0).abs() < 1e-9 && (physical.1 - 200.0).abs() < 1e-9);
+        assert!((physical.0 - 3000.0).abs() < 1e-9 && (physical.1 - 673.5).abs() < 1e-9);
         assert_eq!(restored.monitor.as_deref(), Some("side"));
         assert_eq!(
             area_for(&areas, saved).and_then(|area| area.name.as_deref()),
@@ -983,29 +1144,42 @@ mod tests {
         );
         // The window starts the pet's 8-point padding, at the side display's
         // scale, above and left of it.
-        let window_at = rescale(restored_window_origin(saved, window / primary), primary, 1.0);
-        assert!((window_at.0 - (3000.0 - 12.0)).abs() < 1e-9 && (window_at.1 - (200.0 - 12.0)).abs() < 1e-9);
+        let window_at = rescale(
+            restored_window_origin((restored.x, restored.y), window / primary),
+            primary,
+            1.0,
+        );
+        assert!((window_at.0 - (3000.0 - 258.75)).abs() < 1e-9 && window_at.1.abs() < 1e-9);
     }
 
     #[test]
     fn a_pet_clamped_onto_a_denser_display_stays_whole_in_its_own_points() {
         // A 100% primary and a 150% display to its right, in primary points.
-        // There the 88-point pet is 132 units wide.
+        // The full fixed window is 690 by 900 units on the dense display.
         let side = WorkArea {
             unit: 1.5,
             ..area("side", 1920.0, 0.0, 2560.0, 1440.0)
         };
         let areas = [area("primary", 0.0, 0.0, 1920.0, 1080.0), side.clone()];
-        let edge = (side.area.right() - 132.0, side.area.bottom() - 132.0);
-        // Overlapping the right edge: pulled in by its scaled extent, not 88.
+        let edge = (
+            side.area.right() - (WINDOW_WIDTH - pet_offset(false, PetLayout::default()).0) * side.unit,
+            side.area.bottom() - (WINDOW_HEIGHT - pet_offset(false, PetLayout::default()).1) * side.unit,
+        );
+        // Overlapping the right edge: pulled in by the fixed window extent.
         let past_edge = PetAnchor {
             x: side.area.right() - 100.0,
             y: 300.0,
             monitor: Some("side".to_owned()),
         };
         let pulled = clamp_anchor(&past_edge, &areas);
-        assert_eq!((pulled.x, pulled.y), (edge.0, 300.0));
-        // Inside by 88 but not by 132 is not whole.
+        assert_eq!(
+            (pulled.x, pulled.y),
+            (
+                edge.0,
+                side.area.y + pet_offset(false, PetLayout::default()).1 * side.unit
+            )
+        );
+        // Inside by the image size but not by the full window is not whole.
         let almost = PetAnchor {
             x: side.area.right() - 100.0,
             y: side.area.bottom() - 100.0,
@@ -1022,9 +1196,13 @@ mod tests {
         assert_eq!((home.x, home.y), edge);
         // A pet with no place keeps the margin in the display's own points.
         let corner = default_anchor(&side);
+        let (dx, dy) = pet_offset(false, PetLayout::default());
         assert_eq!(
             (corner.x, corner.y),
-            (side.area.right() - 168.0, side.area.bottom() - 168.0)
+            (
+                side.area.right() - (WINDOW_WIDTH + DEFAULT_MARGIN - dx) * side.unit,
+                side.area.bottom() - (WINDOW_HEIGHT + DEFAULT_MARGIN - dy) * side.unit,
+            )
         );
         assert_eq!(clamp_anchor(&corner, &areas), corner);
     }

@@ -502,6 +502,8 @@ def test_mh_routing_010_model_not_found_stays_request_scoped_through_real_gatewa
                         "stream_started": False,
                         "http_status": 404,
                         "upstream_error_code": "not_found_error" if protocol == "anthropic" else "model_not_found",
+                        # The upstream's own message, persisted since #2376.
+                        "upstream_detail": f"model {target} not found",
                     }
                 first.configure(model_errors={})
                 base_url, token = await gateway.endpoint(
@@ -720,79 +722,6 @@ def test_mh_claude_launch_001_settings_cannot_bypass_the_configured_route(
         assert native_settings.read_text() == native_payload
 
 
-def _seed_codex_native_login(home) -> None:
-    _write(
-        home / ".codex" / "auth.json",
-        (
-            '{"auth_mode":"chatgpt","tokens":'
-            '{"access_token":"codex-native-e2e-123456"}}'
-        ),
-    )
-    _write(
-        home / ".codex" / "config.toml",
-        'cli_auth_credentials_store = "file"\n',
-    )
-
-
-def test_d1_subscription_added_after_api_key_is_appended_at_tail(
-    mock_llm_upstream,
-    model_hub_app,
-) -> None:
-    """D1: current placement appends a later native subscription."""
-
-    # D-1 remains open: current shipped behavior appends at tail, so the API
-    # key precedes and can burn before the later subscription.
-    _configure_protocol(
-        mock_llm_upstream,
-        "openai_responses",
-        models=[{"id": "gpt-5.3-codex"}],
-    )
-    api_source, _ = _create_source(
-        model_hub_app,
-        mock_llm_upstream,
-        protocol="openai_responses",
-        nonce="scn_d100000000000001",
-    )
-    _seed_codex_native_login(model_hub_app.home)
-    scan = model_hub_app.client.post("/api/models/migration/scan", {})
-    scan_body = scan.json()
-    assert scan.status == 200, scan_body
-    [native_item] = [
-        item
-        for item in scan_body["scan"]["items"]
-        if item["kind"] == "oauth_native"
-    ]
-    applied = model_hub_app.client.post(
-        "/api/models/migration/apply", {"item_ids": [native_item["id"]]}
-    )
-    applied_body = applied.json()
-    assert applied.status == 200, applied_body
-    native_source = next(
-        source
-        for source in applied_body["sources"]
-        if (
-            source["vendor"] == "openai"
-            and source["kind"] == "subscription"
-            and source["supply_channel"] == "native_cli"
-        )
-    )
-
-    mode = model_hub_app.client.patch(
-        "/api/models/agents/codex/mode", {"mode": "hub"}
-    )
-    assert mode.status == 200, mode.json()
-
-    agent = model_hub_app.client.get(
-        "/api/models/agents/codex/sources"
-    )
-    assert agent.status == 200, agent.json()
-    agent_body = agent.json()
-    assert agent_body["agent"]["sources"]["order"] == [
-        api_source["id"],
-        native_source["id"],
-    ]
-
-
 def _prepare_probe_chain(
     app,
     first_upstream: MockLLMUpstream,
@@ -990,7 +919,8 @@ def test_replaced_shared_key_keeps_source_identity_and_reaches_upstream_once(
         replaced_port = after_replace.json()["runtime"]["status"][
             "listening"
         ]["port"]
-        assert replaced_port != first_port
+        # A Source save hot-reloads the running engine (#2138): same process, same port.
+        assert replaced_port == first_port
 
         app.restart_controller()
         mock_llm_upstream.reset_requests()
@@ -1157,6 +1087,11 @@ def test_d5_nonrefreshable_401_marks_the_key_for_repair(
             assert next_probe.json()["probe"]["source_id"] == second["id"]
 
 
+@pytest.mark.xfail(strict=True, reason=(
+    "D-4 gap: the managed engine never forwards an upstream error's headers (its status errors "
+    "carry none, whatever passthrough-headers says), so Retry-After never reaches Avibe and a "
+    "5xx cools for the local 30-36 s backoff only (#2666)"
+))
 def test_d6_server_error_preserves_later_retry_after_through_real_engine(
     model_hub_app_factory,
     mock_llm_upstream,

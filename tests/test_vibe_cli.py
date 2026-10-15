@@ -575,7 +575,7 @@ def test_status_and_doctor_report_a_service_older_than_the_last_activation(split
         [sys.executable, "-c", "import time; time.sleep(60)", str(split.old / "uv" / "tools" / "avibe-os" / "bin" / "vibe")]
     )
     try:
-        monkeypatch.setattr(runtime, "service_instance_lock_available", lambda: (False, service.pid))
+        monkeypatch.setattr(runtime, "service_instance_lock_available", lambda **kwargs: (False, service.pid))
         expected = {
             "generation": str(split.old),
             "version": "1.4.0",
@@ -1376,7 +1376,7 @@ def start_runtime(monkeypatch):
     monkeypatch.setattr(runtime, "ui_server_compatible", lambda host, port: True)
     monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: True)
     monkeypatch.setattr(runtime, "wait_for_service_ready", lambda pid, timeout: pid)
-    monkeypatch.setattr(runtime, "service_instance_lock_available", lambda: (True, None))
+    monkeypatch.setattr(runtime, "service_instance_lock_available", lambda **kwargs: (True, None))
     monkeypatch.setattr(runtime, "extra_service_process_pids", lambda **kwargs: [])
     monkeypatch.setattr(runtime, "maybe_systemd_scope_prefix", lambda: [])
     monkeypatch.setattr(runtime, "wait_for_service_pid", lambda pid, timeout: True)
@@ -1436,7 +1436,7 @@ def test_start_service_marks_every_existing_return_as_reused(monkeypatch, start_
     monkeypatch.setattr(runtime, "_pid_reservation_is_fresh", lambda *args: True)
     monkeypatch.setattr(runtime, "wait_for_service_ready", lambda pid, timeout: 9012)
     monkeypatch.setattr(runtime, "_pid_mismatches_service", lambda pid: branch == "mismatched_command")
-    monkeypatch.setattr(runtime, "service_instance_lock_available", lambda: (False, 1234))
+    monkeypatch.setattr(runtime, "service_instance_lock_available", lambda **kwargs: (False, 1234))
     info = runtime.ProcessStartInfo()
     expected_pid = 1234 if branch == "starting" else 9012
 
@@ -2739,7 +2739,7 @@ def _restart_status_payload(**overrides) -> dict:
         "ok": False,
         "job_id": "0d1f2e3a4b5c",
         "supervisor_pid": 4242,
-        "supervisor_started_at": 1.0,
+        "supervisor_start_token": "1.0",
         "state": "failed",
         "trigger": "auto-update",
         "delay_seconds": 0.0,
@@ -2802,7 +2802,7 @@ def _stub_service_liveness(
 
     monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", resolve_owner)
     monkeypatch.setattr(cli.runtime, "extra_service_process_pids", lambda *_a, **_kw: list(extra_pids))
-    monkeypatch.setattr(cli.runtime, "service_instance_lock_available", lambda: (not holds_lock, owner_pid))
+    monkeypatch.setattr(cli.runtime, "service_instance_lock_available", lambda **kwargs: (not holds_lock, owner_pid))
     monkeypatch.setattr(
         cli.runtime,
         "service_instance_started",

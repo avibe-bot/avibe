@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.app.json",
+  "include": [
+    "src/i18n/i18next.d.ts",
+    "src/i18n/translationContract.test.ts",
+    "src/components/settings/models/**/*.ts",
+    "src/components/settings/models/**/*.tsx",
+    "src/components/onboarding/providers/**/*.ts",
+    "src/components/onboarding/providers/**/*.tsx",
+    "src/components/onboarding/setupAction.types.test.ts",
+    "src/components/onboarding/setupConfig.test.ts",
+    "src/components/onboarding/SetupFlowShell.test.tsx",
+    "src/components/onboarding/WizardCompletion.test.tsx",
+    "src/components/onboarding/setupTargets.test.ts",
+    "src/components/onboarding/setupTargets.ts",
+    "src/components/onboarding/entryGate.test.ts",
+    "src/components/onboarding/entryGate.ts"
+  ],
+  "exclude": []
+}

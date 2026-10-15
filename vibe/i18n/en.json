@@ -8,6 +8,9 @@
     "agentModelRequired": "Select a model for the {backend} Agent or Session in Avibe before running it.",
     "modelHubDisabled": "Model Hub is disabled on this instance, so {backend} has no model to run on.",
     "modelGatewayOff": "The model gateway is off, so {backend} has no model to run on. Turn it on in Models, then choose a model.",
+    "modelSourceRequired": "{backend} has no model source yet. Add an API key or a subscription in Models.",
+    "modelsNextStepImUrl": "Someone who manages this Avibe can fix it in Models: {url}",
+    "modelsNextStepIm": "Someone who manages this Avibe can fix it in Models, in the Avibe Workbench.",
     "opencodeModelProviderRequired": "Select an OpenCode model with a provider in Avibe, or configure its Model Hub route."
   },
   "status": {
@@ -308,6 +311,7 @@
       "type": {
         "access": "Access request",
         "sign": "Signature request",
+        "delete": "Delete request",
         "provision": "A secret to fill in"
       },
       "secretSet": "selected secrets",
@@ -734,6 +738,7 @@
     "setup": {
       "starting": "Starting {backend} setup...",
       "unsupportedBackend": "Backend `{backend}` does not support setup yet.",
+      "builtinBackend": "{backend} gets its models from Model Hub and needs no sign-in. Add or manage model sources in Models.",
       "codeUsage": "Usage: `/setup code <value>` or `/setup code <backend> <value>`",
       "claudeMethodUsage": "Usage: `/setup claude <claudeai|console>`",
       "noActiveFlow": "There is no active setup flow for this channel.",
@@ -857,6 +862,10 @@
         "arg": "Override one driver argument; JSON values are parsed when valid.",
         "output": "Caller-selected screenshot path for 'observe window'.",
         "json": "Print the structured service response.",
+        "run": "Run a JavaScript Computer Use script",
+        "runDescription": "Run an ESM file with the shipped @avibe/computer module, bound to this exact Avibe Agent Turn.",
+        "scriptFile": "Path to a readable .mjs script.",
+        "scriptArg": "Pass one script argument as name=value or name=@file. Values remain strings.",
         "observe": "Observe apps, windows, or one exact window",
         "observeApps": "List visible applications",
         "observeWindows": "List windows",
@@ -870,7 +879,7 @@
         "drag": "Drag an observed target",
         "setValue": "Set an observed control value",
         "launch": "Launch an application or URL",
-        "quit": "Quit an application",
+        "forceQuit": "Force-terminate an application; unsaved state is lost.",
         "clipboard": "Read or write the system clipboard",
         "clipboardRead": "Read the system clipboard",
         "clipboardWrite": "Write the system clipboard"
@@ -883,8 +892,38 @@
         "sessionArgumentForbidden": "The Computer Use session is bound to the caller's Avibe Session and cannot be supplied through --args-json or --arg.",
         "outputArgumentConflict": "Use --output or screenshot_out_file in --args-json, not both.",
         "unsupportedCommand": "Unsupported Computer Use command: {command}",
-        "screenshotMissing": "{tool} did not return an image that could be written to --output.",
+        "screenshotMissing": "No screenshot is available for this result. The window may be hidden or minimized, or capture may be unavailable.",
         "outputUnsupported": "--output is supported only by observe window or zoom.",
+        "scriptArgNameValue": "Script --arg values must use name=value.",
+        "scriptArgDuplicate": "Script argument '{name}' was provided more than once.",
+        "scriptArgFile": "Cannot read script argument file {path}: {error}",
+        "scriptFile": "Cannot run Computer Use script {path}: {error}",
+        "scriptFileType": "Computer Use script {path} must be a readable .mjs file.",
+        "scriptNodeUnavailable": "Computer Use scripts require the Node runtime shipped with the Avibe desktop app.",
+        "scriptSdkUnavailable": "The shipped @avibe/computer module is unavailable. Reinstall or update the Avibe desktop app.",
+        "scriptOpenRejected": "The Controller rejected the Computer Use script connection ({code}).",
+        "scriptRuntime": "The Computer Use script runtime failed: {error}",
+        "scriptRuntimeExit": "The Computer Use script runtime exited with status {status} without returning a result.",
+        "scriptRuntimeInvalid": "The shipped Computer Use script runtime returned an invalid result.",
+        "scriptTimedOut": "The Computer Use script exceeded its total {seconds}-second timeout.",
+        "scriptFailed": "Computer Use script failed at {step}: {error}",
+        "scriptAmbiguous": "The selector matched more than one target.",
+        "scriptConnectionInvalid": "The script's Controller connection is no longer valid.",
+        "scriptControllerRejected": "The Controller rejected the script request.",
+        "scriptRequestTooLarge": "The Computer Use script request exceeded the Controller size limit.",
+        "scriptControllerUnavailable": "The Controller is unavailable.",
+        "scriptDeadlineExpired": "The script deadline expired.",
+        "scriptElementNotActionable": "The matched element is not actionable.",
+        "scriptInvalidControllerResponse": "The Controller returned an invalid Computer Use response.",
+        "scriptInvalidDescriptor": "The Computer Use script used an invalid or missing handle descriptor.",
+        "scriptInvalidSelector": "The script used an invalid selector.",
+        "scriptInvalidTimeout": "The script used an invalid timeout.",
+        "scriptOperationTimedOut": "The Computer Use operation timed out.",
+        "scriptStaleAppHandle": "The selected application process is no longer available.",
+        "scriptStaleWindowHandle": "The selected application window is no longer available.",
+        "scriptTargetNotFound": "The requested Computer Use target was not found.",
+        "scriptTurnEnded": "The Avibe Turn that launched this script has ended.",
+        "scriptWindowOrderUnavailable": "Window order is unavailable for this selector.",
         "missingCallerSession": "Computer Use requires an Avibe Agent caller Session.",
         "missingCallerTurn": "Computer Use requires the caller's Avibe Session to have an active Turn.",
         "serviceUnavailable": "Avibe service is unavailable: {error}",
@@ -897,6 +936,7 @@
         "desktopLeaseLost": "The desktop lease was lost before Computer Use completed.",
         "focusShortcutForbidden": "This focus shortcut is not allowed. Use launch with a URL instead.",
         "foregroundForbidden": "Foreground input is not allowed.",
+        "foregroundConsentRequired": "Foreground input requires owner consent.",
         "genericDriverError": "The Computer Use driver returned an error.",
         "invalidDriverArguments": "The Computer Use arguments are invalid.",
         "observeFirst": "Observe the exact window again before sending input.",
@@ -1093,6 +1133,7 @@
       "candidate_suppliers_changed": "The available suppliers changed. Reload the model choices and confirm again.",
       "models_dev_unavailable": "models.dev is unavailable. Enter the model metadata manually or retry later.",
       "codex_catalog_unavailable": "Codex could not prepare the local Model Hub catalog. Retry this turn.",
+      "hosted_content_unpinned": "This request carries hosted-tool content that is not pinned to the Source it was rendered for, so no Source may receive it.",
       "request_too_large": "This request exceeds Avibe's local {limit_mib} MiB request limit. Reduce the images or conversation context and retry.",
       "engine_down": "The local model gateway is unavailable.",
       "engine_down_streamed": "The local model gateway is unavailable. This turn's output may be incomplete.",
@@ -1102,6 +1143,29 @@
       "upstream_request_invalid": "The upstream service rejected the request.",
       "upstream_unauthorized": "The upstream service rejected authorization after refresh.",
       "upstream_error": "The upstream service returned an error."
+    },
+    "hostedTools": {
+      "noExecutor": {
+        "web_search": {"one": "No Source can run web search right now. Add an API key from {vendors} as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.", "several": "No Source can run web search right now. Add an API key from one of {vendors} as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this."},
+        "x_search": {"one": "No Source can run X search right now. Add an API key from {vendors} as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.", "several": "No Source can run X search right now. Add an API key from one of {vendors} as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this."}
+      },
+      "listSeparator": ", ",
+      "providerRefused": "The executor's provider refused the call ({detail}).",
+      "providerUnavailable": "The executor's provider is unavailable right now ({detail}). Try again later.",
+      "timedOut": "The executor call timed out.",
+      "unreachable": "The executor could not be reached.",
+      "unreadable": "The executor's response could not be read.",
+      "tooLarge": "The executor's response was larger than allowed.",
+      "didNotRun": "The executor did not run {tool}.",
+      "responseEnded": "The executor's response ended as {status}.",
+      "callFailed": "The provider's {tool} call failed.",
+      "triedSources": "Tried: {sources}.",
+      "imageMissing": "The image endpoint returned no image data.",
+      "imageUnreadable": "The image endpoint returned an image that could not be used.",
+      "imageModelUnavailable": "{model} is no longer available this turn.",
+      "imageParamUnsupported": "{model} does not take {param}.",
+      "imageParamTakers": "Models that take it: {models}.",
+      "imageAlternatives": "Available: {models}."
     },
     "events": {
       "sourceFallback": "source",
@@ -1709,9 +1773,97 @@
       "toolsUnsupported": "The selected model does not support tools, which {backend} needs. Choose another model.",
       "providerProtocol": "The model provider sent a reply {backend} cannot use.",
       "unclassified": "The request to the model failed with an error {backend} could not classify. Try again, or choose another model.",
-      "outputLimit": "The model kept running out of output space while writing a tool call. Ask for smaller steps, or choose a model with a larger output limit.",
+      "outputLimit": "The model reached its output limit before producing a usable answer or tool call. Ask for smaller steps, or choose a model with a larger output limit.",
       "internal": "{backend} stopped because of an internal error. Try again; if it happens again, the service log names the cause.",
+      "historyUnreadable": "This session's history can't be loaded, so {backend} can't continue it. Start a new session with /new.",
       "generic": "{backend}'s run failed."
+    }
+  },
+  "desktopMini": {
+    "sessionTitle": "Vibey · Desktop mini",
+    "noChatProject": "Create a project in Avibe first, so the desktop mini has a place for its conversation.",
+    "builtinAgentUnavailable": "The built-in Agent is not available, so the desktop mini has no one to talk to.",
+    "mainSessionArchived": "The desktop mini's main session is archived and cannot be reopened.",
+    "mainSessionInvalid": "The desktop mini's main session is invalid and cannot be opened.",
+    "mainSessionProtected": "The desktop mini's main session is managed by Avibe and cannot be archived or edited."
+  },
+  "hostedTools": {
+    "errorCode": {
+      "provider_no_reason": "the provider gave no reason",
+      "provider_no_image": "the provider returned no image",
+      "image_not_streamed": "the image did not arrive before the response ended",
+      "image_not_saved": "the image could not be saved",
+      "image_no_store": "nothing here can keep a generated image",
+      "executor_no_image": "the proxy executor returned no image",
+      "gateway_unreachable": "couldn't reach the model gateway",
+      "gateway_refused": "the model gateway refused the call",
+      "gateway_no_result": "the model gateway returned no result",
+      "image_param_unsupported": "the chosen image model doesn't take one of the arguments",
+      "image_model_unavailable": "the chosen image model isn't available",
+      "image_argument_invalid": "the image call had an argument it can't send",
+      "image_reference_unreadable": "a reference image couldn't be read",
+      "provider_refused": "the provider refused the call",
+      "provider_unavailable": "the provider is unavailable right now, try again later",
+      "provider_timed_out": "the call timed out",
+      "provider_unreachable": "couldn't reach the provider",
+      "provider_unreadable": "the provider's response couldn't be read",
+      "provider_too_large": "the provider's response was larger than allowed",
+      "provider_image_unusable": "the provider returned an image that couldn't be used",
+      "search_not_run": "the model answered without searching",
+      "search_failed": "the provider's search failed",
+      "response_ended_early": "the response ended early"
+    },
+    "tool": {
+      "web_search": "Web search",
+      "x_search": "X search",
+      "image_generate": "Image generation"
+    },
+    "quoted": "“{subject}”",
+    "mode": {
+      "native": "native ({provider})",
+      "proxy": "via {provider} proxy",
+      "proxyModel": "via {provider} proxy ({model})",
+      "fallback": "{source} doesn't support it, now using {provider}",
+      "direct": "direct ({provider})"
+    },
+    "count": {
+      "sourceOne": "1 source",
+      "sources": "{count} sources",
+      "postOne": "1 post",
+      "posts": "{count} posts",
+      "imageOne": "1 image",
+      "images": "{count} images"
+    },
+    "cost": {
+      "included": "included in subscription",
+      "list": "≈ ${usd}",
+      "reported": "${usd}",
+      "calls": "{cost} for {calls} calls",
+      "atLeast": "at least {cost}"
+    },
+    "status": {
+      "failed": "failed: {error}",
+      "incomplete": "incomplete: {error}",
+      "pending": "cut off"
+    },
+    "image": {
+      "notOffered": "{model} is not an image model of this turn.",
+      "unknownArguments": "image_generate takes only model, prompt, size, images and n; it was given {names}.",
+      "noPrompt": "prompt must be the text of what to draw.",
+      "sizeForm": "size must be {pixels}, or {ratio}.",
+      "sizeFormUnsupported": "{model} does not take size {size}: it takes {form}.",
+      "badImages": "images must be 1 to {max} paths of reference images.",
+      "badCount": "n must be a whole number from 1 to {max}.",
+      "form": {
+        "pixels": "WIDTHxHEIGHT, such as 1024x1024",
+        "ratio": "an aspect ratio, such as 16:9"
+      },
+      "reference": {
+        "unreadable": "Cannot read the reference image {path}: {reason}.",
+        "notImage": "The reference image {path} is not an image (jpg, png, gif, webp).",
+        "tooLarge": "The reference image {path} is {size}, over the {limit} limit.",
+        "unsupported": "The reference image {path} is {mime}, which cannot be sent."
+      }
     }
   }
 }

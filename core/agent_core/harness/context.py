@@ -22,12 +22,15 @@ from itertools import accumulate
 from dataclasses import dataclass, field
 from typing import Any, Callable, Collection, Mapping, Optional, Protocol, Sequence
 
-from core.agent_core.ai._common import endpoint_origin
-from core.agent_core.ai.provider import ModelCapabilities, ModelEndpoint, ModelRequest
+from core.agent_core.ai._common import endpoint_origin, native_hosted_tools
+from core.agent_core.ai.hosted import portable_sizes
+from core.agent_core.ai.transform import SYNTHETIC_TOOL_RESULT
+from core.agent_core.ai.provider import HostedToolRoute, ModelCapabilities, ModelEndpoint, ModelRequest
 from core.agent_core.harness.projection import ContextView, Unit, context_view
 from core.agent_core.harness.store import ContextEntry
 from core.agent_core.messages import (
     AssistantMessage,
+    HostedToolBlock,
     ImageBlock,
     Message,
     TextBlock,
@@ -52,6 +55,9 @@ MARGIN_RATIO = 0.03
 #: The margin is at most an eighth of the window: with ``O <= W / 4`` (the Avibe Agent's budget), ``T >= 0.625 * W``.
 MARGIN_CAP_RATIO = 0.125
 THRESHOLD_RATIO = 0.9
+#: A context price step (``ModelCapabilities.context_price_steps``) smaller than this is not kept below (section 1): a
+#: checkpoint's own context is some 30,000 tokens, so a lower threshold would compact almost every request.
+PRICE_STEP_MIN = 100_000
 KEEP_MAX = 20_000
 KEEP_RATIO = 0.25
 IMAGE_TOKENS = 1_600
@@ -92,7 +98,8 @@ CLEARED_PLACEHOLDER = (
     "[Old tool result cleared to save context. Re-run the tool or re-read the file if you need it again.]"
 )
 
-CHECKPOINT_MAX_TOKENS = 16_000
+#: A checkpoint request asks for at most this many output tokens, its reasoning included (section 6).
+CHECKPOINT_MAX_TOKENS = 64_000
 CHECKPOINT_TRUNCATED = (
     "[Output truncated to fit this checkpoint turn: showing about {shown} of {total} tokens. "
     "Read a smaller range if you need more.]"
@@ -217,7 +224,9 @@ class ContextConfig:
     host: Optional[ContextHost] = None
     #: This Session's scratch directory; checkpoint turns may write only there.
     scratch_dir: Optional[str] = None
-    clear_tool_results: bool = True
+    #: Opt-in policy for proactively replacing old tool results with the cleared placeholder. New Sessions keep
+    #: original results until normal compaction unless an adapter explicitly enables this experiment.
+    clear_tool_results: bool = False
     clock: Callable[[], float] = field(default=time.time, repr=False)
 
 
@@ -240,6 +249,8 @@ def message_tokens(message: Message) -> int:
     images = 0
     signed = 0  # thinking text that rides with a payload: the reported reasoning covers it
     payload: Optional[int] = None  # UTF-8 bytes of its opaque payloads, None without any
+    hosted_bytes = 0  # UTF-8 bytes of its hosted calls as replayed
+    hosted: Optional[dict[int, int]] = None
     for block in message.content:
         if isinstance(block, TextBlock):
             size += _utf8(block.text) if block.text is not None else block.ref.bytes
@@ -256,8 +267,15 @@ def message_tokens(message: Message) -> int:
             size += _utf8(block.name) + _utf8(arguments)
             if block.signature is not None:
                 payload = (payload or 0) + _utf8(block.signature)
+        elif isinstance(block, HostedToolBlock):
+            # The largest form it can go back in (§5), so the estimate holds wherever the message sits and whatever
+            # hop it goes to: its synthetic call and result, its in-place text, or its native payload verbatim.
+            if hosted is None:
+                hosted = portable_sizes(message, interrupted=SYNTHETIC_TOOL_RESULT)  # type: ignore[arg-type]
+            native = json.dumps(list(block.native.payload), ensure_ascii=False, separators=(",", ":"))
+            hosted_bytes += max(hosted[id(block)], _utf8(native))
     reasoning = 0 if payload is None else max(math.ceil(signed / 4), _reasoning(message, payload))
-    return math.ceil(size / 4) + images * IMAGE_TOKENS + reasoning
+    return math.ceil((size + hosted_bytes) / 4) + images * IMAGE_TOKENS + reasoning
 
 
 def _reasoning(message: Message, payload: int) -> int:
@@ -276,10 +294,27 @@ def messages_tokens(messages: Sequence[Message]) -> int:
     return sum(message_tokens(message) for message in messages)
 
 
-def request_tokens(system: str, tools: Sequence[ToolSpec], messages: Sequence[Message]) -> int:
-    """The whole request: system prompt, tool definitions, and messages."""
+def request_tokens(
+    system: str,
+    tools: Sequence[ToolSpec],
+    messages: Sequence[Message],
+    native: Optional[Mapping[str, HostedToolRoute]] = None,
+) -> int:
+    """The whole request: system prompt, tool definitions, and messages.
+
+    ``native`` holds the request's hosted tools that its hop runs natively (``native_hosted_tools``): such a tool is
+    sent as the provider's declaration in its spec's place, so that is what it counts as.
+    """
+    native = native or {}
     definitions = sum(
-        _utf8(json.dumps([spec.name, spec.description, dict(spec.input_schema)], ensure_ascii=False))
+        _utf8(
+            json.dumps(
+                dict(native[spec.name].declaration or {})
+                if spec.name in native
+                else [spec.name, spec.description, dict(spec.input_schema)],
+                ensure_ascii=False,
+            )
+        )
         for spec in tools
     )
     return math.ceil((_utf8(system) + definitions) / 4) + messages_tokens(messages)
@@ -337,7 +372,7 @@ def _valid_usage(message: Optional[Message]) -> bool:
 
 def sent_tokens(request: ModelRequest) -> int:
     """``tokens()`` of a whole request (section 2): system prompt, tool definitions, and messages."""
-    return request_tokens(request.system, request.tools, request.messages)
+    return request_tokens(request.system, request.tools, request.messages, native_hosted_tools(request))
 
 
 def request_facts(request: ModelRequest) -> dict[str, int]:
@@ -366,7 +401,7 @@ def output_tokens(capabilities: ModelCapabilities, configured: int) -> int:
 
 
 def checkpoint_max_tokens(capabilities: ModelCapabilities, configured: int) -> int:
-    """A checkpoint request's ``max_tokens``: ``min(16,000, O)`` (section 6)."""
+    """A checkpoint request's ``max_tokens``: ``min(64,000, O)`` (section 6)."""
     return min(CHECKPOINT_MAX_TOKENS, output_tokens(capabilities, configured))
 
 
@@ -465,7 +500,7 @@ def budget(
 ) -> Budget:
     """``W, L_in, O, M, T, keep`` and ``est`` of a composed ``request`` on the route resolved for it.
 
-    Sections 1 and 2: it derives ``W, L_in, M, T, keep`` and ``est`` and reads ``O`` from ``request.max_tokens``,
+    Sections 1 and 2: it derives ``W, L_in, M, P, T, keep`` and ``est`` and reads ``O`` from ``request.max_tokens``,
     which ``output_tokens`` or ``checkpoint_max_tokens`` set when the request was built. ``transcript`` is the part
     of the request's messages that comes from the rows, which is what an anchor is checked against.
     """
@@ -474,6 +509,10 @@ def budget(
     output = request.max_tokens
     margin = min(max(MARGIN_MIN, math.ceil(MARGIN_RATIO * window)), math.floor(MARGIN_CAP_RATIO * window))
     threshold = min(limit - output - margin, math.floor(THRESHOLD_RATIO * window))
+    # A step at or past the window cannot lower T, and is never multiplied: a hand-edited price may name any size.
+    step = min((size for size in capabilities.context_price_steps if PRICE_STEP_MIN <= size < window), default=None)
+    if step is not None:
+        threshold = min(threshold, math.floor(THRESHOLD_RATIO * step))
     keep = max(0, min(KEEP_MAX, math.floor(KEEP_RATIO * threshold)))
     return Budget(window, limit, output, margin, threshold, keep, _estimate(request, transcript, anchor))
 

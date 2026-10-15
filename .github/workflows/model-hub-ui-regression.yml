@@ -1,0 +1,57 @@
+name: Model Hub UI regression
+
+on:
+  schedule:
+    - cron: "37 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: model-hub-ui-regression
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  model-hub-ui:
+    name: model-hub-ui-regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: "22.14.0"
+          cache: "npm"
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install UI dependencies
+        working-directory: ui
+        run: npm ci
+
+      - name: Install Chromium
+        id: install_chromium
+        working-directory: ui
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Model Catalog browser regression
+        working-directory: ui
+        run: npm run test:model-catalog
+
+      - name: Run Model Provider browser regression
+        if: ${{ always() && steps.install_chromium.outcome == 'success' }}
+        working-directory: ui
+        run: npm run test:model-provider
+
+      - name: Upload browser artifacts
+        if: failure()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        with:
+          name: model-hub-ui-regression-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ui/e2e/.artifacts
+          if-no-files-found: ignore
+          retention-days: 14

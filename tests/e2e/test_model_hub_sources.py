@@ -13,7 +13,7 @@ from tests.e2e.drivers.mock_llm_upstream import MockLLMUpstream
 
 pytestmark = pytest.mark.e2e_model_hub
 
-CONTRACT_VERSION = 11
+CONTRACT_VERSION = 15
 MENU_MODEL = "claude-sonnet-4-6"
 SYNTHETIC_API_KEY = "sk-model-hub-e2e-not-real"
 
@@ -35,6 +35,18 @@ def _configure_protocol(
         else [{"id": "mock-model"}],
     )
     upstream.reset_requests()
+
+
+def _require_key(upstream: MockLLMUpstream, key: str) -> None:
+    """Make the mock refuse its data surfaces without ``key``, as a real API-key endpoint does.
+
+    A model-free probe never proves a key (#1920): the declared interface's
+    model listing does, only where it refuses a request without the key
+    (#1936). The engine sends a custom-origin Anthropic key as Bearer, and
+    observation sends the protocol's header, so the mock takes either.
+    """
+
+    upstream.configure(required_api_key=key, required_auth_scheme="either")
 
 
 def _source_payload(
@@ -76,6 +88,7 @@ def _create_source(
         ),
         **(extra or {}),
     }
+    _require_key(upstream, payload["key"])
     response = app.client.post("/api/models/sources", payload)
     body = response.json()
     assert response.status == 201, body
@@ -88,14 +101,15 @@ def _create_source(
     "protocol",
     ["anthropic", "openai_responses", "openai_chat"],
 )
-def test_b1_auto_observe_selects_protocol_from_response_shape(
+def test_b1_auto_observe_needs_a_declared_protocol_to_prove_the_key(
     mock_llm_upstream: MockLLMUpstream,
     model_hub_app,
     protocol: str,
 ) -> None:
-    """B1: auto observation proves each protocol from response evidence."""
+    """B1: Auto never proves a key; the declared interface's key-gated listing does (#1920, #1936)."""
 
     _configure_protocol(mock_llm_upstream, protocol)
+    _require_key(mock_llm_upstream, SYNTHETIC_API_KEY)
     request = _source_payload(mock_llm_upstream, protocol=protocol)
     request.pop("kind")
     request.pop("display_name")
@@ -108,6 +122,26 @@ def test_b1_auto_observe_selects_protocol_from_response_shape(
     body = response.json()
     assert response.status == 200, body
     assert body["contract_version"] == CONTRACT_VERSION
+    # A model-free probe's schema error shows a shape, never the key, and Auto
+    # never asks a listing, which names no protocol.
+    assert body["observation"] == {
+        "contract_version": CONTRACT_VERSION,
+        "outcome": "adapter_error",
+        "reachable": True,
+        "authenticated": "unknown",
+        "protocol": None,
+        "discovery": "not_attempted",
+        "models": [],
+        "model_metadata": [],
+    }
+    assert "/v1/models" not in [item["path"] for item in mock_llm_upstream.requests()]
+
+    mock_llm_upstream.reset_requests()
+    response = model_hub_app.client.post(
+        "/api/models/sources/observe", {**request, "protocol": protocol}
+    )
+    body = response.json()
+    assert response.status == 200, body
     assert body["observation"] == {
         "contract_version": CONTRACT_VERSION,
         "outcome": "observed",
@@ -199,12 +233,12 @@ def test_b3_discovered_model_persists_only_contract_fields(
     "models_endpoint",
     ["http_404", "http_500", "malformed_json"],
 )
-def test_b4_inventory_failure_requires_consent_then_commits_error_source(
+def test_b4_inventory_failure_requires_consent_then_commits_unverified_source(
     mock_llm_upstream: MockLLMUpstream,
     model_hub_app,
     models_endpoint: str,
 ) -> None:
-    """B4: protocol proof survives an independently failed inventory."""
+    """B4: with no readable key-gated listing nothing proves the key; only an explicit unverified save commits."""
 
     _configure_protocol(mock_llm_upstream, "openai_chat")
     mock_llm_upstream.configure(models_endpoint=models_endpoint)
@@ -218,33 +252,42 @@ def test_b4_inventory_failure_requires_consent_then_commits_error_source(
         }[models_endpoint],
     )
 
-    rejected = model_hub_app.client.post(
-        "/api/models/sources", payload
-    )
-    rejected_body = rejected.json()
-    assert rejected.status == 422, rejected_body
-    assert rejected_body["error"] == "discovery_failed"
-    assert rejected_body["detail"].endswith("inventory_unavailable")
-    assert rejected_body["observation"]["protocol"] == "openai_chat"
-    assert rejected_body["observation"]["discovery"] == "failed"
+    # Nothing proves the key (#1936), so the create is never observed and the
+    # inventory waiver has nothing to waive.
+    for attempt in (payload, {**payload, "accept_unavailable_inventory": True}):
+        rejected = model_hub_app.client.post("/api/models/sources", attempt)
+        rejected_body = rejected.json()
+        assert rejected.status == 422, rejected_body
+        assert rejected_body["error"] == "discovery_failed"
+        assert rejected_body["detail"].endswith("observation_failed")
+        assert rejected_body["observation"] == {
+            "contract_version": CONTRACT_VERSION,
+            "outcome": "adapter_error",
+            "reachable": True,
+            "authenticated": "unknown",
+            "protocol": None,
+            "discovery": "not_attempted",
+            "models": [],
+            "model_metadata": [],
+        }
     assert model_hub_app.client.get(
         "/api/models/sources"
     ).json()["sources"] == []
 
+    # Explicit consent (#1920): the declared interface is saved unverified, unprobed.
+    mock_llm_upstream.reset_requests()
     accepted = model_hub_app.client.post(
-        "/api/models/sources",
-        {**payload, "accept_unavailable_inventory": True},
+        "/api/models/sources", {**payload, "save_unverified": True}
     )
     accepted_body = accepted.json()
     assert accepted.status == 201, accepted_body
     source = accepted_body["source"]
     assert source["protocol"] == "openai_chat"
     assert source["models"] == []
-    assert source["state"] == {
-        "status": "error",
-        "retry_at": None,
-        "detail_key": "models.source.error.unclassified",
-    }
+    assert source["verification_pending"]
+    assert source["state"]["status"] == "standby"
+    # No probe: a background inventory refresh may still read the listing.
+    assert [item for item in mock_llm_upstream.requests() if item["method"] == "POST"] == []
 
 
 @pytest.mark.xfail(
@@ -314,10 +357,13 @@ def test_b6_replace_key_rolls_back_then_rename_and_retarget_commit(
     assert revocation_journal.stat().st_mtime_ns > journal_mtime
     assert json.loads(revocation_journal.read_text(encoding="utf-8")) == []
 
+    # The endpoint now takes the replacement key, and its listing proves it.
+    replacement_key = "sk-model-hub-e2e-replacement"
     mock_llm_upstream.configure(auth="ok")
+    _require_key(mock_llm_upstream, replacement_key)
     replaced = model_hub_app.client.put(
         f"/api/models/sources/{source['id']}/credential",
-        {"key": "sk-model-hub-e2e-replacement"},
+        {"key": replacement_key},
     )
     replaced_body = replaced.json()
     assert replaced.status == 200, replaced_body
@@ -332,6 +378,7 @@ def test_b6_replace_key_rolls_back_then_rename_and_retarget_commit(
 
     with MockLLMUpstream() as replacement_upstream:
         _configure_protocol(replacement_upstream)
+        _require_key(replacement_upstream, replacement_key)
         retargeted = model_hub_app.client.patch(
             f"/api/models/sources/{source['id']}",
             {"base_url": replacement_upstream.url},
@@ -388,9 +435,11 @@ def test_b7_delete_guard_requires_exact_echo_before_force(
     assert refused.status == 409, refusal
     assert refusal["error"] == "source_in_route_chain"
     assert refusal["would_remove_hops"]
-    assert refusal["would_interrupt"] == [
-        {"backend": "claude", "model_id": MENU_MODEL, "agents": []}
-    ]
+    # Deleting the only Source strands every protected menu row it supplied,
+    # passthrough included (#1897): pin the chained row, not the menus' contents.
+    assert {
+        "backend": "claude", "model_id": MENU_MODEL, "agents": []
+    } in refusal["would_interrupt"]
 
     stale_hops = [dict(hop) for hop in refusal["would_remove_hops"]]
     stale_hops[0]["model_id"] = "stale-confirmed-model"
@@ -483,13 +532,30 @@ def test_b8_refresh_force_is_body_only_in_the_current_http_contract(
 
     # Open decision B6 has no D-1..D-4 identifier in plan section 5:
     # normalize destructive force transport or retain the current split.
-    source = _create_guarded_source(model_hub_app, mock_llm_upstream)
+    # An API-key hop needs no inventory membership (#1897), so an emptied
+    # listing strands nothing on its own. Refresh drops a hop where another
+    # Source still lists the model and automatic matching narrows to it (#1934).
+    _configure_protocol(mock_llm_upstream, "anthropic", models=[{"id": MENU_MODEL}])
+    _create_source(
+        model_hub_app, mock_llm_upstream, nonce="scn_b800000000000001",
+        vendor="anthropic", display_name="Listing E2E source",
+    )
+    source, _ = _create_source(
+        model_hub_app, mock_llm_upstream, nonce="scn_b800000000000002",
+        vendor="anthropic", display_name="Emptied E2E source",
+    )
+    mode = model_hub_app.client.patch("/api/models/agents/claude/mode", {"mode": "hub"})
+    assert mode.status == 200, mode.json()
     endpoint = f"/api/models/sources/{source['id']}/refresh"
     mock_llm_upstream.configure(models=[])
     refused = model_hub_app.client.post(endpoint, {})
     refusal = refused.json()
     assert refused.status == 409, refusal
     assert refusal["error"] == "source_model_in_route_chain"
+    assert any(
+        hop["backend"] == "claude" and hop["source_id"] == source["id"] and hop["model_id"] == MENU_MODEL
+        for hop in refusal["would_remove_hops"]
+    ), refusal["would_remove_hops"]
 
     query_force = model_hub_app.client.post(
         f"{endpoint}?force=true",
@@ -603,7 +669,6 @@ def test_b10_custom_models_and_free_text_tiers_obey_ownership_rules(
         "high",
         "xhigh",
         "max",
-        "ultra",
     ]
     assert catalog_model["reasoning_efforts_source"] == "catalog"
     managed = model_hub_app.client.patch(
@@ -707,7 +772,6 @@ def test_b10_custom_models_and_free_text_tiers_obey_ownership_rules(
         "high",
         "xhigh",
         "max",
-        "ultra",
     ]
     assert refreshed_catalog_model["reasoning_efforts_source"] == "catalog"
     events = model_hub_app.client.get("/api/models/events?limit=20").json()[

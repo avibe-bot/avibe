@@ -289,7 +289,10 @@ async def _post_turn(
     payload: dict[str, object] | None = None,
 ) -> tuple[int, bytes]:
     headers = {"Authorization": f"Bearer {launch.gateway_token}"}
-    if launch.gateway_request_metadata:
+    if launch.backend == "vibey":
+        # Vibey sends its resolution's request headers, which name its Turn.
+        headers.update(launch.gateway_request_metadata)
+    elif launch.gateway_request_metadata:
         headers["x-codex-turn-metadata"] = json.dumps(launch.gateway_request_metadata)
     request_payload = payload or {
         "model": launch.runtime_model,
@@ -1434,24 +1437,26 @@ def test_mh_unlisted_001_removed_model_fails_its_next_turn_with_one_clear_reason
 
 
 @pytest.mark.parametrize(
-    ("case", "discriminator", "held", "event_reason"),
+    ("case", "discriminator", "hold_reason", "event_reason"),
     (
-        ("listed_without_route", "route_unconfigured", False, "route_unconfigured"),
-        ("unlisted", "model_unlisted", True, None),
-        ("unlisted_with_manual_route", "blocked_supply_state", False, "source_missing"),
+        ("listed_without_route", "route_unconfigured", "model_hub_route_unconfigured", "route_unconfigured"),
+        ("unlisted", "model_unlisted", "model_hub_model_unlisted", None),
+        ("unlisted_with_manual_route", "blocked_supply_state", None, "source_missing"),
     ),
 )
-def test_only_an_unlisted_model_holds_its_input_for_an_explicit_retry(
+def test_a_refusal_only_models_can_clear_holds_its_input_for_an_explicit_retry(
     tmp_path: Path,
     case: str,
     discriminator: str,
-    held: bool,
+    hold_reason: str | None,
     event_reason: str | None,
 ) -> None:
     """MH-UNLISTED-001: an empty chain is the list's answer only for an id the
     list does not hold; a listed row still asks for a Route, and a retained
-    manual Route still reports its own blocker. Only the unlisted id is final,
-    and, being no model of this backend, it interrupts no supply in the feed."""
+    manual Route still reports its own blocker. A missing Route and an unlisted
+    id fail the same way until Models changes, so each holds its input under its
+    own reason; a blocker keeps the automatic startup retries. Being no model of
+    this backend, the unlisted id interrupts no supply in the feed."""
 
     config = _config()
     model_id = _requested_model("claude") if case == "listed_without_route" else "claude-gone-9"
@@ -1480,9 +1485,7 @@ def test_only_an_unlisted_model_holds_its_input_for_an_explicit_retry(
     assert refused.value.turn_outcome is not None
     assert refused.value.turn_outcome.discriminator == discriminator
     assert prewrite_failure_evidence(context) == (
-        {"reason": "model_hub_model_unlisted", "requires_explicit_retry": True}
-        if held
-        else {}
+        {"reason": hold_reason, "requires_explicit_retry": True} if hold_reason else {}
     )
     assert [
         event["reason"]

@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from core.agent_core.ai.provider import ModelCapabilities, ModelEndpoint, ModelRequest
+from core.agent_core.ai.provider import HostedToolRoute, ModelCapabilities, ModelEndpoint, ModelRequest
 from core.agent_core.harness.context import (
     KEPT_INPUTS_WIN,
     CLEARED_PLACEHOLDER,
@@ -54,8 +54,15 @@ from core.agent_core.harness.context import (
 from core.agent_core.harness.projection import context_view, project
 from core.agent_core.harness.store import ContextEntry
 from core.agent_core.tools.base import ToolSpec
+from core.agent_core.tools.hosted import hosted_tool_spec
 from core.agent_core.messages import (
     AssistantMessage,
+    HostedAction,
+    HostedNative,
+    HostedRecord,
+    HostedSource,
+    HostedSummary,
+    HostedToolBlock,
     ImageBlock,
     TextBlock,
     ThinkingBlock,
@@ -115,6 +122,33 @@ def test_the_estimate_counts_utf8_bytes_so_chinese_is_not_undercounted():
     reply = AssistantMessage((ThinkingBlock("ab"), call), ORIGIN, "tool_use")  # unsigned thinking replays as text
     replayed = len("ab") + len("read") + len('{"path":"中"}'.encode())
     assert message_tokens(reply) == math.ceil(replayed / 4)
+
+
+@pytest.mark.parametrize(
+    ("payload", "counted"),
+    [
+        # An OpenAI web_search_call item is smaller than the synthetic call and result it goes back as elsewhere.
+        ({"type": "web_search_call", "id": "ws_1"}, "portable"),
+        # An Anthropic search result is mostly its encrypted pages, which go back verbatim to the Source that served
+        # them (§4.4, §5).
+        ({"type": "web_search_tool_result", "encrypted_content": "x" * 18_000}, "native"),
+    ],
+)
+def test_a_hosted_call_counts_as_the_largest_form_it_can_go_back_in(payload, counted):
+    """Whether a hosted call goes back verbatim depends on the hop each request goes to, so its estimate is its largest
+    form: its native payload, or its synthetic call (whose arguments repeat its query) and result."""
+    search = HostedToolBlock(
+        id="srvtoolu_1",
+        tool="web_search",
+        action=HostedAction("search", queries=("q",)),
+        record=HostedRecord(status="completed", sources=(HostedSource(url="https://a.test"),)),
+        native=HostedNative(source_id="src_served00001", payload=(payload,)),
+    )
+    reply = AssistantMessage((search,), ORIGIN, "stop", hosted_summary=HostedSummary())
+    portable = len("web_search") + len('{"query":"q"}') + len('[web_search: "q"]\n1. https://a.test')
+    native = len(json.dumps([payload], separators=(",", ":")))
+    assert message_tokens(reply) == math.ceil((portable if counted == "portable" else native) / 4)
+    assert (native > portable) is (counted == "native")
 
 
 def responses_item(reasoning: int, summary: str = "") -> ThinkingBlock:
@@ -185,27 +219,54 @@ def make_request(messages=(), *, system="system", tools=(), endpoint=ENDPOINT, m
 
 
 @pytest.mark.parametrize(
-    "window,input_limit,hop_output,configured,output,margin,threshold,keep",
+    "window,input_limit,hop_output,configured,output,margin,threshold,keep,checkpoint",
     [
-        (200_000, None, 32_000, 64_000, 32_000, 8_000, 160_000, 20_000),
-        (1_000_000, None, 32_000, 32_000, 32_000, 30_000, 900_000, 20_000),
-        (None, None, None, 8_192, 8_192, 8_000, 111_808, 20_000),  # unknown: W = 128,000, O = 8,192
-        (400_000, 272_000, 128_000, 128_000, 128_000, 12_000, 132_000, 20_000),
-        (32_000, None, 64_000, 4_096, 4_096, 4_000, 23_904, 5_976),  # O is the request's, capped by the Agent
-        (8_000, None, 2_000, 2_000, 2_000, 1_000, 5_000, 1_250),  # M is at most W / 8
+        (200_000, None, 32_000, 64_000, 32_000, 8_000, 160_000, 20_000, 32_000),  # a checkpoint asks for all of O
+        (1_000_000, None, 32_000, 32_000, 32_000, 30_000, 900_000, 20_000, 32_000),
+        (1_000_000, None, 128_000, 128_000, 128_000, 30_000, 842_000, 20_000, 64_000),  # and at most 64,000
+        (None, None, None, 8_192, 8_192, 8_000, 111_808, 20_000, 8_192),  # unknown: W = 128,000, O = 8,192
+        (400_000, 272_000, 128_000, 128_000, 128_000, 12_000, 132_000, 20_000, 64_000),
+        (200_000, None, 16_000, 64_000, 16_000, 8_000, 176_000, 20_000, 16_000),
+        (256_000, None, 64_000, 64_000, 64_000, 8_000, 184_000, 20_000, 64_000),
+        (32_000, None, 64_000, 4_096, 4_096, 4_000, 23_904, 5_976, 4_096),  # O is the request's, capped by the Agent
+        (8_000, None, 2_000, 2_000, 2_000, 1_000, 5_000, 1_250, 2_000),  # M is at most W / 8
     ],
 )
 def test_limits_follow_the_frozen_formula_from_the_route_capabilities(
-    window, input_limit, hop_output, configured, output, margin, threshold, keep
+    window, input_limit, hop_output, configured, output, margin, threshold, keep, checkpoint
 ):
     capabilities = ModelCapabilities(context_window=window, input_limit=input_limit, max_output_tokens=hop_output)
     assert output_tokens(capabilities, configured) == output
-    assert checkpoint_max_tokens(capabilities, configured) == min(16_000, output)
+    assert checkpoint_max_tokens(capabilities, configured) == checkpoint
     plan = budget(make_request(system="", max_tokens=output), capabilities, transcript=())
     assert (plan.output, plan.margin, plan.threshold, plan.keep) == (output, margin, threshold, keep)
     limit = input_limit or window or 128_000
     at_limit = budget(make_request(system="x" * 4 * (limit - output - margin), max_tokens=output), capabilities, transcript=())
     assert at_limit.fits and not replace(at_limit, est=at_limit.est + 1).fits
+
+
+@pytest.mark.parametrize(
+    "window,output,steps,threshold",
+    [
+        (1_050_000, 128_000, (), 890_500),  # a flat price: the window's threshold
+        (1_050_000, 128_000, (272_000,), 244_800),  # GPT-5.4 and later: a tenth below the step
+        (1_050_000, 128_000, (272_000, 600_000), 244_800),  # the smallest step
+        (1_000_000, 128_000, (100_000,), 90_000),  # a step of 100,000 is kept below
+        (1_000_000, 128_000, (32_000,), 842_000),  # a smaller one is not
+        (1_000_000, 128_000, (32_000, 128_000), 115_200),  # but a dearer step above it is
+        (128_000, 32_000, (200_000,), 88_000),  # a step past the window changes nothing
+        (1_050_000, 128_000, (10**400,), 890_500),  # nor does one past any float a hand-edited price may name
+    ],
+)
+def test_the_threshold_stays_below_the_context_price_step(window, output, steps, threshold):
+    capabilities = ModelCapabilities(context_window=window, max_output_tokens=output, context_price_steps=steps)
+    request = make_request(system="", max_tokens=output)
+    plan = budget(request, capabilities, transcript=())
+    flat = budget(request, replace(capabilities, context_price_steps=()), transcript=())
+    assert plan.threshold == threshold
+    # Only the threshold (and the tail it bounds) follows the step: the output, margin and limit are the window's.
+    assert (plan.output, plan.margin, plan.input_limit) == (flat.output, flat.margin, flat.input_limit)
+    assert plan.keep == min(20_000, threshold // 4)
 
 
 @pytest.mark.parametrize("window", [4_000, 8_000, 12_000, 32_000, 128_000, 1_000_000])
@@ -276,6 +337,22 @@ def test_the_anchor_holds_while_the_transcript_up_to_its_response_is_unchanged()
     tool = ToolSpec("t", "d" * 400, {})
     tool_delta = request_tokens("system", (tool,), ()) - request_tokens("system", (), ())
     assert _est(rows, make_request(messages, tools=(tool,))) == 5_000 + after + tool_delta
+    # A hosted tool counts as what its hop sends: the provider's declaration where its route is native, its spec
+    # elsewhere, so a route that turns proxied grows the estimate though the request's tools are the same.
+    search = hosted_tool_spec("web_search")
+    declaration = {"type": "web_search_20250305", "name": "web_search", "max_uses": 5}
+    proxied = make_request(messages, tools=(search,))
+    native = replace(
+        proxied,
+        endpoint=replace(
+            ENDPOINT,
+            source_id="src_hostedtest1",
+            hosted_tools={"web_search": HostedToolRoute("native", False, declaration=declaration)},
+        ),
+    )
+    as_spec = len(json.dumps([search.name, search.description, dict(search.input_schema)]).encode())
+    as_declaration = len(json.dumps(declaration).encode())
+    assert _est(rows, proxied) - _est(rows, native) == math.ceil((6 + as_spec) / 4) - math.ceil((6 + as_declaration) / 4)
     rehydrated = user("state " * 50)
     assert _est(rows, make_request((rehydrated, *messages))) == 5_000 + after + message_tokens(rehydrated)
     # An edit after the anchored response is counted by its bytes.

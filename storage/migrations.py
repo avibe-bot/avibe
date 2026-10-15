@@ -158,6 +158,7 @@ HEAD_REQUIRED_COLUMNS = PRE_SHOW_SESSION_EVENTS_REQUIRED_COLUMNS | {
     },
 }
 HEAD_ONLY_REQUIRED_COLUMNS = {
+    "vault_secrets": {"fields"},
     "show_pages": {"access_mode", "access_revision", "share_id", "offline_at"},
     "show_page_access_entries": {
         "page_id",
@@ -710,6 +711,9 @@ def _repair_head_required_columns(conn: sqlite3.Connection, tables: set[str]) ->
         if table in tables and "context_seq" not in _column_names(conn, table):
             conn.execute(f'alter table "{table}" add column "context_seq" INTEGER')
             changed = True
+    if "vault_secrets" in tables and "fields" not in _column_names(conn, "vault_secrets"):
+        conn.execute('alter table "vault_secrets" add column "fields" TEXT')
+        changed = True
 
     _ensure_head_indexes(conn, tables)
     return changed
@@ -819,6 +823,7 @@ _AGENT_RUNS_INDEX_REVISION_MODULES = (
     "storage.alembic.versions.20260728_0041_agent_runs_owed_notice_backoff_index",
     "storage.alembic.versions.20260729_0042_agent_runs_definition_streak_index",
     "storage.alembic.versions.20260811_0051_callback_terminal_turn_identity",
+    "storage.alembic.versions.20261015_0066_agent_runs_callback_parent_index",
 )
 #: Columns the managed indexes read. A head-shaped database has all of them, but
 #: this helper is also reached from ``_repair_head_required_columns`` on older drifted
@@ -833,6 +838,9 @@ _AGENT_RUNS_INDEX_COLUMNS = frozenset(
         "session_id",
         "run_type",
         "source_kind",
+        "parent_run_id",
+        "source_actor",
+        "id",
     }
 )
 
@@ -923,6 +931,20 @@ def _ensure_messages_query_indexes(conn: sqlite3.Connection, tables: set[str]) -
     ):
         conn.execute(transcript_index.DROP_INDEX_SQL)
         conn.execute(transcript_index.CREATE_INDEX_SQL)
+    # The turn-id expression index, from the revision that owns its DDL: the
+    # planner matches an index expression by text, so a retyped copy is ignored.
+    turn_id_index = import_module(
+        "storage.alembic.versions.20261012_0064_messages_turn_id_index"
+    )
+    turn_id_row = conn.execute(
+        "select sql from sqlite_master where type = 'index' and name = ?",
+        (turn_id_index._INDEX,),
+    ).fetchone()
+    if turn_id_row is None or _normalized_index_sql(turn_id_row[0]) != _normalized_index_sql(
+        turn_id_index.CREATE_INDEX_SQL
+    ):
+        conn.execute(turn_id_index.DROP_INDEX_SQL)
+        conn.execute(turn_id_index.CREATE_INDEX_SQL)
     conn.execute('create index if not exists ix_messages_session_created_id on messages (session_id, created_at, id)')
     conn.execute('create index if not exists ix_messages_session_type_created_id on messages (session_id, type, created_at, id)')
     conn.execute('create index if not exists ix_messages_platform_session_created_id on messages (platform, session_id, created_at, id)')

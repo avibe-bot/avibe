@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pet-set-dismissed"
+description = "Enables the pet_set_dismissed command without any pre-configured scope."
+commands.allow = ["pet_set_dismissed"]
+
+[[permission]]
+identifier = "deny-pet-set-dismissed"
+description = "Denies the pet_set_dismissed command without any pre-configured scope."
+commands.deny = ["pet_set_dismissed"]

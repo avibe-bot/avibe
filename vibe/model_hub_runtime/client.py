@@ -15,6 +15,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal
+from email.utils import format_datetime
 from typing import Any, AsyncIterator, BinaryIO, Literal, Mapping, TypeVar, cast
 
 import aiohttp
@@ -27,10 +28,12 @@ from core.handlers.model_hub.adapter import (
     InvokeCancelledError,
     RawCallOutcome,
     RawOutcomeKind,
+    UpstreamRejection,
 )
 from core.handlers.model_hub.async_owner import run_owned_in_thread
 from core.handlers.model_hub.classification import UPSTREAM_MACHINE_ERROR_CODES
-from core.handlers.model_hub.events import redact_untrusted_text
+from core.handlers.model_hub.events import bounded_diagnostic_detail
+from core.handlers.model_hub.hosted_images import IMAGE_RESPONSE_MAX_BYTES
 from core.handlers.model_hub.json_wire import (
     JSONEvent,
     JSONPath,
@@ -38,7 +41,6 @@ from core.handlers.model_hub.json_wire import (
     project_json_reader,
 )
 from core.handlers.model_hub.request import FORWARDED_CALLER_HEADERS
-from core.message_output import plain_untrusted_text
 from core.os_errors import local_os_errno
 from core.handlers.model_hub.stream_wire import (
     ErrorEnvelopePath,
@@ -56,8 +58,6 @@ from vibe.model_hub_runtime.state import SourceRecord
 
 
 _STREAM_CHUNK_BYTES = 64 * 1024
-# Upper bound on upstream error text shown to the user in a terminal message.
-_UPSTREAM_DETAIL_CHARS = 400
 # The engine answers a failed upstream connection itself, before any upstream
 # response, with exactly its own generic envelope and Go's transport error text.
 # That is a network fact, not an upstream server verdict.
@@ -68,16 +68,31 @@ _ENGINE_TRANSPORT_FAILURE = re.compile(
     r"http2: (?:client connection lost|server sent GOAWAY)|server closed idle connection|"
     r"no such host|network is unreachable|proxyconnect"
 )
-# C0/C1 controls and every Unicode Bidi_Control character: either can act on
-# whatever renders the text (a terminal, a log viewer, a browser).
-_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 # This threshold only selects memory or a temporary file; it never rejects or
 # truncates upstream response bytes.
 _PRELUDE_MEMORY_BYTES = 256 * 1024
+# A buffered answer is spooled whole before it is read. An image answer, served or refused, is bounded while it
+# downloads, so a relay that never stops cannot fill the disk before the image call rejects it
+# (vibey-hosted-tools.md §7.4).
+_BUFFERED_RESPONSE_MAX_BYTES: Mapping[str, int] = {"openai_images": IMAGE_RESPONSE_MAX_BYTES}
+# The machine code of an answer cut at that bound; L1's own, never an upstream's.
+RESPONSE_TOO_LARGE = "response_too_large"
 _ERROR_OBSERVATION_BYTES = 256 * 1024
 # Projecting a response body that has already arrived is local work. It has
 # its own budget so the client's connection budget never limits it.
 _LOCAL_PROJECTION_TIMEOUT_SECONDS = ENGINE_TRANSPORT_TIMEOUT_SECONDS
+# A streamed response that sends the gateway no byte for this long is stalled.
+# The engine sets no timeout once its upstream is connected, so the gateway,
+# its downstream client, bounds it. Only (Source vendor, protocol) pairs whose
+# untranslated streams were measured to keep sending in every phase are
+# bounded: Anthropic sends a ping every 10 s, even while a relay buffers a tool
+# call's input, and OpenAI's Responses events never paused for more than 36 s,
+# including before the first event of a cold 250K-token prompt. The engine
+# holds SSE comments and its translators drop heartbeats, so an xAI tool call
+# or a translated stream can be silent for minutes while healthy
+# (docs/plans/model-hub-inference-deadlines.md, "Stream idle bound").
+_STREAM_IDLE_TIMEOUT_SECONDS = 120.0
+_STREAM_IDLE_BOUNDED_SOURCES = frozenset({("anthropic", "anthropic"), ("openai", "openai_responses")})
 _OFFICIAL_BASE_URLS = official_api_key_base_urls()
 logger = logging.getLogger(__name__)
 _ProjectedJSON = TypeVar("_ProjectedJSON")
@@ -458,6 +473,11 @@ class EngineClient:
                 endpoint += "?alt=sse"
             body.pop("model", None)
             body.pop("stream", None)
+        elif request_protocol == "openai_images":
+            # Reference images make an edit (vibey-hosted-tools.md §7.4). An images call is
+            # always buffered, and names no stream: not every images endpoint reads one.
+            endpoint = "/v1/images/edits" if "images" in body else "/v1/images/generations"
+            body["model"] = routed_model
         else:
             endpoint = _endpoint_for_protocol(request_protocol)
             body["model"] = routed_model
@@ -478,11 +498,23 @@ class EngineClient:
             total=None,
             connect=self.timeout,
             sock_connect=self.timeout,
-            sock_read=None,
+            sock_read=(
+                _STREAM_IDLE_TIMEOUT_SECONDS
+                if stream and request_protocol == source.protocol
+                and (source.vendor, source.protocol) in _STREAM_IDLE_BOUNDED_SOURCES
+                else None
+            ),
         )
-        # Connecting to the local engine is bounded. Once connected, headers
-        # and response bytes can wait on upstream inference for any duration;
-        # completion, transport failure, or owner cancellation ends that wait.
+        # Connecting to the local engine is bounded. Once connected, inference
+        # can take any duration; completion, transport failure, or owner
+        # cancellation ends it. A stream whose upstream keeps sending must keep
+        # sending, though: from the request on, every byte restarts its idle
+        # bound, and one that runs out closes the engine connection, which
+        # cancels the upstream request. A buffered response sends nothing until
+        # it is complete, so it has none.
+        bound = _BUFFERED_RESPONSE_MAX_BYTES.get(request_protocol)
+        # A body can carry megabytes of images: encoded off the controller loop.
+        encoded = await run_owned_in_thread(lambda: json.dumps(body).encode("utf-8"))
         trace_configs: list[aiohttp.TraceConfig] = []
         if on_request_sent is not None:
             # CPA resolves the route as soon as it reads the body, while a
@@ -533,10 +565,21 @@ class EngineClient:
                 )
             return completed_handle(outcome)
 
+        def cut(status: int) -> EngineInvokeHandle:
+            # A local cut, like a transport failure: nothing past the bound was read or observed.
+            return ended(_outcome(
+                kind=RawOutcomeKind.NETWORK_ERROR,
+                source=source,
+                model_id=model_id,
+                http_status=status,
+                error_code=RESPONSE_TOO_LARGE,
+                message="upstream response exceeded its bound",
+            ))
+
         try:
             response = await session.post(
                 self._url(endpoint),
-                json=body,
+                data=encoded,
                 headers=headers,
                 allow_redirects=False,
             )
@@ -548,7 +591,7 @@ class EngineClient:
                 error_body = _StreamPrelude()
                 try:
                     await asyncio.wait_for(
-                        _read_response_into(response.content, error_body),
+                        _read_response_into(response.content, error_body, max_bytes=bound),
                         timeout=self.timeout,
                     )
                     observed_payload = await _observe_buffered_protocol_response_async(
@@ -562,8 +605,16 @@ class EngineClient:
                 except (asyncio.TimeoutError, aiohttp.ClientError):
                     payload = b""
                     observed_payload = ProtocolObservation()
+                except _ResponseTooLarge:
+                    response.close()
+                    await session.close()
+                    return cut(response.status)
                 finally:
                     error_body.close()
+                if retry_after is None:
+                    retry_after = _upstream_reset_advice(
+                        payload, observed_payload.error_envelope_paths or (("error",),),
+                    )
                 if _is_local_model_registration_failure(
                     response.status,
                     payload,
@@ -616,7 +667,15 @@ class EngineClient:
                 buffered_body = _StreamPrelude()
                 prelude = buffered_body
                 await buffered_body.write_async(first)
-                await _read_response_into(response.content, buffered_body)
+                try:
+                    await _read_response_into(
+                        response.content, buffered_body, max_bytes=None if bound is None else bound - len(first),
+                    )
+                except _ResponseTooLarge:
+                    buffered_body.close()
+                    response.close()
+                    await session.close()
+                    return cut(response.status)
                 observation = await _observe_buffered_protocol_response_async(
                     observe_buffered_protocol_response,
                     request_protocol,
@@ -709,7 +768,8 @@ class EngineClient:
             if wire_state is not None:
                 raise InvokeCancelledError(wire_state) from cancelled
             raise
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as exc:
+            logger.warning("Model Hub engine request for source %s timed out: %s", source.source_id, exc)
             if response is not None:
                 response.close()
             await session.close()
@@ -1329,10 +1389,18 @@ def _is_local_model_registration_failure(
         return False
     error = decoded.get("error")
     error_type, _, _ = _raw_error_fields(payload)
+    message = error.get("message") if isinstance(error, dict) else None
     return (
-        isinstance(error, dict)
-        and error_type == "invalid_request_error"
-        and error.get("message") == f"unknown provider for model {routed_model}"
+        error_type == "invalid_request_error"
+        and isinstance(message, str)
+        and (
+            message == f"unknown provider for model {routed_model}"
+            # Its images handler refuses, before any upstream, a model it does not route
+            # there (sdk/api/handlers/openai/openai_images_handlers.go at d318bcc3).
+            or message.startswith(
+                f"Model {routed_model} is not supported on /v1/images/generations or /v1/images/edits."
+            )
+        )
     )
 
 
@@ -1483,11 +1551,22 @@ def _project_raw_error_fields(
     return types[0] if types else None, codes[0] if codes else None, candidates
 
 
+class _ResponseTooLarge(Exception):
+    """A response grew past the bound its request protocol sets."""
+
+
 async def _read_response_into(
     content: aiohttp.StreamReader,
     target: _StreamPrelude,
+    *,
+    max_bytes: int | None = None,
 ) -> None:
+    received = 0
     while chunk := await content.read(_STREAM_CHUNK_BYTES):
+        received += len(chunk)
+        if max_bytes is not None and received > max_bytes:
+            # Stop reading: what is past the bound is never written anywhere.
+            raise _ResponseTooLarge
         await target.write_async(chunk)
 
 
@@ -1594,7 +1673,7 @@ async def _response_stream(
                 message="upstream stream ended before a protocol terminal event",
                 stream_started=wire_state.model_output_started,
             )
-    except asyncio.TimeoutError:
+    except asyncio.TimeoutError as exc:
         outcome = _observed_stream_terminal_outcome(
             wire_state,
             source,
@@ -1602,6 +1681,9 @@ async def _response_stream(
             response.status,
         )
         if outcome is None:
+            logger.warning(
+                "Model Hub engine stream for source %s timed out after model output: %s", source.source_id, exc,
+            )
             outcome = _outcome(
                 kind=RawOutcomeKind.TIMEOUT,
                 source=source,
@@ -1694,6 +1776,7 @@ def _reduce_protocol_observation(
             stream_started=stream_started,
             usage=observation.usage,
             recovery_verified=observation.recovery_verified,
+            hosted_tools=observation.hosted_tools,
         )
     if observation.outcome == "failed_terminal":
         projected_types = tuple(
@@ -1716,7 +1799,7 @@ def _reduce_protocol_observation(
                 observation.error_envelope_paths,
             )
         upstream_detail = (
-            _bounded_upstream_detail(observation.error_message)
+            bounded_diagnostic_detail(observation.error_message)
             if observation.error_message is not None
             else _upstream_error_detail(
                 observation.error_payload or b"",
@@ -1754,6 +1837,15 @@ def _reduce_protocol_observation(
             usage=observation.usage,
             recovery_verified=observation.recovery_verified,
             upstream_detail=upstream_detail,
+            rejection=_upstream_rejection(
+                http_status,
+                stream_started,
+                error_code,
+                error_type,
+                observation.error_payload or b"",
+                observation.error_envelope_paths or (("error",),),
+                observation.error_message,
+            ),
         )
     return _outcome(
         kind=RawOutcomeKind.PROTOCOL_ERROR,
@@ -1856,6 +1948,8 @@ def _outcome(
     recovery_verified: bool = False,
     upstream_detail: str | None = None,
     os_errno: int | None = None,
+    rejection: UpstreamRejection | None = None,
+    hosted_tools: frozenset[str] = frozenset(),
 ) -> RawCallOutcome:
     return RawCallOutcome(
         kind=kind,
@@ -1871,6 +1965,8 @@ def _outcome(
         recovery_verified=recovery_verified,
         upstream_detail=upstream_detail,
         os_errno=os_errno,
+        rejection=rejection,
+        hosted_tools=hosted_tools,
     )
 
 
@@ -1914,22 +2010,118 @@ def _upstream_error_detail(
     if not payload or not project_json_reader(io.BytesIO(payload), message_paths, visit):
         return None
     for path in message_paths:
-        text = _bounded_upstream_detail(values.get(path, ""))
+        text = bounded_diagnostic_detail(values.get(path, ""))
         if text:
             return text
     return None
 
 
-def _bounded_upstream_detail(message: str) -> str | None:
-    # Control characters (terminal escapes, BEL) would act on whatever renders
-    # the text, a log viewer included; they carry no message content.
-    text = " ".join(_CONTROL_CHARACTERS.sub(" ", message).split())
-    if not text:
+_REJECTION_TOKEN = re.compile(r"[A-Za-z0-9_.\[\]-]{1,64}")
+_REJECTION_MESSAGE_SCAN_CHARS = 2000
+_INVALID_VALUE_MESSAGE = re.compile(r"Invalid value: '([A-Za-z0-9_.-]{1,64})'")
+_UNSUPPORTED_TOOL_TYPE_MESSAGE = re.compile(r"Unsupported tool type: ([A-Za-z0-9_.-]{1,64})")
+_INVALID_ENCRYPTED_CONTENT_MESSAGE = re.compile(r"Invalid encrypted_content in ([a-z_]{1,64}) block")
+
+
+def _upstream_rejection(
+    http_status: int | None,
+    stream_started: bool,
+    error_code: str | None,
+    error_type: str | None,
+    payload: bytes,
+    envelope_paths: tuple[ErrorEnvelopePath, ...],
+    message: str | None,
+) -> UpstreamRejection | None:
+    """Project a 400 before output into the closed tokens the evidence rules read.
+
+    The machine code and type come from the one extractor (``_raw_error_fields``
+    and its projection); this adds only the first envelope's ``param`` and the
+    single token each recognized message names. The prose itself never leaves.
+    """
+
+    if http_status != 400 or stream_started:
         return None
-    text = plain_untrusted_text(redact_untrusted_text(text))
-    if len(text) > _UPSTREAM_DETAIL_CHARS:
-        text = text[: _UPSTREAM_DETAIL_CHARS - 1].rstrip() + "…"
-    return text
+    names = ("param", "message")
+    paths = tuple((*path, name) for path in envelope_paths for name in names)
+    values: dict[JSONPath, str] = {}
+
+    def visit(path: JSONPath, event: JSONEvent, value: object | None, _scope: JSONScope) -> None:
+        if event == "replace":
+            values.pop(path, None)
+        elif event == "scalar" and isinstance(value, str):
+            values[path] = value
+
+    if payload:
+        project_json_reader(io.BytesIO(payload), paths, visit)
+    envelope = next(
+        (path for path in envelope_paths if any((*path, name) in values for name in names)),
+        None,
+    )
+    fields = {name: values.get((*envelope, name)) for name in names} if envelope is not None else {}
+    text = (fields.get("message") or message or "")[:_REJECTION_MESSAGE_SCAN_CHARS]
+
+    def token(value: object) -> str | None:
+        return value if isinstance(value, str) and _REJECTION_TOKEN.fullmatch(value) else None
+
+    def named(pattern: re.Pattern[str]) -> str | None:
+        found = pattern.search(text)
+        return found.group(1) if found else None
+
+    return UpstreamRejection(
+        status=400,
+        code=token(error_code),
+        error_type=token(error_type),
+        param=token(fields.get("param")),
+        invalid_value=named(_INVALID_VALUE_MESSAGE),
+        unsupported_tool_type=named(_UNSUPPORTED_TOOL_TYPE_MESSAGE),
+        invalid_encrypted_content_block=named(_INVALID_ENCRYPTED_CONTENT_MESSAGE),
+    )
+
+
+def _upstream_reset_advice(
+    payload: bytes,
+    envelope_paths: tuple[ErrorEnvelopePath, ...],
+) -> str | None:
+    """Project a usage cap's own reset as Retry-After advice, in that header's syntax.
+
+    A ChatGPT subscription past its cap answers 429 ``usage_limit_reached`` with
+    ``resets_at`` (Unix seconds) and ``resets_in_seconds`` in the error envelope
+    and no header. The first becomes an HTTP-date and the second delay-seconds;
+    L2 validates either exactly like the header. Only that envelope's reset is
+    advice: the same field names in any other error say nothing about when the
+    Source can serve again.
+    """
+
+    fields = ("type", "resets_at", "resets_in_seconds")
+    reset_paths = tuple((*path, field) for path in envelope_paths for field in fields)
+    values: dict[JSONPath, object] = {}
+
+    def visit(
+        path: JSONPath,
+        event: JSONEvent,
+        value: object | None,
+        _scope: JSONScope,
+    ) -> None:
+        if event == "replace":
+            values.pop(path, None)
+        elif event == "scalar":
+            values[path] = value
+
+    if not payload or not project_json_reader(io.BytesIO(payload), reset_paths, visit):
+        return None
+    for path in envelope_paths:
+        if values.get((*path, "type")) != "usage_limit_reached":
+            continue
+        resets_at = values.get((*path, "resets_at"))
+        if type(resets_at) is int and resets_at > 0:
+            try:
+                return format_datetime(datetime.fromtimestamp(resets_at, timezone.utc), usegmt=True)
+            except (OverflowError, OSError, ValueError):
+                pass
+        resets_in_seconds = values.get((*path, "resets_in_seconds"))
+        if type(resets_in_seconds) is int and resets_in_seconds >= 0:
+            return str(resets_in_seconds)
+    return None
 
 
 def _safe_error_code(value: object) -> str | None:

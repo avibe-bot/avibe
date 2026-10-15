@@ -34,7 +34,7 @@ import socket
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Any, Callable, Optional, TYPE_CHECKING
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
@@ -55,6 +55,11 @@ logger = logging.getLogger(__name__)
 
 _PROCESSING_RECORD_CURSOR_RE = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
 _PROCESSING_RECORD_ENTRY_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,256}\Z")
+_COMPUTER_SCRIPT_REQUEST_MAX_BYTES = 8 * 1024 * 1024
+
+
+class _RequestBodyTooLarge(RuntimeError):
+    """An internal request exceeded its route-specific hard limit."""
 
 
 def _create_controller_loop_server(config: Any) -> Any:
@@ -189,6 +194,16 @@ def create_app(
         controller.session_turns = manager
     manager.bind_context(_build_session_context)
 
+    from core.computer_script_sessions import (
+        ComputerScriptSessionError,
+        ComputerScriptSessionManager,
+    )
+
+    computer_script_sessions = getattr(controller, "computer_script_sessions", None)
+    if not isinstance(computer_script_sessions, ComputerScriptSessionManager):
+        computer_script_sessions = ComputerScriptSessionManager(manager)
+        controller.computer_script_sessions = computer_script_sessions
+
     # The turn registry (``session_id -> Turn``) is owned by the manager and tests
     # inspect it via ``app.state``. Flush intents live on each ``Turn`` (set by
     # ``manager.cancel`` / ``manager.send_now``), not in side sets here.
@@ -209,6 +224,34 @@ def create_app(
                 "scheduled Delivery queue projection failed for Session=%s",
                 session_id,
             )
+
+    # Falling through admission's transaction, as opposed to answering from inside it.
+    _ADMITTED = object()
+
+    async def _run_store_step(operation: Callable[[], Any]) -> Any:
+        from core.runtime_work import RuntimeWorkSupervisor
+
+        supervisor = getattr(controller, "runtime_work_supervisor", None)
+        if isinstance(supervisor, RuntimeWorkSupervisor):
+            return await supervisor.run_sync(operation)
+        return await asyncio.to_thread(operation)
+
+    async def _off_loop(operation: Callable[[], Any]) -> tuple["asyncio.Future[Any]", bool]:
+        """Run one scheduled-turn store step on the runtime-work executor, the door the
+        scheduler's own store work uses, so its write-lock wait and commit never hold
+        the loop (#2630).
+
+        Cancellation cannot split the step, as it could not while the step ran
+        synchronously on the loop: one that arrives meanwhile waits for the step to
+        land. Returns the landed step and whether a cancellation was caught, and the
+        caller answers the cancellation from what the step committed. Once a Run's
+        ownership has moved to its Delivery, the answer is recovery, never an escaping
+        cancellation that would let the executor settle the Run and drop the turn.
+        """
+
+        from core.runtime_work import land_step
+
+        return await land_step(_run_store_step(operation))
 
     async def _submit_scheduled_turn(
         session_id: str,
@@ -231,6 +274,7 @@ def create_app(
 
         from core.message_mirror import _scope_id_for_session
         from core.message_priority import normalize_delivery_intent
+        from core.runtime_work import answer_caught_cancellation, step_failed
         from core.session_turns import (
             DeliveryRequest,
             SCHEDULED_PROVENANCE_KEY,
@@ -264,212 +308,232 @@ def create_app(
         execution_id = str(
             (context.platform_specific or {}).get("task_execution_id") or ""
         ).strip()
-        with run_update_event_transaction(get_cached_sqlite_engine()) as conn:
-            from sqlalchemy import select
-            from storage.agent_session_rows import reserve_write_lock
-            from storage.models import agent_runs, agent_sessions
+        # Admission's write transaction: a fixed set of keyed statements, run on the
+        # runtime-work executor rather than the loop, where its write-lock wait and
+        # commit would stall every session's turns (#2630). An early return inside
+        # it is the submission's answer; falling through means admitted.
+        def _admit_delivery() -> Any:
+            nonlocal delivery_id, delivery_owner_transferred, delivery_request
+            nonlocal effective_delivery_intent, execution_id, scope_id, target_was_busy
+            with run_update_event_transaction(get_cached_sqlite_engine()) as conn:
+                from sqlalchemy import select
+                from storage.agent_session_rows import reserve_write_lock
+                from storage.models import agent_runs, agent_sessions
 
-            reserve_write_lock(conn)
-            scope_id = _scope_id_for_session(conn, session_id)
-            dedupe_key = message_deliveries.native_dedupe_key(
-                submission_platform,
-                native_message_id,
-                scope_id=scope_id,
-            )
-            existing = message_deliveries.get_delivery_by_native_identity(
-                conn,
-                platform=submission_platform,
-                native_message_id=native_message_id,
-                scope_id=scope_id,
-                session_id=session_id,
-                normalize_legacy=True,
-            )
-            legacy_accepted = bool(
-                native_message_id
-                and messages_service.native_message_exists(
+                reserve_write_lock(conn)
+                scope_id = _scope_id_for_session(conn, session_id)
+                dedupe_key = message_deliveries.native_dedupe_key(
+                    submission_platform,
+                    native_message_id,
+                    scope_id=scope_id,
+                )
+                existing = message_deliveries.get_delivery_by_native_identity(
                     conn,
                     platform=submission_platform,
-                    scope_id=scope_id,
                     native_message_id=native_message_id,
+                    scope_id=scope_id,
+                    session_id=session_id,
+                    normalize_legacy=True,
                 )
-            )
-            target_was_busy = message_deliveries.active_turn(conn, session_id) is not None
-            if existing is not None and existing["session_id"] != session_id:
-                return "duplicate"
-            if existing is not None and existing["state"] != "reserved":
-                if execution_id:
-                    run_owner = conn.execute(
-                        select(
-                            agent_runs.c.status,
-                            agent_runs.c.session_id,
-                            agent_runs.c.delivery_id,
-                        )
-                        .where(agent_runs.c.id == execution_id)
-                        .limit(1)
-                    ).mappings().first()
-                    if (
-                        run_owner is not None
-                        and normalize_run_status(run_owner["status"])
-                        in {"queued", "running"}
-                        and run_owner["session_id"] == session_id
-                        and run_owner["delivery_id"] == existing["id"]
+                legacy_accepted = bool(
+                    native_message_id
+                    and messages_service.native_message_exists(
+                        conn,
+                        platform=submission_platform,
+                        scope_id=scope_id,
+                        native_message_id=native_message_id,
+                    )
+                )
+                target_was_busy = message_deliveries.active_turn(conn, session_id) is not None
+                if existing is not None and existing["session_id"] != session_id:
+                    return "duplicate"
+                if existing is not None and existing["state"] != "reserved":
+                    if execution_id:
+                        run_owner = conn.execute(
+                            select(
+                                agent_runs.c.status,
+                                agent_runs.c.session_id,
+                                agent_runs.c.delivery_id,
+                            )
+                            .where(agent_runs.c.id == execution_id)
+                            .limit(1)
+                        ).mappings().first()
+                        if (
+                            run_owner is not None
+                            and normalize_run_status(run_owner["status"])
+                            in {"queued", "running"}
+                            and run_owner["session_id"] == session_id
+                            and run_owner["delivery_id"] == existing["id"]
+                        ):
+                            existing_state = str(existing["state"])
+                            if existing_state == "retired":
+                                cancel_queued_agent_run_delivery_in_connection(
+                                    conn,
+                                    execution_id,
+                                    session_id=session_id,
+                                    delivery_id=str(existing["id"]),
+                                )
+                                return TurnSubmissionResult(
+                                    route="enqueued",
+                                    queue_persisted=False,
+                                    target_was_busy=target_was_busy,
+                                    delivery_status="canceled",
+                                )
+                            if (
+                                legacy_send_now
+                                and existing_state == "queued"
+                                and existing.get("priority") == "p3"
+                                and message_deliveries.delivery_has_history_event(
+                                    existing,
+                                    kind="admission",
+                                )
+                                and not message_deliveries.delivery_has_history_event(
+                                    existing,
+                                    kind="steer",
+                                )
+                            ):
+                                existing = message_deliveries.cas_delivery(
+                                    conn,
+                                    str(existing["id"]),
+                                    expected_version=int(existing["version"]),
+                                    expected_states=("queued",),
+                                    values={"priority": "p1", "state": "reserved"},
+                                    history_event={
+                                        "kind": "legacy_send_now_re_admission",
+                                        "from_priority": "p3",
+                                    },
+                                )
+                                if existing is None:
+                                    raise RuntimeError(
+                                        "legacy send-now Delivery re-admission lost"
+                                    )
+                                delivery_owner_transferred = True
+                            else:
+                                return TurnSubmissionResult(
+                                    route=(
+                                        "enqueued"
+                                        if existing_state
+                                        in {
+                                            "queued",
+                                            "interrupt_waiting",
+                                            "waiting_terminal",
+                                            "reconciling_steer",
+                                        }
+                                        else "ran"
+                                    ),
+                                    queue_persisted=True,
+                                    target_was_busy=target_was_busy,
+                                    delivery_status=existing_state,
+                                    delivery_owner_transferred=True,
+                                )
+                    if not delivery_owner_transferred:
+                        return "duplicate"
+                if legacy_accepted:
+                    return "duplicate"
+                status = conn.execute(
+                    select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)
+                ).scalar_one_or_none()
+                if status != "active":
+                    raise ValueError("Session is archived")
+                if existing is not None:
+                    delivery_id = str(existing["id"])
+                    delivery_request = manager._request_from_delivery(existing)
+                    scope_id = delivery_request.scope_id
+                    from core.message_priority import delivery_intent_for_priority
+
+                    persisted_intent = delivery_intent_for_priority(
+                        delivery_request.priority
+                    )
+                    effective_delivery_intent = persisted_intent
+                    provenance = (delivery_request.metadata or {}).get(
+                        SCHEDULED_PROVENANCE_KEY
+                    )
+                    persisted_spec = (
+                        provenance.get("platform_specific")
+                        if isinstance(provenance, dict)
+                        else None
+                    )
+                    if isinstance(persisted_spec, dict):
+                        execution_id = str(
+                            persisted_spec.get("task_execution_id") or execution_id
+                        ).strip()
+                else:
+                    from core.message_priority import priority_for_delivery_intent
+
+                    delivery_id = message_deliveries.new_delivery_id()
+                    admitted_state = "reserved"
+                    priority = priority_for_delivery_intent(delivery_intent)
+                    message_deliveries.insert_delivery(
+                        conn,
+                        delivery_id=delivery_id,
+                        session_id=session_id,
+                        priority=priority,
+                        state=admitted_state,
+                        snapshot=message_deliveries.message_snapshot(
+                            scope_id=scope_id,
+                            session_id=session_id,
+                            platform=submission_platform,
+                            author="harness",
+                            author_id=author_id,
+                            author_name=author_name,
+                            source="harness",
+                            message_type="harness",
+                            text=text,
+                            metadata={
+                                **dict(submission_spec.get("message_metadata") or {}),
+                                SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(
+                                    context
+                                )
+                            },
+                            native_message_id=native_message_id or None,
+                        ),
+                        dispatch_text=text,
+                        dedupe_key=dedupe_key,
+                        history_event={
+                            "kind": "admission",
+                            "priority": priority,
+                            "state": admitted_state,
+                        },
+                    )
+                if execution_id and not delivery_owner_transferred:
+                    if not attach_agent_run_delivery_in_connection(
+                        conn,
+                        execution_id,
+                        session_id=session_id,
+                        delivery_id=delivery_id,
+                        delivery_outcome={
+                            "intent": effective_delivery_intent,
+                            "status": "admitted",
+                            "target_was_busy": target_was_busy,
+                        },
                     ):
-                        existing_state = str(existing["state"])
-                        if existing_state == "retired":
-                            cancel_queued_agent_run_delivery_in_connection(
+                        if agent_run_cancellation_won_in_connection(conn, execution_id):
+                            message_deliveries.retire_not_written(
                                 conn,
-                                execution_id,
-                                session_id=session_id,
-                                delivery_id=str(existing["id"]),
+                                session_id,
+                                delivery_id,
+                                reason="agent_run_canceled",
                             )
                             return TurnSubmissionResult(
                                 route="enqueued",
                                 queue_persisted=False,
-                                target_was_busy=target_was_busy,
                                 delivery_status="canceled",
                             )
-                        if (
-                            legacy_send_now
-                            and existing_state == "queued"
-                            and existing.get("priority") == "p3"
-                            and message_deliveries.delivery_has_history_event(
-                                existing,
-                                kind="admission",
-                            )
-                            and not message_deliveries.delivery_has_history_event(
-                                existing,
-                                kind="steer",
-                            )
-                        ):
-                            existing = message_deliveries.cas_delivery(
-                                conn,
-                                str(existing["id"]),
-                                expected_version=int(existing["version"]),
-                                expected_states=("queued",),
-                                values={"priority": "p1", "state": "reserved"},
-                                history_event={
-                                    "kind": "legacy_send_now_re_admission",
-                                    "from_priority": "p3",
-                                },
-                            )
-                            if existing is None:
-                                raise RuntimeError(
-                                    "legacy send-now Delivery re-admission lost"
-                                )
-                            delivery_owner_transferred = True
-                        else:
-                            return TurnSubmissionResult(
-                                route=(
-                                    "enqueued"
-                                    if existing_state
-                                    in {
-                                        "queued",
-                                        "interrupt_waiting",
-                                        "waiting_terminal",
-                                        "reconciling_steer",
-                                    }
-                                    else "ran"
-                                ),
-                                queue_persisted=True,
-                                target_was_busy=target_was_busy,
-                                delivery_status=existing_state,
-                                delivery_owner_transferred=True,
-                            )
-                if not delivery_owner_transferred:
-                    return "duplicate"
-            if legacy_accepted:
-                return "duplicate"
-            status = conn.execute(
-                select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)
-            ).scalar_one_or_none()
-            if status != "active":
-                raise ValueError("Session is archived")
-            if existing is not None:
-                delivery_id = str(existing["id"])
-                delivery_request = manager._request_from_delivery(existing)
-                scope_id = delivery_request.scope_id
-                from core.message_priority import delivery_intent_for_priority
+                        raise RuntimeError("Agent Run Delivery binding was refused")
+                    delivery_owner_transferred = True
+            return _ADMITTED
 
-                persisted_intent = delivery_intent_for_priority(
-                    delivery_request.priority
-                )
-                effective_delivery_intent = persisted_intent
-                provenance = (delivery_request.metadata or {}).get(
-                    SCHEDULED_PROVENANCE_KEY
-                )
-                persisted_spec = (
-                    provenance.get("platform_specific")
-                    if isinstance(provenance, dict)
-                    else None
-                )
-                if isinstance(persisted_spec, dict):
-                    execution_id = str(
-                        persisted_spec.get("task_execution_id") or execution_id
-                    ).strip()
-            else:
-                from core.message_priority import priority_for_delivery_intent
-
-                delivery_id = message_deliveries.new_delivery_id()
-                admitted_state = "reserved"
-                priority = priority_for_delivery_intent(delivery_intent)
-                message_deliveries.insert_delivery(
-                    conn,
-                    delivery_id=delivery_id,
-                    session_id=session_id,
-                    priority=priority,
-                    state=admitted_state,
-                    snapshot=message_deliveries.message_snapshot(
-                        scope_id=scope_id,
-                        session_id=session_id,
-                        platform=submission_platform,
-                        author="harness",
-                        author_id=author_id,
-                        author_name=author_name,
-                        source="harness",
-                        message_type="harness",
-                        text=text,
-                        metadata={
-                            **dict(submission_spec.get("message_metadata") or {}),
-                            SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(
-                                context
-                            )
-                        },
-                        native_message_id=native_message_id or None,
-                    ),
-                    dispatch_text=text,
-                    dedupe_key=dedupe_key,
-                    history_event={
-                        "kind": "admission",
-                        "priority": priority,
-                        "state": admitted_state,
-                    },
-                )
-            if execution_id and not delivery_owner_transferred:
-                if not attach_agent_run_delivery_in_connection(
-                    conn,
-                    execution_id,
-                    session_id=session_id,
-                    delivery_id=delivery_id,
-                    delivery_outcome={
-                        "intent": effective_delivery_intent,
-                        "status": "admitted",
-                        "target_was_busy": target_was_busy,
-                    },
-                ):
-                    if agent_run_cancellation_won_in_connection(conn, execution_id):
-                        message_deliveries.retire_not_written(
-                            conn,
-                            session_id,
-                            delivery_id,
-                            reason="agent_run_canceled",
-                        )
-                        return TurnSubmissionResult(
-                            route="enqueued",
-                            queue_persisted=False,
-                            delivery_status="canceled",
-                        )
-                    raise RuntimeError("Agent Run Delivery binding was refused")
-                delivery_owner_transferred = True
+        admission_step, admission_cancelled = await _off_loop(_admit_delivery)
+        if admission_cancelled and not delivery_owner_transferred and step_failed(admission_step):
+            # A failed admission moved nothing to the Delivery: answer the cancellation, not its error.
+            answer_caught_cancellation(admission_step)
+        admission = admission_step.result()
+        if admission is not _ADMITTED:
+            if admission_cancelled and not getattr(admission, "delivery_owner_transferred", False):
+                raise asyncio.CancelledError
+            return admission
+        if admission_cancelled and not delivery_owner_transferred:
+            raise asyncio.CancelledError
 
         if delivery_request is None:
             from core.message_priority import priority_for_delivery_intent
@@ -507,23 +571,27 @@ def create_app(
             }
         )
 
-        def _defer_transferred_delivery() -> TurnSubmissionResult:
+        def _record_deferred_outcome() -> tuple[str, bool]:
+            with run_update_event_transaction(get_cached_sqlite_engine()) as conn:
+                persisted = message_deliveries.get_delivery(conn, delivery_id)
+                status = str((persisted or {}).get("state") or "reserved")
+                recorded = record_agent_run_delivery_outcome_in_connection(
+                    conn,
+                    execution_id,
+                    {
+                        "intent": effective_delivery_intent,
+                        "status": status,
+                        "target_was_busy": target_was_busy,
+                    },
+                )
+            return status, recorded
+
+        async def _defer_transferred_delivery() -> TurnSubmissionResult:
             delivery_status = "reserved"
             try:
-                with run_update_event_transaction(get_cached_sqlite_engine()) as conn:
-                    persisted = message_deliveries.get_delivery(conn, delivery_id)
-                    delivery_status = str(
-                        (persisted or {}).get("state") or delivery_status
-                    )
-                    recorded = record_agent_run_delivery_outcome_in_connection(
-                        conn,
-                        execution_id,
-                        {
-                            "intent": effective_delivery_intent,
-                            "status": delivery_status,
-                            "target_was_busy": target_was_busy,
-                        },
-                    )
+                # Already answering a cancellation: a further one cannot change the answer.
+                deferred_step, _cancelled = await _off_loop(_record_deferred_outcome)
+                delivery_status, recorded = deferred_step.result()
                 if not recorded:
                     logger.warning(
                         "Agent Run deferred Delivery outcome lost its exact CAS: "
@@ -547,6 +615,15 @@ def create_app(
                 delivery_owner_transferred=True,
             )
 
+        if admission_cancelled:
+            logger.warning(
+                "Delivery admission canceled after Agent Run ownership transfer; "
+                "deferring to recovery: run=%s delivery=%s",
+                execution_id,
+                delivery_id,
+            )
+            return await _defer_transferred_delivery()
+
         try:
             result = await manager.deliver(
                 delivery_request,
@@ -567,7 +644,7 @@ def create_app(
                 execution_id,
                 delivery_id,
             )
-            return _defer_transferred_delivery()
+            return await _defer_transferred_delivery()
         except Exception:
             if not delivery_owner_transferred:
                 raise
@@ -577,7 +654,7 @@ def create_app(
                 execution_id,
                 delivery_id,
             )
-            return _defer_transferred_delivery()
+            return await _defer_transferred_delivery()
         delivery_state = str(result.state)
         route = "enqueued" if delivery_state in {
             "queued",
@@ -596,9 +673,10 @@ def create_app(
         )
         _publish_scheduled_queue_growth(session_id, delivery_state)
         if delivery_owner_transferred and execution_id:
-            try:
+
+            def _record_outcome() -> bool:
                 with run_update_event_transaction(get_cached_sqlite_engine()) as conn:
-                    recorded = record_agent_run_delivery_outcome_in_connection(
+                    return record_agent_run_delivery_outcome_in_connection(
                         conn,
                         execution_id,
                         {
@@ -607,6 +685,12 @@ def create_app(
                             "target_was_busy": submission.target_was_busy,
                         },
                     )
+
+            try:
+                # Ownership has moved to the Delivery: the submission's answer must reach
+                # the executor, so a cancellation here does not escape it.
+                outcome_step, _cancelled = await _off_loop(_record_outcome)
+                recorded = outcome_step.result()
                 if not recorded:
                     logger.warning(
                         "Agent Run Delivery outcome lost its exact CAS after ownership "
@@ -726,6 +810,170 @@ def create_app(
             "tool": tool,
             "session_id": caller_session_id,
             "result": result,
+        }
+
+    def _computer_script_error(
+        exc: ComputerScriptSessionError,
+        *,
+        dispatched: bool | None = None,
+    ) -> JSONResponse:
+        content: dict[str, Any] = {
+            "ok": False,
+            "error": exc.code,
+            "params": {},
+        }
+        if dispatched is False:
+            content["dispatched"] = False
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=content,
+        )
+
+    @app.post("/internal/computer-script/open")
+    async def _computer_script_open(request: Request) -> Any:
+        payload = await _safe_json(request)
+        if set(payload) != {"caller_session_id", "timeout_seconds"}:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "invalid_computer_script_open_request",
+                    "params": {},
+                },
+            )
+        caller_session_id = payload.get("caller_session_id")
+        if not isinstance(caller_session_id, str) or not caller_session_id.strip():
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "invalid_computer_script_open_request",
+                    "params": {},
+                },
+            )
+        try:
+            opened = computer_script_sessions.open(
+                caller_session_id.strip(),
+                payload.get("timeout_seconds"),
+            )
+        except ComputerScriptSessionError as exc:
+            return _computer_script_error(exc)
+        return {"ok": True, **opened}
+
+    @app.post("/internal/computer-script/request")
+    async def _computer_script_request(request: Request) -> Any:
+        try:
+            payload = await _bounded_json_object(
+                request,
+                limit=_COMPUTER_SCRIPT_REQUEST_MAX_BYTES,
+            )
+        except _RequestBodyTooLarge:
+            return JSONResponse(
+                status_code=413,
+                content={
+                    "ok": False,
+                    "error": "computer_script_request_too_large",
+                    "params": {
+                        "limit_bytes": _COMPUTER_SCRIPT_REQUEST_MAX_BYTES,
+                    },
+                    "dispatched": False,
+                },
+            )
+        if set(payload) != {
+            "connection_token",
+            "tool",
+            "arguments",
+            "descriptor",
+        }:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "invalid_computer_script_request",
+                    "params": {},
+                    "dispatched": False,
+                },
+            )
+        connection_token = payload.get("connection_token")
+        tool = payload.get("tool")
+        arguments = payload.get("arguments")
+        descriptor = payload.get("descriptor")
+        if (
+            not isinstance(connection_token, str)
+            or not connection_token
+            or not isinstance(tool, str)
+            or not isinstance(arguments, dict)
+        ):
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "invalid_computer_script_request",
+                    "params": {},
+                    "dispatched": False,
+                },
+            )
+        try:
+            caller_session_id, forwarded = (
+                computer_script_sessions.prepare_tool_request(
+                    connection_token,
+                    tool,
+                    arguments,
+                )
+            )
+        except ComputerScriptSessionError as exc:
+            return _computer_script_error(exc, dispatched=False)
+
+        computer_server = getattr(controller, "computer_use_server", None)
+        if computer_server is None:
+            from core.computer_server import ComputerUseServer
+
+            try:
+                computer_server = ComputerUseServer()
+            except Exception:
+                logger.exception("Computer Use server initialization failed")
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "ok": False,
+                        "error": "computer_use_unavailable",
+                        "params": {},
+                        "dispatched": False,
+                    },
+                )
+            controller.computer_use_server = computer_server
+
+        result = await computer_server.call_tool(
+            tool,
+            forwarded,
+            handle_descriptor=descriptor,
+        )
+        return {
+            "ok": result.get("isError") is not True,
+            "tool": tool,
+            "session_id": caller_session_id,
+            "result": result,
+        }
+
+    @app.post("/internal/computer-script/close")
+    async def _computer_script_close(request: Request) -> Any:
+        payload = await _safe_json(request)
+        connection_token = payload.get("connection_token")
+        if set(payload) != {"connection_token"} or not isinstance(
+            connection_token,
+            str,
+        ):
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "invalid_computer_script_close_request",
+                    "params": {},
+                },
+            )
+        return {
+            "ok": True,
+            "closed": computer_script_sessions.close(connection_token),
         }
 
     @app.post("/internal/show-access/settings-read")
@@ -1578,6 +1826,32 @@ async def _safe_json(request: Request) -> dict[str, Any]:
     except Exception:
         body = {}
     return body if isinstance(body, dict) else {}
+
+
+async def _bounded_json_object(
+    request: Request,
+    *,
+    limit: int,
+) -> dict[str, Any]:
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared_length = int(content_length)
+        except ValueError:
+            declared_length = -1
+        if declared_length > limit:
+            raise _RequestBodyTooLarge
+
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > limit:
+            raise _RequestBodyTooLarge
+        body.extend(chunk)
+    try:
+        payload = await asyncio.to_thread(json.loads, bytes(body))
+    except (TypeError, ValueError, RecursionError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 async def _build_dispatch_payload(payload: dict[str, Any]) -> tuple[str, MessageContext]:

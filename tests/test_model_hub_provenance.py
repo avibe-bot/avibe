@@ -16,7 +16,7 @@ from core.handlers.model_hub.provenance import (
 )
 from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
 from core.handlers.model_hub.service import ModelHubError
-from core.run_settlement import SETTLED_BY_TERMINAL_RESULT, SETTLED_BY_STOPPED
+from core.run_settlement import SETTLED_BY_TERMINAL_RESULT, SETTLED_BY_STOPPED, SETTLED_BY_NO_TERMINAL_RESULT
 from modules.agents.model_hub import ModelHubLaunch, ModelHubRuntimeRouter, bind_launch
 from tests.test_model_hub_resolution import _config, _service, _source
 from tests.test_model_hub_routing_modes import MODEL, _loaded_catalog_config, _sparse_config
@@ -97,16 +97,77 @@ def test_recovery_callbacks_are_material_post_lock_and_snapshots_are_copies(tmp_
     assert not registry.store.path.exists()
 
 
-def test_native_hub_failure_keeps_the_gateway_terminal_projection_readable(tmp_path):
+def test_backend_callback_without_an_attempt_does_not_freeze_gateway_evidence(tmp_path):
     registry = _live_registry(tmp_path)
+    registry.fail_hub_attempt("turn-live", diagnostic="backend exited before attribution")
     projection = produce_turn_outcome("turn.engine_down")
     registry.record_turn_outcome("turn-live", projection)
-    registry.fail_hub_attempt("turn-live")
     assert registry.terminal_projection("turn-live", backend="codex") == projection
     assert not registry._traces["turn-live"].outcome_frozen
-    registry.close_turn_admission("turn-live", settled_by=SETTLED_BY_STOPPED)
+
+
+@pytest.mark.parametrize("with_projection", [False, True])
+def test_new_attempt_retires_previous_request_terminal_before_fsm_drop(tmp_path, with_projection):
+    registry = _live_registry(tmp_path)
+    registry.begin_attempt(
+        "turn-live", source_id="src_previous1", resolved_model_id=MODEL, channel="hub", via_mapping=False,
+    )
+    outcome = RawCallOutcome(
+        kind=RawOutcomeKind.HTTP_ERROR if with_projection else RawOutcomeKind.PROTOCOL_ERROR,
+        http_status=400 if with_projection else 200,
+        error_code="invalid_request_error" if with_projection else None,
+        redacted_message=None, stream_started=False, model_id=MODEL, source_id="src_previous1",
+    )
+    registry.finish_attempt("turn-live", outcome=outcome, decision=classify_outcome(outcome))
+    if with_projection:
+        registry.record_turn_outcome("turn-live", produce_turn_outcome("turn.request_nonfallback"))
+    registry.begin_attempt(
+        "turn-live", source_id="src_successor1", resolved_model_id=MODEL, channel="hub", via_mapping=False,
+    )
+    assert registry._traces["turn-live"].terminal_outcome is None
+    registry.settle("turn-live", settled_by=SETTLED_BY_NO_TERMINAL_RESULT)
+    terminal = registry.store.get("turn-live")["terminal_error"]
+    assert terminal["source_id"] == "src_successor1"
+    assert terminal["reason"] == "stream_interrupted"
+
+
+@pytest.mark.parametrize("late_outcome", [RawOutcomeKind.SUCCESS, RawOutcomeKind.NETWORK_ERROR])
+@pytest.mark.parametrize("closure", [SETTLED_BY_TERMINAL_RESULT, SETTLED_BY_STOPPED])
+def test_native_hub_failure_keeps_the_gateway_terminal_projection_readable(tmp_path, late_outcome, closure):
+    registry = _live_registry(tmp_path)
+    registry.begin_attempt(
+        "turn-live", source_id="src_primary01", resolved_model_id=MODEL, channel="hub", via_mapping=False,
+    )
+    failure = RawCallOutcome(
+        kind=RawOutcomeKind.HTTP_ERROR, http_status=400, error_code="invalid_request_error",
+        redacted_message=None, stream_started=False, model_id=MODEL, source_id="src_primary01",
+    )
+    registry.finish_attempt("turn-live", outcome=failure, decision=classify_outcome(failure))
+    projection = produce_turn_outcome("turn.request_nonfallback")
+    registry.record_turn_outcome("turn-live", projection)
+    terminal = dict(registry._traces["turn-live"].terminal_error)
     registry.fail_hub_attempt("turn-live")
-    assert registry.terminal_projection("turn-live", backend="codex") is None
+    assert registry.terminal_projection("turn-live", backend="codex") == projection
+
+    # After the backend has acknowledged the terminal, late admission cannot
+    # clear it, and late success/interruption cannot contradict the notice.
+    registry.begin_attempt(
+        "turn-live", source_id="src_late0001", resolved_model_id=MODEL, channel="hub", via_mapping=False,
+    )
+    late = replace(failure, kind=late_outcome, error_code=None, stream_started=True, source_id="src_late0001")
+    registry.finish_attempt("turn-live", outcome=late, decision=classify_outcome(late))
+    registry.record_turn_outcome("turn-live", produce_turn_outcome("turn.served"))
+    assert registry.terminal_projection("turn-live", backend="codex") == projection
+    assert registry.terminal_projection("turn-live", backend="claude") is None
+    registry.close_turn_admission("turn-live", settled_by=closure)
+    assert registry.terminal_projection("turn-live", backend="codex") == (
+        None if closure == SETTLED_BY_STOPPED else projection
+    )
+    registry.fail_hub_attempt("turn-live")
+    registry.settle("turn-live", settled_by=closure)
+    record = registry.store.get("turn-live")
+    assert record["outcome"] == "failed_terminal"
+    assert record["terminal_error"] == terminal
 
 
 @pytest.mark.parametrize("terminal", ["exhausted", "no_candidate"])
@@ -200,7 +261,7 @@ def test_live_recovery_snapshots_never_revive_invalid_or_terminal_owners(tmp_pat
 def _record(turn_id, *, backend="claude", model=MODEL, outcome="failed_terminal"):
     identity = {"source_id": "src_deleted01", "configured_model_id": "unknown-model", "channel": "hub"}
     return {
-        "contract_version": 11,
+        "contract_version": 15,
         "turn_id": turn_id,
         "ts": "2026-09-06T00:00:00Z",
         "agent": backend,
@@ -400,6 +461,6 @@ def test_model_history_client_rpc_http_share_nullable_read_only_result(monkeypat
         f"/api/models/agents/claude/provenance?model={MODEL}", headers=csrf_headers(client, origin), base_url=origin
     )
     assert response.status_code == 200
-    assert response.get_json() == {"ok": True, "contract_version": 11, "provenance": record}
+    assert response.get_json() == {"ok": True, "contract_version": 15, "provenance": record}
     assert store.config.to_payload() == before
     assert adapter.synced == []

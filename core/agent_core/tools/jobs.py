@@ -4,6 +4,10 @@ Every command runs under ``job_wrapper.py`` in its own session: stdin closed,
 stdout and stderr through a pipe into a bounded log the wrapper keeps. Nothing
 in the host holds a pipe to the job, so any ``LocalJobHost`` over the same
 directory, in this process or after a restart, can read, wait on, or kill it.
+The host starts the wrapper as this module imported it, from a copy under
+``<jobs_dir>/wrapper/`` (``core.frozen_script``): an upgrade that replaces the
+installed files before the service restarts must not put a newer wrapper, whose
+argv may differ, under a running host.
 
 Job directory: ``meta.json``, ``pid``, ``decision``, ``output.log`` (the head),
 ``tail.log`` (the rolling tail, once the head is full), ``exit``, ``stopped``
@@ -64,6 +68,7 @@ from core.agent_core.tools import windows_files, windows_job
 from core.agent_core.tools.base import CallInstance, JobStatus
 from core.agent_core.tools.paths import os_reason, run_to_end
 from core.agent_core.tools.shell import Shell, default_shell
+from core.frozen_script import FrozenScript
 from core.process_isolation import (
     DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS,
     KILL_SIGNAL,
@@ -103,7 +108,13 @@ STOP_KILLED = "killed"
 STOP_WRAPPER_ERROR = "wrapper_error"
 
 _WINDOWS = os.name == "nt"
-_WRAPPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "job_wrapper.py")
+#: The wrapper, with the helpers it loads beside itself on Windows, as this module was imported.
+_WRAPPER = FrozenScript(
+    *(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
+        for name in ("job_wrapper.py", "windows_job.py", "windows_files.py")
+    )
+)
 #: How long past the deadline the host leaves a live wrapper to decide (its poll interval, its
 #: 0.5 s drain, and margin) before stopping the job itself.
 _WRAPPER_DECIDES_S = 1.0
@@ -379,6 +390,10 @@ class LocalJobHost:
             raise JobStartError(
                 f"Could not start the command: its job record would be over {_META_CHARS} characters."
             ) from None
+        try:
+            wrapper = _WRAPPER.path(os.path.join(self._jobs_dir, "wrapper"))
+        except OSError as exc:
+            raise JobStartError(f"Could not start the command: {os_reason(exc)}.") from exc
         os.makedirs(self._jobs_dir, exist_ok=True)
         os.mkdir(job_dir, 0o700)
         self._write_meta(job_id, meta)
@@ -394,8 +409,8 @@ class LocalJobHost:
             sys.executable,
             "-I",
             "-S",
-            "-B",  # on Windows the wrapper loads its helpers by path: no bytecode written into the install
-            _WRAPPER,
+            "-B",  # on Windows the wrapper loads its helpers by path: no bytecode written beside them
+            wrapper,
             "avibe-job",
             job_dir,
             repr(DECISION_TIMEOUT_S),

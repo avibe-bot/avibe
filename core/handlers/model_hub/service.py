@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import logging
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Iterable, Literal, Mapping, Optional, Protocol, cast
+from typing import Any, Awaitable, Callable, Collection, Iterable, Literal, Mapping, NamedTuple, Optional, Protocol, cast
 
-from sqlalchemy import func, select
+from sqlalchemy import func, literal_column, select
 
 from config import paths
 from modules.agents.catalog import NATIVE_CLI_BACKENDS
@@ -24,6 +26,7 @@ from config.v2_config import (
     ModelHubAgentSupplyConfig,
     ModelHubBackendModelConfig,
     ModelHubConfig,
+    is_model_hub_model_id,
     model_hub_fixed_menu_ids,
     ModelHubMenuConfig,
     ModelHubModelConfig,
@@ -43,21 +46,31 @@ from config.v2_config import (
     validate_model_hub_source_client_nonce,
 )
 from core.agent_auth_service import BackendLoginInProgressError
+from core.agent_core.ai.registry import sent_effort
+from core.agent_core.messages import HostedCost
 from core.os_errors import format_os_errno, local_error_detail
 from core.services.settings import default_config
 from storage.db import get_cached_sqlite_engine
-from storage.models import agent_sessions, messages
+from storage.models import MESSAGE_TURN_ID_SQL, agent_sessions, messages
 from vibe.backend_model_catalog import (
+    ImageModelSpec,
     PROTOCOL_REASONING_EFFORT_DEFAULTS,
     builtin_display_name,
-    bundled_catalog_reasoning_efforts_by_model,
+    bundled_catalog_wire_efforts_by_model,
+    bundled_client_presets_once,
+    bundled_provider_overlay,
+    hosted_tool_spec,
+    provider_image_models,
 )
+from vibe.i18n import t as i18n_t
+from vibe.model_hub_runtime.client import RESPONSE_TOO_LARGE
 from vibe.model_hub_runtime.api_key_vendors import (
     catalog_api_key_vendor_label,
     pinned_api_key_protocol,
 )
 
 from .adapter import (
+    ENGINE_TRANSPORT_TIMEOUT_SECONDS,
     DiscoveredModel,
     EngineAdapter,
     EngineEnsureResult,
@@ -84,7 +97,7 @@ from .address_repair import (
     payload_carries_credential_address,
     repair_credential_addresses,
 )
-from .async_owner import await_owned_task
+from .async_owner import await_owned_task, run_owned_in_thread
 from .catalog_admission import (
     admissible_backend_model,
     backend_model_admission_error,
@@ -92,6 +105,8 @@ from .catalog_admission import (
 from .classification import (
     ResolutionDecision,
     classify_outcome,
+    machine_codes_name_model,
+    names_model_refusal,
     source_settlement_allowed,
     source_settlement_rule,
     terminal_outcome_category,
@@ -103,7 +118,57 @@ from .events import (
     build_resolution_event,
     contains_credential_material,
 )
+from .capability_evidence import (
+    CapabilityEvidenceStore,
+    EvidenceFeature,
+    EvidenceRecord,
+    identity_digest,
+)
 from .errors import ModelDiscoveryError
+from .evidence_rules import LearnedEvidence
+from .evidence_rules import learn as learn_from_rejection
+from .evidence_rules import wire_effort
+from .hosted_admission import PIN_UNAVAILABLE_CODE, HostedContent, admits, hosted_content
+from .hosted_executor import (
+    EXECUTOR_RESPONSE_MAX_BYTES,
+    ExecutorCall,
+    ExecutorCallRefused,
+    ExecutorResponseRefused,
+    ResponsesStreamReader,
+    anthropic_result,
+    call_timeout,
+    executor_request,
+    executor_streams,
+    Failure,
+    failed_record,
+    failure,
+    parse_call,
+    provider_charges,
+    responses_result,
+)
+from .hosted_images import (
+    IMAGE_RESPONSE_MAX_BYTES,
+    IMAGE_TIMEOUT_SECONDS,
+    image_request,
+    image_result,
+    parse_image_call,
+    unsupported_argument,
+)
+from .hosted_turn import IMAGE_TOOL, ExecutorSlot, TurnHostedTools
+from .hosted_tools import (
+    ExecutorCandidate,
+    HostedEvidence,
+    HostedToolSettingRefused,
+    admitted_image,
+    apply_hosted_tool_put,
+    clear_request,
+    engine_stamp,
+    executor_candidate,
+    executor_vendors,
+    freeze_turn_tools,
+    hop_hosted_tools,
+    hosted_tools_status,
+)
 from .identifiers import (
     OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL,
     canonical_model_id,
@@ -130,7 +195,14 @@ from .oauth import (
     OAuthFlowRegistry,
     UnavailableNativeOAuthAdapter,
 )
-from .pricing import VALUE_WINDOW_DAYS, PriceTable, load_price_table, quota_values
+from .pricing import (
+    VALUE_WINDOW_DAYS,
+    PriceTable,
+    context_price_steps,
+    hosted_response_cost,
+    load_price_table,
+    quota_values,
+)
 from .quota import QuotaSourceRef, SubscriptionQuotaCache, SubscriptionQuotaError
 from .provenance import (
     REQUEST_NONFALLBACK_TURN_OUTCOME,
@@ -146,8 +218,8 @@ from .provenance import (
     produce_turn_outcome,
 )
 from .request import ModelHubRequest, without_opaque_history
-from .reasoning_tiers import resolve_reasoning_tiers
-from .stream_wire import ProtocolSSEState
+from .reasoning_tiers import catalog_wire_efforts, rederive_persisted_tiers, resolve_reasoning_tiers
+from .stream_wire import ProtocolSSEState, ProtocolUsageReport
 from .resolver import (
     BackendName,
     ModelHubTurnResolution,
@@ -175,7 +247,7 @@ from .usage import (
     local_usage_day,
 )
 
-CONTRACT_VERSION = 11
+CONTRACT_VERSION = 15
 
 
 def seeded_source_name(vendor: str) -> str:
@@ -277,8 +349,29 @@ _MODELS_DEV_CANDIDATE_FIELDS = (
 )
 
 
-AGENT_CHAIN_CONTRACT_VERSION = 11
-PROBE_RESULT_CONTRACT_VERSION = 11
+def _described_as_fit_for_agent_turns(match: Mapping[str, Any]) -> bool:
+    """models.dev says the model takes text and tool calls and answers in text: the least an Agent's turn needs."""
+
+    return (
+        match.get("supports_tools") is True
+        and "text" in (match.get("input_modalities") or ())
+        and "text" in (match.get("output_modalities") or ())
+    )
+
+
+def _described_as_unfit_for_agent_turns(match: Mapping[str, Any]) -> bool:
+    """models.dev says the model takes no tool calls, or takes or answers in something other than text."""
+
+    if match.get("supports_tools") is False:
+        return True
+    return any(
+        bool(modalities) and "text" not in modalities
+        for modalities in (match.get("input_modalities") or (), match.get("output_modalities") or ())
+    )
+
+
+AGENT_CHAIN_CONTRACT_VERSION = 15
+PROBE_RESULT_CONTRACT_VERSION = 15
 _SOURCE_DISCOVERY_TIMEOUT_SECONDS = 15
 _SOURCE_PROBE_TIMEOUT_SECONDS = 60
 # Background inventory refresh. The first tick doubles as the startup delay, so
@@ -429,11 +522,38 @@ class ModelHubConfigStore(Protocol):
     def mutate(self, mutator: Callable[[ModelHubConfig], bool]) -> None: ...
 
 
+def _file_identity(path: Path) -> tuple | None:
+    """What changes whenever the config file is replaced or rewritten: its path, inode and size, and its times."""
+
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return None
+    return (str(path), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
 class V2ModelHubConfigStore:
+    """Model Hub's config, read from the shared config file and served from a snapshot (#2568).
+
+    Reading the file parses the whole config, which grows with Sources,
+    inventories and routes, and Model Hub reads it on every request. So the
+    store keeps the last parse and serves a copy of it while the file is
+    unchanged: a read costs one ``stat`` and a copy, never a parse. Any change to
+    the file (a write through this store, another writer in this process, the UI
+    process or the CLI) replaces or rewrites it, which changes its identity, and
+    the next read parses again. A write through this store keeps what it
+    committed as the snapshot, inside its own lock, so the reads after it parse
+    nothing.
+    """
+
     _NATIVE_AUTH_FIELDS = {
         "claude": ("auth_mode", "api_key", "base_url", "auth_mode_set"),
         "codex": ("auth_mode", "api_key", "base_url", "oauth_relay_marker"),
     }
+
+    def __init__(self) -> None:
+        self._snapshot_lock = threading.Lock()
+        self._snapshot: tuple[tuple, ModelHubConfig] | None = None
 
     def native_auth_snapshot(self, backends: tuple[str, ...]) -> dict[str, dict]:
         try:
@@ -456,26 +576,47 @@ class V2ModelHubConfigStore:
         *,
         expected_hub: tuple[dict, ...],
     ) -> None:
-        from config.v2_config import config_write_transaction
+        from config.v2_config import config_file_lock, config_write_transaction
 
         self.ensure_writable()
-        with config_write_transaction() as config:
-            if config.model_hub.to_payload() not in expected_hub:
-                raise MigrationConflictError
-            for backend, values in desired.items():
-                target = getattr(config.agents, backend)
-                actual = {name: getattr(target, name) for name in values}
-                if actual not in (expected.get(backend), values):
+        path = paths.get_config_path()
+        with config_file_lock(path):
+            with config_write_transaction(path) as config:
+                if config.model_hub.to_payload() not in expected_hub:
                     raise MigrationConflictError
-                for name, value in values.items():
-                    setattr(target, name, value)
-            config.model_hub = ModelHubConfig.from_payload(model_hub.to_payload())
+                for backend, values in desired.items():
+                    target = getattr(config.agents, backend)
+                    actual = {name: getattr(target, name) for name in values}
+                    if actual not in (expected.get(backend), values):
+                        raise MigrationConflictError
+                    for name, value in values.items():
+                        setattr(target, name, value)
+                config.model_hub = ModelHubConfig.from_payload(model_hub.to_payload())
+            self._seed(path, config.model_hub)
 
     def load(self) -> ModelHubConfig:
+        path = paths.get_config_path()
+        identity = _file_identity(path)
+        with self._snapshot_lock:
+            snapshot = self._snapshot
+        if snapshot is not None and identity is not None and snapshot[0] == identity:
+            # Callers own what they load and may change it; the snapshot stays as the file holds it.
+            return copy.deepcopy(snapshot[1])
+        fresh = self._read(path)
+        return default_config().model_hub if fresh is None else fresh[1]
+
+    def _read(self, path: Path) -> tuple[tuple, ModelHubConfig] | None:
+        """Parse the file and keep the parse, when the file did not change while it was read."""
+
+        before = _file_identity(path)
         try:
-            return V2Config.load().model_hub
+            model_hub = V2Config.load().model_hub
         except FileNotFoundError:
-            return default_config().model_hub
+            return None
+        if before is not None and _file_identity(path) == before:
+            with self._snapshot_lock:
+                self._snapshot = (before, copy.deepcopy(model_hub))
+        return (before or (), model_hub)
 
     def ensure_writable(self) -> None:
         try:
@@ -489,17 +630,36 @@ class V2ModelHubConfigStore:
     def save(self, model_hub: ModelHubConfig) -> None:
         model_hub = ModelHubConfig.from_payload(model_hub.to_payload())
         self.ensure_writable()
-        from config.v2_config import update_config_fields
+        from config.v2_config import config_file_lock, update_config_fields
 
-        update_config_fields(lambda cfg: setattr(cfg, "model_hub", model_hub))
+        path = paths.get_config_path()
+        with config_file_lock(path):
+            committed = update_config_fields(lambda cfg: setattr(cfg, "model_hub", model_hub), config_path=path)
+            self._seed(path, committed.model_hub)
 
     def mutate(self, mutator: Callable[[ModelHubConfig], bool]) -> None:
         from config.v2_config import config_file_lock
 
-        with config_file_lock():
+        path = paths.get_config_path()
+        with config_file_lock(path):
             config = V2Config.load()
             if mutator(config.model_hub):
                 config.save()
+                self._seed(path, config.model_hub)
+
+    def _seed(self, path: Path, model_hub: ModelHubConfig) -> None:
+        """Keep what a write just committed as the snapshot, without reading the file back.
+
+        Called inside the write's config lock, so no other writer can have
+        replaced the file since: its identity now names exactly this content. The
+        section is settled the way a load settles it (the one repairing door).
+        """
+
+        identity = _file_identity(path)
+        if identity is not None:
+            settled = ModelHubConfig.from_payload(model_hub.to_payload(), repairing=True)
+            with self._snapshot_lock:
+                self._snapshot = (identity, settled)
 
 class UnavailableEngineAdapter:
     """Explicit fail-closed adapter for isolated callers and tests."""
@@ -649,6 +809,139 @@ class _InvocationUnsupported(_InvocationPlanChanged):
         self.reason = reason
 
 
+def _pinned_hop(request: Any, backend: str) -> tuple[str, str | None] | None:
+    """The exact (Source, model) a Vibey request is pinned to (``x-avibe-pin-source``), if any."""
+
+    return getattr(request, "pinned_hop", None) if backend == "vibey" else None
+
+
+def _pin_unavailable(learned: LearnedEvidence | None = None, source_id: str = "") -> ModelHubError:
+    """The pinned hop cannot serve this request before output (``vibey-hosted-tools.md`` §3.5).
+
+    ``learned`` is the hosted feature a narrow rule just refused on that hop;
+    only then does the answer carry a ``reason``.
+    """
+
+    reason = (
+        {"kind": "hosted_unsupported", "tool": learned.feature.name, "aspect": learned.feature.aspect,
+         "source_id": source_id}
+        if learned is not None else None
+    )
+    return ModelHubError(PIN_UNAVAILABLE_CODE, status=409, data={"reason": reason} if reason else None)
+
+
+class UserTestCall(NamedTuple):
+    """One call a user asked for, as it settled (``ModelHubService._user_test_call``)."""
+
+    source: ModelHubSourceConfig
+    outcome: RawCallOutcome
+    elapsed_ms: int
+
+
+def _call_usage(outcome: RawCallOutcome | None, observed: ProtocolSSEState | None) -> ProtocolUsageReport | None:
+    """The tokens one upstream call reported: its outcome's, else what was observed on the wire."""
+
+    usage = outcome.usage if outcome is not None else None
+    return observed.usage if usage is None and observed is not None else usage
+
+
+def _executor_failure(outcome: RawCallOutcome | None, say: Callable[..., str], *, refused: str | None) -> Failure | None:
+    """How a proxied hosted call failed, in the user's language and by its code; None when it succeeded.
+
+    ``refused`` names a bound the response itself broke (size, nesting).
+    """
+
+    if refused is not None:
+        return failure(say, refused)
+    if outcome is None or outcome.kind is RawOutcomeKind.SUCCESS:
+        return None
+    if outcome.error_code == RESPONSE_TOO_LARGE:
+        # The engine client cut an answer past its bound while it downloaded.
+        return failure(say, "modelHub.hostedTools.tooLarge")
+    if outcome.kind is RawOutcomeKind.TIMEOUT:
+        return failure(say, "modelHub.hostedTools.timedOut")
+    if outcome.kind is RawOutcomeKind.NETWORK_ERROR:
+        return failure(say, "modelHub.hostedTools.unreachable")
+    if outcome.kind is RawOutcomeKind.PROTOCOL_ERROR:
+        return failure(say, "modelHub.hostedTools.unreadable")
+    # The provider's own machine code and its redacted, bounded detail stay verbatim.
+    detail = " ".join(
+        part for part in (
+            f"HTTP {outcome.http_status}" if outcome.http_status is not None else None,
+            outcome.error_code,
+        ) if part
+    )
+    if outcome.upstream_detail:
+        detail = f"{detail}: {outcome.upstream_detail}" if detail else outcome.upstream_detail
+    if classify_outcome(replace(outcome, stream_started=False)).reason == "server_error":
+        # An overload or server error is transient: the provider did not refuse the call.
+        return failure(say, "modelHub.hostedTools.providerUnavailable", detail=detail or outcome.kind.value)
+    return failure(say, "modelHub.hostedTools.providerRefused", detail=detail or outcome.kind.value)
+
+
+def _cost_payload(cost: HostedCost) -> dict[str, Any]:
+    return {"basis": cost.basis} if cost.usd is None else {"basis": cost.basis, "usd": cost.usd}
+
+
+@dataclass(frozen=True)
+class _HostedUpstreamCall:
+    """How one upstream call a hosted tool made ended (``ModelHubService._hosted_upstream_call``)."""
+
+    # The Source as the call's final admission saw it: what the call reports (billing, cost, name) follows it.
+    source: ModelHubSourceConfig
+    outcome: RawCallOutcome | None
+    # A bound the response broke, as a failure key to show.
+    refused: str | None
+    timed_out: bool
+    usage: ProtocolUsageReport | None
+    # Whether the provider could have charged for it: it reported tokens or produced a response.
+    billable: bool
+
+
+@dataclass(frozen=True)
+class _ExecutorAttempt:
+    """One executor candidate a search chain called, as it settled (``vibey-hosted-tools.md`` §6)."""
+
+    source: ModelHubSourceConfig
+    model_id: str
+    record: dict[str, Any]
+    cost: Optional[HostedCost]
+    # Whether the provider could have charged for it: it reported tokens or produced a response.
+    billable: bool
+    # Whether its failure passes the search to the next candidate.
+    moves_on: bool
+
+    def execution(self) -> dict[str, Any]:
+        execution: dict[str, Any] = {
+            "mode": "proxy",
+            "executor_origin": {"provider": self.source.vendor, "api": self.source.protocol, "model": self.model_id},
+            "executor_source_id": self.source.id,
+            "executor_billing": self.source.billing,
+        }
+        if self.cost is not None:
+            execution["cost"] = _cost_payload(self.cost)
+        return execution
+
+    def failed_attempt(self) -> dict[str, Any]:
+        attempt: dict[str, Any] = {"source_id": self.source.id, "billing": self.source.billing}
+        if self.cost is not None:
+            attempt["cost"] = _cost_payload(self.cost)
+        return attempt
+
+
+def _sent_effort(backend: str, source: ModelHubSourceConfig, model_id: str, effort: str) -> Optional[str]:
+    """The effort token ``backend`` sends a hop for the menu value ``effort``: the key its evidence is held under.
+
+    Vibey's adapter for the hop's protocol says it (``registry.sent_effort``),
+    so the menu and the wire cannot drift; the native CLIs send the value as
+    the menu names it.
+    """
+
+    if backend == "vibey":
+        return sent_effort(source.protocol, model_id, effort)
+    return effort
+
+
 def _google_admission_skip_reason(
     frontend_protocol: str | None,
     source_protocol: str,
@@ -687,6 +980,9 @@ class ResolvedInvocation:
     settlement_generation: Optional[int] = None
     verification_pending: Optional[str] = None
     origin: HopOrigin | None = None
+    # Vibey: the catalog tools the request declared natively, which a served
+    # response may prove ran (``vibey-hosted-tools.md`` §3.2).
+    hosted_calls: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -994,6 +1290,8 @@ def _oauth_payload(
         payload["client_nonce"] = client_nonce
     if flow.state == "failed" and flow.error_detail:
         payload["error_detail"] = flow.error_detail
+    if getattr(flow, "application_failed", False) is True:
+        payload["application_failed"] = True
     return payload
 
 
@@ -1003,7 +1301,7 @@ def _runtime_payload(status: EngineStatus, *, enabled: bool) -> dict:
 
     manager = EngineRuntimeManager()
     return {
-        "contract_version": 11,
+        "contract_version": 15,
         "enabled": enabled,
         "host_platform": status.host_platform or manager.host_platform(),
         "manifest": manager.contract_manifest(),
@@ -1115,6 +1413,7 @@ class ModelHubService:
         recovery: RecoveryPolicy | None = None,
         price_table: Callable[[], PriceTable] | None = None,
         models_dev_catalog: Callable[[], Mapping[str, Any]] | None = None,
+        capability_evidence: CapabilityEvidenceStore | None = None,
     ):
         self.store = store
         self.adapter = adapter
@@ -1128,7 +1427,13 @@ class ModelHubService:
         )
         # One writer per ledger, shared with the gateway: both metering populations
         # then have the same owner for the lifetime of what they write.
-        self.usage_writer = UsageWriter(self.usage)
+        # Read per report: the override file is hand-edited and the catalog refreshes itself.
+        self.price_table: Callable[[], PriceTable] = price_table or (
+            lambda: load_price_table(paths.get_state_dir())
+        )
+        # Built here, at controller startup before the loop serves, so the writer's
+        # first price-table read never runs on the loop and every call is tiered.
+        self.usage_writer = UsageWriter(self.usage, price_table=self.price_table)
         self.native_oauth_adapter = native_oauth_adapter or UnavailableNativeOAuthAdapter()
         self.oauth_flows = oauth_flows or OAuthFlowRegistry(
             paths.get_state_dir() / "model_hub_oauth_flows.json",
@@ -1142,6 +1447,18 @@ class ModelHubService:
         self.migration_journal = migration_journal or NativeTakeoverJournal(
             events.path.parent / "native-takeover" / "current.json"
         )
+        # Beside the other state documents, so it follows wherever they live.
+        self.capability_evidence = capability_evidence or CapabilityEvidenceStore(
+            events.path.parent / "model_hub_capability_evidence.json"
+        )
+        # Bundled state that never changes while this process runs, resolved once
+        # here at startup so that no request path reads a file on the loop.
+        self.engine_stamp = engine_stamp()
+        from vibe import __version__ as avibe_release
+
+        self.avibe_release = avibe_release
+        bundled_provider_overlay()
+        bundled_client_presets_once()
         self.migration_blocked_backends: set[str] = set()
         self.migration_guard = migration_guard or self._unavailable_migration_guard
         self.migration_reconcile_auth = migration_reconcile_auth
@@ -1190,10 +1507,6 @@ class ModelHubService:
         self._builtin_snapshot_cache: dict[BackendName, list[dict[str, Any]]] = {}
         self._pending_builtin_catalog_refresh: set[BackendName] = set()
         self.quota = SubscriptionQuotaCache(self._fetch_subscription_quota, now=lambda: self.now())
-        # Read per report: the override file is hand-edited and the catalog refreshes itself.
-        self.price_table: Callable[[], PriceTable] = price_table or (
-            lambda: load_price_table(paths.get_state_dir())
-        )
         # A cached copy only: the picker read must not wait on the network.
         self.models_dev_catalog: Callable[[], Mapping[str, Any]] = models_dev_catalog or (
             lambda: _cached_models_dev_catalog()
@@ -1428,8 +1741,43 @@ class ModelHubService:
         if self.migration_reconcile_auth is not None:
             self.migration_reconcile_auth(snapshot)
 
-    def _save_config(self, config: ModelHubConfig) -> ModelHubConfig:
-        canonical = ModelHubConfig.from_payload(config.to_payload())
+    async def _save_config(self, config: ModelHubConfig) -> ModelHubConfig:
+        """Persist the Model Hub section; the one door every config write goes through.
+
+        The file work (the migration journal check, the cross-process config
+        lock, the rewrite of the whole config file) runs on a worker thread, so
+        the controller loop never waits on another process's lock or a slow
+        disk. Callers hold ``_mutation_lock`` from the load they changed to this
+        save, so writes stay serialized. The recovery reconcile and its waiters'
+        wake-up are loop state and stay on the loop.
+        """
+
+        worker = asyncio.create_task(asyncio.to_thread(self._persist_config, config.to_payload()))
+        try:
+            canonical = await asyncio.shield(worker)
+        except asyncio.CancelledError as cancelled:
+            # The write is underway in its thread and will land. Hold the caller, and the mutation lock it holds,
+            # until it has, and publish it: otherwise a later write could start from the older snapshot and be
+            # overwritten when this one finishes.
+            try:
+                canonical = await await_owned_task(worker)
+            except BaseException:
+                raise cancelled from None
+            self._publish_saved(canonical)
+            raise cancelled
+        return self._publish_saved(canonical)
+
+    def _publish_saved(self, canonical: ModelHubConfig) -> ModelHubConfig:
+        """The loop-side half of a save: recovery follows the saved Sources and its waiters wake."""
+
+        self.recovery.reconcile(canonical)
+        self.recovery.notify()
+        return canonical
+
+    def _persist_config(self, payload: dict) -> ModelHubConfig:
+        """``_save_config``'s blocking half, run off the loop: canonicalize and write."""
+
+        canonical = ModelHubConfig.from_payload(payload)
         try:
             pending = self.migration_journal.load()
         except (TakeoverStateError, OSError):
@@ -1456,11 +1804,9 @@ class ModelHubService:
             )
         else:
             self.store.save(canonical)
-        self.recovery.reconcile(canonical)
-        self.recovery.notify()
         return canonical
 
-    def _save_projection_neutral(
+    async def _save_projection_neutral(
         self,
         previous: ModelHubConfig,
         updated: ModelHubConfig,
@@ -1469,9 +1815,21 @@ class ModelHubService:
 
         if self._bindings(previous) != self._bindings(updated):
             raise AssertionError("projection-neutral mutation changed engine bindings")
-        return self._save_config(updated)
+        return await self._save_config(updated)
 
-    def _save_runtime_config(
+    def _save_projection_neutral_blocking(self, previous: ModelHubConfig, updated: ModelHubConfig) -> ModelHubConfig:
+        """``_save_projection_neutral`` for a synchronous hook; it blocks the loop for the write.
+
+        Only native reauth's irreversible-start hook uses it: that hook's contract (``AgentAuthService``'s
+        ``on_irreversible_start``) is synchronous, and it writes once per user-started reauth. Everything else
+        saves through ``_save_config``.
+        """
+
+        if self._bindings(previous) != self._bindings(updated):
+            raise AssertionError("projection-neutral mutation changed engine bindings")
+        return self._publish_saved(self._persist_config(updated.to_payload()))
+
+    async def _save_runtime_config(
         self,
         previous: ModelHubConfig,
         updated: ModelHubConfig,
@@ -1479,7 +1837,7 @@ class ModelHubService:
         """Best-effort persistence for runtime state during config recovery."""
 
         try:
-            self._save_projection_neutral(previous, updated)
+            await self._save_projection_neutral(previous, updated)
         except ValueError as exc:
             if "recovery warnings" not in str(exc):
                 raise
@@ -1666,10 +2024,10 @@ class ModelHubService:
         # Route target order is not part of this projection, so a pure chain reorder
         # compares equal and does not touch the engine.
         if previous_bindings == updated_bindings:
-            self._save_config(updated)
+            await self._save_config(updated)
             return
         self._engine_synced = False
-        self._save_config(updated)
+        await self._save_config(updated)
         try:
             await self._sync_sources(updated, force_empty=bool(previous_bindings))
         except asyncio.CancelledError:
@@ -1680,7 +2038,7 @@ class ModelHubService:
         except Exception:
             if not rollback_on_sync_failure:
                 raise
-            self._save_config(previous)
+            await self._save_config(previous)
             try:
                 await self._sync_sources(previous, force_empty=bool(updated_bindings))
             except ModelHubError:
@@ -2359,6 +2717,8 @@ class ModelHubService:
         previous = self.store.load()
         config = self._clone_config(previous)
         source = self._source(config, source_id)
+        # The material behind the ref may be the new grant's: the Source no longer has the earlier one's identity.
+        self._mark_source_unverified(source)
         source.models = [
             model
             for model in source.models
@@ -2442,7 +2802,7 @@ class ModelHubService:
         discovered_by_id = {model.id: model for model in canonical_models}
         overrides: list[tuple[str, Literal["upstream", "catalog"]]] = []
         if catalog_efforts_by_model is None:
-            catalog_efforts_by_model = bundled_catalog_reasoning_efforts_by_model()
+            catalog_efforts_by_model = bundled_catalog_wire_efforts_by_model()
 
         def apply_tiers(
             model: ModelHubModelConfig,
@@ -2700,8 +3060,12 @@ class ModelHubService:
         config: ModelHubConfig | None = None,
     ) -> dict:
         payload = source.to_payload()
+        observed_at = self.now()
         for model in payload["models"]:
             model.setdefault("retired", False)
+            refused = self._refused_efforts(source, model["id"], observed_at)
+            if refused:
+                model["refused_efforts"] = refused
         payload["adopted_by"] = self._adopted_by(source.id, config)
         return self._source_account_payload(payload)
 
@@ -2918,7 +3282,7 @@ class ModelHubService:
                     )
                 else:
                     catalog_efforts_by_model = (
-                        bundled_catalog_reasoning_efforts_by_model()
+                        bundled_catalog_wire_efforts_by_model()
                     )
                     for model in source.models:
                         resolution = resolve_reasoning_tiers(
@@ -3022,6 +3386,15 @@ class ModelHubService:
             except (KeyError, OSError):
                 pass
         failed = binding.intent == "create" and source.state.status == "error"
+        application_failed = False
+        if binding.channel == "native_cli" and binding.vendor == "anthropic" and not failed:
+            try:
+                # The existing flow retains this historical receipt for its
+                # normal TTL. No status CLI or new persistence is involved.
+                receipt = self.native_oauth_adapter.completed_source_status(flow_id)
+                application_failed = getattr(receipt, "application_failed", False) is True
+            except (KeyError, NativeOAuthUnavailableError):
+                pass  # An expired receipt does not undo a saved Source.
         return OAuthFlowState(
             flow_id=flow_id,
             source_id=source.id,
@@ -3053,6 +3426,7 @@ class ModelHubService:
                 if binding.channel == "hub"
                 else None
             ),
+            application_failed=application_failed,
         )
 
     def _completed_reauth_result(
@@ -3705,7 +4079,7 @@ class ModelHubService:
                     allow_empty=True,
                 )
             else:
-                catalog_efforts_by_model = bundled_catalog_reasoning_efforts_by_model()
+                catalog_efforts_by_model = bundled_catalog_wire_efforts_by_model()
                 for model in source.models:
                     resolution = resolve_reasoning_tiers(
                         protocol=source.protocol,
@@ -4371,7 +4745,7 @@ class ModelHubService:
             except ModelHubError:
                 restored = False
                 try:
-                    self._save_config(previous)
+                    await self._save_config(previous)
                     restored = True
                     self._engine_synced = False
                     await self._sync_sources(previous)
@@ -5004,7 +5378,14 @@ class ModelHubService:
             unavailable_source_ids=unavailable_source_ids,
             live_recovery=live_recovery,
         )
-        menu_model_ids = [model.id for model in agent.models if model.id not in hidden]
+        menu_models = [model for model in agent.models if model.id not in hidden]
+        model_resolutions = {
+            model.id: resolve_model_hub_turn(
+                config, backend, model.id, now=now, unavailable_source_ids=unavailable_source_ids,
+                live_recovery=live_recovery,
+            )
+            for model in menu_models
+        }
         model_supply = [
             {
                 "model_id": model_id,
@@ -5012,12 +5393,17 @@ class ModelHubService:
                 "route_origin": model_resolution.route_origin,
                 "has_runnable_hop": bool(model_resolution.candidate_hops),
             }
-            for model_id in menu_model_ids
-            for model_resolution in (resolve_model_hub_turn(
-                config, backend, model_id, now=now, unavailable_source_ids=unavailable_source_ids,
-                live_recovery=live_recovery,
-            ),)
+            for model_id, model_resolution in model_resolutions.items()
         ]
+        # Only Hub turns reach the evidence; a Direct Agent's menu is the backend's own.
+        effort_menus = {
+            model.id: (
+                self._effort_menu(backend, model, model_resolutions[model.id], now)
+                if agent.mode == "hub"
+                else {"omitted": [], "not_on": {}}
+            )
+            for model in menu_models
+        }
         selected_model_id = (
             (resolution.requested_model or None)
             if agent.mode == "hub"
@@ -5109,7 +5495,9 @@ class ModelHubService:
             ),
             "model_supply": model_supply if agent.mode == "hub" else None,
             "named_agents": named_agents,
-            "catalog_models": self._catalog_models_payload(agent),
+            "catalog_models": [
+                {**model, "effort_menu": effort_menus[model["id"]]} for model in self._catalog_models_payload(agent)
+            ],
             "builtin_models": builtin_models,
         }
 
@@ -5144,7 +5532,11 @@ class ModelHubService:
             )
             proposed_name, proposed_efforts = _storable_backend_model_metadata(
                 model.display_name,
-                model.reasoning_efforts,
+                (
+                    catalog_wire_efforts(model.id, model.reasoning_efforts)
+                    if model.reasoning_efforts_source == "catalog"
+                    else model.reasoning_efforts
+                ),
             )
             if display_name is None and proposed_name is not None:
                 display_name = proposed_name
@@ -5153,7 +5545,7 @@ class ModelHubService:
                     reasoning_efforts.append(effort)
         return suppliers, display_name, reasoning_efforts
 
-    def _models_dev_descriptions(self, model_ids: list[str]) -> dict[str, dict]:
+    def _models_dev_descriptions(self, model_ids: list[str], *, fetch_catalog: bool = True) -> dict[str, dict]:
         """Exact models.dev matches for provider candidates; empty when unknown.
 
         The description is optional: an unreadable catalog leaves every
@@ -5162,10 +5554,11 @@ class ModelHubService:
 
         if not model_ids:
             return {}
-        from vibe.models_dev_catalog import exact_models_dev_matches
+        from vibe.models_dev_catalog import cached_models_dev_catalog, exact_models_dev_matches
 
         try:
-            return exact_models_dev_matches(model_ids, dict(self.models_dev_catalog()))
+            catalog = self.models_dev_catalog() if fetch_catalog else cached_models_dev_catalog()
+            return exact_models_dev_matches(model_ids, dict(catalog))
         except Exception as exc:  # noqa: BLE001 - optional metadata never fails a read
             logger.info("Model Hub candidates have no models.dev metadata: %s", type(exc).__name__)
             return {}
@@ -5425,28 +5818,43 @@ class ModelHubService:
         self,
         config: ModelHubConfig,
         backend: BackendName,
+        *,
+        native_sources: Collection[tuple[str, str]] = (),
+        fetch_catalog: bool = True,
     ) -> None:
         """Give each Agent's model a Gateway menu row when a Source serves it.
 
-        Called as a backend enters Gateway mode. Direct mode never reads the
-        Gateway menu, so an Agent there keeps a model its CLI offered, and an
+        Called after confirmed migration or as a backend enters Gateway mode.
+        Direct mode never reads the Gateway menu, so an Agent there keeps a
+        model its CLI offered, and an
         OpenCode one spells it with its own provider (``openai/gpt-5.6-sol``).
         The row added is the one the picker adds for a provider model, only
         when a Source in this backend's default routing lists it. The Agent's
         selection itself is untouched, so switching back to Direct still runs
         it. A row the user removed stays removed, and a selection nothing
-        serves stays visible as an Agent that needs attention.
+        serves stays visible as an Agent that needs attention. During migration,
+        a static Source carried from that selection's native provider can instead
+        retain it by passthrough, without claiming an upstream inventory.
         """
 
         if self.named_agents_override is None:
             return
         agent = config.agents[backend]
+        source_by_id = {source.id: source for source in config.sources}
         carried: list[str] = []
         for _name, selected in self.named_agents_override(backend):
             selected = str(selected or "").strip()
             menu_ids = {model.id for model in agent.models}
             if not selected or self._menu_model_for_selection(agent, selected) in menu_ids:
                 continue
+            if backend == "opencode" and native_sources:
+                provider, separator, model = selected.partition("/")
+                if not separator or not model or not any(
+                    native_provider == provider for native_provider, _ in native_sources
+                ):
+                    # A same-named inventory entry from a different provider
+                    # does not consent to migrating this Direct selection.
+                    continue
             candidates = (
                 opencode_menu_model_candidates(selected)
                 if backend == "opencode"
@@ -5462,11 +5870,29 @@ class ModelHubService:
                 ),
                 None,
             )
+            if served is None and native_sources:
+                provider, separator, model = selected.partition("/")
+                native_model = model if backend == "opencode" and separator else selected
+                if (
+                    (backend != "opencode" or (provider and separator and model))
+                    and native_model not in agent.removed_model_ids
+                    and native_model not in carried
+                    and any(
+                        (backend != "opencode" or native_provider == provider)
+                        and source_id in agent.sources.order
+                        and (source := source_by_id.get(source_id)) is not None
+                        and self._eligible_for_agent(source, backend)
+                        and source_supports_passthrough(source)
+                        and not source_model_retired(source, native_model)
+                        for native_provider, source_id in native_sources
+                    )
+                ):
+                    served = native_model
             if served is not None:
                 carried.append(served)
         if not carried:
             return
-        described = self._models_dev_descriptions(carried)
+        described = self._models_dev_descriptions(carried, fetch_catalog=fetch_catalog)
         for model_id in carried:
             candidate = self._provider_candidate(
                 config,
@@ -5482,14 +5908,16 @@ class ModelHubService:
                 checked=[model.id for model in agent.models],
             )
 
-    async def _seed_vibey(self, config: ModelHubConfig) -> bool:
+    async def _seed_vibey(self, config: ModelHubConfig, *, fetch_catalog: bool = True) -> bool:
         """Give a pending Vibey entry its starting supply, in place; whether it took.
 
         Its Sources are every existing one this backend may use, placed as a
         newly created Source would be. Its models are the built-in Agents'
         selections, in order, that one of those Sources lists, each added as the
-        picker adds a provider model; none qualifying leaves the list empty
-        rather than picking one. The seed counts only once it has placed a
+        picker adds a provider model. With none qualifying, Vibey starts on one
+        model the Sources list (``_vibey_starting_model``), so a new install's
+        default Agent can run once setup places a Source; a model nothing can
+        describe leaves the list empty. The seed counts only once it has placed a
         Source: until then the entry stays pending, so the first Source the user
         adds still brings every Source and the starting models with it. Each
         mutation that adds Sources seeds after its Sources are final, so one
@@ -5499,10 +5927,11 @@ class ModelHubService:
         agent = config.agents["vibey"]
         if not any(self._eligible_for_agent(source, "vibey") for source in config.sources):
             return False
-        # Seeded rows keep the models.dev metadata they are written with, so a
-        # seed with no copy cached fetches one in the foreground, bounded; a
-        # foreground fetch already running (the startup warm-up) is shared.
-        await asyncio.to_thread(self._ensure_models_dev_copy)
+        # Seeded rows keep the models.dev metadata they are written with.
+        # Migration uses only the cached copy so moving a saved key never waits
+        # on optional network metadata; ordinary background backfill still runs.
+        if fetch_catalog:
+            await asyncio.to_thread(self._ensure_models_dev_copy)
         config.vibey_supply_pending = False
         for source in config.sources:
             self._apply_source_placement(config, source, ("vibey",))
@@ -5532,14 +5961,54 @@ class ModelHubService:
             )
             if served is not None and served not in model_ids:
                 model_ids.append(served)
-        described = self._models_dev_descriptions(model_ids)
+        described = self._models_dev_descriptions(model_ids, fetch_catalog=fetch_catalog)
         rows = []
         for model_id in model_ids:
-            candidate = self._provider_candidate(config, "vibey", model_id, described.get(model_id))
+            match = described.get(model_id)
+            # A selection is a person's choice for a native Agent: only a description
+            # that rules out an Agent's turn keeps it from starting Vibey.
+            if match is not None and _described_as_unfit_for_agent_turns(match):
+                continue
+            candidate = self._provider_candidate(config, "vibey", model_id, match)
             if candidate is not None:
                 rows.append(candidate[0])
+        if not rows:
+            starting = self._vibey_starting_model(config, fetch_catalog=fetch_catalog)
+            rows = [starting] if starting is not None else []
         agent.models = rows
         return True
+
+    def _vibey_starting_model(
+        self, config: ModelHubConfig, *, fetch_catalog: bool = True,
+    ) -> ModelHubBackendModelConfig | None:
+        """The one model a seed with no qualifying selection starts Vibey on, or ``None``.
+
+        The first model, in Vibey's Source order and then each Source's own
+        inventory order, that models.dev describes (by the exact match the
+        picker's candidates use) as taking tool calls and producing text: the
+        least an Agent's turn needs. A model models.dev does not know is never
+        guessed at, so an inventory it cannot describe starts Vibey with none.
+        """
+
+        source_by_id = {source.id: source for source in config.sources}
+        listed = list(
+            dict.fromkeys(
+                model.id
+                for source_id in config.agents["vibey"].sources.order
+                if (source := source_by_id.get(source_id)) is not None
+                for model in source.models
+                if not model.retired
+            )
+        )
+        described = self._models_dev_descriptions(listed, fetch_catalog=fetch_catalog)
+        for model_id in listed:
+            match = described.get(model_id)
+            if match is None or not _described_as_fit_for_agent_turns(match):
+                continue
+            candidate = self._provider_candidate(config, "vibey", model_id, match)
+            if candidate is not None:
+                return candidate[0]
+        return None
 
     async def _announce_vibey_seed(self) -> None:
         """Announce a committed seed as the Vibey catalog change it is.
@@ -5584,6 +6053,37 @@ class ModelHubService:
                     raise
         await self._announce_vibey_seed()
         return [model.id for model in config.agents["vibey"].models]
+
+    async def start_vibey_without_models(self) -> list[str]:
+        """Start a seeded Vibey whose catalog is still empty on its starting model; the ids it took.
+
+        A seed that found nothing describable leaves the catalog empty. The snapshot
+        reconcile calls this, when a models.dev copy arrives and on its cadence, and
+        only while Vibey's built-in Agent has no model, so whatever later makes a
+        listed model describable (the copy, or a Source added since) starts a Vibey
+        nothing was ever chosen for. A catalog a person emptied records its removals,
+        so it is theirs and stays empty.
+        """
+
+        async with self._mutation_lock:
+            previous = self.store.load()
+            vibey = previous.agents["vibey"]
+            if previous.vibey_supply_pending or vibey.models or vibey.removed_model_ids:
+                return []
+            starting = self._vibey_starting_model(previous)
+            if starting is None:
+                return []
+            config = self._clone_config(previous)
+            config.agents["vibey"].models = [starting]
+            try:
+                # As for the seed, an engine that is not up must not undo the start: the
+                # config is saved first, and the Agent still has to hear about it.
+                await self._commit_synced(previous, config, rollback_on_sync_failure=False)
+            except ModelHubError:
+                if not self.store.load().agents["vibey"].models:
+                    raise
+        await self._announce_vibey_seed()
+        return [starting.id]
 
     def _ensure_models_dev_copy(self) -> None:
         """Fetch models.dev in the foreground, bounded, when no copy is cached.
@@ -5660,6 +6160,812 @@ class ModelHubService:
             for backend in changed:
                 await self._refresh_backend_catalog(backend)
             return changed
+
+    def hosted_evidence(self) -> HostedEvidence:
+        """A reader over the evidence that applies the current wire stamp; memory only. Take one per resolution."""
+
+        return HostedEvidence(self.capability_evidence, self.engine_stamp, self.avibe_release)
+
+    def hosted_tools_status(self) -> dict:
+        """Models → Tools: each tool's settings, saved and effective, and what real use showed."""
+
+        return {
+            "hosted_tools": hosted_tools_status(
+                self.store.load(),
+                evidence=self.hosted_evidence(),
+                spec_for=hosted_tool_spec,
+                image_price=self._image_price,
+            )
+        }
+
+    def _image_price(self, source: ModelHubSourceConfig, spec: ImageModelSpec) -> Optional[dict]:
+        """One image's price for the Tools card: the vendor's list price, else an estimate, else None (never zero).
+
+        Only an unqualified list price is one: a price for one size or quality would read as every image's, and the
+        card names neither. The estimate values the overlay's ``tokens_per_image`` at the model's output token rate,
+        through the one pricing owner.
+        """
+
+        listed = next((entry.price for entry in spec.prices if entry.size is None and entry.quality is None), None)
+        if listed is not None:
+            return {"usd": round(listed.usd_per_1k / 1000, 6), "basis": "list"}
+        if spec.tokens_per_image is None:
+            return None
+        cost = self.hosted_call_cost(
+            replace(source, billing="metered"),
+            spec.id,
+            (),
+            usage=ProtocolUsageReport.of(input_tokens=0, cached_input_tokens=0, output_tokens=spec.tokens_per_image),
+            counts={},
+        )
+        if cost is None or not cost.usd:
+            # An estimate of zero means the model's rate is unknown, never that an image is free.
+            return None
+        return {"usd": cost.usd, "basis": "estimated"}
+
+    async def set_hosted_tool(self, tool: str, payload: object) -> dict:
+        """Change one hosted tool's settings, field by field; it applies from the next turn."""
+
+        async with self._mutation_lock:
+            previous = self.store.load()
+            try:
+                setting = apply_hosted_tool_put(previous, tool, payload)
+            except HostedToolSettingRefused as refused:
+                raise ModelHubError(refused.code, status=refused.status) from None
+            if previous.hosted_tools.get(tool) != setting:
+                config = self._clone_config(previous)
+                config.hosted_tools[tool] = setting
+                await self._commit_synced(previous, config)
+        return await asyncio.to_thread(self.hosted_tools_status)
+
+    async def clear_hosted_refusals(self, tool: str, payload: object) -> dict:
+        """Clear a tool's refusals on one Source (and model), or on every Source; it applies from the next request.
+
+        Persisted before it takes effect: a failed write changes nothing, so what the user is shown holds after a
+        restart.
+        """
+
+        try:
+            matches = clear_request(tool, payload)
+        except HostedToolSettingRefused as refused:
+            raise ModelHubError(refused.code, status=refused.status) from None
+        async with self._mutation_lock:
+            await self._clear_evidence(self.store.load(), matches)
+        return await asyncio.to_thread(self.hosted_tools_status)
+
+    async def clear_source_evidence(self, source_id: str, payload: object) -> dict:
+        """Clear one effort refusal of a Source's model (capability model §5); answers the Source."""
+
+        async with self._mutation_lock:
+            config = self.store.load()
+            source = next((item for item in config.sources if item.id == source_id), None)
+            if source is None:
+                raise ModelHubError("source_not_found", status=404)
+            if not isinstance(payload, dict) or set(payload) != {"model_id", "feature"}:
+                raise ModelHubError("invalid_parameter", status=400)
+            model_id = payload["model_id"]
+            try:
+                feature = EvidenceFeature.from_payload(payload["feature"])
+            except (TypeError, ValueError):
+                raise ModelHubError("invalid_parameter", status=400) from None
+            if not is_model_hub_model_id(model_id) or feature.kind != "effort":
+                raise ModelHubError("invalid_parameter", status=400)
+            await self._clear_evidence(
+                config,
+                lambda record: (record.source_id, record.model_id, record.feature) == (source_id, model_id, feature),
+            )
+            return {"source": self._source_payload(source, config)}
+
+    async def _clear_evidence(self, config: ModelHubConfig, matches: Callable[[EvidenceRecord], bool]) -> None:
+        """Clear under the Source mutation lock, so the identities it keeps are the ones the config holds."""
+
+        try:
+            await asyncio.to_thread(self.capability_evidence.clear, matches, live=lambda: config.sources)
+        except OSError:
+            logger.warning("Model Hub could not persist an evidence clear; nothing changed", exc_info=True)
+            raise ModelHubError("state_write_failed", status=500) from None
+
+    async def record_hosted_refusals(
+        self, source: ModelHubSourceConfig, refusals: Iterable[tuple[str, EvidenceFeature, str]],
+    ) -> None:
+        """Record refusals no upstream narrow rule writes (an executor model, an image endpoint); memory first.
+
+        Each is ``(model_id, feature, detail)`` under the current wire stamp. One call writes the batch, so sibling
+        image models of one endpoint land together. A failed file write is logged; memory keeps them.
+        """
+
+        evidence = self.hosted_evidence()
+        records = [
+            EvidenceRecord(
+                source_id=source.id,
+                model_id=model_id,
+                feature=feature,
+                status="unsupported",
+                observed_at=self.now(),
+                wire=evidence.wire_for(source, model_id),
+                source_identity=identity_digest(source),
+                detail=detail[:64],
+            )
+            for model_id, feature, detail in refusals
+        ]
+        if records:
+            await asyncio.to_thread(
+                self.capability_evidence.write_refusals,
+                records,
+                live=lambda: self.store.load().sources,
+                wire_for=evidence.wire_for,
+            )
+
+    async def record_hosted_success(
+        self, source: ModelHubSourceConfig, model_id: str, tool: str, mode: str,
+    ) -> None:
+        """Record a real success of a hosted tool (display only): the latest projection at once, the file hourly."""
+
+        record = EvidenceRecord(
+            source_id=source.id,
+            model_id=model_id,
+            feature=EvidenceFeature.hosted(tool, "call"),
+            status="verified",
+            observed_at=self.now(),
+            wire=self.hosted_evidence().wire_for(source, model_id),
+            source_identity=identity_digest(source),
+            mode=mode,  # type: ignore[arg-type]
+        )
+        await asyncio.to_thread(
+            self.capability_evidence.note_success, record, live=lambda: self.store.load().sources, now=record.observed_at,
+        )
+
+    def _effort_refused(self, source: ModelHubSourceConfig, model_id: str, request: Any) -> bool:
+        """Whether this hop has negative evidence for the effort the request sends.
+
+        Efforts are forwarded unchanged; a hop known to refuse one is not a
+        candidate for this request (capability model §3.4). Every place that
+        decides on candidates asks this one predicate, so the resolve loop and
+        the recovery loop never disagree. Memory-only and lock-free: the store
+        read its file at startup.
+        """
+
+        return self._refuses_effort(
+            source, model_id, wire_effort(request, getattr(request, "protocol", "")), self.now(),
+        )
+
+    def _refuses_effort(
+        self, source: ModelHubSourceConfig, model_id: str, token: Optional[str], now: datetime
+    ) -> bool:
+        """Whether this hop has negative evidence for the effort token a request sends; None sends none."""
+
+        feature = EvidenceFeature.effort_or_none(token)
+        if feature is None:
+            return False
+        return self.hosted_evidence().unsupported(source, model_id, feature)
+
+    def _effort_menu(
+        self, backend: BackendName, model: ModelHubBackendModelConfig, resolution: ModelHubTurnResolution, now: datetime
+    ) -> dict:
+        """Which of this menu model's efforts routing refuses now, in menu vocabulary (capability model §3.4).
+
+        A tier is ``omitted`` when a request at it would end in
+        ``effort_unsupported``: every hop the route would try or wait for refuses
+        the token the backend sends for it, as ``_effort_refused`` decides for a
+        request. A tier refused on some of those hops only is ``not_on`` their
+        Sources.
+        """
+
+        hops = list(
+            {
+                (hop.source.id, hop.model_id): hop
+                for hop in (*resolution.candidate_hops, *resolution.self_healing_hops(None))
+                if hop.source is not None and hop.model_id is not None
+            }.values()
+        )
+        omitted: list[str] = []
+        not_on: dict[str, list[str]] = {}
+        if not hops:
+            return {"omitted": omitted, "not_on": not_on}
+        # One request carries one token to every hop it may try: the one the backend writes for the hop it builds
+        # the request on, the first. ``_effort_refused`` reads that same token from the request.
+        primary = hops[0]
+        for effort in model.reasoning_efforts:
+            token = _sent_effort(backend, primary.source, primary.model_id, effort)
+            refusing = [hop.source.id for hop in hops if self._refuses_effort(hop.source, hop.model_id, token, now)]
+            if refusing and len(refusing) == len(hops):
+                omitted.append(effort)
+            elif refusing:
+                not_on[effort] = list(dict.fromkeys(refusing))
+        return {"omitted": omitted, "not_on": not_on}
+
+    def _effort_capable_hop_may_recover(
+        self, backend: str, model_id: str, supply_channel: Any, request: Any
+    ) -> bool:
+        """Whether a temporarily blocked hop of this route does not refuse the request's effort."""
+
+        resolution = self._invocation_resolution(
+            self.store.load(), cast(BackendName, backend), model_id, supply_channel,
+        )
+        return any(
+            hop.source is not None
+            and hop.model_id is not None
+            and not self._effort_refused(hop.source, hop.model_id, request)
+            for hop in resolution.self_healing_hops(supply_channel)
+        )
+
+    async def _learn_capability_evidence(
+        self, source: ModelHubSourceConfig, model_id: str, request: Any, outcome: RawCallOutcome
+    ) -> LearnedEvidence | None:
+        """Record the one feature a 400 before output names, through the narrow rules; return it."""
+
+        if outcome.rejection is None:
+            return None
+        learned = learn_from_rejection(
+            request,
+            outcome.rejection,
+            request_protocol=getattr(request, "protocol", ""),
+            source=source,
+            model_id=model_id,
+            spec_for=hosted_tool_spec,
+        )
+        if learned is None:
+            return None
+        evidence = self.hosted_evidence()
+        # Routing state: memory takes it before the re-render that follows, even if the file write fails. The store
+        # drops it if the Source or the model's rendering changed while the request ran.
+        await asyncio.to_thread(
+            self.capability_evidence.write_refusal,
+            EvidenceRecord(
+                source_id=source.id,
+                model_id=model_id,
+                feature=learned.feature,
+                status="unsupported",
+                observed_at=self.now(),
+                wire=evidence.wire_for(source, model_id),
+                source_identity=identity_digest(source),
+                detail=learned.detail,
+            ),
+            live=lambda: self.store.load().sources,
+            wire_for=evidence.wire_for,
+        )
+        return learned
+
+    def _admits_hosted(self, content: HostedContent, source: ModelHubSourceConfig, model_id: str) -> bool:
+        """Whether this hop runs a request's hosted content with current positive evidence; memory only."""
+
+        return admits(
+            content,
+            source=source,
+            model_id=model_id,
+            spec_for=hosted_tool_spec,
+            evidence=self.hosted_evidence(),
+        )
+
+    def hosted_call_cost(
+        self,
+        source: ModelHubSourceConfig,
+        model_id: str,
+        tools: Iterable[str],
+        *,
+        usage: Optional[ProtocolUsageReport],
+        counts: Mapping[str, int],
+        reported_usd: Optional[float] = None,
+    ) -> Optional[HostedCost]:
+        """The cost of one hosted response served by ``source``/``model_id``; None when unknown, never zero.
+
+        Vibey's ``hosted_summary`` and the gateway's ``ProxyExecution`` both ask
+        here, so only the pricing module turns usage into money. Memory-only:
+        the token price comes from the table the usage writer already holds, so
+        a response that ends before the first table is read is simply unpriced.
+        """
+
+        prices = self.usage_writer.held_prices
+        priced = hosted_response_cost(
+            billing=source.billing,
+            reported_usd=reported_usd,
+            model_price=prices.price(model_id) if prices is not None else None,
+            usage=usage,
+            tool_prices={
+                tool: (spec.price if (spec := hosted_tool_spec(source.vendor, source.protocol, model_id, tool)) else None)
+                for tool in tools
+            },
+            counts=counts,
+        )
+        if priced is None:
+            return None
+        basis, usd = priced
+        return HostedCost(basis=basis, usd=None if usd is None else round(usd, 6))
+
+    def context_price_steps(self, model_id: str) -> tuple[int, ...]:
+        """Where ``model_id``'s list price steps up with its context (``pricing.context_price_steps``), ascending.
+
+        Memory-only, like ``hosted_call_cost``: read from the table the usage writer already holds, so a hop resolved
+        before the first table is read, or for a model with no price, reports none.
+        """
+
+        prices = self.usage_writer.held_prices
+        return context_price_steps(prices.price(model_id)) if prices is not None else ()
+
+    def _admitted_executor(self, slot: ExecutorSlot, tool: str) -> ExecutorCandidate | None:
+        """The chain's candidate as the current snapshot admits it, else None (``vibey-hosted-tools.md`` §6).
+
+        The turn froze the order, not the Sources' runtime: a Source that is
+        removed, no longer runs the tool on its executor model, or has refused
+        it since is passed over, and so is one whose identity (base URL,
+        credential, ...) changed since the chain was built. It reads the config,
+        which grows with use: call it off the controller loop.
+        """
+
+        config = self.store.load()
+        source = next((item for item in config.sources if item.id == slot.source_id), None)
+        if source is None or identity_digest(source) != slot.identity:
+            return None
+        # The frozen model while it stays listed and runnable, even if the Source now lists one its vendor prefers.
+        return executor_candidate(source, slot.model_id, tool, evidence=self.hosted_evidence(), spec_for=hosted_tool_spec)
+
+    async def run_hosted_tool(
+        self,
+        tool: str,
+        payload: object,
+        *,
+        turn: TurnHostedTools | None,
+        language: str = "en",
+    ) -> dict:
+        """Run one proxied search on its turn's executor chain (``vibey-hosted-tools.md`` §6).
+
+        ``turn`` is what the caller's live turn froze; a tool outside it is
+        refused, unrun. The chain tries the turn's executors in order, each
+        admitted on the snapshot it is called on, within one deadline. It moves
+        on after a failure normal routing fails over from, a narrow-rule
+        refusal, a refusal of the executor model, or a failure mid-response;
+        any other outcome ends it. Every candidate called is metered on its own
+        Source. A proxy call never changes Source health: it is a tool call,
+        not the turn's model hop.
+        """
+
+        def say(key: str, **params: str) -> str:
+            return i18n_t(key, language, **params)
+
+        try:
+            # Validation is proportional to the request: off the controller loop.
+            call = await asyncio.to_thread(parse_call, tool, payload)
+        except ExecutorCallRefused as refused:
+            raise ModelHubError(refused.code, status=refused.status) from None
+        if turn is None or tool not in turn.tools:
+            raise ModelHubError("tool_not_enabled", status=409)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + call_timeout(tool)
+        attempts: list[_ExecutorAttempt] = []
+        for slot in turn.executors.get(tool, ()):
+            if loop.time() >= deadline:
+                break
+            attempt = await self._executor_attempt(call, slot, deadline=deadline, say=say)
+            if attempt is None:
+                continue
+            attempts.append(attempt)
+            if not attempt.moves_on:
+                break
+        if not attempts:
+            vendors = [catalog_api_key_vendor_label(vendor) or vendor for vendor in executor_vendors(tool)]
+            form = "one" if len(vendors) == 1 else "several"
+            listed = say("modelHub.hostedTools.listSeparator").join(vendors)
+            # Which providers to add is this call's own fact: worded in the user's language and shown as written.
+            no_source = Failure(say(f"modelHub.hostedTools.noExecutor.{tool}.{form}", vendors=listed), None)
+            return {"record": failed_record(no_source)}
+        # The record is the last attempt's; earlier billable ones are listed, each with its own billing.
+        last = attempts[-1]
+        record = last.record
+        if last.moves_on:
+            # Every candidate was tried and failed: say which, so the user sees whether retrying or those Sources is the issue.
+            tried = ", ".join(dict.fromkeys(attempt.source.display_name for attempt in attempts))
+            # Its reason keeps its code; the Sources tried follow in its text.
+            last_failure = Failure(record["error"], record["error_code"])
+            record = failed_record(
+                last_failure.also(say("modelHub.hostedTools.triedSources", sources=tried)), record.get("sources"),
+            )
+        execution = last.execution()
+        failed_attempts = [attempt.failed_attempt() for attempt in attempts[:-1] if attempt.billable]
+        if failed_attempts:
+            execution["failed_attempts"] = failed_attempts
+        return {"record": record, "execution": execution}
+
+    async def run_image_tool(self, payload: object, *, turn: TurnHostedTools | None, language: str = "en") -> dict:
+        """Run one ``image_generate`` call directly on the images endpoint of the model it names (§7.4).
+
+        ``turn`` is what the caller's live turn froze: a model outside its enum
+        is refused, unrun. There is no chain and no fallback: a failed call says
+        which other models the turn offers, and the model may call again with
+        one. The call is metered on its Source and never changes Source health.
+        """
+
+        def say(key: str, **params: str) -> str:
+            return i18n_t(key, language, **params)
+
+        try:
+            # Reference images are megabytes of base64: validated off the controller loop.
+            call = await asyncio.to_thread(parse_image_call, payload)
+        except ExecutorCallRefused as refused:
+            raise ModelHubError(refused.code, status=refused.status) from None
+        choice = next((item for item in (turn.images if turn is not None else ()) if item.model_id == call.model), None)
+        if turn is None or IMAGE_TOOL not in turn.tools or choice is None:
+            raise ModelHubError("tool_not_enabled", status=409)
+        others = [item.model_id for item in turn.images if item.model_id != call.model]
+
+        def failed(reason: Failure) -> dict:
+            # The other models follow the reason in its text; its code stays its own.
+            if others:
+                reason = reason.also(say("modelHub.hostedTools.imageAlternatives", models=", ".join(others)))
+            return {"record": failed_record(reason)}
+
+        unsupported = unsupported_argument(call, choice.spec)
+        if unsupported is not None:
+            takers = [item.model_id for item in turn.images if unsupported_argument(call, item.spec) is None]
+            text = say("modelHub.hostedTools.imageParamUnsupported", model=call.model, param=unsupported)
+            if takers:
+                text = f"{text} {say('modelHub.hostedTools.imageParamTakers', models=', '.join(takers))}"
+            return {"record": failed_record(Failure(text, "image_param_unsupported"))}
+
+        async def admitted() -> ModelHubSourceConfig | None:
+            # The config grows with use: read it off the controller loop.
+            config = await asyncio.to_thread(self.store.load)
+            return admitted_image(config, choice, evidence=self.hosted_evidence())
+
+        unavailable = Failure(say("modelHub.hostedTools.imageModelUnavailable", model=call.model), "image_model_unavailable")
+        source = await admitted()
+        if source is None:
+            return failed(unavailable)
+        # Its reference images become data URLs: megabytes, built off the controller loop.
+        request = ModelHubRequest(await asyncio.to_thread(image_request, call, choice.spec), protocol="openai_images")
+        body = bytearray()
+
+        async def feed(chunk: bytes) -> None:
+            if len(body) + len(chunk) > IMAGE_RESPONSE_MAX_BYTES:
+                raise ExecutorResponseRefused("modelHub.hostedTools.tooLarge")
+            body.extend(chunk)
+
+        called = await self._hosted_upstream_call(
+            source, call.model, request, stream=False,
+            deadline=asyncio.get_running_loop().time() + IMAGE_TIMEOUT_SECONDS, feed=feed,
+            admitted_now=admitted,
+        )
+        if called is None:
+            return failed(unavailable)
+        source = called.source
+        outcome = called.outcome
+        failed_reason = _executor_failure(outcome, say, refused=called.refused)
+        # The bytearray itself goes to the worker: no copy of the answer on the loop.
+        # Every images endpoint offered makes one image when the call names no n.
+        result = await asyncio.to_thread(image_result, body, say, asked=call.n or 1) if failed_reason is None else None
+        execution: dict[str, Any] = {
+            "mode": "direct",
+            "executor_origin": {"provider": source.vendor, "api": source.protocol, "model": call.model},
+            "executor_source_id": source.id,
+            "executor_billing": source.billing,
+        }
+        cost = self._image_call_cost(
+            source, choice.spec, usage=called.usage, images=len(result.images) if result is not None else 0,
+            generation=result.generation if result is not None else None,
+        )
+        if cost is not None:
+            execution["cost"] = _cost_payload(cost)
+        if result is None or result.record["status"] != "completed":
+            if outcome is not None and outcome.kind is not RawOutcomeKind.SUCCESS:
+                await self._learn_image_refusal(source, call.model, outcome)
+            if failed_reason is None and result is not None:
+                failed_reason = Failure(result.record["error"], result.record.get("error_code"))
+            answer = failed(failed_reason or failure(say, "modelHub.hostedTools.unreadable"))
+            return {**answer, "execution": execution}
+        await self.record_hosted_success(source, call.model, IMAGE_TOOL, "direct")
+        answer: dict[str, Any] = {"record": result.record, "execution": execution, "images": [
+            {"data": data} for data in result.images
+        ]}
+        if result.generation is not None:
+            answer["generation"] = dict(result.generation)
+        return answer
+
+    async def _learn_image_refusal(self, source: ModelHubSourceConfig, model_id: str, outcome: RawCallOutcome) -> None:
+        """The image narrow rule (§3.2): an upstream refusal of the model or of the endpoint, before any output.
+
+        The engine's own refusals reach here as local failures, never as an
+        upstream status, so they never teach. A refusal of the endpoint itself
+        (a 404: the path is not served) holds for every image model the Source
+        registers there, so sibling models do not each fail once.
+        """
+
+        if outcome.kind is not RawOutcomeKind.HTTP_ERROR or outcome.stream_started:
+            return
+        detail = f"{outcome.http_status} {outcome.error_code or outcome.error_type or 'error'}"[:64]
+        feature = EvidenceFeature.hosted(IMAGE_TOOL, "call")
+        if outcome.http_status in {400, 404} and machine_codes_name_model(outcome):
+            refused = [model_id]
+        elif outcome.http_status == 404:
+            refused = [
+                spec.id for spec in provider_image_models(source.vendor) if source.kind in spec.kinds
+            ] or [model_id]
+        else:
+            return
+        await self.record_hosted_refusals(source, [(refused_id, feature, detail) for refused_id in refused])
+
+    def _image_call_cost(
+        self,
+        source: ModelHubSourceConfig,
+        spec: ImageModelSpec,
+        *,
+        usage: Optional[ProtocolUsageReport],
+        images: int,
+        generation: Mapping[str, str] | None,
+    ) -> Optional[HostedCost]:
+        """One image call's cost: included, the list price per delivered image, else its tokens; None when unknown."""
+
+        if source.billing == "monthly":
+            return HostedCost(basis="included", usd=None)
+        size = (generation or {}).get("size")
+        quality = (generation or {}).get("quality")
+        matching = [
+            entry for entry in spec.prices
+            if entry.size in {None, size} and entry.quality in {None, quality}
+        ]
+        if matching and images:
+            # The most specific price that applies to what was delivered.
+            price = max(matching, key=lambda entry: (entry.size is not None) + (entry.quality is not None)).price
+            return HostedCost(basis="list", usd=round(price.usd_per_1k / 1000 * images, 6))
+        return self.hosted_call_cost(source, spec.id, (), usage=usage, counts={})
+
+    async def _executor_attempt(
+        self,
+        call: ExecutorCall,
+        slot: ExecutorSlot,
+        *,
+        deadline: float,
+        say: Callable[..., str],
+    ) -> _ExecutorAttempt | None:
+        """Call one executor candidate; None when this snapshot does not admit it, so nothing ran."""
+
+        tool, model_id = call.tool, slot.model_id
+        candidate = await asyncio.to_thread(self._admitted_executor, slot, tool)
+        if candidate is None:
+            return None
+        source = candidate.source
+        request = executor_request(call, source, model_id, candidate.declaration, candidate.include)
+        stream = executor_streams(source)
+        reader = ResponsesStreamReader() if stream else None
+        body = bytearray()
+
+        async def feed(chunk: bytes) -> None:
+            if reader is not None:
+                await asyncio.to_thread(reader.feed, chunk)
+            elif len(body) + len(chunk) > EXECUTOR_RESPONSE_MAX_BYTES:
+                raise ExecutorResponseRefused("modelHub.hostedTools.tooLarge")
+            else:
+                body.extend(chunk)
+
+        async def admitted_now() -> ModelHubSourceConfig | None:
+            final = await asyncio.to_thread(self._admitted_executor, slot, tool)
+            return final.source if final is not None else None
+
+        called = await self._hosted_upstream_call(
+            source, model_id, request, stream=stream, deadline=deadline, feed=feed, admitted_now=admitted_now,
+        )
+        if called is None:
+            return None
+        source = called.source
+        outcome = called.outcome
+        failed = _executor_failure(outcome, say, refused=called.refused)
+        if reader is not None:
+            result = await asyncio.to_thread(responses_result, tool, reader.readout, say, failed=failed)
+        elif failed is not None:
+            result = None
+        else:
+            # The bytearray itself goes to the worker: no copy of up to the response budget on the loop.
+            result = await asyncio.to_thread(anthropic_result, body, say)
+        # The call's cost is the pricing module's, from what the meter saw and what the provider reported.
+        counts, reported_usd = provider_charges(source.protocol, result.usage if result is not None else None)
+        cost = self.hosted_call_cost(
+            source, model_id, (tool,), usage=called.usage, counts=counts, reported_usd=reported_usd,
+        )
+        if outcome is not None and tool in outcome.hosted_tools and result is not None and result.record["status"] == "completed":
+            # A proxy call is a native call on the executor Source: the same positive evidence (§3.2).
+            await self.record_hosted_success(source, model_id, tool, "executor")
+        # A response that broke a bound reached nothing of Vibey's, so it is a failure before output here (§6
+        # step 4): the next candidate is tried. A timeout spent the chain's one deadline.
+        moves_on = called.refused is not None
+        if (
+            outcome is not None and outcome.kind is not RawOutcomeKind.SUCCESS
+            and called.refused is None and not called.timed_out
+        ):
+            moves_on = await self._executor_moves_on(source, model_id, tool, request, outcome)
+        return _ExecutorAttempt(
+            source=source,
+            model_id=model_id,
+            record=(
+                result.record if result is not None
+                else failed_record(failed or failure(say, "modelHub.hostedTools.unreadable"))
+            ),
+            cost=cost,
+            billable=called.billable,
+            moves_on=moves_on,
+        )
+
+    async def _hosted_upstream_call(
+        self,
+        source: ModelHubSourceConfig,
+        model_id: str,
+        request: ModelHubRequest,
+        *,
+        stream: bool,
+        deadline: float,
+        feed: Callable[[bytes], Awaitable[None]],
+        admitted_now: Callable[[], Awaitable[ModelHubSourceConfig | None]],
+    ) -> _HostedUpstreamCall | None:
+        """One upstream call a hosted tool makes on its own behalf; None when it was never admitted.
+
+        ``admitted_now`` admits the call again on the snapshot it is made on,
+        under the mutation lock. ``feed`` takes the response as it arrives and
+        raises ``ExecutorResponseRefused`` when it breaks a bound. The call is
+        metered on its Source however it ends, and it never settles Source
+        health: it is a tool call, not the turn's model hop.
+        """
+
+        handle = None
+        cancelled_observed: ProtocolSSEState | None = None
+        outcome: RawCallOutcome | None = None
+        admitted = False
+        refused: str | None = None
+
+        async def invoke() -> None:
+            nonlocal handle, outcome, admitted, refused, cancelled_observed, source
+            while True:
+                await self._prepare_engine_for_demand()
+                await self._mutation_lock.acquire()
+                held = True
+
+                def release_owner() -> None:
+                    nonlocal held
+                    if held:
+                        held = False
+                        self._mutation_lock.release()
+
+                def on_admitted() -> None:
+                    nonlocal admitted
+                    admitted = True
+                    release_owner()
+
+                try:
+                    # Admitted again on the snapshot the call is made on, under the lock. The call and
+                    # everything it reports (billing, cost, the Source's name) follow that snapshot.
+                    final = await admitted_now()
+                    if final is None:
+                        return
+                    source = final
+                    if not self._engine_synced:
+                        continue
+                    try:
+                        handle = await self._engine_call(self.adapter.invoke(
+                            source.id, model_id, request, stream, "vibey", on_admitted=on_admitted,
+                        ))
+                    except InvokeCancelledError as cancelled_early:
+                        # Cancelled after admission, before a handle: the wire
+                        # facts already observed are still billed, so still metered.
+                        cancelled_observed = cancelled_early.observed
+                        # Raised as a plain cancellation: the deadline converts
+                        # only that into its timeout, and any other canceller
+                        # reads it as its own.
+                        raise asyncio.CancelledError() from None
+                    break
+                finally:
+                    release_owner()
+            if handle.stream is not None:
+                try:
+                    async for chunk in handle.stream:
+                        await feed(chunk)
+                except ExecutorResponseRefused as broken:
+                    # The response broke a bound: the call failed, and nothing more
+                    # of it is read. Its usage is still metered, from the outcome
+                    # when the call already has one (a buffered response does).
+                    refused = broken.key
+                    await self._engine_call(handle.close_stream())
+                    if handle.outcome_available:
+                        outcome = await self._engine_call(handle.outcome())
+                    return
+            outcome = await self._engine_call(handle.outcome())
+
+        async def settle() -> None:
+            # The call ended now; a slow close must not move its usage to a later slice.
+            ended_at = self.now()
+            try:
+                if handle is not None:
+                    # Bounded like the gateway's own teardown: a stuck close must
+                    # not hold the call past its deadline or the gateway's shutdown.
+                    await asyncio.wait_for(handle.close_stream(), timeout=ENGINE_TRANSPORT_TIMEOUT_SECONDS)
+            except (asyncio.TimeoutError, Exception):
+                logger.warning("Model Hub hosted-tool call stream did not close cleanly", exc_info=True)
+            finally:
+                if handle is not None or cancelled_observed is not None:
+                    await self._meter_call(
+                        source_id=source.id,
+                        model_id=model_id,
+                        outcome=outcome,
+                        observed=handle.observed if handle is not None else cancelled_observed,
+                        at=ended_at,
+                    )
+
+        timed_out = False
+        try:
+            await asyncio.wait_for(invoke(), timeout=max(0.0, deadline - asyncio.get_running_loop().time()))
+        except asyncio.TimeoutError:
+            timed_out = True
+            if admitted:
+                outcome = RawCallOutcome(
+                    kind=RawOutcomeKind.TIMEOUT, http_status=None, error_code=None, redacted_message=None,
+                    stream_started=False, model_id=model_id, source_id=source.id,
+                )
+        except ModelHubError as error:
+            if not admitted:
+                logger.info("Model Hub hosted-tool call was not reached: %s", error.code)
+                return None
+            outcome = RawCallOutcome(
+                kind=RawOutcomeKind.NETWORK_ERROR, http_status=None, error_code=error.code, redacted_message=None,
+                stream_started=False, model_id=model_id, source_id=source.id,
+            )
+        finally:
+            # A known outcome belongs to the call even if its caller leaves:
+            # drain the bounded settlement before propagating cancellation.
+            settlement = asyncio.create_task(settle())
+            try:
+                await asyncio.shield(settlement)
+            except asyncio.CancelledError as cancelled:
+                try:
+                    await await_owned_task(settlement)
+                except BaseException:
+                    pass
+                raise cancelled
+        if not admitted:
+            return None
+        usage = _call_usage(outcome, handle.observed if handle is not None else cancelled_observed)
+        return _HostedUpstreamCall(
+            source=source,
+            outcome=outcome,
+            refused=refused,
+            timed_out=timed_out,
+            usage=usage,
+            # A call that produced nothing and reported no tokens was not billed.
+            billable=usage is not None or (
+                outcome is not None and (outcome.stream_started or outcome.kind is RawOutcomeKind.SUCCESS)
+            ),
+        )
+
+    async def _executor_moves_on(
+        self,
+        source: ModelHubSourceConfig,
+        model_id: str,
+        tool: str,
+        request: ModelHubRequest,
+        outcome: RawCallOutcome,
+    ) -> bool:
+        """Whether a failed executor call passes the search to the next candidate (§6 step 4).
+
+        Nothing reaches Vibey until the chain returns, so a failure mid-response
+        counts as before output here. A narrow rule's refusal records its
+        evidence, as on any hop. A refusal of the executor model (the Source
+        does not serve it) skips the Source for this call only: it names the
+        model, not the tool, so it is no evidence about the tool (§6 step 4).
+        """
+
+        learned = await self._learn_capability_evidence(source, model_id, request, outcome)
+        if learned is not None and learned.feature.kind == "hosted_tool":
+            return True
+        if not outcome.stream_started and names_model_refusal(outcome):
+            return True
+        decision = classify_outcome(replace(outcome, stream_started=False))
+        return decision.action in {"fallback", "refresh"}
+
+    def freeze_turn_hosted_tools(self, config: ModelHubConfig) -> TurnHostedTools:
+        """What a Vibey turn's first resolution freezes: its tools, executor orders and image models (§3.4)."""
+
+        return freeze_turn_tools(config, evidence=self.hosted_evidence(), spec_for=hosted_tool_spec)
+
+    def hosted_tools_for_hop(
+        self, source: ModelHubSourceConfig, model_id: str, turn: TurnHostedTools,
+    ) -> dict:
+        """``HopResolution.hosted_tools`` for a hop of a Vibey turn served by this Source and model."""
+
+        return hop_hosted_tools(turn, source, model_id, evidence=self.hosted_evidence(), spec_for=hosted_tool_spec)
 
     async def set_agent_mode(self, backend: str, mode: object) -> dict:
         if mode not in {"hub", "direct"} or (backend == "vibey" and mode != "hub"):
@@ -5970,6 +7276,56 @@ class ModelHubService:
         from vibe.backend_model_catalog import backend_builtin_models
 
         return backend_builtin_models(backend)
+
+    async def reconcile_source_reasoning_tiers(self) -> list[tuple[str, str]]:
+        """Derive saved Source tiers again by the current ladder, once at startup; the (Source, model) pairs it changed.
+
+        Rows an earlier build derived keep its rules until discovery revisits
+        them: 3.2.0 found no catalog row for a snapshot id and declared the whole
+        protocol default list for Opus 4.6. ``rederive_persisted_tiers`` decides
+        which rows are derived again, and an agent's provider rows that still hold
+        what those rows gave follow them. The result is saved once, so a later
+        start changes nothing.
+        """
+
+        async with self._mutation_lock:
+            previous = self.store.load()
+            config = self._clone_config(previous)
+            catalog_efforts_by_model = bundled_catalog_wire_efforts_by_model()
+            changed: list[tuple[str, str]] = []
+            for source in config.sources:
+                for model in source.models:
+                    resolution = rederive_persisted_tiers(
+                        protocol=source.protocol,
+                        model_id=model.id,
+                        efforts=model.reasoning_efforts,
+                        source=model.reasoning_efforts_source,
+                        catalog_efforts_by_model=catalog_efforts_by_model,
+                    )
+                    if resolution is None or (
+                        list(resolution.efforts) == list(model.reasoning_efforts)
+                        and resolution.source == model.reasoning_efforts_source
+                    ):
+                        continue
+                    model.reasoning_efforts = list(resolution.efforts)
+                    model.reasoning_efforts_source = resolution.source
+                    changed.append((source.id, model.id))
+            if changed:
+                # A provider row in an agent's list took its tiers from its suppliers' Source rows when it was added,
+                # and a hop offers only the tiers its row lists (Vibey sends no other). A row that still holds what
+                # its suppliers gave follows them; one that holds anything else was set apart and stays.
+                for backend, agent in config.agents.items():
+                    for row in agent.models:
+                        if row.origin != "provider":
+                            continue
+                        before = self._candidate_suppliers(previous, backend, row.id)[2]
+                        after = self._candidate_suppliers(config, backend, row.id)[2]
+                        if after != before and list(row.reasoning_efforts) == before:
+                            row.reasoning_efforts = after
+            if changed and self._reconcile_store_writable():
+                await self._commit_synced(previous, config)
+                return changed
+            return []
 
     async def reconcile_builtin_models(
         self,
@@ -6662,6 +8018,7 @@ class ModelHubService:
                 if status in {"active", "standby", "cooldown"}
                 else status
             )
+            refused = self._refused_efforts(source, inspection.model_id, observed_at)
             chain.append(
                 {
                     "source_id": source.id,
@@ -6672,6 +8029,7 @@ class ModelHubService:
                     "reason": inspection.reason,
                     "retry_at": inspection.retry_at,
                     **({"recovery": inspection.recovery} if inspection.recovery is not None else {}),
+                    **({"refused_efforts": refused} if refused else {}),
                 }
             )
         current = next(
@@ -6696,6 +8054,25 @@ class ModelHubService:
                 else "interrupted"
             ),
         }
+
+    def _refused_efforts(self, source: ModelHubSourceConfig, model_id: str, now: datetime) -> list[dict]:
+        """The efforts this hop currently refuses, as routing reads the evidence."""
+
+        evidence = self.hosted_evidence()
+        refused = [
+            record
+            for record in self.capability_evidence.for_hop(source.id, model_id)
+            if record.feature.kind == "effort" and evidence.refusal(source, model_id, record.feature) is record
+        ]
+        return [
+            {
+                "effort": record.feature.name,
+                "basis": "observed",
+                "observed_at": record.payload()["observed_at"],
+                "detail": record.detail,
+            }
+            for record in sorted(refused, key=lambda item: (item.observed_at, item.feature.name))
+        ]
 
     def agent_chain(self, backend: str, model_id: object) -> dict:
         if backend not in MODEL_HUB_BACKENDS or not isinstance(model_id, str) or not model_id:
@@ -6808,18 +8185,76 @@ class ModelHubService:
                 raise ModelHubError(reason, status=422)
             return source
 
+        async def drain(handle: InvokeHandle) -> None:
+            if handle.stream is not None:
+                async for _chunk in handle.stream:
+                    pass
+
+        source, outcome, elapsed_ms = await self._user_test_call(
+            source_id,
+            model_id,
+            selected,
+            # OpenCode preserves the request's explicit protocol and API keys
+            # have unrestricted origins.
+            lambda source: self._probe_request(source, model_id, "opencode", output_tokens=128),
+            stream=False,
+            origin="opencode",
+            consume=drain,
+            timeout=_SOURCE_PROBE_TIMEOUT_SECONDS,
+        )
+        succeeded = outcome.kind is RawOutcomeKind.SUCCESS
+        return {
+            "source_id": source.id,
+            "model_id": model_id,
+            "protocol": source.protocol,
+            "reachable": succeeded,
+            "latency_ms": elapsed_ms,
+            "error": None if succeeded else self._test_call_failure(outcome),
+        }
+
+    def _test_call_failure(self, outcome: RawCallOutcome) -> str:
+        """A failed user test call's detail key, for display only: it blocks nothing and changes no route state."""
+
+        decision = classify_outcome(outcome)
+        if decision.action == "refresh":
+            decision = ResolutionDecision("fallback", reason="credential_revoked")
+        return self._probe_failure(outcome, decision, recovery_managed=False)[0]
+
+    async def _user_test_call(
+        self,
+        source_id: str,
+        model_id: str,
+        selected: Callable[[ModelHubConfig], ModelHubSourceConfig],
+        request: Callable[[ModelHubSourceConfig], ModelHubRequest],
+        *,
+        stream: bool,
+        origin: str,
+        consume: Callable[[InvokeHandle], Awaitable[None]],
+        timeout: float,
+    ) -> UserTestCall:
+        """One call a user asked for, on exactly this Source and model: no Agent route, no failover.
+
+        ``selected`` re-checks the Source on every snapshot it is invoked from,
+        and ``consume`` reads the opened call. The call is settled whatever
+        happens: a success counts as the retry a cooldown waits for and verifies
+        the credential, a failure changes no route state, and the call is
+        metered. Returns the Source as invoked, its outcome, its latency, and
+        whether this call retired the Source's pending verification itself.
+        """
+
         handle = None
         outcome = None
         source = None
         admitted_at = None
         attempt_generation = PRE_ATTEMPT_SETTLEMENT_GENERATION
+        cancelled_observed: ProtocolSSEState | None = None
 
         async def invoke_selected() -> None:
-            nonlocal source, handle, outcome, admitted_at, attempt_generation
+            nonlocal source, handle, outcome, admitted_at, attempt_generation, cancelled_observed
             # Bound local waiting too, but never call it a model failure before
             # the adapter has actually admitted this Source/model invocation.
             async with self._mutation_lock:
-                selected(self.store.load())
+                selected(await asyncio.to_thread(self.store.load))
             while True:
                 await self._prepare_engine_for_demand()
                 await self._mutation_lock.acquire()
@@ -6842,29 +8277,34 @@ class ModelHubService:
 
                 try:
                     source = ModelHubSourceConfig.from_payload(
-                        selected(self.store.load()).to_payload(),
+                        selected(await asyncio.to_thread(self.store.load)).to_payload(),
                     )
                     if not self._engine_synced:
                         continue
-                    # OpenCode preserves the request's explicit protocol and
-                    # API keys have unrestricted origins. No Agent resolver
-                    # is involved: the adapter binds this exact Source.
-                    handle = await self._engine_call(self.adapter.invoke(
-                        source.id,
-                        model_id,
-                        self._probe_request(source, model_id, "opencode", output_tokens=128),
-                        False,
-                        "opencode",
-                        on_admitted=admitted,
-                    ))
+                    # No Agent resolver is involved: the adapter binds this exact Source.
+                    try:
+                        handle = await self._engine_call(self.adapter.invoke(
+                            source.id,
+                            model_id,
+                            request(source),
+                            stream,
+                            origin,
+                            on_admitted=admitted,
+                        ))
+                    except InvokeCancelledError as cancelled_early:
+                        # Cancelled after admission, before a handle (a timeout
+                        # included): the wire facts already observed are billed,
+                        # so they are still metered. Raised on as a plain
+                        # cancellation, which the deadline below reads as its own
+                        # timeout and any other canceller as theirs.
+                        cancelled_observed = cancelled_early.observed
+                        raise asyncio.CancelledError() from None
                     break
                 finally:
                     release_owner()
             if admitted_at is None:
                 raise ModelHubError("engine_down", status=503)
-            if handle.stream is not None:
-                async for _chunk in handle.stream:
-                    pass
+            await consume(handle)
             outcome = await self._engine_call(handle.outcome())
 
         async def settle_attempt() -> None:
@@ -6879,17 +8319,18 @@ class ModelHubService:
                         source.id, source.credential_ref, source.verification_pending, outcome,
                     )
             finally:
-                if handle is not None:
-                    try:
+                try:
+                    if handle is not None:
                         await handle.close_stream()
-                    finally:
+                finally:
+                    if handle is not None or cancelled_observed is not None:
                         await self._meter_call(
-                            source_id=source_id, model_id=model_id,
-                            outcome=outcome, observed=handle.observed,
+                            source_id=source_id, model_id=model_id, outcome=outcome,
+                            observed=handle.observed if handle is not None else cancelled_observed,
                         )
 
         try:
-            await asyncio.wait_for(invoke_selected(), timeout=_SOURCE_PROBE_TIMEOUT_SECONDS)
+            await asyncio.wait_for(invoke_selected(), timeout=timeout)
         except asyncio.TimeoutError:
             if admitted_at is None:
                 raise ModelHubError("engine_down", status=503) from None
@@ -6917,24 +8358,7 @@ class ModelHubService:
                     pass
                 raise cancelled
         assert source is not None and outcome is not None
-        succeeded = outcome.kind is RawOutcomeKind.SUCCESS
-        # Classify failures for display only. A selected model failure cannot
-        # block other models on this Source, refresh credentials, or modify route
-        # state.
-        decision = classify_outcome(outcome)
-        if decision.action == "refresh":
-            decision = ResolutionDecision("fallback", reason="credential_revoked")
-        error = None if succeeded else self._probe_failure(
-            outcome, decision, recovery_managed=False,
-        )[0]
-        return {
-            "source_id": source.id,
-            "model_id": model_id,
-            "protocol": source.protocol,
-            "reachable": succeeded,
-            "latency_ms": elapsed_ms,
-            "error": error,
-        }
+        return UserTestCall(source, outcome, elapsed_ms)
 
     @staticmethod
     def _probe_failure(
@@ -6979,7 +8403,7 @@ class ModelHubService:
             )
         return "models.source.error.unclassified", "unclassified_error"
 
-    def _write_source_blocker_locked(
+    async def _write_source_blocker_locked(
         self,
         config: ModelHubConfig,
         source: ModelHubSourceConfig,
@@ -7006,7 +8430,7 @@ class ModelHubService:
             status=status,
             detail_key=detail_key,
         )
-        persisted = self._save_runtime_config(previous, config)
+        persisted = await self._save_runtime_config(previous, config)
         if persisted:
             # A blocked grant must not keep reporting the windows it had while usable.
             self.quota.forget(source.id)
@@ -7201,13 +8625,9 @@ class ModelHubService:
         with get_cached_sqlite_engine().begin() as conn:
             conn.execute(
                 messages.update()
-                .where(
-                    func.json_extract(
-                        messages.c.metadata_json,
-                        "$.turn_id",
-                    )
-                    == normalized
-                )
+                # The indexed expression, verbatim: a seek on this turn's rows
+                # instead of a scan of every Message under the write lock.
+                .where(literal_column(MESSAGE_TURN_ID_SQL) == normalized)
                 .values(
                     metadata_json=func.json_set(
                         messages.c.metadata_json,
@@ -7221,30 +8641,33 @@ class ModelHubService:
     def _known_turn(
         turn_id: str,
     ) -> tuple[Optional[str], Optional[Literal["direct", "hub"]]]:
+        # The turn's row is found alone, by the indexed expression: joined to
+        # ``agent_sessions``, whose ``metadata_json`` shares the column name, the
+        # expression's unqualified column would be ambiguous.
+        turn_row = (
+            select(
+                messages.c.session_id,
+                func.json_extract(
+                    messages.c.metadata_json,
+                    "$.model_hub_mode",
+                ).label("mode"),
+            )
+            .where(literal_column(MESSAGE_TURN_ID_SQL) == turn_id)
+            .limit(1)
+            .subquery()
+        )
         try:
             with get_cached_sqlite_engine().connect() as conn:
                 row = conn.execute(
                     select(
                         agent_sessions.c.agent_backend.label("backend"),
-                        func.json_extract(
-                            messages.c.metadata_json,
-                            "$.model_hub_mode",
-                        ).label("mode"),
-                    )
-                    .select_from(
-                        messages.join(
+                        turn_row.c.mode,
+                    ).select_from(
+                        turn_row.join(
                             agent_sessions,
-                            messages.c.session_id == agent_sessions.c.id,
+                            turn_row.c.session_id == agent_sessions.c.id,
                         )
                     )
-                    .where(
-                        func.json_extract(
-                            messages.c.metadata_json,
-                            "$.turn_id",
-                        )
-                        == turn_id
-                    )
-                    .limit(1)
                 ).mappings().first()
         except Exception:
             return None, None
@@ -7383,10 +8806,10 @@ class ModelHubService:
                         status="needs_action",
                         detail_key="models.source.needs_action.oauth_expired",
                     )
-                self._save_projection_neutral(previous, config)
+                self._save_projection_neutral_blocking(previous, config)
 
                 def restore_after_spawn_failure() -> None:
-                    self._save_projection_neutral(config, previous)
+                    self._save_projection_neutral_blocking(config, previous)
 
                 return restore_after_spawn_failure
 
@@ -7783,7 +9206,7 @@ class ModelHubService:
                 updated = self._clone_config(previous)
                 updated.enabled = True
                 updated.runtime_default_applied = True
-                self._save_projection_neutral(previous, updated)
+                await self._save_projection_neutral(previous, updated)
                 # A start renders the persisted projection, whose text-only
                 # marks come from the catalog copy of its last sync. Syncing
                 # here gives an explicit start the current copy's marks.
@@ -7818,7 +9241,7 @@ class ModelHubService:
                 updated = self._clone_config(previous)
                 updated.enabled = False
                 updated.runtime_default_applied = True
-                self._save_projection_neutral(previous, updated)
+                await self._save_projection_neutral(previous, updated)
                 return _runtime_payload(status, enabled=False)
 
     def migration_scan(self) -> dict:
@@ -7936,7 +9359,7 @@ class ModelHubService:
                 previous = self._clone_config(config)
                 source.state = ModelHubSourceStateConfig(status="standby")
                 try:
-                    self._save_runtime_config(previous, config)
+                    await self._save_runtime_config(previous, config)
                 except OSError:
                     # Inference is authoritative; the policy remembers exactly
                     # which stale persisted cooldown must not be imported again.
@@ -7954,7 +9377,7 @@ class ModelHubService:
         # actual streaming output is read separately from the handle observer.
         return outcome.kind is RawOutcomeKind.SUCCESS and outcome.recovery_verified
 
-    def _write_cooldown_locked(
+    async def _write_cooldown_locked(
         self,
         config: ModelHubConfig,
         source: ModelHubSourceConfig,
@@ -7981,7 +9404,7 @@ class ModelHubService:
             detail_key=detail_key or f"models.source.cooldown.{decision.reason}",
         )
         try:
-            persisted = self._save_runtime_config(previous, config)
+            persisted = await self._save_runtime_config(previous, config)
         except OSError:
             # HTTP recovery already owns the live deadline. Failed telemetry
             # cannot replace the upstream result or erase temporary eligibility.
@@ -8070,7 +9493,7 @@ class ModelHubService:
                             from_label=current.display_name, now=self.now(),
                         )
                     return event_reason, False
-                persisted = self._write_cooldown_locked(
+                persisted = await self._write_cooldown_locked(
                     config,
                     current,
                     decision,
@@ -8088,7 +9511,7 @@ class ModelHubService:
                     "account_banned": "models.source.needs_action.account_banned",
                     "unclassified_error": "models.source.error.unclassified",
                 }[event_reason]
-                persisted = self._write_source_blocker_locked(
+                persisted = await self._write_source_blocker_locked(
                     config,
                     current,
                     backend=backend,
@@ -8246,8 +9669,11 @@ class ModelHubService:
 
     @staticmethod
     def _mark_source_unverified(source: ModelHubSourceConfig) -> None:
-        # Persist identity with the credential, including same-handle reauth.
-        source.verification_pending = f"vp_{uuid.uuid4().hex}"
+        # Persist identity with the credential, including same-handle reauth: the marker clears once a call verifies
+        # the credential, and the generation keeps it, so the Source's identity never reverts to an earlier one.
+        marker = f"vp_{uuid.uuid4().hex}"
+        source.verification_pending = marker
+        source.credential_generation = marker
 
     async def _verify_successful_source(
         self,
@@ -8256,13 +9682,15 @@ class ModelHubService:
         verification_pending: str | None,
         outcome: RawCallOutcome,
     ) -> None:
-        """Retire pending verification only for the current credential's call."""
+        """Retire pending verification only for the current credential's call.
+
+        The Source's identity does not include the marker, so retiring it changes no identity: health, retry state
+        and evidence all carry over.
+        """
         if outcome.kind is not RawOutcomeKind.SUCCESS or verification_pending is None:
             return
-        retired_identity: tuple[tuple, tuple] | None = None
 
         def clear_current(config: ModelHubConfig) -> bool:
-            nonlocal retired_identity
             current = next((item for item in config.sources if item.id == source_id), None)
             if (
                 current is None
@@ -8270,19 +9698,14 @@ class ModelHubService:
                 or current.verification_pending != verification_pending
             ):
                 return False
-            previous_identity = source_identity(current)
             current.verification_pending = None
-            retired_identity = (previous_identity, source_identity(current))
             return True
 
         try:
             async with self._mutation_lock:
-                self.store.mutate(clear_current)
-                if retired_identity is not None:
-                    previous_identity, current_identity = retired_identity
-                    self.recovery.verification_retired(source_id, previous_identity, current_identity)
-                    if self._source_attempt_identities.get(source_id) == previous_identity:
-                        self._source_attempt_identities[source_id] = current_identity
+                # Held under the mutation lock until the write lands, even if the caller is cancelled.
+                await run_owned_in_thread(self.store.mutate, clear_current)
+            return
         except ValueError as exc:
             if "recovery warnings" not in str(exc):
                 raise
@@ -8353,6 +9776,7 @@ class ModelHubService:
             await self._verify_successful_source(
                 resolved.source_id, resolved.credential_ref, resolved.verification_pending, outcome,
             )
+            await self._record_native_successes(resolved, outcome)
             return HandleSettlement(
                 outcome=outcome,
                 decision=decision,
@@ -8397,6 +9821,25 @@ class ModelHubService:
                 source_transition_persisted=source_transition_persisted,
             ),
         )
+
+    async def _record_native_successes(self, resolved: ResolvedInvocation, outcome: RawCallOutcome) -> None:
+        """Positive evidence for each natively declared tool the served response proves ran (§3.2).
+
+        Display-only history, written after the response completed. It is
+        keyed on the identity the hop was resolved under: a Source changed
+        since is not vouched for.
+        """
+
+        proven = resolved.hosted_calls & outcome.hosted_tools
+        if not proven or resolved.origin is None:
+            return
+        # The config grows with use: read it off the controller loop.
+        config = await asyncio.to_thread(self.store.load)
+        source = next((item for item in config.sources if item.id == resolved.source_id), None)
+        if source is None or identity_digest(source) != resolved.origin.identity:
+            return
+        for tool in sorted(proven):
+            await self.record_hosted_success(source, resolved.model_id, tool, "native")
 
     def _emit_switch(
         self,
@@ -8466,6 +9909,7 @@ class ModelHubService:
         exact_retry: bool = False,
         on_admitted: Callable[[int], None] | None = None,
         recovery_request: RecoveryRequest | None = None,
+        hosted: HostedContent = HostedContent(),
     ) -> InvokeHandle:
         while True:
             await self._mutation_lock.acquire()
@@ -8489,10 +9933,12 @@ class ModelHubService:
             try:
                 config = self.store.load()
                 resolution = self._invocation_resolution(config, backend, requested_model_id, supply_channel)
+                pinned_hop = _pinned_hop(request, backend)
                 candidates = [
                     hop for hop in resolution.candidate_hops
                     if hop.source_id not in excluded_source_ids
                     and (hop.source_id, hop.model_id) not in (excluded_hops or ())
+                    and (pinned_hop is None or (hop.source_id, hop.model_id) == pinned_hop)
                 ]
                 candidate = next(
                     (
@@ -8518,12 +9964,42 @@ class ModelHubService:
                     # hop, including fallback/refresh. Persisted ids stay intact;
                     # refusal must precede a transport, attempt, or recovery slot.
                     try:
-                        origin = HopOrigin(source.vendor, source.protocol, model_id)
+                        origin = HopOrigin(source.vendor, source.protocol, model_id, source.id)
                         origin.response_headers()
                     except ServedHopHeaderTooLarge:
                         raise ModelHubError("served_hop_too_large", status=422) from None
-                    if getattr(request, "primary_origin", None) != origin:
+                    # Opaque payloads are bound to the account that issued them,
+                    # the Source identity, not only to the origin (C-6 item 6). The
+                    # request was rendered for the launch primary's identity; the
+                    # serving one is read on this final snapshot, so a key rotated
+                    # while the engine was prepared counts.
+                    primary = getattr(request, "primary_origin", None)
+                    identity = identity_digest(source)
+                    other_account = (
+                        primary != origin or primary.source != origin.source or primary.identity != identity
+                    )
+                    if pinned_hop is None and other_account:
+                        # An unpinned request is stripped for any other account.
                         attempt_request = without_opaque_history(request)
+                    elif (
+                        other_account
+                        and primary is not None
+                        and pinned_hop == (primary.source, primary.model)
+                    ):
+                        # A pinned request is never rewritten: rendered for the
+                        # primary's identity, it cannot go to the primary under
+                        # another, so Vibey renders it again portably.
+                        raise _pin_unavailable()
+                    # Hosted content is admitted on this final snapshot, so evidence
+                    # or a Source that changed while the engine was prepared counts.
+                    if hosted and not self._admits_hosted(hosted, source, model_id):
+                        raise _pin_unavailable()
+                    # Native content stays on one identity of the Source per turn. The
+                    # claim is made here, under the exclusion this call is admitted in,
+                    # so no concurrent request or config change slips between them.
+                    claim = getattr(request, "pin_identity_claim", None)
+                    if hosted and (claim is None or not claim(identity, bool(hosted.in_flight))):
+                        raise _pin_unavailable()
                 if self._engine_synced:
                     if recovery_request is not None and recovery_request.expired:
                         raise _RecoveryWindowClosed
@@ -8564,6 +10040,7 @@ class ModelHubService:
         exact_retry: bool = False,
         on_admitted: Callable[[int], None] | None = None,
         recovery_request: RecoveryRequest | None = None,
+        hosted: HostedContent = HostedContent(),
     ) -> tuple[InvokeHandle, Optional[RawCallOutcome], asyncio.CancelledError | None]:
         acquired_handle: InvokeHandle | None = None
         generation: int | None = None
@@ -8610,6 +10087,7 @@ class ModelHubService:
                     exact_retry=exact_retry,
                     on_admitted=admitted,
                     recovery_request=recovery_request,
+                    hosted=hosted,
                 )
             except InvokeCancelledError as cancelled:
                 await meter_observed(cancelled.observed, None)
@@ -8680,7 +10158,7 @@ class ModelHubService:
                 decision,
                 (),
                 (),
-                HopOrigin(source.vendor, source.protocol, source_model_id) if backend == "vibey" else None,
+                HopOrigin(source.vendor, source.protocol, source_model_id, source.id) if backend == "vibey" else None,
             )
         if decision.action == "fallback" or (
             decision.action == "surface"
@@ -8708,6 +10186,7 @@ class ModelHubService:
         model_id: str,
         outcome: RawCallOutcome | None,
         observed: ProtocolSSEState | None,
+        at: datetime | None = None,
     ) -> None:
         """Fold one bodyless upstream call into the usage ledger, best-effort.
 
@@ -8732,11 +10211,11 @@ class ModelHubService:
         the vendor had already billed. The writer's own bounded wait keeps the
         ordinary path leaving the row on disk before the caller sees its outcome,
         without putting an unresponsive disk in front of the next failover hop.
+
+        ``at`` is when the call ended, when its caller settles it later than that.
         """
 
-        usage = outcome.usage if outcome is not None else None
-        if usage is None and observed is not None:
-            usage = observed.usage
+        usage = _call_usage(outcome, observed)
         reached_model = (
             outcome is not None
             and (outcome.kind is RawOutcomeKind.SUCCESS or outcome.stream_started)
@@ -8748,7 +10227,7 @@ class ModelHubService:
                 source_id=source_id,
                 model_id=model_id,
                 usage=usage,
-                at=self.now(),
+                at=at or self.now(),
             )
         )
 
@@ -8813,6 +10292,21 @@ class ModelHubService:
     ) -> ResolvedInvocation:
         if backend not in MODEL_HUB_BACKENDS:
             raise ModelHubError("mapping_target_unavailable")
+        pinned_hop = _pinned_hop(request, backend)
+        hosted = (
+            # A walk of the whole history, so off the controller loop.
+            await asyncio.to_thread(
+                hosted_content, request, getattr(request, "protocol", ""), pinned=pinned_hop is not None,
+            )
+            if backend == "vibey"
+            else HostedContent()
+        )
+        if hosted and pinned_hop is None:
+            # Vibey pins every request carrying Source-specific hosted content,
+            # so unpinned content has no correct hop: refuse it before anything runs.
+            raise ModelHubError(
+                "hosted_content_unpinned", status=422, turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
+            )
         engine_prepared = False
         # An entirely unsupported Google request must not reconcile the engine
         # or custody. Supported hops drain the journal in demand preparation.
@@ -8832,6 +10326,10 @@ class ModelHubService:
             )
         event_agent = cast(EventAgent, backend)
         candidate_hops = list(resolution.candidate_hops)
+        if pinned_hop is not None and all((hop.source_id, hop.model_id) != pinned_hop for hop in candidate_hops):
+            # Cooling down, removed, or no longer this route's hop: refused
+            # before anything is invoked, and never waited out.
+            raise _pin_unavailable()
         if not candidate_hops:
             projection_config, projection_resolution = config, resolution
             if supply_channel is not None:
@@ -8876,6 +10374,7 @@ class ModelHubService:
         globally_blocked_source_ids: set[str] = set()
         unsupported_hops: set[tuple[str, str]] = set()
         unsupported_reason: str | None = None
+        effort_rejected_sources: list[str] = []
         while True:
             async with self._mutation_lock:
                 if recovery_request is not None and recovery_request.expired:
@@ -8890,6 +10389,7 @@ class ModelHubService:
                         hop for hop in resolution.candidate_hops
                         if hop.source_id not in globally_blocked_source_ids
                         and (hop.source_id, hop.model_id) not in unsupported_hops
+                        and (pinned_hop is None or (hop.source_id, hop.model_id) == pinned_hop)
                     ),
                     None,
                 )
@@ -8900,7 +10400,10 @@ class ModelHubService:
             if source is None or target_model is None:
                 raise AssertionError("runnable hop must have an exact identity")
             verification_pending = source.verification_pending
-            origin = HopOrigin(source.vendor, source.protocol, target_model) if backend == "vibey" else None
+            origin = (
+                HopOrigin(source.vendor, source.protocol, target_model, source.id, identity_digest(source))
+                if backend == "vibey" else None
+            )
             if source.supply_channel == "native_cli":
                 self._emit_switch(
                     agent=event_agent,
@@ -8949,6 +10452,12 @@ class ModelHubService:
                     )
                     if reason is not None:
                         raise _InvocationUnsupported(reason)
+                if self._effort_refused(source, target_model, request):
+                    effort_rejected_sources.append(source.id)
+                    raise _InvocationUnsupported("effort_unsupported")
+                if pinned_hop is not None and getattr(request, "protocol", None) != source.protocol:
+                    # Native content is never translated: the pinned hop must speak the request's protocol.
+                    raise _pin_unavailable()
                 await self._prepare_engine_for_demand(already_synced=engine_prepared)
                 engine_prepared = True
                 handle, outcome, cancelled = await self._invoke(
@@ -8963,8 +10472,12 @@ class ModelHubService:
                     supply_channel=supply_channel,
                     on_admitted=admitted,
                     recovery_request=recovery_request,
+                    hosted=hosted,
                 )
             except _InvocationUnsupported as skipped:
+                if pinned_hop is not None:
+                    # Normal routing would skip this hop; a pinned request cannot.
+                    raise _pin_unavailable() from None
                 unsupported_reason = skipped.reason
                 unsupported_hops.add((source.id, target_model))
                 logger.info(
@@ -9000,8 +10513,10 @@ class ModelHubService:
                     settlement_generation=settlement_generation,
                     verification_pending=verification_pending,
                     origin=origin,
+                    hosted_calls=frozenset(tool for tool, _type in hosted.calls),
                 )
             decision = await self._classify_source_outcome(source, outcome)
+            learned = await self._learn_capability_evidence(source, target_model, request, outcome)
             if cancelled is not None:
                 await self._settle_cancelled_attempt(
                     source=source,
@@ -9032,6 +10547,7 @@ class ModelHubService:
                         exact_retry=True,
                         on_admitted=admitted,
                         recovery_request=recovery_request,
+                        hosted=hosted,
                     )
                 except _InvocationPlanChanged:
                     if attempt_observer is not None:
@@ -9063,8 +10579,10 @@ class ModelHubService:
                         settlement_generation=settlement_generation,
                         verification_pending=verification_pending,
                         origin=origin,
+                        hosted_calls=frozenset(tool for tool, _type in hosted.calls),
                     )
                 decision = classify_outcome(outcome, refresh_attempted=True)
+                learned = await self._learn_capability_evidence(source, target_model, request, outcome)
                 if cancelled is not None:
                     await self._settle_cancelled_attempt(
                         source=source,
@@ -9118,6 +10636,18 @@ class ModelHubService:
                     verification_pending=verification_pending,
                     origin=origin,
                 )
+            if (
+                pinned_hop is not None
+                and decision.action == "surface"
+                and not outcome.stream_started
+                and learned is not None
+                and learned.feature.kind == "hosted_tool"
+            ):
+                # A narrow hosted-content rule named this refusal and recorded
+                # its evidence: the pinned hop cannot take this content, so the
+                # request goes back to Vibey for its portable form.
+                self.recovery.release(source.id, settlement_generation)
+                raise _pin_unavailable(learned, source.id)
             if decision.action == "surface":
                 self.recovery.release(source.id, settlement_generation)
                 source_transition_persisted: bool | None = None
@@ -9154,6 +10684,19 @@ class ModelHubService:
                         source_transition_persisted=source_transition_persisted,
                     ),
                 )
+            if decision.action == "fallback" and pinned_hop is not None:
+                # A failure normal routing would fail over from. The Source's
+                # health is settled as usual; the request goes back to Vibey,
+                # which re-renders it in portable form and sends it unpinned.
+                await self._settle_fallback_source(
+                    source,
+                    decision,
+                    backend=cast(BackendName, backend),
+                    model_id=model_id,
+                    settlement_generation=settlement_generation,
+                    outcome=outcome,
+                )
+                raise _pin_unavailable()
             if decision.action == "fallback":
                 non_retryable_failure |= decision.reason not in RETRY_DELAYS
                 if recovery_request is not None and decision.reason in RETRY_DELAYS:
@@ -9184,11 +10727,32 @@ class ModelHubService:
                 turn_outcome=ENGINE_DOWN_TURN_OUTCOME,
                 local_error_detail=format_os_errno(outcome.os_errno),
             )
+        if pinned_hop is not None:
+            # The pinned hop left the route or its recovery window closed.
+            raise _pin_unavailable()
+        if (
+            unsupported_reason == "effort_unsupported"
+            and failed_source is None
+            and self._effort_capable_hop_may_recover(backend, model_id, supply_channel, request)
+        ):
+            # A hop that does not refuse this effort is only blocked for now:
+            # the request waits for it like any other, rather than ending here.
+            unsupported_reason = None
         if unsupported_reason is not None and failed_source is None:
             # No upstream attempt exists. Exhaustion would invent a failed
             # attempt (and a retryable supply state) for a local limitation.
             raise ModelHubError(
-                unsupported_reason, status=422, turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
+                unsupported_reason,
+                status=422,
+                turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
+                data=(
+                    {
+                        "effort": wire_effort(request, getattr(request, "protocol", "")),
+                        "source_ids": list(dict.fromkeys(effort_rejected_sources)),
+                    }
+                    if unsupported_reason == "effort_unsupported"
+                    else None
+                ),
             )
         final_config, final_resolution = self._inspect_terminal_chain(
             backend=cast(BackendName, backend),
@@ -9264,7 +10828,15 @@ class ModelHubService:
                     resolution = self._invocation_resolution(
                         config, kwargs["backend"], kwargs["model_id"], supply_channel,
                     )
-                    if resolution.candidate_hops:
+                    request = kwargs.get("request")
+                    if any(
+                        hop.source is not None
+                        and hop.model_id is not None
+                        and not self._effort_refused(hop.source, hop.model_id, request)
+                        for hop in resolution.candidate_hops
+                    ):
+                        # Retry now only for a hop this request may use: a hop
+                        # that refuses its effort would spin the loop.
                         continue
                     # An action already owed elsewhere in the chain keeps it
                     # `interrupted` for display, but must not end this request

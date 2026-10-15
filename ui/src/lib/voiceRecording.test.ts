@@ -12,6 +12,8 @@ import {
   VoiceRecordingPipeline,
 } from './voiceRecording';
 
+const initialNavigatorLocks = Object.getOwnPropertyDescriptor(navigator, 'locks');
+
 type CaptureHandlers = {
   onSamples: (samples: Int16Array) => void;
   onStopped: () => void;
@@ -109,6 +111,8 @@ const wavSamples = async (blob: Blob): Promise<number[]> => {
 };
 
 afterEach(() => {
+  Reflect.deleteProperty(navigator, 'locks');
+  if (initialNavigatorLocks) Object.defineProperty(navigator, 'locks', initialNavigatorLocks);
   vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -650,6 +654,72 @@ describe('deleteMapValueIfCurrent', () => {
 });
 
 describe('voice capture ownership', () => {
+  // One lock manager shared by independently loaded JS realms. Callbacks are
+  // asynchronous, as in Web Locks; stealing rejects the previous request.
+  const installLocks = () => {
+    let current: { reject: (error: unknown) => void } | null = null;
+    const locks = {
+      request: vi.fn((_name: string, options: { steal?: boolean }, callback: () => Promise<void>) =>
+        new Promise<void>((resolve, reject) => {
+          queueMicrotask(() => {
+            if (options.steal) current?.reject(new DOMException('lock stolen', 'AbortError'));
+            const owner = { reject };
+            current = owner;
+            void callback().then(() => {
+              if (current === owner) current = null;
+              resolve();
+            }, reject);
+          });
+        })),
+    };
+    Object.defineProperty(navigator, 'locks', { configurable: true, value: locks });
+    return locks;
+  };
+
+  const anotherRealm = async () => {
+    vi.resetModules();
+    return import('./voiceRecording');
+  };
+
+  it('preserves captured samples when another realm steals the lock', async () => {
+    installLocks();
+    const main = await anotherRealm();
+    const pet = await anotherRealm();
+    const recording = setup();
+    await recording.pipeline.start();
+    recording.capture().emit(123, 456);
+    const finish = vi.fn(() => recording.pipeline.finish());
+    const oldOwner = main.claimVoiceCapture(finish);
+    await oldOwner.ready;
+    const newOwner = pet.claimVoiceCapture(vi.fn());
+    await newOwner.ready;
+    await vi.waitFor(() => expect(finish).toHaveBeenCalledOnce());
+    expect(oldOwner.isCurrent()).toBe(false);
+    expect(newOwner.isCurrent()).toBe(true);
+    recording.capture().settle();
+    expect(recording.onSegment).toHaveBeenCalledOnce();
+    expect(await wavSamples(recording.onSegment.mock.calls[0][0])).toEqual([123, 456]);
+    oldOwner.release();
+    expect(newOwner.isCurrent()).toBe(true);
+    newOwner.release();
+  });
+
+  it('orders simultaneous independent-realm claims with the newest owning capture', async () => {
+    installLocks();
+    const main = await anotherRealm();
+    const pet = await anotherRealm();
+    const finishMain = vi.fn();
+    const first = main.claimVoiceCapture(finishMain);
+    const last = pet.claimVoiceCapture(vi.fn());
+    await Promise.allSettled([first.ready, last.ready]);
+    await vi.waitFor(() => expect(finishMain).toHaveBeenCalledOnce());
+    expect(first.isCurrent()).toBe(false);
+    expect(last.isCurrent()).toBe(true);
+    first.release();
+    expect(last.isCurrent()).toBe(true);
+    last.release();
+  });
+
   it('finishes the previous surface and ignores its stale release', () => {
     const finishChat = vi.fn();
     const finishShowPage = vi.fn();
@@ -667,6 +737,55 @@ describe('voice capture ownership', () => {
     const next = claimVoiceCapture(vi.fn());
     expect(finishShowPage).not.toHaveBeenCalled();
     next.release();
+  });
+
+  it('keeps local replacement semantics when Web Locks is unavailable', () => {
+    const previousDescriptor = Object.getOwnPropertyDescriptor(navigator, 'locks');
+    Reflect.deleteProperty(navigator, 'locks');
+    const previousFinish = vi.fn();
+    const nextFinish = vi.fn();
+    const previous = claimVoiceCapture(previousFinish);
+    const next = claimVoiceCapture(nextFinish);
+
+    expect(previous.isCurrent()).toBe(false);
+    expect(next.isCurrent()).toBe(true);
+    expect(previousFinish).toHaveBeenCalledOnce();
+    previous.release();
+    expect(next.isCurrent()).toBe(true);
+
+    next.release();
+    expect(next.isCurrent()).toBe(false);
+    if (previousDescriptor) Object.defineProperty(navigator, 'locks', previousDescriptor);
+  });
+
+  it('finishes an old owner through the Web Lock steal path without double finishing', async () => {
+    installLocks();
+    const previousFinish = vi.fn();
+    const nextFinish = vi.fn();
+    const previous = claimVoiceCapture(previousFinish);
+    await previous.ready;
+    const next = claimVoiceCapture(nextFinish);
+
+    await expect(next.ready).resolves.toBeUndefined();
+    await Promise.resolve();
+    expect(previousFinish).toHaveBeenCalledOnce();
+    expect(next.isCurrent()).toBe(true);
+    next.release();
+  });
+
+  it('makes the newest simultaneous claim the owner', async () => {
+    installLocks();
+    const firstFinish = vi.fn();
+    const secondFinish = vi.fn();
+    const first = claimVoiceCapture(firstFinish);
+    const second = claimVoiceCapture(secondFinish);
+
+    await expect(second.ready).resolves.toBeUndefined();
+    await Promise.resolve();
+    expect(first.isCurrent()).toBe(false);
+    expect(second.isCurrent()).toBe(true);
+    expect(firstFinish).toHaveBeenCalledOnce();
+    second.release();
   });
 });
 

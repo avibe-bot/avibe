@@ -238,13 +238,6 @@ MODEL_OUTPUT_ENVELOPE_FIXTURES = (
         "response.function_call_arguments.delta",
         False,
     ),
-    (
-        "openai_responses",
-        "response.image_generation_call.partial_image",
-        ("type",),
-        "response.image_generation_call.partial_image",
-        False,
-    ),
     ("openai_chat", None, ("choices", "*", "delta", "content"), None, True),
     ("openai_chat", None, ("choices", "*", "delta", "reasoning_content"), None, True),
     ("openai_chat", None, ("choices", "*", "delta", "refusal"), None, True),
@@ -252,8 +245,10 @@ MODEL_OUTPUT_ENVELOPE_FIXTURES = (
     ("openai_chat", None, ("choices", "*", "delta", "function_call"), None, True),
 )
 BUFFERED_ERROR_TRUST_ROOT_FIXTURES = {
-    protocol: (("error",),) for protocol in ("anthropic", "openai_responses", "openai_chat", "google")
+    protocol: (("error",),) for protocol in ("anthropic", "openai_responses", "openai_chat", "google", "openai_images")
 }
+# Answered only buffered (image_generate's images endpoints): no stream envelope is ever read.
+BUFFERED_ONLY_PROTOCOLS = frozenset({"openai_images"})
 ACCEPTED_SSE_LINE_ENDINGS = (b"\r\n", b"\n", b"\r")
 STREAM_BOUNDARY_DIMENSIONS = {
     "transport_event": ("eof", "client_error"),
@@ -307,6 +302,7 @@ MACHINE_ERROR_FAMILY_FIXTURES = {
         "rate_limit_exceeded",
         "quota_exceeded",
         "insufficient_quota",
+        "usage_limit_reached",
         "billing_error",
         "overloaded",
         "overloaded_error",
@@ -709,9 +705,13 @@ def test_usage_metering_has_one_owner_per_call_population() -> None:
     meter_calls = [
         node for node in ast.walk(service_tree) if _call_name(node) == "_meter_call"
     ]
-    # Explicit Source tests consume their own response rather than forwarding a
-    # Turn to the gateway. They reuse the same metering owner, exactly once.
-    consumers = (invoke, _functions(service_tree)["probe_source"])
+    # Calls a user asked for (the Source test, through `_user_test_call`) and
+    # each executor call of a proxied search consume their own response rather
+    # than forwarding a Turn to the gateway. They reuse the same metering owner,
+    # exactly once.
+    consumers = (
+        invoke, _functions(service_tree)["_user_test_call"], _functions(service_tree)["_hosted_upstream_call"],
+    )
     assert len(meter_calls) == len(consumers)
     assert all(
         sum(call in set(ast.walk(consumer)) for call in meter_calls) == 1
@@ -1233,11 +1233,22 @@ def test_machine_error_field_access_has_one_extractor() -> None:
         if path.name == "migration.py":
             continue  # its ``type`` field is an auth-record kind, not an error code
         tree = _tree(path)
-        # Request history discriminates content blocks, not error envelopes.
-        # Exempt only that function's type reads; code reads and the rest of
-        # request.py remain subject to the extraction-owner guard.
-        history = _functions(tree).get("_plain_history") if path.name == "request.py" else None
-        history_nodes = set(ast.walk(history)) if history is not None else set()
+        # Request history and declared tools discriminate request items, not
+        # error envelopes. Exempt only those functions' type reads; code reads
+        # and the rest of request.py remain subject to the extraction-owner guard.
+        functions = _functions(tree) if path.name == "request.py" else {}
+        history_nodes = {
+            node
+            for name in ("_plain_history", "declared_tool_types", "replays_history_items")
+            if (history := functions.get(name)) is not None
+            for node in ast.walk(history)
+        }
+        if path.name in {"hosted_admission.py", "hosted_executor.py"}:
+            # Hosted admission discriminates request tools and history items, and
+            # the proxy executor response items and stream events, never an error
+            # envelope (executor error codes come from the call's outcome). Their
+            # type reads are exempt too.
+            history_nodes = set(ast.walk(tree))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
                 continue
@@ -1265,12 +1276,14 @@ def test_machine_error_extractor_reads_only_declared_envelope_paths() -> None:
 
 
 def test_reasoning_tier_resolver_call_inventory_requires_batch_indexes() -> None:
+    # owner -> (needs the batch index, call sites)
     expected = {
-        ("service.py", "apply_tiers"): True,
-        ("service.py", "_create_oauth_source"): True,
-        ("service.py", "create_source"): True,
-        ("service.py", "_apply_reasoning_tier_ladder"): False,
-        ("migration.py", "_validated_source"): True,
+        ("service.py", "apply_tiers"): (True, 1),
+        ("service.py", "_create_oauth_source"): (True, 1),
+        ("service.py", "create_source"): (True, 1),
+        ("service.py", "_apply_reasoning_tier_ladder"): (False, 1),
+        # A fixed subscription catalog and an API key's saved manual models.
+        ("migration.py", "_validated_source"): (True, 2),
     }
     calls_by_owner: dict[tuple[str, str | None], list[ast.Call]] = {}
     for path in (SERVICE, MIGRATION):
@@ -1283,22 +1296,23 @@ def test_reasoning_tier_resolver_call_inventory_requires_batch_indexes() -> None
             calls_by_owner.setdefault(key, []).append(node)
 
     assert set(calls_by_owner) == set(expected)
-    assert all(len(calls) == 1 for calls in calls_by_owner.values())
-    for key, needs_batch_index in expected.items():
-        [call] = calls_by_owner[key]
-        injected = next(
-            (
-                keyword.value
-                for keyword in call.keywords
-                if keyword.arg == "catalog_efforts_by_model"
-            ),
-            None,
-        )
-        if needs_batch_index:
-            assert isinstance(injected, ast.Name)
-            assert injected.id == "catalog_efforts_by_model"
-        else:
-            assert injected is None
+    for key, (needs_batch_index, call_sites) in expected.items():
+        calls = calls_by_owner[key]
+        assert len(calls) == call_sites
+        for call in calls:
+            injected = next(
+                (
+                    keyword.value
+                    for keyword in call.keywords
+                    if keyword.arg == "catalog_efforts_by_model"
+                ),
+                None,
+            )
+            if needs_batch_index:
+                assert isinstance(injected, ast.Name)
+                assert injected.id == "catalog_efforts_by_model"
+            else:
+                assert injected is None
 
 
 def test_settlement_abandonment_cannot_overwrite_a_committed_terminal_fact() -> None:
@@ -1388,7 +1402,9 @@ def _assert_stream_taxonomy_matches(
 
 
 def test_stream_authority_and_acceptance_fixtures_match_both_ways() -> None:
-    assert set(PROTOCOL_STREAM_TAXONOMY) == {str(fixture["protocol"]) for fixture in STREAM_ENVELOPE_FIXTURES}
+    assert set(PROTOCOL_STREAM_TAXONOMY) - BUFFERED_ONLY_PROTOCOLS == {
+        str(fixture["protocol"]) for fixture in STREAM_ENVELOPE_FIXTURES
+    }
     assert set(SSE_LINE_ENDINGS) == set(ACCEPTED_SSE_LINE_ENDINGS)
     assert all(str(fixture["source"]).startswith("https://") for fixture in STREAM_ENVELOPE_FIXTURES)
     for protocol, taxonomy in PROTOCOL_STREAM_TAXONOMY.items():
@@ -1741,11 +1757,11 @@ def test_exact_sse_tokenizer_accepts_large_protocol_frames() -> None:
     assert tokenizer.feed(b"data: " + data + b"\n\n") == (b"data: " + data,)
 
 
-def test_large_image_event_is_observed_without_retaining_its_base64_body() -> None:
+def test_large_output_event_is_observed_without_retaining_its_body() -> None:
     state = ProtocolSSEState("openai_responses")
-    event_type = b"response.image_generation_call.partial_image"
+    event_type = b"response.output_text.delta"
     state.observe(
-        b"event: " + event_type + b'\ndata: {"type":"' + event_type + b'","partial_image_b64":"'
+        b"event: " + event_type + b'\ndata: {"type":"' + event_type + b'","delta":"'
     )
 
     assert state.model_output_started is False

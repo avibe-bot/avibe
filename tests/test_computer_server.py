@@ -215,12 +215,25 @@ class _BlockedStream:
         return b""
 
 
+class _LinesStream:
+    def __init__(self, lines: list[bytes]) -> None:
+        self.lines = iter([*lines, b""])
+
+    async def readline(self) -> bytes:
+        return next(self.lines)
+
+
+class _RaisingStream:
+    async def readline(self) -> bytes:
+        raise RuntimeError("stream reader failed\nwith details")
+
+
 class _TransportProcess:
-    def __init__(self, stdout, *, stdin=None) -> None:
+    def __init__(self, stdout, *, stdin=None, stderr=None) -> None:
         self.returncode = None
         self.stdin = stdin or _TestStdin()
         self.stdout = stdout
-        self.stderr = _EofStream()
+        self.stderr = stderr or _EofStream()
 
     async def wait(self) -> int:
         self.returncode = 0
@@ -228,6 +241,116 @@ class _TransportProcess:
 
     def kill(self) -> None:
         self.returncode = -9
+
+
+def _write_fake_mcp_proxy(path: Path) -> None:
+    path.write_text(
+        """#!/usr/bin/env python3
+import base64
+import json
+import sys
+
+
+def send(request_id, result):
+    print(
+        json.dumps(
+            {"jsonrpc": "2.0", "id": request_id, "result": result},
+            separators=(",", ":"),
+        ),
+        flush=True,
+    )
+
+
+for line in sys.stdin:
+    message = json.loads(line)
+    request_id = message.get("id")
+    if request_id is None:
+        continue
+    method = message.get("method")
+    if method == "initialize":
+        send(request_id, {"protocolVersion": "2025-06-18"})
+        continue
+    params = message.get("params") or {}
+    if method != "tools/call":
+        send(request_id, {})
+        continue
+    name = params.get("name")
+    arguments = params.get("arguments") or {}
+    if name == "start_session":
+        send(
+            request_id,
+            {
+                "content": [{"type": "text", "text": "session started"}],
+                "structuredContent": {"active": True},
+            },
+        )
+        continue
+    if name == "get_window_state" and arguments.get("window_id") == 6285:
+        send(
+            request_id,
+            {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "simulated owner lookup failure from the driver",
+                    }
+                ],
+                "structuredContent": {
+                    "exit_code": 1,
+                    "code": "tool_invocation_failed",
+                },
+                "isError": True,
+            },
+        )
+        continue
+    if name == "get_window_state":
+        label = "q" * 500
+        elements = [
+            {
+                "element_index": index,
+                "role": "group",
+                "label": label,
+                "depth": 1,
+            }
+            for index in range(330)
+        ]
+        tree_markdown = "\\n".join(
+            f"- [element_index {index}] group {label}" for index in range(330)
+        )
+        send(
+            request_id,
+            {
+                "content": [
+                    {
+                        "type": "image",
+                        "data": base64.b64encode(b"p" * 900000).decode("ascii"),
+                        "mimeType": "image/png",
+                    }
+                ],
+                "structuredContent": {
+                    "pid": arguments["pid"],
+                    "window_id": arguments["window_id"],
+                    "element_count": len(elements),
+                    "elements": elements,
+                    "tree_markdown": tree_markdown,
+                    "screenshot_width": 1568,
+                    "screenshot_height": 1442,
+                    "screenshot_mime_type": "image/png",
+                },
+            },
+        )
+        continue
+    send(
+        request_id,
+        {
+            "content": [{"type": "text", "text": "unexpected tool"}],
+            "isError": True,
+        },
+    )
+""",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
 
 
 def _acquire_lease_in_process(
@@ -323,12 +446,239 @@ async def test_non_ready_call_names_status_and_never_spawns_upstream(
     payload = json.loads(result["content"][0]["text"])
     assert payload == {
         "code": "computer_use_unavailable",
+        "dispatched": False,
         "params": {
             "reason": reason,
             "status": status,
         },
     }
     assert starts == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    (
+        "descriptor",
+        "tool",
+        "arguments",
+        "apps",
+        "windows",
+        "expected_code",
+        "expected_tools",
+    ),
+    [
+        (
+            {
+                "kind": "app",
+                "pid": 41,
+                "bundle_id": "com.apple.mail",
+                "name": None,
+            },
+            "kill_app",
+            {"pid": 41, "session": "ses-script"},
+            [
+                {
+                    "pid": 41,
+                    "bundle_id": "com.apple.notes",
+                    "name": "Notes",
+                }
+            ],
+            [],
+            "stale_app_handle",
+            ["start_session", "list_apps"],
+        ),
+        (
+            {
+                "kind": "app",
+                "pid": 41,
+                "bundle_id": "com.apple.mail",
+                "name": None,
+            },
+            "list_windows",
+            {"pid": 41, "session": "ses-script"},
+            [
+                {
+                    "pid": 57,
+                    "bundle_id": "com.apple.mail",
+                    "name": "Mail",
+                }
+            ],
+            [],
+            "stale_app_handle",
+            ["start_session", "list_apps"],
+        ),
+        (
+            {
+                "kind": "window",
+                "pid": 41,
+                "window_id": 9,
+                "app": {
+                    "kind": "app",
+                    "pid": 41,
+                    "bundle_id": "com.apple.mail",
+                    "name": None,
+                },
+            },
+            "get_window_state",
+            {"pid": 41, "window_id": 9, "session": "ses-script"},
+            [
+                {
+                    "pid": 41,
+                    "bundle_id": "com.apple.mail",
+                    "name": "Mail",
+                }
+            ],
+            [
+                {
+                    "pid": 57,
+                    "window_id": 9,
+                    "app_name": "Mail",
+                }
+            ],
+            "stale_window_handle",
+            ["start_session", "list_apps", "list_windows"],
+        ),
+    ],
+)
+async def test_script_handle_descriptors_are_validated_before_the_action(
+    tmp_path: Path,
+    descriptor: dict[str, Any],
+    tool: str,
+    arguments: dict[str, Any],
+    apps: list[dict[str, Any]],
+    windows: list[dict[str, Any]],
+    expected_code: str,
+    expected_tools: list[str],
+) -> None:
+    state_path, state = _state(tmp_path)
+
+    class HandleUpstream(FakeUpstream):
+        async def request(
+            self,
+            method: str,
+            params: Mapping[str, Any],
+        ) -> dict[str, Any]:
+            assert method == "tools/call"
+            copied = json.loads(json.dumps(params))
+            self.calls.append((method, copied))
+            name = params["name"]
+            if name == "list_apps":
+                structured = {"apps": apps}
+            elif name == "list_windows":
+                structured = {"windows": windows}
+            else:
+                structured = {"effect": "confirmed", "route": "system_api"}
+            return {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "content": [],
+                    "structuredContent": structured,
+                },
+            }
+
+    upstream = HandleUpstream()
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+        lease_manager=FakeLeaseManager(),  # type: ignore[arg-type]
+    )
+
+    result = await server.call_tool(
+        tool,
+        arguments,
+        handle_descriptor=descriptor,
+    )
+
+    assert result["structuredContent"]["code"] == expected_code
+    assert [params["name"] for _method, params in upstream.calls] == expected_tools
+
+
+@pytest.mark.asyncio
+async def test_current_script_window_descriptor_is_not_forwarded_to_driver(
+    tmp_path: Path,
+) -> None:
+    state_path, state = _state(tmp_path)
+
+    class HandleUpstream(FakeUpstream):
+        async def request(
+            self,
+            method: str,
+            params: Mapping[str, Any],
+        ) -> dict[str, Any]:
+            assert method == "tools/call"
+            copied = json.loads(json.dumps(params))
+            self.calls.append((method, copied))
+            name = params["name"]
+            if name == "list_apps":
+                structured = {
+                    "apps": [
+                        {
+                            "pid": 41,
+                            "bundle_id": "com.apple.mail",
+                            "name": "Mail",
+                        }
+                    ]
+                }
+            elif name == "list_windows":
+                structured = {
+                    "windows": [
+                        {
+                            "pid": 41,
+                            "window_id": 9,
+                            "app_name": "Mail",
+                        }
+                    ]
+                }
+            else:
+                structured = {"pid": 41, "window_id": 9, "elements": []}
+            return {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "content": [],
+                    "structuredContent": structured,
+                },
+            }
+
+    upstream = HandleUpstream()
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+        lease_manager=FakeLeaseManager(),  # type: ignore[arg-type]
+    )
+    descriptor = {
+        "kind": "window",
+        "pid": 41,
+        "window_id": 9,
+        "app": {
+            "kind": "app",
+            "pid": 41,
+            "bundle_id": "com.apple.mail",
+            "name": None,
+        },
+    }
+
+    result = await server.call_tool(
+        "get_window_state",
+        {"pid": 41, "window_id": 9, "session": "ses-script"},
+        handle_descriptor=descriptor,
+    )
+
+    assert result.get("isError") is not True
+    assert [params["name"] for _method, params in upstream.calls] == [
+        "start_session",
+        "list_apps",
+        "list_windows",
+        "get_window_state",
+    ]
+    assert upstream.calls[-1][1]["arguments"] == {
+        "pid": 41,
+        "window_id": 9,
+        "session": "ses-script",
+    }
 
 
 @pytest.mark.asyncio
@@ -400,8 +750,442 @@ def test_result_folding_preserves_images_and_moves_structured_content() -> None:
     assert result["content"][0]["type"] == "image"
     assert result["content"][-1]["type"] == "text"
     assert '"answer":42' in result["content"][-1]["text"]
-    assert "structuredContent" not in result
+    assert result["structuredContent"] == {"answer": 42}
     assert "outputSchema" not in result
+
+
+def test_result_folding_preserves_driver_error_code_params_and_detail() -> None:
+    result = _fold_tool_result(
+        {
+            "result": {
+                "content": [{"type": "text", "text": "fallback driver text"}],
+                "structuredContent": {
+                    "code": "capture_failed",
+                    "params": {"scope": "window"},
+                    "reason": "ScreenCaptureKit window was unavailable",
+                },
+                "isError": True,
+            }
+        }
+    )
+
+    payload = json.loads(result["content"][0]["text"])
+    assert payload == {
+        "code": "capture_failed",
+        "detail": "ScreenCaptureKit window was unavailable",
+        "params": {"scope": "window"},
+    }
+    assert result["structuredContent"] == payload
+
+
+def test_result_folding_marks_consent_refusal_not_dispatched() -> None:
+    result = _fold_tool_result(
+        {
+            "result": {
+                "content": [],
+                "structuredContent": {
+                    "code": "foreground_consent_required",
+                    "params": {},
+                },
+                "isError": True,
+            }
+        }
+    )
+
+    payload = json.loads(result["content"][0]["text"])
+    assert payload == {
+        "code": "foreground_consent_required",
+        "dispatched": False,
+        "params": {},
+    }
+    assert result["structuredContent"] == payload
+
+
+def test_result_folding_preserves_bounded_detail_inside_driver_params() -> None:
+    result = _fold_tool_result(
+        {
+            "result": {
+                "content": [{"type": "text", "text": "fallback driver text"}],
+                "structuredContent": {
+                    "code": "capture_failed",
+                    "params": {
+                        "detail": "api_key=supersecretvalue123456\ncapture failed",
+                        "scope": "window",
+                    },
+                },
+                "isError": True,
+            }
+        }
+    )
+
+    payload = json.loads(result["content"][0]["text"])
+    assert payload == {
+        "code": "capture_failed",
+        "detail": "api_key=[redacted] capture failed",
+        "params": {
+            "detail": "api_key=[redacted] capture failed",
+            "scope": "window",
+        },
+    }
+    assert "supersecretvalue123456" not in result["content"][0]["text"]
+    assert result["structuredContent"] == payload
+
+
+def test_result_folding_preserves_real_driver_exit_code_and_content_detail() -> None:
+    result = _fold_tool_result(
+        {
+            "result": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "window ownership lookup failed in the driver",
+                    }
+                ],
+                "structuredContent": {
+                    "exit_code": 1,
+                    "code": "tool_invocation_failed",
+                },
+                "isError": True,
+            }
+        }
+    )
+
+    payload = json.loads(result["content"][0]["text"])
+    assert payload == {
+        "code": "tool_invocation_failed",
+        "detail": "window ownership lookup failed in the driver",
+        "params": {"exit_code": 1},
+    }
+    assert result["structuredContent"] == payload
+
+
+def test_result_folding_uses_bounded_content_text_for_unstructured_driver_errors() -> None:
+    result = _fold_tool_result(
+        {
+            "result": {
+                "content": [
+                    {"type": "text", "text": "driver detail\nwith \x00 controls"},
+                ],
+                "isError": True,
+            },
+        },
+        tool_name="get_window_state",
+    )
+
+    payload = json.loads(result["content"][0]["text"])
+    assert payload == {
+        "code": "upstream_tool_error",
+        "detail": "driver detail with controls",
+        "params": {"tool": "get_window_state"},
+    }
+    assert result["structuredContent"] == payload
+
+
+def test_result_folding_preserves_json_rpc_error_code_and_detail() -> None:
+    result = _fold_tool_result(
+        {
+            "error": {
+                "code": -32001,
+                "message": "driver rejected request",
+                "data": {"reason": "window no longer exists"},
+            }
+        }
+    )
+
+    payload = json.loads(result["content"][0]["text"])
+    assert payload == {
+        "code": "upstream_error",
+        "detail": "driver rejected request",
+        "params": {"rpc_code": -32001},
+    }
+    assert result["structuredContent"] == payload
+
+
+def test_diagnostic_text_is_bounded_and_single_line() -> None:
+    result = _fold_tool_result(
+        {
+            "result": {
+                "content": [
+                    {"type": "text", "text": "\x1b[31m" + ("x" * 3_000)},
+                ],
+                "isError": True,
+            }
+        }
+    )
+
+    payload = json.loads(result["content"][0]["text"])
+    detail = payload["detail"]
+    assert len(detail) == 2048
+    assert "\n" not in detail
+    assert "\x1b" not in detail
+    assert detail.endswith("...")
+
+
+def test_driver_error_detail_redacts_credential_material() -> None:
+    result = _fold_tool_result(
+        {
+            "result": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "capture failed with api_key=supersecretvalue123456",
+                    },
+                ],
+                "structuredContent": {
+                    "code": "capture_failed",
+                    "params": {"scope": "window"},
+                },
+                "isError": True,
+            }
+        }
+    )
+
+    payload = json.loads(result["content"][0]["text"])
+    assert payload == {
+        "code": "capture_failed",
+        "detail": "capture failed with api_key=[redacted]",
+        "params": {"scope": "window"},
+    }
+    assert result["structuredContent"] == payload
+    assert "supersecretvalue123456" not in result["content"][0]["text"]
+
+
+def test_driver_error_detail_redacts_before_flattening_lines() -> None:
+    result = _fold_tool_result(
+        {
+            "result": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "api_key=supersecretvalue123456\ncapture failed",
+                    },
+                ],
+                "isError": True,
+            }
+        }
+    )
+
+    payload = json.loads(result["content"][0]["text"])
+    assert payload["detail"] == "api_key=[redacted] capture failed"
+    assert "supersecretvalue123456" not in result["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_upstream_stderr_and_malformed_json_are_logged(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("WARNING", logger="core.computer_server")
+    upstream = JsonRpcUpstream(
+        _TransportProcess(
+            _LinesStream([b"{not-json\n"]),
+            stdin=_TestStdin(),
+            stderr=_LinesStream([b"driver stderr detail\n"]),
+        )
+    )
+
+    await asyncio.gather(upstream._reader_task, upstream._stderr_task)
+    assert "malformed JSON" in caplog.text
+    assert "driver stderr detail" in caplog.text
+    await upstream.close()
+
+
+@pytest.mark.asyncio
+async def test_upstream_diagnostic_logging_is_line_bounded(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("WARNING", logger="core.computer_server")
+    malformed = [f"malformed-{index:02d}\\n".encode() for index in range(25)]
+    stderr = [f"stderr-{index:02d}\\n".encode() for index in range(25)]
+    upstream = JsonRpcUpstream(
+        _TransportProcess(
+            _LinesStream(malformed),
+            stdin=_TestStdin(),
+            stderr=_LinesStream(stderr),
+        )
+    )
+
+    await asyncio.gather(upstream._reader_task, upstream._stderr_task)
+    assert "malformed-19" in caplog.text
+    assert "malformed-20" not in caplog.text
+    assert "stderr-19" in caplog.text
+    assert "stderr-20" not in caplog.text
+    assert caplog.text.count("further lines suppressed") == 2
+    await upstream.close()
+
+
+@pytest.mark.asyncio
+async def test_upstream_stderr_log_redacts_credential_material(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("WARNING", logger="core.computer_server")
+    upstream = JsonRpcUpstream(
+        _TransportProcess(
+            _EofStream(),
+            stdin=_TestStdin(),
+            stderr=_LinesStream(
+                [b"request failed with Authorization: Bearer tokenvalue1234\n"]
+            ),
+        )
+    )
+
+    await asyncio.gather(upstream._reader_task, upstream._stderr_task)
+    assert "Authorization: Bearer [redacted]" in caplog.text
+    assert "tokenvalue1234" not in caplog.text
+    await upstream.close()
+
+
+@pytest.mark.asyncio
+async def test_upstream_reader_exception_is_logged_and_preserved_for_pending_request(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("WARNING", logger="core.computer_server")
+    upstream = JsonRpcUpstream(
+        _TransportProcess(_RaisingStream(), stdin=_TestStdin())
+    )
+    with pytest.raises(UpstreamUnavailable, match="stream reader failed"):
+        await upstream.request("tools/call", {"name": "list_apps"})
+
+    assert "computer-use upstream reader failed" in caplog.text
+    assert "stream reader failed with details" in caplog.text
+    await upstream.close()
+
+
+@pytest.mark.asyncio
+async def test_upstream_reader_exception_redacts_detail_from_result_and_log(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class _SecretRaisingStream:
+        async def readline(self) -> bytes:
+            raise RuntimeError("reader failed with api_key=supersecretvalue123456")
+
+    caplog.set_level("WARNING", logger="core.computer_server")
+    upstream = JsonRpcUpstream(
+        _TransportProcess(_SecretRaisingStream(), stdin=_TestStdin())
+    )
+    with pytest.raises(UpstreamUnavailable) as caught:
+        await upstream.request("tools/call", {"name": "list_apps"})
+
+    assert "api_key=[redacted]" in str(caught.value)
+    assert "supersecretvalue123456" not in str(caught.value)
+    assert "api_key=[redacted]" in caplog.text
+    assert "supersecretvalue123456" not in caplog.text
+    await upstream.close()
+
+
+@pytest.mark.asyncio
+async def test_call_tool_preserves_upstream_unavailable_detail_and_logs(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("WARNING", logger="core.computer_server")
+    state_path, state = _state(tmp_path)
+    upstream = FakeUpstream()
+    upstream.fail_transport = True
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+        lease_manager=FakeLeaseManager(),  # type: ignore[arg-type]
+    )
+
+    result = await server.call_tool("list_apps", {"session": "ses-a"})
+    payload = json.loads(result["content"][0]["text"])
+    assert payload == {
+        "code": "upstream_unavailable",
+        "detail": "transport failed",
+        "dispatched": False,
+        "params": {},
+    }
+    assert "transport failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_post_forward_upstream_failure_does_not_claim_not_dispatched(
+    tmp_path: Path,
+) -> None:
+    state_path, state = _state(tmp_path)
+    upstream = FakeUpstream()
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+        lease_manager=FakeLeaseManager(),  # type: ignore[arg-type]
+    )
+
+    started = await server.call_tool("start_session", {"session": "ses-a"})
+    assert started.get("isError") is not True
+
+    upstream.fail_transport = True
+    result = await server.call_tool("list_apps", {"session": "ses-a"})
+    payload = result["structuredContent"]
+
+    assert payload["code"] == "upstream_unavailable"
+    assert "dispatched" not in payload
+
+
+@pytest.mark.asyncio
+async def test_real_stdio_proxy_preserves_large_window_state_response(
+    tmp_path: Path,
+) -> None:
+    state_path, state = _state(tmp_path)
+    _write_fake_mcp_proxy(Path(state.proxy_executable))
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+    )
+
+    try:
+        result = await server.call_tool(
+            "get_window_state",
+            {
+                "session": "ses-large-window",
+                "pid": 97470,
+                "window_id": 6286,
+            },
+        )
+    finally:
+        await server.close()
+
+    assert result.get("isError") is not True
+    image = next(item for item in result["content"] if item.get("type") == "image")
+    assert len(image["data"]) == 1_200_000
+    payload = result["structuredContent"]
+    assert payload["pid"] == 97470
+    assert payload["window_id"] == 6286
+    assert payload["element_count"] == 330
+    assert len(payload["elements"]) == 330
+    assert len(payload["tree_markdown"]) > 165_000
+    assert payload["screenshot_width"] == 1568
+    assert payload["screenshot_height"] == 1442
+
+
+@pytest.mark.asyncio
+async def test_real_stdio_proxy_preserves_driver_failure_detail(
+    tmp_path: Path,
+) -> None:
+    state_path, state = _state(tmp_path)
+    _write_fake_mcp_proxy(Path(state.proxy_executable))
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+    )
+
+    try:
+        result = await server.call_tool(
+            "get_window_state",
+            {
+                "session": "ses-driver-error",
+                "pid": 97470,
+                "window_id": 6285,
+            },
+        )
+    finally:
+        await server.close()
+
+    payload = json.loads(result["content"][0]["text"])
+    assert payload == {
+        "code": "tool_invocation_failed",
+        "detail": "simulated owner lookup failure from the driver",
+        "params": {"exit_code": 1},
+    }
 
 
 @pytest.mark.asyncio
@@ -703,6 +1487,7 @@ async def test_failed_explicit_start_does_not_change_committed_epoch(
     payload = json.loads(result["content"][0]["text"])
     assert payload == {
         "code": "upstream_tool_error",
+        "detail": "tool failed",
         "params": {"tool": "start_session"},
     }
     assert [params["name"] for _method, params in upstream.calls][-1] == "start_session"

@@ -13,6 +13,7 @@
         {"id": "claude-sonnet-5-5", "label": "claude-sonnet-5-5 [1M]", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
         {"id": "claude-sonnet-5", "label": "claude-sonnet-5 [1M]", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
         {"id": "claude-sonnet-4-6", "label": "claude-sonnet-4-6 [1M]", "reasoning_efforts": ["low", "medium", "high", "max"]},
+        {"id": "claude-haiku-5-5", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
         {"id": "claude-haiku-4-5", "reasoning_efforts": ["low", "medium", "high"]},
         {"id": "claude-opus-4-5", "reasoning_efforts": ["low", "medium", "high"]},
         {"id": "claude-sonnet-4-5", "reasoning_efforts": ["low", "medium", "high"]},
@@ -32,17 +33,108 @@
     },
     "codex": {
       "models": [
-        {"id": "gpt-6-astra", "label": "GPT-6-Astra", "priority": 1, "visibility": "list", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"]},
+        {"id": "gpt-6-astra", "label": "GPT-6-Astra", "priority": 1, "visibility": "list", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"], "client_presets": ["ultra"]},
         {"id": "gpt-6.1-sol", "label": "GPT-6.1-Sol", "priority": 2, "visibility": "list", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
         {"id": "gpt-6-sol", "label": "GPT-6-Sol", "priority": 3, "visibility": "list", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
         {"id": "gpt-6-luna", "label": "GPT-6-Luna", "priority": 4, "visibility": "list", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
-        {"id": "gpt-5.6-sol", "label": "GPT-5.6-Sol", "priority": 6, "reasoning_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"]},
-        {"id": "gpt-5.6-terra", "label": "GPT-5.6-Terra", "priority": 7, "reasoning_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"]},
+        {"id": "gpt-5.6-sol", "label": "GPT-5.6-Sol", "priority": 6, "reasoning_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"], "client_presets": ["ultra"]},
+        {"id": "gpt-5.6-terra", "label": "GPT-5.6-Terra", "priority": 7, "reasoning_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"], "client_presets": ["ultra"]},
         {"id": "gpt-5.6-luna", "label": "GPT-5.6-Luna", "priority": 8, "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
         {"id": "gpt-5.5", "label": "GPT-5.5", "priority": 12, "reasoning_efforts": ["low", "medium", "high", "xhigh"]},
         {"id": "gpt-5.4", "label": "GPT-5.4", "priority": 16, "reasoning_efforts": ["low", "medium", "high", "xhigh"]},
         {"id": "gpt-5.4-mini", "label": "GPT-5.4-Mini", "priority": 23, "reasoning_efforts": ["low", "medium", "high", "xhigh"]},
         {"id": "gpt-5.2", "label": "GPT-5.2", "priority": 29, "visibility": "hide", "reasoning_efforts": ["low", "medium", "high", "xhigh"]}
+      ]
+    }
+  },
+  "providers": {
+    "anthropic": {
+      "executor_models": ["claude-haiku-5-5", "claude-haiku-4-5"],
+      "models": [
+        {
+          "match": {"prefix": "claude-"},
+          "wire_efforts": null,
+          "hosted_tools": {
+            "anthropic": {
+              "web_search": {
+                "declaration": {"type": "web_search_20250305", "name": "web_search", "max_uses": 5},
+                "price": {"unit": "search", "usd_per_1k": 10, "as_of": "2026-10-13", "url": "https://platform.claude.com/docs/en/about-claude/pricing"}
+              }
+            }
+          }
+        }
+      ]
+    },
+    "openai": {
+      "executor_models": ["gpt-6-luna", "gpt-5.6-luna"],
+      "models": [
+        {
+          "match": {"prefix": "gpt-"},
+          "wire_efforts": null,
+          "hosted_tools": {
+            "openai_responses": {
+              "web_search": {
+                "declaration": {"type": "web_search"},
+                "include": ["web_search_call.action.sources"],
+                "price": {"unit": "call", "usd_per_1k": 10, "as_of": "2026-10-13", "url": "https://developers.openai.com/api/docs/pricing"}
+              }
+            }
+          }
+        }
+      ],
+      "image_models": [
+        {
+          "id": "gpt-image-2",
+          "description": "GPT Image 2: precise prompts, legible text, edits",
+          "params": ["images", "n", "size"],
+          "size_forms": ["pixels"],
+          "kinds": ["api_key"],
+          "request": {"output_format": "jpeg", "output_compression": 90}
+        }
+      ]
+    },
+    "gemini": {
+      "models": [],
+      "image_models": [
+        {
+          "id": "gemini-2.5-flash-image",
+          "description": "Gemini 2.5 Flash Image (Nano Banana): fast generation",
+          "params": ["n", "size"],
+          "size_forms": ["ratio"],
+          "kinds": ["api_key"],
+          "request": {"response_format": "b64_json"},
+          "tokens_per_image": 1290
+        },
+        {
+          "id": "gemini-3-pro-image-preview",
+          "description": "Gemini 3 Pro Image (Nano Banana Pro): high fidelity, text rendering",
+          "params": ["n", "size"],
+          "size_forms": ["ratio"],
+          "kinds": ["api_key"],
+          "request": {"response_format": "b64_json"},
+          "tokens_per_image": 1120
+        }
+      ]
+    },
+    "xai": {
+      "executor_models": ["grok-4.20-0309-non-reasoning"],
+      "models": [
+        {
+          "match": {"prefix": "grok-4"},
+          "wire_efforts": null,
+          "hosted_tools": {
+            "openai_responses": {
+              "web_search": {
+                "declaration": {"type": "web_search"},
+                "price": {"unit": "call", "usd_per_1k": 5, "as_of": "2026-10-13", "url": "https://docs.x.ai/developers/pricing"}
+              },
+              "x_search": {
+                "declaration": {"type": "x_search"},
+                "price": {"unit": "post", "usd_per_1k": 5, "extra": [{"unit": "profile", "usd_per_1k": 10}], "as_of": "2026-10-13", "url": "https://docs.x.ai/developers/pricing"}
+              }
+            }
+          }
+        }
       ]
     }
   }

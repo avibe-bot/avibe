@@ -1979,6 +1979,8 @@ pub fn run() {
                 .with_handler(|app, _shortcut, event| {
                     if event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed {
                         pet::wake(app, avibe_runtime_host::pet::PetIntent::Listen);
+                    } else {
+                        pet::wake(app, avibe_runtime_host::pet::PetIntent::Release);
                     }
                 })
                 .build(),
@@ -2109,6 +2111,8 @@ pub fn run() {
             open_install_docs,
             pet::pet_ready,
             pet::pet_set_expanded,
+            pet::pet_hit_regions,
+            pet::pet_set_dismissed,
             pet::pet_bind,
             pet::pet_unbind,
             pet::pet_open

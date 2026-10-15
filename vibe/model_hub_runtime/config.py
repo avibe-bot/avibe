@@ -14,6 +14,7 @@ from vibe.model_hub_runtime.api_key_vendors import (
     openai_compatible_endpoint,
     validate_api_key_auth_scheme,
 )
+from vibe.backend_model_catalog import IMAGE_PROTOCOLS, provider_image_models
 from vibe.model_hub_runtime.state import EngineStateError, EngineStateStore, RuntimeSecrets, SourceRecord
 
 # The engine rotates main.log at 10 MB and deletes the oldest rotated files beyond this total.
@@ -96,6 +97,10 @@ def render_engine_config(
         "max-retry-interval": 0,
         "disable-cooling": True,
         "disable-claude-cloak-mode": True,
+        # Forward exactly the tools a client declares: never add the hosted image
+        # tool, never strip one. Vibey declares it only when the user enabled it;
+        # Codex CLI drops a hosted image call it did not ask for (vibey-hosted-tools.md §7.1).
+        "disable-image-generation": "passthrough",
         "save-cooldown-status": False,
         "transient-error-cooldown-seconds": -1,
         "quota-exceeded": {
@@ -136,7 +141,8 @@ def _append_source(
     # Its name match is looser than a routed ID (see _engine_model_name) and
     # takes the first entry that matches, so models it cannot tell apart are
     # declared text-only together or not at all.
-    routed = tuple(dict.fromkeys((*source.model_ids, *source.route_model_ids)))
+    images = image_model_ids(source)
+    routed = tuple(dict.fromkeys((*source.model_ids, *source.route_model_ids, *images)))
     marked = set(source.text_only_model_ids) if source.protocol == "openai_chat" else set()
     unmarked_names = {_engine_model_name(model) for model in routed if model not in marked}
     text_only = {model for model in marked if _engine_model_name(model) not in unmarked_names}
@@ -153,6 +159,10 @@ def _append_source(
             entry["thinking"] = {"levels": list(reversed(reasoning_efforts))}
         if model in text_only:
             entry["input-modalities"] = ["text"]
+        if model in images and source.protocol == "openai_chat":
+            # An OpenAI-compatible entry serves the images endpoints only for a model it flags
+            # (CPA config_types.go OpenAICompatibilityModel.Image); gpt-image names pass unflagged.
+            entry["image"] = True
         models.append(entry)
     if source.protocol == "google":
         if not source.base_url:
@@ -215,6 +225,11 @@ def _append_source(
     raise EngineStateError("unsupported source protocol")
 
 
+def registered_model_ids(source: SourceRecord) -> tuple[str, ...]:
+    """The model ids an API-key Source registers in the rendered YAML, each routed as ``prefix/model``."""
+    return tuple(dict.fromkeys((*source.model_ids, *source.route_model_ids, *image_model_ids(source))))
+
+
 def expected_model_names(
     sources: Iterable[SourceRecord],
     store: EngineStateStore,
@@ -226,9 +241,21 @@ def expected_model_names(
         metadata = store.credential_metadata_if_present(source.credential_ref)
         if metadata is None or metadata.get("kind") != "api_key":
             continue
-        for model in (*source.model_ids, *source.route_model_ids):
+        for model in registered_model_ids(source):
             expected[f"{source.prefix}/{model}"] = reload_display_name(model, generation)
     return expected
+
+
+def image_model_ids(source: SourceRecord) -> tuple[str, ...]:
+    """The vendor's image models an API-key Source's engine entry registers, so ``image_generate`` can route them.
+
+    Only models whose route was verified on API keys, on a protocol whose engine
+    entry serves the images endpoints.
+    """
+
+    if source.protocol not in IMAGE_PROTOCOLS:
+        return ()
+    return tuple(spec.id for spec in provider_image_models(source.vendor) if "api_key" in spec.kinds)
 
 
 def _engine_model_name(model: str) -> str:

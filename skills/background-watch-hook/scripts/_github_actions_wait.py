@@ -125,21 +125,26 @@ def render_actions_result(
     head_sha: str,
     selected: dict[str, list[dict[str, Any]]],
     success_conclusions: set[str],
+    fail_fast: bool = False,
 ) -> tuple[str | None, bool]:
+    failed = [
+        workflow
+        for workflow, runs in selected.items()
+        if any(
+            str(run.get("status") or "") == TERMINAL_STATUS
+            and str(run.get("conclusion") or "") not in success_conclusions
+            for run in runs
+        )
+    ]
     missing = [workflow for workflow, runs in selected.items() if not runs]
     running = [
         workflow
         for workflow, runs in selected.items()
         if any(str(run.get("status") or "") != TERMINAL_STATUS for run in runs)
     ]
-    if missing or running:
+    if (missing or running) and not (fail_fast and failed):
         return None, False
 
-    failed = [
-        workflow
-        for workflow, runs in selected.items()
-        if any(str(run.get("conclusion") or "") not in success_conclusions for run in runs)
-    ]
     result = "failure" if failed else "success"
     short_sha = head_sha[:12]
     branch_label = f" on {branch}" if branch else ""
@@ -149,4 +154,6 @@ def render_actions_result(
             lines.append(format_run(run))
     if failed:
         lines.append(f"Failed workflow(s): {', '.join(failed)}")
+    if missing or running:
+        lines.append(f"Still waiting for workflow(s): {', '.join(dict.fromkeys([*missing, *running]))}")
     return "\n".join(lines), bool(failed)

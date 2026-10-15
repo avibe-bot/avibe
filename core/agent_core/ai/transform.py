@@ -12,9 +12,12 @@ import re
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from core.agent_core.ai.hosted import portable_hosted
+from core.agent_core.ai.provider import ModelEndpoint
 from core.agent_core.messages import (
     AssistantMessage,
     AssistantContent,
+    HostedToolBlock,
     ImageBlock,
     Message,
     Origin,
@@ -69,13 +72,20 @@ def transform_messages(
     target: Origin,
     supports_images: bool = True,
     protocol: str | None = None,
+    endpoint: ModelEndpoint | None = None,
 ) -> TransformResult:
     """Compile canonical history for one target origin.
 
-    The returned map is per request. The transcript is never mutated.
+    The returned map is per request. The transcript is never mutated. ``endpoint`` is the hop the request goes to: a
+    response's opaque payloads (signatures, redacted thinking) go back only to a hop of the Source identity that served
+    it, and its hosted calls verbatim only to the Source that served them (``native_replay``). Without an
+    ``endpoint``, the origin alone decides.
     """
 
     target_protocol = protocol or target.api
+    # The response the request continues within its turn keeps its hosted calls in place, verbatim or as text (§4.4);
+    # every earlier one goes back verbatim with replay evidence or as a synthetic call and result (§5).
+    live = in_flight_position(messages)
     id_map: dict[str, str] = {}
     used_tool_ids: set[str] = set()
     tool_id_occurrences: dict[str, int] = {}
@@ -83,7 +93,7 @@ def transform_messages(
     suppressed_tool_result_ids: set[str] = set()
     transformed: list[Message] = []
 
-    for message in messages:
+    for position, message in enumerate(messages):
         if isinstance(message, UserMessage):
             pending_tool_ids.clear()
             suppressed_tool_result_ids.clear()
@@ -115,10 +125,51 @@ def transform_messages(
             continue
 
         pending_tool_ids.clear()
-        same_origin = message.origin == target
+        # Opaque payloads are bound to the account that issued them, the Source identity: another account's ciphertext
+        # is refused (xAI, OpenAI). A message another identity served, one no known identity did, or one whose
+        # identity's provider refused an opaque payload this turn is sent as a different origin's.
+        same_origin = message.origin == target and _opaque_admitted(message, endpoint)
         content: list[AssistantContent] = []
         turn_tool_ids: dict[str, list[str]] = {}
+        in_flight = position == live
+        verbatim = native_replay(message, in_flight=in_flight, endpoint=endpoint, target=target, protocol=target_protocol)
+        hosted = {} if verbatim else portable_hosted(message, in_flight=in_flight, interrupted=SYNTHETIC_TOOL_RESULT)
+        # The synthetic results of the current run of hosted calls, and the assistant parts they split off.
+        results: list[ToolResultMessage] = []
+        parts: list[Message] = []
+
+        def split() -> None:
+            nonlocal content, results
+            if results:
+                parts.append(_assistant_part(message, content, stop_reason="tool_use"))
+                parts.extend(results)
+                content, results = [], []
+
         for block in message.content:
+            if isinstance(block, HostedToolBlock) and verbatim:
+                content.append(block)  # its native payload, rendered in place by the protocol's builder
+                continue
+            if isinstance(block, HostedToolBlock):
+                portable = hosted[id(block)]
+                if portable.kind == "in_place":
+                    split()
+                    content.append(TextBlock(text=portable.text))
+                    continue
+                name, arguments, text, is_error = portable.name, dict(portable.arguments), portable.text, portable.is_error
+                call_id = _claim_tool_call_id(
+                    block.id,
+                    normalize_tool_call_id(block.id, target_protocol),
+                    used_tool_ids=used_tool_ids,
+                    occurrences=tool_id_occurrences,
+                )
+                content.append(ToolCallBlock(id=call_id, name=name, arguments=arguments))
+                results.append(
+                    ToolResultMessage(
+                        tool_call_id=call_id, tool_name=name, content=(TextBlock(text=text),), is_error=is_error
+                    )
+                )
+                continue
+            split()
             if isinstance(block, ThinkingBlock):
                 if block.redacted:
                     if same_origin:
@@ -165,18 +216,84 @@ def transform_messages(
             continue
         for source_id, wire_ids in turn_tool_ids.items():
             pending_tool_ids.setdefault(source_id, []).extend(wire_ids)
-        transformed.append(
-            AssistantMessage(
-                content=tuple(content),
-                origin=message.origin,
-                stop_reason=message.stop_reason,
-                usage=message.usage,
-                error_message=message.error_message,
-            )
-        )
+        split()
+        transformed.extend(parts)
+        if content or not parts:
+            transformed.append(_assistant_part(message, content, stop_reason=message.stop_reason))
 
     transformed = _insert_synthetic_results(transformed)
     return TransformResult(messages=tuple(transformed), tool_call_id_map=dict(id_map))
+
+
+def _assistant_part(message: AssistantMessage, content: list[AssistantContent], *, stop_reason: str) -> AssistantMessage:
+    hosted = any(isinstance(block, HostedToolBlock) for block in content)
+    return AssistantMessage(
+        content=tuple(content),
+        origin=message.origin,
+        stop_reason=stop_reason,  # type: ignore[arg-type]
+        usage=message.usage,
+        error_message=message.error_message,
+        hosted_summary=message.hosted_summary if hosted else None,
+    )
+
+
+def in_flight_position(messages: list[Message] | tuple[Message, ...]) -> int | None:
+    """The position of the response a request continues within its turn (§4.4), or None.
+
+    It is the request's last assistant message, stopped for tools, with nothing after it but tool results (a
+    ``pause_turn`` continuation has none). A user message after it means its turn ended, as one may right after its
+    tool results, so a later turn never counts as continuing it.
+    """
+
+    last = max((i for i, m in enumerate(messages) if isinstance(m, AssistantMessage)), default=None)
+    if last is None or messages[last].stop_reason != "tool_use":  # type: ignore[union-attr]
+        return None
+    if any(not isinstance(message, ToolResultMessage) for message in messages[last + 1 :]):
+        return None
+    return last
+
+
+def _opaque_admitted(message: AssistantMessage, endpoint: ModelEndpoint | None) -> bool:
+    """Whether ``message``'s opaque payloads may go to ``endpoint``: a hop of the Source identity that served it, whose
+    provider has not refused one this turn (§3.5)."""
+
+    return endpoint is None or (
+        message.source_identity == endpoint.source_identity and message.source_identity not in endpoint.opaque_refused
+    )
+
+
+def native_replay(
+    message: AssistantMessage, *, in_flight: bool, endpoint: ModelEndpoint | None, target: Origin, protocol: str
+) -> bool:
+    """Whether a response's hosted calls go back verbatim, their native payloads in place (§4.4, §5).
+
+    Only to the hop the request goes to, when that hop's Source served them on the same origin: one hop then builds
+    the request and serves it (§3.5; a moved hop gets the in-place form). The hop must still declare each tool they
+    called natively, since a provider refuses its server items without their declaration, over a protocol with native
+    hosted content, and the request must not be portable.
+    * The response its turn continues (``in_flight``) needs no ``replay``: that is the provider's own continuation
+      contract.
+    * Any earlier response needs ``replay`` assumed on the hop for every tool it called, and every one of its calls
+      finished.
+    """
+
+    blocks = [block for block in message.content if isinstance(block, HostedToolBlock)]
+    if not blocks or endpoint is None or not endpoint.source_id or endpoint.portable or message.origin != target:
+        return False
+    # A native payload is opaque provider content too: it goes back only to the account that issued it.
+    if not _opaque_admitted(message, endpoint):
+        return False
+    if protocol not in ("anthropic", "openai_responses"):
+        return False
+    if {block.native.source_id for block in blocks} != {endpoint.source_id}:
+        return False
+    for block in blocks:
+        route = endpoint.hosted_tools.get(block.tool)
+        if route is None or route.mode != "native":
+            return False
+        if not in_flight and (not route.replay or block.record.status == "pending"):
+            return False
+    return True
 
 
 def transform_messages_for_target(

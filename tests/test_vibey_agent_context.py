@@ -216,7 +216,7 @@ async def test_a_skill_load_through_bash_is_marked_in_its_context_row(engine, se
 async def test_a_context_that_cannot_fit_locally_is_never_reported_as_a_source_failure(engine, session, tmp_path):
     reported: list[str] = []
 
-    async def record_native_failure(context, diagnostic) -> bool:
+    async def record_native_failure(context, diagnostic, *, error_kind=None) -> bool:
         reported.append(diagnostic)
         return False
 
@@ -283,7 +283,7 @@ _CUT_CALL = [Done(assistant(calls=[ToolCallBlock("cut", "bash", {"command": "ls"
 async def test_model_hub_hears_only_of_failures_the_served_source_produced(engine, session, tmp_path, case, recorded):
     reported: list[str] = []
 
-    async def record_native_failure(context, diagnostic) -> bool:
+    async def record_native_failure(context, diagnostic, *, error_kind=None) -> bool:
         reported.append(diagnostic)
         return False
 
@@ -506,7 +506,10 @@ async def test_a_threshold_checkpoint_and_an_overflow_roll_through_the_real_loop
 
     from modules.agents.vibey.models import registry_providers
 
-    served = json.dumps({"provider": "upstream", "api": "anthropic", "model": "served-model"}, separators=(",", ":"))
+    served = json.dumps(
+        {"provider": "upstream", "api": "anthropic", "model": "served-model", "source": "src_upstream01"},
+        separators=(",", ":"),
+    )
     overflow = json.dumps(
         {"type": "error", "error": {"type": "invalid_request_error", "message": "prompt is too long: 40000 tokens > 32000 maximum"}}
     )

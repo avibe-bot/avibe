@@ -165,7 +165,10 @@ def intake(github, monkeypatch):
     server.disconnect = False
     server.arrived, server.release = threading.Event(), threading.Event()
     server.recovery_arrived = threading.Event()
-    thread = threading.Thread(target=server.serve_forever,daemon=True)
+    thread = threading.Thread(
+        target=lambda: server.serve_forever(poll_interval=0.01),
+        daemon=True,
+    )
     thread.start()
     monkeypatch.setenv("AVIBE_FEEDBACK_TEST_SHARE_BASE_URL",f"http://127.0.0.1:{server.server_port}")
     upstream_get = github.RequestHandlerClass.do_GET

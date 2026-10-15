@@ -10,8 +10,8 @@
 // and the PR records the server implementation and feature-flag activation
 // edge. The client never synthesizes a fallback payload shape.
 
-export const CONTRACT_VERSION = 11 as const;
-export const PERSISTED_TURN_CONTRACT_VERSIONS = [5, 6, 7, 8, 9, 10, 11] as const;
+export const CONTRACT_VERSION = 15 as const;
+export const PERSISTED_TURN_CONTRACT_VERSIONS = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] as const;
 export const AGENT_CHAIN_CONTRACT_VERSION = CONTRACT_VERSION;
 export const PROBE_RESULT_CONTRACT_VERSION = CONTRACT_VERSION;
 
@@ -112,6 +112,19 @@ export type SuppliedModel = {
   /** Persistent retirement tombstone; retired entries stay readable but are not callable. */
   retired?: boolean;
   discovered_at?: string | null;
+  /** Server-derived, read-only: the reasoning efforts this Source model currently
+   *  refuses (capability evidence). Absent when none; never written back. */
+  refused_efforts?: RefusedEffort[];
+};
+
+/** One reasoning effort a Source model refused, as capability evidence records it.
+ *  It stays until the user clears it or the Source's wire stamp changes. */
+export type RefusedEffort = {
+  effort: string;
+  basis: 'observed';
+  observed_at: string;
+  /** The HTTP status and upstream code, never provider prose. */
+  detail: string | null;
 };
 
 export type Source = {
@@ -135,6 +148,8 @@ export type Source = {
   state: SourceState;
   /** Opaque pending-verification identity; presence means no successful model call yet. */
   verification_pending?: string | null;
+  /** Opaque identity of the latest credential or endpoint change; kept after verification. Not for display. */
+  credential_generation?: string | null;
   usage?: SourceUsage;
   /** Subscription identity for the row's mono sub-line (e.g. "me@gmail.com").
    *  Never secret material; may be null. */
@@ -213,6 +228,21 @@ export type BackendModel = {
    *  Code's `Default`, which never names a Route key. */
   routeable: boolean;
 };
+
+/**
+ * What routing would do with each of a model's efforts right now, in menu
+ * vocabulary (`model-hub-capability-model.md` §3.4). Response-only, on the model
+ * picker's catalog read: `omitted` efforts would end in `effort_unsupported` on
+ * every hop the route would try or wait for; `not_on` names, by Source id, the
+ * hops that refuse an effort the others still serve. Never written back.
+ */
+export type EffortMenu = { omitted: string[]; not_on: Record<string, string[]> };
+
+/** A catalog row as the model picker reads it. */
+export type PickerCatalogModel = BackendModel & { effort_menu?: EffortMenu };
+
+/** The model picker's read of one backend's catalog (`GET /api/models/agents/<backend>/models`). */
+export type PickerAgentCatalog = Pick<AgentSupply, 'backend' | 'mode'> & { catalog_models?: PickerCatalogModel[] | null };
 
 /** `baseline` is the last full list this caller observed; `models` is its
  *  desired replacement. The server applies the difference to the latest saved
@@ -626,16 +656,30 @@ export type TurnProvenance = {
     source_id: string | null;
     configured_model_id: string | null;
     channel: SupplyChannel | null;
+    local_error_detail?: string;
+    origin?: { provider: string; api: SourceProtocol; model: string };
+    stripped_reasoning_efforts?: string[];
+    declared_reasoning_efforts?: string[];
+  } & ({
     reason: 'invalid_parameter' | 'protocol_error' | 'tool_incompatible' | 'stream_interrupted' | 'engine_down';
     stream_started: boolean;
     http_status?: number | null;
     upstream_error_code?: string | null;
     upstream_detail?: string;
-    local_error_detail?: string;
-    origin?: { provider: string; api: SourceProtocol; model: string };
-    stripped_reasoning_efforts?: string[];
-    declared_reasoning_efforts?: string[];
-  } | null;
+    error_kind?: never;
+    backend_error_detail?: never;
+  } | {
+    reason: 'backend_error';
+    /** The reporter has no failing-request phase evidence or upstream API verdict. */
+    stream_started: null;
+    http_status?: never;
+    upstream_error_code?: never;
+    upstream_detail?: never;
+    /** The backend's typed failure kind, a machine identifier such as `stalled`. */
+    error_kind?: string;
+    /** The backend's own redacted diagnostic, never an upstream answer. */
+    backend_error_detail?: string;
+  }) | null;
   model_supply_state: 'waiting' | 'interrupted' | null;
   blockers: Array<RouteHop & { reason: ChainUnavailableReason; retry_at?: string | null }>;
 };
@@ -734,6 +778,8 @@ export type OAuthFlow = {
   /** A failed flow's own reason (provider, engine, or CLI), verbatim on one
    *  bounded line; shown behind the copyable details control. */
   error_detail?: string;
+  /** Native authorization committed, but its runtime-application attempt failed. */
+  application_failed?: boolean;
   expires_at?: string | null;
 };
 
@@ -977,6 +1023,102 @@ export type QuotaSummary = {
   pending?: string[];
   value?: QuotaValueTotals;
 };
+
+// ── hosted-tools-status.schema.json ─────────────────────────────────────
+/** The catalog's tools, in catalog order (`vibey-hosted-tools.md` §2). */
+export const HOSTED_TOOL_NAMES = ['web_search', 'x_search', 'image_generate'] as const;
+export type HostedToolName = (typeof HOSTED_TOOL_NAMES)[number];
+export type HostedSearchToolName = Exclude<HostedToolName, 'image_generate'>;
+
+/** How a call ran: natively in the model's request, through a search executor, or on an image endpoint. */
+export type HostedExecutionMode = 'native' | 'executor' | 'direct';
+
+/** A positive record: a real response ran the tool on this (Source, model). Display only. */
+export type HostedSuccess = { source_id: string; model_id: string; mode: HostedExecutionMode; at: string };
+
+/** A current negative record: routing state until the user clears it or the wire stamp changes. */
+export type HostedRefusal = {
+  source_id: string;
+  model_id: string;
+  /** `call`: the tool itself; `replay`: earlier results sent back to it. */
+  aspect: 'call' | 'replay';
+  at: string;
+  /** The HTTP status and upstream code, never provider prose. */
+  reason: string;
+};
+
+/** What real use learned: the latest success, every pair's positive record, and the current refusals. */
+export type HostedToolRunStatus = {
+  latest_ok: HostedSuccess | null;
+  verified: HostedSuccess[];
+  refused: HostedRefusal[];
+};
+
+/** The overlay's list price for one hosted tool on a provider (`usd_per_1k` per `unit`). */
+export type HostedToolPriceUnit = 'call' | 'search' | 'post' | 'profile';
+export type HostedToolListPrice = {
+  unit: HostedToolPriceUnit;
+  usd_per_1k: number;
+  extra: { unit: HostedToolPriceUnit; usd_per_1k: number }[];
+  as_of: string;
+  url: string;
+};
+
+/** A Source that can execute a search for models that cannot run it natively, with the vendor's executor model. */
+export type HostedExecutorCandidate = {
+  source_id: string;
+  model_id: string;
+  billing: 'monthly' | 'metered';
+  /** A non-official endpoint: its price is the vendor's API price, which it may not bill. */
+  relay: boolean;
+  /** Null when no list price is known, never zero. */
+  price: HostedToolListPrice | null;
+};
+
+export type HostedModelRef = { source_id: string; model_id: string };
+
+/** One image's price: the vendor's list price, or an estimate from token pricing. */
+export type HostedImagePrice = { usd: number; basis: 'list' | 'estimated' };
+
+/** An image model `image_generate` offers now, with its serving Source's billing (a subscription's images are included). */
+export type HostedImageModel = HostedModelRef & { description: string; billing: 'monthly' | 'metered'; price: HostedImagePrice | null };
+
+type HostedToolBase = { enabled: boolean; status: HostedToolRunStatus };
+
+export type HostedSearchToolStatus = HostedToolBase & {
+  name: HostedSearchToolName;
+  /** The saved order; null when automatic. */
+  executor_order: string[] | null;
+  /** The order the gateway would try now. */
+  effective_order: string[];
+  /** Every eligible executor, in effective order. */
+  executor_candidates: HostedExecutorCandidate[];
+};
+
+export type HostedImageToolStatus = HostedToolBase & {
+  name: 'image_generate';
+  /** The saved default; null when default. A saved model no longer available stays, flagged. */
+  default_model: (HostedModelRef & { available: boolean }) | null;
+  effective_default: HostedModelRef | null;
+  /** Exactly the pairs `image_generate` offers now. */
+  models: HostedImageModel[];
+  /** A catalog fact, not the user's Sources: the vendors whose bundled overlay lists image models. */
+  image_offered_by: string[];
+};
+
+export type HostedToolStatus = HostedSearchToolStatus | HostedImageToolStatus;
+
+export type HostedToolsStatus = { tools: HostedToolStatus[] };
+
+/** PUT /api/models/hosted-tools/<tool>, per field: an absent field is unchanged, `null` resets it. */
+export type HostedToolPut = {
+  enabled?: boolean;
+  executor_order?: string[] | null;
+  default_model?: HostedModelRef | null;
+};
+
+/** POST /api/models/hosted-tools/<tool>/clear: one Source (one of its models), or `{}` for every Source. */
+export type HostedToolClear = { source_id: string; model_id?: string } | Record<string, never>;
 
 // ── API envelope + request shapes (api.md) ──────────────────────────────
 export type ApiOk<T> = { ok: true; contract_version: typeof CONTRACT_VERSION } & T;

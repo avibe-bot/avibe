@@ -24,7 +24,7 @@ COMPUTER_CLI_TOOLS: dict[tuple[str, ...], str] = {
     ("clipboard", "read"): "clipboard_read",
     ("clipboard", "write"): "clipboard_write",
     ("launch",): "launch_app",
-    ("quit",): "kill_app",
+    ("force-quit",): "kill_app",
 }
 
 OBSERVATION_TOOLS = frozenset(
@@ -124,6 +124,10 @@ def tool_for_command(path: tuple[str, ...]) -> str:
 
 
 def _structured_payloads(result: Mapping[str, Any]) -> list[dict[str, Any]]:
+    structured = result.get("structuredContent")
+    if isinstance(structured, dict):
+        return [structured]
+
     payloads: list[dict[str, Any]] = []
     content = result.get("content")
     if not isinstance(content, list):
@@ -159,25 +163,51 @@ def _error_payload(result: Mapping[str, Any]) -> dict[str, Any]:
 
 _COMPUTER_ERROR_I18N_KEYS = {
     "active_turn_required": "computer.cli.error.activeTurnRequired",
+    "ambiguous": "computer.cli.error.scriptAmbiguous",
+    "application_not_found": "computer.cli.error.scriptTargetNotFound",
+    "computer_script_request_failed": "computer.cli.error.scriptControllerRejected",
+    "computer_script_request_too_large": "computer.cli.error.scriptRequestTooLarge",
+    "computer_script_descriptor_required": "computer.cli.error.scriptInvalidDescriptor",
+    "computer_script_protocol_error": "computer.cli.error.scriptRuntimeInvalid",
     "computer_use_unavailable": "computer.cli.error.computerUseUnavailable",
     "computer_use_error": "computer.cli.error.genericDriverError",
+    "controller_timeout": "computer.cli.error.scriptOperationTimedOut",
+    "controller_unavailable": "computer.cli.error.scriptControllerUnavailable",
     "desktop_busy": "computer.cli.error.desktopBusy",
     "desktop_lease_lost": "computer.cli.error.desktopLeaseLost",
+    "element_not_actionable": "computer.cli.error.scriptElementNotActionable",
+    "element_not_found": "computer.cli.error.scriptTargetNotFound",
     "focus_shortcut_forbidden": "computer.cli.error.focusShortcutForbidden",
+    "foreground_consent_required": "computer.cli.error.foregroundConsentRequired",
     "foreground_forbidden": "computer.cli.error.foregroundForbidden",
     "invalid_arguments": "computer.cli.error.invalidDriverArguments",
     "invalid_computer_use_request": "computer.cli.error.requestRejected",
+    "invalid_computer_use_response": "computer.cli.error.scriptInvalidControllerResponse",
+    "invalid_computer_script_descriptor": "computer.cli.error.scriptInvalidDescriptor",
+    "invalid_selector": "computer.cli.error.scriptInvalidSelector",
+    "invalid_timeout": "computer.cli.error.scriptInvalidTimeout",
+    "not_found": "computer.cli.error.scriptTargetNotFound",
     "observe_first": "computer.cli.error.observeFirst",
     "platform_unsupported": "computer.cli.error.platformUnsupported",
+    "script_connection_invalid": "computer.cli.error.scriptConnectionInvalid",
+    "script_timeout": "computer.cli.error.scriptDeadlineExpired",
+    "script_turn_ended": "computer.cli.error.scriptTurnEnded",
     "session_archived": "computer.cli.error.sessionArchived",
     "session_argument_forbidden": "computer.cli.error.sessionArgumentForbidden",
     "session_required": "computer.cli.error.missingCallerSession",
     "session_unavailable": "computer.cli.error.sessionUnavailable",
+    "snapshot_not_found": "computer.cli.error.scriptTargetNotFound",
+    "stale_app_handle": "computer.cli.error.scriptStaleAppHandle",
+    "stale_window_handle": "computer.cli.error.scriptStaleWindowHandle",
+    "timeout": "computer.cli.error.scriptOperationTimedOut",
     "unknown_tool": "computer.cli.error.unknownTool",
     "upstream_error": "computer.cli.error.upstreamError",
     "upstream_protocol_error": "computer.cli.error.upstreamProtocolError",
     "upstream_tool_error": "computer.cli.error.upstreamToolError",
     "upstream_unavailable": "computer.cli.error.upstreamUnavailable",
+    "window_id_not_found": "computer.cli.error.scriptTargetNotFound",
+    "window_not_found": "computer.cli.error.scriptTargetNotFound",
+    "window_order_unavailable": "computer.cli.error.scriptWindowOrderUnavailable",
     "window_target_required": "computer.cli.error.windowTargetRequired",
 }
 
@@ -223,14 +253,16 @@ def translate_computer_error(
     error: Mapping[str, Any],
     *,
     translate: Callable[..., str],
+    fallback: str | None = None,
 ) -> str:
     """Render a Controller or driver error without trusting prose from it."""
 
     code = str(error.get("code") or "computer_use_error")
-    key = _COMPUTER_ERROR_I18N_KEYS.get(
-        code,
-        "computer.cli.error.genericDriverError",
-    )
+    key = _COMPUTER_ERROR_I18N_KEYS.get(code)
+    if key is None:
+        if fallback is not None:
+            return fallback
+        key = "computer.cli.error.genericDriverError"
     params = error.get("params")
     if code == "unknown_tool" and isinstance(params, Mapping):
         return translate(key, tool=str(params.get("tool") or ""))

@@ -8,9 +8,8 @@ const DEFAULT_LAYOUT: PetLayout = { panel_side: 'left', panel_edge: 'bottom' };
  * The native frame's expansion, held once per document outside React so the
  * setup-pending card and the pet surface share it across their unmounts.
  *
- * Closing hides the panel at once (a moment of transparent frame is
- * harmless); opening shows it only once the shell has grown the frame, so
- * content is never marked seen while still clipped. Native resizes are sent
+ * Closing hides the panel at once; opening waits for the shell to confirm
+ * the panel state. The v2 window has a fixed size. Native state writes are sent
  * one at a time in the order they were asked, so an older `pet_set_expanded`
  * cannot apply after a newer one; only the latest request updates React. A
  * failed request restores the last confirmed expansion, so a redundant

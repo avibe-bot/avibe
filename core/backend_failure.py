@@ -136,7 +136,7 @@ def _controller_language(controller: Any) -> str:
 
 def _model_hub_failure(
     controller: Any, context: Any, request: Any, backend: str
-) -> tuple[str | None, str | None] | None:
+) -> tuple[str | None, str | None, Any] | None:
     """Render exact live Hub evidence, never parse a native exception wrapper.
 
     The registry owns ambiguity, pending-request, and Stop guards. Without that
@@ -165,6 +165,7 @@ def _model_hub_failure(
         return (
             render_turn_outcome_copy(projection, _controller_language(controller)),
             projection.local_error_detail,
+            projection,
         )
     return None
 
@@ -381,14 +382,23 @@ async def emit_backend_failure(
     auth recovery supplied that immediate notification.
 
     ``cause`` is the exception the failure reports, when the adapter has one. A
-    Model Hub turn refusal names its own cause, so it never reaches the text
-    auth heuristic, which would misread a model id that says ``oauth``.
+    Model Hub refusal names its own cause, so it never reaches the text auth
+    heuristic, which would misread a model id that says ``oauth``; when its fix
+    is in Models, the notice ends with where to make it.
 
     ``delivery``, when supplied, is filled in with what the notify attempt actually
     proved. A durable Turn or legacy Harness Run supplies an evidence object
     automatically so Runs attached after settlement inherit the same proof. A clean
     return alone is not enough to distinguish a delivered message from a lost one.
     """
+
+    from core.message_context import resolve_context_platform
+    from modules.agents.model_hub import (
+        MODELS_NEXT_STEP,
+        is_model_hub_refusal,
+        models_next_step_text,
+        refusal_fixed_in_models,
+    )
 
     backend_name = str(backend or "backend").strip() or "backend"
     error, visible = _failure_texts(backend_name, diagnostic, display_text)
@@ -400,6 +410,21 @@ async def emit_backend_failure(
         terminal = replace(
             terminal, metadata={**terminal.metadata, "local_error_detail": hub_failure[1]},
         )
+    # A Model Hub refusal whose fix is in Models ends with where to make it. The Workbench
+    # draws notices as plain text, so it gets the step as data and renders its own link;
+    # IM gets the line itself. The form follows where the notice goes, after a scheduled or
+    # Harness override; a restart's copy below replaces the refusal, and its step with it.
+    if getattr(controller, "shutdown_requested", False) is not True and refusal_fixed_in_models(
+        cause=cause,
+        outcome=hub_failure[2] if hub_failure is not None and hub_failure[0] is not None else None,
+    ):
+        platform = resolve_context_platform(
+            routed_delivery_context(context), fallback_platform=getattr(controller, "primary_platform", None),
+        )
+        if platform == "avibe":
+            terminal = replace(terminal, metadata={**terminal.metadata, "failure_next_step": MODELS_NEXT_STEP})
+        else:
+            visible = f"{visible}\n{models_next_step_text(controller)}"
     harness_run_id = harness_run_identity(context, request)
     owns_failure_contract = bool(
         _turn_failure_identity(context, request) or harness_run_id
@@ -444,11 +469,9 @@ async def emit_backend_failure(
     # function at all; see ``emit_replayed_backend_failure``. A bypass argument here
     # was the previous shape, and it left the replay inside this lifecycle with its
     # live behaviours switched off one at a time.
-    from core.handlers.model_hub.service import turn_refusal
-
     auth_service = getattr(controller, "agent_auth_service", None)
     maybe_recover = getattr(auth_service, "maybe_emit_auth_recovery_message", None)
-    if not harness_run_id and callable(maybe_recover) and turn_refusal(cause) is None:
+    if not harness_run_id and callable(maybe_recover) and not is_model_hub_refusal(cause):
         try:
             handled_auth = await maybe_recover(
                 context,

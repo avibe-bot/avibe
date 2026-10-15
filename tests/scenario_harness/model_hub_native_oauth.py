@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from config.v2_config import ModelHubAgentSupplyConfig, ModelHubConfig, V2Config
 from core.agent_auth_service import AgentAuthService
@@ -241,9 +241,9 @@ class CustodiedNativeOAuthScenarioHarness:
     """
 
     auth_url = "https://claude.ai/oauth/authorize?fixture=1"
-    account = {"active_auth_mode": "oauth", "email": "owner@example.com"}
 
     def __init__(self, state_dir: Path):
+        self.auth_status_reader = Mock(side_effect=AssertionError("completion must not query Settings"))
         config = V2Config.default()
         config.model_hub.enabled = True
         for supply in config.model_hub.agents.values():
@@ -268,7 +268,7 @@ class CustodiedNativeOAuthScenarioHarness:
         )
         self.agent_auth._send_claude_control_request = wait_for_consent
         self.agent_auth._send_claude_callback = send_callback
-        self.agent_auth._verify_login = AsyncMock(return_value=(True, '{"loggedIn": true}'))
+        self.agent_auth._verify_login = AsyncMock(return_value=(True, '{"loggedIn": true, "authMethod": "claude.ai"}'))
         self.agent_auth._refresh_backend_runtime = AsyncMock()
         self.agent_auth._disconnect_claude_client = AsyncMock()
         self.service = ModelHubService(
@@ -277,7 +277,7 @@ class CustodiedNativeOAuthScenarioHarness:
             events=BoundedEventLog(state_dir / "events.json"),
             native_oauth_adapter=AgentAuthNativeOAuthAdapter(
                 self.agent_auth,
-                auth_status_reader=lambda _backend: self.account,
+                auth_status_reader=self.auth_status_reader,
             ),
             oauth_flows=OAuthFlowRegistry(state_dir / "oauth_flows.json"),
             revocations=CredentialRevocationJournal(state_dir / "revocations.json"),

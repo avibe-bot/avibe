@@ -370,3 +370,54 @@ def test_runtime_start_failure_retains_explicit_start_intent(tmp_path, marker):
     assert main.load_config().model_hub.enabled is True
     assert path.read_bytes() == after
     assert not list(path.parent.glob("config.json.bak-*"))
+
+
+def test_the_store_parses_the_config_once_until_the_file_changes(monkeypatch):
+    """#2568: Model Hub reads its config on every request, so the store serves its last parse while the file is
+    unchanged. Any change to the file, by this store or another writer, is read on the next load, as before."""
+    from core.handlers.model_hub.service import V2ModelHubConfigStore
+
+    config = V2Config.default()
+    model_id = config.model_hub.agents["codex"].models[0].id
+    config.model_hub.sources = [_source("src_snapshot1", (model_id,), vendor="openai")]
+    path = paths.get_config_path()
+    config.save(path)
+    parses = []
+    load = V2Config.load
+
+    def counting(*args, **kwargs):
+        parses.append(1)
+        return load(*args, **kwargs)
+
+    monkeypatch.setattr(V2Config, "load", counting)
+    store = V2ModelHubConfigStore()
+
+    first = store.load()
+    for _ in range(5):
+        store.load()
+    assert len(parses) == 1
+
+    # What a caller loads is its own: changing it never reaches the snapshot.
+    first.sources.clear()
+    assert [source.id for source in store.load().sources] == ["src_snapshot1"]
+
+    # Another writer replaces the file: the next load reads it.
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["model_hub"]["sources"][0]["display_name"] = "另一个进程改的名字"
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    assert store.load().sources[0].display_name == "另一个进程改的名字"
+    assert len(parses) == 2
+
+    # A write through the store keeps what it committed, without reading the file back, and the reads after it parse
+    # nothing.
+    edited = store.load()
+    edited.sources[0].display_name = "保存后的名字"
+    with monkeypatch.context() as patched:
+        patched.setattr(store, "_read", lambda _path: pytest.fail("a write read the file back"))
+        store.save(edited)
+        store.mutate(lambda hub: setattr(hub.sources[0], "display_name", "改过两次的名字") or True)
+    after_writes = len(parses)
+    assert store.load().sources[0].display_name == "改过两次的名字"
+    assert store.load().sources[0].display_name == "改过两次的名字"
+    assert len(parses) == after_writes
+    assert V2ModelHubConfigStore().load().sources[0].display_name == "改过两次的名字"

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pet-hit-regions"
+description = "Enables the pet_hit_regions command without any pre-configured scope."
+commands.allow = ["pet_hit_regions"]
+
+[[permission]]
+identifier = "deny-pet-hit-regions"
+description = "Denies the pet_hit_regions command without any pre-configured scope."
+commands.deny = ["pet_hit_regions"]

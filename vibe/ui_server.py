@@ -3106,7 +3106,92 @@ def _apply_vault_sandbox_security_headers(response: FastAPIResponse, path: str) 
 @app.middleware("http")
 async def add_vault_sandbox_security_headers(starlette_request: FastAPIRequest, call_next):
     response = await call_next(starlette_request)
-    return _apply_vault_sandbox_security_headers(response, starlette_request.url.path)
+    return _apply_vault_sandbox_security_headers(response, starlette_request.scope["path"])
+
+
+# RFC 9112 §3.2 Host: ``uri-host [":" port]`` (same grammar Starlette >= 1.0.1
+# enforces). Anything else, e.g. ``/``, ``?`` or ``#``, would let the Host move
+# the path boundary of the URL rebuilt from it.
+_VALID_REG_NAME_RE = re.compile(
+    r"(?:[a-z0-9._~!$&'()*+,;=-]|%[0-9a-f]{2})+",
+    re.IGNORECASE,
+)
+_VALID_ZONE_ID_RE = re.compile(r"[a-z0-9._~-]+", re.IGNORECASE)
+_VALID_IPV_FUTURE_RE = re.compile(
+    r"(?-i:v)[0-9a-f]+\.[a-z0-9._~!$&'()*+,;=:-]+",
+    re.IGNORECASE,
+)
+_VALID_ASCII_DIGITS_RE = re.compile(r"[0-9]+")
+
+
+def _is_valid_host_header(value: str) -> bool:
+    """Return whether *value* is a syntactically valid Host authority."""
+
+    host = value
+    port = ""
+    if value.startswith("["):
+        closing = value.find("]")
+        if closing < 0:
+            return False
+        literal = value[1:closing]
+        suffix = value[closing + 1 :]
+        if suffix:
+            if not suffix.startswith(":") or _VALID_ASCII_DIGITS_RE.fullmatch(suffix[1:]) is None:
+                return False
+            port = suffix[1:]
+        address, separator, zone = literal.partition("%")
+        if separator:
+            if zone.startswith("25"):
+                zone = zone[2:]
+            if _VALID_ZONE_ID_RE.fullmatch(zone) is None:
+                return False
+        try:
+            ipaddress.IPv6Address(address)
+        except ValueError:
+            if separator or _VALID_IPV_FUTURE_RE.fullmatch(literal) is None:
+                return False
+    else:
+        if value.count(":") > 1:
+            return False
+        host, separator, port = value.partition(":")
+        if separator and _VALID_ASCII_DIGITS_RE.fullmatch(port) is None:
+            return False
+        if _VALID_REG_NAME_RE.fullmatch(host) is None:
+            return False
+
+    port = port.lstrip("0")
+    return len(port) <= 5 and int(port or "0") <= 65535
+
+
+class _RejectInvalidHostMiddleware:
+    """Refuse HTTP and WebSocket requests whose Host is not a valid authority.
+
+    Request hooks and handlers read origin and host values derived from Host;
+    this keeps every one of them on a well-formed value. Registered after the
+    other middleware so it wraps all of them.
+    """
+
+    def __init__(self, asgi_app: Any) -> None:
+        self.app = asgi_app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] in {"http", "websocket"}:
+            hosts = [value for key, value in scope.get("headers") or () if key == b"host"]
+            if len(hosts) > 1 or (hosts and not _is_valid_host_header(hosts[0].decode("latin-1"))):
+                if scope["type"] == "websocket":
+                    await send({"type": "websocket.close", "code": 1008})
+                    return
+                response = FastAPIResponse(
+                    content='{"ok":false,"error":"invalid_host_header"}',
+                    status_code=400,
+                    media_type="application/json",
+                )
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(_RejectInvalidHostMiddleware)
 
 
 @app.after_request
@@ -5068,6 +5153,63 @@ async def model_hub_quota_refresh(starlette_request: FastAPIRequest):
     return await _dispatch_native_ui_request(starlette_request, handler)
 
 
+@app.get("/api/models/hosted-tools", include_in_schema=False)
+async def model_hub_hosted_tools_get(starlette_request: FastAPIRequest):
+    async def handler():
+        from core.handlers.model_hub import ModelHubError
+
+        try:
+            return _model_hub_success(**await _model_hub_service().hosted_tools_status())
+        except ModelHubError as exc:
+            return _model_hub_error(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.put("/api/models/hosted-tools/{tool}", include_in_schema=False)
+async def model_hub_hosted_tool_put(tool: str, starlette_request: FastAPIRequest):
+    async def handler():
+        from core.handlers.model_hub import ModelHubError
+
+        try:
+            status = await _model_hub_service().set_hosted_tool(tool, _model_hub_json_object("invalid_parameter"))
+            return _model_hub_success(**status)
+        except ModelHubError as exc:
+            return _model_hub_error(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.post("/api/models/hosted-tools/{tool}/clear", include_in_schema=False)
+async def model_hub_hosted_tool_clear(tool: str, starlette_request: FastAPIRequest):
+    async def handler():
+        from core.handlers.model_hub import ModelHubError
+
+        try:
+            status = await _model_hub_service().clear_hosted_refusals(tool, _model_hub_json_object("invalid_parameter"))
+            return _model_hub_success(**status)
+        except ModelHubError as exc:
+            return _model_hub_error(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.post("/api/models/sources/{source_id}/evidence/clear", include_in_schema=False)
+async def model_hub_source_evidence_clear(source_id: str, starlette_request: FastAPIRequest):
+    async def handler():
+        from core.handlers.model_hub import ModelHubError
+
+        try:
+            result = await _model_hub_service().clear_source_evidence(
+                source_id, _model_hub_json_object("invalid_parameter"),
+            )
+            return _model_hub_success(**result)
+        except ModelHubError as exc:
+            return _model_hub_error(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
 @app.route("/api/models/agents/<backend>/chains", methods=["GET"])
 def model_hub_agent_chains_get(backend):
     from core.handlers.model_hub import ModelHubError
@@ -5747,7 +5889,13 @@ def vault_secrets_post():
     from vibe import api
 
     try:
-        return jsonify(api.create_vault_secret(request.json or {}, origin=_vault_sandbox_webauthn_origin()))
+        return jsonify(
+            api.create_vault_secret(
+                request.json or {},
+                origin=_vault_sandbox_webauthn_origin(),
+                user_context=getattr(g, "authorization_context", None),
+            )
+        )
     except ValueError as exc:
         return _vault_error_response(exc)
 
@@ -5757,9 +5905,66 @@ def vault_secret_patch(name):
     from vibe import api
 
     try:
-        return jsonify(api.update_vault_secret(name, request.json or {}))
+        return jsonify(
+            api.update_vault_secret(
+                name,
+                request.json or {},
+                user_context=getattr(g, "authorization_context", None),
+            )
+        )
     except ValueError as exc:
         return _vault_error_response(exc)
+
+
+@app.put("/api/vault/secrets/{name}/fields/{field}", include_in_schema=False)
+async def vault_secret_field_put(
+    name: str,
+    field: str,
+    starlette_request: FastAPIRequest,
+):
+    async def handler():
+        from vibe import api
+
+        try:
+            payload = request.json if isinstance(request.json, dict) else {}
+            return jsonify(
+                await asyncio.to_thread(
+                    api.update_vault_secret_field,
+                    name,
+                    field,
+                    payload,
+                    user_context=getattr(g, "authorization_context", None),
+                )
+            )
+        except ValueError as exc:
+            return _vault_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.delete("/api/vault/secrets/{name}/fields/{field}", include_in_schema=False)
+async def vault_secret_field_delete(
+    name: str,
+    field: str,
+    starlette_request: FastAPIRequest,
+):
+    async def handler():
+        from vibe import api
+
+        try:
+            return jsonify(
+                await asyncio.to_thread(
+                    api.delete_vault_secret_field,
+                    name,
+                    field,
+                    request.json,
+                    user_context=getattr(g, "authorization_context", None),
+                )
+            )
+        except ValueError as exc:
+            return _vault_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
 
 
 @app.route("/api/vault/secrets/<name>", methods=["DELETE"])
@@ -5777,7 +5982,13 @@ def vault_secret_reveal_context_post(name):
     from vibe import api
 
     try:
-        return jsonify(api.create_vault_reveal_context(name, request.json or {}))
+        return jsonify(
+            api.create_vault_reveal_context(
+                name,
+                request.json or {},
+                user_context=getattr(g, "authorization_context", None),
+            )
+        )
     except ValueError as exc:
         return _vault_error_response(exc)
 
@@ -5794,7 +6005,15 @@ def vault_requests_get():
         limit = int(request.args.get("limit") or 100)
     except ValueError:
         limit = 100
-    return jsonify(api.get_vault_requests(status=status, request_type=req_type, limit=limit, session=session))
+    return jsonify(
+        api.get_vault_requests(
+            status=status,
+            request_type=req_type,
+            limit=limit,
+            session=session,
+            user_context=getattr(g, "authorization_context", None),
+        )
+    )
 
 
 @app.route("/api/vault/requests/<request_id>", methods=["GET"])
@@ -5803,7 +6022,13 @@ def vault_request_get(request_id):
     from storage import vault_service
 
     try:
-        return jsonify(api.get_vault_request(request_id, audience=vault_service.REQUEST_AUDIENCE_UI))
+        return jsonify(
+            api.get_vault_request(
+                request_id,
+                audience=vault_service.REQUEST_AUDIENCE_UI,
+                user_context=getattr(g, "authorization_context", None),
+            )
+        )
     except ValueError as exc:
         return _vault_error_response(exc)
 
@@ -5833,7 +6058,12 @@ def vault_access_request_post():
     from vibe import api
 
     try:
-        return jsonify(api.request_vault_access(request.json or {}))
+        return jsonify(
+            api.request_vault_access(
+                request.json or {},
+                user_context=getattr(g, "authorization_context", None),
+            )
+        )
     except ValueError as exc:
         return _vault_error_response(exc)
 
@@ -5843,7 +6073,12 @@ def vault_sign_request_post():
     from vibe import api
 
     try:
-        return jsonify(api.request_vault_sign(request.json or {}))
+        return jsonify(
+            api.request_vault_sign(
+                request.json or {},
+                user_context=getattr(g, "authorization_context", None),
+            )
+        )
     except ValueError as exc:
         return _vault_error_response(exc)
 
@@ -5856,6 +6091,25 @@ def vault_request_deny_post(request_id):
         return jsonify(api.deny_vault_request(request_id, request.json or {}))
     except ValueError as exc:
         return _vault_error_response(exc)
+
+
+@app.post("/api/vault/requests/{request_id}/approve-delete", include_in_schema=False)
+async def vault_request_approve_delete_post(request_id: str, starlette_request: FastAPIRequest):
+    async def handler():
+        from vibe import api
+
+        try:
+            return jsonify(
+                await asyncio.to_thread(
+                    api.approve_vault_delete_request,
+                    request_id,
+                    user_context=getattr(g, "authorization_context", None),
+                )
+            )
+        except ValueError as exc:
+            return _vault_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
 
 
 @app.route("/api/vault/requests/<request_id>/fulfill-access", methods=["POST"])
@@ -6819,9 +7073,10 @@ def version():
 # could both pass the check before either seeds restart_status.json, scheduling
 # two supervisors that race on the same pid files + lock.
 _RESTART_CONTROL_LOCK = threading.Lock()
-# How long a just-seeded, pid-less "scheduled" status is treated as in flight
-# (its supervisor is still starting up). Past this, a pid-less status is stale
-# (the supervisor died before recording its pid) and must NOT block restarts.
+# How long a restart status whose job cannot be verified is treated as in
+# flight: a just-seeded, pid-less status (its supervisor is still starting up),
+# or a live pid whose identity cannot be read. Past this such a status is stale
+# and must NOT block restarts.
 _RESTART_SEED_GRACE_SECONDS = 60.0
 
 
@@ -6829,32 +7084,18 @@ def _restart_in_flight() -> bool:
     """True only when a restart is genuinely still running, so a stale status
     can never permanently block Web restarts."""
     from vibe import runtime
+    from vibe.upgrade import restart_record_is_pending
 
-    status = runtime.read_json(runtime.get_restart_status_path()) or {}
-    if status.get("state") not in ("scheduled", "running"):
-        return False
+    path = runtime.get_restart_status_path()
+    status = runtime.read_json(path) or {}
     sup_pid = status.get("supervisor_pid")
-    if isinstance(sup_pid, int):
-        if not runtime.pid_alive(sup_pid):
-            return False
-        # Guard against PID reuse: a dead supervisor's pid can be reclaimed by an
-        # unrelated process (notably across a reboot), which would otherwise keep
-        # blocking restarts until that process exits. The job records its
-        # ``supervisor_started_at`` (process create time), so only treat the pid
-        # as the live supervisor when the create time still matches.
-        started_at = status.get("supervisor_started_at")
-        if started_at is not None:
-            current = runtime.process_create_time(sup_pid)
-            if current is not None and current != started_at:
-                return False
-        return True
-    # No supervisor pid recorded yet: in flight only while the seed is fresh
-    # (the child is still starting). An older pid-less status is stale.
-    try:
-        age = time.time() - runtime.get_restart_status_path().stat().st_mtime
-    except OSError:
+    if isinstance(sup_pid, int) and not runtime.pid_alive(sup_pid):
+        # A job that has exited runs no restart, whatever its status says.
         return False
-    return age < _RESTART_SEED_GRACE_SECONDS
+    # A live pid is the job only while its recorded identity matches: a pid
+    # reclaimed by an unrelated process (notably across a reboot) would
+    # otherwise keep blocking restarts until that process exits.
+    return restart_record_is_pending(status, path, grace_seconds=_RESTART_SEED_GRACE_SECONDS)
 
 
 def _runtime_refusal_payload(action: str, refusal: "DesktopRuntimeClaimRefused") -> dict[str, Any]:
@@ -8934,9 +9175,9 @@ def global_prompts_get():
     """Read every backend's *global* instructions file for the editor.
 
     The global twin of the per-project AGENTS.md editor: each backend's
-    user-level prompt file (claude→~/.claude/CLAUDE.md, codex→~/.codex/AGENTS.md,
-    opencode→~/.config/opencode/AGENTS.md) that the CLI prepends to every
-    session's system prompt.
+    user-level prompt file (vibey→~/.avibe/AGENTS.md, claude→~/.claude/CLAUDE.md,
+    codex→~/.codex/AGENTS.md, opencode→~/.config/opencode/AGENTS.md) that it
+    puts ahead of every system prompt.
     """
     from vibe.global_agents_md import read_all_global_agents_md
 
@@ -9359,6 +9600,105 @@ def sessions_create():
     return jsonify(session), 201
 
 
+@app.route("/api/desktop-mini/session", methods=["POST"])
+def desktop_mini_session_ensure():
+    """The caller's desktop mini conversation with the built-in Agent, created on first use.
+
+    Interim rule until sessions get a built-in ``main`` type: see
+    docs/plans/2026-10-12-desktop-mini-main-agent.md §10.1.
+    """
+    from core.services import sessions as workbench_sessions_service
+    from core.vibe_agents import VibeAgentAccessError, VibeAgentStore
+    from storage.workbench_sessions_service import NoChatProjectError, ensure_desktop_mini_session
+    from vibe.sse_broker import broker
+
+    store = VibeAgentStore()
+    try:
+        vibey = store.get_builtin_default_agent_for_backend("vibey")
+    finally:
+        store.close()
+    lang = _request_ui_language()
+    if vibey is None:
+        return _coded_error_response("builtin_agent_unavailable", t("desktopMini.builtinAgentUnavailable", lang), 409)
+    authorization_context = getattr(g, "authorization_context", None)
+    engine = _projects_engine()
+    try:
+        with engine.begin() as conn:
+            session = ensure_desktop_mini_session(
+                conn,
+                agent_name=vibey.name,
+                title=t("desktopMini.sessionTitle", lang),
+                authorization_context=authorization_context,
+            )
+            can_chat = _session_can_chat(conn, authorization_context, session["id"])
+    except NoChatProjectError:
+        return _coded_error_response(NoChatProjectError.code, t("desktopMini.noChatProject", lang), 409)
+    except (VibeAgentAccessError, workbench_sessions_service.ProjectAccessDeniedError):
+        return _coded_error_response("project_access_denied", t("error.projectAccessDenied", lang), 403)
+    broker.publish("session.activity", {"session_id": session["id"], "scope_id": session["scope_id"], "event": "created"})
+    return jsonify({**session, "capabilities": {"can_chat": can_chat}})
+
+
+@app.route("/api/sessions/main", methods=["GET"])
+def sessions_main():
+    """Return the caller's stable built-in main session, creating it on first use."""
+
+    from core.services import sessions as workbench_sessions_service
+    from core.vibe_agents import VibeAgentAccessError, VibeAgentStore
+    from vibe.authorization import InstanceAuthorizationError
+    from storage.workbench_sessions_service import (
+        MainSessionArchivedError,
+        MainSessionInvariantError,
+        ensure_main_session,
+    )
+
+    store = VibeAgentStore()
+    try:
+        vibey = store.get_builtin_default_agent_for_backend("vibey")
+    finally:
+        store.close()
+    lang = _request_ui_language()
+    if vibey is None:
+        return _coded_error_response("builtin_agent_unavailable", t("desktopMini.builtinAgentUnavailable", lang), 409)
+
+    authorization_context = getattr(g, "authorization_context", None)
+    engine = _projects_engine()
+    try:
+        with engine.begin() as conn:
+            session = ensure_main_session(
+                conn,
+                agent_name=vibey.name,
+                title=t("desktopMini.sessionTitle", lang),
+                authorization_context=authorization_context,
+            )
+    except InstanceAuthorizationError:
+        return jsonify(
+            {"ok": False, "error": "instance_access_forbidden", "required_role": "owner"}
+        ), 403
+    except (VibeAgentAccessError, workbench_sessions_service.ProjectAccessDeniedError):
+        return _coded_error_response("project_access_denied", t("error.projectAccessDenied", lang), 403)
+    except MainSessionArchivedError:
+        return _coded_error_response(
+            MainSessionArchivedError.code,
+            t("desktopMini.mainSessionArchived", lang),
+            409,
+        )
+    except MainSessionInvariantError:
+        return _coded_error_response(
+            MainSessionInvariantError.code,
+            t("desktopMini.mainSessionInvalid", lang),
+            409,
+        )
+    return jsonify(
+        {
+            "session": session,
+            "capabilities": {
+                "can_chat": bool(getattr(authorization_context, "can_chat", False)),
+            },
+        }
+    )
+
+
 def _session_fork_error_response(err: Exception):
     """Map a ``SessionForkError`` to its machine code, in the STRUCTURED body.
 
@@ -9772,6 +10112,7 @@ def _session_archived_response():
 #: The archive/edit refusal's copy: the row exists to receive notices and cannot be
 #: torn down or re-labelled. Used by the DELETE and PATCH guards.
 RESERVED_SESSION_PROTECTED_I18N_KEY = "harness.notice.workspaceSessionProtected"
+MAIN_SESSION_PROTECTED_I18N_KEY = "desktopMini.mainSessionProtected"
 #: The send refusal's copy. A SEPARATE key on purpose: "cannot be archived or modified"
 #: is not an answer to "why did my message not send", and the composer's own inert-state
 #: notice has to say the same thing this body says.
@@ -9879,6 +10220,7 @@ def _publish_session_update_activity(
 @app.route("/api/sessions/<session_id>", methods=["PATCH"])
 async def sessions_update(session_id: str):
     from core.services import sessions as workbench_sessions_service
+    from storage.workbench_sessions_service import MAIN_SESSION_ID, MAIN_SESSION_UPDATABLE_FIELDS
     from vibe import internal_client
     from vibe.sse_broker import broker
 
@@ -9901,6 +10243,13 @@ async def sessions_update(session_id: str):
     }
     if not updatable:
         return jsonify({"error": "no updatable fields supplied"}), 400
+    if str(session_id) == MAIN_SESSION_ID and not set(updatable).issubset(
+        MAIN_SESSION_UPDATABLE_FIELDS
+    ):
+        return _reserved_session_response(
+            MAIN_SESSION_PROTECTED_I18N_KEY,
+            code="reserved_session",
+        )
 
     engine = _projects_engine()
     # Archive is TERMINAL, so it outranks every transient conflict below — most
@@ -10008,7 +10357,9 @@ async def sessions_update(session_id: str):
         # un-project the system surface until the next heal. Mirror the DELETE
         # route's 403 + localized copy so the two guards read as one contract.
         return _reserved_session_response(
-            RESERVED_SESSION_PROTECTED_I18N_KEY,
+            MAIN_SESSION_PROTECTED_I18N_KEY
+            if str(session_id) == MAIN_SESSION_ID
+            else RESERVED_SESSION_PROTECTED_I18N_KEY,
             code=getattr(err, "code", "reserved_session"),
         )
     except ValueError as err:
@@ -10197,6 +10548,7 @@ async def sessions_archive(session_id: str):
     from core.show_pages import ShowPageError, require_show_page_management
     from sqlalchemy import select
     from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
+    from storage.workbench_sessions_service import MAIN_SESSION_ID
     from storage.models import show_pages
     from vibe.sse_broker import broker
 
@@ -10204,6 +10556,11 @@ async def sessions_archive(session_id: str):
     if str(session_id) == WORKSPACE_NOTICE_SESSION_ID:
         return _reserved_session_response(
             RESERVED_SESSION_PROTECTED_I18N_KEY,
+            code="reserved_session",
+        )
+    if str(session_id) == MAIN_SESSION_ID:
+        return _reserved_session_response(
+            MAIN_SESSION_PROTECTED_I18N_KEY,
             code="reserved_session",
         )
     try:
@@ -10242,7 +10599,9 @@ async def sessions_archive(session_id: str):
             code = getattr(err, "code", "forbidden")
             if code == "reserved_session":
                 return _reserved_session_response(
-                    RESERVED_SESSION_PROTECTED_I18N_KEY,
+                    MAIN_SESSION_PROTECTED_I18N_KEY
+                    if str(session_id) == MAIN_SESSION_ID
+                    else RESERVED_SESSION_PROTECTED_I18N_KEY,
                     code=code,
                 )
             return _coded_error_response(code, str(err), 403)
@@ -10271,7 +10630,9 @@ async def sessions_archive(session_id: str):
             return jsonify({"error": f"Session not found: {session_id}"}), 404
         if status_code == 403 and body.get("error") == "reserved_session":
             return _reserved_session_response(
-                RESERVED_SESSION_PROTECTED_I18N_KEY,
+                MAIN_SESSION_PROTECTED_I18N_KEY
+                if str(session_id) == MAIN_SESSION_ID
+                else RESERVED_SESSION_PROTECTED_I18N_KEY,
                 code="reserved_session",
             )
         candidate = body.get("session")
@@ -15033,7 +15394,14 @@ async def show_runtime_vendor_asset(vendor_path: str):
     `/show/<id>/` surface and the anonymous public `/p/<share>/` surface. We forward
     this prefix verbatim (never under a per-session base) and, because the content
     hash is in the path, mark successful responses immutable for a year.
+
+    This route is reachable without authentication, so its path must never leave the
+    vendor prefix. Dot segments survive `quote()` and the HTTP client normalizes them
+    before sending, which would rebase the request onto the runtime's unauthenticated
+    session routes. Vendor files never use dot-prefixed segments, so reject them all.
     """
+    if _is_show_page_dot_path(vendor_path):
+        return FastAPIResponse(status_code=404)
     runtime_path = f"{_SHOW_RUNTIME_VENDOR_PREFIX}/{quote(vendor_path, safe='/@:-._~')}"
     if request._request.url.query:
         runtime_path = f"{runtime_path}?{request._request.url.query}"

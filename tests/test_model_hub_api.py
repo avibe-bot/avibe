@@ -1031,7 +1031,7 @@ def test_runtime_start_is_explicit_and_returns_v4_status(tmp_path):
     assert adapter.start_calls == 1
     assert store.config.enabled is True
     assert runtime["enabled"] is True
-    assert runtime["contract_version"] == 11
+    assert runtime["contract_version"] == 15
     assert runtime["status"]["health"] == "ok"
     _assert_valid("runtime-dependency.schema.json", runtime)
 
@@ -1338,7 +1338,7 @@ def test_runtime_start_crosses_the_controller_rpc_boundary(monkeypatch):
 
     async def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"contract_version": 11, "status": {"health": "ok"}}
+        return {"contract_version": 15, "status": {"health": "ok"}}
 
     monkeypatch.setattr(model_hub_client, "_rpc", rpc)
 
@@ -1355,7 +1355,7 @@ def test_runtime_stop_crosses_the_controller_rpc_boundary(monkeypatch):
 
     async def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"contract_version": 11, "status": {"health": "not_started"}}
+        return {"contract_version": 15, "status": {"health": "not_started"}}
 
     monkeypatch.setattr(model_hub_client, "_rpc", rpc)
 
@@ -1372,7 +1372,7 @@ def test_runtime_install_crosses_the_controller_rpc_boundary(monkeypatch):
 
     async def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"contract_version": 11, "status": {"health": "installing"}}
+        return {"contract_version": 15, "status": {"health": "installing"}}
 
     monkeypatch.setattr(model_hub_client, "_rpc", rpc)
 
@@ -1390,7 +1390,7 @@ def test_runtime_dependency_ensure_crosses_the_controller_rpc_boundary(monkeypat
     def rpc(operation, payload=None):
         calls.append((operation, payload))
         return {
-            "contract_version": 11,
+            "contract_version": 15,
             "changed": True,
             "status": {"health": "not_started", "verified": True},
         }
@@ -2409,6 +2409,8 @@ def test_backend_catalog_add_edit_and_runtime_refresh(
         "reasoning_efforts": ["low", "high"],
         "locked": False,
         "routeable": True,
+        # Server-derived like ``locked``: a client may send back the row it read, and the read states it again.
+        "effort_menu": {"omitted": [], "not_on": {}},
     }
     if backend == "opencode":
         added["native_protocol"] = "openai_responses"
@@ -2914,6 +2916,7 @@ def test_backend_catalog_add_validates_supplier_echo_and_stores_draft_literally(
         "reasoning_efforts": [],
         "locked": False,
         "routeable": True,
+        "effort_menu": {"omitted": [], "not_on": {}},
     }
     before = store.config.to_payload()
 
@@ -4807,7 +4810,7 @@ def test_agent_models_route_returns_only_picker_catalog_fields(monkeypatch):
     assert response.status_code == 200
     assert response.get_json() == {
         "ok": True,
-        "contract_version": 11,
+        "contract_version": 15,
         "agent": {
             "backend": "codex",
             "mode": "hub",
@@ -6131,7 +6134,7 @@ def test_create_source_rejects_omitted_protocol_for_an_uncataloged_vendor(tmp_pa
         (
             "openai_responses",
             DiscoveredModel(id="gpt-5.6-sol"),
-            ["low", "medium", "high", "xhigh", "max", "ultra"],
+            ["low", "medium", "high", "xhigh", "max"],
             "catalog",
         ),
     ),
@@ -6237,7 +6240,7 @@ def test_source_create_requires_explicit_consent_for_proven_inventory_failure(
         return {"catalog-manual": ("low", "ultra")}
 
     monkeypatch.setattr(
-        "core.handlers.model_hub.service.bundled_catalog_reasoning_efforts_by_model",
+        "core.handlers.model_hub.service.bundled_catalog_wire_efforts_by_model",
         load_catalog_index,
     )
     store = MemoryStore()
@@ -7036,14 +7039,7 @@ def test_add_model_upsert_cannot_bypass_catalog_tier_lock(tmp_path):
         )
     )["models"][0]
 
-    assert created["reasoning_efforts"] == [
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-        "max",
-        "ultra",
-    ]
+    assert created["reasoning_efforts"] == ["low", "medium", "high", "xhigh", "max"]
     assert created["reasoning_efforts_source"] == "catalog"
     with pytest.raises(ModelHubError) as error:
         asyncio.run(
@@ -7064,7 +7060,7 @@ def test_add_model_upsert_cannot_bypass_catalog_tier_lock(tmp_path):
     (
         (
             DiscoveredModel(id="gpt-5.6-sol"),
-            ["low", "medium", "high", "xhigh", "max", "ultra"],
+            ["low", "medium", "high", "xhigh", "max"],
             "catalog",
             "catalog_tiers",
         ),
@@ -7073,7 +7069,8 @@ def test_add_model_upsert_cannot_bypass_catalog_tier_lock(tmp_path):
                 id="gpt-5.6-sol",
                 supported_parameters=("reasoning_effort",),
             ),
-            ["minimal", "low", "medium", "high", "xhigh"],
+            # The protocol defaults, bounded by the model's catalog row.
+            ["low", "medium", "high", "xhigh"],
             "upstream",
             "upstream_tiers",
         ),
@@ -8616,6 +8613,8 @@ def test_failed_same_handle_hub_reauth_requires_user_action(
     assert exc_info.value.code == ("discovery_failed" if failure == "discovery" else "engine_down")
     persisted = store.config.sources[0]
     assert persisted.credential_ref == "cred_hub_reused"
+    # The material behind the reused ref may be the new grant's, so the Source leaves the earlier grant's identity.
+    assert persisted.credential_generation is not None and persisted.verification_pending == persisted.credential_generation
     assert persisted.models == []
     assert persisted.state.status == "needs_action"
     assert persisted.state.detail_key == "models.source.needs_action.oauth_expired"
@@ -9003,14 +9002,7 @@ def test_completed_hub_oauth_persists_only_a_response_proven_protocol(tmp_path):
     assert result["source"]["protocol"] == "openai_chat"
     assert store.config.sources[0].protocol == "openai_chat"
     assert store.config.sources[0].credential_ref == "cred_oauth_proven"
-    assert store.config.sources[0].models[0].reasoning_efforts == [
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-        "max",
-        "ultra",
-    ]
+    assert store.config.sources[0].models[0].reasoning_efforts == ["low", "medium", "high", "xhigh", "max"]
     assert (
         store.config.sources[0].models[0].reasoning_efforts_source
         == "catalog"
@@ -9686,7 +9678,7 @@ def test_runtime_start_route_requires_csrf_before_starting_engine(monkeypatch, t
     assert accepted.status_code == 200
     runtime = accepted.get_json()["runtime"]
     assert adapter.start_calls == 1
-    assert runtime["contract_version"] == 11
+    assert runtime["contract_version"] == 15
     _assert_valid("runtime-dependency.schema.json", runtime)
 
 
@@ -10735,3 +10727,57 @@ def test_quota_endpoints_serve_hub_subscriptions_and_rate_limit_forced_refresh(m
     _assert_valid("quota-summary.schema.json", refreshed.get_json()["quota"])
     # Inside the forced-refresh interval the cached snapshot answers.
     assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_config_save_never_holds_the_controller_loop(tmp_path):
+    """A save waits on the cross-process config lock and a full config rewrite (#2639); the controller loop runs
+    every session's turns and the gateway, so it keeps running while a save is held."""
+    import threading
+
+    service, store, _adapter = _service(tmp_path)
+    entered, release = threading.Event(), threading.Event()
+    released_in_time = []
+    save = store.save
+
+    def held_save(config):
+        entered.set()
+        # Another process holds the config lock until the loop, still free, lets it go.
+        released_in_time.append(release.wait(2))
+        save(config)
+
+    store.save = held_save
+    writing = asyncio.create_task(service.set_hosted_tool("web_search", {"enabled": False}))
+    assert await asyncio.to_thread(entered.wait, 5)
+    release.set()
+    await writing
+    assert released_in_time == [True]
+    assert store.config.hosted_tools["web_search"].enabled is False
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_save_holds_the_mutation_lock_until_its_write_lands(tmp_path):
+    """The write runs on in its thread after the caller is cancelled; releasing the lock early would let a later
+    write start from the older snapshot and be overwritten when this one lands."""
+    import threading
+
+    service, store, _adapter = _service(tmp_path)
+    entered, release = threading.Event(), threading.Event()
+    save = store.save
+
+    def held_save(config):
+        entered.set()
+        assert release.wait(5)
+        save(config)
+
+    store.save = held_save
+    writing = asyncio.create_task(service.set_hosted_tool("web_search", {"enabled": False}))
+    assert await asyncio.to_thread(entered.wait, 5)
+    writing.cancel()
+    await asyncio.sleep(0.05)
+    assert service._mutation_lock.locked()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await writing
+    assert not service._mutation_lock.locked()
+    assert store.config.hosted_tools["web_search"].enabled is False

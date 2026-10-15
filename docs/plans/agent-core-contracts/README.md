@@ -12,7 +12,7 @@ on it fork; after that, a change needs orchestrator approval and lands here firs
 | C-4 | Agent event stream and its mapping to Avibe outputs | `agent` → adapter | [`agent-event.schema.json`](agent-event.schema.json), [`loop-control.md`](loop-control.md) §6 | P2 |
 | C-5 | Transcript rows, `context_seq`, projection, fork | adapter ↔ `harness` | [`transcript.md`](transcript.md), [`transcript-rows.schema.json`](transcript-rows.schema.json) | P2 |
 | C-6 | Model Hub consumer extension | Model Hub → adapter | [`model-hub-consumer.md`](model-hub-consumer.md), [`hop-resolution.schema.json`](hop-resolution.schema.json) | P1 |
-| C-7 | Tools, output governance, job handle | `tools` → `agent`, adapter | [`tools.md`](tools.md), [`job.schema.json`](job.schema.json) | P1 |
+| C-7 | Tools, output governance, job handle, environment block, project instructions | `tools` → `agent`, adapter | [`tools.md`](tools.md), [`job.schema.json`](job.schema.json) | P1 |
 | C-8 | Backend registration | catalog → every backend list | [`backend-registration.md`](backend-registration.md) | P2 |
 | C-5, C-7 | Recovery invariants for jobs, tool calls, and delivery, with owners and proofs | `tools`, `loop`, adapter | [`recovery.md`](recovery.md) | P1 |
 | C-9 | Context management: tiers, trigger, cut, forked checkpoint, overflow ladder, guards | `harness` → `agent`, adapter | [`context.md`](context.md); rows in [`transcript-rows.schema.json`](transcript-rows.schema.json) | P3 (frozen 2026-10-04) |

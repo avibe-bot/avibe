@@ -198,7 +198,7 @@ describe('native authentication ownership presentation', () => {
   });
 
   it('maps OAuth removal refusal to the existing Model Hub action', async () => {
-    mock.api.removeBackendAuth.mockResolvedValue({
+    mock.api.removeClaudeOAuthCredentials.mockResolvedValue({
       ok: false,
       error: 'native_auth_hub_owned',
       reauth_channel: 'hub',
@@ -214,7 +214,7 @@ describe('native authentication ownership presentation', () => {
       '/settings/backends/claude',
     );
 
-    fireEvent.click(await screen.findByRole('button', { name: en.settings.backends.oauthRemove }));
+    fireEvent.click(await screen.findByRole('button', { name: en.settings.backends.oauthCleanStoredCredentials }));
     expect(await screen.findByText(en.settings.backends.nativeAuthHubOwned)).toBeTruthy();
     expect(screen.getByRole('link', { name: en.settings.backends.openModelHub })).toBeTruthy();
     expect(screen.queryByText('native_auth_hub_owned')).toBeNull();

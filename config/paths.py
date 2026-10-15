@@ -233,6 +233,14 @@ def get_state_backups_dir() -> Path:
     return get_state_dir() / "backups"
 
 
+#: The user's global instruction file for Vibey, in the Avibe home (C-7 ``tools.md`` section 9; owner decision).
+GLOBAL_INSTRUCTIONS_FILENAME = "AGENTS.md"
+
+
+def get_global_instructions_path() -> Path:
+    return get_vibe_remote_dir() / GLOBAL_INSTRUCTIONS_FILENAME
+
+
 def get_user_preferences_path() -> Path:
     return get_state_dir() / "user_preferences.md"
 

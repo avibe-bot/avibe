@@ -1,5 +1,8 @@
 # Desktop Pet
 
+The mini layout and interactions are superseded by [Desktop mini v2](2026-10-12-desktop-mini-main-agent.md). Binding, authorization, send ownership, and lifecycle rules below still apply.
+
+
 Status: in progress (2026-10-04). Delivery is split into three PRs; see
 "Implementation notes".
 

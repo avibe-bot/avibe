@@ -8,6 +8,7 @@
   "DELETE /api/terminal/example": "viewer",
   "DELETE /api/vault/grants/example": "editor",
   "DELETE /api/vault/secrets/example": "editor",
+  "DELETE /api/vault/secrets/example/fields/example": "editor",
   "DELETE /api/web-push/subscriptions": "viewer",
   "GET /api/agent-backends": "editor",
   "GET /api/agents": "editor",
@@ -54,6 +55,7 @@
   "GET /api/sessions/example/messages": "viewer",
   "GET /api/sessions/example/queue": "editor",
   "GET /api/sessions/example/turn-state": "viewer",
+  "GET /api/sessions/main": "viewer",
   "GET /api/show-pages": "viewer",
   "GET /api/show-pages/example": "editor",
   "GET /api/show-pages/example/access": "viewer",
@@ -87,6 +89,7 @@
   "POST /api/asr/telemetry": "editor",
   "POST /api/asr/transcribe": "editor",
   "POST /api/config": "editor",
+  "POST /api/desktop-mini/session": "editor",
   "POST /api/dock/pins": "editor",
   "POST /api/files/copy": "editor",
   "POST /api/files/delete": "editor",
@@ -126,6 +129,7 @@
   "POST /api/vault/requests/access": "editor",
   "POST /api/vault/requests/example/deny": "editor",
   "POST /api/vault/requests/example/fulfill-access": "editor",
+  "POST /api/vault/requests/example/approve-delete": "editor",
   "POST /api/vault/requests/sign": "editor",
   "POST /api/vault/secrets": "editor",
   "POST /api/vault/secrets/example/reveal-context": "editor",
@@ -136,5 +140,6 @@
   "POST /api/web-push/test": "viewer",
   "PUT /api/dock/order": "editor",
   "PUT /api/files/write": "editor",
-  "PUT /api/sessions/example/draft": "editor"
+  "PUT /api/sessions/example/draft": "editor",
+  "PUT /api/vault/secrets/example/fields/example": "editor"
 }

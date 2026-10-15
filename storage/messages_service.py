@@ -1330,6 +1330,11 @@ def list_inbox_sessions(
             .where(msg.c.session_id.is_not(None))
             .order_by(order_value.desc(), msg.c.id.desc())
             .limit(1)
+            # Always the outer row's session. Nested in another subquery whose
+            # FROM lacks ``agent_sessions`` (``last_input_turn_state``),
+            # auto-correlation would instead add ``agent_sessions`` to this FROM
+            # and return the latest value across every session.
+            .correlate(agent_sessions)
         )
         if platform is not None:
             query = query.where(msg.c.platform == platform)
@@ -1416,6 +1421,10 @@ def list_inbox_sessions(
             )
         )
         .where(message_deliveries.c.message_id == last_input_id)
+        # The input's Delivery is this session's: seek by session rather than
+        # walk every Delivery for one message id, which has no index.
+        .where(message_deliveries.c.session_id == agent_sessions.c.id)
+        .correlate(agent_sessions)
         .limit(1)
         .scalar_subquery()
     )
@@ -1432,6 +1441,10 @@ def list_inbox_sessions(
     )
     if platform is not None:
         unread_q = unread_q.where(m.c.platform == platform)
+    if only_session:
+        # One session's row counts only that session's unread messages, rather
+        # than grouping every session's and joining one back.
+        unread_q = unread_q.where(m.c.session_id == only_session)
     unread_sub = unread_q.subquery()
 
     unread_count_col = func.coalesce(unread_sub.c.unread_count, 0).label("unread_count")

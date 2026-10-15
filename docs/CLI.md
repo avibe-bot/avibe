@@ -225,7 +225,7 @@ vibe computer set-value --arg pid=123 --arg value=enabled --arg element_token=el
 vibe computer clipboard read
 vibe computer clipboard write --arg text="copied text"
 vibe computer launch --arg bundle_id=com.example.App
-vibe computer quit --arg pid=123
+vibe computer force-quit --arg pid=123
 ```
 
 Every leaf also accepts `--args-json OBJECT` or `--args-json @FILE`,
@@ -233,6 +233,10 @@ repeatable `--arg NAME=VALUE`, and `--json`. `--output PATH` is supported by
 `observe window` and `zoom`; it writes or confirms the caller-selected PNG and
 prints the resulting path. Human output for observations includes the
 accessibility state and element tokens when the driver returns them.
+
+Machine-readable output keeps the structured driver object in
+`result.structuredContent` and retains the legacy text content. `force-quit`
+uses the driver's SIGKILL operation; unsaved application state can be lost.
 
 The command reaches the running Controller over local control IPC, so the
 existing `require_bind`, observe-first, exact-window, focus-shortcut,

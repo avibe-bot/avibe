@@ -27,19 +27,14 @@ export const SourceTestDialog: React.FC<{
   const [status, setStatus] = React.useState<TestStatus>(null);
   const [continuation] = React.useState(createContinuationSettlement);
   const running = React.useRef(false);
-  const identity = `${source.id}/${source.credential_ref}/${source.base_url}/${source.protocol}`;
+  // Every credential change, a same-handle reauthentication included, mints a new generation that verification keeps.
+  const identity = `${source.id}/${source.credential_ref}/${source.credential_generation ?? ''}/${source.base_url}/${source.protocol}`;
   const selected = selectTestModel(source.models, selection);
   React.useEffect(() => {
     continuation.invalidate();
     setStatus(null);
     return () => { continuation.invalidate(); };
   }, [continuation, identity, selected]);
-  React.useEffect(() => {
-    if (source.verification_pending) {
-      continuation.invalidate();
-      setStatus(null);
-    }
-  }, [continuation, source.verification_pending]);
   const options = source.models.filter((model) => !model.retired).map((model) => ({
     value: model.id, label: model.id,
   }));
@@ -72,7 +67,8 @@ export const SourceTestDialog: React.FC<{
         });
         const matches = current && current.credential_ref === latest.credential_ref
           && current.base_url === latest.base_url && current.protocol === latest.protocol
-          && (!current.verification_pending || current.verification_pending === latest.verification_pending)
+          // Every credential change mints a new generation, which verification keeps.
+          && (current.credential_generation ?? null) === (latest.credential_generation ?? null)
           && current.models.some((model) => model.id === selected && !model.retired);
         // Only a verified reply lifts a cooldown, so the reconciled state, not
         // `reachable`, says whether this test restored the provider.

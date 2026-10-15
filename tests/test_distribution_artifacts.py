@@ -56,8 +56,20 @@ def _assert_members_and_metadata(members, metadata):
     assert "memory" not in parsed.get_all("Provides-Extra", [])
     assert all("avibe-memory" not in item.lower().replace("_", "-")
                for item in parsed.get_all("Requires-Dist", []))
-    for required in ("vibe/cli.py", "core/controller.py", "vibe/show_runtime_manifest.json",
-                     "vibe/show_router.tsx", "vibe/ui/dist/index.html"):
+    for required in (
+        "vibe/cli.py",
+        "core/controller.py",
+        "vibe/show_runtime_manifest.json",
+        "vibe/show_router.tsx",
+        "vibe/ui/dist/index.html",
+        "vibe/computer_sdk/index.mjs",
+        "vibe/computer_sdk/index.d.ts",
+        "vibe/computer_sdk/failure-envelope.json",
+        "vibe/computer_sdk/loader.mjs",
+        "vibe/computer_sdk/package.json",
+        "vibe/computer_sdk/runner.mjs",
+        "vibe/computer_sdk/runtime.mjs",
+    ):
         assert required in members, required
 
 

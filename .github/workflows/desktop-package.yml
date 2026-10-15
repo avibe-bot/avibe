@@ -63,7 +63,7 @@ jobs:
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
-          node-version: "22.23.1"
+          node-version: "22.23.3"
           cache: npm
           cache-dependency-path: |
             ui/package-lock.json
@@ -296,6 +296,59 @@ jobs:
           echo "driver_packaged_path=$(pwd)/$driver" >> "$GITHUB_ENV"
           echo "driver_provenance_path=$(pwd)/src-tauri/binaries/cua-driver-${{ matrix.target }}.provenance.json" >> "$GITHUB_ENV"
           echo "driver_packaged_cdhash=$(codesign -dv --verbose=4 "$driver" 2>&1 | sed -n 's/^CDHash=//p' | head -1)" >> "$GITHUB_ENV"
+
+      - name: Smoke-test macOS app launch
+        if: runner.os == 'macOS'
+        working-directory: desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="target/release/bundle/macos/Avibe.app"
+          executable="$(plutil -extract CFBundleExecutable raw -o - "$app/Contents/Info.plist")"
+          binary="$app/Contents/MacOS/$executable"
+          [ -x "$binary" ] || {
+            echo "Avibe executable not found at $binary" >&2
+            exit 1
+          }
+          launch_log="$RUNNER_TEMP/avibe-desktop-launch.log"
+          smoke_home="$(mktemp -d)"
+          mkdir -p "$smoke_home/tmp"
+          HOME="$smoke_home" TMPDIR="$smoke_home/tmp" "$binary" >"$launch_log" 2>&1 &
+          app_pid=$!
+          cleanup() {
+            if kill -0 "$app_pid" 2>/dev/null; then
+              kill "$app_pid" 2>/dev/null || true
+            fi
+            for _ in $(seq 1 5); do
+              if ! kill -0 "$app_pid" 2>/dev/null; then
+                break
+              fi
+              sleep 1
+            done
+            if kill -0 "$app_pid" 2>/dev/null; then
+              kill -KILL "$app_pid" 2>/dev/null || true
+            fi
+            wait "$app_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          for _ in $(seq 1 10); do
+            if ! kill -0 "$app_pid" 2>/dev/null; then
+              wait "$app_pid" || status=$?
+              cat "$launch_log"
+              echo "Avibe exited during the launch smoke test (status ${status:-0})" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          if grep -Eiq 'panicked at|there is no reactor running|fatal runtime error' "$launch_log"; then
+            cat "$launch_log"
+            echo "Avibe logged a panic during the launch smoke test" >&2
+            exit 1
+          fi
+
+          cleanup
+          trap - EXIT
 
       - name: Create headless-safe DMG
         if: runner.os == 'macOS'

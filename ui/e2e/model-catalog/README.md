@@ -1,7 +1,9 @@
 # Model Catalog Interaction Regression
 
 Run `npm run test:model-catalog` from `ui/` after installing the pinned Chromium
-binary with `npx playwright install chromium`. CI runs this in `ui-checks`.
+binary with `npx playwright install chromium`. PR `lint` intentionally does not run
+this suite. GitHub runs it in the daily/manual
+`.github/workflows/model-hub-ui-regression.yml` workflow instead.
 The suite follows the existing
 isolated UI fixture pattern and never starts or contacts Avibe or a backend CLI.
 Only `modelsApi` is replaced with in-memory reads/writes. The catalog, picker,
@@ -26,8 +28,8 @@ contracts remain covered by their existing tests; this is not live acceptance.
 
 The live `playwright.config.ts` excludes this fixture directory. The consuming
 `scripts/modelCatalogDiscovery.test.mjs` checks both real configs with `--list`:
-live discovery excludes the fixture, while isolated discovery retains the original
-36 catalog scenarios and discovers every fixture spec on desktop and mobile.
+live discovery excludes the fixture, while isolated discovery finds every fixture
+spec on desktop and mobile.
 Collection starts no browser, web server or fixture.
 
 `gateway-status.spec.ts` consumes `MH-GATEWAY-STATUS-001`. It renders the real

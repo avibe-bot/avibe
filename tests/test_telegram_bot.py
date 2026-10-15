@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import aiohttp
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -30,6 +31,21 @@ from config.v2_config import TelegramConfig
 
 # The settings handler lists routing backends in catalog order, the built-in backend first.
 ROUTING_BACKENDS = list(AGENT_BACKENDS)
+
+
+@pytest.fixture(autouse=True)
+def _telegram_api_unreachable(monkeypatch):
+    """Every Bot API call ends in ``telegram_api.call_api``, which posts to api.telegram.org.
+
+    A test that expects a call stubs that call; any other one fails the way it does
+    offline, such as the command-menu sync a started bot runs or the cleanup of an
+    interaction message.
+    """
+
+    async def unreachable(_bot_token, method, *_args, **_kwargs):
+        raise aiohttp.ClientConnectionError(f"tests do not reach api.telegram.org ({method})")
+
+    monkeypatch.setattr(telegram_api, "call_api", unreachable)
 
 
 @pytest.fixture(autouse=True)

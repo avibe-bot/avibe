@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import os
+import shutil
 import sys
 from pathlib import Path
 
 import pytest
 
+from config import paths
 from core import command_runner, watch_worker
 from core.command_runner import (
     STREAM_TRUNCATION_MARKER,
@@ -386,15 +389,40 @@ async def test_spawn_uses_the_stable_supervisor_entrypoint(tmp_path: Path, monke
     )
 
     assert result.exit_code == 0
-    assert captured["args"] == (
-        os.path.abspath(sys.executable),
-        str(Path(watch_worker.__file__).resolve()),
-    )
+    executable, supervisor = captured["args"]
+    assert executable == os.path.abspath(sys.executable)
+    # The runner's own copy of the supervisor, outside the installed package.
+    assert Path(supervisor).is_relative_to(paths.get_runtime_dir())
+    assert Path(supervisor).read_bytes() == Path(watch_worker.__file__).read_bytes()
     kwargs = captured["kwargs"]
     assert kwargs["cwd"] == str(tmp_path)
     assert kwargs["stdin"] == asyncio.subprocess.PIPE
     assert kwargs["stdout"] == asyncio.subprocess.PIPE
     assert kwargs["stderr"] == asyncio.subprocess.PIPE
+
+
+async def test_runner_starts_the_supervisor_it_imported_after_an_upgrade_replaces_the_installed_one(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An upgrade installs its files before the service restarts. Until then the running runner speaks its own
+    supervisor's protocol, so it must not start the newer supervisor that the install now holds."""
+    installed = tmp_path / "watch_worker.py"
+    shutil.copyfile(watch_worker.__file__, installed)
+    monkeypatch.setattr(watch_worker, "__file__", str(installed))
+    spec = importlib.util.spec_from_file_location("avibe_installed_command_runner", command_runner.__file__)
+    runner = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, runner)
+    spec.loader.exec_module(runner)  # the service imports the runner
+    installed.write_text("import sys\nsys.exit('a newer version, whose protocol this runner does not speak')\n")
+
+    result = await runner.run_supervised_command(
+        command=[sys.executable, "-c", "print('ran')"],
+        cwd=str(tmp_path),
+        timeout_seconds=10,
+        label="test upgrade",
+    )
+
+    assert (result.exit_code, result.stdout.strip(), result.stderr) == (0, "ran", "")
 
 
 async def test_spawn_can_discard_supervisor_stderr(tmp_path: Path, monkeypatch) -> None:

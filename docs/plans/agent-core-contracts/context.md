@@ -1,16 +1,18 @@
 # C-9 Context management
 
-Frozen 2026-10-04 by owner decision; amended 2026-10-12 by owner decision (the estimate of opaque reasoning payloads
-and the anchor's validity, §2; the cache lifetime per route, §3). The `harness` owns the rules
-(`core/agent_core/harness/context.py`, `projection.py`); the loop applies them before every model request
-(`core/agent_core/agent/loop.py`); the adapter supplies the Session-specific parts (§9). Row shapes:
-[`transcript-rows.schema.json`](transcript-rows.schema.json); events:
+Frozen 2026-10-04 by owner decision; amended 2026-10-13 by owner decision (the estimate of opaque reasoning payloads
+and the anchor's validity, §2; the cache lifetime per route, §3; the checkpoint request's output budget, §1 and §6);
+amended 2026-10-15 by owner decision (the threshold stays below the route's context price step, §1).
+The `harness` owns the rules (`core/agent_core/harness/context.py`, `projection.py`); the loop applies them before
+every model request (`core/agent_core/agent/loop.py`); the adapter supplies the Session-specific parts (§9). Row
+shapes: [`transcript-rows.schema.json`](transcript-rows.schema.json); events:
 [`agent-event.schema.json`](agent-event.schema.json).
 
 Three tiers, cheapest first:
 
 1. **Output governance at write time** (C-7): no tool result exceeds 2,000 lines / 50 KB.
-2. **Clearing old tool results**, recorded as `context_edit` rows (§4). On by default.
+2. **Optional clearing of old tool results**, recorded as `context_edit` rows (§4). Off by default; an adapter may
+   enable it for evaluation or rollout.
 3. **Checkpoint**, recorded as a `context_compaction` row, written by the model in a forked request (§5–§7).
 
 Compaction and clearing only append rows; they never rewrite or delete one. A fork anchored before a checkpoint
@@ -20,7 +22,7 @@ projects the full original context (C-5 §4).
 
 The hop capabilities Model Hub returns for the route resolved for the request (C-6) give the limits. `O` is set
 when the request is built, as its `max_tokens` (`output_tokens()`, `checkpoint_max_tokens()`). One pure function,
-`harness/context.budget(request, capabilities, transcript, anchor)`, derives `W, L_in, M, T, keep` and the request's
+`harness/context.budget(request, capabilities, transcript, anchor)`, derives `W, L_in, M, P, T, keep` and the request's
 `est` (§2) and reads `O` from the request, once per request (§10, invariant 1). No state keeps these values between
 requests, so a route change is picked up at once; a smaller window than expected is handled by the overflow path
 (§8). Every fit decision is `budget()` on a request actually composed (§10, invariant 1), including the two the
@@ -30,9 +32,10 @@ stage only considers: the fork it would send first, and the minimal request of t
 W    = context_window                              (128,000 when unknown)
 L_in = input_limit                                 (W when unknown)
 O    = the request's max_tokens: for a conversation request max_output_tokens (8,192 when unknown), capped by the
-       Agent's output budget; for a checkpoint request min(16,000, that)
+       Agent's output budget; for a checkpoint request min(64,000, that)
 M    = min(max(8,000, ceil(0.03 * W)), floor(W / 8))
-T    = min(L_in - O - M, floor(0.9 * W))           the compaction threshold
+P    = the smallest context_price_steps size of at least 100,000 and below W   (none when there is none)
+T    = min(L_in - O - M, floor(0.9 * W), floor(0.9 * P))     the compaction threshold; without P, the first two
 keep = min(20,000, floor(0.25 * T))                the verbatim tail of a normal checkpoint
 ```
 
@@ -43,8 +46,24 @@ be sent), and 296 more would leave `T < 0.25 * W`. The adapter therefore asks fo
 `min(max_output_tokens, floor(W / 4))` on every hop it resolves (a retry's fallback included), the maximum 8,192 when
 unknown, so the output never takes more than a quarter of any window; the limits themselves still come from Model
 Hub. `M` is at most an eighth of the window, so with `O <= W / 4` the threshold stays positive on every window:
-`T >= 0.625 * W` (with `L_in = W`). Windows of 64,000 tokens and more are unchanged (`M = max(8,000, 3% W)`); on an
-8,000-token route `O = 2,000`, `M = 1,000`, and `T = 5,000`.
+`T >= 0.625 * W` (with `L_in = W`), and `T >= min(0.625 * W, 90,000)` with a price step `P` (below). Windows of
+64,000 tokens and more are unchanged (`M = max(8,000, 3% W)`); on an 8,000-token route `O = 2,000`, `M = 1,000`, and
+`T = 5,000`.
+
+`P` is where the route's price steps up. `context_price_steps` (C-6) lists the input sizes past which the target
+model's list price rises, from Model Hub's price table (the user's override file, then models.dev's first-party
+`cost.tiers`). Past 272,000 input tokens, OpenAI's GPT-5.4 and later models bill the whole request at twice the input
+and cache rates and 1.5 times the output, on a 1,050,000-token window; Gemini and Grok models step at 200,000. A long
+request is slower as well: on the gpt-6-astra Sessions recorded from 2026-10-10 to 2026-10-15, with about the same
+output, the median request took 23 s under 100,000 tokens, 43 s at 200,000 to 300,000, and 78 s past 800,000, and
+65% of the requests were past the step (86% of their input tokens) at `T = 890,500`. Replaying those requests with
+`T = 244,800` costs about a quarter at list price, checkpoints included, with 126 checkpoints instead of 9. So
+`T` stays a tenth below the step, the window's ratio: the tenth leaves room for one tool batch and the checkpoint
+request, so the checkpoint is written below the step too. A step under 100,000 tokens is not kept below: a
+checkpoint's own context (system prompt, tools, checkpoint, `keep`) is some 30,000 tokens, so a lower threshold would
+compact almost every request, and a dearer step above it still counts. A step at or past the window cannot lower
+`T` and is ignored without arithmetic, whatever size a hand-edited price names. The step is the model's list price whatever
+the Source bills (a subscription's request is as slow). With no price, or a flat one, `T` is as before.
 
 A conversation request **fits** when `est + O + M <= L_in`, where `est` is its estimate (§2); `M` absorbs the
 estimate's error. A request **can fit** when `est + O <= L_in`. A checkpoint request (§6) is sent only when it can
@@ -113,9 +132,9 @@ before a retry alike:
    to its own tool results (§6), one helper for both. The run continues and compacts as usual. A batch that does not
    fit even with every result cut to its note, or a last unit that is an input, stops the run: the provider never
    sees the request. A batch that fits once the conversation moves out is never cut; the ladder makes room for it.
-2. **Clear** (§4) when the provider cache is cold (the request's route has not used it for longer than its
-   lifetime, below; after a restart, measured from the response rows' `created_at`) or `est >= 0.8 * T`, which does
-   not depend on the lifetime.
+2. **Clear**, when enabled (§4), if the provider cache is cold (the request's route has not used it for longer than
+   its lifetime, below; after a restart, measured from the response rows' `created_at`) or `est >= 0.8 * T`, which
+   does not depend on the lifetime.
 3. **Checkpoint** when `est >= T`, the run has not stopped compacting (§10), and there is something to summarize,
    at most once per model request: a normal checkpoint (§6, reason `threshold`) when the fork it would send can fit,
    otherwise the overflow ladder from (b) (§8, reason `overflow`). A checkpoint request that overflows continues at
@@ -151,9 +170,15 @@ content is committed as a non-final response, and the run ends `context_exhauste
 requests (§6) never run this stage (no clearing, checkpoint, or ladder; one compaction is in flight per Session);
 each is sent only when it can fit.
 
-## 4. Clearing old tool results
+## 4. Optional clearing of old tool results
 
-- Eligible: results of `read` and `bash` in the projected context (terminal screen snapshots join when they exist).
+This policy is disabled by default. When disabled, no new `clear_old_tool_result` rows are written; the normal
+`fit_tool_result` edits for a newest batch that cannot fit, checkpoints, and overflow ladder remain active. Existing
+`clear_old_tool_result` rows continue to project as recorded, so disabling the policy never changes already persisted
+Sessions.
+
+- Eligible when enabled: results of `read` and `bash` in the projected context (terminal screen snapshots join when
+  they exist).
 - Protected: results after the second-latest input (the last 2 user turns; with fewer than 2 inputs since the latest
   checkpoint, all of them), the newest 5 eligible results, and results already cleared (a result cut to fit, §3, can
   still be cleared). A skill load clears like any
@@ -199,7 +224,13 @@ A checkpoint is written by a **side turn** of the conversation (C-10 `fork.md` �
 - The request uses the same hop, system prompt, tool definitions, tool choice, and reasoning settings as the
   conversation's next request, and its messages begin with the conversation's projected messages unchanged, so its
   prefix is byte-identical to the previous request's and a warm provider cache hits. Tool choice, thinking, and
-  effort are never changed: Anthropic renders them into the prompt. `max_tokens = min(16,000, O)`.
+  effort are never changed: Anthropic renders them into the prompt. `max_tokens = min(64,000, O)`. It bounds the
+  reasoning as well as the checkpoint text, and a length stop fails the turn (below). Three checkpoints measured at
+  `xhigh` effort on 246,000 to 307,000-token contexts wrote 9,200 to 10,600 tokens of checkpoint text, and 11,552 to
+  20,644 tokens of output with their reasoning. Reasoning varied from 2,070 to 10,018 tokens and may grow with the
+  context; a checkpoint near `T` on a 1,000,000-token window reads about three times those contexts. Output is billed
+  as produced, so an unused budget costs nothing, and `T` already reserves `O` (§1), so the request can fit at
+  `est = T`.
 - **Normal**: the prefix is the whole projected conversation. **Rolling**: the prefix is the projected context up to
   the cut, which is a prefix of the original request.
 - One user message is appended: the checkpoint request (§11). It takes the user role, but it comes from the harness,
@@ -224,9 +255,9 @@ below, and the budget's 5 rounds, 4,000-token floor, and 1,000-token slack; C-10
   unavailable. Write the checkpoint as your reply text, not into a file.` (a model denied a file write may otherwise
   keep trying one; the owner-approved request, §11, stays untouched).
 - Every request of the turn is budgeted on the route resolved for it (§1): its `max_tokens` is that route's
-  `min(16,000, O)`.
+  `min(64,000, O)`.
 - The bound is the window, not `T`, the same way in threshold and rolling turns. Before each call,
-  `room = L_in - est - min(16,000, O) - reserved`, where `est` is the budget of the turn's latest request plus the
+  `room = L_in - est - min(64,000, O) - reserved`, where `est` is the budget of the turn's latest request plus the
   tokens of the response and results since, and `reserved` is one fixed-text result (the longer of the two below)
   for each later call of the same response, so every result of the batch is accounted for before it exists. This is
   the one bound that extends the latest request's budget by arithmetic (§10, invariant 1). A call runs only while

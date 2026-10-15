@@ -10,6 +10,10 @@ adapter remain C-8 work.
 returns the serialized `HopResolution` in `hop-resolution.schema.json`. It calls
 the existing `resolve("vibey", ...)`; `ModelHubLaunch.to_hop_resolution()` projects
 that launch. There is no second planner, credential store, or upstream client.
+Its `capabilities.context_price_steps` are where the target model's list price
+rises with its context (`pricing.context_price_steps`), read from the price table
+the usage writer already holds, so resolution does no I/O for them; a hop
+resolved before the first table is read reports none.
 
 The backend id is `vibey`. It has a fixed catalog (ordinary editable model rows),
 no native protocol pin, no native CLI, and no Direct mode. Until its starting
@@ -25,8 +29,24 @@ subscription joins it whether or not a starting model matches, ahead of the API
 keys), and its catalog becomes the models the built-in
 Claude, Codex, and OpenCode Agents run, in that order, that one of those Sources
 lists, deduplicated and added as the picker adds a provider model (models.dev
-metadata included). None qualifying leaves the catalog empty; no model is picked
-on the user's behalf. A Vibey Agent without a model cannot run a turn, so the
+metadata included). A selection that models.dev explicitly describes as taking
+no tool calls, or as taking or producing no text, does not qualify; one it does not know still
+does, being a person's own choice for a native Agent. With none qualifying, the
+seed starts Vibey on one model, so a new install's default Agent can run once
+setup places a Source. That model is the
+first one, in Vibey's Source order and then each Source's own non-retired
+inventory order, that models.dev describes, by the picker's exact match, as
+taking text and tool calls and producing text. A model models.dev does not know is never
+guessed at: with none described that way, the catalog stays empty and the setup
+card offers the pick. A Vibey left with nothing to run on is healed by the
+snapshot reconcile that also backfills MH-LIMITS-001, which runs when a copy
+arrives and on the controller's cadence, and at every start, so a Vibey an earlier
+build seeded empty starts on the first upgraded start. While Vibey's catalog is empty, records
+no removal, and its built-in Agent has no model, it starts on the same rule's
+model, whether a new copy or a later Source made one describable. Nothing was
+ever chosen for that Vibey, so this is its start, not a re-seed. An Agent that
+has a model, or a list a person emptied, is that person's choice and is never
+overridden. A Vibey Agent without a model cannot run a turn, so the
 built-in one takes its catalog's first model while it has none: one controller
 rule, decided under the Agent store's write lock so a chosen model stands, run
 on every Vibey catalog change (`_refresh_backend_catalog`, which each seed also
@@ -86,8 +106,14 @@ travels as in-memory request metadata, never as upstream JSON or a caller-suppli
 header. Each revalidated Vibey attempt compares its admitted origin against that
 original primary, including fallback, credential refresh, and recovery walks.
 
-If any origin component differs, or the primary origin cannot be verified, the
-gateway strips opaque history **before engine invocation and protocol conversion**:
+If any origin component differs, the serving Source or its identity differs
+from the primary's, or the primary origin cannot be verified, the gateway strips
+opaque history **before engine invocation and protocol conversion**. Opaque
+payloads are bound to the account that issued them: a provider refuses another
+account's ciphertext. The serving identity (`identity_digest`) is read on the
+final admission snapshot, so a key rotated while the engine was prepared counts.
+The launch identity rides only on the in-memory primary origin, never in the
+served-hop header, `HopOrigin.payload()`, or persisted provenance.
 
 - Block `signature`, `thoughtSignature`, `thought_signature`, and encrypted
   reasoning payloads are removed, including protocol-owned tool-call extensions.
@@ -97,10 +123,13 @@ gateway strips opaque history **before engine invocation and protocol conversion
 - Tool ids, arguments, results, and unrelated request options remain unchanged.
   A tool argument named `signature` is user data, not protocol metadata.
 
-Same-origin fallback, even on another Source, retains the original history. Each
-attempt gets its own cleaned history; cleaning never mutates the original request
-that a later same-origin attempt might reuse. Native callers retain their existing
-history behavior.
+A retry on the primary Source under its launch identity retains the original
+history; a fallback to another Source of the same origin does not. A pinned
+request is never rewritten: one pinned to the primary hop whose identity changed
+since the launch answers `pin_unavailable`, and Vibey renders it again
+portably. Each attempt gets its own cleaned history; cleaning never mutates the
+original request that a later attempt might reuse. Native callers retain their
+existing history behavior.
 
 After a request completes, the consumer may resolve the **same catalog alias and
 turn** again to obtain a different primary hop. The existing turn keeps its attempt
@@ -136,14 +165,17 @@ Every Vibey model response that the gateway serves carries the response header
 `x-avibe-served-hop`. Its value is compact ASCII-escaped JSON:
 
 ```json
-{"provider":"openai","api":"openai_responses","model":"upstream-model"}
+{"provider":"openai","api":"openai_responses","model":"upstream-model","source":"src_relay9c1x"}
 ```
 
-The exact object is `hop-origin.schema.json`. The provider and protocol are
-captured from the Source snapshot used at attempt admission, and the model is the
-configured upstream target of that attempt. The same immutable `HopOrigin` travels
-with `ResolvedInvocation` and the request's `AttemptIdentity`; successful settlement
-stores it as the required `TurnProvenance.served.origin` for Vibey. Historical and
+The exact object is `served-hop.schema.json`: exactly `provider`, `api`, `model`
+and `source`, since contract v12. The provider and protocol are captured from the
+Source snapshot used at attempt admission, the model is the configured upstream
+target of that attempt, and `source` is that Source's id, because two Sources can
+share an origin. The same immutable `HopOrigin` travels with `ResolvedInvocation`
+and the request's `AttemptIdentity`; successful settlement stores its `provider`,
+`api` and `model` (`hop-origin.schema.json`) as the required
+`TurnProvenance.served.origin` for Vibey, beside the attempt's `source_id`. Historical and
 native records may omit origin; Vibey has no pre-v11 historical record.
 Failed/canceled attempts can also retain that snapshot, without implying success.
 For a turn making several model requests, each response header names its own
@@ -198,6 +230,10 @@ The header needs no upstream credentials and is never forwarded upstream.
 - Starting supply (MH-VIBEY-007): an unrelated write keeps the unseeded row absent;
   the seed places existing Sources for Vibey alone and keeps only routable Agent
   models; a second start leaves the persisted row, including removed Sources, alone.
+  With no qualifying selection, the seed starts Vibey on the first listed model
+  models.dev describes as tool-capable with text output; a selection models.dev
+  rules out does not start it; nothing describable leaves the catalog empty, and
+  a copy that arrives later starts it unless its built-in Agent already has a model.
 - Real loopback gateway requests through the existing service, with hermetic engine
   fixtures: primary protocol resolution, cross-protocol failover, non-ASCII origin,
   slow Anthropic resolution, buffered/streamed bodies, and concurrent requests.

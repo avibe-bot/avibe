@@ -42,7 +42,7 @@ from core.handlers.model_hub.classification import (
     terminal_outcome_category,
 )
 from core.handlers.model_hub.errors import ModelDiscoveryError
-from core.handlers.model_hub.events import redact_untrusted_text
+from core.handlers.model_hub.events import bounded_diagnostic_detail, redact_untrusted_text
 from core.handlers.model_hub.request import ModelHubRequest
 from core.handlers.model_hub.stream_wire import (
     ProtocolObservation,
@@ -56,7 +56,7 @@ from vibe.model_hub_runtime import supervisor as supervisor_module
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
 from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_catalog, official_models_dev_provider
 from vibe.model_hub_runtime.client import EngineClient, EngineClientError, EngineConnection
-from vibe.model_hub_runtime.config import write_engine_config
+from vibe.model_hub_runtime.config import expected_model_names, write_engine_config
 from vibe.model_hub_runtime.environment import engine_subprocess_environment
 from vibe.model_hub_runtime.installer import (
     EngineRuntimeManager,
@@ -529,6 +529,9 @@ def test_supervisor_records_health_transitions_without_repeating_or_leaking_erro
         for _ in range(2):
             assert supervisor.status()["status"]["health"] == "ok"
         failure[0] = EngineClientError("private-body", error_type="TimeoutError")
+        # A passed check vouches for the engine until it expires.
+        assert supervisor.status()["status"]["health"] == "ok"
+        supervisor._verified_at -= supervisor_module.MODEL_HUB_HEALTH_TTL_SECONDS
         assert supervisor.status()["status"]["health"] == "degraded"
 
     messages = [record.getMessage() for record in caplog.records]
@@ -899,39 +902,39 @@ def test_packaged_manifest_matches_frozen_runtime_dependency_values(
         "assets": [
             {
                 "platform": "darwin-arm64",
-                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.23-2/CLIProxyAPI_8.0.23_darwin_aarch64.tar.gz",
-                "size_bytes": 40514706,
-                "sha256": "db6e2e1622a066c1f407dd2c5ce0d2676cdf81b713dbf84f2afd48768015e360",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.23-3/CLIProxyAPI_8.0.23_darwin_aarch64.tar.gz",
+                "size_bytes": 40525867,
+                "sha256": "094d9fdf61d2de655bd9206190b3688fc0c22d6ef2cda09716c9b004bc15b80d",
             },
             {
                 "platform": "darwin-x64",
-                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.23-2/CLIProxyAPI_8.0.23_darwin_amd64.tar.gz",
-                "size_bytes": 42974424,
-                "sha256": "defbe2074ea70f578db2f0ddaa436327cc2b434730df75e01f5f8dcfecfea6cd",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.23-3/CLIProxyAPI_8.0.23_darwin_amd64.tar.gz",
+                "size_bytes": 42988519,
+                "sha256": "4d4f5c754219cf4173254e98fc8d573fea11cb425b883daeae56d57f0a6e89e4",
             },
             {
                 "platform": "linux-amd64",
-                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.23-2/CLIProxyAPI_8.0.23_linux_amd64.tar.gz",
-                "size_bytes": 40932273,
-                "sha256": "254b71f4c72b6b56766fd5625b7d16356cd9cc389f5cd35ef24c0470c937fd8f",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.23-3/CLIProxyAPI_8.0.23_linux_amd64.tar.gz",
+                "size_bytes": 40946469,
+                "sha256": "3733df8472813f74530ce7a739a3ebcd091db9c16de815e016ed0de537a2e1c6",
             },
             {
                 "platform": "linux-arm64",
-                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.23-2/CLIProxyAPI_8.0.23_linux_aarch64.tar.gz",
-                "size_bytes": 37547515,
-                "sha256": "4d89ec9733c3953243fd852d509bb913a782eb2bedf6ba81b0347bb5e998bf39",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.23-3/CLIProxyAPI_8.0.23_linux_aarch64.tar.gz",
+                "size_bytes": 37556916,
+                "sha256": "0ee21fcb4d7316ebce4a46739df75f83bcd8369b3757e5b539d0080477d396a5",
             },
             {
                 "platform": "windows-amd64",
-                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.23-2/CLIProxyAPI_8.0.23_windows_amd64.tar.gz",
-                "size_bytes": 41444643,
-                "sha256": "3eab3dbb539d5c88ae78231de92ceff33988ab847c1e67f282599b98022b7d77",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.23-3/CLIProxyAPI_8.0.23_windows_amd64.tar.gz",
+                "size_bytes": 41463417,
+                "sha256": "543497b874e9370c85967fd3b5688dbf582cd454b074993af11a90ce41c9c501",
             },
             {
                 "platform": "windows-arm64",
-                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.23-2/CLIProxyAPI_8.0.23_windows_aarch64.tar.gz",
-                "size_bytes": 37803292,
-                "sha256": "95e31d67a229908d7ce52da2cf1e1b54fa70201a14a040945cee9a021ac2d719",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.23-3/CLIProxyAPI_8.0.23_windows_aarch64.tar.gz",
+                "size_bytes": 37817697,
+                "sha256": "cde450406bc9cbe8a19cb71e75ee959e387abee0173b97700481e0cb289018fc",
             },
         ],
     }
@@ -1346,7 +1349,7 @@ def test_manifest_resolution_drives_admission_persistence_and_schema(
         installer=manager,
         state_store=EngineStateStore(tmp_path / "state"),
     )
-    projected = {"contract_version": 11, **supervisor.status()}
+    projected = {"contract_version": 15, **supervisor.status()}
     schema = json.loads(
         Path("docs/plans/model-hub-contracts/runtime-dependency.schema.json").read_text(
             encoding="utf-8"
@@ -1434,45 +1437,45 @@ def test_installing_projection_matches_live_owner_or_resumable_claim(
                 "darwin-arm64",
                 False,
                 "darwin-arm64",
-                40514706,
-                "db6e2e1622a066c1f407dd2c5ce0d2676cdf81b713dbf84f2afd48768015e360",
-                "6a908bde31115b913b5c71a2f149805f8a976025459950ff6e8f6f0eb05767e4",
+                40525867,
+                "094d9fdf61d2de655bd9206190b3688fc0c22d6ef2cda09716c9b004bc15b80d",
+                "8a58f862e5a881c58f05aa8bd379418ebca442d0ec1445002c8248d4cf8460a9",
                 "cli-proxy-api",
             ),
             (
                 "darwin-x64",
                 False,
                 "darwin-x64",
-                42974424,
-                "defbe2074ea70f578db2f0ddaa436327cc2b434730df75e01f5f8dcfecfea6cd",
-                "569b1bb7e4a6d698dda66337ba4ae47e4b3ec2662466b7cdceb98bebd63a5e3a",
+                42988519,
+                "4d4f5c754219cf4173254e98fc8d573fea11cb425b883daeae56d57f0a6e89e4",
+                "86870b2e96319b421949d1933f10010a8a7c11c1ba787d9d1bcf08a5e00e0f77",
                 "cli-proxy-api",
             ),
             (
                 "linux-x64",
                 False,
                 "linux-amd64",
-                40932273,
-                "254b71f4c72b6b56766fd5625b7d16356cd9cc389f5cd35ef24c0470c937fd8f",
-                "197eec804e0be5264ad5e75a8c1552e601de456d9296cb1ec2e0ac6f6f16f89b",
+                40946469,
+                "3733df8472813f74530ce7a739a3ebcd091db9c16de815e016ed0de537a2e1c6",
+                "2cbf349b79a3026cce551c65df103cf67a0878ad1c195e5087f2c4fab189cc77",
                 "cli-proxy-api",
             ),
             (
                 "linux-arm64",
                 False,
                 "linux-arm64",
-                37547515,
-                "4d89ec9733c3953243fd852d509bb913a782eb2bedf6ba81b0347bb5e998bf39",
-                "e824efc5b7dface33993fd2d2634e8c3243feafc2f56a6e220fb7aef2f24419f",
+                37556916,
+                "0ee21fcb4d7316ebce4a46739df75f83bcd8369b3757e5b539d0080477d396a5",
+                "9c968a791a9fda4f48193fafaf5ae9dc87680225c9697e2a06ba0a94ec42e2e9",
                 "cli-proxy-api",
             ),
             (
                 "win32-x64",
                 False,
                 "windows-amd64",
-                41444643,
-                "3eab3dbb539d5c88ae78231de92ceff33988ab847c1e67f282599b98022b7d77",
-                "5fc8d17e4a63e996de1de59324dcb016b994442d9efca95ad52f00aa2f32b98f",
+                41463417,
+                "543497b874e9370c85967fd3b5688dbf582cd454b074993af11a90ce41c9c501",
+                "baea8d2f7a0ae9589552f5c98033d47b1710010bfc8ed16a039c237b7292db7e",
                 "cli-proxy-api.exe",
             ),
             # x64 Python on Windows on Arm still gets the native engine.
@@ -1480,18 +1483,18 @@ def test_installing_projection_matches_live_owner_or_resumable_claim(
                 "win32-x64",
                 True,
                 "windows-arm64",
-                37803292,
-                "95e31d67a229908d7ce52da2cf1e1b54fa70201a14a040945cee9a021ac2d719",
-                "6bb5c1dde91a272da2f517f2f987bebfa5e82e9193b0636824d4164631ec10e2",
+                37817697,
+                "cde450406bc9cbe8a19cb71e75ee959e387abee0173b97700481e0cb289018fc",
+                "ce589b8ff37d38c1da86847977692c2a21a342ac8391d749c2cf9adb9444844e",
                 "cli-proxy-api.exe",
             ),
             (
                 "win32-arm64",
                 True,
                 "windows-arm64",
-                37803292,
-                "95e31d67a229908d7ce52da2cf1e1b54fa70201a14a040945cee9a021ac2d719",
-                "6bb5c1dde91a272da2f517f2f987bebfa5e82e9193b0636824d4164631ec10e2",
+                37817697,
+                "cde450406bc9cbe8a19cb71e75ee959e387abee0173b97700481e0cb289018fc",
+                "ce589b8ff37d38c1da86847977692c2a21a342ac8391d749c2cf9adb9444844e",
                 "cli-proxy-api.exe",
             ),
     ],
@@ -1699,7 +1702,9 @@ def test_config_generation_is_private_and_never_logs_secrets(
             "alias": "model-a",
             "display-name": "model-a #0",
             "thinking": {"levels": ["high", "low"]},
-        }
+        },
+        # An OpenAI key's engine entry registers the vendor's image models too (vibey-hosted-tools.md §7.4).
+        {"name": "gpt-image-2", "alias": "gpt-image-2", "display-name": "gpt-image-2 #0"},
     ]
     assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
     assert stat.S_IMODE(store.auth_dir.stat().st_mode) == 0o700
@@ -1787,9 +1792,50 @@ def test_engine_config_declares_text_only_input_only_on_openai_compatibility_mod
     ]
     for key in ("codex-api-key", "claude-api-key"):
         [entry] = payload[key]
-        assert entry["models"] == [
-            {"name": "text-model", "alias": "text-model", "display-name": "text-model #0"}
-        ]
+        assert entry["models"][0] == {"name": "text-model", "alias": "text-model", "display-name": "text-model #0"}
+        assert all("input-modalities" not in model for model in entry["models"])
+
+
+def test_an_api_key_engine_entry_registers_its_vendors_image_models(tmp_path: Path) -> None:
+    """MH-HOSTED-GATEWAY-007: image_generate routes only models the engine registered; an OpenAI-compatible entry
+    serves the images endpoints only for a model it flags, and reload verification expects them all."""
+
+    store = EngineStateStore(tmp_path / "state")
+    instance_dir, runtime_secrets = store.prepare_instance("install-1")
+    refs = {
+        "openai": store.store_api_key("openai-secret", vendor="openai", protocol="openai_responses"),
+        "gemini": store.store_api_key("gemini-secret", vendor="gemini", protocol="openai_chat"),
+        "custom": store.store_api_key("custom-secret", base_url="https://api.example.test/v1"),
+    }
+    store.sync_sources([
+        _binding(refs["openai"], source_id="src_openai0001", vendor="openai", protocol="openai_responses",
+                 base_url=None, model_ids=("gpt-6-astra",)),
+        _binding(refs["gemini"], source_id="src_gemini0001", vendor="gemini", protocol="openai_chat",
+                 base_url=None, model_ids=("gemini-3-flash", "gemini-2.5-flash-image")),
+        _binding(refs["custom"], source_id="src_custom0001", model_ids=("model-a",)),
+    ])
+    config_path = instance_dir / "config.yaml"
+    write_engine_config(
+        config_path, host="127.0.0.1", port=18231, auth_dir=store.auth_dir, runtime_secrets=runtime_secrets,
+        sources=store.list_sources(), state_store=store,
+    )
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+    def models(entry):
+        return {model["name"]: model.get("image") for model in entry["models"]}
+
+    [openai] = payload["codex-api-key"]
+    assert models(openai) == {"gpt-6-astra": None, "gpt-image-2": None}
+    custom, gemini = sorted(payload["openai-compatibility"], key=lambda entry: entry["base-url"])
+    # Listed as a chat model or not, an image model is flagged, and registered once.
+    assert models(gemini) == {
+        "gemini-3-flash": None, "gemini-2.5-flash-image": True, "gemini-3-pro-image-preview": True,
+    }
+    assert models(custom) == {"model-a": None}
+    sources = {source.source_id: source for source in store.list_sources()}
+    expected = expected_model_names(store.list_sources(), store, "0")
+    assert f'{sources["src_openai0001"].prefix}/gpt-image-2' in expected
+    assert f'{sources["src_gemini0001"].prefix}/gemini-3-pro-image-preview' in expected
 
 
 def _rendered_text_only(tmp_path: Path, model_ids: tuple[str, ...], text_only: tuple[str, ...]) -> set[str]:
@@ -1929,6 +1975,8 @@ def test_mixed_anthropic_credentials_disable_cloak_only_for_api_key_entry(
 
     payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert payload["disable-claude-cloak-mode"] is True
+    # The engine forwards declared image tools unchanged and never adds one.
+    assert payload["disable-image-generation"] == "passthrough"
     assert payload["claude-api-key"] == [
         {
             "api-key": "api-key-fixture",
@@ -3178,6 +3226,66 @@ def test_source_sync_waits_for_a_reload_that_removes_every_model(tmp_path: Path)
         supervisor.stop()
 
 
+@pytest.mark.parametrize(
+    ("damage", "error"),
+    [("missing", None), ("corrupt", "JSONDecodeError"), ("non_object", "NonObjectDocument")],
+)
+def test_a_key_replacement_reloads_without_reading_the_old_credential(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, damage: str, error: str | None,
+) -> None:
+    """Replacing the key is how a damaged credential is recovered, so the reload never depends on reading it."""
+
+    supervisor, store = _fixture_supervisor(tmp_path)
+    old_ref = store.store_api_key("old-secret", base_url="https://api.example.test/v1")
+    store.sync_sources([_binding(old_ref)])
+    connection = supervisor.ensure_running()
+    adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)
+    document = store.root / "credentials" / f"{old_ref}.json"
+    try:
+        if damage == "missing":
+            document.unlink()
+        else:
+            document.write_bytes(b"{fixture-corrupt" if damage == "corrupt" else b"[]")
+        new_ref = store.store_api_key("new-secret", base_url="https://api.example.test/v1")
+        with caplog.at_level(logging.WARNING, logger="vibe.model_hub_runtime.supervisor"):
+            asyncio.run(adapter.sync_sources([_binding(new_ref)]))
+        prefix = store.get_source("src_fixture123").prefix
+        assert EngineClient(connection).list_model_ids() == {f"{prefix}/model-a"}
+        warnings = [record.getMessage() for record in caplog.records if "previous credential" in record.getMessage()]
+        assert warnings == ([] if error is None else [
+            f"Model Hub reload cannot read the previous credential of source=src_fixture123 error={error}; "
+            "its removal is awaited by the names its projection routes"
+        ])
+        # Every other reader still refuses the damaged document.
+        if damage != "missing":
+            with pytest.raises(EngineStateError):
+                store.credential_metadata(old_ref)
+    finally:
+        supervisor.stop()
+
+
+def test_removing_a_source_with_an_unreadable_credential_is_confirmed_only_once_its_names_leave(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lost acknowledgment proves nothing: the removed Source's names, read from its projection, must leave."""
+
+    monkeypatch.setattr(supervisor_module, "MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS", 0.5)
+    supervisor, store = _fixture_supervisor(tmp_path, drop_reload_ack=True, reload_delay=30)
+    credential_ref = store.store_api_key("upstream-secret", base_url="https://api.example.test/v1")
+    store.sync_sources([_binding(credential_ref)])
+    connection = supervisor.ensure_running()
+    prefix = store.get_source("src_fixture123").prefix
+    adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)
+    try:
+        (store.root / "credentials" / f"{credential_ref}.json").write_bytes(b"{fixture-corrupt")
+        # The write is neither acknowledged nor applied: the engine still serves the removed Source.
+        with pytest.raises((EngineStateError, EngineUnavailableError)):
+            asyncio.run(adapter.sync_sources([]))
+        assert EngineClient(connection).list_model_ids() == {f"{prefix}/model-a"}
+    finally:
+        supervisor.stop()
+
+
 def test_source_sync_never_restarts_a_live_engine_that_lost_the_reload_ack(tmp_path: Path) -> None:
     supervisor, store = _fixture_supervisor(tmp_path, drop_reload_ack=True)
     credential_ref = store.store_api_key("upstream-secret", base_url="https://api.example.test/v1")
@@ -4025,6 +4133,63 @@ def test_supervisor_starts_checks_health_and_stops_mock_engine(
     assert second.gateway_token == first.gateway_token
     assert second.management_key == first.management_key
     supervisor.stop()
+
+
+def test_a_verified_engine_serves_calls_with_a_liveness_check_until_its_health_check_expires(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supervisor, _store = _fixture_supervisor(tmp_path)
+    checks: list[str] = []
+    real_health = EngineClient.health
+
+    def counted_health(client: EngineClient) -> bool:
+        checks.append(client.connection.base_url)
+        return real_health(client)
+
+    monkeypatch.setattr(EngineClient, "health", counted_health)
+    try:
+        first = supervisor.ensure_running()
+        at_ready = len(checks)
+        for _ in range(20):
+            assert supervisor.ensure_running() is first
+            assert supervisor.status()["status"]["health"] == "ok"
+        assert len(checks) == at_ready
+
+        supervisor._verified_at -= supervisor_module.MODEL_HUB_HEALTH_TTL_SECONDS
+        assert supervisor.ensure_running() is first
+        assert supervisor.ensure_running() is first
+        assert len(checks) == at_ready + 1
+
+        # An engine that exits is found by the next call's liveness check, which starts another.
+        supervisor._process.kill()
+        supervisor._process.wait(timeout=5)
+        assert supervisor.ensure_running() is not first
+    finally:
+        supervisor.stop()
+
+
+def test_a_failed_health_check_is_not_remembered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    installer = SimpleNamespace(
+        status=lambda: {"installed": True, "version": "fixture"},
+        contract_manifest=lambda: {"name": "cliproxyapi", "version": "fixture", "assets": []},
+    )
+    supervisor = EngineSupervisor(installer=installer, state_store=EngineStateStore(tmp_path / "state"))
+    supervisor._process = SimpleNamespace(poll=lambda: None)
+    supervisor._connection = EngineConnection("http://127.0.0.1:15220", "management", "gateway")
+    answers = [False, False, True]
+    checks: list[bool] = []
+
+    def health(_client: EngineClient) -> bool:
+        checks.append(answers[min(len(checks), len(answers) - 1)])
+        return checks[-1]
+
+    monkeypatch.setattr(EngineClient, "health", health)
+
+    healths = [supervisor.status()["status"]["health"] for _ in range(5)]
+
+    assert healths == ["degraded", "degraded", "ok", "ok", "ok"]
+    assert checks == [False, False, True]
+    supervisor._process = None
 
 
 def test_supervisor_disable_restores_explicit_off_state(tmp_path: Path) -> None:
@@ -7437,8 +7602,8 @@ def test_slow_source_prelude_is_bounded_without_blocking_other_routes(
                 return None
 
         class Session:
-            async def post(self, *_args, json=None, **_kwargs):
-                source_id = "src_slow0001" if str(json["model"]).startswith("slow/") else "src_fast0001"
+            async def post(self, *_args, data=None, **_kwargs):
+                source_id = "src_slow0001" if str(json.loads(data)["model"]).startswith("slow/") else "src_fast0001"
                 return Response(source_id)
 
             async def close(self) -> None:
@@ -7842,7 +8007,8 @@ def test_engine_upstream_detail_is_bounded_and_keeps_non_ascii_text() -> None:
     detail = client_module._upstream_error_detail(payload, (("error",),))
 
     assert detail is not None
-    assert len(detail) == client_module._UPSTREAM_DETAIL_CHARS
+    # The persisted contract's bound (turn-provenance.schema.json maxLength).
+    assert len(detail) == 400
     assert detail.startswith("模型不可用") and detail.endswith("…")
 
 
@@ -7862,7 +8028,7 @@ def test_engine_upstream_detail_is_bounded_and_keeps_non_ascii_text() -> None:
     ],
 )
 def test_engine_upstream_detail_redacts_labeled_opaque_secrets(message: str, expected: str) -> None:
-    assert client_module._bounded_upstream_detail(message) == expected
+    assert bounded_diagnostic_detail(message) == expected
 
 
 def test_engine_upstream_detail_redaction_stays_linear_on_hostile_labels() -> None:
@@ -7873,7 +8039,7 @@ def test_engine_upstream_detail_redaction_stays_linear_on_hostile_labels() -> No
 
 
 def test_engine_upstream_detail_cannot_ping_the_channel_it_is_rendered_into() -> None:
-    detail = client_module._bounded_upstream_detail(
+    detail = bounded_diagnostic_detail(
         "ask @everyone or @ops_lead, <@123> <@&456> <!here> <#C1>"
     )
 
@@ -7893,7 +8059,7 @@ def test_engine_upstream_detail_cannot_ping_the_channel_it_is_rendered_into() ->
     ],
 )
 def test_engine_upstream_detail_cannot_hide_a_link_behind_trusted_copy(message: str) -> None:
-    detail = client_module._bounded_upstream_detail(message)
+    detail = bounded_diagnostic_detail(message)
 
     assert detail is not None
     assert "](" not in detail.replace(" ", "")
@@ -7903,7 +8069,7 @@ def test_engine_upstream_detail_cannot_hide_a_link_behind_trusted_copy(message: 
 
 
 def test_engine_upstream_detail_keeps_email_addresses_usable() -> None:
-    assert client_module._bounded_upstream_detail("Contact support@example.com, cc @ops or x@everyone") == (
+    assert bounded_diagnostic_detail("Contact support@example.com, cc @ops or x@everyone") == (
         "Contact support@example.com, cc @\u200bops or x@\u200beveryone"
     )
 
@@ -8053,9 +8219,9 @@ def test_engine_client_preserves_large_valid_responses(
             b'{"output":[{"content":"' + large_value + b'"}]}'
             if not case["stream"]
             else (
-                b"event: response.image_generation_call.partial_image\n"
-                b'data: {"type":"response.image_generation_call.partial_image",'
-                b'"partial_image_b64":"'
+                b"event: response.output_text.delta\n"
+                b'data: {"type":"response.output_text.delta",'
+                b'"delta":"'
                 + large_value
                 + b'"}\n\nevent: response.completed\ndata: {"type":"response.completed"}\n\n'
             )

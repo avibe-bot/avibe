@@ -37,6 +37,10 @@
     {"method": "GET", "path": "/api/models/usage?days=<n>", "response_schema": "UsageResponse", "exercises": [{"path": "/api/models/usage?days=30", "status": 200}, {"path": "/api/models/usage?window=24h", "status": 200}]},
     {"method": "GET", "path": "/api/models/quota", "response_schema": "QuotaResponse", "exercise": {"path": "/api/models/quota", "status": 200}},
     {"method": "POST", "path": "/api/models/quota/refresh", "response_schema": "QuotaResponse", "exercise": {"path": "/api/models/quota/refresh", "status": 200}},
+    {"method": "GET", "path": "/api/models/hosted-tools", "response_schema": "HostedToolsResponse", "exercise": {"path": "/api/models/hosted-tools", "status": 200}},
+    {"method": "PUT", "path": "/api/models/hosted-tools/<tool>", "response_schema": "HostedToolsResponse", "exercise": {"path": "/api/models/hosted-tools/web_search", "status": 200, "json": {"enabled": true, "executor_order": null}}},
+    {"method": "POST", "path": "/api/models/hosted-tools/<tool>/clear", "response_schema": "HostedToolsResponse", "exercise": {"path": "/api/models/hosted-tools/web_search/clear", "status": 200, "json": {"source_id": "src_conform001"}}},
+    {"method": "POST", "path": "/api/models/sources/<source_id>/evidence/clear", "response_schema": "SourceResponse", "exercise": {"path": "/api/models/sources/src_conform001/evidence/clear", "status": 200, "json": {"model_id": "claude-opus-4-6", "feature": {"kind": "effort", "name": "max"}}}},
     {"method": "POST", "path": "/api/models/oauth/start", "response_schema": "OAuthFlowResponse", "exercise": {"path": "/api/models/oauth/start", "status": 200, "json": {"vendor": "anthropic", "channel": "hub"}}},
     {"method": "GET", "path": "/api/models/oauth/status/<flow_id>", "response_schema": "OAuthResultResponse", "exercise": {"path": "/api/models/oauth/status/oaf_00000001", "status": 200}},
     {"method": "POST", "path": "/api/models/oauth/submit", "response_schema": "OAuthResultResponse", "exercise": {"path": "/api/models/oauth/submit", "status": 200, "json": {"flow_id": "oaf_00000001", "value": "contract-code"}}},
@@ -56,7 +60,7 @@
       "required": ["ok", "contract_version", "probe"],
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 11},
+        "contract_version": {"const": 15},
         "probe": {"$ref": "model-hub/source-probe-result.schema.json"}
       }
     },
@@ -155,7 +159,7 @@
     "SuccessCore": {
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 11}
+        "contract_version": {"const": 15}
       }
     },
     "SourceListResponse": {
@@ -164,7 +168,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 11},
+        "contract_version": {"const": 15},
         "sources": {"type": "array", "items": {"$ref": "#/definitions/SourceApi"}}
       }
     },
@@ -174,7 +178,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 11},
+        "contract_version": {"const": 15},
         "observation": {"$ref": "model-hub/observation-result.schema.json"}
       }
     },
@@ -184,7 +188,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 11},
+        "contract_version": {"const": 15},
         "source": {"$ref": "#/definitions/SourceApi"},
         "added_to": {"type": "array", "items": {"$ref": "#/definitions/AddedTo"}},
         "adopted_by": {"type": "array", "items": {"$ref": "#/definitions/AdoptedBy"}, "uniqueItems": true}
@@ -196,7 +200,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 11},
+        "contract_version": {"const": 15},
         "source": {"$ref": "#/definitions/SourceApi"}
       }
     },
@@ -206,7 +210,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 11},
+        "contract_version": {"const": 15},
         "source": {"$ref": "#/definitions/SourceApi"},
         "removed_hops": {"type": "array", "items": {"$ref": "#/definitions/RouteHopRef"}},
         "interrupted": {"type": "array", "items": {"$ref": "#/definitions/SupplyGap"}}
@@ -218,7 +222,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 11},
+        "contract_version": {"const": 15},
         "removed_hops": {"type": "array", "items": {"$ref": "#/definitions/RouteHopRef"}},
         "interrupted": {"type": "array", "items": {"$ref": "#/definitions/SupplyGap"}}
       }
@@ -229,7 +233,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 11},
+        "contract_version": {"const": 15},
         "agents": {"type": "array", "items": {"$ref": "#/definitions/AgentSupplyApi"}}
       }
     },
@@ -239,7 +243,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 11},
+        "contract_version": {"const": 15},
         "agent": {"$ref": "#/definitions/AgentSupplyApi"}
       }
     },
@@ -256,7 +260,7 @@
           ],
           "properties": {
             "ok": {"const": true},
-            "contract_version": {"const": 11},
+            "contract_version": {"const": 15},
             "agent": {"$ref": "#/definitions/AgentSupplyApi"},
             "removed_hops": {"type": "array", "items": {"$ref": "#/definitions/RouteHopRef"}, "uniqueItems": true},
             "interrupted": {"type": "array", "items": {"$ref": "#/definitions/SupplyGap"}, "uniqueItems": true}
@@ -281,7 +285,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": false},
-        "contract_version": {"const": 11},
+        "contract_version": {"const": 15},
         "error": {"const": "candidate_suppliers_changed"},
         "detail": {"type": "string", "minLength": 1},
         "changed": {
@@ -301,7 +305,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 11},
+        "contract_version": {"const": 15},
         "agent": {
           "type": "object",
           "required": ["backend", "mode", "catalog_models"],
@@ -402,7 +406,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 11},
+        "contract_version": {"const": 15},
         "candidates": {
           "type": "object",
           "required": ["builtin", "providers", "in_list"],
@@ -421,7 +425,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 11},
+        "contract_version": {"const": 15},
         "matches": {
           "type": "array",
           "maxItems": 8,
@@ -455,7 +459,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 11},
+        "contract_version": {"const": 15},
         "chain": {"$ref": "model-hub/agent-chain.schema.json"}
       }
     },
@@ -465,7 +469,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 11},
+        "contract_version": {"const": 15},
         "chains": {"type": "array", "items": {"$ref": "model-hub/agent-chain.schema.json"}}
       }
     },
@@ -475,7 +479,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 11},
+        "contract_version": {"const": 15},
         "chain": {"$ref": "model-hub/agent-chain.schema.json"},
         "removed_hops": {"type": "array", "items": {"$ref": "#/definitions/RouteHopRef"}},
         "interrupted": {"type": "array", "items": {"$ref": "#/definitions/SupplyGap"}}
@@ -487,7 +491,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 11},
+        "contract_version": {"const": 15},
         "probe": {"$ref": "model-hub/probe-result.schema.json"}
       }
     },
@@ -497,7 +501,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 11},
+        "contract_version": {"const": 15},
         "events": {"type": "array", "items": {"$ref": "model-hub/resolution-event.schema.json"}}
       }
     },
@@ -507,7 +511,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 11},
+        "contract_version": {"const": 15},
         "usage": {"$ref": "model-hub/usage-summary.schema.json"}
       }
     },
@@ -517,8 +521,18 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 11},
+        "contract_version": {"const": 15},
         "quota": {"$ref": "model-hub/quota-summary.schema.json"}
+      }
+    },
+    "HostedToolsResponse": {
+      "type": "object",
+      "required": ["ok", "contract_version", "hosted_tools"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"const": true},
+        "contract_version": {"const": 15},
+        "hosted_tools": {"$ref": "model-hub/hosted-tools-status.schema.json"}
       }
     },
     "OAuthFlowResponse": {
@@ -527,7 +541,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 11},
+        "contract_version": {"const": 15},
         "flow": {
           "allOf": [
             {"$ref": "model-hub/oauth-flow.schema.json"},
@@ -549,7 +563,7 @@
           "additionalProperties": false,
           "properties": {
             "ok": {"const": true},
-            "contract_version": {"const": 11},
+            "contract_version": {"const": 15},
             "flow": {
               "allOf": [
                 {"$ref": "model-hub/oauth-flow.schema.json"},
@@ -572,7 +586,7 @@
           "additionalProperties": false,
           "properties": {
             "ok": {"const": true},
-            "contract_version": {"const": 11},
+            "contract_version": {"const": 15},
             "flow": {
               "allOf": [
                 {"$ref": "model-hub/oauth-flow.schema.json"},
@@ -597,7 +611,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 11}
+        "contract_version": {"const": 15}
       }
     },
     "RuntimeApi": {
@@ -619,7 +633,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 11},
+        "contract_version": {"const": 15},
         "scan": {"$ref": "model-hub/migration-scan.schema.json"}
       }
     },
@@ -629,7 +643,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 11},
+        "contract_version": {"const": 15},
         "applied": {"type": "integer", "minimum": 0},
         "sources": {"type": "array", "items": {"$ref": "#/definitions/SourceApi"}},
         "added_to": {"type": "array", "items": {"$ref": "#/definitions/AddedTo"}}
@@ -641,7 +655,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 11},
+        "contract_version": {"const": 15},
         "provenance": {"$ref": "model-hub/turn-provenance.schema.json"}
       }
     },
@@ -652,7 +666,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 11},
+        "contract_version": {"const": 15},
         "provenance": {
           "anyOf": [
             {"$ref": "model-hub/turn-provenance.schema.json"},
@@ -667,7 +681,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 11},
+        "contract_version": {"const": 15},
         "runtime": {"$ref": "#/definitions/RuntimeApi"}
       }
     }

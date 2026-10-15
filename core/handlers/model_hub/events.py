@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Optional, TypeAlias, get_args
 
+from core.message_output import plain_untrusted_text
 from vibe.i18n import t as i18n_t
 
 from .state_file import write_state_document
@@ -138,6 +139,28 @@ def redact_untrusted_text(value: str) -> str:
     if match is None:
         return redacted
     return redacted[: match.end()] + "[redacted]"
+
+
+# Upper bound on a failure diagnostic Avibe keeps and shows: an upstream's error
+# message, or a backend's own report of a failed turn.
+_DIAGNOSTIC_DETAIL_CHARS = 400
+# C0/C1 controls and every Unicode Bidi_Control character: either can act on
+# whatever renders the text (a terminal, a log viewer, a browser).
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+
+
+def bounded_diagnostic_detail(message: str) -> str | None:
+    """The display-safe projection of untrusted failure text, or None when it holds nothing."""
+
+    # Control characters (terminal escapes, BEL) would act on whatever renders
+    # the text, a log viewer included; they carry no message content.
+    text = " ".join(_CONTROL_CHARACTERS.sub(" ", message).split())
+    if not text:
+        return None
+    text = plain_untrusted_text(redact_untrusted_text(text))
+    if len(text) > _DIAGNOSTIC_DETAIL_CHARS:
+        text = text[: _DIAGNOSTIC_DETAIL_CHARS - 1].rstrip() + "…"
+    return text
 
 
 def contains_credential_material(value: object) -> bool:

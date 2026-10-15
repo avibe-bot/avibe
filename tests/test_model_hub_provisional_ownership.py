@@ -33,14 +33,13 @@ def _native(monkeypatch, tmp_path, kind):
     return service, store, adapter, path, [rows[0]["id"]]
 
 
-@pytest.mark.parametrize("kind", ["oauth", "api_key", "observation"])
+@pytest.mark.parametrize("kind", ["oauth", "api_key"])
 def test_provision_failure_before_return_keeps_durable_cleanup_owner(monkeypatch, tmp_path, kind):
     service, store, adapter, native, ids = _native(monkeypatch, tmp_path, kind)
     original = native.read_bytes()
     method = {
         "oauth": "provision_oauth_credential",
         "api_key": "provision_credential",
-        "observation": "provision_transient_credential",
     }[kind]
     provision = getattr(adapter, method)
     observed = []
@@ -50,9 +49,7 @@ def test_provision_failure_before_return_keeps_durable_cleanup_owner(monkeypatch
             on_reserved(ref)
             entry, = service.revocations.list()
             assert entry.credential_ref == ref
-            if kind == "observation":
-                assert entry.source_id == "observation"
-            elif kind == "oauth":
+            if kind == "oauth":
                 assert entry.source_id == args[0]
             else:
                 assert entry.source_id.startswith("src_")
@@ -79,7 +76,7 @@ def test_provision_failure_before_return_keeps_durable_cleanup_owner(monkeypatch
     adapter.fail_revoke_refs.clear()
     asyncio.run(recovered._ensure_engine_synced())
     assert recovered.revocations.list() == []
-    assert observed[0].credential_ref in adapter.revoked + adapter.transient_revoked
+    assert observed[0].credential_ref in adapter.revoked
     assert native.read_bytes() == original
 
 

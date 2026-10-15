@@ -626,6 +626,8 @@
       "gatewayOff": "模型网关已关闭，{{name}} 没有可用的模型。",
       "hubDisabled": "模型网关已停用",
       "hubDisabledNotice": "本实例已停用模型网关，{{name}} 没有可用的模型。",
+      "noModelSource": "无模型来源",
+      "noModelSourceNotice": "{{name}} 通过模型网关获取模型，请在「模型」页添加来源。",
       "builtinBadge": "内置",
       "openProviderPage": "配置 Provider",
       "providerOauth": "OAuth(默认)",
@@ -699,6 +701,8 @@
       "oauthStarting": "正在启动 OAuth 流程…",
       "oauthVerifying": "正在验证凭据…",
       "oauthSuccess": "登录成功。",
+      "claudeAuthorizationCompleted": "授权已完成并保存。运行时配置是否应用是另一项状态。",
+      "claudeNativeCredentialsCleared": "已清理本机保存的账号凭据。环境变量和项目中的认证设置未被修改。",
       "oauthFailed": "OAuth 失败：{{detail}}",
       "oauthPollTimedOut": "登录在允许时间内未完成，请重试。",
       "oauthUrlCopied": "链接已复制到剪贴板。",
@@ -971,6 +975,7 @@
         },
         "tab": {
           "hub": "供应商与路由",
+          "tools": "工具",
           "quota": "订阅额度",
           "usage": "用量",
           "logs": "日志"
@@ -1322,7 +1327,11 @@
           "protocol_error": "协议错误",
           "tool_incompatible": "工具不兼容",
           "stream_interrupted": "响应中断",
-          "engine_down": "模型网关不可用"
+          "engine_down": "模型网关不可用",
+          "backend_error": "Agent 后端报告了失败"
+        },
+        "errorKind": {
+          "stalled": "模型请求等待数据超时"
         },
         "origin": {
           "automatic": "自动",
@@ -1963,7 +1972,7 @@
           "native": {
             "label": "由 Agent 管理",
             "desc": {
-              "claude": "Claude Code 直接用这个订阅，凭据只留在本机。"
+              "claude": "本机 Claude Code 管理这份原生登录，凭据保存在它自己的存储中。"
             }
           },
           "hub": {
@@ -2033,6 +2042,7 @@
           "timeout": "授权超时，请重新连接",
           "generic": "连接失败，请重试",
           "finalize": "已完成授权，但创建模型供应商失败，请重试",
+          "nativeApply": "授权和模型供应商配置已保存，但本次未能应用后端配置。请在后端设置中检查并重试应用。",
           "finalizeReauth": "已重新登录，但这个供应商还是不可用，请重试",
           "details": {
             "show": "查看详情",
@@ -2078,7 +2088,7 @@
       "migration": {
         "open": "迁移配置",
         "title": "迁移到模型网关",
-        "subtitle": "导入配置文件、Shell 启动文件或受支持凭据库中已保存的认证。迁移后，助手统一通过模型网关认证：订阅登录转交模型网关托管，API Key 复制导入，原配置默认保留。",
+        "subtitle": "导入配置文件、Shell 启动文件或受支持凭据库中已保存的认证。订阅登录转交模型网关托管；API Key 直接复制导入，原配置默认保留，迁移时不联网校验 Key 或拉取模型列表。Key 是否可用由后续模型调用确认。",
         "cleanApiKeys": "同时清理原生 CLI 中的 API Key 配置",
         "cleanApiKeysHint": "包括 Shell 启动文件和各 CLI 的配置文件。不勾选时这些 Key 保持原样，经模型网关启动的助手不会使用它们。",
         "empty": "没有检测到可迁移的配置。",
@@ -2106,7 +2116,7 @@
           "runtimeStopping": "这些助手刚才在 Avibe 中运行的任务还在停止中，请稍后重试。",
           "permissionNeeded": "请允许访问凭据，再重试。",
           "recoveryPending": "迁移尚未完成，请重试以继续。",
-          "itemConflict": "无法验证已保存的配置或凭据。请检查配置文件和认证是否有效后重试，或在模型网关中手动添加供应商。",
+          "itemConflict": "无法安全迁移所选配置。请重新打开迁移窗口以扫描最新配置；若仍然失败，请检查配置文件格式和访问权限。",
           "configurationBlocked": "请先调整原生配置，再重新扫描。",
           "credentialsInvalid": "认证已过期，请在模型网关中重新登录。",
           "reauthorizationRequired": "此后端已迁移过，无法确认改动后的原生登录是否是新授权。原配置文件未改动，请在模型网关中为已有供应商重新登录，不要再次导入这份登录。"
@@ -2338,6 +2348,164 @@
         "refreshed": "已更新",
         "unresolved": "仍然不可用",
         "failed": "没能处理，请重试"
+      },
+      "tools": {
+        "title": "工具",
+        "subtitle": "Vibey 在对话中可使用的工具。搜索会把查询发给执行它的厂商，失败时可能改由你的其他供应商重试；图片提示词会发给图片模型的厂商。按量付费的供应商每次调用都会计费。",
+        "group": {
+          "search": "搜索",
+          "generate": "生成"
+        },
+        "tool": {
+          "web_search": {
+            "name": "网页搜索",
+            "inline": "网页搜索",
+            "description": "搜索网页，并在回答中注明出处。"
+          },
+          "x_search": {
+            "name": "X 搜索",
+            "inline": "X 搜索",
+            "description": "搜索 X 上的帖子，支持 from:、within_time: 等高级语法。"
+          },
+          "image_generate": {
+            "name": "图片生成",
+            "inline": "图片生成",
+            "description": "Vibey 按需调用图片模型生成或编辑图片，结果存为文件。"
+          }
+        },
+        "state": {
+          "on": "已开启",
+          "off": "已关闭"
+        },
+        "toggle": {
+          "turnOn": "开启{{name}}",
+          "turnOff": "关闭{{name}}"
+        },
+        "status": {
+          "ok": "最近一次由 {{source}} 执行 · 正常 · {{date}}",
+          "refused": "{{source}} 不支持 · {{models}}",
+          "refusedMany": "{{sources}} 不支持",
+          "switched": "{{line}}，已改用 {{source}}",
+          "replay": "{{source}} 不支持回放历史结果",
+          "replayMany": "{{sources}} 不支持回放历史结果"
+        },
+        "clear": {
+          "label": "清除",
+          "source": "清除 {{source}} 的{{toolInline}}拒绝记录",
+          "model": "清除 {{source}} 上 {{model}} 的{{toolInline}}拒绝记录",
+          "all": "全部清除",
+          "allLabel": "清除{{toolInline}}的全部拒绝记录"
+        },
+        "advanced": {
+          "label": "高级",
+          "summaryBoth": "{{order}} · {{sources}}"
+        },
+        "order": {
+          "title": "执行顺序",
+          "caption": "当前模型不能原生搜索时，按这个顺序找供应商代为搜索。",
+          "captionCustom": "当前模型不能原生搜索时，按这个顺序找供应商代为搜索。已自定义。",
+          "summaryAuto": "执行顺序：自动",
+          "summaryCustom": "执行顺序：已自定义",
+          "reset": "恢复自动",
+          "empty": "你的供应商都不能为无法原生运行{{toolInline}}的模型代为搜索。",
+          "moveUp": "上移 {{source}}",
+          "moveDown": "下移 {{source}}",
+          "moved_one": "已将 {{source}} 移到第 {{position}} 位，共 {{count}} 位。",
+          "moved_other": "已将 {{source}} 移到第 {{position}} 位，共 {{count}} 位。"
+        },
+        "sources": {
+          "title": "各供应商状态",
+          "caption": "来自真实调用。“不支持”会一直保留，直到你清除，或供应商配置、引擎或 Avibe 版本变化；清除后，下一次请求会再试这个供应商。"
+        },
+        "pair": {
+          "ok": "正常 · {{date}}",
+          "refused": "不支持 · {{date}}",
+          "replay": "不支持回放 · {{date}}"
+        },
+        "image": {
+          "title": "可用的图片模型",
+          "noUnitPrice": "暂无单价",
+          "perImage": "${{usd}} / 张",
+          "perImageEstimated": "≈ ${{usd}} / 张",
+          "pair": "{{model}} · {{source}}",
+          "defaultBadge": "默认",
+          "defaultLabel": "默认模型",
+          "defaultPick": "默认图片模型",
+          "automatic": "自动",
+          "automaticNamed": "自动（{{pair}}）",
+          "automaticRule": "自动（按目录顺序的第一个可用模型）",
+          "unavailable": "{{pair}}（不可用）",
+          "defaultNote": "Vibey 没有指定模型时使用。Vibey 也可以按需改用列表里的其他模型。",
+          "unavailableNote": "已保存的默认模型暂不可用，当前使用 {{pair}}。",
+          "unavailableNoteNone": "已保存的默认模型暂不可用。",
+          "emptyOne": "图片生成需要 {{vendor}} 的 API Key。",
+          "emptyMany": "图片生成需要 {{vendors}} 其中一家的 API Key。",
+          "emptyRefused": "目前没有可用的图片模型。清除上面的拒绝记录后会再试。",
+          "emptyNoVendor": "目前没有可用的图片模型。",
+          "description": {
+            "gpt-image-2": "写实照片、图中文字准确，支持按参考图编辑",
+            "gemini-2_5-flash-image": "出图快，人物和风格前后一致，适合多图合成与局部修改",
+            "gemini-3-pro-image-preview": "高保真，图中文字渲染准确"
+          },
+          "vendor": {
+            "openai": "OpenAI",
+            "gemini": "Google",
+            "xai": "xAI"
+          }
+        },
+        "cost": {
+          "included": "订阅内含",
+          "includedNote": "不另计费",
+          "perUnit": "${{usd}} / {{unit}}",
+          "unit": {
+            "call": "次",
+            "search": "次搜索",
+            "post": "条帖子",
+            "profile": "个账号"
+          },
+          "listNote": "API 标价",
+          "listNoteExtras": "API 标价 · {{extras}}",
+          "extra": "另加 {{price}}",
+          "extraSeparator": "，",
+          "unknown": "暂无标价"
+        },
+        "footnote": "费用按厂商 API 标价估算，中转的实际账单可能不同；订阅不另计费。Claude 订阅不能运行这些工具。",
+        "saveFailed": "{{toolInline}}设置未能保存，请重试。",
+        "clearFailed": "{{toolInline}}拒绝记录未能清除，请重试。"
+      },
+      "capability": {
+        "readFailed": "未能读取此供应商的工具能力。",
+        "col": "能力",
+        "chip": {
+          "ok": "{{tool}} · 正常 · {{date}}",
+          "refused": "{{tool}} · 不支持",
+          "replay": "{{tool}} · 不支持回放"
+        },
+        "explain": {
+          "native": "最近一次真实调用在这个模型上原生执行了{{toolInline}}。只用于显示，不影响路由。",
+          "executor": "这个模型作为执行者，为其他模型执行了{{toolInline}}。只用于显示，不影响路由。",
+          "direct": "这个模型通过图片接口生成了图片。只用于显示，不影响路由。",
+          "refused": "此供应商在这个模型的真实请求中拒绝了{{toolInline}}。清除前，Vibey 会改用其他方式完成。",
+          "replay": "这个模型能在此供应商上执行{{toolInline}}，但拒绝回放历史结果，之后历史结果会以文本形式发回。"
+        },
+        "recorded": "记录时间",
+        "recordedValue": "{{time}} · 一次真实请求",
+        "reason": "原因",
+        "kept": "保留",
+        "keptValue": "直到你清除，或供应商配置、引擎或 Avibe 版本变化",
+        "lastOk": "上次正常",
+        "clear": "清除",
+        "clearTool": "清除 {{model}} 的{{tool}}拒绝记录",
+        "clearEffort": "清除 {{model}} 的 {{effort}} 拒绝记录",
+        "clearHint": "现在支持了？点标签上的“清除”，下一次请求会再试这个供应商。",
+        "clearFailed": "拒绝记录未能清除，请重试。",
+        "accessibleName": "{{label}}。{{explanation}}",
+        "accessibleNameFacts": "{{label}}。{{explanation}}{{facts}}",
+        "accessibleFact": "{{term}}：{{value}}。",
+        "effort": {
+          "unsupported": "{{effort}} · 不支持",
+          "explain": "此供应商拒绝过这个推理强度，之后的请求会跳过它。"
+        }
       }
     }
   },
@@ -2514,6 +2682,15 @@
     "retry": "重试"
   },
   "errors": {
+    "invalid_field_name": "字段名须为 1–64 个小写字母、数字或下划线，且以字母开头。",
+    "field_exists": "此字段名已存在，请使用其他名称。",
+    "field_not_found": "此字段已不存在。请刷新密钥并选择当前字段。",
+    "too_many_fields": "每个密钥最多可包含 32 个字段（含默认字段）。",
+    "fields_corrupt": "此密钥保存的字段数据已损坏。默认值仍可使用；为保留现有数据，字段修改已禁用。",
+    "fields_not_supported": "签名密钥不支持命名字段或默认字段改名。",
+    "record_mismatch": "保存期间字段记录发生变化，请刷新密钥后重试。",
+    "secret_conflict": "此密钥已在其他位置修改。请检查刷新后的字段再试；你的修改尚未保存。",
+    "secret_not_found": "此密钥已不存在。请刷新密钥库并选择其他密钥。",
     "retry_not_available": "这条通知无法重试，可以发送消息继续。",
     "retry_stale": "会话已经开始了后续任务，如需继续请发送消息。",
     "retry_busy": "上一轮还在结束处理中，请稍后再试。",
@@ -4211,11 +4388,12 @@
     "description": "分别编辑各 backend 的全局指令文件，会加在本机所有 agent 系统提示词的最前面。",
     "placeholder": "用 Markdown 写下该 backend 的全局指令…",
     "tipEffect": "会加在 {{backend}} 所有 agent 系统提示词的最前面，新会话自动生效。",
+    "tipEffectVibey": "每个 Turn 开始时加载进所有 Vibey agent 的系统提示词，排在项目的 AGENTS.md 之前；改动在下一个 Turn 生效。",
     "missingHint": "该文件尚不存在，保存后会自动创建",
     "readError": "无法读取该文件（不是有效的 UTF-8），请先在磁盘上修复后再编辑。",
     "save": "保存",
     "sync": "一键同步到全部 backend",
-    "syncConfirm": "用 {{backend}} 的当前内容覆盖全部三个 backend 的全局提示词文件？",
+    "syncConfirm": "用 {{backend}} 的当前内容覆盖全部 backend 的全局提示词文件？",
     "saved": "已保存 {{backend}} 的全局提示词。",
     "synced": "已同步到全部 backend。",
     "discardConfirm": "有未保存的修改，确定关闭并丢弃吗？"
@@ -4634,6 +4812,10 @@
     },
     "notifyLabel": "通知",
     "retryRequested": "已请求重试",
+    "failureNextStep": {
+      "openModels": "打开「模型」页",
+      "askAdmin": "请联系 Avibe 管理员在「模型」页处理。"
+    },
     "retryFailed": "未能提交重试，可以再次点击。",
     "collapse": "收起",
     "turnInProgress": "当前回合还在进行中，请等待回复后再发送。",
@@ -4654,6 +4836,9 @@
       "vaultDenied": "已拒绝",
       "vaultFailed": "处理失败",
       "vaultExpired": "已过期",
+      "vaultDeleteApproved": "删除已批准，密钥已删除",
+      "vaultDeleteDenied": "删除已拒绝",
+      "vaultDeleteExpired": "删除申请已过期",
       "agentFallback": "智能体"
     },
     "citation": {
@@ -4671,6 +4856,9 @@
       "agent": "Agent",
       "model": "模型",
       "effort": "思考强度",
+      "effortNotOn": "{{sources}} 不支持",
+      "effortNotOnSome": "部分供应商不支持",
+      "effortRefused": "当前没有供应商支持 · 可在模型 → 供应商中清除",
       "newAgent": "新建 Agent",
       "addModel": "添加模型",
       "noModels": "未找到模型",
@@ -4758,6 +4946,76 @@
       }
     },
     "agentActivity": {
+      "hosted": {
+        "errorCode": {
+          "provider_no_reason": "供应商未说明原因。",
+          "provider_no_image": "供应商没有返回图片。",
+          "image_not_streamed": "回复结束前图片未传完。",
+          "image_not_saved": "图片未能保存。",
+          "image_no_store": "当前环境无法保存生成的图片。",
+          "executor_no_image": "代理执行者没有返回图片。",
+          "gateway_unreachable": "无法连接模型网关。",
+          "gateway_refused": "模型网关拒绝了这次调用。",
+          "gateway_no_result": "模型网关没有返回结果。",
+          "image_param_unsupported": "所选图片模型不支持其中一个参数。",
+          "image_model_unavailable": "所选图片模型当前不可用。",
+          "image_argument_invalid": "图片调用的参数无法发送。",
+          "image_reference_unreadable": "无法读取参考图片。",
+          "provider_refused": "供应商拒绝了这次调用。",
+          "provider_unavailable": "供应商暂时不可用，请稍后重试。",
+          "provider_timed_out": "调用超时。",
+          "provider_unreachable": "无法连接供应商。",
+          "provider_unreadable": "无法读取供应商的回复。",
+          "provider_too_large": "供应商的回复超出了大小上限。",
+          "provider_image_unusable": "供应商返回的图片无法使用。",
+          "search_not_run": "模型没有搜索就直接作答了。",
+          "search_failed": "供应商的搜索失败了。",
+          "response_ended_early": "回复提前结束了。"
+        },
+        "mode": {
+          "native": "原生 · {{provider}}",
+          "proxy": "由 {{provider}} 代理",
+          "direct": "{{provider}} 直连",
+          "directModel": "{{model}} · {{source}}",
+          "proxyModel": "由 {{provider}} 代理 · {{model}}"
+        },
+        "status": {
+          "failed": "失败",
+          "incomplete": "未完成",
+          "pending": "已中断"
+        },
+        "cost": {
+          "included": "订阅内含",
+          "list": "≈ ${{usd}}",
+          "reported": "${{usd}}",
+          "atLeast": "至少 {{cost}}",
+          "calls_one": "{{cost}}（{{count}} 次调用）",
+          "calls_other": "{{cost}}（{{count}} 次调用）"
+        },
+        "count": {
+          "sources_one": "{{count}} 个来源",
+          "sources_other": "{{count}} 个来源",
+          "posts_one": "{{count}} 条帖子",
+          "posts_other": "{{count}} 条帖子",
+          "images_one": "{{count}} 张",
+          "images_other": "{{count}} 张"
+        },
+        "ranNative": "原生执行：{{where}}",
+        "ranProxy": "代理执行：{{where}}",
+        "ranDirect": "直连执行：{{where}}",
+        "fallback": {
+          "ranOn": "{{from}} 不支持{{toolInline}}，已改用 {{provider}}（{{source}}）",
+          "ran": "{{from}} 不支持{{toolInline}}，已改用 {{provider}}",
+          "kept": "之后自动沿用，可在 模型 › 工具 中清除",
+          "keptManager": "之后自动沿用，实例管理员可在 模型 › 工具 中清除"
+        },
+        "duration": "用时 {{seconds}} 秒",
+        "alsoSearched": "还搜索了：{{queries}}",
+        "image": {
+          "prompt": "提示词",
+          "download": "下载 {{name}}"
+        }
+      },
       "running": "正在执行",
       "step": "{{count}} 步",
       "steps": "{{count}} 步",
@@ -4827,10 +5085,12 @@
       "httpStatus": "HTTP 状态码",
       "errorCode": "错误码",
       "reasonLabel": "原因",
+      "errorKind": "失败类型",
       "blockers": "当时不可用的供应商",
       "upstreamNote": "以上内容均由上游供应商的 API 返回。Avibe 会保留状态码、错误码，以及去除凭据后的上游报错信息（最多 400 字）。",
         "upstreamDetail": "上游返回",
         "connectionDetail": "连接错误",
+      "backendDetail": "Agent 后端报告",
       "copyRecord": "复制记录",
       "reason": {
         "quota_exhausted": "额度用尽",
@@ -4880,9 +5140,41 @@
     "chat": {
       "floatApprovals": "等你授权 · {{count}}"
     },
+    "search": {
+      "label": "搜索密钥",
+      "placeholder": "搜索名称、描述、标签、域名…",
+      "clear": "清空搜索",
+      "count_one": "{{count}} 个密钥",
+      "count_other": "{{count}} 个密钥",
+      "filtered": "{{visible}} / {{total}} 个密钥"
+    },
     "filter": {
-      "clear": "清除筛选",
-      "empty": "没有匹配所选标签的密钥。"
+      "clear": "清除",
+      "clearAll": "清除全部",
+      "empty": "没有匹配的密钥",
+      "reset": "清除搜索和筛选",
+      "tags": "标签",
+      "skills": "Skills",
+      "tagsByUsage": "标签 · 按使用次数",
+      "selectedTags": "标签（{{count}}）",
+      "entry": "{{name}} · {{count}}",
+      "searchTags": "搜索标签",
+      "searchTagsPlaceholder": "在 {{count}} 个标签里查找",
+      "noTags": "没有这个标签",
+      "intersection": "可多选，需同时满足",
+      "remove": "移除筛选：{{name}}",
+      "moreTags": "显示其余 {{count}} 个标签",
+      "quick": "快捷筛选",
+      "all": "全部",
+      "protected": "保护档",
+      "signing": "签名密钥",
+      "unused": "从未使用"
+    },
+    "sort": {
+      "label": "排序",
+      "name": "名称",
+      "recent": "最近使用",
+      "added": "最近添加"
     },
     "grants": {
       "title": "活跃授权",
@@ -4930,17 +5222,65 @@
       "copy": "复制值",
       "showInBrowser": "在浏览器中查看",
       "errors": {
+        "staleField": "此链接指向的字段已不存在。请打开密钥并选择当前字段。",
         "contextFailed": "无法准备查看，请重试。",
         "unavailable": "此保护档暂不支持查看。"
       }
     },
     "saved": "已更新 {{name}}",
-    "editSecret": "编辑信息",
+    "editSecret": "编辑 Secret",
     "rowActions": "更多操作",
     "edit": {
-      "title": "编辑信息",
-      "subtitle": "普通信息不影响授权;Fetch 策略变化会重新审批",
+      "title": "编辑 Secret",
+      "subtitle": "值或 Fetch 策略变化后需要重新审批",
       "lockedHint": "名称、类型、保护级别不可修改"
+    },
+    "fields": {
+      "title": "字段",
+      "name": "字段 {{index}} 名称",
+      "namePlaceholder": "field_name",
+      "value": "{{field}} 的值",
+      "default": "默认",
+      "defaultName": "默认字段名称",
+      "newName": "新字段名称",
+      "newValue": "新字段值",
+      "add": "添加字段",
+      "useTemplate": "用模板",
+      "templateLogin": "登录",
+      "templateLogin2fa": "登录 + 两步验证",
+      "multiHint": "一条密钥可以存多个字段，比如一个账号的用户名、密码和两步验证码。",
+      "setDefault": "设为默认",
+      "setDefaultNamed": "将 {{field}} 设为默认",
+      "rowActions": "{{field}} 的操作",
+      "showNamed": "显示 {{field}}",
+      "hideNamed": "隐藏 {{field}}",
+      "remove": "移除 {{field}}",
+      "removeField": "移除字段",
+      "removeConfirm": "移除 <field/> 和它的值？",
+      "removeConfirmSaved": "移除 <field/> 和它的值？已有授权会失效。",
+      "confirmRemove": "移除",
+      "defaultNotRemovable": "默认字段不能移除，先把别的字段设为默认",
+      "extraNotRenamable": "额外字段不能改名",
+      "discardNew": "放弃新字段",
+      "save": "保存",
+      "saveNamed": "保存 {{field}}",
+      "saveNew": "保存新字段",
+      "saved": "字段已保存",
+      "draftsDropped": "其他位置已移除字段，已丢弃这些草稿：{{fields}}。",
+      "recordConflict": "保存期间字段记录发生变化。值未写入，请重新加载 Secret 后再试。",
+      "secretConflict": "保存期间此密钥发生变化，字段已刷新。请检查后重新保存；你的值尚未写入。",
+      "replacePlaceholder": "已保存 · 输入即替换",
+      "revealField": "要显示的字段",
+      "nameRequired": "填写字段名",
+      "nameInvalid": "字段名只能用小写字母、数字和下划线，以字母开头",
+      "nameTaken": "已经有一个 {{field}} 字段",
+      "valueRequired": "填写这个字段的值",
+      "nameRule": "字段名：小写字母、数字和下划线，以字母开头。",
+      "references": "Agent 引用",
+      "referenceName": "NAME",
+      "referenceDefault": "只写 <name/> 时，取默认字段 <field/>。",
+      "singleFile": "文件上传仅支持单值。添加字段前请先切换到文本模式。",
+      "editHelp": "改完一行点保存 · 留空的保持原值"
     },
     "protectedUnlock": {
       "checking": "正在检查你的保护层…",
@@ -5068,6 +5408,7 @@
       "waitingForValue": "等待填写",
       "access": "使用密钥",
       "sign": "签名",
+      "delete": "删除请求",
       "provision": "填写密钥",
       "approved": "已批准访问",
       "signed": "签名完成",
@@ -5078,7 +5419,14 @@
       "accessSubtitle": "由你决定要不要让 AI 使用它。它的值绝不会展示给 AI 或聊天。",
       "signTitle": "Agent 想要签名",
       "signSubtitle": "每次签名都要你批准——无法预先批准。",
+      "deleteTitle": "Agent 想删除一个密钥",
+      "deleteSubtitle": "请确认详情，再永久删除这条密钥。",
+      "deleteManagementHint": "删除需要实例管理权限；你仍可以拒绝这个申请。",
+      "deleteFields": "删除会移除全部字段：{{fields}}",
       "secret": "密钥",
+      "description": "说明",
+      "reason": "原因",
+      "tags": "标签",
       "key": "密钥",
       "session": "会话",
       "command": "命令",
@@ -5344,6 +5692,8 @@
       "api_key": "API Key",
       "subscriptionConnected": "订阅已连接",
       "api_keyConnected": "API Key 已连接",
+      "externalConnected": "可以启动",
+      "externalConnectedHint": "执行时由 Claude Code 管理认证；此状态不表示已验证登录。",
       "claudeGuide": "通过 Claude 登录或填入 API Key",
       "codexGuide": "通过 ChatGPT 登录，或使用 OpenAI API Key",
       "opencodeGuide": "选择一种方式连接即可",
@@ -5372,6 +5722,7 @@
       "noteBuiltinUnset": "还没有模型，选一个即可开始",
       "noteGatewayOff": "模型网关已关闭，{{name}} 需要它才能运行",
       "noteHubDisabled": "本实例已停用模型网关，{{name}} 需要它才能运行",
+      "noteNoSource": "还没有模型来源供给 {{name}}。",
       "pickModelNamed": "为 {{name}} 选择模型",
       "allModels": "全部模型…",
       "modelsUnreadable": "未能读取模型",
@@ -5407,6 +5758,13 @@
       "showKey": "显示凭据",
       "hideKey": "隐藏凭据",
       "connected": "已连接",
+      "nativeReady": "可以启动 · 认证由 Claude Code 管理",
+      "claudeManagedAuth": "这里显示已保存的本机配置，不预测会话将选用哪种凭据。执行时由 Claude Code 管理认证。",
+      "nativeStore": {
+        "present": "检测到本机 OAuth 材料，但未验证账号或令牌是否有效。",
+        "absent": "未观察到本机 OAuth 材料；Claude Code 仍可能使用其他认证来源。",
+        "unknown": "无法确认原生凭据存储的内容，这不代表已经退出登录。"
+      },
       "savedSubscription": "已检测到订阅凭据",
       "savedDisabled": "凭据已保存。此助手当前未启用。",
       "readFailed": "无法读取连接状态，请重试",
@@ -5580,12 +5938,67 @@
     "chooseSession": "选择一个会话",
     "switchSession": "切换会话",
     "openInAvibe": "在 Avibe 中打开",
-    "inputPlaceholder": "给 agent 发消息…",
+    "inputPlaceholder": "和歪比说…",
     "send": "发送",
     "queued": "已排队，当前这轮结束后执行。",
     "moreInAvibe": "更多回复请在 Avibe 中查看",
     "empty": "还没有消息，说点什么开始吧。",
     "vaultRequest": "需要授权，在 Avibe 中打开",
-    "noSessions": "还没有进行中的会话，先在 Avibe 里新建一个。"
+    "noSessions": "还没有进行中的会话，先在 Avibe 里新建一个。",
+    "mainAgent": "歪比",
+    "mainAgentTitle": "歪比",
+    "thinking": "思考中",
+    "waiting": "等待中",
+    "repliedPrefix": "已回复：",
+    "untitledTask": "未命名任务",
+    "dismiss": "移除任务",
+    "voiceContinue": "继续语音输入",
+    "voice": {
+      "cloudRequired": "语音输入需要 Avibe Cloud，暂时可以打字发送。",
+      "listening": "正在听…",
+      "open": "语音输入",
+      "stop": "停止语音输入",
+      "startFailed": "无法使用麦克风。请在系统设置里检查麦克风权限，或直接打字。",
+      "empty": "没听到说话。可以再说一次，或直接打字。",
+      "failed": "没能转成文字。可以再说一次，或直接打字。"
+    },
+    "keyboard": {
+      "open": "输入消息",
+      "close": "关闭输入"
+    },
+    "stack": {
+      "expand": "展开会话卡片"
+    },
+    "activityKind": {
+      "watch": "监控",
+      "task": "定时任务",
+      "agent_run": "委派运行",
+      "backend_activity": "后台活动"
+    },
+    "activityStatus": {
+      "running": "运行中",
+      "queued": "排队中",
+      "waiting": "等待中",
+      "stopped": "已停止",
+      "completed": "已完成",
+      "failed": "失败",
+      "unknown": "处理中"
+    },
+    "stop": {
+      "stop": "停止",
+      "pause": "暂停",
+      "confirmStop": "停止？",
+      "confirmPause": "暂停？",
+      "stopping": "正在停止…",
+      "pausing": "正在暂停…",
+      "stopped": "已停止",
+      "paused": "已暂停",
+      "failed": "没停下来，稍后再试"
+    },
+    "failedPrefix": "没跑起来：",
+    "fixInAvibe": "在 Avibe 中处理",
+    "talkToVibey": "和歪比对话",
+    "noChatProject": "先在 Avibe 里建一个项目，和歪比的对话需要放在项目里。",
+    "vibeyUnavailable": "没能打开和歪比的对话，请稍后再试。"
   }
 }

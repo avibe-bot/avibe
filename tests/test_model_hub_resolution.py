@@ -1707,7 +1707,7 @@ def test_service_accepts_authoritative_reachable_adapter_error(tmp_path):
     )
 
     assert result["observation"] == {
-        "contract_version": 11,
+        "contract_version": 15,
         "outcome": "adapter_error",
         "reachable": True,
         "authenticated": "unknown",
@@ -1738,7 +1738,7 @@ def test_unknown_adapter_error_does_not_claim_connection(tmp_path):
     assert exc.value.code == "discovery_failed"
     assert exc.value.detail == "modelHub.errors.adapter_error"
     assert exc.value.data["observation"] == {
-        "contract_version": 11,
+        "contract_version": 15,
         "outcome": "adapter_error",
         "reachable": None,
         "authenticated": "unknown",
@@ -2352,6 +2352,7 @@ def test_direct_mode_refuses_chain_and_probe(tmp_path):
 
 
 def test_new_subscription_joins_only_the_agents_its_catalog_serves(tmp_path):
+    """D1: a later subscription is placed ahead of API keys, where its fixed catalog serves the menu (D-1, #2156)."""
     key = _source("src_placekey01", ("claude-opus-4-6",))
     config = _config([key])
     service, _, _ = _service(tmp_path, config)

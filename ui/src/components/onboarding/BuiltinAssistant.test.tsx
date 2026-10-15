@@ -65,7 +65,7 @@ const vibeyAgent = (model: string | null) => ({
   system_prompt: null, created_at: '', metadata: { builtin_default: true, lock_delete: true },
 });
 const chain = (modelId: string) => ({
-  contract_version: 11, backend: 'vibey', model_id: modelId,
+  contract_version: 15, backend: 'vibey', model_id: modelId,
   manual_override: null, route_origin: 'automatic', current: { source_id: 'src_openai', model_id: modelId },
   chain: [{ source_id: 'src_openai', model_id: modelId, channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }],
   supply_state: 'ok',
@@ -260,6 +260,13 @@ describe('the built-in assistant card', () => {
     const choice = await card().findByRole('button', { name: 'Model route for Vibey, review and reorder' });
     await waitFor(() => expect(within(choice).getByText('gpt-5.6-sol')).toBeTruthy());
     expect(choice.getAttribute('aria-disabled')).toBe('true');
+    await act(async () => undefined);
+    expect(enter().disabled).toBe(true);
+  });
+
+  it('says no model source supplies it yet', async () => {
+    render(wrap(<AgentDetection data={data({ agent_supply_blocks: { vibey: 'no_source' } })} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={reads} />));
+    expect(await card().findByText(en.onboarding.setup.noteNoSource.replace('{{name}}', 'Vibey'))).toBeTruthy();
     await act(async () => undefined);
     expect(enter().disabled).toBe(true);
   });

@@ -519,6 +519,12 @@ NO_EVENT_EXIT_CODE = 64
 # read as "running" and leave "waiting" unreachable. Waiter liveness is a
 # separate field (``process_alive``), not a state.
 _WATCH_RUNTIME_RUN_TYPE = "watch_runtime"
+
+
+def _watch_runtime_run_id(watch_id: str) -> str:
+    """A watch's one supervisor heartbeat row: written as, and read by, this primary key."""
+
+    return f"runtime:{watch_id}"
 # The Agent turn a ``--on-failure agent`` command fire queues to REPORT its failure.
 # It carries the failing definition's own ``definition_id`` -- that link is how the
 # Harness shows the turn beside the task -- and it settles ``succeeded`` whenever the
@@ -8789,7 +8795,7 @@ class SQLiteBackgroundTaskStore:
             for watch_id, runtime_payload in watches.items():
                 if not isinstance(runtime_payload, dict):
                     continue
-                run_id = f"runtime:{watch_id}"
+                run_id = _watch_runtime_run_id(watch_id)
                 values = self._run_values(
                     {
                         "id": run_id,
@@ -9367,6 +9373,9 @@ class SQLiteBackgroundTaskStore:
 
         runtimes: dict[str, dict[str, Any]] = {}
         for batch in _id_batches(watch_ids):
+            # A watch has one heartbeat row, ``runtime:<watch id>``: read it by primary
+            # key, so the lookup seeks those rows instead of walking every heartbeat a
+            # watch ever wrote (#2524).
             rows = conn.execute(
                 select(
                     agent_runs.c.definition_id,
@@ -9376,8 +9385,8 @@ class SQLiteBackgroundTaskStore:
                     agent_runs.c.updated_at,
                     agent_runs.c.metadata_json,
                 )
+                .where(agent_runs.c.id.in_([_watch_runtime_run_id(watch_id) for watch_id in batch]))
                 .where(agent_runs.c.run_type == _WATCH_RUNTIME_RUN_TYPE)
-                .where(agent_runs.c.definition_id.in_(batch))
             ).mappings()
             for row in rows:
                 payload = _json_loads(row["metadata_json"], {})

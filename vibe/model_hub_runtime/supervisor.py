@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Iterable, TypeVar
 
 from config import paths
 from config.atomic_io import write_atomic
@@ -32,10 +32,15 @@ from core.process_isolation import (
     signal_process_tree,
 )
 from vibe.model_hub_runtime.client import EngineClient, EngineClientError, EngineConnection
-from vibe.model_hub_runtime.config import expected_model_names, render_engine_config, write_engine_config
+from vibe.model_hub_runtime.config import (
+    expected_model_names,
+    registered_model_ids,
+    render_engine_config,
+    write_engine_config,
+)
 from vibe.model_hub_runtime.environment import engine_subprocess_environment
 from vibe.model_hub_runtime.installer import EngineRuntimeManager
-from vibe.model_hub_runtime.state import EngineStateStore, SourceRecord
+from vibe.model_hub_runtime.state import EngineStateContentError, EngineStateStore, SourceRecord
 
 
 logger = logging.getLogger(__name__)
@@ -44,6 +49,12 @@ _T = TypeVar("_T")
 
 MODEL_HUB_STARTUP_TIMEOUT_SECONDS = 30.0
 MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS = 5.0
+# How long a passed full health check vouches for a running engine. Within it a
+# call checks only that the process is alive. The full check (two management
+# round trips, tens of milliseconds, which a request holds the adapter's routing
+# lock across) runs at start and once this expires. A failed one is not
+# remembered: every call checks again, and a request restarts the engine.
+MODEL_HUB_HEALTH_TTL_SECONDS = 30.0
 _STARTUP_POLL_INTERVAL_SECONDS = 0.05
 # Durable identity of the engine this state root last spawned. A service that
 # dies without running ``atexit`` (SIGKILL, crash, forced restart) leaves its
@@ -95,6 +106,8 @@ class EngineSupervisor:
         self._start_attempted = False
         self._health_failure_signature: tuple[str, str, int | None] | None = None
         self._health_os_errno: int | None = None
+        # Monotonic time of the last full health check the running engine passed.
+        self._verified_at: float | None = None
         self._record_os_errno: int | None = None
         self._config_generation = 0
 
@@ -188,9 +201,37 @@ class EngineSupervisor:
             # management path does not prove live streams dead. The
             # generation check decides; the process is never killed here.
         expected = expected_model_names(sources, self.state_store, generation)
-        stale = frozenset(expected_model_names(previous_sources or (), self.state_store, generation)) - set(expected)
+        stale = self._previous_model_names(previous_sources or (), generation) - set(expected)
         self._await_models_locked(client, expected, stale)
         self._last_check = _utc_now()
+
+    def _previous_model_names(self, previous_sources: Iterable[SourceRecord], generation: str) -> frozenset[str]:
+        """The routed names the previous projection registered, so the reload can await their removal.
+
+        Replacing a Source's key is how the user recovers a credential document
+        that no longer parses, so the reload must not depend on reading it.
+        Such a Source's names come from its projection record instead, the
+        names the rendered YAML registered for it, so a reload that removes it
+        still waits for them to leave, whether or not the engine acknowledged
+        the write. A replacement keeps the prefix and model ids, so those names
+        stay expected and are never awaited as stale; a Source still projected
+        with such a document fails at render, before this. Every other reader
+        still refuses the document.
+        """
+
+        names: set[str] = set()
+        for source in previous_sources:
+            try:
+                names.update(expected_model_names((source,), self.state_store, generation))
+            except EngineStateContentError as exc:
+                logger.warning(
+                    "Model Hub reload cannot read the previous credential of source=%s error=%s; "
+                    "its removal is awaited by the names its projection routes",
+                    source.source_id,
+                    type(exc.__cause__).__name__ if exc.__cause__ is not None else "NonObjectDocument",
+                )
+                names.update(f"{source.prefix}/{model}" for model in registered_model_ids(source))
+        return frozenset(names)
 
     def _await_models_locked(
         self,
@@ -431,6 +472,7 @@ class EngineSupervisor:
                     self._stop_locked()
                     raise EngineUnavailableError("models.engine.unsafe_permissions") from exc
                 self._last_check = _utc_now()
+                self._verified_at = time.monotonic()
                 logger.info(
                     "Model Hub engine startup outcome=ready managed_version=%s "
                     "elapsed_seconds=%.3f child_output_retained=false",
@@ -456,7 +498,12 @@ class EngineSupervisor:
     def _healthy_locked(self) -> bool:
         if not self._is_running_locked() or self._connection is None:
             return False
-        return self._check_health_locked(EngineClient(self._connection, timeout=1.0))
+        verified_at = self._verified_at
+        if verified_at is not None and time.monotonic() - verified_at < MODEL_HUB_HEALTH_TTL_SECONDS:
+            return True
+        healthy = self._check_health_locked(EngineClient(self._connection, timeout=1.0))
+        self._verified_at = time.monotonic() if healthy else None
+        return healthy
 
     def _check_health_locked(self, client: EngineClient) -> bool:
         healthy = client.health()
@@ -494,6 +541,7 @@ class EngineSupervisor:
         process = self._process
         self._process = None
         self._connection = None
+        self._verified_at = None
         self._health_failure_signature = None
         self._health_os_errno = None
         if process is not None and process.poll() is None:

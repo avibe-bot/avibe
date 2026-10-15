@@ -56,9 +56,11 @@ If the installer cannot use PyPI, it falls back to GitHub. If `vibe` is installe
 
 When the installer runs as root, it installs the launcher at `/usr/local/bin/vibe`, the one supported location for root installs. Later upgrades move every stable `vibe` launcher that selects this install together; see [Upgrading](UPGRADING.md#stable-launchers).
 
-## Step 3: Install at Least One Coding Agent
+## Step 3: Optional: Add a Coding CLI
 
-Ask the user which backend they want first. Recommended default: OpenCode for low-friction setup, Claude Code for deeper coding work, Codex for OpenAI workflows.
+New installs start with Vibey, Avibe's built-in agent. It needs no CLI and runs once setup adds a Model Hub source
+(Step 4). Install Claude Code, Codex, or OpenCode only if the user also wants one of them: Avibe runs them alongside
+Vibey, and the user can make one the default for new chats later, in Agents.
 
 OpenCode:
 
@@ -112,8 +114,9 @@ setup completes, use **Add model source** to return to this step.
 Subscriptions added during setup connect through Model Hub so the assistant
 selection step can use them.
 
-In the wizard, help the user install or detect Claude Code, Codex, or OpenCode,
-then connect one assistant with a subscription or API key. Existing valid
+In the wizard, Vibey is ready once it has a model, and new chats start with it. If
+the user also wants Claude Code, Codex, or OpenCode, help install or detect it, then
+connect it with a subscription or API key. Existing valid
 credentials count; starting another login preserves them until the new login
 commits. Settings → Backends uses the same connection and recovery controls.
 OpenCode retains its explicit **Allow tool calls** action.
@@ -123,7 +126,7 @@ the wizard confirms application and an available Agent before completing setup.
 Pending application, uncertain keychain auth, or a failed start stays recoverable
 on this screen. For OpenCode, if the Agent's provider is unconnected or its exact
 model is absent from that provider's merged native/custom catalog, choose a
-compatible model in the inline recovery and apply it explicitly. The wizard never chooses a model or changes an existing usable default silently.
+compatible model in the inline recovery and apply it explicitly. The wizard never changes an existing usable default silently, and it picks no model for an assistant except Vibey's starting model: the first tool-capable text model the sources list, in their order and then each source's own model order, which the user can change.
 
 IM is optional for a fresh installation. Configure Slack, Discord, Telegram,
 WeChat, or Lark / Feishu later in Settings. Existing enabled but incomplete IM

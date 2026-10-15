@@ -136,6 +136,26 @@ describe('add-subscription start recovery', () => {
     expect(start.mock.calls[0][2]).toMatch(/^ofn_[a-z0-9]{16,64}$/);
   });
 
+  it('AUTH-SETUP-910 keeps a saved native source and warns about failed runtime application', async () => {
+    const flow = {
+      flow_id: 'oaf_committed_auth', vendor: 'anthropic', channel: 'native_cli' as const,
+      state: 'success' as const, application_failed: true,
+      presentation: { expects: 'none' as const }, expires_at: '2099-01-01T00:00:00Z',
+    };
+    const start = vi.spyOn(modelsApi, 'startOAuth').mockResolvedValue(flow);
+    vi.spyOn(modelsApi, 'getOAuthStatus').mockResolvedValue({
+      flow, created: { source: subscription(), added_to: [], adopted_by: [] }, repaired: null,
+    });
+    vi.spyOn(modelsApi, 'cancelOAuth').mockResolvedValue(undefined);
+    const connected = vi.fn();
+    renderDialog({ onConnected: connected });
+    await userEvent.click(screen.getByRole('button', { name: /Sign in|去登录/i }));
+    await waitFor(() => expect(connected.mock.calls.filter(([source]) => source?.id === 'src_subscription')).toHaveLength(1));
+    expect(screen.getAllByText(i18n.t('settings.models.oauth.error.nativeApply')).length).toBeGreaterThan(0);
+    expect(start).toHaveBeenCalledOnce();
+    expect(screen.queryByText(i18n.t('settings.models.oauth.error.generic'))).toBeNull();
+  });
+
   it('leaves the provider page to the user: sign-in opens no window and offers the link to click or copy', async () => {
     const authUrl = 'https://provider.example/authorize?code=1';
     const open = vi.spyOn(window, 'open');

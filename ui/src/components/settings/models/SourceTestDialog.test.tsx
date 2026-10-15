@@ -19,7 +19,8 @@ const source: Source = {
   id: 'src_test0001', kind: 'api_key', vendor: 'custom', display_name: 'My relay',
   protocol: 'openai_chat', base_url: 'https://relay.example/v1', supply_channel: 'hub',
   billing: 'metered', state: { status: 'standby', retry_at: null, detail_key: null },
-  credential_ref: 'cred_test001', verification_pending: 'vp_original', last_discovered_at: null,
+  credential_ref: 'cred_test001', verification_pending: 'vp_original', credential_generation: 'vp_original',
+  last_discovered_at: null,
   models: ['first-model', 'gpt-5.6-luna', 'manual-model'].map((id) => ({
     id, display_name: null, origin: 'discovered', reasoning_efforts: [], reasoning_efforts_source: null,
   })),
@@ -91,12 +92,15 @@ describe('SourceTestDialog', () => {
     expect(screen.getByText(/responded successfully/)).toBeTruthy();
   });
 
-  it('cannot show a late success for a replacement credential', async () => {
+  it.each([
+    ['a replacement credential', { credential_ref: 'cred_new', verification_pending: 'vp_new', credential_generation: 'vp_new' }],
+    ['a verified same-handle reauthentication', { verification_pending: null, credential_generation: 'vp_new' }],
+  ])('cannot show a late success for %s', async (_name, replacement) => {
     let resolve!: (result: SourceProbeResult) => void;
     vi.spyOn(modelsApi, 'probeSource').mockReturnValue(new Promise((done) => { resolve = done; }));
     const rendered = render(view());
     await userEvent.click(screen.getByRole('button', { name: 'Run test' }));
-    rendered.rerender(view({ ...source, credential_ref: 'cred_new', verification_pending: 'vp_new' }));
+    rendered.rerender(view({ ...source, ...replacement }));
     resolve(answer());
     await waitFor(() => expect(screen.getByRole('button', { name: 'Run test' }).hasAttribute('disabled')).toBe(false));
     expect(screen.queryByText(/responded successfully/)).toBeNull();
@@ -136,11 +140,13 @@ describe('SourceTestDialog', () => {
     expect(probe).toHaveBeenCalledTimes(1);
   });
 
-  it.each(['unread', 'superseded', 'deleted', 'credential', 'marker', 'base_url', 'protocol', 'model'])('requires a current matching Source after reconciliation: %s', async (change) => {
+  it.each(['unread', 'superseded', 'deleted', 'credential', 'reauth', 'verified-reauth', 'base_url', 'protocol', 'model'])('requires a current matching Source after reconciliation: %s', async (change) => {
     vi.spyOn(modelsApi, 'probeSource').mockResolvedValue(answer());
     const current = { ...source };
     if (change === 'credential') current.credential_ref = 'cred_replacement';
-    if (change === 'marker') current.verification_pending = 'vp_replacement';
+    // A same-handle reauthentication keeps the ref and mints a new generation, which verification keeps.
+    if (change === 'reauth') Object.assign(current, { verification_pending: 'vp_replacement', credential_generation: 'vp_replacement' });
+    if (change === 'verified-reauth') Object.assign(current, { verification_pending: null, credential_generation: 'vp_replacement' });
     if (change === 'base_url') current.base_url = 'https://other.example/v1';
     if (change === 'protocol') current.protocol = 'anthropic';
     if (change === 'model') current.models = [];
@@ -174,7 +180,7 @@ describe('SourceTestDialog', () => {
     const rendered = render(view());
     await userEvent.click(screen.getByRole('button', { name: 'Run test' }));
     await waitFor(() => expect(settlement.unread).toHaveBeenCalledTimes(1));
-    rendered.rerender(view({ ...source, credential_ref: 'cred_new', verification_pending: 'vp_new' }));
+    rendered.rerender(view({ ...source, credential_ref: 'cred_new', verification_pending: 'vp_new', credential_generation: 'vp_new' }));
     resolve(landing());
     await waitFor(() => expect(screen.getByRole('button', { name: 'Run test' }).hasAttribute('disabled')).toBe(false));
     expect(screen.queryByRole('status')).toBeNull();

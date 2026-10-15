@@ -5,9 +5,13 @@ import io
 import json
 from pathlib import Path
 from runpy import run_path
+import shutil
+import subprocess
 import tarfile
 
 import pytest
+
+from scripts import desktop_release
 
 
 _SCRIPT = run_path(
@@ -29,7 +33,10 @@ def test_patched_source_manifest_hash_locks_the_divergence() -> None:
         (Path("desktop/cua-driver") / manifest["tool_snapshot"]).read_text()
     )
 
-    assert driver["patch"]["contract"] == "click.click_mode=raw"
+    assert (
+        driver["patch"]["contract"]
+        == "click.click_mode=raw; embedded parent-liveness cleanup"
+    )
     assert driver["patch"]["upstream_refs"]
     assert driver["patch"]["upgrade_plan"]
     assert _SCRIPT["digest"](patch) == driver["patch"]["sha256"]
@@ -97,6 +104,61 @@ def test_built_contract_rejects_snapshot_input_schema_shape(
         match="does not expose click.click_mode",
     ):
         _SCRIPT["verify_built_contract"](tmp_path / "cua-driver")
+
+
+@pytest.mark.skipif(
+    shutil.which("codesign") is None,
+    reason="codesign exists only on macOS, where the helper is prepared; nothing to sign elsewhere",
+)
+def test_prepared_helper_is_a_signed_code_object(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An x86_64 build leaves the linker's output unsigned; the prepared helper never is."""
+
+    built = tmp_path / "build" / "cua-driver"
+    built.parent.mkdir()
+    shutil.copyfile("/usr/bin/true", built)
+    built.chmod(0o755)
+    subprocess.run(["codesign", "--remove-signature", str(built)], check=True)
+    unsigned = subprocess.run(
+        ["codesign", "-dv", str(built)], capture_output=True, text=True
+    )
+    assert "not signed at all" in unsigned.stderr
+
+    contract_checked: list[str] = []
+
+    def verify_contract(binary: Path) -> None:
+        subprocess.run(["codesign", "--verify", "--strict", str(binary)], check=True)
+        contract_checked.append(str(binary))
+
+    script = _SCRIPT["prepare"].__globals__
+    patch = Path("desktop/cua-driver") / _SCRIPT["load_manifest"]()["driver"]["patch"]["file"]
+    monkeypatch.setitem(script, "extract_driver_source", lambda *_args: tmp_path / "source")
+    monkeypatch.setitem(script, "apply_driver_patch", lambda *_args: patch.resolve())
+    monkeypatch.setitem(script, "build_driver", lambda *_args: built)
+    monkeypatch.setitem(script, "verify_built_contract", verify_contract)
+
+    output = _SCRIPT["prepare"](
+        "x86_64-apple-darwin",
+        source_archive=tmp_path / "source.tar.gz",
+        output_dir=tmp_path / "binaries",
+    )
+
+    assert contract_checked == [str(built)]
+    subprocess.run(["codesign", "--verify", "--strict", str(output)], check=True)
+    details = subprocess.run(
+        ["codesign", "-dv", str(output)], capture_output=True, text=True, check=True
+    )
+    assert "Signature=adhoc" in details.stderr
+    provenance = json.loads(
+        output.with_name(f"{output.name}.provenance.json").read_text(encoding="utf-8")
+    )
+    assert provenance["prepared_binary_sha256"] == _SCRIPT["digest"](output)
+    desktop_release.driver_provenance(
+        "x86_64-apple-darwin",
+        output,
+        output.with_name(f"{output.name}.provenance.json"),
+    )
 
 
 def test_source_extraction_is_scoped_to_the_driver_subtree(tmp_path: Path) -> None:

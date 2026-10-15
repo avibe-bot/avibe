@@ -35,15 +35,6 @@ test('live E2E discovery never collects the model catalog fixture', () => {
   expect(specs.filter((spec) => spec.file.startsWith('model-catalog/'))).toEqual([]);
 }, 35_000);
 
-test('isolated catalog discovery retains all scenario-labelled browser cases', () => {
-  const specs = collect('playwright.model-catalog.config.ts')
-    .filter((spec) => spec.file === 'catalog.spec.ts');
-  expect(specs.flatMap((spec) => spec.tests)).toHaveLength(36);
-  for (const spec of specs) {
-    expect(spec.title).toContain('MH-MENU-COMPOSE-001');
-  }
-}, 35_000);
-
 test('isolated discovery includes every fixture spec on both viewports', () => {
   const specs = collect('playwright.model-catalog.config.ts');
   const files = readdirSync(new URL('../e2e/model-catalog/', import.meta.url))

@@ -118,7 +118,13 @@ def test_complete_registered_api_management_inventory():
         for method in (getattr(route, "methods", None) or ())
         if method not in {"HEAD", "OPTIONS"}
     }
-    assert len(endpoints) == 280
+    assert len(endpoints) == 289
+    assert ("GET", "/api/sessions/main") in endpoints
+    assert http_authorization_policy("POST", "/api/vault/requests/{request_id}/approve-delete").minimum_role == "editor"
+    for method in ("PUT", "DELETE"):
+        assert (method, "/api/vault/secrets/{name}/fields/{field}") in endpoints
+        assert http_authorization_policy(method, "/api/vault/secrets/LOGIN/fields/username").minimum_role == "editor"
+    assert http_authorization_policy("POST", "/api/desktop-mini/session").minimum_role == "editor"
     assert http_authorization_policy("GET", "/api/desktop/capabilities").minimum_role == "member"
     assert http_authorization_policy("GET", "/api/desktop/computer-use/status").minimum_role == "member"
     # Additive read-only backend projection inherits native backend-management
@@ -158,6 +164,43 @@ def test_complete_registered_api_management_inventory():
                 if role is None:
                     assert not context.has_role(minimum), (method, raw)
     assert actual_read_roles == baseline_read_roles
+
+
+@pytest.mark.parametrize("role, status", [("editor", 403), ("member", 200), ("owner", 200)])
+def test_approve_delete_http_uses_management_authority(management_http, role, status):
+    """The real HTTP path must pass remote authority to the deletion transaction."""
+    from sqlalchemy import select
+    from storage import vault_service
+    from storage.models import vault_requests, vault_secrets
+    from storage.vault_crypto import Sealed
+
+    request_http = management_http(role)
+    routes = [
+        route for route in ui_server.app.routes
+        if getattr(route, "path", "") == "/api/vault/requests/{request_id}/approve-delete"
+        and "POST" in (getattr(route, "methods", None) or ())
+    ]
+    assert len(routes) == 1
+    # Native registration uses the handler itself, not a compat endpoint wrapper.
+    assert routes[0].endpoint is ui_server.vault_request_approve_delete_post
+    engine = api._vault_engine()
+    try:
+        with engine.begin() as conn:
+            vault_service.create_secret(conn, name="DELETE_HTTP", sealed=Sealed("ct", "nonce", "wrap"))
+            pending = vault_service.create_delete_request(conn, "DELETE_HTTP")
+        response = request_http("POST", f"/api/vault/requests/{pending['id']}/approve-delete", payload={})
+        assert response.status_code == status, response.get_json()
+        with engine.connect() as conn:
+            remaining = conn.execute(select(vault_secrets.c.name).where(vault_secrets.c.name == "DELETE_HTTP")).first()
+            decided = conn.execute(select(vault_requests.c.status).where(vault_requests.c.id == pending["id"])).scalar_one()
+        if status == 403:
+            assert response.get_json()["code"] == "resource_access_forbidden"
+            assert remaining is not None and decided == "pending"
+        else:
+            assert response.get_json()["removed"] is True
+            assert remaining is None and decided == "approved"
+    finally:
+        engine.dispose()
 
 
 @pytest.mark.parametrize("role", ["owner", "member", "editor", "viewer", None])

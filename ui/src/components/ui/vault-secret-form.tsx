@@ -8,6 +8,7 @@ import {
   FileText,
   Loader2,
   Lock,
+  Plus,
   RefreshCw,
   Server,
   ShieldCheck,
@@ -24,6 +25,7 @@ import {
   type SigningAddresses,
   type VaultRequestSpec,
   type VaultSecret,
+  type VaultCreatePayload,
   type VaultWebAuthnRegistrationPayload,
 } from '@/context/ApiContext';
 import type { VaultSandboxSealResult } from '@/lib/vaultSandboxClient';
@@ -38,7 +40,9 @@ import {
   type ProtectedRecordEnvelope,
   type SigningKeyMaterial,
 } from '@/lib/vaultCrypto';
+import { vaultErrorMessage } from '@/lib/vaultErrors';
 import { useProtectedVault } from '@/lib/useProtectedVault';
+import { MAX_VAULT_FIELDS, VAULT_FIELD_PATTERN, vaultFieldNameIssue, vaultRecordName } from '@/lib/vaultFields';
 import { openVaultsInBrowser } from '@/lib/vaultBrowserHandoff';
 import { Badge } from './badge';
 import { Button } from './button';
@@ -48,11 +52,25 @@ import { SigningAddressList } from './signing-address-list';
 import { Switch } from './switch';
 import { TagInput } from './tag-input';
 import { Textarea } from './textarea';
+import {
+  VaultFieldList,
+  VaultFieldReferences,
+  VaultFieldRemoveConfirm,
+  VaultFieldRow,
+  VaultFieldsHeader,
+  VaultFieldTemplateMenu,
+} from './vault-field-list';
 import { VaultProtectedUnlock } from './vault-protected-unlock';
+import { VaultSecretFieldsEditor } from './vault-secret-fields-editor';
 
 type VaultKind = 'static' | 'keypair';
 type FetchAuthMode = 'bearer' | 'header' | 'query';
 type StaticSecretSource = 'text' | 'file';
+/** A create-form field row. Touched flags hold back blank-field errors until the user has been there. */
+type FieldDraft = { id: number; name: string; value: string; nameTouched?: boolean; valueTouched?: boolean };
+
+let nextFieldDraftId = 0;
+const fieldDraft = (name: string, value = ''): FieldDraft => ({ id: nextFieldDraftId++, name, value });
 
 const AVAULT_P2_MIN_VERSION = '0.1.3';
 const MAX_SECRET_FILE_BYTES = 1024 * 1024;
@@ -132,7 +150,7 @@ export const VaultSecretForm: React.FC<{
   provisionRequestId?: string | null;
   requestSpec?: VaultRequestSpec | null;
   treatExistingAsFulfilled?: boolean;
-  /** When set, the form is in value-free edit mode for this existing secret. */
+  /** When set, metadata and individual field values can be edited. */
   editSecret?: VaultSecret | null;
   /** Called after a successful metadata edit (edit mode only). */
   onSaved?: (name: string) => void;
@@ -155,6 +173,12 @@ export const VaultSecretForm: React.FC<{
   const api = useApi();
   const [name, setName] = useState(fixedName ?? '');
   const [value, setValue] = useState('');
+  const [fieldRows, setFieldRows] = useState<FieldDraft[] | null>(null);
+  const [defaultFieldIndex, setDefaultFieldIndex] = useState(0);
+  // The input that should take focus when its row first mounts (after Add field or a template).
+  const [focusField, setFocusField] = useState<{ id: number; part: 'name' | 'value' } | null>(null);
+  const [focusedNameId, setFocusedNameId] = useState<number | null>(null);
+  const [fieldEditBusy, setFieldEditBusy] = useState(false);
   const staticValueRef = useRef('');
   const setStaticValue = useCallback((next: string) => {
     staticValueRef.current = next;
@@ -289,13 +313,23 @@ export const VaultSecretForm: React.FC<{
     if (requestSpec.policy?.allowed_hosts) setAllowHosts(requestSpec.policy.allowed_hosts);
     if (requestSpec.policy?.auth?.type) setFetchAuthMode(requestSpec.policy.auth.type);
     if (requestSpec.policy?.auth?.name) setFetchAuthName(requestSpec.policy.auth.name);
+    if (requestSpec.fields?.length) {
+      setFieldRows(requestSpec.fields.map((field) => fieldDraft(field)));
+      setDefaultFieldIndex(Math.max(0, requestSpec.fields.indexOf(requestSpec.default_field ?? requestSpec.fields[0])));
+    }
   }, [requestSpec, provisionRequestId]);
 
   // Edit mode: seed editable metadata from the existing secret. Name / kind / protection are
   // shown read-only (not seeded into editable controls); the value is never loaded; always_ask
   // is neither seeded nor emitted — the backend preserves it (storage.update_secret_metadata).
+  const seededEditSecretRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!editSecret) return;
+    if (!editSecret) {
+      seededEditSecretRef.current = null;
+      return;
+    }
+    if (seededEditSecretRef.current === editSecret.name) return;
+    seededEditSecretRef.current = editSecret.name;
     setKind(editSecret.kind === 'keypair' ? 'keypair' : 'static');
     setProtection(editSecret.protection === 'protected' ? 'protected' : 'standard');
     const parts = partitionTags(editSecret.tags);
@@ -310,6 +344,7 @@ export const VaultSecretForm: React.FC<{
 
   const p2Ready = useMemo(() => avaultP2Ready(avaultDep), [avaultDep]);
   const secretName = (fixedName ?? name).trim();
+  const secretNameValid = /^[A-Za-z_][A-Za-z0-9_]*$/.test(secretName);
   const protectedCreateReady = protectedVault.status === 'unlocked';
   const isKeypair = kind === 'keypair';
   const isProvision = Boolean(fixedName);
@@ -365,7 +400,10 @@ export const VaultSecretForm: React.FC<{
     };
   }, [signingKey, api]);
 
-  const staticValueReady = staticSource === 'file' ? selectedFile != null && selectedFile.size > 0 : Boolean(value);
+  const staticValueReady = fieldRows
+    ? fieldRows.every((field) => field.value && VAULT_FIELD_PATTERN.test(field.name)) &&
+      new Set(fieldRows.map((field) => field.name)).size === fieldRows.length
+    : staticSource === 'file' ? selectedFile != null && selectedFile.size > 0 : Boolean(value);
   const valueReady = isKeypair
     ? // Protected keypair must be generated in-sandbox first (below); standard keypair needs the
       // locally-built signing key. Static readiness is the entered/selected value.
@@ -374,8 +412,8 @@ export const VaultSecretForm: React.FC<{
       : signingKey != null
     : staticValueReady;
   const canSubmit = isEdit
-    ? !submitting
-    : Boolean(secretName && valueReady) &&
+    ? !submitting && !fieldEditBusy
+    : Boolean(secretNameValid && valueReady) &&
       !submitting &&
       // Block submit while a protected keypair is (re)generating in the sandbox, so the user can't
       // submit the previous envelope mid-ceremony and persist a key they're actively replacing.
@@ -390,6 +428,7 @@ export const VaultSecretForm: React.FC<{
   const clearStaticValue = useCallback(() => {
     staticValueRef.current = '';
     setValue('');
+    setFieldRows((rows) => rows?.map((row) => ({ ...row, value: '' })) ?? null);
     clearSelectedFile();
   }, [clearSelectedFile]);
 
@@ -469,7 +508,7 @@ export const VaultSecretForm: React.FC<{
   // here. R1 semantics — silent while unlocked (the form's gate covers the locked case). Regenerate
   // just calls again and discards the previous envelope.
   const generateProtectedKeypair = async () => {
-    if (!secretName || generatingKeypair) return;
+    if (!secretNameValid || generatingKeypair) return;
     const gen = (keypairGenRef.current += 1);
     setGeneratingKeypair(true);
     setKeypairError(null);
@@ -556,7 +595,7 @@ export const VaultSecretForm: React.FC<{
         });
         const result = await api.updateVaultSecret(editSecret.name, patch, { handleError: false });
         if (!result.ok) {
-          setError(result.message || t('vaults.dialog.errors.updateFailed'));
+          setError(vaultErrorMessage(t, result, t('vaults.dialog.errors.updateFailed')));
           return;
         }
         onSaved?.(editSecret.name);
@@ -606,7 +645,32 @@ export const VaultSecretForm: React.FC<{
       let establishingVmk = false;
       let authzFactorRegistration: Awaited<ReturnType<typeof protectedVault.sealValue>>['authzFactorRegistration'];
       let protectedPublicMeta: Record<string, unknown> | undefined;
-      if (protection === 'protected') {
+      let extraFields: VaultCreatePayload['fields'];
+      if (!isKeypair && fieldRows) {
+        extraFields = [];
+        const defaultField = fieldRows[defaultFieldIndex].name;
+        const pubkey = protection === 'standard' ? await api.getVaultPubkey() : null;
+        let defaultCrypto: typeof cryptoFields | undefined;
+        for (const [index, row] of fieldRows.entries()) {
+          const record = vaultRecordName(secretName, row.name, defaultField);
+          let fieldCrypto: typeof cryptoFields;
+          if (protection === 'protected') {
+            const valueRef = { current: row.value };
+            const sealed = await protectedVault.sealValue(record, 'static', {
+              valueRef,
+              clear: () => setFieldRows((rows) => rows?.map((field, i) => i === index ? { ...field, value: '' } : field) ?? null),
+            });
+            fieldCrypto = { sealed: sealed.envelope };
+            establishingVmk ||= sealed.establishingVmk;
+            authzFactorRegistration ??= sealed.authzFactorRegistration;
+          } else {
+            fieldCrypto = { blind_box: await sealBlindBox(row.value, pubkey!, standardCreateBlindBoxContext(record)) };
+          }
+          if (index === defaultFieldIndex) defaultCrypto = fieldCrypto;
+          else extraFields.push({ name: row.name, record, ...fieldCrypto });
+        }
+        cryptoFields = defaultCrypto!;
+      } else if (protection === 'protected') {
         if (isKeypair) {
           // Keypair was already sealed in-sandbox by "Generate key" (protocol v2 §7.2). Submit the
           // held envelope + public metadata; no second seal, and the private key never existed here.
@@ -657,6 +721,7 @@ export const VaultSecretForm: React.FC<{
           ...base,
           ...(protectedPublicMeta ? { kind: 'keypair', signer_kind: 'local', public_meta: protectedPublicMeta } : {}),
           ...cryptoFields,
+          ...(!isKeypair && fieldRows ? { default_field: fieldRows[defaultFieldIndex].name, fields: extraFields } : {}),
           ...(establishingVmk
             ? {
                 establishing_vmk: true,
@@ -682,7 +747,7 @@ export const VaultSecretForm: React.FC<{
           setError(t('vaults.protectedUnlock.errors.alreadyInitialized'));
           return;
         }
-        throw new Error(created.message || created.code || t('vaults.request.saveFailed'));
+        throw new Error(vaultErrorMessage(t, created, t('vaults.request.saveFailed')));
       }
       if (protection === 'protected') protectedVault.afterCreated();
       clearStaticValue();
@@ -706,7 +771,7 @@ export const VaultSecretForm: React.FC<{
       } else if (err instanceof ApiError && err.code === 'secret_name_case_conflict') {
         setError(err.message || t('vaults.dialog.errors.secretNameCaseConflict'));
       } else {
-        setError(err instanceof Error ? err.message : String(err));
+        setError(vaultErrorMessage(t, err, t('vaults.request.saveFailed')));
       }
     } finally {
       fileBytesToWipe?.fill(0);
@@ -804,6 +869,115 @@ export const VaultSecretForm: React.FC<{
     </div>
   );
 
+  // Leaving the single value turns it into rows. Its value moves to the default row (`value`
+  // for Add field, `password` for a template), and a selected file is dropped because file
+  // uploads hold one value only.
+  const leaveSingleValue = () => {
+    setStaticValue('');
+    setStaticSource('text');
+    clearSelectedFile();
+  };
+  const addFieldRow = () => {
+    const added = fieldDraft('');
+    setFieldRows((rows) => [...(rows ?? [fieldDraft('value', value)]), added]);
+    setFocusField({ id: added.id, part: 'name' });
+    leaveSingleValue();
+  };
+  const applyFieldTemplate = (fields: string[], defaultField: string) => {
+    const rows = fields.map((field) => fieldDraft(field, field === defaultField ? value : ''));
+    setFieldRows(rows);
+    setDefaultFieldIndex(fields.indexOf(defaultField));
+    setFocusField({ id: (rows.find((row) => !row.value) ?? rows[0]).id, part: 'value' });
+    leaveSingleValue();
+  };
+  const patchFieldRow = (id: number, patch: Partial<FieldDraft>) =>
+    setFieldRows((rows) => rows?.map((row) => (row.id === id ? { ...row, ...patch } : row)) ?? null);
+  const removeFieldRow = (index: number) => {
+    setFieldRows((rows) => rows?.filter((_, i) => i !== index) ?? null);
+    setDefaultFieldIndex((current) => (index < current ? current - 1 : current));
+  };
+
+  const fieldNames = fieldRows?.map((row) => row.name) ?? [];
+  const fieldNameIssues = fieldNames.map((fieldName, index) =>
+    vaultFieldNameIssue(fieldName, fieldNames.filter((_, i) => i !== index)));
+  const focusedNameIssue = fieldNameIssues[fieldRows?.findIndex((row) => row.id === focusedNameId) ?? -1];
+  const showNameRule = focusedNameId !== null && focusedNameIssue !== 'nameInvalid' && focusedNameIssue !== 'nameTaken';
+
+  const staticFields = fieldRows ? (
+    <div className="flex flex-col gap-2">
+      <VaultFieldsHeader count={fieldRows.length} />
+      <VaultFieldList onAdd={addFieldRow} addDisabled={submitting || fieldRows.length >= MAX_VAULT_FIELDS}>
+        {fieldRows.map((row, index) => {
+          const label = row.name || String(index + 1);
+          const nameIssue = fieldNameIssues[index];
+          // A blank name or value only counts as an error once the user has been there.
+          const issue = nameIssue === 'nameRequired'
+            ? (row.nameTouched || row.value ? nameIssue : null)
+            : nameIssue ?? (row.valueTouched && !row.value ? 'valueRequired' : null);
+          return (
+            <VaultFieldRow
+              key={row.id}
+              field={label}
+              isDefault={index === defaultFieldIndex}
+              name={{
+                editable: true,
+                value: row.name,
+                label: t('vaults.fields.name', { index: index + 1 }),
+                onChange: (next) => patchFieldRow(row.id, { name: next }),
+                onFocus: () => setFocusedNameId(row.id),
+                onBlur: () => {
+                  setFocusedNameId(null);
+                  patchFieldRow(row.id, { nameTouched: true });
+                },
+                autoFocus: focusField?.id === row.id && focusField.part === 'name',
+              }}
+              value={{
+                value: row.value,
+                label: t('vaults.fields.value', { field: label }),
+                placeholder: row.name ? t('vaults.fields.value', { field: row.name }) : t('vaults.dialog.valuePlaceholder'),
+                onChange: (next) => patchFieldRow(row.id, { value: next }),
+                onBlur: () => patchFieldRow(row.id, { valueTouched: true }),
+                autoFocus: focusField?.id === row.id && focusField.part === 'value',
+              }}
+              onSetDefault={() => setDefaultFieldIndex(index)}
+              remove={{
+                label: t('vaults.fields.remove', { field: label }),
+                // Only a row that holds a value has something to lose.
+                confirm: row.value ? <VaultFieldRemoveConfirm field={label} revokesGrants={false} /> : undefined,
+                onRemove: () => removeFieldRow(index),
+                blockedReason: index === defaultFieldIndex ? t('vaults.fields.defaultNotRemovable') : undefined,
+              }}
+              issue={issue}
+              disabled={submitting}
+            />
+          );
+        })}
+      </VaultFieldList>
+      {showNameRule ? <span className="text-[11px] text-muted">{t('vaults.fields.nameRule')}</span> : null}
+      <VaultFieldReferences
+        secretName={secretName}
+        fields={fieldNames.filter((_, index) => fieldNameIssues[index] === null)}
+        defaultField={fieldNames[defaultFieldIndex] ?? ''}
+      />
+    </div>
+  ) : (
+    <div className="flex flex-col gap-1.5">
+      <span className={FIELD_LABEL}>{t('vaults.dialog.value')}</span>
+      {valueField}
+      <div className="-ml-2.5 flex flex-wrap items-center gap-0.5">
+        <Button type="button" variant="ghost" size="xs" className="px-2.5 text-[13px] text-muted hover:text-foreground"
+          disabled={submitting || staticSource === 'file'} onClick={addFieldRow}>
+          <Plus />
+          {t('vaults.fields.add')}
+        </Button>
+        <VaultFieldTemplateMenu disabled={submitting || staticSource === 'file'} onApply={applyFieldTemplate} />
+      </div>
+      <span className="text-[11px] text-muted">
+        {staticSource === 'file' ? t('vaults.fields.singleFile') : t('vaults.fields.multiHint')}
+      </span>
+    </div>
+  );
+
   const fetchAuthPolicyFields = (
     <div className="flex flex-col gap-1.5">
       <span className={FIELD_LABEL}>{t('vaults.dialog.fetchAuth')}</span>
@@ -829,7 +1003,7 @@ export const VaultSecretForm: React.FC<{
           />
         )}
       </div>
-      <span className="text-[11px] text-muted-foreground">{t('vaults.dialog.fetchAuthHelp')}</span>
+      <span className="text-[11px] text-muted">{t('vaults.dialog.fetchAuthHelp')}</span>
     </div>
   );
 
@@ -849,7 +1023,7 @@ export const VaultSecretForm: React.FC<{
         removeLabel={(value) => t('vaults.dialog.removeChip', { value })}
         onPendingChange={setTagsPending}
       />
-      <span className="text-[11px] text-muted-foreground">{t('vaults.dialog.tagsHelp')}</span>
+      <span className="text-[11px] text-muted">{t('vaults.dialog.tagsHelp')}</span>
     </div>
   );
 
@@ -867,7 +1041,7 @@ export const VaultSecretForm: React.FC<{
         removeLabel={(value) => t('vaults.dialog.removeChip', { value })}
         onPendingChange={setHostsPending}
       />
-      <span className="text-[11px] text-muted-foreground">{t('vaults.dialog.allowHostsHelp')}</span>
+      <span className="text-[11px] text-muted">{t('vaults.dialog.allowHostsHelp')}</span>
     </div>
   );
 
@@ -904,7 +1078,7 @@ export const VaultSecretForm: React.FC<{
                 <span className="flex-1 text-[13.5px] font-semibold text-foreground">{title}</span>
                 {selected && <Check className="size-4 text-mint-ink" />}
               </span>
-              <span className="text-[11.5px] leading-snug text-muted-foreground">{desc}</span>
+              <span className="text-[11.5px] leading-snug text-muted">{desc}</span>
             </button>
           );
         })}
@@ -920,7 +1094,7 @@ export const VaultSecretForm: React.FC<{
       <div className="flex items-start gap-3 rounded-[10px] border border-border bg-surface-2 px-3 py-3">
         <div className="flex min-w-0 flex-1 flex-col gap-1">
           <span className="text-[13px] font-semibold text-foreground">{t('vaults.dialog.alwaysAskSign')}</span>
-          <span className="text-[11.5px] leading-snug text-muted-foreground">{t('vaults.dialog.alwaysAskSignHelp')}</span>
+          <span className="text-[11.5px] leading-snug text-muted">{t('vaults.dialog.alwaysAskSignHelp')}</span>
         </div>
         <Switch
           checked={alwaysAsk}
@@ -1003,9 +1177,7 @@ export const VaultSecretForm: React.FC<{
     </div>
   );
 
-  // ---- Edit mode — value-free metadata edit of an existing secret --------------------
-  // Name / kind / protection / value are immutable and shown read-only; only description, tags
-  // (incl. `skill:` tags) and — for a static secret — the fetch proxy policy are editable.
+  // Field writes save independently; the form submit updates shared metadata.
   if (isEdit && editSecret) {
     return (
       <form className={cn('flex min-w-0 flex-col gap-4', className)} onSubmit={onSubmit}>
@@ -1023,10 +1195,11 @@ export const VaultSecretForm: React.FC<{
             </div>
           </div>
         </div>
-        <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+        <p className="flex items-center gap-1.5 text-[11px] text-muted">
           <Lock className="size-3 shrink-0" />
           {t('vaults.edit.lockedHint')}
         </p>
+        {!isKeypair && <VaultSecretFieldsEditor key={editSecret.name} secret={editSecret} disabled={submitting} onBusyChange={setFieldEditBusy} />}
 
         <label className="flex flex-col gap-1.5">
           <span className={FIELD_LABEL}>{t('vaults.dialog.description')}</span>
@@ -1046,7 +1219,7 @@ export const VaultSecretForm: React.FC<{
         )}
 
         <div className="mt-1 flex justify-end gap-2">
-          <Button type="button" variant="ghost" onClick={onCancel} disabled={submitting}>
+          <Button type="button" variant="ghost" onClick={onCancel} disabled={submitting || fieldEditBusy}>
             {cancelLabel ?? t('vaults.dialog.cancel')}
           </Button>
           <Button type="submit" disabled={!canSubmit}>
@@ -1076,11 +1249,10 @@ export const VaultSecretForm: React.FC<{
         </div>
 
         {!isKeypair && (
-          <label className="flex flex-col gap-1.5">
-            <span className={FIELD_LABEL}>{t('vaults.dialog.value')}</span>
-            {valueField}
-            <span className="text-[11px] text-muted-foreground">{t('vaults.dialog.provisionValueHelp')}</span>
-          </label>
+          <div className="flex flex-col gap-1.5">
+            {staticFields}
+            <span className="text-[11px] text-muted">{t('vaults.dialog.provisionValueHelp')}</span>
+          </div>
         )}
 
         <label className="flex flex-col gap-1.5">
@@ -1139,6 +1311,8 @@ export const VaultSecretForm: React.FC<{
               setSigningError(null);
             } else {
               clearStaticValue();
+              setFieldRows(null);
+              setDefaultFieldIndex(0);
             }
             // A sandbox-sealed protected keypair is bound to its kind; switching kind invalidates it.
             clearProtectedKeypair();
@@ -1167,20 +1341,15 @@ export const VaultSecretForm: React.FC<{
           required
           className="font-mono"
         />
-        <span className="text-[11px] text-muted-foreground">{t('vaults.dialog.nameHint')}</span>
+        <span className="text-[11px] text-muted">{t('vaults.dialog.nameHint')}</span>
       </label>
 
       {/* Value (static) or signing-key builder (keypair) */}
-      {!isKeypair && (
-        <label className="flex flex-col gap-1.5">
-          <span className={FIELD_LABEL}>{t('vaults.dialog.value')}</span>
-          {valueField}
-        </label>
-      )}
+      {!isKeypair && staticFields}
 
       {isKeypair && protection === 'standard' && (
         <div className="flex flex-col gap-2.5 rounded-[10px] border border-border bg-surface-2 px-3 py-3">
-          <span className="text-xs text-muted-foreground">{t('vaults.dialog.signingKeyHelp')}</span>
+          <span className="text-xs text-muted">{t('vaults.dialog.signingKeyHelp')}</span>
           <div className="grid grid-cols-2 gap-2">
             {(['generate', 'import'] as const).map((src) => (
               <Button
@@ -1250,7 +1419,7 @@ export const VaultSecretForm: React.FC<{
 
           {signingKey && (
             <div className="flex min-w-0 flex-col gap-1.5">
-              <span className="text-xs font-medium text-muted-foreground">{t('vaults.dialog.signingAddresses')}</span>
+              <span className="text-xs font-medium text-muted">{t('vaults.dialog.signingAddresses')}</span>
               {addressesLoading ? (
                 <span className="flex items-center gap-1.5 text-xs text-muted">
                   <Loader2 className="size-3.5 animate-spin" />
@@ -1259,9 +1428,9 @@ export const VaultSecretForm: React.FC<{
               ) : signingAddresses ? (
                 <SigningAddressList addresses={signingAddresses} />
               ) : (
-                <span className="text-xs text-muted-foreground">{t('vaults.dialog.signingAddressesUnavailable')}</span>
+                <span className="text-xs text-muted">{t('vaults.dialog.signingAddressesUnavailable')}</span>
               )}
-              <span className="text-xs text-muted-foreground">{t('vaults.dialog.signingAddressesHint')}</span>
+              <span className="text-xs text-muted">{t('vaults.dialog.signingAddressesHint')}</span>
             </div>
           )}
 
@@ -1281,11 +1450,11 @@ export const VaultSecretForm: React.FC<{
           the locked case. No import option — generate is the single path. */}
       {isKeypair && protection === 'protected' && protectedCreateReady && (
         <div className="flex flex-col gap-2.5 rounded-[10px] border border-border bg-surface-2 px-3 py-3">
-          <span className="text-xs text-muted-foreground">{t('vaults.dialog.signingKeyProtectedHelp')}</span>
+          <span className="text-xs text-muted">{t('vaults.dialog.signingKeyProtectedHelp')}</span>
           <Button
             type="button"
             variant="secondary"
-            disabled={submitting || generatingKeypair || !secretName}
+            disabled={submitting || generatingKeypair || !secretNameValid}
             onClick={() => void generateProtectedKeypair()}
           >
             {generatingKeypair ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
@@ -1293,13 +1462,13 @@ export const VaultSecretForm: React.FC<{
           </Button>
           {protectedKeypair && (
             <div className="flex min-w-0 flex-col gap-1.5">
-              <span className="text-xs font-medium text-muted-foreground">{t('vaults.dialog.signingAddresses')}</span>
+              <span className="text-xs font-medium text-muted">{t('vaults.dialog.signingAddresses')}</span>
               {protectedKeypair.addresses ? (
                 <SigningAddressList addresses={protectedKeypair.addresses} />
               ) : (
-                <span className="text-xs text-muted-foreground">{t('vaults.dialog.signingAddressesUnavailable')}</span>
+                <span className="text-xs text-muted">{t('vaults.dialog.signingAddressesUnavailable')}</span>
               )}
-              <span className="text-xs text-muted-foreground">{t('vaults.dialog.signingKeyProtectedBornHint')}</span>
+              <span className="text-xs text-muted">{t('vaults.dialog.signingKeyProtectedBornHint')}</span>
             </div>
           )}
           {keypairError && <span className="text-xs text-destructive-ink">{keypairError}</span>}

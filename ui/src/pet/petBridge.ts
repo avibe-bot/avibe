@@ -23,6 +23,10 @@ import { openLinkInNewContext } from '@/lib/pwaNavigation';
  *   avibe:pet-summon  detail { intent }  only after pet_ready(); earlier summons
  *                                        are returned by pet_ready() instead
  *   avibe:pet-bound   detail { session_id: string | null, revision }
+ *   avibe:pet-hover   detail { hover: boolean }  the cursor entered or left
+ *                                        the hit rects reported with `hover`;
+ *                                        a webview in a window that is not
+ *                                        key gets no hover of its own on macOS
  *
  * `revision` is the shell's binding revision: it grows by one on every change
  * to the binding, and every answer and event carries the revision it reflects.
@@ -30,11 +34,11 @@ import { openLinkInNewContext } from '@/lib/pwaNavigation';
  * order, so the page applies only a revision newer than the last it applied.
  *
  * Outside the shell (a browser tab during development) the bridge keeps the
- * binding in localStorage and lays the panel out to the right, so the route
+ * binding in localStorage with the same fixed mini layout, so the route
  * stays usable without the native window.
  */
 
-export type PetIntent = 'listen' | 'show';
+export type PetIntent = 'listen' | 'show' | 'release';
 
 export type PetLayout = {
   panel_side: 'left' | 'right';
@@ -49,10 +53,15 @@ export type PetBinding = {
 
 export type PetReady = PetBinding & {
   summon_pending: { intent: PetIntent } | null;
+  dismissed_ids: string[];
 };
 
 export const PET_SUMMON_EVENT = 'avibe:pet-summon';
 export const PET_BOUND_EVENT = 'avibe:pet-bound';
+export const PET_HOVER_EVENT = 'avibe:pet-hover';
+
+/** A window-local rect that takes the mouse; `hover` marks Vibey's hover zone. */
+export type PetHitRect = { x: number; y: number; width: number; height: number; hover?: boolean };
 
 // Outside the shell, `{ binding, revision }` as JSON: the dev stand-in for
 // `pet.json` and the shell's revision counter.
@@ -67,7 +76,7 @@ const shellInvoke = (): TauriInternals['invoke'] | null => {
   return internals?.invoke ? internals.invoke.bind(internals) : null;
 };
 
-const isIntent = (value: unknown): value is PetIntent => value === 'listen' || value === 'show';
+const isIntent = (value: unknown): value is PetIntent => value === 'listen' || value === 'show' || value === 'release';
 
 const parseBinding = (value: unknown): PetBinding => {
   const result = value as { binding?: unknown; revision?: unknown } | null;
@@ -109,12 +118,15 @@ export const petBridge = {
 
   ready: async (): Promise<PetReady> => {
     const invoke = shellInvoke();
-    if (!invoke) return { ...readDevBinding(), summon_pending: null };
+    if (!invoke) return { ...readDevBinding(), summon_pending: null, dismissed_ids: [] };
     const result = (await invoke('pet_ready')) as { summon_pending?: { intent?: unknown } | null } | null;
     const pending = result?.summon_pending;
     return {
       ...parseBinding(result),
       summon_pending: pending && isIntent(pending.intent) ? { intent: pending.intent } : null,
+      dismissed_ids: Array.isArray((result as { dismissed_ids?: unknown } | null)?.dismissed_ids)
+        ? (result as { dismissed_ids: unknown[] }).dismissed_ids.filter((id): id is string => typeof id === 'string')
+        : [],
     };
   },
 
@@ -126,6 +138,18 @@ export const petBridge = {
       panel_side: layout?.panel_side === 'right' ? 'right' : 'left',
       panel_edge: layout?.panel_edge === 'top' ? 'top' : 'bottom',
     };
+  },
+
+  setHitRegions: async (rects: PetHitRect[]): Promise<void> => {
+    const invoke = shellInvoke();
+    if (!invoke) return;
+    await invoke('pet_hit_regions', { rects });
+  },
+
+  setDismissedIds: async (sessionId: string, ids: string[]): Promise<void> => {
+    const invoke = shellInvoke();
+    if (!invoke) return;
+    await invoke('pet_set_dismissed', { sessionId, ids });
   },
 
   bind: async (sessionId: string): Promise<PetBinding> => {
@@ -185,6 +209,13 @@ export const devPathForLink = (link: string): string => {
 export const sessionLink = (sessionId: string): string => `avibe://session/${sessionId}`;
 export const vaultRequestLink = (requestId: string): string => `avibe://vaults/request/${requestId}`;
 export const SETTINGS_LINK = 'avibe://settings';
+
+/** Subscribe to the shell's hover reports; returns the unsubscribe function. */
+export const onPetHover = (handler: (hover: boolean) => void): (() => void) => {
+  const listener = (event: Event) => handler((event as CustomEvent<{ hover?: unknown }>).detail?.hover === true);
+  window.addEventListener(PET_HOVER_EVENT, listener);
+  return () => window.removeEventListener(PET_HOVER_EVENT, listener);
+};
 
 /** Subscribe to shell events; returns the unsubscribe function. */
 export const onPetEvents = (handlers: {

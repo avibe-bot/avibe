@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/hop-origin.schema.json",
   "title": "HopOrigin",
-  "description": "Upstream identity captured at admission. Serialized in x-avibe-served-hop and the same provenance attempt's origin.",
+  "description": "Upstream identity captured at admission and persisted as the provenance attempt's origin, beside that attempt's source_id. The x-avibe-served-hop header carries these fields plus the Source id; see served-hop.schema.json.",
   "type": "object",
   "required": ["provider", "api", "model"],
   "additionalProperties": false,

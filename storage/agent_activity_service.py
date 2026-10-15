@@ -204,13 +204,29 @@ def _emit_micros(row_id: Optional[str], ts: datetime) -> int:
     return int(ts.timestamp() * 1_000_000)
 
 
-def _event_emit_micros(event: dict[str, Any], ts: datetime) -> int:
+def _event_anchor_micros(event: dict[str, Any], ts: datetime) -> int:
+    """The clock that places an event in the scanned window: its own emission, or the row it belongs to.
+
+    A native hosted call is written after the response row that carried it, so it
+    names that row (``precedes_message_id``) and belongs wherever that row does.
+    """
     metadata = event.get("metadata") or {}
+    precedes = metadata.get("precedes_message_id")
+    if isinstance(precedes, str) and precedes:
+        return _emit_micros(precedes, ts)
     legacy_message_id = metadata.get("legacy_message_id")
     return _emit_micros(
         str(legacy_message_id) if legacy_message_id else event.get("id"),
         ts,
     )
+
+
+def _event_emit_micros(event: dict[str, Any], ts: datetime) -> int:
+    """The event's place in the timeline: a hosted call happened before the text of
+    its response, so it sorts just ahead of that row."""
+    anchor = _event_anchor_micros(event, ts)
+    precedes = (event.get("metadata") or {}).get("precedes_message_id")
+    return anchor - 1 if isinstance(precedes, str) and precedes else anchor
 
 
 def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, Any]]:
@@ -361,7 +377,9 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
     for event in events:
         event_ts = _parse_ts(event.get("created_at"))
         event_sort = _event_emit_micros(event, event_ts)
-        if oldest_msg_sort is not None and event_sort < oldest_msg_sort:
+        # Window membership by the row the event belongs to, never by its sort key:
+        # a card sorted just ahead of the oldest retained response is still its card.
+        if oldest_msg_sort is not None and _event_anchor_micros(event, event_ts) < oldest_msg_sort:
             continue
         if event.get("event_type") == "silent_terminal":
             terminal_outcome = (event.get("metadata") or {}).get(
@@ -400,6 +418,9 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
                 "turn_id": str(event.get("turn_id") or "").strip() or None,
                 "row_kind": "tool_call",
                 "text": event.get("text") if include_text else None,
+                # A hosted-tool call carries its card (``core.hosted_activity``); every
+                # other tool call is its text alone.
+                "hosted": ((event.get("content") or {}).get("hosted") if include_text else None),
             }
         )
     for turn in conn.execute(
@@ -488,6 +509,7 @@ def _make_group(
                     if isinstance(item.get("citations"), list) and item["citations"]
                     else {}
                 ),
+                **({"hosted": item["hosted"]} if isinstance(item.get("hosted"), dict) else {}),
             }
             for item in pending
         ]

@@ -69,6 +69,14 @@ class _FakeHTTPResponse:
         return self._body.read(size)
 
 
+def _stub_tmux_install(monkeypatch) -> None:
+    """Startup reconcile also ensures the managed tmux, which downloads it where none is installed."""
+
+    import core.tmux_runtime as tmux_runtime
+
+    monkeypatch.setattr(tmux_runtime, "ensure_tmux_installed", lambda force=False: {"ok": True, "installed": True})
+
+
 def _serve_release_asset(monkeypatch, suffix: str, body: bytes) -> list[str]:
     """Serve ``body`` for any URL ending in ``suffix``; return the requested URLs."""
     calls: list[str] = []
@@ -1740,6 +1748,7 @@ def test_dependencies_status_node_unsupported_not_ready(monkeypatch):
 
 def test_reconcile_startup_dependencies_reports_runtime_install_failure_without_node(monkeypatch):
     monkeypatch.setenv("VIBE_RIPGREP_OFFLINE", "1")
+    _stub_tmux_install(monkeypatch)
     monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: {"ok": True, "installed": True})
     monkeypatch.setattr(api, "ensure_avault_installed", lambda force=False: {"ok": True, "installed": True})
     monkeypatch.setattr(
@@ -2302,6 +2311,7 @@ def test_reconcile_startup_dependencies_uses_automatic_runtime_admission(monkeyp
     """MH-RUNTIME-008: startup converges CPA without changing run intent."""
 
     monkeypatch.setenv("VIBE_RIPGREP_OFFLINE", "1")
+    _stub_tmux_install(monkeypatch)
     askill_calls = []
     avault_calls = []
     model_hub_calls = []

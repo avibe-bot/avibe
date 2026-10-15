@@ -35,6 +35,7 @@ from core.agent_core.agent.loop import Agent
 from core.agent_core.agent.models import RetryPolicy
 from core.agent_core.ai._common import endpoint_origin, prepare_messages
 from core.agent_core.ai.anthropic import build_messages_payload
+from core.agent_core.ai.errors import classify_error
 from core.agent_core.ai.openai_chat import build_chat_payload
 from core.agent_core.ai.openai_responses import build_responses_payload
 from core.agent_core.ai.provider import Done, ModelEndpoint, ProviderError, TextDelta
@@ -42,6 +43,8 @@ from core.agent_core.agent.models import ModelSelection
 from core.agent_core.cancel import CancelToken
 from core.agent_core.harness.context import (
     CHECKPOINT_REQUEST,
+    CHECKPOINT_TRUNCATED,
+    CACHE_TTL_UNKNOWN_S,
     TOOL_TRUNCATED,
     ContextConfig,
     StateRequest,
@@ -53,6 +56,12 @@ from core.agent_core.harness.context import (
 from core.agent_core.harness.projection import context_view, project
 from core.agent_core.messages import (
     AssistantMessage,
+    HostedAction,
+    HostedCost,
+    HostedNative,
+    HostedRecord,
+    HostedSummary,
+    HostedToolBlock,
     Origin,
     TextBlock,
     ThinkingBlock,
@@ -71,8 +80,12 @@ from tests.agent_core.fakes import (
     FakeModelRouter,
     FakeTool,
     InMemoryTranscriptStore,
+    ORIGIN,
+    WINDOW_REFUSAL,
+    anthropic_error,
     assistant,
     input_row,
+    model_hub_error,
 )
 
 DENIED, BUDGET_USED = DREAMING.denied, DREAMING.budget_used
@@ -234,6 +247,18 @@ def growing(count: int, final: str = "done"):
     return [call("read", f"read-{index}", path=f"f{index}") for index in range(count)] + [[Done(assistant(final))]]
 
 
+async def at_threshold(store, selection, threshold: int, sizes, **options) -> int:
+    """A first run on ``selection`` of reads sized ``sizes`` that stays under ``threshold``; the tokens of an input
+    that brings the next request to it exactly. No reply reports usage, so nothing anchors and the estimate is the
+    request's ``tokens()`` (section 2)."""
+    model = Model(reads(len(sizes), final="noted"))
+    agent = make_agent(model, store=store, tools=[sized_reader(*sizes)], selection=selection, **options)
+    events = await run(agent, row="history")
+    assert events[-1].reason == "completed" and not model.checkpoint_requests
+    last = model.requests[-1]
+    return threshold - request_tokens(last.system, last.tools, project(await store.load("session")).messages)
+
+
 async def test_a_threshold_checkpoint_forks_the_exact_prefix_and_leaves_checkpoint_and_tail():
     host = Host()
     model = Model(growing(4), [[TextDelta(0, "streamed checkpoint"), Done(assistant(CHECKPOINT))]])
@@ -311,19 +336,37 @@ async def _wire(request):
 
 
 @pytest.mark.parametrize("protocol", ["anthropic", "openai_chat", "openai_responses"])
-async def test_the_fork_is_a_byte_identical_prefix_on_every_protocol_wire(protocol):
+@pytest.mark.parametrize(
+    "limits,read,asked",
+    [
+        ((64_000, 32_000, 4_096), 6_000, 4_096),  # O up to 64,000: the conversation's own output cap
+        ((400_000, 272_000, 128_000), 33_000, 64_000),  # T = 132,000; above 64,000 a checkpoint asks for 64,000
+    ],
+    ids=["O 4,096", "O 128,000"],
+)
+async def test_the_fork_is_a_byte_identical_prefix_on_every_protocol_wire(protocol, limits, read, asked):
+    window, input_limit, output = limits
     endpoint = ModelEndpoint(protocol, "http://model.invalid", "test-model", "", provider="test-provider")
-    capabilities = replace(SELECTION.capabilities, supports_reasoning=True, reasoning_efforts=("high",))
+    capabilities = replace(
+        SELECTION.capabilities,
+        context_window=window,
+        input_limit=input_limit,
+        max_output_tokens=output,
+        supports_reasoning=True,
+        reasoning_efforts=("high",),
+    )
     selection = ModelSelection(endpoint, capabilities)
     model = Model(growing(4), [[Done(assistant(CHECKPOINT))]])
-    agent = make_agent(model, tools=[reader(tokens(6_000))], selection=selection)
+    agent = make_agent(model, tools=[reader(tokens(read))], selection=selection, max_tokens=output)
     agent.reasoning_effort = "high"
     await run(agent)
     previous, fork = model.requests[3], model.requests[4]
     assert is_checkpoint(fork) and fork.reasoning_effort == "high"
+    assert (previous.max_tokens, fork.max_tokens) == (output, asked)
     previous_settings, previous_items = await _wire(previous)
     fork_settings, fork_items = await _wire(fork)
-    assert fork_settings == previous_settings  # model, system, tools, tool choice, thinking, effort, output cap
+    # Model, system, tools, tool choice, thinking, and effort are the conversation's; only the output cap may differ.
+    assert fork_settings == (await _wire(replace(previous, max_tokens=asked)))[0]
     assert fork_items[: len(previous_items)] == previous_items
     assert len(fork_items) > len(previous_items)
 
@@ -501,6 +544,44 @@ async def test_a_checkpoint_turn_reserves_room_for_every_result_of_its_batch():
     assert request_tokens(second.system, second.tools, second.messages) + 4_096 <= 32_000
 
 
+#: A 128,000-token route answering up to 32,000 tokens: M = 8,000 and T = 88,000 (section 1).
+WIDE = ModelSelection(
+    ENDPOINT, replace(SELECTION.capabilities, context_window=128_000, input_limit=None, max_output_tokens=32_000)
+)
+
+
+@pytest.mark.parametrize(
+    "room,ran,last",
+    [(4_000, ["peek"], CHECKPOINT_TRUNCATED.format(shown=3_000, total=10_000)), (3_999, [], BUDGET_USED)],
+    ids=["room 4,000", "room 3,999"],
+)
+async def test_a_checkpoint_turn_at_T_reads_only_while_the_window_leaves_the_floor_after_its_output(room, ran, last):
+    # At est = T on WIDE a checkpoint asks for all of O, 32,000, so the room its tools have,
+    # L_in - est - min(64,000, O) - reserved, is about M less the checkpoint request and the response (section 6).
+    # The response is sized to leave exactly ``room``: a read runs from 4,000 tokens on, its result cut to
+    # room - 1,000, and one token less denies it.
+    store = InMemoryTranscriptStore()
+    size = await at_threshold(store, WIDE, 88_000, [20_000] * 4, max_tokens=32_000)
+
+    def peek(request):
+        read = ToolCallBlock("peek", "read", {"path": "f"})  # 4 tokens
+        pad = 128_000 - request_tokens(request.system, request.tools, request.messages) - 32_000 - room - 4
+        return [Done(AssistantMessage((text(tokens(pad)), read), assistant().origin, "tool_use"))]
+
+    tool = reader(tokens(10_000))
+    model = Model([[Done(assistant("done"))]], [peek, [Done(assistant(CHECKPOINT))]])
+    agent = make_agent(model, store=store, tools=[tool], selection=WIDE, max_tokens=32_000)
+    events = await run(agent, tokens(size), row="crossing")
+    first, second = model.checkpoint_requests
+    assert request_tokens(first.system, first.tools, first.messages[:-1]) == 88_000  # est = T
+    assert (first.max_tokens, second.max_tokens) == (32_000, 32_000)
+    assert [ctx.tool_call_id for _, ctx in tool.calls] == ran
+    result = second.messages[-1]
+    assert result.content[-1].text == last and message_tokens(result) <= room - 1_000
+    assert [event.mode for event in events if isinstance(event, CompactionFinished)] == ["normal"]
+    assert events[-1].reason == "completed"
+
+
 class FailingHost(Host):
     def __init__(self, step: str) -> None:
         super().__init__()
@@ -574,6 +655,32 @@ async def test_a_checkpoint_request_that_cannot_fit_a_new_route_is_audited_and_t
     assert events[-1].reason == "completed"
 
 
+#: A request the provider refuses because its input plus ``max_tokens`` exceeds the window (an Anthropic model before
+#: Claude 4.5), at the endpoint and through Model Hub, classified as the Anthropic adapter classifies an HTTP error.
+WINDOW_REFUSALS = [
+    pytest.param(classify_error(status=400, body=json.dumps(envelope(WINDOW_REFUSAL)), protocol="anthropic"), id=name)
+    for name, envelope in (("window-endpoint", anthropic_error), ("window-model-hub", model_hub_error))
+]
+
+
+@pytest.mark.parametrize("refusal", WINDOW_REFUSALS)
+async def test_a_threshold_checkpoint_the_provider_refuses_for_its_window_rolls(refusal):
+    # The threshold checkpoint's request can fit by the estimate, but the provider refuses it for its window: an
+    # overflow, so the ladder goes on at (b) and rolls (section 3, section 8 a).
+    store = InMemoryTranscriptStore()
+    await run(make_agent(Model(history()), store=store, tools=[reader(tokens(3_000))], selection=ROOMY))
+    model = Model([[Done(assistant("after"))]], [[refusal], [Done(assistant(CHECKPOINT))]])
+    agent = make_agent(model, store=store, tools=[reader(tokens(3_000))], selection=ROOMY)
+    events = await cross(agent)
+    finished = [(event.reason, event.mode) for event in events if isinstance(event, CompactionFinished)]
+    assert finished == [("overflow", "rolling")]
+    failed = [event for event in events if isinstance(event, CompactionFailed)]
+    assert [event.reason for event in failed] == ["threshold"] and failed[0].error.startswith("overflow: ")
+    normal, rolling = model.checkpoint_requests
+    assert len(rolling.messages) < len(normal.messages)  # the rolling fork carries a prefix of the context
+    assert events[-1].reason == "completed"
+
+
 #: Checkpoint turns that fail without a repair: a length stop, and a provider error.
 FAILURES = [
     [Done(assistant(CHECKPOINT, stop_reason="length"))],
@@ -617,6 +724,28 @@ async def test_the_checkpoint_usage_keeps_every_reported_field():
     compaction = next(row for row in await agent.store.load("session") if row.kind == "compaction")
     assert compaction.payload["usage"] == expected
     assert agent.store.audits[0][2]["usage"] == expected
+
+
+async def test_a_hosted_call_a_checkpoint_turn_makes_is_recorded_with_its_cost_and_the_checkpoint_holds():
+    """MH-HOSTED-VIBEY-002, C-10 F2: a side turn keeps the native hosted declarations, so a provider may run a hosted
+    call during a checkpoint. That call cannot be denied at execution; it is parsed like any other, kept in the turn's
+    audit with its reported cost, and the checkpoint text beside it still holds."""
+    search = HostedToolBlock(
+        id="srvtoolu_1",
+        tool="web_search",
+        action=HostedAction("search", queries=("release notes",)),
+        record=HostedRecord(status="completed"),
+        native=HostedNative(source_id="src_served00001", payload=({"type": "server_tool_use", "id": "srvtoolu_1"},)),
+    )
+    summary = HostedSummary(counts={"web_search_requests": 1}, cost=HostedCost(basis="reported", usd=0.01))
+    reply = AssistantMessage((search, text(CHECKPOINT)), ORIGIN, "stop", hosted_summary=summary)
+    agent = make_agent(Model(after_checkpoint(), [[Done(reply)]]), tools=[reader(tokens(3_000))], selection=ROOMY)
+    await run(agent)
+    assert (await cross(agent))[-1].reason == "completed"
+    assert [row for row in await agent.store.load("session") if row.kind == "compaction"]
+    audited = agent.store.audits[0][2]["messages"][-1]
+    assert audited["content"][0]["type"] == "hosted_tool"
+    assert audited["hosted_summary"]["cost"] == {"basis": "reported", "usd": 0.01}
 
 
 async def test_failing_checkpoints_stop_after_two_in_a_run_and_the_next_run_tries_again():
@@ -785,9 +914,10 @@ async def test_two_ineffective_checkpoints_stop_compaction_for_the_run():
 OVERFLOW = ProviderError("overflow", "prompt is too long: 40000 tokens > 32000 maximum", False, status=400)
 
 
-async def test_a_provider_overflow_below_T_takes_a_normal_checkpoint_and_retries():
+@pytest.mark.parametrize("refusal", [pytest.param(OVERFLOW, id="prompt-too-long"), *WINDOW_REFUSALS])
+async def test_a_provider_overflow_below_T_takes_a_normal_checkpoint_and_retries(refusal):
     model = Model(
-        [call("read", "r0", path="f"), call("read", "r1", path="f"), [OVERFLOW], [Done(assistant("done"))]],
+        [call("read", "r0", path="f"), call("read", "r1", path="f"), [refusal], [Done(assistant("done"))]],
         [[Done(assistant(CHECKPOINT))]],
     )
     agent = make_agent(model, tools=[reader(tokens(4_000))])
@@ -838,6 +968,55 @@ async def test_the_ladder_rolls_when_no_fork_can_take_the_whole_context():
     assert "ROLL TWO" in checkpoint_message(request)
     assert rows[-1].kind == "response" and request.messages == project(rows[:-1]).messages
     assert request_tokens(request.system, request.tools, request.messages) + 4_096 + 8_000 <= 32_000
+    assert events[-1].reason == "completed"
+
+
+#: A 1,000,000-token route answering up to 128,000 tokens: M = 30,000 and T = 842,000 (section 1).
+MILLION = ModelSelection(
+    ENDPOINT, replace(SELECTION.capabilities, context_window=1_000_000, input_limit=None, max_output_tokens=128_000)
+)
+
+
+def _calls(request) -> list[str]:
+    return [call.id for message in request.messages if isinstance(message, AssistantMessage) for call in message.tool_calls]
+
+
+async def test_a_threshold_checkpoint_on_a_1m_route_asks_for_64k_and_can_fit_at_T():
+    store = InMemoryTranscriptStore()
+    size = await at_threshold(store, MILLION, 842_000, [100_000] * 8, max_tokens=128_000)
+    model = Model([[Done(assistant("done"))]], [[Done(assistant(CHECKPOINT))]])
+    agent = make_agent(model, store=store, tools=[reader("")], selection=MILLION, max_tokens=128_000)
+    events = await run(agent, tokens(size), row="crossing")
+    (fork,) = model.checkpoint_requests
+    # The request is at T exactly. Its fork, the whole context and the checkpoint request, asks for 64,000 and can
+    # fit: T reserves O (section 1).
+    assert request_tokens(fork.system, fork.tools, fork.messages[:-1]) == 842_000
+    assert fork.max_tokens == 64_000
+    assert request_tokens(fork.system, fork.tools, fork.messages) + 64_000 <= 1_000_000
+    finished = [(event.reason, event.mode) for event in events if isinstance(event, CompactionFinished)]
+    assert finished == [("threshold", "normal")]
+    assert [request.max_tokens for request in model.conversation_requests] == [128_000]  # the conversation asks for O
+    assert events[-1].reason == "completed"
+
+
+async def test_the_overflow_ladder_on_a_1m_route_asks_for_64k_and_still_rolls_at_half_the_tokens():
+    # The provider refuses a request under T (it counts more than the estimate), then the normal checkpoint over the
+    # whole context too, so the ladder rolls (section 8 a, b). Each fork asks for 64,000 and can fit, and the rolling
+    # one cuts nearest half the tokens, as with 16,000: the first four of the eight reads move out.
+    model = Model(
+        [*_long_context(8), [OVERFLOW], [Done(assistant("done"))]], [[OVERFLOW], [Done(assistant(CHECKPOINT))]]
+    )
+    agent = make_agent(model, tools=[reader(tokens(100_000))], selection=MILLION, max_tokens=128_000)
+    events = await run(agent)
+    assert [event.mode for event in events if isinstance(event, CompactionFinished)] == ["rolling"]
+    normal, rolling = model.checkpoint_requests
+    refused, sent = model.conversation_requests[-2:]
+    assert normal.messages[:-1] == refused.messages and _calls(rolling) == ["r0", "r1", "r2", "r3"]
+    for fork in (normal, rolling):
+        assert fork.max_tokens == 64_000
+        assert request_tokens(fork.system, fork.tools, fork.messages) + 64_000 <= 1_000_000
+    assert _calls(sent) == ["r4", "r5", "r6", "r7"]
+    assert {request.max_tokens for request in model.conversation_requests} == {128_000}
     assert events[-1].reason == "completed"
 
 
@@ -1277,7 +1456,7 @@ CLAUDE = ModelEndpoint("anthropic", "http://model.invalid", "claude-opus-5-5", "
 async def test_clearing_runs_once_the_route_cache_has_gone_cold_and_spares_recent_turns(endpoint, lifetime):
     now = [1_000.0]
     store = InMemoryTranscriptStore(clock=lambda: now[0])
-    context = ContextConfig(clock=lambda: now[0])
+    context = ContextConfig(clock=lambda: now[0], clear_tool_results=True)
     script = [*_long_context(9), *([Done(assistant(word))] for word in ("one", "two", "three", "four"))]
     model = Model(script)
     route = ModelSelection(endpoint, LARGE.capabilities)
@@ -1302,6 +1481,27 @@ async def test_clearing_runs_once_the_route_cache_has_gone_cold_and_spares_recen
     assert store.transactions == [["context_edit"] * 4]  # one transition, one transaction
 
 
+async def test_old_tool_result_clearing_is_disabled_by_default():
+    now = [1_000.0]
+    store = InMemoryTranscriptStore(clock=lambda: now[0])
+    model = Model([*_long_context(9), *([Done(assistant(word))] for word in ("one", "two", "three"))])
+    agent = make_agent(
+        model,
+        store=store,
+        tools=[reader(tokens(6_000))],
+        selection=LARGE,
+        context=ContextConfig(clock=lambda: now[0]),
+    )
+    await run(agent, row="turn-1")
+    await run(agent, row="turn-2")
+    now[0] += CACHE_TTL_UNKNOWN_S + 1
+    await run(agent, row="turn-3")
+
+    rows = await store.load("session")
+    assert not [row for row in rows if row.kind == "context_edit"]
+    assert not model.checkpoint_requests
+
+
 #: A Model Hub Google hop as the adapter calls it: over Chat at the gateway, while the served-hop report names the
 #: Google protocol the gateway converted to (C-6). Its cache lifetime is unknown: an hour.
 GEMINI = ModelEndpoint("openai_chat", "http://model.invalid", "gemini-3-pro", "", provider="google")
@@ -1314,7 +1514,7 @@ async def routed_turn(store, now, endpoint, scripts, row, served=None):
     origin = served or endpoint_origin(endpoint)
     model = Model([[replace(event, message=replace(event.message, origin=origin)) for event in s] for s in scripts])
     route = ModelSelection(endpoint, LARGE.capabilities)
-    context = ContextConfig(clock=lambda: now[0])
+    context = ContextConfig(clock=lambda: now[0], clear_tool_results=True)
     agent = make_agent(model, store=store, tools=[reader(tokens(6_000))], selection=route, context=context)
     assert (await run(agent, row=row))[-1].reason == "completed"
     return [row for row in await store.load("session") if row.kind == "context_edit"]
@@ -1356,7 +1556,12 @@ async def test_pressure_clearing_runs_on_a_warm_cache():
     route = ModelSelection(ENDPOINT, replace(SELECTION.capabilities, context_window=72_000, input_limit=None))
     script = [*_long_context(9), *([Done(assistant(word))] for word in ("one", "two", "three"))]
     model = Model(script, [[Done(assistant(CHECKPOINT))]])
-    agent = make_agent(model, tools=[reader(tokens(6_000))], selection=route)
+    agent = make_agent(
+        model,
+        tools=[reader(tokens(6_000))],
+        selection=route,
+        context=ContextConfig(clear_tool_results=True),
+    )
     for turn in ("turn-1", "turn-2", "turn-3"):
         assert (await run(agent, row=turn))[-1].reason == "completed"
     edits = [row for row in await agent.store.load("session") if row.kind == "context_edit"]
@@ -1402,7 +1607,7 @@ async def test_a_return_to_a_long_reasoning_session_never_checkpoints_at_57_perc
     script = [*reads, *(responses_reply(value=word, reasoning=200) for word in ("noted", "two", "three"))]
     model = Model(script, [[Done(assistant(CHECKPOINT))]])
     route = ModelSelection(GPT, LARGE.capabilities)
-    context = ContextConfig(clock=lambda: now[0])
+    context = ContextConfig(clock=lambda: now[0], clear_tool_results=True)
     agent = make_agent(model, store=store, tools=[reader(tokens(7_300))], selection=route, context=context)
     await run(agent, row="turn-1")
     await run(agent, row="turn-2")

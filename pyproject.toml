@@ -176,7 +176,8 @@ markers = [
     "allow_foreign_signals(reason): opt out of the autouse guard that refuses os.kill/os.killpg to processes the test did not start (state the reason)",
     "reap_processes: kill every process the test started that is still running when it ends, and after a killed run (tests/process_reaper.py)",
     "real_web_push_sender: opt out of the autouse stub that keeps the delayed Web Push sender from outliving a test, for tests that drive the sender directly",
-    "real_catalog_refresh: opt out of the autouse stub that keeps the remote model catalog and models.dev refreshes from outliving a test, for tests that drive a refresh directly",
+    "real_catalog_refresh: opt out of the autouse stubs that keep the remote model catalog and models.dev fetches off the network and off threads that outlive a test, for tests that drive a refresh or fetch directly",
+    "allow_network(reason): opt an integration test that is meant to be live out of the suite-wide refusal of network access past loopback (tests/network_guard.py; state the reason)",
 ]
 
 [dependency-groups]

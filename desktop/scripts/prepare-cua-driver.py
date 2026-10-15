@@ -69,7 +69,8 @@ def load_manifest(path: Path = SOURCES) -> dict:
         or driver["patch"].get("file")
         != "patches/0001-macos-raw-single-click.patch"
         or SHA256.fullmatch(str(driver["patch"].get("sha256"))) is None
-        or driver["patch"].get("contract") != "click.click_mode=raw"
+        or driver["patch"].get("contract")
+        != "click.click_mode=raw; embedded parent-liveness cleanup"
         or not isinstance(driver["patch"].get("upstream_refs"), list)
         or not driver["patch"]["upstream_refs"]
         or not isinstance(driver["patch"].get("upgrade_plan"), str)
@@ -250,6 +251,17 @@ def verify_built_contract(binary: Path) -> None:
         raise ValueError("patched Cua Driver click.click_mode contract is unexpected")
 
 
+def sign_adhoc(binary: Path) -> None:
+    """Sign the built helper ad hoc, as Apple's linker already does for arm64 output.
+
+    The linker leaves x86_64 output unsigned, and a gh-v TEST build has Tauri sign
+    the app ad hoc while bundling, which codesign refuses while a nested helper is
+    unsigned. The packaging workflow still re-signs the helper from the inside out.
+    """
+    subprocess.run(["codesign", "--force", "--sign", "-", str(binary)], check=True)
+    subprocess.run(["codesign", "--verify", "--strict", str(binary)], check=True)
+
+
 def prepare(
     target: str,
     *,
@@ -271,6 +283,7 @@ def prepare(
         source_root = extract_driver_source(manifest, resolved_archive, work / "source")
         patch = apply_driver_patch(manifest, source_root)
         prepared = build_driver(manifest, source_root, target)
+        sign_adhoc(prepared)
         verify_built_contract(prepared)
         temporary_output = destination / f".{output.name}.{os.getpid()}.tmp"
         shutil.copyfile(prepared, temporary_output)

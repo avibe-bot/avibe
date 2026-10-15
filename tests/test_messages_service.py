@@ -2525,3 +2525,113 @@ def test_quick_reply_choice_recorded_on_agent_message_once(isolated_state):
         assert loaded[0]["content"].get("quick_reply_chosen") == "Yes"
         # Unknown message id → no choice, no crash.
         assert messages_service.get_quick_reply_chosen(conn, "sess_qr", "does-not-exist") is None
+
+
+def _session_with_accepted_turn(conn, scope_id: str, session_id: str, *, terminal: bool) -> None:
+    """A session whose latest input started a Turn, still running or already terminal."""
+
+    _seed_titled_session(conn, scope_id, session_id, session_id)
+    _insert_msg(conn, scope_id, session_id, "agent", "previous reply", "2026-05-30T10:00:00Z")
+    delivery = message_deliveries.insert_delivery(
+        conn,
+        delivery_id=f"msg_{session_id}_input",
+        session_id=session_id,
+        priority="p3",
+        state="reserved",
+        snapshot=message_deliveries.message_snapshot(
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="avibe",
+            author="user",
+            source="user",
+            text="next request",
+        ),
+        dispatch_text="next request",
+        now="2026-05-30T10:01:00Z",
+    )
+    turn_id = f"trn_{session_id}"
+    claimed = message_deliveries.claim_start_batch(
+        conn,
+        turn_id=turn_id,
+        session_id=session_id,
+        backend="claude",
+        deliveries=[delivery],
+        dispatch_text="next request",
+        attempt_id=f"atm_{session_id}",
+    )
+    assert message_deliveries.bind_native_start(
+        conn,
+        turn_id,
+        expected_version=int(claimed["turn"]["version"]),
+        runtime_key=f"runtime-{session_id}",
+        runtime_turn_id=f"runtime-turn-{session_id}",
+        native_turn_id=f"native-turn-{session_id}",
+    ) is not None
+    assert message_deliveries.materialize_start_acceptance(
+        conn,
+        turn_id=turn_id,
+        evidence={"kind": "native_start"},
+    )
+    if terminal:
+        message_deliveries.terminalize_turn(
+            conn,
+            turn_id,
+            outcome="completed",
+            settled_by="terminal_result",
+            evidence_kind="result",
+        )
+
+
+@pytest.mark.parametrize("latest_input", ["running", "settled"])
+def test_each_inbox_row_awaits_only_its_own_sessions_turn(isolated_state, latest_input):
+    # Whichever session took the platform's latest input, the other's row must
+    # not borrow that input's Turn state.
+    engine = create_sqlite_engine()
+    order = ["ses_settled", "ses_running"] if latest_input == "running" else ["ses_running", "ses_settled"]
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        for session_id in order:
+            _session_with_accepted_turn(conn, scope_id, session_id, terminal=session_id == "ses_settled")
+
+    with engine.connect() as conn:
+        listed = {
+            row["session_id"]: row["replied"]
+            for row in messages_service.list_inbox_sessions(conn, platform="avibe")["sessions"]
+        }
+        single = {
+            session_id: messages_service.get_inbox_session(conn, session_id)["replied"]
+            for session_id in ("ses_running", "ses_settled")
+        }
+
+    assert listed == {"ses_running": True, "ses_settled": False}
+    assert single == listed
+
+
+def test_one_sessions_inbox_row_reads_only_that_sessions_rows(isolated_state):
+    from sqlalchemy import event
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        for session_id in ("ses_one", "ses_other"):
+            _seed_titled_session(conn, scope_id, session_id, session_id)
+            _insert_msg(conn, scope_id, session_id, "agent", "unread reply", "2026-05-30T10:00:00Z", read=False)
+    statements: list[tuple[str, tuple]] = []
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def capture(_conn, _cursor, statement, parameters, _context, _executemany):
+        statements.append((statement, tuple(parameters)))
+
+    with engine.connect() as conn:
+        row = messages_service.get_inbox_session(conn, "ses_one")
+        [(statement, parameters)] = statements
+        plan = [str(step[3]) for step in conn.exec_driver_sql(f"EXPLAIN QUERY PLAN {statement}", parameters)]
+
+    assert row["unread_count"] == 1
+    unread_steps = [step for step in plan if "ix_messages_unread_session" in step]
+    assert unread_steps, plan
+    # Counted for the one session by equality, never as a range over every session's rows.
+    assert all("session_id=?" in step and "session_id>?" not in step for step in unread_steps), unread_steps
+    # No other part of the row walks every session's Messages or Deliveries either.
+    assert not [step for step in plan if "session_id>?" in step], plan
+    assert not [step for step in plan if step.startswith("SCAN message")], plan

@@ -114,7 +114,11 @@ class _StubIMClient:
         self.reactions = []
         self.sent_messages = []
         self.removed_keyboards = []
-        self.formatter = type("Formatter", (), {"format_error": staticmethod(lambda text: text)})()
+        self.formatter = type(
+            "Formatter",
+            (),
+            {"format_error": staticmethod(lambda text: text), "escape_special_chars": staticmethod(lambda text: text)},
+        )()
 
     def should_use_thread_for_reply(self):
         return False
@@ -639,7 +643,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         notify_call, call = controller.emit_agent_message.await_args_list
         self.assertEqual(
             notify_call.args[:3],
-            (context, "notify", "Error: context preparation failed"),
+            (context, "notify", "❌ Error: context preparation failed"),
         )
         self.assertEqual(call.args[:3], (context, "result", ""))
         output = call.kwargs["output"]
@@ -987,7 +991,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(controller.im_client.clear_calls, [("wx-chat", "wx-user")])
         self.assertFalse(captured_requests[0].typing_indicator_active)
         self.assertIsNone(captured_requests[0].typing_indicator_task)
-        self.assertEqual(controller.im_client.sent_messages, [("wx-chat", "Error: agent failed")])
+        self.assertEqual(controller.im_client.sent_messages, [("wx-chat", "❌ Error: agent failed")])
 
     def _capture_typing_tasks(self, controller):
         tasks = []
@@ -1791,10 +1795,10 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         result = await handler.handle_scheduled_message(context, "hello")
 
         self.assertEqual(result, "boom")
-        self.assertEqual(controller.im_client.sent_messages, [("C1", "Error: boom")])
+        self.assertEqual(controller.im_client.sent_messages, [("C1", "❌ Error: boom")])
         self.assertEqual(controller.emit_agent_message.await_count, 2)
         notify_call, _terminal_call = controller.emit_agent_message.await_args_list
-        self.assertEqual(notify_call.args[:3], (context, "notify", "Error: boom"))
+        self.assertEqual(notify_call.args[:3], (context, "notify", "❌ Error: boom"))
         terminal_output = controller.emit_agent_message.await_args.kwargs["output"]
         self.assertEqual(
             terminal_output.metadata["turn_failure_notification"],
@@ -1842,7 +1846,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         result = await handler.handle_scheduled_message(context, "hello")
 
         self.assertEqual(result, "'backend config'")
-        self.assertEqual(controller.im_client.sent_messages, [("C1", "Error: 'backend config'")])
+        self.assertEqual(controller.im_client.sent_messages, [("C1", "❌ Error: 'backend config'")])
         self.assertEqual(controller.emit_agent_message.await_count, 2)
         self.assertNotIn("not available", controller.im_client.sent_messages[0][1])
 
@@ -1979,6 +1983,46 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(request.ack_message_id)
         self.assertIsNone(request.ack_reaction_message_id)
         await handler._remove_ack_reaction(context, request)
+
+
+    async def test_a_dispatch_failure_notice_is_plain_and_a_supply_refusal_is_its_own_copy(self):
+        """The Workbench draws notices as plain text, so no formatter markup or escape reaches one.
+
+        The primary IM platform's formatter is not the Workbench's: its ``*Error*`` showed
+        literally there. An IM sends the notice as its own markup, so the raw error is escaped
+        there, or a ``<@U1>`` in it would mention someone. A supply refusal is already the
+        user's copy, so it is not wrapped in a second "Error:".
+        """
+        from modules.agents.model_hub import ModelSupplyRefusal
+
+        controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
+        controller.im_client.formatter = type(
+            "SlackFormatter",
+            (),
+            {
+                "format_error": staticmethod(lambda text: f"❌ *Error*: {text}"),
+                "escape_special_chars": staticmethod(lambda text: text.replace("<", "&lt;").replace(">", "&gt;")),
+            },
+        )()
+        handler = MessageHandler(controller)
+        workbench = MessageContext(user_id="u1", channel_id="ses-1", platform="avibe")
+        slack = MessageContext(user_id="u1", channel_id="C1", platform="slack")
+        refusal = ModelSupplyRefusal("Vibey has no model source yet.", fixed_in_models=True)
+
+        emitted = AsyncMock()
+        # This suite loads the handler module on its own, so patch the globals it actually reads.
+        with patch.dict(MessageHandler._emit_agent_dispatch_failure.__globals__, emit_backend_failure=emitted):
+            await handler._emit_agent_dispatch_failure(workbench, None, refusal)
+            await handler._emit_agent_dispatch_failure(workbench, None, RuntimeError("<@U1> socket closed"))
+            await handler._emit_agent_dispatch_failure(slack, None, RuntimeError("<@U1> socket closed"))
+
+        texts = [call.kwargs["display_text"] for call in emitted.await_args_list]
+        assert texts == [
+            "❌ Vibey has no model source yet.",
+            f"❌ {handler._t('error.processMessageFailed', error='<@U1> socket closed')}",
+            f"❌ {handler._t('error.processMessageFailed', error='&lt;@U1&gt; socket closed')}",
+        ]
+        assert [call.kwargs["cause"] for call in emitted.await_args_list][0] is refusal
 
 
 if __name__ == "__main__":

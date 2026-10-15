@@ -465,19 +465,20 @@ class StatusBubbleResultTests(unittest.IsolatedAsyncioTestCase):
         # The bubble was deleted (never reused as a chunk).
         self.assertEqual(controller.im_client.deletes, ["msg-1"])
 
-    async def test_split_later_chunk_failure_keeps_first_chunk(self):
-        # Discord long result: chunk 0 sends fine, a later chunk send fails. The
-        # failure must NOT propagate; the first chunk stays delivered and the
-        # bubble is still retired (deleted).
+    async def test_split_later_chunk_failure_is_not_reported_as_delivered(self):
+        # Discord long result: chunk 0 sends fine, a later chunk send fails. A
+        # partial split must not count as delivery: the split stops at the failed
+        # chunk, is never re-sent, and (with no file route on this client) the
+        # turn ends with the delivery-failed notice instead of a success anchor.
         class _FailLaterChunk(_EditClient):
             def __init__(self):
                 super().__init__()
-                self._x_sends = 0
+                self.chunk_attempts = 0
 
             async def send_message(self, context, text, parse_mode=None, reply_to=None, subtext=None):
                 if text.startswith("x"):
-                    self._x_sends += 1
-                    if self._x_sends >= 2:  # fail the 2nd+ chunk
+                    self.chunk_attempts += 1
+                    if self.chunk_attempts >= 2:  # fail the 2nd+ chunk
                         raise RuntimeError("later chunk send failed")
                 return await super().send_message(context, text, parse_mode, reply_to, subtext)
 
@@ -486,9 +487,14 @@ class StatusBubbleResultTests(unittest.IsolatedAsyncioTestCase):
         ctx = _ctx("discord")
         with mock.patch("core.message_dispatcher.persist_agent_message"):
             await d.emit_agent_message(ctx, "toolcall", "🔧 `Bash` `{}`")  # bubble msg-1
-            result_id = await d.emit_agent_message(ctx, "result", "x" * 2500)
-        self.assertEqual(result_id, "msg-2")  # first chunk delivered
-        self.assertEqual(controller.im_client.deletes, ["msg-1"])  # bubble still retired
+            result_id = await d.emit_agent_message(ctx, "result", "x" * 5000)
+        self.assertIsNone(result_id)
+        # Chunk 0 delivered, chunk 1 failed, nothing after it and no second split.
+        self.assertEqual(controller.im_client.chunk_attempts, 2)
+        sent_texts = [text for _, text, _ in controller.im_client.sent]
+        self.assertEqual(len([text for text in sent_texts if text.startswith("x")]), 1)
+        self.assertIn(d._t("error.resultDeliveryFailed"), sent_texts)
+        self.assertNotIn("msg-1", controller.im_client.deletes)  # bubble not retired as delivered
 
     async def test_split_head_chunk_failure_returns_none(self):
         # If the HEAD chunk fails to send, the split is abandoned (returns None) so

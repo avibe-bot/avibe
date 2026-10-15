@@ -37,12 +37,17 @@ scenarios:
     backend: shared
     test: tests/test_scheduled_tasks.py::test_drain_serializes_executions_per_session
   - id: HFR-004
-    name: restart recovers held run queues without flushing user-owned queue heads
+    name: >-
+      restart recovers a Delivery-owned Run once, and never sends user-owned queue input
+      or a Run queued behind a stopped user head
     status: covered
     kind: restart
     layer: scenario
     backend: shared
-    test: tests/test_scheduled_tasks.py::test_restart_recovers_persisted_workbench_run_queue_after_older_owner_settles
+    test:
+      - tests/test_scheduled_tasks.py::test_restart_recovers_delivery_owned_run_without_unrelated_run_arbitration
+      - tests/test_scheduled_tasks.py::test_restart_does_not_flush_user_queue_ahead_of_held_agent_run
+      - tests/test_scheduled_tasks.py::test_restart_does_not_auto_send_pure_user_queue
   - id: HFR-005
     name: live long-running owner is never stolen by age
     status: covered
@@ -191,12 +196,12 @@ scenarios:
     backend: shared
     test: tests/test_scheduled_tasks.py::test_sweep_never_terminalizes_a_transport_reason_with_no_timestamp
   - id: HFR-026
-    name: live ownership exempts an aged queue hold from its TTL
+    name: only explicit Turn attribution owns running work; queue-hold metadata owns nothing
     status: covered
     kind: safety
     layer: scenario
     backend: shared
-    test: tests/test_scheduled_tasks.py::test_sweep_spares_an_aged_queue_hold_a_live_turn_still_owns
+    test: tests/test_scheduled_tasks.py::test_legacy_hold_metadata_does_not_change_turn_or_run_ownership
   - id: HFR-027
     name: gate-owned Workbench turn settles its own Run when no result arrives
     status: covered
@@ -205,12 +210,12 @@ scenarios:
     backend: shared
     test: tests/test_scheduled_tasks.py::test_workbench_turn_settles_its_agent_run_when_no_result_arrives
   - id: HFR-028
-    name: swept Run's persisted queue segment is retired immediately
+    name: cancelling a Delivery-owned Run retires its queued Delivery
     status: covered
     kind: failure_recovery
     layer: scenario
     backend: shared
-    test: tests/test_scheduled_tasks.py::test_sweep_retires_the_queue_segment_of_the_run_it_expired
+    test: tests/test_scheduled_tasks.py::test_canceling_a_delivery_owned_run_retires_its_exact_queue_row
   - id: HFR-029
     name: backend runtime refresh settles its Run as a refresh, not a user stop
     status: covered
@@ -387,12 +392,12 @@ scenarios:
     backend: shared
     test: tests/test_agent_run_target.py::test_resolve_agent_run_target_tolerates_concurrent_row_insert
   - id: HFR-054
-    name: an unresolvable pinned session pauses its definition and notifies once
+    name: an unresolvable pinned session notifies on its first failure and pauses its definition after three
     status: covered
     kind: failure_recovery
     layer: scenario
     backend: shared
-    test: tests/test_scheduled_tasks.py::test_execute_task_pauses_and_notifies_when_pinned_session_is_missing
+    test: tests/test_scheduled_tasks.py::test_execute_task_notifies_then_pauses_after_three_unresolvable_failures
   - id: HFR-055
     name: a create_once definition rebinds instead of failing forever
     status: covered
@@ -438,7 +443,10 @@ scenarios:
     backend: shared
     test: tests/test_harness_failure_visibility.py::test_complete_does_not_clobber_an_already_terminal_run
   - id: HFR-061
-    name: the coalesced completer does not clobber an already-settled success
+    name: >-
+      Turn settlement does not clobber an already-settled success, a Stop that lands under
+      a settlement writer stays canceled with no failure notice, and an uncancelled run
+      still settles failed with its notice
     status: covered
     kind: safety
     layer: contract
@@ -497,7 +505,11 @@ scenarios:
     # They take no ids of their own because PR6's block is full at 099 and 100+ is
     # contracted to PR2 by the merged plan (docs/plans/harness-run-reliability.md
     # §10.7; landed in #1044, PR2 not started per its status header).
-    test: tests/test_harness_failure_visibility.py::test_complete_coalesced_does_not_clobber_an_already_succeeded_run
+    test:
+      - tests/test_harness_failure_visibility.py::test_turn_participant_settlement_does_not_clobber_an_already_succeeded_run
+      - tests/test_harness_failure_visibility.py::test_a_cancel_landing_under_the_coalesced_completer_is_not_overwritten
+      - tests/test_harness_failure_visibility.py::test_a_cancel_landing_under_settle_run_terminal_is_not_overwritten
+      - tests/test_harness_failure_visibility.py::test_the_cancel_cas_does_not_leave_an_uncancelled_run_unsettled
   - id: HFR-062
     name: one success does not erase recent failure history in the CLI
     status: covered
@@ -2408,7 +2420,7 @@ scenarios:
     kind: concurrency
     layer: contract
     backend: shared
-    test: tests/test_runtime_activation.py::test_hfr_137_claim_first_requeues_when_cleanup_wins_before_pid
+    test: tests/test_runtime_activation.py::test_hfr_137_claim_that_loses_to_cleanup_during_its_write_is_given_back
   - id: HFR-138
     name: ownership handoffs stay visible in one SQLite generation
     status: covered
@@ -3705,8 +3717,8 @@ scenarios:
     test: tests/test_scheduled_tasks.py::test_an_adopted_reservation_is_dropped_from_the_retry_record_without_being_touched
   - id: HFR-280
     name: >-
-      a Workbench PATCH cannot mutate a session archived inside its window, and the
-      archive outranks the backend lock
+      a Workbench PATCH and a concurrent archive of the same session serialize: the archive
+      waits for the PATCH, so a rename or re-route never lands on an already-archived row
     status: covered
     kind: safety
     layer: contract
@@ -3735,7 +3747,13 @@ scenarios:
     # Both fail against the pre-fix service: the rename lands silently (DID NOT RAISE),
     # the re-route answers SessionBackendLockedError. Same _commit_competing_bind_after
     # harness and the same real _archive_write payload as HFR-252.
-    test: tests/test_sqlite_sessions_store.py::test_update_session_cannot_rename_a_session_archived_inside_its_window
+    # Later the writer reservation removed the read/archive/write window itself: the
+    # PATCH and the archive now serialize, so there is no race left to refuse. Both
+    # halves are proved by test_update_session_serializes_rename_before_archive and
+    # test_update_session_serializes_route_change_before_archive.
+    test:
+      - tests/test_sqlite_sessions_store.py::test_update_session_serializes_rename_before_archive
+      - tests/test_sqlite_sessions_store.py::test_update_session_serializes_route_change_before_archive
   - id: HFR-281
     name: >-
       a completion hook queued inside a stamp names an Agent the catalog still has
@@ -4258,7 +4276,7 @@ scenarios:
     backend: codex
     # A definitive process death makes the old local Turn fence non-authoritative;
     # only unknown ownership or an active Activity can still veto replacement.
-    test: tests/test_codex_agent.py::CodexTransportCwdStalenessTests::test_hfr_473_dead_transport_restarts_past_stale_turn_ownership
+    test: tests/test_codex_agent.py::CodexGenerationAcquisitionTests::test_hfr_473_dead_transport_restarts_past_stale_turn_ownership
   - id: HFR-474
     name: upgrade recovery collapses legacy restart notices by durable Turn ownership
     status: covered

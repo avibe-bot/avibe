@@ -216,6 +216,14 @@
   --model-hub-quota-row-gap: 14px;
   --model-hub-quota-nested-indent: 12px;
 
+  /* Tools tab: hosted tools (frames pDd61, kPTBo). Reuses the usage tab's type scale. */
+  --model-hub-tools-gap: 16px;
+  --model-hub-tool-group-gap: 10px;
+  --model-hub-tool-pad-x: 20px;
+  --model-hub-tool-line-pad-y: 10px;
+  --model-hub-tool-row-pad-x: 14px;
+  --model-hub-tool-row-pad-y: 9px;
+
   /* Backend model catalog dialog. `--model-hub-catalog-row-gap` is read from a
    * Tailwind arbitrary value in the dialog's markup, which has no selector of
    * its own to declare it on. */
@@ -1523,6 +1531,45 @@
   min-height: var(--model-hub-source-table-row-height);
   padding-block: var(--model-hub-source-table-padding-y);
 }
+/* Capability chips (frame FB4vC): their own column from md, a full-width line
+   under the model id below it. */
+@media (min-width: 768px) {
+  .model-hub-source-table--capabilities {
+    --model-hub-source-table-columns: minmax(0, 0.8fr) minmax(0, 1.7fr) auto;
+  }
+}
+@media (max-width: 767px) {
+  .model-hub-source-table--capabilities .model-hub-source-capabilities {
+    grid-column: 1 / -1;
+    order: 3;
+  }
+}
+.model-hub-capability-detail { font-size: var(--model-hub-usage-cell-size); line-height: 18px; }
+/* A chip is its label (which opens the detail) and, on a refusal, a trailing clear. */
+.model-hub-capability-chip { padding: 0; }
+.model-hub-capability-chip > button {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: inherit;
+}
+.model-hub-capability-chip > .model-hub-capability-clear {
+  border-left: 1px solid var(--model-hub-gold-66);
+  border-radius: 0 999px 999px 0;
+}
+.model-hub-capability-clear:disabled { opacity: 0.5; }
+.model-hub-source-capabilities-failure { font-size: var(--model-hub-source-tier-size); }
+.model-hub-capability-explain { color: var(--model-hub-usage-note-ink); }
+.model-hub-capability-facts {
+  grid-template-columns: auto minmax(0, 1fr);
+  padding: 8px 10px;
+  background: var(--model-hub-wash-05);
+  font-size: var(--model-hub-usage-note-size);
+}
+.model-hub-capability-facts dt { color: var(--model-hub-ink-73); }
+.model-hub-capability-facts dd { overflow-wrap: anywhere; }
 /* The draft spans the table width, with commands on their own trailing line. */
 .model-hub-source-table-draft {
   grid-template-columns: minmax(0, 1fr) auto;
@@ -2078,6 +2125,78 @@
   font-size: var(--model-hub-usage-cell-size);
 }
 .model-hub-usage-pending { font-size: var(--model-hub-usage-title-size); }
+
+/* Tools tab. */
+.model-hub-tools { gap: var(--model-hub-tools-gap); }
+.model-hub-tools-title { font-size: 15px; line-height: 21px; }
+.model-hub-tools-subtitle,
+.model-hub-tools-foot {
+  color: var(--model-hub-usage-note-ink);
+  font-size: var(--model-hub-usage-cell-size);
+  line-height: 18px;
+}
+.model-hub-tools-foot { font-size: var(--model-hub-usage-note-size); line-height: 16px; }
+.model-hub-tool-group { gap: var(--model-hub-tool-group-gap); }
+.model-hub-tool-group-title {
+  color: var(--model-hub-ink-73);
+  font-size: var(--model-hub-usage-label-size);
+  line-height: 15px;
+}
+.model-hub-tool-card-head { padding: 14px var(--model-hub-tool-pad-x); }
+.model-hub-tool-name { font-size: 14px; line-height: 20px; }
+.model-hub-tool-description,
+.model-hub-tool-state { font-size: var(--model-hub-usage-cell-size); }
+.model-hub-tool-description { color: var(--model-hub-usage-note-ink); }
+/* A status line, and the Advanced toggle, each a full-width row under the head. */
+.model-hub-tool-status,
+.model-hub-tool-advanced-toggle {
+  padding: var(--model-hub-tool-line-pad-y) var(--model-hub-tool-pad-x);
+  font-size: var(--model-hub-usage-cell-size);
+  line-height: 18px;
+}
+.model-hub-tool-image {
+  padding: 12px var(--model-hub-tool-pad-x) 14px;
+  font-size: var(--model-hub-usage-cell-size);
+}
+.model-hub-tool-image-row {
+  grid-template-columns: minmax(0, 1fr) minmax(0, auto) minmax(96px, auto);
+  column-gap: var(--model-hub-usage-gutter);
+  row-gap: 6px;
+  padding: var(--model-hub-tool-row-pad-y) var(--model-hub-tool-row-pad-x);
+}
+@media (max-width: 767px) {
+  .model-hub-tool-image-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .model-hub-tool-image-row > :first-child { grid-column: 1 / -1; }
+}
+.model-hub-tool-advanced-body {
+  padding: 2px var(--model-hub-tool-pad-x) 16px;
+  font-size: var(--model-hub-usage-cell-size);
+}
+.model-hub-tool-executor-row,
+.model-hub-tool-pair-row {
+  column-gap: var(--model-hub-usage-gutter);
+  row-gap: 6px;
+  padding: var(--model-hub-tool-row-pad-y) var(--model-hub-tool-row-pad-x);
+}
+.model-hub-tool-executor-row { grid-template-columns: auto minmax(0, 1fr) minmax(0, auto) auto; }
+.model-hub-tool-pair-row { grid-template-columns: minmax(0, 1fr) minmax(0, auto) auto; }
+/* Below md a row stacks: identity, then its state or price, then its actions. */
+@media (max-width: 767px) {
+  .model-hub-tool-executor-row { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .model-hub-tool-executor-row > :nth-child(3) { grid-column: 2 / -1; grid-row: 2; }
+  .model-hub-tool-pair-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .model-hub-tool-pair-row > :nth-child(2) { grid-column: 1 / -1; grid-row: 2; }
+}
+.model-hub-tool-cost-note {
+  color: var(--model-hub-usage-note-ink);
+  font-size: var(--model-hub-usage-note-size);
+  line-height: 15px;
+}
+.model-hub-tool-note {
+  color: var(--model-hub-usage-note-ink);
+  font-size: var(--model-hub-usage-note-size);
+  line-height: 16px;
+}
 .model-hub-usage-empty {
   padding: 26px var(--model-hub-usage-padding-x);
   font-size: var(--model-hub-usage-cell-size);

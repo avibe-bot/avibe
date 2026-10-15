@@ -130,16 +130,20 @@ ledger, config generations, schema or second lifecycle controller is added.
   cannot erase that failure. Only explicit successful apply clears it.
 - `GET /api/backend/{backend}/connection` produces `BackendConnectionState`:
   `{ok, backend, installed, enabled, supply_mode: direct | hub,
-  auth: subscription | api_key | none | unknown,
+  auth: subscription | api_key | external | none | unknown,
   application: applied | draining | failed | stopped | unknown, ready,
-  entry_eligible, permission_required?, message?}`. In Direct mode, existing native auth
-  readers/provider catalog produce `auth`; no model-call test is added. A
-  provider counts only with an effective API/OAuth entry, not a keyless/local
-  catalog row. Codex keychain uncertainty is `unknown` regardless of saved mode.
-- `ready` requires the same backend installed/enabled, confirmed credential
-  source, controller applied and (OpenCode only) existing tool permission.
-  `entry_eligible` additionally accepts a confirmed stopped controller with
-  persisted auth. A running service with unavailable IPC stays unknown.
+  entry_eligible, permission_required?, message?}`. Direct Claude reports
+  `auth: external`: authentication belongs to Claude, and this read does not
+  inspect credentials or predict their selection. Other native auth readers /
+  provider catalogs retain their existing projections; no model-call test is
+  added. A keyless/local OpenCode catalog row is not credential evidence.
+  Codex keychain uncertainty is `unknown` regardless of saved mode.
+- `ready` requires the same backend installed/enabled, controller applied and
+  (OpenCode only) existing tool permission. Managed credentials retain their
+  admission checks; `external` Direct Claude requires custody and launch
+  capability, not a passive login claim. `entry_eligible` additionally accepts
+  a confirmed stopped controller. A running service with unavailable IPC stays
+  unknown. See [Claude observation ownership](claude-auth-observation-ownership.md).
 - A fresh GET observes the persisted authentication owner and the last Avibe application, not
   continuous remote credential validity or external-file hot reload. This
   limitation applies equally to Settings; known apply failure takes precedence.

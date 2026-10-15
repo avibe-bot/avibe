@@ -15,7 +15,7 @@ import core.agent_core.ai.anthropic as anthropic_module
 import core.agent_core.ai.sse as sse_module
 import core.agent_core.ai.openai_responses as responses_module
 from core.agent_core.ai.anthropic import AnthropicAdapter, build_messages_payload
-from core.agent_core.ai._common import OutputBudgetExceeded, StreamAssembler, read_response_body
+from core.agent_core.ai._common import OutputBudgetExceeded, ServedHop, StreamAssembler, read_response_body
 from core.agent_core.ai.openai_chat import OpenAIChatAdapter, build_chat_payload
 from core.agent_core.ai.openai_responses import OpenAIResponsesAdapter, build_responses_payload
 from core.agent_core.ai.provider import (
@@ -30,7 +30,8 @@ from core.agent_core.ai.provider import (
     ToolCallDelta,
     ToolCallStart,
 )
-from core.agent_core.ai.registry import ADAPTERS, adapter_class
+from core.agent_core.ai.registry import ADAPTERS, adapter_class, sent_effort
+from tests.agent_core.ai._wire import build_wire_request
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
     AssistantMessage,
@@ -44,6 +45,7 @@ from core.agent_core.messages import (
     Usage,
 )
 from core.agent_core.tools.base import ToolSpec
+from tests.agent_core.fakes import WINDOW_REFUSAL, anthropic_error, model_hub_error
 
 
 def _request(
@@ -645,6 +647,19 @@ async def test_adapters_join_protocol_path_before_existing_query(
                 'data: {"type":"content_block_delta","index":0,'
                 '"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":\\"x"}}\n\n'
                 'data: {"type":"message_delta","delta":{"stop_reason":"max_tokens"}}\n\n'
+                'data: {"type":"message_stop"}\n\n'
+            ),
+        ),
+        (
+            # Generation reached the context window first: Anthropic says to treat the response as truncated.
+            AnthropicAdapter,
+            "anthropic",
+            (
+                'data: {"type":"content_block_start","index":0,'
+                '"content_block":{"type":"tool_use","id":"toolu_1","name":"read"}}\n\n'
+                'data: {"type":"content_block_delta","index":0,'
+                '"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":\\"x"}}\n\n'
+                'data: {"type":"message_delta","delta":{"stop_reason":"model_context_window_exceeded"}}\n\n'
                 'data: {"type":"message_stop"}\n\n'
             ),
         ),
@@ -2546,14 +2561,47 @@ def test_openai_payloads_forward_explicit_none_reasoning_effort(
         assert "include" not in payload
 
 
-def test_anthropic_adaptive_xhigh_maps_to_max_effort() -> None:
-    payload = build_messages_payload(
-        _request("anthropic", model_id="claude-opus-5", reasoning_effort="xhigh"),
-        (),
-    )
+@pytest.mark.parametrize(
+    ("model_id", "effort", "sent"),
+    [
+        # Native on Opus 4.7 and later (Anthropic's effort docs): the hop declares it, so it goes as given.
+        ("claude-opus-5", "xhigh", "xhigh"),
+        ("claude-opus-4-7", "xhigh", "xhigh"),
+        ("claude-haiku-5-5", "xhigh", "xhigh"),
+        ("claude-opus-4-6", "max", "max"),
+        # Anthropic has no minimal level.
+        ("claude-opus-5", "minimal", "low"),
+    ],
+)
+def test_anthropic_sends_the_declared_effort_as_given(model_id: str, effort: str, sent: str) -> None:
+    payload = build_messages_payload(_request("anthropic", model_id=model_id, reasoning_effort=effort), ())
 
     assert payload["thinking"] == {"type": "adaptive"}
-    assert payload["output_config"] == {"effort": "max"}
+    assert payload["output_config"] == {"effort": sent}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("protocol", "model_id"),
+    [
+        ("anthropic", "claude-opus-5-5"),
+        ("anthropic", "claude-opus-4-5"),
+        ("openai_responses", "gpt-6-sol"),
+        ("openai_chat", "deepseek-v4"),
+    ],
+)
+@pytest.mark.parametrize("effort", ["minimal", "low", "high", "xhigh", "max", "none", "off", "XHIGH"])
+async def test_sent_effort_is_the_token_each_adapter_puts_on_the_wire(protocol: str, model_id: str, effort: str) -> None:
+    """Model Hub's effort menu reads ``sent_effort``; it must name exactly the token the request carries."""
+
+    wire = await build_wire_request(_request(protocol, model_id=model_id, reasoning_effort=effort), gateway=True)
+
+    carried = {
+        "anthropic": (wire.body.get("output_config") or {}).get("effort"),
+        "openai_responses": (wire.body.get("reasoning") or {}).get("effort"),
+        "openai_chat": wire.body.get("reasoning_effort"),
+    }[protocol]
+    assert carried == sent_effort(protocol, model_id, effort)
 
 
 @pytest.mark.asyncio
@@ -2800,8 +2848,35 @@ async def test_malformed_tool_arguments_are_terminal_invalid_requests() -> None:
     assert "malformed tool arguments" in error.message
 
 
+_ORIGIN_KEYS = '"provider":"anthropic","api":"anthropic","model":"model-x"'
+
+
+@pytest.mark.parametrize("report,expected", [
+    pytest.param(
+        "{" + _ORIGIN_KEYS + ',"source":"src_fixture01"}',
+        ServedHop(Origin("anthropic", "anthropic", "model-x"), "src_fixture01"),
+        id="exact",
+    ),
+    pytest.param("{" + _ORIGIN_KEYS + "}", None, id="v11-without-source"),
+    pytest.param("{" + _ORIGIN_KEYS + ',"source":"src_fixture01","extra":"x"}', None, id="extra-key"),
+    pytest.param("{" + _ORIGIN_KEYS + ',"source":12345678}', None, id="non-string"),
+    pytest.param("{" + _ORIGIN_KEYS + ',"source":"src_short"}', None, id="bad-source-id"),
+    pytest.param(
+        "{" + _ORIGIN_KEYS + ',"source":"src_fixture01","source":"src_fixture02"}', None, id="duplicate-key",
+    ),
+])
+def test_served_hop_report_is_exactly_origin_and_source(report: str, expected: ServedHop | None) -> None:
+    """MH-VIBEY-002: only the exact v12 report verifies an origin; any other shape leaves it unverified."""
+    assert common_module.default_served_hop_resolver({"x-avibe-served-hop": report}) == expected
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("served_hop", [None, "invalid", '{"provider":"anthropic","api":"anthropic","model":"model-x"}'])
+@pytest.mark.parametrize("served_hop", [
+    None,
+    "invalid",
+    '{"provider":"anthropic","api":"anthropic","model":"model-x","source":"src_fixture01"}',
+    '{"provider":"anthropic","api":"anthropic","model":"model-x","source":"src_fixture02"}',
+])
 async def test_gateway_origin_sanitization_preserves_streamed_block_indexes(served_hop: str | None) -> None:
     body = (
         'data: {"type":"message_start","message":{"usage":{}}}\n\n'
@@ -2822,10 +2897,9 @@ async def test_gateway_origin_sanitization_preserves_streamed_block_indexes(serv
         return httpx.Response(200, headers=headers, text=body)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        events = await _events(
-            AnthropicAdapter(client, gateway=True),
-            _request("anthropic"),
-        )
+        request = _request("anthropic")
+        hop = replace(request.endpoint, source_id="src_fixture01", source_identity="sha256:fixture-account")
+        events = await _events(AnthropicAdapter(client, gateway=True), replace(request, endpoint=hop))
 
     final = events[-1]
     assert isinstance(final, Done)
@@ -2844,6 +2918,10 @@ async def test_gateway_origin_sanitization_preserves_streamed_block_indexes(serv
     if not verified:
         assert all(not isinstance(block, ThinkingBlock) or block.signature is None for block in final.message.content)
     assert all(not isinstance(block, ToolCallBlock) or block.signature is None for block in final.message.content)
+    # The message records the identity its opaque payloads go back to (cross-provider.md): the hop's, when the hop's
+    # own Source served it; none when another Source did, whose identity is unknown here.
+    own = verified and "src_fixture01" in served_hop
+    assert final.message.source_identity == ("sha256:fixture-account" if own else None)
 
 
 class _Loader(MediaLoader):
@@ -3085,6 +3163,36 @@ async def test_http_413_is_classified_as_overflow() -> None:
     assert error.kind == "overflow"
     assert error.status == 413
     assert error.retryable is False
+
+
+#: Anthropic's 400 for a ``max_tokens`` above the model's output limit: it names ``max_tokens`` too, but no smaller
+#: context can fix it.
+OUTPUT_LIMIT_REFUSAL = (
+    "max_tokens: 200000 > 128000, which is the maximum allowed number of output tokens for claude-opus-4-1-20250805"
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("envelope", [anthropic_error, model_hub_error], ids=["endpoint", "model-hub"])
+@pytest.mark.parametrize(
+    ("message", "kind"),
+    [(WINDOW_REFUSAL, "overflow"), (OUTPUT_LIMIT_REFUSAL, "invalid_request")],
+    ids=["window", "output-limit"],
+)
+async def test_anthropic_window_refusal_is_overflow_and_output_limit_refusal_is_not(
+    envelope: Any, message: str, kind: str,
+) -> None:
+    # Models before Claude 4.5 refuse a request whose input plus max_tokens exceeds the window; later ones stop at the
+    # window instead. Through Model Hub the upstream's message reaches the adapter inside the gateway's copy and code.
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json=envelope(message))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(AnthropicAdapter(client), _request("anthropic"))
+
+    (error,) = events
+    assert isinstance(error, ProviderError)
+    assert (error.kind, error.status, error.retryable, error.partial) == (kind, 400, False, None)
 
 
 @pytest.mark.asyncio
@@ -3445,11 +3553,11 @@ class _StalledResolver:
         self.started = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def __call__(self, headers: Mapping[str, str]) -> Origin | None:
+    async def __call__(self, headers: Mapping[str, str]) -> ServedHop | None:
         del headers
         self.started.set()
         await self.release.wait()
-        return Origin("served", "openai_chat", "served-model")
+        return ServedHop(Origin("served", "openai_chat", "served-model"), "src_served01")
 
 
 class _CloseFailStream(httpx.AsyncByteStream):
@@ -3690,7 +3798,7 @@ async def test_http_error_classification_precedes_served_hop_resolution(
     resolver_calls = []
     closed = []
 
-    async def resolver(headers: Mapping[str, str]) -> Origin | None:
+    async def resolver(headers: Mapping[str, str]) -> ServedHop | None:
         resolver_calls.append(headers)
         raise RuntimeError("served-hop resolution failed")
 

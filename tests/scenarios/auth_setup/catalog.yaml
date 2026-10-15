@@ -347,10 +347,14 @@ scenarios:
     kind: historical_regression
     layer: scenario
     backend: shared
-    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_hub_owned_native_subscription_create_closes_the_loop
+    test:
+      - tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_hub_owned_native_subscription_create_closes_the_loop
+      - tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_claude_receipt_separates_verification_commit_and_application
     supporting_tests:
       - tests/test_native_writer_custody.py::test_hub_backend_admits_creating_the_empty_native_subscription_slot
       - tests/test_model_hub_api.py::test_native_oauth_custody_refusal_is_not_reported_as_engine_down
+      - tests/test_settings_disk_fallback.py::test_claude_inventory_is_read_only_and_never_attests_effective_auth
+      - ui/src/components/onboarding/BackendConnection.test.tsx
   - id: AUTH-SETUP-911
     name: Web Claude OAuth launches the same CLI as normal Agent turns for padded paths and the desktop default selector
     status: covered
@@ -527,6 +531,19 @@ scenarios:
       - ui/src/components/onboarding/BuiltinAssistant.test.tsx
       - ui/src/components/onboarding/entryGate.test.ts
       - ui/e2e/onboarding-fidelity/lineup.spec.ts
+  - id: AUTH-SETUP-132
+    name: A new install starts on Vibey, and setup completes without writing a default
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: vibey
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_a_new_install_starts_on_vibey_and_setup_completes_without_choosing_a_default
+    # The scenario owns the server boundary: the first Agent read records the built-in Vibey
+    # Agent as the default with the native backends enabled, its route becomes runnable, and
+    # completion keeps it. The browser's rule of keeping a recorded default that can run, even
+    # when a CLI assistant can run too, is the supporting test below.
+    supporting_tests:
+      - ui/src/components/onboarding/entryGate.test.ts
   - id: AUTH-SETUP-130
     name: "Occupied vendor callback port: OAuth start succeeds and the pasted callback completes the login"
     status: partial
@@ -549,6 +566,21 @@ scenarios:
     supporting_tests:
       - tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_hub_oauth_mispaste_stays_recoverable_and_schemeless_address_signs_in
   - id: AUTH-SETUP-131
+    name: A source that lists no built-in Agent's model still leaves Vibey runnable, and setup completes on it without a pick
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: vibey
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_vibey_starts_on_a_sources_tool_capable_model_and_setup_completes_without_a_pick
+    # The scenario owns the server boundary setup's providers screen calls: the add-source
+    # route, the seed it runs, the Vibey catalog change it announces, the controller's
+    # reconciliation of the built-in Agent's model, the runnable named route the entry
+    # gate admits, and completion. The browser side, which keeps a recorded default that
+    # can run, is the supporting tests below.
+    supporting_tests:
+      - ui/src/components/onboarding/entryGate.test.ts
+      - tests/test_model_hub_vibey_consumer.py
+  - id: AUTH-SETUP-133
     name: Selected broken native CLI refuses setup eligibility, then recovers at the same path
     status: covered
     kind: recovery_path

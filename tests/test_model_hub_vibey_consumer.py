@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import threading
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
@@ -24,6 +25,7 @@ from config.v2_config import (
     ModelHubAgentSupplyConfig,
     ModelHubBackendModelConfig,
     ModelHubConfig,
+    ModelHubHostedToolConfig,
     ModelHubModelConfig,
     ModelHubRouteConfig,
     ModelHubRouteHopConfig,
@@ -31,10 +33,12 @@ from config.v2_config import (
     ModelHubSourceStateConfig,
 )
 from core.handlers.model_hub.adapter import RawOutcomeKind
-from core.handlers.model_hub.provenance import BoundedProvenanceStore, HopOrigin, SERVED_HOP_HEADER
+from core.handlers.model_hub.pricing import PriceTable
+from core.handlers.model_hub.provenance import BoundedProvenanceStore, SERVED_HOP_HEADER
 from core.handlers.model_hub.request import ModelHubRequest
 from core.handlers.model_hub.service import ModelHubError
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
+from core.handlers.model_hub.usage import UsageWriter
 from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
 from modules.agents.model_hub import (
     ModelHubRuntimeRouter,
@@ -44,6 +48,7 @@ from modules.agents.model_hub import (
     claude_settings_for_launch,
     resolve_model_hub_launch,
 )
+from modules.agents.vibey.models import selection_from_hop
 from tests.test_model_hub_l3 import (
     InvokeHandle,
     LiveInvokeHandle,
@@ -69,10 +74,11 @@ MANDATORY_FIELDS = {
         (): (
             "backend", "requested_model", "protocol", "base_url", "token",
             "runtime_model", "source_id", "provider", "request_headers", "capabilities",
+            "hosted_tools",
         ),
         ("capabilities",): (
             "context_window", "input_limit", "max_output_tokens", "supports_tools",
-            "supports_images", "supports_reasoning", "reasoning_efforts",
+            "supports_images", "supports_reasoning", "reasoning_efforts", "context_price_steps",
         ),
     },
     "turn-provenance.schema.json": {
@@ -83,6 +89,9 @@ MANDATORY_FIELDS = {
         ),
         ("served",): ("source_id", "configured_model_id", "channel", "origin"),
         ("served", "origin"): ("provider", "api", "model"),
+    },
+    "served-hop.schema.json": {
+        (): ("provider", "api", "model", "source"),
     },
 }
 
@@ -96,8 +105,14 @@ def _validate(schema_name, value):
     Draft7Validator(schema, registry=Registry().with_resources(resources.items())).validate(value)
 
 
-def _assert_mandatory_fields(schema_name, payload):
-    for path, fields in MANDATORY_FIELDS[schema_name].items():
+# Each enabled hosted tool's promised fields, for a native and a proxied entry.
+HOSTED_TOOL_MANDATORY_FIELDS = {
+    ("hosted_tools", "web_search"): ("native", "replay", "declaration", "include"),
+}
+
+
+def _assert_mandatory_fields(schema_name, payload, table=None):
+    for path, fields in (table or MANDATORY_FIELDS[schema_name]).items():
         for field in fields:
             incomplete = copy.deepcopy(payload)
             target = incomplete
@@ -109,6 +124,18 @@ def _assert_mandatory_fields(schema_name, payload):
             assert missing.value.validator == "required"
             assert list(missing.value.absolute_path) == list(path)
             assert missing.value.message == f"'{field}' is a required property"
+
+
+def _served_hop(response):
+    """The exact served-hop header, validated against its own schema."""
+    report = json.loads(response.headers[SERVED_HOP_HEADER])
+    _validate("served-hop.schema.json", report)
+    return report
+
+
+def _recorded_hop(attempt):
+    """A provenance attempt in the header's shape: its persisted origin plus its Source."""
+    return {**attempt["origin"], "source": attempt["source_id"]}
 
 
 def _vibey_service(tmp_path, sources, *, handles=()):
@@ -200,12 +227,15 @@ def _signed_history(protocol):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("protocol", PROTOCOL_ENDPOINTS)
-@pytest.mark.parametrize("change", ["same_origin", "provider", "api", "model"])
-async def test_failover_strips_opaque_history_only_when_origin_changes(tmp_path, protocol, change):
-    """MH-VIBEY-005: the engine must never receive primary-signed history at another origin.
+@pytest.mark.parametrize("change", ["source", "provider", "api", "model"])
+async def test_failover_strips_opaque_history_for_another_origin_or_source(tmp_path, protocol, change):
+    """MH-VIBEY-005: the engine must never receive primary-signed history at another origin or Source.
 
     Origin-report tests alone do not inspect the outgoing history at admission.
-    Source identity alone is not origin identity; preserve ordinary tool data.
+    Opaque payloads are bound to the Source as well (an account refuses another
+    account's ciphertext), so a fallback Source of the same origin gets the
+    plain history too; ordinary tool data is preserved. A retry on the primary
+    Source keeps it (the recovery-walk test below).
     """
     primary = _source("src_primary01", "Primary", vendor="anthropic", protocol=protocol)
     fallback_protocol = "anthropic" if protocol != "anthropic" else "openai_responses"
@@ -231,6 +261,7 @@ async def test_failover_strips_opaque_history_only_when_origin_changes(tmp_path,
                 f'{hop["base_url"]}/{PROTOCOL_ENDPOINTS[protocol]}',
                 headers={
                     "Authorization": f'Bearer {hop["token"]}',
+                    **hop["request_headers"],
                     "anthropic-beta": "fixture-beta",
                     "User-Agent": "fixture-agent",
                 },
@@ -238,12 +269,13 @@ async def test_failover_strips_opaque_history_only_when_origin_changes(tmp_path,
             ) as response:
                 assert response.status == 200
                 assert await response.read() == b"{}"
-                assert json.loads(response.headers[SERVED_HOP_HEADER]) == {
+                assert _served_hop(response) == {
                     "provider": fallback.vendor, "api": fallback.protocol, "model": fallback.models[0].id,
+                    "source": fallback.id,
                 }
         assert [entry[0] for entry in service.adapter.invocations] == [primary.id, fallback.id]
         assert service.adapter.requests[0] == {**common, **original}
-        assert service.adapter.requests[1] == {**common, **(original if change == "same_origin" else plain)}
+        assert service.adapter.requests[1] == {**common, **plain}
         assert all(request.protocol == protocol for request in service.adapter.requests)
         assert all(request.headers == {
             "anthropic-beta": "fixture-beta", "user-agent": "fixture-agent",
@@ -255,12 +287,14 @@ async def test_failover_strips_opaque_history_only_when_origin_changes(tmp_path,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("turn_id", ["turn-snapshot", None])
-@pytest.mark.parametrize("origin_state", ["unchanged", "changed", "unverified"])
+@pytest.mark.parametrize("origin_state", ["unchanged", "changed", "rotated", "unverified"])
 async def test_opaque_history_uses_launch_snapshot_without_requiring_turn_attribution(tmp_path, turn_id, origin_state):
     """MH-VIBEY-005: config reload and untracked calls cannot invent primary provenance.
 
     A fallback-only case cannot catch snapshot recomputation at HTTP arrival or
-    loss of the route credential when no dispatched turn is being tracked.
+    loss of the route credential when no dispatched turn is being tracked. A key
+    rotated after the launch makes the primary another account, whose history
+    was signed under the launch identity (C-6 item 6).
     """
     primary = _source("src_primary01", "Primary", vendor="anthropic", protocol="anthropic")
     service = _vibey_service(tmp_path, [primary], handles=[
@@ -272,16 +306,19 @@ async def test_opaque_history_uses_launch_snapshot_without_requiring_turn_attrib
     try:
         if origin_state == "unverified":
             base, token = await gateway.endpoint("vibey", process_scope="vibey:unverified")
-            base_url, model = f"{base}/v1", "menu-alias"
+            base_url, model, request_headers = f"{base}/v1", "menu-alias", {}
         else:
             hop = await router.resolve_hop("menu-alias", process_scope="vibey:snapshot", turn_id=turn_id)
             base_url, model, token = hop["base_url"], hop["runtime_model"], hop["token"]
+            request_headers = hop["request_headers"]
         if origin_state == "changed":
             service.store.config.sources[0].vendor = "custom"
+        if origin_state == "rotated":
+            service.store.config.sources[0].credential_ref = "cred_rotated0001"
         async with aiohttp.ClientSession() as client:
             async with client.post(
                 f"{base_url}/messages",
-                headers={"Authorization": f"Bearer {token}"},
+                headers={"Authorization": f"Bearer {token}", **request_headers},
                 json={"model": model, **signed},
             ) as response:
                 assert response.status == 200
@@ -291,6 +328,39 @@ async def test_opaque_history_uses_launch_snapshot_without_requiring_turn_attrib
         )["messages"]
     finally:
         await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_a_later_turn_after_a_key_rotation_gets_a_route_under_the_new_identity(tmp_path):
+    """MH-VIBEY-005: a route credential carries the launch identity the gateway compares against, so a turn launched
+    after the key changed gets a route under the new identity. Its own Source's signed history, rendered for that
+    identity, is kept; the earlier route still answers for the identity it was launched under."""
+
+    primary = _source("src_primary01", "Primary", vendor="anthropic", protocol="anthropic")
+    service = _vibey_service(tmp_path, [primary], handles=[
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS), (b"{}",)),
+    ])
+    signed, _plain = _signed_history("anthropic")
+    gateway = ModelHubTurnGateway(service)
+    router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+    try:
+        before = await router.resolve_hop("menu-alias", process_scope="vibey:rotation", turn_id="turn-before")
+        completion = router.settle_turn("turn-before", settled_by=SETTLED_BY_TERMINAL_RESULT, ts="2026-10-02T08:00:00Z")
+        if completion:
+            await completion
+        service.store.config.sources[0].credential_ref = "cred_rotated0001"
+        after = await router.resolve_hop("menu-alias", process_scope="vibey:rotation", turn_id="turn-after")
+        async with aiohttp.ClientSession() as client:
+            async with client.post(
+                f'{after["base_url"]}/messages',
+                headers={"Authorization": f'Bearer {after["token"]}', **after["request_headers"]},
+                json={"model": after["runtime_model"], **signed},
+            ) as response:
+                assert response.status == 200
+    finally:
+        await gateway.close()
+    assert after["source_identity"] != before["source_identity"] and after["token"] != before["token"]
+    assert service.adapter.requests[0]["messages"] == signed["messages"]
 
 
 @pytest.mark.asyncio
@@ -330,7 +400,7 @@ async def test_opaque_history_origin_survives_recovery_walks(tmp_path, recovered
         async with aiohttp.ClientSession() as client:
             async with client.post(
                 f'{hop["base_url"]}/messages',
-                headers={"Authorization": f'Bearer {hop["token"]}'},
+                headers={"Authorization": f'Bearer {hop["token"]}', **hop["request_headers"]},
                 json={"model": hop["runtime_model"], **signed},
             ) as response:
                 assert response.status == 200
@@ -435,7 +505,7 @@ async def test_sequential_vibey_retry_replaces_route_and_retains_served_provenan
         async with aiohttp.ClientSession() as client:
             async with client.post(
                 f'{initial["base_url"]}/messages',
-                headers={"Authorization": f'Bearer {initial["token"]}'},
+                headers={"Authorization": f'Bearer {initial["token"]}', **initial["request_headers"]},
                 json={"model": initial["runtime_model"], "stream": True, "messages": []},
             ) as response:
                 assert response.status == 200
@@ -444,12 +514,12 @@ async def test_sequential_vibey_retry_replaces_route_and_retains_served_provenan
             assert retry["source_id"] == fallback.id
             async with client.post(
                 f'{retry["base_url"]}/responses',
-                headers={"Authorization": f'Bearer {retry["token"]}'},
+                headers={"Authorization": f'Bearer {retry["token"]}', **retry["request_headers"]},
                 json={"model": retry["runtime_model"], "input": "retry"},
             ) as response:
                 assert response.status == 200
                 await response.read()
-                origin = json.loads(response.headers[SERVED_HOP_HEADER])
+                origin = _served_hop(response)
             # A late old credential must not arm/poison the retry's attribution,
             # even if the request is invalid before the model is parsed.
             service.store.config.agents["vibey"].routes["menu-alias"] = ModelHubRouteConfig((
@@ -457,7 +527,7 @@ async def test_sequential_vibey_retry_replaces_route_and_retains_served_provenan
             ))
             async with client.post(
                 f'{initial["base_url"]}/messages',
-                headers={"Authorization": f'Bearer {initial["token"]}'},
+                headers={"Authorization": f'Bearer {initial["token"]}', **initial["request_headers"]},
                 **(
                     {"data": "invalid json"} if late_request == "malformed"
                     else {"json": {"model": initial["runtime_model"], "messages": []}}
@@ -466,7 +536,7 @@ async def test_sequential_vibey_retry_replaces_route_and_retains_served_provenan
                 assert response.status == (400 if late_request == "malformed" else 200)
                 await response.read()
                 if late_request == "valid":
-                    assert json.loads(response.headers[SERVED_HOP_HEADER])["model"] == "late-model"
+                    assert _served_hop(response)["model"] == "late-model"
         completion = router.settle_turn(turn_id, settled_by=SETTLED_BY_TERMINAL_RESULT, ts=NOW.isoformat())
         if completion:
             await completion
@@ -474,7 +544,7 @@ async def test_sequential_vibey_retry_replaces_route_and_retains_served_provenan
         assert record is not None
         assert record["outcome"] == "served"
         assert record["served"]["source_id"] == fallback.id
-        assert record["served"]["origin"] == origin
+        assert _recorded_hop(record["served"]) == origin
         _validate("turn-provenance.schema.json", record)
     finally:
         await gateway.close()
@@ -504,7 +574,7 @@ async def test_a_vibey_sessions_turns_share_its_scope_and_each_keeps_its_provena
                 tokens += [preflight["token"], later["token"]]
                 async with client.post(
                     f'{later["base_url"]}/messages',
-                    headers={"Authorization": f'Bearer {later["token"]}'},
+                    headers={"Authorization": f'Bearer {later["token"]}', **later["request_headers"]},
                     json={"model": later["runtime_model"], "messages": []},
                 ) as response:
                     assert response.status == 200
@@ -519,6 +589,65 @@ async def test_a_vibey_sessions_turns_share_its_scope_and_each_keeps_its_provena
     finally:
         await gateway.close()
     assert len(set(tokens)) == 1
+
+@pytest.mark.asyncio
+async def test_a_finished_turns_request_is_never_credited_to_the_next_turn_on_its_route(tmp_path):
+    """MH-VIBEY-009: a Vibey request names its Turn, so a finished Turn's late request reaches no successor.
+
+    The Session's next Turn reuses the route credential. Only the Turn the
+    request names may own it, for a model call and for a proxied hosted call.
+    """
+    primary = _source("src_primary01", "Primary", vendor="anthropic", protocol="anthropic")
+    service = _vibey_service(tmp_path, [primary], handles=[
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=primary.id), (b"{}",)),
+        # The late request's refusal; a request error never changes Source health.
+        LiveInvokeHandle(_outcome(
+            RawOutcomeKind.HTTP_ERROR, status=400, code="invalid_request_error", source_id=primary.id,
+        ), ()),
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=primary.id), (b"{}",)),
+    ])
+    # On, with no executor (no Source's vendor offers X search here): a call its live Turn owns answers a failed
+    # record; any other call is not bound.
+    service.store.config.hosted_tools["x_search"] = ModelHubHostedToolConfig(enabled=True)
+    gateway = ModelHubTurnGateway(service)
+    router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+
+    async def post(client, hop, turn_headers, path, body):
+        async with client.post(
+            f'{hop["base_url"]}/{path}',
+            headers={"Authorization": f'Bearer {hop["token"]}', **turn_headers},
+            json=body,
+        ) as response:
+            return response.status, await response.json(content_type=None)
+
+    search = {"arguments": {"query": "q"}}
+    try:
+        async with aiohttp.ClientSession() as client:
+            finished = await router.resolve_hop("menu-alias", process_scope="vibey:session", turn_id="turn-finished")
+            message = {"model": finished["runtime_model"], "messages": []}
+            assert (await post(client, finished, finished["request_headers"], "messages", message))[0] == 200
+            completion = router.settle_turn("turn-finished", settled_by=SETTLED_BY_TERMINAL_RESULT, ts=NOW.isoformat())
+            if completion:
+                await completion
+            live = await router.resolve_hop("menu-alias", process_scope="vibey:session", turn_id="turn-live")
+            assert live["token"] == finished["token"]
+            stale = finished["request_headers"]
+            assert (await post(client, live, stale, "messages", message))[0] == 400
+            status, answer = await post(client, live, stale, "hosted-tools/x_search", search)
+            assert (status, answer["error"]["code"]) == (409, "turn_not_live")
+            status, answer = await post(client, live, live["request_headers"], "hosted-tools/x_search", search)
+            assert status == 200 and answer["record"]["status"] == "failed"
+            assert (await post(client, live, live["request_headers"], "messages", message))[0] == 200
+        completion = router.settle_turn("turn-live", settled_by=SETTLED_BY_TERMINAL_RESULT, ts=NOW.isoformat())
+        if completion:
+            await completion
+        record = service.provenance.get("turn-live")
+        assert record is not None and record["outcome"] == "served"
+        assert record["failed_attempts"] == [] and record["terminal_error"] is None
+        _validate("turn-provenance.schema.json", record)
+    finally:
+        await gateway.close()
+
 
 @pytest.mark.asyncio
 async def test_vibey_route_replacement_refuses_overlap_without_poisoning_current_request(tmp_path):
@@ -546,7 +675,7 @@ async def test_vibey_route_replacement_refuses_overlap_without_poisoning_current
         async with aiohttp.ClientSession() as client:
             pending = asyncio.create_task(client.post(
                 f'{first["base_url"]}/messages',
-                headers={"Authorization": f'Bearer {first["token"]}'},
+                headers={"Authorization": f'Bearer {first["token"]}', **first["request_headers"]},
                 json={"model": first["runtime_model"], "messages": []},
             ))
             try:
@@ -775,6 +904,55 @@ async def test_fresh_install_seeds_vibey_with_its_first_source(tmp_path, first, 
     assert announced == ["vibey"]
 
 
+TOOL_CATALOG = {"relay": {"name": "Relay", "models": {
+    "embed-1": {"name": "Embed 1", "tool_call": False, "modalities": {"input": ["text"], "output": ["text"]}},
+    "draw-1": {"name": "Draw 1", "tool_call": True, "modalities": {"input": ["text"], "output": ["image"]}},
+    "chat-1": {"name": "Chat 1", "tool_call": True, "modalities": {"input": ["text"], "output": ["text"]},
+               "limit": {"context": 200_000, "output": 32_000}},
+    "chat-2": {"name": "Chat 2", "tool_call": True, "modalities": {"input": ["text"], "output": ["text"]}},
+    "see-1": {"name": "See 1", "tool_call": True, "modalities": {"input": ["image"], "output": ["text"]}},
+}}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("selections", "sources", "seeded"), [
+    # The first listed model that takes text and tool calls and answers in text, past the ones that do not.
+    ([("codex", "gpt-6-astra")], [("src_seedrelay001", ("embed-1", "draw-1", "see-1", "unknown-1", "chat-1", "chat-2"))], ["chat-1"]),
+    # Sources the user already had are read in Vibey's Source order, each in its own inventory order.
+    ([("codex", "gpt-6-astra")], [("src_seedrelay001", ("unknown-1", "embed-1")), ("src_seedrelay002", ("chat-2", "chat-1"))], ["chat-2"]),
+    # A model models.dev cannot describe is never guessed at.
+    ([("codex", "gpt-6-astra")], [("src_seedrelay001", ("unknown-1", "unknown-2"))], []),
+    # A native Agent's selection that models.dev rules out for an Agent's turn does not start Vibey;
+    # one it does not know still does, being that person's own choice.
+    ([("codex", "embed-1"), ("opencode", "custom/draw-1"), ("claude", "see-1")],
+     [("src_seedrelay001", ("embed-1", "draw-1", "see-1", "chat-2"))], ["chat-2"]),
+    ([("codex", "unknown-1")], [("src_seedrelay001", ("unknown-1", "chat-2"))], ["unknown-1"]),
+])
+async def test_a_seed_with_no_qualifying_selection_starts_vibey_on_a_tool_capable_model(
+    tmp_path, selections, sources, seeded,
+):
+    """MH-VIBEY-007: a new install's default Agent can run once setup places a Source.
+
+    No built-in Agent's model is listed by these Sources, so the seed starts
+    Vibey on one model they do list, by a rule a person can predict.
+    """
+    payload = ModelHubConfig().to_payload()
+    payload["sources"] = [
+        _seed_source(source_id, day, *model_ids, vendor="custom", protocol="openai_chat").to_payload()
+        for day, (source_id, model_ids) in enumerate(sources, start=1)
+    ]
+    service, store, _announced = _seed_service(tmp_path, payload, selections)
+    service.models_dev_catalog = lambda: TOOL_CATALOG
+
+    assert await service.seed_vibey_supply() == seeded
+
+    vibey = store.payload["agents"]["vibey"]
+    assert [model["id"] for model in vibey["models"]] == seeded
+    if seeded == ["chat-1"]:
+        [row] = vibey["models"]
+        assert (row["origin"], row["display_name"], row["context_window"]) == ("provider", "Chat 1", 200_000)
+
+
 @pytest.mark.asyncio
 async def test_the_first_source_seed_fetches_a_models_dev_copy_when_none_is_cached(tmp_path, monkeypatch):
     """MH-VIBEY-007: seeded rows keep the metadata they are written with.
@@ -893,6 +1071,89 @@ def test_native_cli_and_direct_are_not_vibey_channels(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_hop_resolution_states_each_enabled_hosted_tool(tmp_path):
+    """MH-HOSTED-001: a tool the overlay offers is assumed native with no evidence (nothing is probed); the hop states
+    facts only, never an executor, and a tool the user turned off is absent."""
+    primary = _source("src_primary01", "Primary", protocol="openai_responses", model_id="gpt-6-astra")
+    service = _vibey_service(tmp_path, [primary])
+    service.store.config.hosted_tools = {"x_search": ModelHubHostedToolConfig(enabled=False)}
+    resolving_threads = []
+    resolve_on_worker = service.hosted_tools_for_hop
+
+    def recorded(*args):
+        resolving_threads.append(threading.current_thread())
+        return resolve_on_worker(*args)
+
+    service.hosted_tools_for_hop = recorded
+    gateway = ModelHubTurnGateway(service)
+    router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+    try:
+        hop = await router.resolve_hop("menu-alias", process_scope="vibey:test", turn_id="turn-hosted")
+        # The first resolution may load the evidence file, so it never runs on the controller loop.
+        assert resolving_threads and threading.main_thread() not in resolving_threads
+        _validate("hop-resolution.schema.json", hop)
+        assert hop["hosted_tools"] == {
+            "web_search": {
+                "native": "assumed",
+                "declaration": {"type": "web_search"},
+                "include": ["web_search_call.action.sources"],
+                "replay": "assumed",
+            },
+            # The bundled overlay's verified image model on an OpenAI key, its params as sorted lists.
+            "image_generate": {
+                "models": [{
+                    "source_id": "src_primary01", "model_id": "gpt-image-2",
+                    "description": "GPT Image 2: precise prompts, legible text, edits",
+                    "params": ["images", "n", "size"], "size_forms": ["pixels"],
+                }],
+                "default": {"source_id": "src_primary01", "model_id": "gpt-image-2"},
+            },
+        }
+        _assert_mandatory_fields("hop-resolution.schema.json", hop, HOSTED_TOOL_MANDATORY_FIELDS)
+        image = {"source_id": "src_primary01", "model_id": "gpt-image-2", "description": "OpenAI images",
+                 "params": ["images", "n", "size"], "size_forms": ["pixels"]}
+        _validate("hop-resolution.schema.json", {**hop, "hosted_tools": {
+            "web_search": {"native": "unsupported", "replay": "unsupported"},
+            "image_generate": {"models": [image], "default": {"source_id": "src_primary01", "model_id": "gpt-image-2"}},
+        }})
+        for broken in (
+            # Declaration and include belong to an assumed native tool only.
+            {"web_search": {"native": "unsupported", "declaration": {"type": "web_search"}, "replay": "unsupported"}},
+            {"web_search": {"native": "assumed", "include": [], "replay": "assumed"}},
+            # v1's shape is gone: no mode, no executor, no boolean replay.
+            {"web_search": {"mode": "proxy", "executor": None, "replay": False}},
+            {"web_search": {"native": "assumed", "declaration": {"type": "web_search"}, "include": [], "replay": True}},
+            {"image_generation": {"native": "unsupported", "replay": "unsupported"}},
+            # image_generate is absent rather than empty, and names only what the enum needs.
+            {"image_generate": {"models": [], "default": {"source_id": "src_primary01", "model_id": "gpt-image-2"}}},
+            {"image_generate": {"models": [{**image, "endpoint": "images"}], "default": image}},
+        ):
+            with pytest.raises(ValidationError):
+                _validate("hop-resolution.schema.json", {**hop, "hosted_tools": broken})
+    finally:
+        await gateway.close()
+
+
+def test_both_hop_resolution_copies_state_the_same_contract():
+    """MH-HOSTED-001: the agent-core copy and the Model Hub copy cannot drift."""
+    agent_core = json.loads((CONTRACTS.parent / "agent-core-contracts/hop-resolution.schema.json").read_text())
+    model_hub = json.loads((CONTRACTS / "hop-resolution.schema.json").read_text())
+    assert sorted(agent_core["required"]) == sorted(model_hub["required"])
+    assert set(agent_core["properties"]) == set(model_hub["properties"])
+
+    def constraints(schema):
+        if isinstance(schema, dict):
+            return {key: constraints(value) for key, value in schema.items() if key != "description"}
+        if isinstance(schema, list):
+            return [constraints(value) for value in schema]
+        return schema
+
+    # The copies differ only in prose and in where `protocol` points (both name the same four values).
+    for name in set(agent_core["properties"]) - {"protocol"}:
+        assert constraints(agent_core["properties"][name]) == constraints(model_hub["properties"][name]), name
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("protocol", PROTOCOL_ENDPOINTS)
 @pytest.mark.parametrize("known", [False, True])
 async def test_hop_resolution_uses_primary_protocol_and_alias_capabilities(tmp_path, protocol, known):
@@ -905,6 +1166,17 @@ async def test_hop_resolution_uses_primary_protocol_and_alias_capabilities(tmp_p
             input_modalities=["text", "image"], supports_tools=True, supports_reasoning=False,
             reasoning_efforts=["high"],
         )
+        # The target model's price, not the requested alias's: a tier no dearer than the base is no step.
+        base = {"input": 5, "output": 30, "cache_read": 0.5}
+        prices = PriceTable(
+            catalog={"openai": {"models": {"upstream-model": {"cost": {**base, "tiers": [
+                {**base, "tier": {"type": "context", "size": 128_000}},
+                {"input": 10, "output": 45, "cache_read": 1, "tier": {"type": "context", "size": 272_000}},
+            ]}}}}},
+            vendor_map={"families": [{"prefix": "upstream-", "vendor_id": "openai"}]},
+            overrides={}, price_table_date="2026-10-15",
+        )
+        service.usage_writer = UsageWriter(service.usage, price_table=lambda: prices)
     gateway = ModelHubTurnGateway(service)
     router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
     try:
@@ -923,7 +1195,9 @@ async def test_hop_resolution_uses_primary_protocol_and_alias_capabilities(tmp_p
             "supports_images": True if known else None,
             "supports_reasoning": False if known else None,
             "reasoning_efforts": [],
+            "context_price_steps": [272_000] if known else [],
         }
+        assert selection_from_hop(hop).capabilities.context_price_steps == ((272_000,) if known else ())
         _assert_mandatory_fields("hop-resolution.schema.json", hop)
         launch = await router.resolve("vibey", "menu-alias", process_scope="vibey:test", turn_id="turn-hop")
         assert hop["token"] not in repr(launch)
@@ -965,12 +1239,14 @@ async def test_failover_origin_is_available_before_body_and_matches_served_attem
         async with aiohttp.ClientSession() as client:
             async with client.post(
                 f'{hop["base_url"]}/{PROTOCOL_ENDPOINTS[protocol]}',
-                headers={"Authorization": f'Bearer {hop["token"]}'},
+                headers={"Authorization": f'Bearer {hop["token"]}', **hop["request_headers"]},
                 json={"model": hop["runtime_model"], "stream": stream, "messages": []},
             ) as response:
                 assert response.status == 200, await response.text() if response.status != 200 else ""
-                origin = json.loads(response.headers[SERVED_HOP_HEADER])
-                assert origin == {"provider": "anthropic", "api": fallback_protocol, "model": "模型/β"}
+                origin = _served_hop(response)
+                assert origin == {
+                    "provider": "anthropic", "api": fallback_protocol, "model": "模型/β", "source": second.id,
+                }
                 assert response.headers[SERVED_HOP_HEADER].isascii()
                 assert await response.read() == answer
         completion = router.settle_turn(
@@ -981,17 +1257,22 @@ async def test_failover_origin_is_available_before_body_and_matches_served_attem
         record = service.provenance.get("turn-fallback")
         _validate("turn-provenance.schema.json", record)
         _assert_mandatory_fields("turn-provenance.schema.json", record)
+        _assert_mandatory_fields("served-hop.schema.json", origin)
         # The new Avibe promise must not tighten native or released records.
         # Exercise the persistence reader, not only in-memory schema payloads.
         history = []
         for backend in ("claude", "codex", "opencode"):
-            for version in (5, 6, 7, 8, 9, 10):
+            for version in (5, 6, 7, 8, 9, 10, 11):
                 native = copy.deepcopy(record)
                 native.update(agent=backend, contract_version=version, turn_id=f"{backend}-{version}")
                 native["served"].pop("origin")
                 for attempt in native["failed_attempts"]:
                     attempt.pop("origin", None)
                 history.append(native)
+        # Vibey records written before the served-hop report named its Source.
+        released_vibey = copy.deepcopy(record)
+        released_vibey.update(contract_version=11, turn_id="vibey-11")
+        history.append(released_vibey)
         history_path = tmp_path / "native-history.json"
         history_path.write_text(json.dumps(history))
         history_store = BoundedProvenanceStore(history_path)
@@ -999,7 +1280,7 @@ async def test_failover_origin_is_available_before_body_and_matches_served_attem
             loaded = history_store.get(native["turn_id"])
             assert loaded == native
             _validate("turn-provenance.schema.json", loaded)
-        assert record["served"]["origin"] == origin
+        assert _recorded_hop(record["served"]) == origin
         assert record["served"]["source_id"] == second.id
         assert record["failed_attempts"][0]["source_id"] == first.id
         assert [entry[0] for entry in service.adapter.invocations] == [first.id, second.id]
@@ -1098,7 +1379,9 @@ async def test_terminal_response_origin_follows_its_carrier(
         if backend == "vibey":
             protocol = launch.protocol
         headers = {"Authorization": f"Bearer {launch.gateway_token}"}
-        if launch.gateway_request_metadata:
+        if backend == "vibey":
+            headers.update(launch.gateway_request_metadata)
+        elif launch.gateway_request_metadata:
             headers["x-codex-turn-metadata"] = json.dumps(launch.gateway_request_metadata)
         async with aiohttp.ClientSession() as client:
             async with client.post(
@@ -1109,8 +1392,10 @@ async def test_terminal_response_origin_follows_its_carrier(
                 assert response.status == expected_status
                 origin = None
                 if backend == "vibey" and has_producer:
-                    origin = json.loads(response.headers[SERVED_HOP_HEADER])
-                    assert origin == {"provider": "anthropic", "api": "anthropic", "model": "模型/β"}
+                    origin = _served_hop(response)
+                    assert origin == {
+                        "provider": "anthropic", "api": "anthropic", "model": "模型/β", "source": source.id,
+                    }
                 else:
                     assert SERVED_HOP_HEADER not in response.headers
                 assert (await response.json())["error"]
@@ -1133,7 +1418,7 @@ async def test_terminal_response_origin_follows_its_carrier(
         if cause == "upstream":
             assert record["terminal_error"]["source_id"] == source.id
             if backend == "vibey":
-                assert record["terminal_error"]["origin"] == origin
+                assert _recorded_hop(record["terminal_error"]) == origin
             else:
                 assert "origin" not in record["terminal_error"]
         elif failure == "exhaustion":
@@ -1150,8 +1435,8 @@ async def test_terminal_response_origin_follows_its_carrier(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fallback", [False, True])
 @pytest.mark.parametrize("model_id,allowed", [
-    pytest.param("a" * 4044, True, id="exact-bound"),  # 52 bytes of JSON envelope.
-    pytest.param("a" * 4045, False, id="one-over"),
+    pytest.param("a" * 4019, True, id="exact-bound"),  # 77 bytes of JSON envelope.
+    pytest.param("a" * 4020, False, id="one-over"),
     pytest.param("模" * 1350, False, id="unicode-expansion"),
 ])
 async def test_origin_header_limit_is_checked_before_each_vibey_hop(tmp_path, model_id, allowed, fallback):
@@ -1181,13 +1466,13 @@ async def test_origin_header_limit_is_checked_before_each_vibey_hop(tmp_path, mo
         async with aiohttp.ClientSession() as client:
             async with client.post(
                 f'{hop["base_url"]}/{PROTOCOL_ENDPOINTS[hop["protocol"]]}',
-                headers={"Authorization": f'Bearer {hop["token"]}'},
+                headers={"Authorization": f'Bearer {hop["token"]}', **hop["request_headers"]},
                 json={"model": hop["runtime_model"], "stream": False, "messages": []},
             ) as response:
                 if allowed:
                     assert response.status == 200
                     assert len(response.headers[SERVED_HOP_HEADER].encode("ascii")) == 4096
-                    assert json.loads(response.headers[SERVED_HOP_HEADER])["model"] == model_id
+                    assert _served_hop(response)["model"] == model_id
                     assert await response.read() == b"{}"
                 else:
                     assert response.status == 422
@@ -1241,7 +1526,7 @@ async def test_slow_anthropic_resolution_waits_to_publish_origin_and_keeps_sourc
         hop = await router.resolve_hop("menu-alias", process_scope="vibey:test", turn_id="turn-slow")
         async with aiohttp.ClientSession() as client:
             task = asyncio.create_task(client.post(
-                f'{hop["base_url"]}/messages', headers={"x-api-key": hop["token"]},
+                f'{hop["base_url"]}/messages', headers={"x-api-key": hop["token"], **hop["request_headers"]},
                 json={"model": hop["runtime_model"], "stream": True, "messages": []},
             ))
             await asyncio.wait_for(entered.wait(), 2)
@@ -1253,13 +1538,13 @@ async def test_slow_anthropic_resolution_waits_to_publish_origin_and_keeps_sourc
             release.set()
             response = await asyncio.wait_for(task, 2)
             async with response:
-                origin = json.loads(response.headers[SERVED_HOP_HEADER])
-                assert origin == HopOrigin("anthropic", "anthropic", "shared-model").payload()
+                origin = _served_hop(response)
+                assert origin == {"provider": "anthropic", "api": "anthropic", "model": "shared-model", "source": source.id}
                 assert await response.read() == answer
         completion = router.settle_turn("turn-slow", settled_by=SETTLED_BY_TERMINAL_RESULT, ts=NOW.isoformat())
         if completion:
             await completion
-        assert service.provenance.get("turn-slow")["served"]["origin"] == origin
+        assert _recorded_hop(service.provenance.get("turn-slow")["served"]) == origin
     finally:
         release.set()
         if task is not None and not task.done():
@@ -1307,11 +1592,11 @@ async def test_concurrent_responses_keep_their_own_origin(tmp_path):
             async def read(hop):
                 async with client.post(
                     f'{hop["base_url"]}/{PROTOCOL_ENDPOINTS[hop["protocol"]]}',
-                    headers={"Authorization": f'Bearer {hop["token"]}'},
+                    headers={"Authorization": f'Bearer {hop["token"]}', **hop["request_headers"]},
                     json={"model": hop["runtime_model"], "stream": True, "messages": []},
                 ) as response:
                     assert response.status == 200
-                    origin = json.loads(response.headers[SERVED_HOP_HEADER])
+                    origin = _served_hop(response)
                     assert await response.read() == _body(hop["protocol"], True)
                     return origin
 
@@ -1320,16 +1605,71 @@ async def test_concurrent_responses_keep_their_own_origin(tmp_path):
             second_origin = await asyncio.wait_for(read(hops[1]), 2)
             release.set()
             first_origin = await asyncio.wait_for(pending, 2)
-        assert first_origin == {"provider": "openai", "api": "openai_chat", "model": "model-one"}
-        assert second_origin == {"provider": "anthropic", "api": "anthropic", "model": "model-two"}
+        assert first_origin == {"provider": "openai", "api": "openai_chat", "model": "model-one", "source": first.id}
+        assert second_origin == {"provider": "anthropic", "api": "anthropic", "model": "model-two", "source": second.id}
         for index, origin in enumerate((first_origin, second_origin)):
             completion = router.settle_turn(f"turn-{index}", settled_by=SETTLED_BY_TERMINAL_RESULT, ts=NOW.isoformat())
             if completion:
                 await completion
-            assert service.provenance.get(f"turn-{index}")["served"]["origin"] == origin
+            assert _recorded_hop(service.provenance.get(f"turn-{index}")["served"]) == origin
     finally:
         release.set()
         if pending is not None and not pending.done():
             pending.cancel()
             await asyncio.gather(pending, return_exceptions=True)
         await gateway.close()
+
+
+
+def test_a_released_vibey_row_loads_without_its_client_preset(tmp_path, monkeypatch):
+    """MH-HOSTED-006 (#2539): 3.2.0 saved Vibey rows with Codex's ``ultra``; every read drops it, once, at load."""
+    from config.v2_config import V2Config
+    from core.services.settings import default_config
+    from vibe import api
+
+    released = json.loads(
+        (Path(__file__).parent / "fixtures/model_hub/released_3_2_0_vibey_client_preset.json").read_text(encoding="utf-8")
+    )
+    clean = ["low", "medium", "high", "xhigh", "max"]
+
+    config = ModelHubConfig.from_payload(copy.deepcopy(released), repairing=True)
+    assert config.agents["vibey"].models[0].reasoning_efforts == clean
+    written = config.to_payload()
+    assert written["agents"]["vibey"]["models"][0]["reasoning_efforts"] == clean
+    # Only the preset changes: Sources, other Agents and the rest of the row are as 3.2.0 wrote them.
+    expected = copy.deepcopy(released)
+    expected["agents"]["vibey"]["models"][0]["reasoning_efforts"] = clean
+    assert written == expected
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["model_hub"] = copy.deepcopy(released)
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    loaded = V2Config.load(config_path=config_path)
+    assert not loaded.load_warnings
+    assert loaded.model_hub.agents["vibey"].models[0].reasoning_efforts == clean
+
+
+def test_loading_and_cloning_model_hub_config_reads_no_catalog_file(monkeypatch):
+    """MH-HOSTED-006: config load runs on the controller loop (service clones), so the preset index costs no I/O."""
+    from vibe.backend_model_catalog import bundled_client_presets_once, get_bundled_catalog_path
+
+    released = json.loads(
+        (Path(__file__).parent / "fixtures/model_hub/released_3_2_0_vibey_client_preset.json").read_text(encoding="utf-8")
+    )
+    bundled_client_presets_once()
+    bundled = get_bundled_catalog_path()
+    reads = []
+    original = Path.read_text
+
+    def counted(self, *args, **kwargs):
+        if self == bundled:
+            reads.append(self)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counted)
+    for _ in range(5):
+        config = ModelHubConfig.from_payload(copy.deepcopy(released), repairing=True)
+        ModelHubConfig.from_payload(config.to_payload())
+    assert reads == []

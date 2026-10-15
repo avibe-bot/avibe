@@ -43,9 +43,9 @@ sits below the product boundary Avibe must own: loop semantics, persistence, and
 
 - The tension system itself. v1 guarantees only the seams it will need: steer, follow-up, hooks, events.
 - Any terminal UI, and any new Web UI beyond registering the backend where backends already appear.
-- Becoming the default agent for new installs. v1 is the built-in backend, always enabled and listed first
-  ([`avibe-agent-always-on.md`](avibe-agent-always-on.md)), but not the default for new chats; that default is decided
-  after the P4 regression with real usage evidence.
+- Becoming the default agent for new installs in v1. v1 is the built-in backend, always enabled and listed first
+  ([`avibe-agent-always-on.md`](avibe-agent-always-on.md)). The owner has since decided the default Agent for new
+  installs (2026-10-12); [`vibey-default-agent.md`](vibey-default-agent.md) owns that rule.
 - An MCP client in the engine or the adapter. Avibe is CLI-first: MCP servers are reached through the Avibe MCP
   Hub's `vibe` commands, the same way for every backend (§10).
 - Per-action permission prompts. No backend prompts per action today (§10). Sandboxing beyond Avibe's existing cwd
@@ -108,7 +108,7 @@ payload.
 | C-4 | Typed agent event stream and its mapping to existing Avibe outputs | `agent` → adapter → Workbench and IM progress | `agent-event.schema.json` |
 | C-5 | Transcript rows: what each context entry stores, `context_seq`, projection, fork by reference (the fork point is C-10) | adapter ↔ `harness` | `transcript.md`, `transcript-rows.schema.json` |
 | C-6 | Model Hub consumer extension: `google` protocol, hop resolution, served-hop report | Model Hub → adapter | `model-hub-consumer.md`, `hop-resolution.schema.json` |
-| C-7 | Tools: Pi's surface plus the owner's additions; output governance; job handle | `tools` → `agent`, adapter | `tools.md`, `job.schema.json` |
+| C-7 | Tools: Pi's surface plus the owner's additions; output governance; job handle; the environment block and project instructions | `tools` → `agent`, adapter | `tools.md`, `job.schema.json` |
 | C-8 | Backend registration: the catalog as the one declaration, and which sets must include `vibey` | catalog → every backend list | `backend-registration.md` |
 | C-9 | Context management: projection tiers, trigger, cut point, checkpoint, overflow ladder, guards | `harness` → `agent`, adapter | `context.md`; row shapes in `transcript-rows.schema.json` |
 | C-10 | Fork: the fork point (a settled cut and its prefix), the side turn, the fork Session, lineage, capability, merge-back (frozen 2026-10-10) | `harness`, `agent`, storage, service → C-9, adapter | `fork.md` |
@@ -184,7 +184,7 @@ and `bash` results with `context_edit` rows, on by default; and a checkpoint wri
 
 - **Limits from Model Hub.** `W` and `L_in` come from the `context_window` and `input_limit` of the route resolved
   for the request (128,000 when unknown). `O` is the request's `max_tokens`: the hop's `max_output_tokens` (8,192
-  when unknown) capped by the Agent's output budget, and `min(16,000, O)` for a checkpoint request. One pure
+  when unknown) capped by the Agent's output budget, and `min(64,000, O)` for a checkpoint request. One pure
   function derives the rest and `est` from the final request, immediately before it is sent.
   `M = min(max(8,000, 3% W), W / 8)`, `T = min(L_in - O - M, 0.9 W)`.
 - **Trigger** before every model request, including inside the tool loop, on the final request (in v1 no user hook
@@ -242,6 +242,13 @@ Owner additions over Pi: `edit` `replaceAll` (from Claude Code and OpenCode) and
 for v1: stale-write guard, line numbers in `read`, a `workdir` parameter, head+tail failure output, `write_stdin`,
 post-edit LSP diagnostics, and dedicated `grep`/`find`/`ls`. Two places where tau falls short and Pi is the source:
 the normalized edit tier, and streaming, bounded output with spill.
+
+**Project instructions.** As Pi does, the Agent loads instruction files into its system prompt:
+- `~/.avibe/AGENTS.md`;
+- then, from the filesystem root down to the Session's cwd, each directory's first of `AGENTS.override.md`,
+  `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, `CLAUDE.MD`.
+
+They are re-read every Turn and bounded at 64 KiB in total (C-7 `tools.md` §9).
 
 **Long-running commands through Watch.** Watch serves as the agent's background facility. A process cannot change
 owners after it starts, so every command gets a portable handle from its first moment and never has to move.

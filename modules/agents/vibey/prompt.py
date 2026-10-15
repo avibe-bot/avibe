@@ -1,7 +1,8 @@
 """Vibey's system prompt and the environment block of each consumed input.
 
 The system prompt is stable so providers can cache it: who the Agent is, Pi's
-tool snippets and rules, then Avibe's injected sections. Who the Agent is comes
+tool snippets and rules, the user's instruction files (``instructions``, C-7
+tools.md section 9), then Avibe's injected sections. Who the Agent is comes
 from its record, so it is the same on every Turn the Session runs as that Agent.
 Facts that change (cwd, date, live Watches) travel in an ``<environment>`` block
 rendered into each consumed input instead (C-7 tools.md section 8), so the
@@ -96,6 +97,8 @@ def coding_prompt(tool_names: Iterable[str], *, builtin_agent: bool, rg: bool) -
         rules.append(f"Use bash for file operations like ls, {'rg' if rg else 'grep'}, find")
     if "powershell" in names:
         rules.append(f"Use powershell for file operations like Get-ChildItem, {'rg' if rg else 'Select-String'}")
+    if rg and ("bash" in names or "powershell" in names):
+        rules.append("Prefer rg (ripgrep) for file searches. Run the `rg` command directly.")
     for name in names:
         rules.extend(TOOL_GUIDELINES.get(name, ()))
     if names:
@@ -110,9 +113,11 @@ def coding_prompt(tool_names: Iterable[str], *, builtin_agent: bool, rg: bool) -
     )
 
 
-def system_prompt(tool_names: Iterable[str], avibe_sections: str, *, builtin_agent: bool, rg: bool) -> str:
+def system_prompt(
+    tool_names: Iterable[str], avibe_sections: str, *, builtin_agent: bool, rg: bool, project_context: str = ""
+) -> str:
     head = coding_prompt(tool_names, builtin_agent=builtin_agent, rg=rg)
-    return "\n\n".join(part for part in (head, avibe_sections.strip()) if part)
+    return "\n\n".join(part for part in (head, project_context, avibe_sections.strip()) if part)
 
 
 # --- environment block ---------------------------------------------------------

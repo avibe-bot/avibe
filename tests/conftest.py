@@ -72,7 +72,7 @@ import psutil
 import pytest
 from sqlalchemy.exc import SAWarning
 
-from tests import process_reaper
+from tests import network_guard, process_reaper
 from tests.fake_pid_helpers import PID_LIMIT
 
 REAL_USER_HOME = Path.home()
@@ -207,9 +207,25 @@ def _record_test_processes(request):
     yield
 
 
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item):
+    """Open the test's network window before any fixture it needs is set up (tests/network_guard.py)."""
+
+    marker = item.get_closest_marker("allow_network")
+    if marker is not None and not (marker.kwargs.get("reason") or marker.args):
+        pytest.fail("@pytest.mark.allow_network needs a reason")
+    if marker is not None and item.get_closest_marker("integration") is None:
+        # The opt-out lifts the guard process-wide, so it may open only in a run the unit suite is not part of.
+        pytest.fail("@pytest.mark.allow_network is honoured only on an integration test")
+    network_guard.begin_test(item.nodeid, allowed=marker is not None)
+
+
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_teardown(item):
-    """Reap after every finalizer of the test has run, so a process a fixture stops is gone first."""
+    """Reap after every finalizer of the test has run, so a process a fixture stops is gone first.
+
+    The network window closes at the same point, so a refusal in any finalizer is the test's too.
+    """
 
     global _active_test_processes
     try:
@@ -219,6 +235,9 @@ def pytest_runtest_teardown(item):
         processes = item.stash.get(_TEST_PROCESSES, None)
         if processes is not None:
             _reaped_processes.extend(f"{item.nodeid}: {each}" for each in processes.reap())
+        refused = network_guard.end_test()
+        if refused:
+            pytest.fail("refused network access past loopback:\n" + "\n".join(refused), pytrace=False)
 
 
 @pytest.fixture
@@ -455,17 +474,27 @@ def _no_background_web_push(request: pytest.FixtureRequest, monkeypatch) -> list
     return pushed
 
 
+def _models_dev_unreachable(_previous: dict) -> dict:
+    raise OSError("tests do not fetch models.dev")
+
+
 @pytest.fixture(autouse=True)
-def _no_background_catalog_refresh(request: pytest.FixtureRequest, monkeypatch) -> None:
-    """Keep the remote catalog refreshes off threads that outlive their test.
+def _no_catalog_fetch(request: pytest.FixtureRequest, monkeypatch) -> None:
+    """Keep the remote catalog fetches off the network and off threads that outlive their test.
 
     Reading the backend model catalog or the models.dev catalog from a fresh home
     finds its cache stale and starts a daemon thread that fetches over the network
     and only then resolves the state directory to write the cache, usually after
     the test has ended -- the same shape as the Web Push sender, and the real-home
     tripwire caught both writing the developer's state. Each scheduler reports
-    that no refresh started. ``real_catalog_refresh`` opts out a test that drives
-    the refresh itself.
+    that no refresh started.
+
+    A foreground read of models.dev with no fresh copy fetches on the caller's
+    thread: Model Hub reads it whenever it seeds Vibey, so any such test fetched
+    models.dev and a slow answer held its CI shard until the watchdog. That fetch
+    fails here as it does offline, so the reader keeps a stale copy or reports
+    the catalog unavailable. ``real_catalog_refresh`` opts out a test that drives
+    a refresh or fetch itself.
     """
 
     if request.node.get_closest_marker("real_catalog_refresh"):
@@ -477,6 +506,9 @@ def _no_background_catalog_refresh(request: pytest.FixtureRequest, monkeypatch) 
         module = _module_this_test_can_import(name)
         if module is not None:
             monkeypatch.setattr(module, scheduler, lambda: False)
+    models_dev = _module_this_test_can_import("vibe.models_dev_catalog")
+    if models_dev is not None:
+        monkeypatch.setattr(models_dev, "_fetch_catalog", _models_dev_unreachable)
 
 
 @pytest.fixture(autouse=True)
@@ -604,11 +636,13 @@ class _ForeignSignalGuard:
 
     The test owns its ``subprocess.Popen`` children and any process it has
     signalled as its own; the founder rule keeps an orphan in a spawned child's
-    group signalable after reparenting hides it from ancestry. The ``tmp_path``
+    group signalable after reparenting hides it from ancestry. The directory
     rule covers a detached grandchild, which keeps nothing else that ties it to
-    the test and is what harnesses such as the Model Hub e2e driver clean up by.
-    It is the only grant over processes outside the tree, so it names this
-    test's directory, never the shared temp root. A pid that names no process
+    the test and is what harnesses such as the Model Hub e2e driver clean up by:
+    a process whose command line names this test's ``tmp_path``, or a fresh
+    directory the test claimed for its own runtime (``claim_test_directory``).
+    It is the only grant over processes outside the tree, so it names the
+    test's own directories, never a shared temp root. A pid that names no process
     gets the ESRCH the real call would raise, delivered to nothing, because a
     descendant the test collected may exit before it is signalled. Signal 0 is
     a liveness probe and passes.
@@ -630,7 +664,7 @@ class _ForeignSignalGuard:
     def __init__(self, test_temp: Path) -> None:
         self.me = _REAL_OS_GETPID()
         # The whole final component: `test_x1` must not claim `test_x10`.
-        self.names_test_temp = process_reaper.names_path(test_temp)
+        self.names_own_directory = [process_reaper.names_path(test_temp)]
         self.owned: set[int] = set()
         # Every pid psutil listed while this test ran: a scan finds real processes by design.
         self.listed: set[int] = set()
@@ -663,7 +697,7 @@ class _ForeignSignalGuard:
             cmdline = _REAL_PSUTIL_PROCESS(pid).cmdline()
         except psutil.Error:
             cmdline = []
-        if any(self.names_test_temp(part) for part in cmdline):
+        if any(names(part) for names in self.names_own_directory for part in cmdline):
             self.owned.add(pid)
             return True
         return False
@@ -758,6 +792,22 @@ class _ForeignSignalGuard:
 
 # The running test's guard, or None between tests and in opted-out tests.
 _active_signal_guard: _ForeignSignalGuard | None = None
+
+
+def claim_test_directory(path: Path) -> None:
+    """Let the running test signal the processes whose command line names ``path``.
+
+    For a harness that roots its runtime in a fresh directory of its own outside
+    ``tmp_path``, such as the Model Hub e2e app under ``/tmp``, whose socket
+    paths would not fit under ``tmp_path``. Claim only a directory this test
+    just created with a unique name, never a shared root. Both spellings are
+    claimed, as written and as resolved: on macOS ``/tmp`` is ``/private/tmp``,
+    and what the app starts names whichever spelling it was handed.
+    """
+
+    if _active_signal_guard is not None:
+        for spelling in dict.fromkeys((os.path.abspath(path), os.path.realpath(path))):
+            _active_signal_guard.names_own_directory.append(process_reaper.names_path(Path(spelling)))
 
 
 def _called_from_product(caller) -> bool:
@@ -1050,9 +1100,12 @@ def _real_home_tripwire(event: str, args: tuple) -> None:
 
 
 sys.addaudithook(_real_home_tripwire)
+# Installed here, before any product module is imported, for the same reasons.
+sys.addaudithook(network_guard.audit)
 
 
 _REPORTED_WRITES = pytest.StashKey[int]()
+_REPORTED_NETWORK_REFUSALS = pytest.StashKey[int]()
 _running_session: pytest.Session | None = None
 
 
@@ -1081,6 +1134,12 @@ def pytest_terminal_summary(terminalreporter) -> None:
         terminalreporter.section("writes under the real Avibe home were refused", red=True)
         for message in written:
             terminalreporter.line(message, red=True)
+    refused = list(network_guard.refused_outside_tests)
+    terminalreporter.config.stash[_REPORTED_NETWORK_REFUSALS] = len(refused)
+    if refused:
+        terminalreporter.section("network access past loopback was refused outside any test", red=True)
+        for message in refused:
+            terminalreporter.line(message, red=True)
 
 
 @pytest.hookimpl(trylast=True)
@@ -1094,7 +1153,9 @@ def pytest_unconfigure(config: pytest.Config) -> None:
     shutil.rmtree(_SESSION_HOME, ignore_errors=True)
     for message in _real_home_writes[config.stash.get(_REPORTED_WRITES, 0) :]:
         sys.stderr.write(f"refused a write under the real Avibe home: {message}\n")
-    if _real_home_writes:
+    for message in network_guard.refused_outside_tests[config.stash.get(_REPORTED_NETWORK_REFUSALS, 0) :]:
+        sys.stderr.write(f"refused network access past loopback outside any test: {message}\n")
+    if _real_home_writes or network_guard.refused_outside_tests:
         _fail_running_session()
 
 

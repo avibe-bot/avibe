@@ -101,22 +101,22 @@ def test_preserved_custom_archive_path_cannot_split_build_and_supervisor(
 def test_restart_in_progress_true_while_job_pid_alive(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
-    _write_restart_status({"ok": None, "state": "running", "supervisor_pid": 4242, "supervisor_started_at": 1000.0})
+    _write_restart_status({"ok": None, "state": "running", "supervisor_pid": 4242, "supervisor_start_token": "1000.0"})
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 4242)
-    monkeypatch.setattr(runtime, "process_create_time", lambda pid: 1000.0)
+    monkeypatch.setattr(runtime, "process_start_token", lambda pid: "1000.0")
 
     assert supervisor._restart_in_progress() is True
 
 
 def test_restart_in_progress_false_when_pid_reused(monkeypatch, tmp_path):
-    # Pid is alive but its start time no longer matches what the job recorded —
+    # Pid is alive but its start token no longer matches what the job recorded —
     # the pid was reused (e.g. after a reboot) by an unrelated process, so the
     # restart is not actually in progress and recovery must proceed.
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
-    _write_restart_status({"ok": None, "state": "running", "supervisor_pid": 4242, "supervisor_started_at": 1000.0})
+    _write_restart_status({"ok": None, "state": "running", "supervisor_pid": 4242, "supervisor_start_token": "1000.0"})
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 4242)
-    monkeypatch.setattr(runtime, "process_create_time", lambda pid: 9999.0)
+    monkeypatch.setattr(runtime, "process_start_token", lambda pid: "9999.0")
 
     assert supervisor._restart_in_progress() is False
 

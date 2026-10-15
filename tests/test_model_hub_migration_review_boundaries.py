@@ -52,29 +52,22 @@ def _seed(home: Path, shape: str) -> tuple[str, Path]:
     "claude-api", "claude-bearer", "codex-api", "codex-alias",
     "opencode-api", "codex-reference", "opencode-reference",
 ])
-def test_persisted_key_proof_and_custody_use_one_value(home, tmp_path, shape):
+def test_persisted_key_custody_holds_the_canonical_value(home, tmp_path, shape):
     backend, profile = _seed(home, shape)
     service, store, adapter = _service(tmp_path, migration_home=home)
-    proof_values = []
-    transient = adapter.provision_transient_credential
-
-    async def capture_proof(vendor, secret, base_url, **kwargs):
-        proof_values.append(secret)
-        return await transient(vendor, secret, base_url, **kwargs)
-
-    adapter.provision_transient_credential = capture_proof
     rows = [row for row in service.migration_scan()["items"] if row["backend"] == backend]
     assert len(rows) == 1 and rows[0]["proposed_action"] == "import"
     result = asyncio.run(service.migration_apply([rows[0]["id"]], clean_api_keys=True))
     assert result["applied"] == 1
     [source] = store.config.sources
-    assert proof_values == [adapter.keys[source.credential_ref][2]] == [KEY]
+    assert adapter.keys[source.credential_ref][2] == KEY
+    assert not adapter.transient_refs and not adapter.observed
     assert profile.read_bytes() == "# 保留偏好\r\n".encode()
     assert service.migration_journal.load() is None
 
 
 @pytest.mark.parametrize("shape", ["claude-bearer", "codex-api", "codex-reference", "opencode-reference"])
-def test_padded_persisted_key_reuses_the_proven_canonical_credential(home, tmp_path, shape):
+def test_padded_persisted_key_reuses_the_canonical_credential(home, tmp_path, shape):
     backend, profile = _seed(home, shape)
     service, store, adapter = _service(tmp_path, migration_home=home)
     vendor = "anthropic" if backend == "claude" else "openai"
@@ -92,7 +85,7 @@ def test_padded_persisted_key_reuses_the_proven_canonical_credential(home, tmp_p
     asyncio.run(service.migration_apply([row["id"]], clean_api_keys=True))
     assert len(adapter.provisioned) == len(store.config.sources) == 1
     assert store.config.sources[0].credential_ref == ref
-    assert adapter.observed and not adapter.transient_refs
+    assert not adapter.observed and not adapter.transient_refs
     assert profile.read_bytes() == "# 保留偏好\r\n".encode()
 
 

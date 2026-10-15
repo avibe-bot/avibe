@@ -6,9 +6,15 @@ import asyncio
 import hashlib
 import ipaddress
 import json
+import logging
 import os
+import queue
+import copy
 import re
 import shutil
+import threading
+from concurrent.futures import Future
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, Optional, cast
@@ -17,11 +23,13 @@ from urllib.parse import urlsplit
 from config import paths
 from config.atomic_io import write_atomic
 from config.v2_config import MODEL_HUB_BACKENDS, ModelHubConfig, ModelHubSourceConfig
+from core.handlers.model_hub.capability_evidence import identity_digest
 from core.handlers.model_hub.classification import ResolutionDecision
 from core.handlers.model_hub.events import (
     EventAgent,
     EventReason,
 )
+from core.handlers.model_hub.hosted_turn import TurnHostedTools
 from core.handlers.model_hub.identifiers import (
     OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL,
     opencode_menu_model_id,
@@ -33,6 +41,8 @@ from core.handlers.model_hub.provenance import (
     TurnOutcomeProjectionInput,
     exact_hop_blockers,
     is_unlisted_model_outcome,
+    outcome_holds_input,
+    project_turn_outcome_copy,
     render_turn_outcome_copy,
     supply_interruption_reason,
 )
@@ -52,7 +62,7 @@ from core.handlers.model_hub.service import (
     turn_refusal,
 )
 from core.services.settings import load_config_or_default
-from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
+from core.handlers.model_hub.turn_gateway import VIBEY_TURN_HEADER, ModelHubTurnGateway
 from core.native_dispatch_phase import mark_prewrite_recovery_required
 from modules.agents.catalog import display_name_for_backend
 from vibe.codex_config import format_toml_basic_string
@@ -60,15 +70,93 @@ from vibe.i18n import t
 from vibe.opencode_config import managed_opencode_runtime_config_content
 
 
+logger = logging.getLogger(__name__)
+
 LaunchChannel = Literal["direct", "native_cli", "hub"]
 TurnMode = Literal["direct", "hub"]
+class _TurnModeWriter:
+    """Stamps each settled turn's mode on its Message rows, one at a time, in settlement order.
+
+    Settlement runs on the service's event loop and never waits on this
+    database write. The worker is a daemon thread: an abandoned stamp costs only
+    that turn's provenance detail, and SQLite rolls back a write cut off
+    mid-transaction, so nothing here may hold process exit.
+    """
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+        self._jobs: queue.SimpleQueue[tuple[Future[None], Callable[..., object], tuple[Any, ...]]] = (
+            queue.SimpleQueue()
+        )
+        self._start_lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+
+    def submit(self, fn: Callable[..., object], *args: Any) -> Future[None]:
+        future: Future[None] = Future()
+        self._jobs.put((future, fn, args))
+        with self._start_lock:
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._run, name=self._name, daemon=True)
+                self._thread.start()
+        return future
+
+    def _run(self) -> None:
+        while True:
+            future, fn, args = self._jobs.get()
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                fn(*args)
+            except BaseException as error:  # noqa: BLE001 - delivered through the future
+                future.set_exception(error)
+            else:
+                future.set_result(None)
+
+    def drain(self, timeout: float) -> bool:
+        """Wait up to ``timeout`` for every queued stamp; on timeout discard the rest and return False."""
+
+        drained = self.submit(lambda: None)
+        try:
+            drained.result(timeout=timeout)
+        except FuturesTimeoutError:
+            # Python 3.10's futures timeout is not the builtin TimeoutError.
+            discarded = 0
+            while True:
+                try:
+                    future, _fn, _args = self._jobs.get_nowait()
+                except queue.Empty:
+                    break
+                if future.cancel() and future is not drained:
+                    discarded += 1
+            logger.warning(
+                "Model Hub turn mode stamps abandoned at shutdown after %.1fs: %d discarded",
+                timeout,
+                discarded,
+            )
+            return False
+        return True
+
+
+_TURN_MODE_WRITER = _TurnModeWriter("model-hub-turn-mode")
+
+
+def _log_turn_mode_failure(stamp: Future[None]) -> None:
+    if stamp.cancelled():
+        return
+    error = stamp.exception()
+    if error is not None:
+        logger.warning("Model Hub turn mode was not stored", exc_info=error)
+
+
+def drain_turn_mode_stamps(timeout: float) -> bool:
+    """Wait up to ``timeout`` for every queued mode stamp; abandon the rest and return False on timeout."""
+
+    return _TURN_MODE_WRITER.drain(timeout)
+
 
 _CONTEXT_LAUNCH_ATTR = "_vibe_model_hub_launch"
 _CONTEXT_MODE_ATTR = "_vibe_model_hub_turn_mode"
 _CONTEXT_FAILURE_RECORDED_ATTR = "_vibe_model_hub_failure_recorded"
-# The durable hold's reason when a turn asks for a model its backend's list
-# does not hold: the same input fails the same way until another model is chosen.
-UNLISTED_MODEL_RETRY_REASON = "model_hub_model_unlisted"
 _NATIVE_QUOTA_RE = re.compile(
     r"(?:quota|usage|credit|billing).{0,32}(?:exhaust|exceed|limit|deplet|insufficient)|"
     r"(?:exhaust|exceed|limit|deplet|insufficient).{0,32}(?:quota|usage|credit|billing)|"
@@ -102,13 +190,19 @@ class ModelHubLaunch:
     provider: Optional[str] = None
     input_limit: Optional[int] = None
     supports_images: Optional[bool] = None
+    # Vibey only: each enabled hosted tool's mode, declaration, executor and replay.
+    hosted_tools: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    # Vibey only: the Source's credential-free identity, from the snapshot its origin came from (C-6).
+    source_identity: Optional[str] = None
+    # Vibey only: where the target model's list price steps up with its context, ascending (C-6, C-9 section 1).
+    context_price_steps: tuple[int, ...] = ()
 
     def to_hop_resolution(self) -> dict[str, Any]:
         """Project C-6 from the same launch that owns routing and credentials."""
 
         if (
             self.backend != "vibey" or self.channel != "hub"
-            or not self.protocol or not self.provider or not self.source_id
+            or not self.protocol or not self.provider or not self.source_id or not self.source_identity
             or not self.gateway_base_url or not self.gateway_token
         ):
             raise ModelHubError("mapping_target_unavailable", status=409)
@@ -120,6 +214,7 @@ class ModelHubLaunch:
             "token": self.gateway_token,
             "runtime_model": self.runtime_model,
             "source_id": self.source_id,
+            "source_identity": self.source_identity,
             "provider": self.provider,
             "request_headers": dict(self.gateway_request_metadata),
             "capabilities": {
@@ -130,7 +225,9 @@ class ModelHubLaunch:
                 "supports_images": self.supports_images,
                 "supports_reasoning": self.supports_reasoning,
                 "reasoning_efforts": list(self.reasoning_efforts),
+                "context_price_steps": list(self.context_price_steps),
             },
+            "hosted_tools": copy.deepcopy({tool: dict(entry) for tool, entry in self.hosted_tools.items()}),
         }
 
     @property
@@ -366,11 +463,33 @@ def launch_refusal_copy(controller: Any, error: BaseException) -> str | None:
     return render_turn_outcome_copy(outcome, _language(controller))
 
 
-_HUB_SUPPLY_REFUSALS = {"hub_disabled": "errors.modelHubDisabled", "gateway_off": "errors.modelGatewayOff"}
+_HUB_SUPPLY_REFUSALS = {
+    "hub_disabled": "errors.modelHubDisabled",
+    "gateway_off": "errors.modelGatewayOff",
+    "no_source": "errors.modelSourceRequired",
+}
+# The turn-outcome copy whose fix is in Models: it sends its reader there, or names a backend's
+# model list, which Models keeps (a model the person removed from the list, even its last one).
+_MODELS_ROUTE_REFUSALS = frozenset(
+    {"modelHub.launch.interrupted", "modelHub.launch.route_unconfigured", "modelHub.launch.model_unlisted"}
+)
+MODELS_PAGE_PATH = "/settings/models"
 
 
-def hub_supply_refusal(controller: Any, backend: str, language: str) -> str | None:
-    """The copy a turn shows when ``hub_supply_block`` names why ``backend`` has no model, else ``None``."""
+class ModelSupplyRefusal(ValueError):
+    """A turn refused because the Model Hub leaves its backend no model to run on.
+
+    It carries its copy, and whether Models is where the fix is: everywhere but an
+    instance whose operator switched the Model Hub off, which takes Models away too.
+    """
+
+    def __init__(self, copy: str, *, fixed_in_models: bool) -> None:
+        super().__init__(copy)
+        self.fixed_in_models = fixed_in_models
+
+
+def hub_supply_refusal(controller: Any, backend: str, language: str) -> ModelSupplyRefusal | None:
+    """The refusal a turn raises when ``hub_supply_block`` names why ``backend`` has no model, else ``None``."""
 
     from config.v2_config import hub_supply_block
 
@@ -378,18 +497,79 @@ def hub_supply_refusal(controller: Any, backend: str, language: str) -> str | No
     block = hub_supply_block(backend, store.load() if store is not None else None)
     if block is None:
         return None
-    return t(_HUB_SUPPLY_REFUSALS[block], language, backend=display_name_for_backend(backend))
+    return ModelSupplyRefusal(
+        t(_HUB_SUPPLY_REFUSALS[block], language, backend=display_name_for_backend(backend)),
+        fixed_in_models=block != "hub_disabled",
+    )
+
+
+def is_model_hub_refusal(error: BaseException | None) -> bool:
+    """Whether ``error`` is a Model Hub refusal, which states its own cause."""
+
+    return isinstance(error, ModelSupplyRefusal) or turn_refusal(error) is not None
+
+
+# The structured next step a Workbench notice carries; the Workbench draws it from its own copy.
+MODELS_NEXT_STEP = "models"
+SUPPLY_REFUSAL_RETRY_REASON = "model_supply_refusal"
+
+
+def refusal_fixed_in_models(
+    *,
+    cause: BaseException | None = None,
+    outcome: TurnOutcomeProjectionInput | None = None,
+) -> bool:
+    """Whether a refused turn's fix is in Models.
+
+    A supply refusal says so itself; a turn outcome does when its own copy already
+    sends the reader there.
+    """
+
+    if isinstance(cause, ModelSupplyRefusal):
+        return cause.fixed_in_models
+    refused = outcome if outcome is not None else turn_refusal(cause)
+    copy = project_turn_outcome_copy(refused) if refused is not None else None
+    return copy is not None and copy.key in _MODELS_ROUTE_REFUSALS
+
+
+def models_next_step_text(controller: Any) -> str:
+    """The IM line that ends a refusal whose fix is in Models.
+
+    No IM identity maps to a Workbench principal, so the line makes no claim about its
+    requester: it says who can fix it, offering Avibe Cloud's public URL when there is one.
+    The Workbench draws its own next step from ``MODELS_NEXT_STEP`` instead.
+    """
+
+    from core.avibe_cloud import workbench_url
+
+    language = _language(controller)
+    url = workbench_url(MODELS_PAGE_PATH, getattr(controller, "config", None))
+    return t("errors.modelsNextStepImUrl", language, url=url) if url else t("errors.modelsNextStepIm", language)
+
+
+def hold_refused_input(context: Any) -> None:
+    """Keep an input the Model Hub refused for want of a model for an explicit retry.
+
+    A supply refusal fails the same way until someone changes Models, so it must not
+    spend the automatic startup retries a transient failure gets.
+    """
+
+    if context is not None:
+        mark_prewrite_recovery_required(context, SUPPLY_REFUSAL_RETRY_REASON)
 
 
 def _hold_unrunnable_input(context: Any, error: ModelHubError) -> None:
-    """Keep an input whose model the backend does not list for an explicit retry.
+    """Keep an input only a Models change can run for an explicit retry.
 
-    Sending it again unchanged fails the same way, so it must not spend the
-    automatic startup retries a transient failure gets.
+    Its model is not in the backend's list, or has no Route: sending it again
+    unchanged fails the same way, so it must not spend the automatic startup
+    retries a transient failure gets. The hold's reason names the refusal, as
+    ``model_hub_model_unlisted`` or ``model_hub_route_unconfigured``.
     """
 
-    if context is not None and is_unlisted_model_outcome(error.turn_outcome):
-        mark_prewrite_recovery_required(context, UNLISTED_MODEL_RETRY_REASON)
+    outcome = error.turn_outcome
+    if context is not None and outcome_holds_input(outcome):
+        mark_prewrite_recovery_required(context, f"model_hub_{outcome.discriminator}")
 
 
 def _language(controller: Any) -> str:
@@ -775,6 +955,7 @@ class ModelHubRuntimeRouter:
         via_mapping: bool = False,
         gateway_request_model_id: Optional[str] = None,
         primary_origin: HopOrigin | None = None,
+        hosted_tools: TurnHostedTools | None = None,
     ) -> tuple[str, str]:
         if self.turn_gateway is not None:
             return await self.turn_gateway.endpoint(
@@ -788,6 +969,7 @@ class ModelHubRuntimeRouter:
                 gateway_request_model_id=gateway_request_model_id,
                 request_scoped=backend == "codex",
                 **({"primary_origin": primary_origin} if primary_origin is not None else {}),
+                **({"hosted_tools": hosted_tools} if hosted_tools is not None else {}),
             )
         await self.service._ensure_engine_synced()
         status = await self.service._engine_call(self.service.adapter.start())
@@ -999,16 +1181,16 @@ class ModelHubRuntimeRouter:
         mode: Optional[Literal["direct", "hub"]] = None,
     ) -> asyncio.Task[None] | None:
         def finish() -> None:
-            try:
-                if mode is not None:
-                    self.service.note_turn_mode(turn_id, mode)
-            finally:
-                if self.turn_gateway is not None:
-                    self.turn_gateway.correlation.settle(
-                        turn_id,
-                        settled_by=settled_by,
-                        ts=ts,
-                    )
+            if mode is not None:
+                _TURN_MODE_WRITER.submit(self.service.note_turn_mode, turn_id, mode).add_done_callback(
+                    _log_turn_mode_failure
+                )
+            if self.turn_gateway is not None:
+                self.turn_gateway.correlation.settle(
+                    turn_id,
+                    settled_by=settled_by,
+                    ts=ts,
+                )
 
         if self.turn_gateway is not None:
             return self.turn_gateway.finalize_turn(turn_id, settled_by=settled_by, finish=finish)
@@ -1144,6 +1326,23 @@ class ModelHubRuntimeRouter:
                 if self.turn_gateway is not None and backend == "codex"
                 else target_model
             )
+            identity = identity_digest(source) if backend == "vibey" else None
+            # A turn's first resolution freezes its hosted tools, executor
+            # orders and image models; later attempts of the turn keep them
+            # (settings apply from the next turn) and recompute only their
+            # hop's own facts.
+            frozen = (
+                self.turn_gateway.correlation.turn_hosted_tools(turn_id)
+                if backend == "vibey" and self.turn_gateway is not None
+                else None
+            )
+            if backend == "vibey" and frozen is None:
+                frozen = await asyncio.to_thread(self.service.freeze_turn_hosted_tools, config)
+            hosted_tools = (
+                await asyncio.to_thread(self.service.hosted_tools_for_hop, source, target_model, frozen)
+                if frozen is not None
+                else {}
+            )
             gateway_base_url, gateway_token = await self._gateway_credentials(
                 backend,
                 process_scope=str(process_scope or "").strip() or f"{backend}:untracked",
@@ -1153,14 +1352,31 @@ class ModelHubRuntimeRouter:
                 source_id=source.id,
                 via_mapping=False,
                 gateway_request_model_id=runtime_model,
+                # The origin and the identity come from one snapshot of the Source.
                 primary_origin=(
-                    HopOrigin(source.vendor, source.protocol, target_model)
-                    if backend == "vibey" else None
+                    HopOrigin(source.vendor, source.protocol, target_model, source.id, identity)
+                    if identity is not None else None
                 ),
+                # The executor endpoint runs only what the turn froze.
+                hosted_tools=frozen,
             )
             if self.turn_gateway is None:
                 prefix = await self._source_prefix(source.id)
                 runtime_model = f"{prefix}/{target_model}"
+            request_metadata: dict[str, str] = {}
+            if self.turn_gateway is not None and backend == "codex":
+                request_metadata = self.turn_gateway.correlation.gateway_request_metadata(
+                    backend=backend, token=gateway_token, turn_id=turn_id,
+                    route=PreparedGatewayRoute(
+                        requested_model_id=requested_model,
+                        resolved_model_id=target_model,
+                        source_id=source.id,
+                        gateway_request_model_id=runtime_model,
+                    ),
+                )
+            elif self.turn_gateway is not None and backend == "vibey" and str(turn_id or "").strip():
+                # Vibey names its turn on every gateway request (HopResolution.request_headers).
+                request_metadata = {VIBEY_TURN_HEADER: str(turn_id).strip()}
             launch = ModelHubLaunch(
                 backend=backend,
                 channel="hub",
@@ -1170,19 +1386,7 @@ class ModelHubRuntimeRouter:
                 source_id=source.id,
                 gateway_base_url=gateway_base_url,
                 gateway_token=gateway_token,
-                gateway_request_metadata=(
-                    self.turn_gateway.correlation.gateway_request_metadata(
-                        backend=backend, token=gateway_token, turn_id=turn_id,
-                        route=PreparedGatewayRoute(
-                            requested_model_id=requested_model,
-                            resolved_model_id=target_model,
-                            source_id=source.id,
-                            gateway_request_model_id=runtime_model,
-                        ),
-                    )
-                    if self.turn_gateway is not None and backend == "codex"
-                    else {}
-                ),
+                gateway_request_metadata=request_metadata,
                 context_window=context_window,
                 max_output_tokens=max_output_tokens,
                 supports_tools=supports_tools,
@@ -1194,6 +1398,11 @@ class ModelHubRuntimeRouter:
                     "image" in backend_model.input_modalities
                     if backend_model is not None and backend_model.input_modalities
                     else None
+                ),
+                hosted_tools=hosted_tools,
+                source_identity=identity,
+                context_price_steps=(
+                    self.service.context_price_steps(target_model) if backend == "vibey" else ()
                 ),
             )
         self._emit_transition(launch, config)
@@ -1256,11 +1465,15 @@ class ModelHubRuntimeRouter:
         self._emit_transition(launch, config)
         return launch
 
-    async def record_native_failure(self, context: Any, diagnostic: str) -> bool:
+    async def record_native_failure(
+        self, context: Any, diagnostic: str, *, error_kind: str | None = None
+    ) -> bool:
         """Record a terminal source failure for the next per-turn resolution.
 
         The method name is retained for existing backend call sites; Hub launches
         use the same cooldown state so the next turn can select a backup source.
+        A Hub turn's record keeps the backend's typed ``error_kind``, when it
+        has one, beside its diagnostic.
         """
 
         launch = launch_for_context(context)
@@ -1275,7 +1488,9 @@ class ModelHubRuntimeRouter:
                 )
                 or ""
             ).strip()
-            self.turn_gateway.correlation.fail_hub_attempt(turn_id)
+            self.turn_gateway.correlation.fail_hub_attempt(
+                turn_id, error_kind=error_kind, diagnostic=diagnostic
+            )
             setattr(context, _CONTEXT_FAILURE_RECORDED_ATTR, True)
             return False
         decision: ResolutionDecision | None

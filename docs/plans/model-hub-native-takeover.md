@@ -316,9 +316,10 @@ acceptance, refresh and inference still require separate authorized testing.
 ## Backend connection ownership
 
 The existing backend connection observation must follow persisted supply mode.
-It exposes additive `supply_mode: "direct" | "hub"`; existing `auth`,
-`application`, `ready`, and `entry_eligible` fields retain their types.
-Direct observations retain native credential behavior. Hub observations use
+It exposes additive `supply_mode: "direct" | "hub"`; `application`, `ready`, and
+`entry_eligible` retain their types. Direct Claude adds `auth: "external"` for
+launch capability with Claude-owned authentication, not a verified account.
+Other Direct observations retain their native credential behavior. Hub observations use
 the configured backend-eligible Sources and their credential ownership, not
 the native stores that takeover deliberately cleared. A missing, disabled or
 unusable Hub supply must not fall back to an unrelated native login. Existing
@@ -326,12 +327,14 @@ application/drain, backend enablement, installation and OpenCode permission
 gates remain effective. This is connection readiness, not an inference probe
 or a promise that every selected model is available.
 
-Direct Claude retains its existing bounded `auth status --json` observation
-for Keychain-backed sign-in; opaque Keychain metadata cannot distinguish an
-OAuth grant from an unrelated MCP-only container. The native credential lease
-covers that query and its thread completion, with custody checked before
-launch. This is not a login, refresh or inference request. Hub connection
-observation never launches this query or borrows an unrelated native login.
+Direct Claude performs only its existing custody check under the native lease,
+not an `auth status` CLI query or credential inspection. Settings reads native
+store evidence separately with `allow_secret=False`; opaque metadata is unknown
+and never a sign-in verdict. Explicit Claude login verification belongs to the
+owning flow: its completion receipt is consumed without a second Settings read.
+Managed Hub Source admission and legacy native-Source routing stay unchanged;
+neither a passive observation nor launch capability can authorize a managed
+credential owner. See `claude-auth-observation-ownership.md`.
 
 Only Sources referenced by the backend's effective source order or explicit
 route hops participate. Eligibility reuses the existing backend and

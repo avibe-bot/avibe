@@ -19,6 +19,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable, NamedTuple
 
@@ -153,6 +154,7 @@ ROOT_DIR = get_project_root()  # For backward compatibility
 MAIN_PATH = get_service_main_path()
 _SERVICE_LOCK = threading.Lock()
 _SERVICE_INSTANCE_LOCK_HANDLE = None
+_SERVICE_INSTANCE_LOCK_OWNER_PID: int | None = None
 _PENDING_SQLITE_BACKUP_READINESS: tuple[Path, str, tuple[str, ...], datetime] | None = None
 _SERVICE_START_PROCESSES: dict[int, subprocess.Popen] = {}
 # /ready can spend up to two seconds in the Controller health probe.
@@ -313,6 +315,12 @@ def _take_lock_file(lock_file) -> bool:
 # its resources allow. Neither names a live process in the record, which a
 # service writes the moment it takes the lock, so only that state is waited
 # out, and only this long; a live holder is answered at once.
+#
+# Only a start or a stop waits: the service taking the lock, a launcher
+# deciding whether one already runs, and `vibe stop` deciding whether anything
+# still holds it. Every other check answers from a single attempt, because
+# the service asks some of them on its event loop, where a wait stalls every
+# turn and lane behind it.
 _SERVICE_LOCK_SETTLE_SECONDS = 2.0
 _SERVICE_LOCK_SETTLE_INTERVAL_SECONDS = 0.02
 
@@ -321,7 +329,7 @@ def _lock_file_names_live_holder(lock_file) -> bool:
     """Whether the record names a process that is running and is the one that wrote it.
 
     A record outlives its holder when a service is killed or the machine stops,
-    and its pid can pass to an unrelated process. The holder's start time,
+    and its pid can pass to an unrelated process. The holder's start token,
     written beside the pid, tells the two apart. A record without one, as an
     older release writes it, cannot be told apart and names no one: a holder
     that wrote it keeps the lock, and is refused once the wait runs out.
@@ -332,13 +340,10 @@ def _lock_file_names_live_holder(lock_file) -> bool:
         return False
     try:
         lock_file.seek(0)
-        started_at = json.loads(lock_file.read() or "{}").get("started_at")
+        start_token = json.loads(lock_file.read() or "{}").get("start_token")
     except (OSError, json.JSONDecodeError, TypeError, AttributeError):
         return False
-    if not isinstance(started_at, (int, float)):
-        return False
-    create_time = process_create_time(pid)
-    return create_time is not None and abs(create_time - started_at) < 1.0
+    return isinstance(start_token, str) and process_start_token(pid) == start_token
 
 
 def _take_service_lock(lock_file) -> bool:
@@ -356,9 +361,9 @@ def _take_service_lock(lock_file) -> bool:
     return True
 
 
-def _try_lock_file(lock_file) -> bool:
+def _try_lock_file(lock_file, *, settle: bool = False) -> bool:
     try:
-        return _take_service_lock(lock_file)
+        return _take_service_lock(lock_file) if settle else _take_lock_file(lock_file)
     except OSError:
         return False
 
@@ -383,20 +388,21 @@ def _unlock_file(lock_file) -> None:
 
 def acquire_service_instance_lock() -> None:
     """Acquire the data-dir scoped service runtime lock for this process lifetime."""
-    global _SERVICE_INSTANCE_LOCK_HANDLE
+    global _SERVICE_INSTANCE_LOCK_HANDLE, _SERVICE_INSTANCE_LOCK_OWNER_PID
     if _SERVICE_INSTANCE_LOCK_HANDLE is not None:
         return
     ensure_dirs()
     lock_path = get_service_lock_path()
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_file = lock_path.open("a+", encoding="utf-8")
-    if not _try_lock_file(lock_file):
+    if not _try_lock_file(lock_file, settle=True):
         holder_pid = _lock_file_pid(lock_file)
         lock_file.close()
         raise ServiceAlreadyRunningError(lock_path=lock_path, holder_pid=holder_pid)
     _write_service_instance_lock_record(lock_file, SERVICE_PHASE_STARTING)
     paths.get_runtime_pid_path().write_text(str(os.getpid()), encoding="utf-8")
     _SERVICE_INSTANCE_LOCK_HANDLE = lock_file
+    _SERVICE_INSTANCE_LOCK_OWNER_PID = os.getpid()
 
 
 def _write_service_instance_lock_record(lock_file, phase: str) -> None:
@@ -409,6 +415,7 @@ def _write_service_instance_lock_record(lock_file, phase: str) -> None:
                 "instance_id": uuid.uuid4().hex,
                 "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "started_at": process_create_time(os.getpid()),
+                "start_token": process_start_token(os.getpid()),
                 "phase": phase,
                 "command": get_process_command(os.getpid()),
             },
@@ -534,12 +541,13 @@ def service_instance_still_starting(pid: int) -> bool:
 
 
 def release_service_instance_lock() -> None:
-    global _SERVICE_INSTANCE_LOCK_HANDLE, _PENDING_SQLITE_BACKUP_READINESS
+    global _SERVICE_INSTANCE_LOCK_HANDLE, _SERVICE_INSTANCE_LOCK_OWNER_PID, _PENDING_SQLITE_BACKUP_READINESS
     _PENDING_SQLITE_BACKUP_READINESS = None
     lock_file = _SERVICE_INSTANCE_LOCK_HANDLE
     if lock_file is None:
         return
     _SERVICE_INSTANCE_LOCK_HANDLE = None
+    _SERVICE_INSTANCE_LOCK_OWNER_PID = None
     try:
         try:
             paths.get_runtime_pid_path().unlink(missing_ok=True)
@@ -556,14 +564,19 @@ def release_service_instance_lock() -> None:
         lock_file.close()
 
 
-def service_instance_lock_available() -> tuple[bool, int | None]:
-    """Return whether the data-dir scoped service lock can be acquired."""
+def service_instance_lock_available(*, settle: bool = False) -> tuple[bool, int | None]:
+    """Return whether the data-dir scoped service lock can be acquired.
+
+    ``settle`` is for a caller deciding whether to start a service; see
+    ``_SERVICE_LOCK_SETTLE_SECONDS``. It may wait, so nothing on an event loop
+    passes it.
+    """
     ensure_dirs()
     lock_path = get_service_lock_path()
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_file = lock_path.open("a+", encoding="utf-8")
     try:
-        if _try_lock_file(lock_file):
+        if _try_lock_file(lock_file, settle=settle):
             _unlock_file(lock_file)
             return True, None
         return False, _lock_file_pid(lock_file)
@@ -585,10 +598,22 @@ def current_process_owns_service_instance() -> bool:
     at construction time. A real service process constructs them only after
     acquiring the lock, so losing this handle later means the process must stop
     scheduling work.
+
+    It is answered from the handle this process holds, and so asked freely on
+    the event loop: no lock is taken and nothing waits. The lease is gone once
+    the handle is released, in a child that inherited it, or when the file it
+    locks is no longer the one at the lock path -- removed or replaced, so that
+    another service could lock the new one.
     """
-    if _SERVICE_INSTANCE_LOCK_HANDLE is None:
+    lock_file = _SERVICE_INSTANCE_LOCK_HANDLE
+    if lock_file is None or _SERVICE_INSTANCE_LOCK_OWNER_PID != os.getpid():
         return False
-    return service_lock_held_by(os.getpid())
+    try:
+        held = os.fstat(lock_file.fileno())
+        current = os.stat(get_service_lock_path())
+    except (OSError, ValueError):
+        return False
+    return (held.st_dev, held.st_ino) == (current.st_dev, current.st_ino)
 
 
 def service_instance_lock_attached_to_process() -> bool:
@@ -797,6 +822,67 @@ def process_create_time(pid: int) -> float | None:
     try:
         return float(psutil.Process(pid).create_time())
     except (psutil.Error, ValueError, TypeError):
+        return None
+
+
+@lru_cache(maxsize=1)
+def _linux_boot_id() -> str | None:
+    try:
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return boot_id or None
+
+
+def process_start_token(pid: int) -> str | None:
+    """When a process started, as a value no clock adjustment changes; None if it cannot be read.
+
+    This is the one identity of a running process: a recorded ``(pid, token)``
+    still names the same execution after the wall clock or the boot time moves,
+    or the machine reboots, and never names a process that later reused the
+    pid. A token is returned only when every part of it was read; otherwise
+    None, which every caller treats as unverifiable.
+
+    - Linux counts a process's start in clock ticks since boot (field 22 of
+      ``/proc/<pid>/stat``). psutil turns that into wall-clock time through the
+      boot time, which moves whenever the clock is stepped -- by a VM's time
+      sync, a WSL2 resume, NTP catching up after boot. The ticks, with the boot
+      they count from, do not move. Ticks restart at every boot, so without
+      the boot id there is no token.
+    - macOS (and NetBSD) store the wall-clock time a process started, but
+      psutil's ``create_time()`` adds the change in whole seconds of
+      ``kern.boottime`` since psutil was imported, and the system time daemon
+      moves ``kern.boottime`` in routine adjustments. The same process then
+      reads a second later or earlier, and differently in two processes that
+      imported psutil at different times. The stored value is what psutil
+      itself uses for process identity (``Process._get_ident``), through
+      ``create_time(monotonic=True)``. That accessor is private, so a psutil
+      without it reads as None.
+    - Windows stores the creation time with the process, and psutil reads it
+      back unchanged.
+    - Elsewhere (FreeBSD, OpenBSD, ...) the start psutil reads moves with
+      system clock updates, as psutil itself warns, and no stable one is
+      available: no process there has a token, so a record of one is
+      unverifiable.
+    """
+
+    if sys.platform.startswith("linux"):
+        try:
+            ticks = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()[19]
+        except (OSError, IndexError, ValueError):
+            return None
+        boot_id = _linux_boot_id()
+        if boot_id is None or not ticks.isdigit():
+            return None
+        return f"{boot_id}:{ticks}"
+    monotonic = sys.platform == "darwin" or sys.platform.startswith("netbsd")
+    if not monotonic and sys.platform != "win32":
+        return None
+    try:
+        process = psutil.Process(pid)
+        start = process._proc.create_time(monotonic=True) if monotonic else process.create_time()
+        return repr(float(start))
+    except (psutil.Error, AttributeError, TypeError, ValueError, OSError):
         return None
 
 
@@ -2144,7 +2230,7 @@ def _resolve_service_pid(
                         "Ignoring stale service pid file pid=%s because it never acquired the service lock",
                         existing_pid,
                     )
-                lock_available, lock_holder_pid = service_instance_lock_available()
+                lock_available, lock_holder_pid = service_instance_lock_available(settle=True)
                 if not lock_available:
                     if lock_holder_pid and pid_alive(lock_holder_pid):
                         if lock_holder_pid == existing_pid:
@@ -2161,7 +2247,7 @@ def _resolve_service_pid(
                 )
             pid_path.unlink(missing_ok=True)
 
-        lock_available, lock_holder_pid = service_instance_lock_available()
+        lock_available, lock_holder_pid = service_instance_lock_available(settle=True)
         if not lock_available:
             if lock_holder_pid and lock_holder_pid == existing_pid and pid_alive(lock_holder_pid):
                 return result(lock_holder_pid, reused=True)

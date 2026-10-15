@@ -18,8 +18,9 @@ afterEach(() => {
 
 describe('Model Hub request deadlines', () => {
   it('keeps the browser backstop beyond the backend RPC ceiling', async () => {
+    // The server side owns the RPC ceiling; the UI-process client imports it from there.
     const backendSource = await readFile('../vibe/model_hub_client.py', 'utf8');
-    const match = backendSource.match(/_RPC_TIMEOUT_SECONDS\s*=\s*([\d.]+)/);
+    const match = backendSource.match(/MODEL_HUB_RPC_TIMEOUT_SECONDS(?::\s*Final)?\s*=\s*([\d.]+)/);
 
     expect(match?.[1]).toBeDefined();
     expect(MODEL_HUB_RPC_CEILING_MS).toBe(Number(match![1]) * 1_000);

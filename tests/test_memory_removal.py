@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 import config.v2_config as v2_config
-from config.v2_config import V2Config, config_write_transaction
+from config.v2_config import V2Config
 
 
 def test_obsolete_memory_config_is_ignored_on_round_trip(tmp_path: Path, monkeypatch):
@@ -26,14 +26,6 @@ def test_obsolete_memory_config_is_ignored_on_round_trip(tmp_path: Path, monkeyp
     assert "memory" not in saved
     assert saved["runtime"]["default_cwd"] == str(tmp_path / "work")
 
-
-def test_config_write_transaction_loads_test_owned_snapshot(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
-    path = tmp_path / "config.json"
-    config = V2Config.default()
-    config.save(path)
-    with config_write_transaction(path) as snapshot:
-        assert snapshot.runtime.default_cwd == config.runtime.default_cwd
 
 @pytest.mark.parametrize("obsolete", [True, None, "legacy", [], {"enabled": True}])
 def test_json_obsolete_memory_shapes_are_ignored(obsolete, tmp_path):

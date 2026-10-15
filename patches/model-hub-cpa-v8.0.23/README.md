@@ -1,7 +1,7 @@
 # Avibe-owned CPA v8.0.23 compatibility patches
 
 This directory records the source patches carried by Avibe's
-`model-hub-engine-v8.0.23-2` build. Each patch applies independently to the
+`model-hub-engine-v8.0.23-3` build. Each patch applies independently to the
 pinned source; the build applies them in the order the manifest's
 `build.patches` records.
 
@@ -33,8 +33,12 @@ its module import path, outside the patched hunk.
 The patch also updates the three `useMaxCompletionTokens=false` cases of
 upstream's `TestNormalizeOpenAIMaxTokens`, which asserted the stock rewrite,
 to assert this contract: the payload, including a `null` limit, is returned
-unchanged. With all patches applied,
-`go test ./internal/runtime/executor/helps/` passes. The test change does not
+unchanged. It updates the four `use-max-completion-tokens=false` chat cases of
+upstream's executor-level `TestOpenAICompatExecutor_MaxTokensNormalization`
+and `TestOpenAICompatExecutor_MaxTokensNormalizationStream` the same way: the
+request keeps `max_completion_tokens`, including `null`, and gains no
+`max_tokens`. With all patches applied, `go test ./internal/runtime/executor/`
+and `go test ./internal/runtime/executor/helps/` pass. The test changes do not
 alter the engine binary.
 
 ## `oauth-callback-forwarder-loopback.patch`
@@ -115,13 +119,123 @@ black-holing CONNECT proxy: stock sent no byte and no error for 9 min 38 s,
 until it was killed; patched sent `event: error` (`request_timeout`) at
 45.0 s. A live stream silent for 120 s completed on both.
 
-Upstream: router-for-me/CLIProxyAPI#6535. Upstream made the health check an
-opt-in setting, `streaming.http2-health-check-seconds`
-(`requests.streaming.http2-health-check-seconds` in the v8 layout), which
-defaults to 0, off. This patch stays unconditional. Once a tagged CPA release
-that Avibe adopts contains that setting, drop this patch and render
-`http2-health-check-seconds: 30` in `vibe/model_hub_runtime/config.py`
-alongside the other fixed keys, in the layout that config uses.
+Upstream declined the health check. router-for-me/CLIProxyAPI#6534 was
+closed as not planned: by the project's design policy CPA sets no timeout
+once an upstream connection is established, HTTP/2 health checks and stream
+read deadlines included, not even as an opt-in setting, and leaves timeouts
+and cancellation to the downstream client. The opt-in pull request,
+router-for-me/CLIProxyAPI#6535, was closed unmerged. Avibe therefore carries
+this patch by design as its client-side transport bound for this connection.
+No drop is planned; re-evaluate only if upstream changes its post-connect
+timeout policy. The cost is that every CPA upgrade must rebase this patch and
+`fallback-transport-h2-ping-health-check.patch`.
+
+## `fallback-transport-h2-ping-health-check.patch`
+
+Patch 4 covers only the dedicated uTLS connection to `https://chatgpt.com`.
+Every other upstream request on an HTTP client from
+`internal/runtime/executor/helps` ran on `http.DefaultTransport`, or on a
+per-request proxy transport, without an HTTP/2 health check. That covers
+API-key relays and OpenAI-compatible providers. The same dead-path failure
+therefore reached Avibe through API-key relays: a turn on an HTTP/2 relay
+whose path went dead waited out the 600-second bound with no byte and no
+error.
+
+The patch gives those requests one shared clone of `http.DefaultTransport`,
+created on first use, with `HTTP2Config{SendPingTimeout: 30s, PingTimeout:
+15s}`, the same timings as patch 4, as constants. It is used:
+
+- as `NewUtlsHTTPClient`'s standard fallback for hosts other than chatgpt.com
+  and api.anthropic.com (the Codex and Claude executors);
+- by the OpenAI-compatible executor, through `WithUpstreamFallbackTransport`,
+  which sets it only when `NewProxyAwareHTTPClient` left the transport nil.
+
+`buildProxyTransport` sets the same health check on proxy transports.
+`http.DefaultTransport` itself is not modified, and `NewProxyAwareHTTPClient`
+still returns a nil transport when no proxy and no injected RoundTripper
+apply, because the Antigravity executor reads that as "direct" and installs
+its own HTTP/1.1 pool. The injected context RoundTripper is untouched, as in
+patch 4. The health check only sets HTTP/2 timings: protocol selection
+(`ForceAttemptHTTP2`, `Protocols`, `TLSNextProto`, ALPN) is unchanged, and a
+transport that did not opt into HTTP/2 still speaks HTTP/1.1.
+
+Avibe renders `proxy-url: ""` and no per-Source proxy, so its Sources take the
+shared clone. Coverage by Avibe Source kind:
+
+| Source | CPA path | Covered |
+| --- | --- | --- |
+| `openai_responses` API key (OpenAI and xAI relays) | `codex-api-key`, `NewUtlsHTTPClient` fallback | yes |
+| `anthropic` API key on a non-Anthropic host | `claude-api-key`, `NewUtlsHTTPClient` fallback | yes |
+| `openai_chat` API key | `openai-compatibility`, `WithUpstreamFallbackTransport` | yes |
+| `anthropic` API key on `api.anthropic.com` | HTTP/1.1 Claude round tripper | no: PING is HTTP/2 only |
+| ChatGPT subscription | patch 4's uTLS connection | patch 4 |
+
+An HTTP/1.1 upstream has no PING, so a silent HTTP/1.1 body is still bounded
+only by the caller. The patch adds `upstream_transport_test.go`:
+
+- a dead path fails the stream;
+- a silent healthy stream survives ten idle periods;
+- the shared transport is wired into both clients and the proxy transports;
+- protocol selection is unchanged.
+
+Upstream: the same failure mode as router-for-me/CLIProxyAPI#6534, declined
+under the same policy (see `codex-utls-h2-ping-health-check.patch`), so no
+upstream follow-up is pending. Avibe carries this patch by design as its
+client-side transport bound for these transports. No drop is planned;
+re-evaluate only if upstream changes its post-connect timeout policy. Every
+CPA upgrade must rebase it together with that patch.
+
+## `codex-sse-per-event-parsing.patch`
+
+The Codex executor read upstream SSE line by line and took every `data:` line
+as a whole event. In SSE an event's data may span several `data:` lines,
+joined with `\n`. On such a split, lenient `gjson` read `"type":
+"response.completed"` from the first fragment, the executor took its
+terminal path, and the rest of the event was never read. The handler's
+validator then failed the stream with `invalid SSE data JSON (len=<first
+fragment>)`, the error Avibe saw from an API-key relay after a turn's full
+output had streamed.
+
+The patch reads the stream through `codexSSEScanner`, which keeps
+`bufio.Scanner`'s interface. It is used by both `ExecuteStream` and the
+non-stream `Execute`. Every event on this path is one JSON value, so:
+
+- A data line that is complete JSON, or cannot start JSON (an empty value,
+  `[DONE]`), is delivered byte-for-byte as before, with no lookahead. This
+  keeps upstreams that send no blank line between events working as stock
+  does; upstream tests cover that framing.
+- A data line that starts an object or array it does not complete collects
+  the following data lines until:
+  - their joined value closes its outermost object or array, tracked
+    incrementally so validation stays linear;
+  - a blank line ends the event;
+  - the stream ends;
+  - a data line that is a complete object of its own starts the next event;
+  - or the collected bytes would exceed the scanner's 50 MB line limit.
+- A completed multi-line event is delivered compacted onto one line.
+- One that never becomes valid JSON is delivered as the same multi-line data
+  field, so it still fails downstream as before. One warning then records its
+  framing: the data line count, each line's length and whether it is valid on
+  its own, the joined length, and the JSON error offset. It records no data
+  bytes.
+- Field and comment lines inside an event follow its data line.
+- An event left unterminated at the end of the stream is still delivered.
+
+The patch adds `codex_sse_events.go` and `codex_sse_events_test.go`. They
+cover:
+
+- the minimal two-line repro and CRLF;
+- blank-less framing, also after a split;
+- invalid fragments, and the warning's contents;
+- the 50 MB bound, and a 2,000-line event under a time bound;
+- `[DONE]` and empty data lines;
+- equivalence with `bufio.Scanner` on well-formed streams;
+- the split event through `ExecuteStream`, with and without bootstrap
+  buffering, and through `Execute`.
+
+Upstream: the line-based parsing is unchanged on CPA `main` (v8.0.27) and
+`dev`. Drop this patch once a tagged CPA release Avibe adopts parses Codex
+SSE per event.
 
 ## Rebuild
 

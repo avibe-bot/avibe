@@ -26,6 +26,7 @@ from core.agent_auth_service import (
     ClaudeOAuthAttempt,
     ClaudeOAuthBatch,
     WebAuthFlow,
+    claude_status_proves_first_party_oauth,
 )
 from modules.agents.opencode.message_processor import (
     extract_opencode_response_text,
@@ -145,6 +146,23 @@ def test_empty_terminal_opencode_message_treats_blank_text_as_empty() -> None:
     assert is_empty_terminal_opencode_message(message) is True
 
 
+@pytest.mark.parametrize("payload,expected", [
+    ({"loggedIn": True, "authMethod": "claude.ai"}, True),
+    ({"loggedIn": True, "authMethod": "setup-token"}, True),
+    ({"loggedIn": True, "source": "oauth_token"}, True),
+    ({"loggedIn": False, "authMethod": "claude.ai"}, False),
+    ({"loggedIn": True, "authMethod": "api-key", "source": "oauth"}, False),
+    ({"loggedIn": True, "authMethod": "third_party", "source": "oauth"}, False),
+    ({"loggedIn": True}, False),
+    ({"loggedIn": "true", "authMethod": "claude.ai"}, False),
+    ([], False),
+])
+def test_explicit_claude_verifier_attests_only_first_party_method(payload, expected):
+    """Only the explicit verifier's result can attest native subscription auth."""
+    assert claude_status_proves_first_party_oauth(json.dumps(payload)) is expected
+    assert not claude_status_proves_first_party_oauth("not json")
+
+
 def test_unsupported_backend_raises(service: AgentAuthService) -> None:
     with pytest.raises(ValueError, match="unsupported_backend"):
         _run(service.start_web_setup("gemini"))
@@ -256,6 +274,7 @@ def test_status_returns_serializable_snapshot(service: AgentAuthService) -> None
         "device_code": "ABCD-EFGH",
         "awaiting_code": False,
         "error": None,
+        "authorization_completed": False,
     }
 
 
@@ -1429,7 +1448,7 @@ def test_clear_claude_oauth_for_api_key_mode_restores_key_settings(
 
     result = _run(service.clear_claude_oauth_for_api_key_mode())
 
-    assert result == {"ok": True}
+    assert result == {"ok": True, "restart": {"ok": True, "message": ""}}
     run_cmd.assert_awaited_once()
     args = run_cmd.call_args.args
     kwargs = run_cmd.call_args.kwargs
@@ -1457,9 +1476,12 @@ def test_clear_claude_oauth_credentials_only_preserves_api_key_config(
     run_cmd = AsyncMock(return_value=(True, None))
     monkeypatch.setattr(service, "_run_utility_command", run_cmd)
 
+    refresh = AsyncMock()
+    monkeypatch.setattr(service, "_refresh_backend_runtime", refresh)
     result = _run(service.clear_claude_oauth_credentials_only())
 
-    assert result == {"ok": True}
+    assert result == {"ok": True, "restart": {"ok": True, "message": ""}}
+    refresh.assert_awaited_once_with("claude")
     assert read_claude_settings_env() == {
         "ANTHROPIC_API_KEY": "sk-active",
         "ANTHROPIC_BASE_URL": "https://relay.example.invalid",
@@ -1482,6 +1504,90 @@ def test_clear_claude_oauth_credentials_files_removes_known_token_files(
     assert str(legacy) in removed
     assert not current.exists()
     assert not legacy.exists()
+
+
+@pytest.mark.parametrize("failure", [None, "write", "apply"])
+def test_claude_cleanup_uses_inventory_locator_preserves_other_grants_and_reconciles(
+    service, monkeypatch, tmp_path, failure,
+):
+    from vibe import native_oauth_store
+    from vibe.claude_config import get_claude_settings_path
+
+    secure = tmp_path / "独立账号存储"
+    secure.mkdir()
+    selected = secure / ".credentials.json"
+    selected.write_text(json.dumps({"claudeAiOauth": {"accessToken": "fixture-claude"},
+                                    "mcpOAuth": {"fixture": {"accessToken": "fixture-mcp"}}}))
+    unrelated = get_claude_credentials_path()
+    unrelated.write_text('{"claudeAiOauth":{"accessToken":"fixture-other-store"}}')
+    before_unrelated = unrelated.read_bytes()
+    monkeypatch.setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", str(secure))
+    monkeypatch.setattr(native_oauth_store, "_KEYCHAIN_STORE", native_oauth_store._FixtureKeychainStore())
+    restore_claude_settings_env({"ANTHROPIC_API_KEY": "fixture-api-key"})
+    before_config = get_claude_settings_path().read_bytes()
+    monkeypatch.setattr(service, "_run_utility_command", AsyncMock(return_value=(True, None)))
+    refresh = AsyncMock(side_effect=RuntimeError("fixture apply failed") if failure == "apply" else None)
+    monkeypatch.setattr(service, "_refresh_backend_runtime", refresh)
+    if failure == "write":
+        monkeypatch.setattr(native_oauth_store, "_apply_file_state", lambda *_args: None)
+
+    assert native_oauth_store.read_native_oauth("claude").exportable
+    result = _run(service.clear_claude_oauth_credentials_only())
+
+    refresh.assert_awaited_once_with("claude")
+    assert unrelated.read_bytes() == before_unrelated
+    assert json.loads(get_claude_settings_path().read_text()) == json.loads(before_config)
+    assert json.loads(selected.read_text())["mcpOAuth"]["fixture"]["accessToken"] == "fixture-mcp"
+    if failure == "write":
+        assert result["partial"] and native_oauth_store.read_native_oauth("claude").exportable
+    else:
+        assert native_oauth_store.read_native_oauth("claude") is None
+        assert not result.get("partial")
+    assert result["restart"]["ok"] is (failure != "apply")
+    assert "fixture-claude" not in json.dumps(result)
+
+
+def test_borrowed_cleanup_does_not_duplicate_its_writers_runtime_reconciliation(service, monkeypatch):
+    from core.backend_restart import NativeCredentialLease
+
+    monkeypatch.setattr(service, "_run_utility_command", AsyncMock(return_value=(True, None)))
+    refresh = AsyncMock()
+    monkeypatch.setattr(service, "_refresh_backend_runtime", refresh)
+    with NativeCredentialLease(("claude",)) as lease:
+        result = _run(service.clear_claude_oauth_credentials_only(lease=lease))
+    assert result == {"ok": True}
+    refresh.assert_not_awaited()
+
+
+def test_cleanup_cancellation_keeps_ownership_through_runtime_reconciliation(service, monkeypatch):
+    from core.backend_restart import NativeCredentialLease, NativeMigrationBlockedError
+
+    monkeypatch.setattr(service, "_clear_claude_oauth_credentials_owned", AsyncMock(return_value={"ok": True}))
+
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def reconcile(_backend):
+            entered.set()
+            await release.wait()
+
+        refresh = AsyncMock(side_effect=reconcile)
+        monkeypatch.setattr(service, "_refresh_backend_runtime", refresh)
+        task = asyncio.create_task(service.clear_claude_oauth_credentials_only())
+        await entered.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        with pytest.raises(NativeMigrationBlockedError):
+            NativeCredentialLease(("claude",)).acquire()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        refresh.assert_awaited_once_with("claude")
+        with NativeCredentialLease(("claude",)):
+            pass
+
+    asyncio.run(run())
 
 
 def test_test_web_auth_rejects_unsupported_backend(service: AgentAuthService) -> None:
@@ -1998,6 +2104,7 @@ def test_claude_committed_credentials_survive_apply_failure_and_cancel(service, 
         flow = WebAuthFlow(flow_id="persisted", backend="claude", claude_oauth_attempt=attempt)
         with pytest.raises(RuntimeError, match="apply failed"):
             await service._commit_web_login(flow)
+        assert flow.authorization_completed
         assert attempt.succeeded
         assert V2Config.load().agents.claude.auth_mode == "oauth"
         assert read_claude_settings_env() == {}
@@ -2031,6 +2138,7 @@ def test_cancel_waits_for_irreversible_commit_before_new_flow_can_start(service,
         service._flow_registry.put(flow)
         service._arm_flow_waiter(flow, service._commit_web_login(flow))
         await committing.wait()
+        assert not flow.authorization_completed
         cancellation = asyncio.create_task(service.cancel_web_flow(flow.flow_id))
         await asyncio.sleep(0)
         assert not cancellation.done()
@@ -2038,6 +2146,7 @@ def test_cancel_waits_for_irreversible_commit_before_new_flow_can_start(service,
         assert (await cancellation)["ok"]
         assert read_claude_settings_env() == {}
         assert flow.claude_oauth_attempt.succeeded
+        assert flow.authorization_completed
         assert flow.flow_id not in service._web_flows
 
     asyncio.run(run())

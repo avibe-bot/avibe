@@ -17,7 +17,7 @@ rules on top of those mappings.
 | Images | `ImageBlock.media_token` is resolved by `MediaLoader` immediately before the request. Unknown `supports_images` is false, so the cross-provider transform replaces each image with `[image: <name or mime>]`. |
 | Tool ids | A safe stored id is preserved when accepted by the target. Otherwise the per-request map uses `call_` plus the first 24 hex characters of SHA-256. The same map rewrites tool results. |
 | Missing tool results | The transform inserts `[tool call interrupted; no result recorded]` with `is_error=true`. |
-| Origin | Direct requests use the endpoint origin. Gateway requests parse only `x-avibe-served-hop`, whose JSON object must contain exactly `provider`, `api`, and `model`. A missing or invalid report makes the response unverified: thinking and tool-call signatures are nulled, and redacted thinking is dropped before allocating a canonical slot, so later event indexes still identify their final message blocks. |
+| Origin | Direct requests use the endpoint origin. Gateway requests parse only `x-avibe-served-hop`, whose JSON object must contain exactly `provider`, `api`, `model`, and `source` (Model Hub contract v12); `origin` takes `provider`, `api`, `model`, and `source` is the serving Source id matching `^src_[a-z0-9]{8,}$`. A missing or invalid report makes the response unverified: thinking and tool-call signatures are nulled, and redacted thinking is dropped before allocating a canonical slot, so later event indexes still identify their final message blocks. |
 | Cancellation | `CancelToken` ends the HTTP stream and yields one non-retryable `ProviderError(kind="aborted")`. Opening, stream reads, error-body reads, media loads, and served-hop resolution all use the shared cancellation-aware await owner. |
 | Network timeouts | The shared lifecycle driver bounds connecting at 10 seconds; a connect failure or timeout is `ProviderError(kind="network")`. Every wait on a connected provider (response headers, the first chunk, and each next chunk) is bounded by the same 600-second silence bound: reasoning models and relays that buffer tool-call arguments stay silent far longer than a connect window. Codex (`stream_idle_timeout_ms`), Claude Code, Pi, and OpenCode use 300 seconds; Avibe doubles it (owner decision, 2026-10-10) because through Model Hub the response headers wait for the first model output, so a high-effort reasoning model's thinking time is all silence and can exceed five minutes. Running out of the silence bound is `ProviderError(kind="stalled")`, never a connection failure. Both kinds are retryable only when no model output was emitted; a provider that never sends response headers cannot hang a turn. A bounded 10-second cancellation join detaches a non-cooperative transport task instead of extending the timeout indefinitely. |
 | HTTP response status | Only 2xx responses enter an SSE translator. Redirects (3xx) are terminal `invalid_request` errors and are never followed implicitly; 4xx/5xx bodies use the shared status-aware classifier. |
@@ -134,10 +134,10 @@ or extracted message/code pair that its wire format makes available.
 
 | Protocol | Auth | Rate limit | Overload/server | Overflow/context |
 | --- | --- | --- | --- | --- |
-| Anthropic | `authentication_error`, `invalid_api_key`, `permission_error`, `permission` | `rate_limit_error` | `overloaded_error` → `overloaded`; `api_error` → `server` | `invalid_request_error` with context text; `context_length_exceeded` → `overflow` |
+| Anthropic | `authentication_error`, `invalid_api_key`, `permission_error`, `permission` | `rate_limit_error` | `overloaded_error` → `overloaded`; `api_error` → `server` | `invalid_request_error` with context text (`ai/errors.is_overflow_message`), which includes the refusal of input plus `max_tokens` over the window by models before Claude 4.5 (``input length and `max_tokens` exceed context limit``); `context_length_exceeded` → `overflow` |
 | OpenAI Chat | `authentication_error`, `invalid_api_key`, `permission` | `rate_limit_error`, `too_many_requests` | `server_error`, `api_error` | `context_length_exceeded`, `request_too_large` |
 | OpenAI Responses | `unauthenticated`, `permission_denied`, `invalid_api_key` | `rate_limit`, `rate_limit_error` | `overloaded`, `server_error`, `service_unavailable` | `context_length_exceeded`, `request_too_large` |
-| Model Hub relays, any protocol | | | `upstream_error`, `service_unavailable_error`; `request_timeout` and `timeout_error` (CLIProxyAPI, Model Hub's engine: `request_timeout` for an upstream `408` or an upstream stream that closed before its terminal, nested under `error` with type `server_error`; `timeout_error`, its Claude type for an upstream `408` or `504`) → `server` | |
+| Model Hub relays, any protocol | | | `upstream_error`, `service_unavailable_error`; `request_timeout` and `timeout_error` (CLIProxyAPI, Model Hub's engine: `request_timeout` for an upstream `408` or an upstream stream that closed before its terminal, nested under `error` with type `server_error`; `timeout_error`, its Claude type for an upstream `408` or `504`) → `server` | `upstream_request_invalid` (the gateway's code for a request its upstream refused; its copy quotes the upstream's message) → `overflow` when the quoted message is context text |
 | Model Hub's own frame, OpenAI Responses and Chat | | | `modelHub.errors.stream_interrupted` (the gateway's code for an upstream stream that ended after output without a terminal) → `interrupted` | |
 HTTP `401/403` always map to `auth`, `413` to `overflow`, `429` to
 `rate_limit` with `Retry-After`, and `5xx` to `server` or `overloaded`. A server code follows the same rule as a
@@ -538,11 +538,19 @@ Anthropic stop reasons:
 
 | Wire value | Canonical |
 | --- | --- |
-| `end_turn`, `stop_sequence`, `pause_turn` | `stop` |
-| `max_tokens` | `length` |
+| `end_turn`, `stop_sequence` | `stop` |
+| `pause_turn` | none: the response continues (Hosted tools, `pause_turn`) |
+| `max_tokens`, `model_context_window_exceeded` | `length` |
 | `tool_use` | `tool_use` |
 | `refusal` | `refusal` |
 | `safety` | `safety` |
+| any other value | `error` |
+
+`model_context_window_exceeded` ends a response whose request asked for more output than the window had room for:
+Claude 4.5 and newer models accept such a request and stop when generation reaches the window, and Anthropic says to
+treat the response as truncated. Earlier models refuse the request instead, unless it carries the
+`model-context-window-exceeded-2025-08-26` beta header, which this adapter does not send; the refusal is an
+`overflow` (Provider error classification).
 
 ## OpenAI Chat Completions
 
@@ -633,3 +641,62 @@ Responses terminal states:
 | `incomplete_details.reason=max_output_tokens` or `length` | `length` |
 | `incomplete_details.reason=content_filter` or `safety` | `safety` |
 | Failed/cancelled | terminal `ProviderError` (classified `unknown` when no provider error code is present) |
+
+## Hosted tools
+
+Designed by [`../vibey-hosted-tools.md`](../vibey-hosted-tools.md) (v2: the search tools `web_search` and `x_search`
+run natively or through the gateway's executor chain; `image_generate` is always a function tool, executed directly).
+These rows describe the wire mapping the `ai` lane implements.
+
+- **Requests.** A search tool's canonical spec is sent as the native declaration on a hop whose facts say `native:
+  assumed`, with its Responses `include` values and the pin header on that request; otherwise as the same-named
+  function. No request declares a hosted image tool.
+- **Parsing** for `web_search` and `x_search`: native results become `HostedToolBlock`s, text citations become
+  `TextBlock.citations`, and response-level facts go to `hosted_summary`. An `image_generation_call` is no hosted item:
+  it is ignored like any undeclared item.
+- **Portable history.** A finished response's hosted calls become synthetic same-named calls and results, split around
+  the assistant message. There is one call per hosted block, and nothing folds. Each result shows its status line
+  first and then every line attached to it. A response its
+  turn is still waiting on (the request's last assistant message, stopped for tools) keeps each call in place as text.
+  So does a hosted call that follows a client tool call of the same response, because a split there would separate
+  that call from its result.
+- **Native replay and pins.** A response's hosted calls go back verbatim, their `native.payload` in place, only to
+  the hop the request goes to, and only when that hop's Source served them on the same origin. The protocol must be
+  Anthropic or Responses, and the hop must still declare each tool they called natively. Such a request is pinned to
+  the hop's Source.
+  - The response a request continues within its turn needs no replay evidence, and its request also names the
+    model that served it (`x-avibe-pin-model`, when that id is ASCII). That response is the request's last assistant
+    message, stopped for tools, with only tool results after it.
+  - Any earlier response needs the hop's current `replay` for every tool it called, and every one of its calls must
+    have finished.
+  - Otherwise the calls take the portable form above. A continuation whose fresh hop is another Source therefore
+    goes in place as text: one hop builds and serves each request.
+- **`pin_unavailable`.** The gateway's `409` `model_hub_pin_unavailable` / `pin_unavailable` answer to a pinned
+  request, matched on `type` and `code`, is never shown and never the generic retry. It ends the send with a refusal
+  and no output, and the loop renders the request again for a fresh hop within the bounds in `provider.md`, in
+  portable form (proxy declarations, synthetic history, in-place text, unpinned) only as the last resort. xAI's
+  decrypt refusal of a replayed ciphertext is answered the same way, without that Source identity's opaque payloads
+  for the rest of the run.
+
+- **Proxy.** A search tool that a hop does not run natively is its canonical function, and a call to it runs on the
+  gateway's executor chain, which the gateway resolves from the live Turn. The result keeps the record on
+  `ToolResultMessage.hosted`, with `execution.mode: proxy`. A call on a hop whose facts say the hop's own Source refused
+  the tool natively (C-6 `refused`) also records that Source as `hosted.fallback_from: {source_id}`, by id only, so
+  a surface can say where the tool fell back from; a tool the vendor never offers natively records none. An `image_generate` call is an ordinary tool call and
+  result everywhere, with `execution.mode: direct`; its images are files the record lists.
+
+An Anthropic citation covers its whole text block, so it carries no range.
+
+| Concern | Anthropic Messages | OpenAI Responses (OpenAI, xAI) | OpenAI Chat Completions |
+| --- | --- | --- | --- |
+| Native declaration (mode from `HopResolution.hosted_tools`) | `{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}` | `{"type": "web_search"}`; xAI also `{"type": "x_search"}`; plus the overlay entry's `include` values (OpenAI web search: `web_search_call.action.sources`) | none. A `google` hop is reached over this Chat form, and the engine translates it to Gemini. |
+| Proxy declaration | `{"name": <tool>, "input_schema": <canonical>}` | `{"type": "function", "name": <tool>, "parameters": <canonical>}` | `{"type": "function", "function": {...}}` |
+| Native result → `HostedToolBlock` | every item under a declared hosted tool, one block each, in stream order, mapped to a provider-neutral `action` by the rule in `../vibey-hosted-tools.md` §4.2. `server_tool_use` plus its `web_search_tool_result` → `search`; `encrypted_content` only in `native.payload`. | `web_search_call` `search` (`queries[]`, else `query`) / `open_page` / `find_in_page`; xAI `custom_tool_call` `x_keyword_search` / `x_semantic_search` / `x_user_search` / `x_thread_fetch`. The `tco_…` `reasoning` items stay thinking blocks. Unknown items become `other`, never dropped. | — |
+| Response-level facts → `AssistantMessage.hosted_summary` | `usage.server_tool_use` counts | xAI `cost_in_usd_ticks` (reported once per response), `server_side_tool_usage_details` counts, and the X-search `url_citation`s as `cited_sources` | — |
+| Citations → `TextBlock.citations` | text-block `citations[]` (`web_search_result_location`: `url`, `title`, `cited_text`) | `output_text.annotations[]` of type `url_citation` (`url`, `title`, `start_index`, `end_index`) | — |
+| Same-Source replay (target hop is `native.source_id` under the identity that minted it, same origin, and `hosted_tools[tool].replay` is `assumed` now) | `native.payload` blocks verbatim, in place; citations not sent | `native.payload` items verbatim, in place; annotations not sent | — |
+| Other-origin replay | assistant `tool_use(name=<tool>, input=<per-action arguments>)` + user `tool_result(record as text)`, splitting the assistant message; a `failed`/`incomplete` record sets `is_error: true` | `function_call(name=<tool>, arguments)` + `function_call_output(record as text)`; a failed record's text starts `[<tool> failed: <error>]` | assistant `tool_calls` + `tool` message, failure as in Responses |
+| Pinning (any protocol) | a request with a native declaration or a verbatim `native.payload` carries `x-avibe-pin-source: <hop source_id>`. A continuation whose calls go back verbatim also carries `x-avibe-pin-model: <its served model>`, the hop's own model. A `409` `model_hub_pin_unavailable` / `pin_unavailable` answer is not shown: the loop renders the request again for a fresh hop, portable only as the last resort (`provider.md`). A `pause_turn` continuation is the exception (below). | same | — |
+| Citations at delivery | `TextBlock.citations` → `core/citations.py` builder → Markdown links + Web sidecar. A response's adjacent text blocks join as written, so an answer Anthropic splits at every cited span reads as one paragraph with each link closing its span; a paragraph break goes only where another block (a tool or hosted call, thinking) came between two texts (`storage/agent_transcript.text_parts`). | same | — |
+| `pause_turn` | not a stop. The adapter sends the request again with the paused content appended as the last assistant message, with no new user message. That continuation goes to the same hop, pinned to the Source and model that served the paused response, and its output streams on as the same response. A continuation block's index follows the paused ones, and a result finalizes its pending call by id. The hosted counters and cost are summed over every response. `usage` is the final request's, whose input already holds every paused part, so the context estimate stays right; billing comes from the gateway's per-call metering. After 5 continuations, a sixth pause ends the response with one `interrupted` error whose partial keeps everything assembled. A continuation is never sent in portable form. One that Source answers `pin_unavailable`, or a pause of a send that carried no pin, ends the response the same way. The merged message is verified only when every response in it was verified and reported the same origin; otherwise it is sanitized as any unverified response. | — | — |
+| In-flight replay (same turn, pinned Source) | verbatim while the fresh hop is the Source that served it and still declares each tool natively, else in place as text: each server block pair is replaced in place by one text block, and signed thinking is kept on the same origin. After a `pin_unavailable`, the fresh hop's facts decide the same way. | same | — |

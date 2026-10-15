@@ -1,0 +1,142 @@
+{
+  "_comment": "The hosted-tool card wire shape (core/hosted_activity.py, content.hosted on a toolcall row, version 1). tests/test_hosted_activity.py builds these exact payloads from canonical C-1 records; the Web card tests render them.",
+  "native_web_search": {
+    "version": 1,
+    "call_id": "srvtoolu_01",
+    "tool": "web_search",
+    "mode": "native",
+    "status": "completed",
+    "subject": "OpenAI announcements October 2026",
+    "action": "search",
+    "provider": "anthropic",
+    "source_id": "src_relayclaude",
+    "source_name": "relay-claude",
+    "model": "claude-opus-5-5",
+    "sources": [
+      { "url": "https://openai.com/index/devday-2026", "title": "DevDay 2026 recap", "page_age": "2 days ago" },
+      { "url": "https://platform.openai.com/docs/changelog", "title": "Responses API changelog" }
+    ],
+    "images": [],
+    "cost": { "basis": "list", "usd": 0.01, "calls": 1 }
+  },
+  "proxy_x_search": {
+    "version": 1,
+    "call_id": "call_x1",
+    "tool": "x_search",
+    "mode": "proxy",
+    "status": "completed",
+    "subject": "from:OpenAI within_time:7d",
+    "provider": "xai",
+    "source_id": "src_grok0001",
+    "source_name": "Grok",
+    "model": "grok-4.6",
+    "duration_ms": 31000,
+    "sources": [
+      {
+        "url": "https://x.com/OpenAI/status/1",
+        "title": "DevDay 2026 recap: everything we shipped this week",
+        "snippet": "Recordings and the launch list in one post.",
+        "page_age": "2 days ago"
+      },
+      { "url": "https://x.com/OpenAIDevs/status/2", "title": "Web search in the Responses API now supports domain filters" }
+    ],
+    "images": [],
+    "cost": { "basis": "reported", "usd": 0.11, "calls": 1 }
+  },
+  "proxy_failed": {
+    "version": 1,
+    "call_id": "call_x2",
+    "tool": "x_search",
+    "mode": "proxy",
+    "status": "failed",
+    "error": "no Source is verified for X search",
+    "subject": "from:OpenAI",
+    "sources": [],
+    "images": []
+  },
+  "proxy_unreachable": {
+    "version": 1,
+    "call_id": "call_x5",
+    "tool": "x_search",
+    "mode": "proxy",
+    "status": "failed",
+    "error": "the gateway could not run the call (ConnectError)",
+    "error_code": "gateway_unreachable",
+    "subject": "from:xai",
+    "sources": [],
+    "images": []
+  },
+  "direct_image": {
+    "version": 1,
+    "call_id": "call_ig1",
+    "tool": "image_generate",
+    "mode": "direct",
+    "status": "completed",
+    "sources": [],
+    "images": [{ "path": "/media/3f2a.png", "mime": "image/png", "width": 1536, "height": 1024, "bytes": 1993000 }],
+    "subject": "A wide photo of an open laptop on a desk at night, empty dark space in the upper right",
+    "provider": "openai",
+    "source_id": "src_relaygpt1",
+    "source_name": "relay-gpt",
+    "model": "gpt-image-2",
+    "size": "1536x1024",
+    "quality": "medium",
+    "revised_prompt": "A wide photo of an open laptop on a desk at night, empty dark space in the upper right"
+  },
+  "proxy_retried": {
+    "version": 1,
+    "call_id": "call_x6",
+    "tool": "x_search",
+    "mode": "proxy",
+    "status": "completed",
+    "sources": [
+      {
+        "url": "https://x.com/OpenAI/status/1",
+        "title": "DevDay 2026 recap: everything we shipped this week",
+        "snippet": "Recordings and the launch list in one post.",
+        "page_age": "2 days ago"
+      }
+    ],
+    "images": [],
+    "subject": "from:OpenAI",
+    "provider": "xai",
+    "source_id": "src_grok0001",
+    "source_name": "Grok",
+    "model": "grok-4.6",
+    "cost": {
+      "basis": "reported",
+      "calls": 1,
+      "usd": 0.11,
+      "at_least": true
+    }
+  },
+  "proxy_fallback": {
+    "version": 1,
+    "call_id": "call_w7",
+    "tool": "web_search",
+    "mode": "proxy",
+    "status": "completed",
+    "sources": [
+      {
+        "url": "https://openai.com/index/devday-2026",
+        "title": "DevDay 2026 recap",
+        "page_age": "2 days ago"
+      }
+    ],
+    "images": [],
+    "subject": "Anthropic announcements October 2026",
+    "provider": "anthropic",
+    "source_id": "src_relayclaude",
+    "source_name": "relay-claude",
+    "model": "claude-haiku-5-5",
+    "fallback_from": {
+      "source_id": "src_relaygpt1",
+      "source_name": "relay-gpt"
+    },
+    "cost": {
+      "basis": "list",
+      "calls": 1,
+      "usd": 0.01
+    }
+  }
+}

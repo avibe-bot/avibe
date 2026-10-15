@@ -386,3 +386,130 @@ def test_terminal_copy_never_promises_automatic_recovery(language):
         assert "2026-09-09" not in text
         assert "自动恢复。" not in text
         assert "has recovered" not in text
+
+
+def _next_step_controller(language: str, *, public_url: str | None):
+    cloud = SimpleNamespace(enabled=public_url is not None, public_url=public_url or "")
+    return SimpleNamespace(
+        config=SimpleNamespace(language=language, remote_access=SimpleNamespace(vibe_cloud=cloud)),
+        emit_agent_message=AsyncMock(return_value="msg-failed"),
+    )
+
+
+_WORKBENCH = MessageContext(user_id="local", channel_id="proj-1", platform="avibe", platform_specific={})
+_IM = MessageContext(user_id="U1", channel_id="C1", platform="slack", platform_specific={})
+# A scheduled or Harness Turn in a Workbench Session whose notices go to an IM channel.
+_ROUTED_TO_IM = MessageContext(
+    user_id="local", channel_id="proj-1", platform="avibe",
+    platform_specific={"delivery_override": {"platform": "slack", "channel_id": "C1"}},
+)
+
+
+def _notice(controller):
+    """The visible text and metadata of the notice a failure emitted."""
+    notify = controller.emit_agent_message.await_args_list[0]
+    return notify.args[2], notify.kwargs["output"].metadata
+
+
+@pytest.mark.parametrize("language", ["en", "zh"])
+@pytest.mark.parametrize(
+    ("context", "public_url", "line_key", "url"),
+    [
+        # The Workbench draws notices as plain text: the step rides as data, and the body stays the refusal.
+        (_WORKBENCH, "https://team.avibe.bot", None, None),
+        # No IM identity maps to a Workbench principal: IM says who can fix it, with the public URL when there is one.
+        (_IM, "https://team.avibe.bot", "errors.modelsNextStepImUrl", "https://team.avibe.bot/settings/models"),
+        (_IM, None, "errors.modelsNextStepIm", None),
+        # The form follows where the notice goes, not the Session it came from.
+        (_ROUTED_TO_IM, "https://team.avibe.bot", "errors.modelsNextStepImUrl", "https://team.avibe.bot/settings/models"),
+    ],
+)
+async def test_a_refusal_fixed_in_models_ends_with_where_to_fix_it(language, context, public_url, line_key, url):
+    from modules.agents.model_hub import ModelSupplyRefusal
+
+    controller = _next_step_controller(language, public_url=public_url)
+    refusal = ModelSupplyRefusal("Vibey has no model source yet.", fixed_in_models=True)
+
+    await emit_backend_failure(controller, context, "vibey", str(refusal), display_text=f"❌ {refusal}", cause=refusal)
+
+    text, metadata = _notice(controller)
+    if line_key is None:
+        assert (text, metadata.get("failure_next_step")) == (f"❌ {refusal}", "models")
+        assert "](" not in text
+    else:
+        line = t(line_key, language, url=url) if url else t(line_key, language)
+        assert (text, metadata.get("failure_next_step")) == (f"❌ {refusal}\n{line}", None)
+
+
+@pytest.mark.parametrize("context", [_WORKBENCH, _IM])
+@pytest.mark.parametrize(
+    "cause",
+    [
+        # The operator switched the Model Hub off, which takes Models away too.
+        "hub_disabled",
+        # Not a Model Hub refusal at all.
+        "native",
+    ],
+)
+async def test_a_failure_models_cannot_fix_gets_no_next_step(context, cause):
+    from modules.agents.model_hub import ModelSupplyRefusal
+
+    controller = _next_step_controller("en", public_url="https://team.avibe.bot")
+    error = (
+        ModelSupplyRefusal("Model Hub is disabled on this instance.", fixed_in_models=False)
+        if cause == "hub_disabled" else RuntimeError("process exited")
+    )
+
+    await emit_backend_failure(controller, context, "vibey", str(error), display_text=f"❌ {error}", cause=error)
+
+    text, metadata = _notice(controller)
+    assert (text, metadata.get("failure_next_step")) == (f"❌ {error}", None)
+
+
+@pytest.mark.parametrize("context", [_WORKBENCH, _IM])
+async def test_a_restart_replaces_the_refusal_and_its_next_step(context):
+    from modules.agents.model_hub import ModelSupplyRefusal
+
+    controller = _next_step_controller("en", public_url="https://team.avibe.bot")
+    controller.shutdown_requested = True
+    refusal = ModelSupplyRefusal("Vibey has no model source yet.", fixed_in_models=True)
+
+    await emit_backend_failure(controller, context, "vibey", str(refusal), display_text=f"❌ {refusal}", cause=refusal)
+
+    text, metadata = _notice(controller)
+    assert (text, metadata.get("failure_next_step")) == (t("turn.interrupted.serviceRestart", "en"), None)
+
+
+@pytest.mark.parametrize(
+    ("discriminator", "supply_state", "pointed"),
+    [
+        # Copy whose fix is in Models carries the way there: it sends the reader there, or names a model
+        # list Models keeps, as when a person removed the Agent's model, even the list's last one...
+        ("route_unconfigured", "interrupted", True),
+        ("blocked_supply_state", "interrupted", True),
+        ("model_unlisted", "interrupted", True),
+        # ...and copy that does not, such as a source still cooling down, does not.
+        ("blocked_supply_state", "waiting", False),
+    ],
+)
+async def test_a_route_refusal_points_to_models_only_when_its_copy_sends_the_reader_there(
+    discriminator, supply_state, pointed,
+):
+    from core.handlers.model_hub.service import ModelHubError
+
+    outcome = TurnOutcomeProjectionInput(
+        outcome="no_candidate",
+        discriminator=discriminator,
+        supply_facts=TurnSupplyFacts(
+            backend="claude", model="claude-opus-5-5", supply_state=supply_state,
+            retry_at="2026-10-12T08:00:00+00:00",
+        ),
+    )
+    refused = ModelHubError("no_candidate", turn_outcome=outcome)
+    controller = _next_step_controller("en", public_url=None)
+    copy = render_turn_outcome_copy(outcome, "en")
+
+    await emit_backend_failure(controller, _WORKBENCH, "claude", str(refused), display_text=copy, cause=refused)
+
+    text, metadata = _notice(controller)
+    assert (text, metadata.get("failure_next_step")) == (copy, "models" if pointed else None)

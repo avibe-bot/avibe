@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import importlib.util
 import os
+import shutil
 import signal
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 
@@ -129,6 +132,28 @@ async def test_a_crash_at_any_launch_step_runs_the_command_at_most_once(tmp_path
     assert may_have_started is (crash_point == "after_go")
     assert _counter(tmp_path) == (1 if may_have_started else 0)
     assert recovery.status(job_id).state == ("exited" if may_have_started else "gone")
+
+
+async def test_a_host_runs_the_wrapper_it_imported_after_an_upgrade_replaces_the_installed_one(tmp_path, monkeypatch):
+    """An upgrade installs its files before the service restarts. Until then the running host speaks its own
+    wrapper's argv, so it must not start the newer wrapper that the install now holds."""
+    tools = os.path.dirname(os.path.abspath(jobs_module.__file__))
+    install = tmp_path / "install"
+    install.mkdir()
+    for name in ("jobs.py", "job_wrapper.py", "windows_job.py", "windows_files.py"):
+        shutil.copyfile(os.path.join(tools, name), install / name)
+    spec = importlib.util.spec_from_file_location("avibe_installed_jobs", install / "jobs.py")
+    installed = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, installed)
+    spec.loader.exec_module(installed)  # the service imports the job host
+    for name in ("job_wrapper.py", "windows_job.py", "windows_files.py"):  # then the upgrade lands
+        (install / name).write_text("import sys\nsys.exit('a newer version, whose argv this host does not speak')\n")
+
+    host = installed.LocalJobHost(str(tmp_path / "jobs"))
+    job_id = await _start(host, tmp_path, "echo ran")
+
+    assert (await host.wait(job_id, deadline_s=10)).exit_code == 0
+    assert host.output(job_id) == (b"ran\n", 4)
 
 
 async def test_a_wrapper_left_without_a_decision_abandons_and_a_late_host_cannot_start_it(tmp_path, monkeypatch):

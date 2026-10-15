@@ -307,11 +307,13 @@ ensure/start. Startup
 has no assistant/source readiness prerequisite. Do not restart after an enable/config write.
 
 Preserve `default_agent_name` if it remains in the available set, including a usable custom
-Agent outside the cards' designated builtin Agents. Otherwise take the first rank that can run —
+Agent outside the cards' designated builtin Agents. A new install records the built-in Agent as
+its default (`../vibey-default-agent.md`), so a runnable Vibey is kept even when a CLI assistant can
+also run; the ranking below applies only to a default that cannot run. Otherwise take the first rank that can run —
 the CLI assistants before a built-in backend, the server's `implicit_default_rank` — and
 within it prefer a runnable designated builtin Agent in card order, then an available named
-Agent in stable backend/name order. The built-in assistant therefore becomes the default
-only when no CLI assistant's Agent, its own or a custom one, can run (D3). Call `setDefaultVibeAgent` and verify a fresh Agent read. Write `setup_completed` last through
+Agent in stable backend/name order. As a fallback, the built-in assistant therefore replaces an
+unrunnable default only when no CLI assistant's Agent, its own or a custom one, can run (D3). Call `setDefaultVibeAgent` and verify a fresh Agent read. Write `setup_completed` last through
 `api.mutateConfig` with an explicit field mutation, then validate a fresh uncached
 `apiFetch('/api/config', {cache:'no-store'})` readback before navigating. Use that same
 read/parse path after an unknown/failed write; cached pre-write data cannot settle it.
@@ -648,7 +650,7 @@ the default journey. Read failures authorize neither lifecycle writes nor comple
 | route control | Confirmed Hub cards with a designated builtin Agent model show that model's first chain hop and backup count. Enabled cards open `RouteChainDialog` for only `(backend, menu model)`; disabled cards preview the same route but cannot edit it. A current successful route read is required to open the editor; pending or failed reads do not infer an empty model or authorize editing. Route-read failure has its own Retry. A CLI assistant's Hub card with no model shows a hint to repair it later in Agent/Model Hub settings; Setup does not choose or write that Agent's model. The built-in card is the D3 exception (C4). Direct cards retain native connection actions, but Direct cannot satisfy setup completion. Unknown or conflicting Hub/Direct ownership disables configuration until a fresh read. A disabled Hub configuration retains C2 recovery, never a Direct setup-completion bypass |
 | candidate identity | for each backend, read its current designated builtin Agent, including disabled Agents, and use its saved menu model; custom Agents or the global default do not substitute as that card's route target. C4 may preserve a runnable custom default independently |
 | route close | close/commit refreshes the card's server-backed route and connection; `RouteChainDialog` owns the edit draft and save lifecycle, not `SetupFlowState` |
-| built-in card | first in the lineup, no switch and no lifecycle: an always-on badge, its route as above once its Agent has a model, otherwise the inline model offer of C4's D3 override. A Hub supply block (`agent_supply_blocks`: gateway off, Hub disabled) is stated on the card and holds its model row still; the shell keeps its own gateway alert and Retry |
+| built-in card | first in the lineup, no switch and no lifecycle: an always-on badge, its route as above once its Agent has a model, otherwise the inline model offer of C4's D3 override. A Hub supply block (`agent_supply_blocks`: gateway off, Hub disabled, no source) is stated on the card and holds its model row still; the shell keeps its own gateway alert and Retry |
 | all uninstalled | one install action per CLI assistant, Back still available; workspace entry stays disabled unless the built-in card is ready |
 
 ### Per-assistant Model Hub route mapping

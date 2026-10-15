@@ -1,0 +1,49 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "model-hub/capability-evidence.schema.json",
+  "title": "CapabilityEvidence",
+  "description": "One persisted evidence record per (Source, model, feature, status) in the Model Hub state directory (model-hub-capability-model.md §3.1). Absence is unknown. Passive only: written from real requests, never probed. An unsupported record is routing state with no time limit, read as unknown once its wire stamp differs from the current one or the user clears it; a verified record is display history of a real success and never changes routing.",
+  "type": "object",
+  "required": ["version", "source_id", "model_id", "feature", "status", "basis", "observed_at", "wire", "source_identity"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": 2 },
+    "source_id": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
+    "model_id": { "type": "string", "minLength": 1 },
+    "feature": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["kind", "name"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "effort" },
+            "name": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,64}$" }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "name", "aspect"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "hosted_tool" },
+            "name": { "enum": ["web_search", "x_search", "image_generate"] },
+            "aspect": { "enum": ["call", "replay"] }
+          },
+          "if": { "properties": { "name": { "const": "image_generate" } } },
+          "then": { "properties": { "aspect": { "const": "call" } } }
+        }
+      ]
+    },
+    "status": { "enum": ["verified", "unsupported"] },
+    "basis": { "const": "observed" },
+    "observed_at": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$" },
+    "wire": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "The wire the record was observed under: a digest of the engine release, the Avibe release, and the model's rendered fields that the Source identity does not cover (its registered reasoning tiers). With source_identity (vendor, protocol, base URL, credential, credential generation) it covers every Source field the engine renderer reads (model-hub-capability-model.md §3.3). An unsupported record under another stamp reads as unknown." },
+    "source_identity": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "Digest of the Source identity at write time; a changed identity drops the record." },
+    "detail": { "type": "string", "minLength": 1, "maxLength": 64, "description": "unsupported only: HTTP status and upstream machine code, never upstream text." },
+    "mode": { "enum": ["native", "executor", "direct"], "description": "verified only: how the call ran." }
+  },
+  "if": { "properties": { "status": { "const": "unsupported" } } },
+  "then": { "required": ["detail"], "not": { "required": ["mode"] } },
+  "else": { "required": ["mode"], "not": { "required": ["detail"] } }
+}

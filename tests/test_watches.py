@@ -16,7 +16,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config import paths
-from core import watch_worker, watches as watches_module
+from core import command_runner, watch_worker, watches as watches_module
 from core.process_isolation import (
     PersistedProcessIdentity,
     ProcessIdentity,
@@ -415,10 +415,7 @@ def test_managed_watch_exec_uses_stable_supervisor(tmp_path: Path, monkeypatch) 
     result = asyncio.run(service._run_cycle(watch, timeout_seconds=5))
 
     assert result.exit_code == 0
-    assert captured["args"] == (
-        os.path.abspath(sys.executable),
-        str(Path(watch_worker.__file__).resolve()),
-    )
+    assert captured["args"] == (os.path.abspath(sys.executable), command_runner.supervisor_path())
     assert captured["kwargs"]["stdin"] == asyncio.subprocess.PIPE
     assert captured["kwargs"]["stdout"] == asyncio.subprocess.PIPE
     assert captured["kwargs"]["stderr"] == asyncio.subprocess.PIPE
@@ -471,10 +468,7 @@ def test_managed_watch_shell_uses_stable_supervisor(tmp_path: Path, monkeypatch)
     result = asyncio.run(service._run_cycle(watch, timeout_seconds=5))
 
     assert result.exit_code == 0
-    assert captured["args"] == (
-        os.path.abspath(sys.executable),
-        str(Path(watch_worker.__file__).resolve()),
-    )
+    assert captured["args"] == (os.path.abspath(sys.executable), command_runner.supervisor_path())
     assert captured["kwargs"]["stdin"] == asyncio.subprocess.PIPE
     assert captured["kwargs"]["stdout"] == asyncio.subprocess.PIPE
     assert captured["kwargs"]["stderr"] == asyncio.subprocess.PIPE

@@ -5,7 +5,7 @@ import { useVaultRequestRefresh } from '@/lib/useVaultRequestRefresh';
 import { useLatestRef } from './useLatestRef';
 
 /**
- * Pending vault requests (access/sign/provision) for one chat session. Fed by
+ * Pending vault requests (access/sign/provision/delete) for one chat session. Fed by
  * `vaults.updated`, with polling only when the controller event bridge is down,
  * and cleared and re-read when the viewer's authorization changes.
  * A timer also refreshes at the earliest visible `expires_at` because expiry
@@ -47,7 +47,7 @@ export function usePendingVaultRequests(sessionId: string): { requests: VaultReq
       if (seq !== loadSeq.current || forSession !== currentSessionRef.current) return;
       const mine = (res.requests ?? []).filter((r) => {
         const type = (r.card as { request_type?: string } | null)?.request_type ?? r.request_type;
-        return type === 'access' || type === 'sign' || type === 'provision';
+        return type === 'access' || type === 'sign' || type === 'provision' || type === 'delete';
       });
       setRequests(mine);
     } catch {

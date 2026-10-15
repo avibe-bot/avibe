@@ -158,26 +158,84 @@ def _load(
         mime_type = _sniff_image(head)
         if mime_type is None:
             return _read_text(handle, absolute, path, offset, limit, cancelled)
-        if mime_type in IMAGE_MIME_TYPES:
-            data = head + handle.read(max(0, MAX_INLINE_IMAGE_BYTES + 1 - len(head)))
-            size = max(os.fstat(handle.fileno()).st_size, len(data))
-            if size > MAX_INLINE_IMAGE_BYTES:
-                # Avibe: no resizing in v1.
-                return text_result(
-                    f"Read image file [{mime_type}]\n[Image omitted: the file is {format_size(size)}, over the "
-                    f"{format_size(MAX_INLINE_IMAGE_BYTES)} inline image limit. Images are not resized.]",
-                    details={"path": absolute, "mime_type": mime_type, "bytes": size},
-                )
-            if mime_type == "image/png" and _png_is_animated(data):
-                # acTL may sit past the sniffed prefix, behind large ancillary chunks.
-                mime_type = "image/apng"
-            else:
-                return _Image(mime_type, data, len(data))
-        # Pi converts other formats to PNG; without an image library Avibe cannot.
-        return text_result(
-            f"Read image file [{mime_type}]\n[Image omitted: could not be converted to a supported inline image format.]",
-            details={"path": absolute, "mime_type": mime_type},
-        )
+        image = _load_image(handle, head, mime_type)
+    if isinstance(image, _Image):
+        return image
+    details = {"path": absolute, "mime_type": image.mime_type}
+    if image.size is not None:
+        details["bytes"] = image.size
+    return text_result(f"Read image file [{image.mime_type}]\n[Image omitted: {image.reason}]", details=details)
+
+
+@dataclass(frozen=True)
+class _Omitted:
+    mime_type: str
+    reason: str
+    size: Optional[int] = None
+
+
+def _load_image(handle: BinaryIO, head: bytes, mime_type: str) -> Union[_Image, _Omitted]:
+    """The image ``handle`` holds, ``head`` already read from it, or why ``read`` cannot attach it."""
+    if mime_type in IMAGE_MIME_TYPES:
+        data = head + handle.read(max(0, MAX_INLINE_IMAGE_BYTES + 1 - len(head)))
+        size = max(os.fstat(handle.fileno()).st_size, len(data))
+        if size > MAX_INLINE_IMAGE_BYTES:
+            # Avibe: no resizing in v1.
+            reason = (
+                f"the file is {format_size(size)}, over the {format_size(MAX_INLINE_IMAGE_BYTES)} inline image limit. "
+                "Images are not resized."
+            )
+            return _Omitted(mime_type, reason, size)
+        if mime_type == "image/png" and _png_is_animated(data):
+            # acTL may sit past the sniffed prefix, behind large ancillary chunks.
+            mime_type = "image/apng"
+        else:
+            return _Image(mime_type, data, len(data))
+    # Pi converts other formats to PNG; without an image library Avibe cannot.
+    return _Omitted(mime_type, "could not be converted to a supported inline image format.")
+
+
+class ImageUnreadable(Exception):
+    """Why ``read_image`` cannot give the image at a path: ``kind`` says which check refused it, so a caller can word
+    it; ``reason`` is the text ``read`` would show, the system's own words for a file it could not open."""
+
+    def __init__(
+        self,
+        reason: str,
+        *,
+        kind: str = "unreadable",
+        mime_type: Optional[str] = None,
+        size: Optional[int] = None,
+    ) -> None:
+        super().__init__(reason)
+        self.reason, self.kind, self.mime_type, self.size = reason, kind, mime_type, size
+
+
+def read_image(path: str, cwd: str) -> tuple[str, bytes]:
+    """The image at ``path`` as ``read`` attaches it, its type and bytes: the path resolved against ``cwd`` and checked
+    as ``read`` does (a regular, readable file; a supported image type within the inline limit). Raises
+    ``ImageUnreadable`` with the reason otherwise. Blocking: call it off the event loop."""
+    try:
+        absolute = resolve_read_path(path, cwd)
+        refusal = _refusal(absolute)
+        if refusal:
+            raise ImageUnreadable(refusal)
+        with os.fdopen(open_regular(absolute), "rb") as handle:
+            head = handle.read(_IMAGE_SNIFF_BYTES)
+            mime_type = _sniff_image(head)
+            image = _load_image(handle, head, mime_type) if mime_type is not None else None
+    except NotRegularFile as exc:
+        raise ImageUnreadable(KIND_REASON[exc.kind]) from None
+    except OSError as exc:
+        raise ImageUnreadable(os_reason(exc)) from None
+    except ToolInputError as exc:
+        raise ImageUnreadable(str(exc)) from None
+    if image is None:
+        raise ImageUnreadable("it is not an image (jpg, png, gif, webp)", kind="not_image")
+    if isinstance(image, _Omitted):
+        kind = "too_large" if image.size is not None else "unsupported"
+        raise ImageUnreadable(image.reason.rstrip("."), kind=kind, mime_type=image.mime_type, size=image.size)
+    return image.mime_type, image.data
 
 
 def _sniff_image(head: bytes) -> Optional[str]:

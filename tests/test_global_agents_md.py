@@ -1,7 +1,8 @@
 """Unit tests for vibe.global_agents_md — per-backend global instruction file
 resolution + the read/write/sync helpers that back the Web UI "Global prompts"
 dialog. All tests pass an isolated ``home`` so they never touch the real
-``~/.claude`` / ``~/.codex`` / ``~/.config/opencode`` files."""
+``~/.claude`` / ``~/.codex`` / ``~/.config/opencode`` files; Vibey's file follows the
+Avibe home, which each test moves under its own ``tmp_path``."""
 
 import os
 
@@ -18,10 +19,17 @@ from vibe.global_agents_md import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _avibe_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".avibe"))
+
+
 # --- path resolution ------------------------------------------------------
 
 
 def test_path_resolution_per_backend(tmp_path: Path):
+    # Vibey's is the one it loads every Turn (C-7 tools.md section 9), in the Avibe home.
+    assert global_instruction_path("vibey", tmp_path) == tmp_path / ".avibe" / "AGENTS.md"
     assert global_instruction_path("claude", tmp_path) == tmp_path / ".claude" / "CLAUDE.md"
     assert global_instruction_path("codex", tmp_path) == tmp_path / ".codex" / "AGENTS.md"
     assert (
@@ -87,7 +95,8 @@ def test_read_existing_file(tmp_path: Path):
 
 def test_read_all_covers_every_backend(tmp_path: Path):
     results = read_all_global_agents_md(tmp_path)
-    assert {r["backend"] for r in results} == {"claude", "codex", "opencode"}
+    # Catalog order, the built-in backend first.
+    assert [r["backend"] for r in results] == ["vibey", "opencode", "claude", "codex"]
 
 
 # --- write ----------------------------------------------------------------
@@ -133,11 +142,12 @@ def test_write_many_single_backend_only_writes_that_one(tmp_path: Path):
 
 
 def test_write_many_all_backends_syncs_identical_content(tmp_path: Path):
-    result = write_many_global_agents_md(["claude", "codex", "opencode"], "shared", tmp_path)
+    result = write_many_global_agents_md(["vibey", "claude", "codex", "opencode"], "shared", tmp_path)
+    assert (tmp_path / ".avibe" / "AGENTS.md").read_text(encoding="utf-8") == "shared"
     assert (tmp_path / ".claude" / "CLAUDE.md").read_text(encoding="utf-8") == "shared"
     assert (tmp_path / ".codex" / "AGENTS.md").read_text(encoding="utf-8") == "shared"
     assert (tmp_path / ".config" / "opencode" / "AGENTS.md").read_text(encoding="utf-8") == "shared"
-    # The refreshed seed reflects all three as existing with the synced content.
+    # The refreshed seed reflects all four as existing with the synced content.
     assert all(entry["exists"] and entry["content"] == "shared" for entry in result)
 
 

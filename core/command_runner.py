@@ -5,11 +5,17 @@ One place owns the mechanics of running a user command through the stable
 and tree teardown. Callers own policy -- registries, localization, persistence
 and result interpretation -- so this module stays a leaf with no knowledge of
 watches, scheduled tasks, storage or the service layer.
+
+The supervisor starts as this module imported it, from a copy under the runtime
+directory (``core.frozen_script``): an upgrade that replaces the installed files
+before the service restarts must not put a newer supervisor, whose spec may
+differ, under a running runner.
 """
 
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import shlex
@@ -17,10 +23,12 @@ import signal
 import sys
 from collections import deque
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Callable, Collection, Mapping, Optional
+from typing import Awaitable, Callable, Collection, Mapping, Optional
 
+from config import paths as config_paths
 from core import watch_worker
+from core.agent_core.tools import windows_job
+from core.frozen_script import FrozenScript
 from core.process_isolation import (
     DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS,
     KILL_SIGNAL,
@@ -49,6 +57,9 @@ STREAM_TRUNCATION_MARKER = b"[avibe: output truncated]\n"
 #: it in a failure notice, and wrap the row in ``vibe task list``.
 COMMAND_PREVIEW_MAX_CHARS = 120
 
+#: The supervisor, with the helper it loads beside itself on Windows, as this module was imported.
+_SUPERVISOR = FrozenScript(watch_worker.__file__, windows_job.__file__)
+
 
 def command_line_preview(
     shell_command: Optional[str],
@@ -71,6 +82,12 @@ def command_line_preview(
     if len(preview) <= max_chars:
         return preview
     return preview[: max_chars - 1].rstrip() + "…"
+
+
+def supervisor_path() -> str:
+    """The supervisor to start: this module's copy of it under the runtime directory."""
+
+    return _SUPERVISOR.path(str(config_paths.get_runtime_dir() / "watch-worker"))
 
 
 @dataclass(frozen=True)
@@ -273,7 +290,9 @@ async def run_supervised_command(
     cwd: str,
     timeout_seconds: float,
     label: str,
-    on_spawn: Optional[Callable[[int, Optional[PersistedProcessIdentity]], None]] = None,
+    on_spawn: Optional[
+        Callable[[int, Optional[PersistedProcessIdentity]], Optional[Awaitable[None]]]
+    ] = None,
     max_output_bytes: Optional[int] = None,
     env: Optional[Mapping[str, str]] = None,
     extra_env: Optional[Mapping[str, str]] = None,
@@ -309,7 +328,7 @@ async def run_supervised_command(
         spawn_env[watch_worker.HIDE_CONSOLE_ENV] = "1"
     process = await asyncio.create_subprocess_exec(
         os.path.abspath(sys.executable),
-        os.fspath(Path(watch_worker.__file__).resolve()),
+        supervisor_path(),
         cwd=cwd,
         env=spawn_env,
         stdin=asyncio.subprocess.PIPE,
@@ -328,7 +347,11 @@ async def run_supervised_command(
             # other failure here rather than leaking the very orphan it is protecting
             # against. Still before the spec is written, so the supervisor is blocked
             # on stdin and nothing the user asked for has started yet.
-            on_spawn(process.pid, identity)
+            # A callback that persists the worker may do so off the loop and hand back
+            # the awaitable; the spec is not written until it has landed.
+            recorded = on_spawn(process.pid, identity)
+            if inspect.isawaitable(recorded):
+                await recorded
         if process.stdin is None:
             await terminate_and_communicate(process, logger, label)
             raise RuntimeError("watch worker supervisor stdin is unavailable")

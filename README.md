@@ -15,7 +15,7 @@
 
 [Docs](https://docs.avibe.bot) · [English](README.md) · [中文](README_ZH.md)
 
-**Drives** ![Claude Code](https://img.shields.io/badge/Claude%20Code-D4A27F?style=flat-square&logo=anthropic&logoColor=white) ![OpenCode](https://img.shields.io/badge/OpenCode-00B4D8?style=flat-square) ![Codex](https://img.shields.io/badge/Codex-412991?style=flat-square)
+**Agents** ![Vibey](https://img.shields.io/badge/Vibey-built--in-14B8A6?style=flat-square) ![Claude Code](https://img.shields.io/badge/Claude%20Code-D4A27F?style=flat-square&logo=anthropic&logoColor=white) ![OpenCode](https://img.shields.io/badge/OpenCode-00B4D8?style=flat-square) ![Codex](https://img.shields.io/badge/Codex-412991?style=flat-square)
 
 **Reach it from** ![Browser](https://img.shields.io/badge/Browser-111827?style=flat-square&logo=googlechrome&logoColor=white) ![Slack](https://img.shields.io/badge/Slack-4A154B?style=flat-square&logo=slack&logoColor=white) ![Discord](https://img.shields.io/badge/Discord-5865F2?style=flat-square&logo=discord&logoColor=white) ![Telegram](https://img.shields.io/badge/Telegram-26A5E4?style=flat-square&logo=telegram&logoColor=white) ![WeChat](https://img.shields.io/badge/WeChat-07C160?style=flat-square&logo=wechat&logoColor=white) ![Lark](https://img.shields.io/badge/Lark%20%2F%20Feishu-3370FF?style=flat-square&logo=bytedance&logoColor=white)
 
@@ -24,6 +24,18 @@
 <br/>
 
 <img src="assets/screenshots/v4/workbench-chat-en.png" alt="The Avibe Workbench — chat with a local agent, inspect its work, and respond without leaving the browser" />
+
+---
+
+## Vibey, Avibe's own agent
+
+Avibe ships its own official agent, **Vibey**: built in, always on, nothing extra to install. Add a model source to Model Hub — a subscription sign-in or an API key — give Vibey a model, and it is ready in the Workbench and in every chat app you connect.
+
+- **It runs the platform for you.** Vibey schedules Tasks, waits on Watches, builds Show Pages, and hands parts of a job to Claude Code, Codex, or OpenCode — all through the same `vibe` commands every agent uses.
+- **It codes.** It reads, writes, and edits files and runs commands (`bash` on macOS and Linux, PowerShell on native Windows). Independent tool calls in one response run at the same time, and a long command becomes a Watch that reports back to the same session.
+- **It keeps going.** Fork a session, stop a turn, keep talking: when a conversation grows long, Vibey condenses the earlier part without interrupting you.
+
+Already have favorite agents? Avibe also runs the official Claude Code, Codex, and OpenCode unchanged, side by side with Vibey. → [Vibey docs](https://docs.avibe.bot/agents/vibey)
 
 ---
 
@@ -213,7 +225,7 @@ Avibe is open source (MIT) and free to run. You bring your own agent subscriptio
 <details>
 <summary><b>Which agents and platforms are supported?</b></summary>
 
-**Agents:** the official Claude Code, Codex, and OpenCode CLIs. **Surfaces:** a built-in browser Workbench (installable on desktop and mobile) plus Slack, Discord, Telegram, WeChat, and Lark / Feishu.
+**Agents:** Vibey, Avibe's built-in agent, plus the official Claude Code, Codex, and OpenCode CLIs. **Surfaces:** a built-in browser Workbench (installable on desktop and mobile) plus Slack, Discord, Telegram, WeChat, and Lark / Feishu.
 </details>
 
 <details>
@@ -225,7 +237,7 @@ Avibe is open source (MIT) and free to run. You bring your own agent subscriptio
 <details>
 <summary><b>How is Avibe different from OpenClaw or Hermes?</b></summary>
 
-OpenClaw and Hermes are *agents* — a gateway-style assistant and a self-improving agent. Avibe is a different layer: the **Agent OS**. It gives every agent it runs a unified world model — agents, sessions, Show Pages, the Harness, Model Hub — so it can schedule itself, build its own loops, and reach you through a real interaction layer, then runs the official Claude Code, Codex, and OpenCode you bring (an Avibe-native agent is [on the roadmap](#roadmap)). See the [comparison table](#avibe-vs-openclaw) above for OpenClaw specifics.
+OpenClaw and Hermes are *agents* — a gateway-style assistant and a self-improving agent. Avibe is a different layer: the **Agent OS**. It gives every agent it runs a unified world model — agents, sessions, Show Pages, the Harness, Model Hub — so it can schedule itself, build its own loops, and reach you through a real interaction layer, then ships its own agent, Vibey, and runs the official Claude Code, Codex, and OpenCode you bring. See the [comparison table](#avibe-vs-openclaw) above for OpenClaw specifics.
 </details>
 
 ---
@@ -240,7 +252,7 @@ Lives in your Workbench and your chat apps. Reads the room. Picks up where you l
 
 > Avibe is the home your agent lives in. Vibey is the colleague who lives there.
 
-Forgets nothing. Holds opinions. Says thanks when you fix its bugs.
+Holds opinions. Says thanks when you fix its bugs.
 
 ---
 
@@ -272,6 +284,12 @@ Full references: [Commands](docs/COMMANDS.md) · [CLI](docs/CLI.md)
 ---
 
 ## Agents
+
+**Vibey reads your instruction files.** Like Claude Code and Codex, Vibey loads your standing instructions at the start of every Turn:
+1. `~/.avibe/AGENTS.md`, for every project;
+2. then, in each directory from the filesystem root down to the working directory, its `AGENTS.md` (or `CLAUDE.md`).
+
+`AGENTS.override.md` takes the place of a directory's `AGENTS.md`. When two files conflict, the more specific one wins. Files in directories below the working directory are not loaded up front: Vibey is told to read a subtree's file before it works with files there. An edit takes effect on the next Turn. The instructions are capped at 64 KiB in all; past that, Vibey is told which file was cut or left out.
 
 The setup wizard detects Claude Code, Codex, and OpenCode on your machine and installs any you choose that are missing. To install one yourself:
 
@@ -340,9 +358,8 @@ What's coming next:
 - **Deeper interaction-first workflows** — more direct manipulation, structured decisions, and in-place collaboration between chat, apps, and Show Pages.
 - **Protected Vault custody** — finish the immutable sandbox integrity gate before enabling passkey-protected secrets for real users.
 - **SaaS mode** — one-click hosted onboarding with a cloud relay, while execution still stays on your own machine.
-- **An Avibe-native agent** — a first-party agent tuned for this runtime, alongside the official CLIs you bring.
 
-Shipped recently: Model Hub with automatic takeover, quota tracking, and usage analytics · realtime voice input · Show Page sharing · Skills unified across all three backends · the three-step setup wizard · the Agent Harness and run graph · multi-window Apps · Standard Vaults.
+Shipped recently: Vibey, Avibe's own agent · Model Hub with automatic takeover, quota tracking, and usage analytics · realtime voice input · Show Page sharing · Skills unified across all three backends · the three-step setup wizard · the Agent Harness and run graph · multi-window Apps · Standard Vaults.
 
 ---
 

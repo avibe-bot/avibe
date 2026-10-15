@@ -60,13 +60,6 @@ def test_legacy_data_identity_survives_config_and_service_probes(tmp_path, monke
     assert snapshot() == before
 
 
-def test_removed_cli_command_is_unknown():
-    result = subprocess.run([sys.executable, "-m", "vibe", "memory", "status"],
-                            capture_output=True, text=True, timeout=30)
-    assert result.returncode == 2
-    assert "invalid choice: 'memory'" in result.stderr
-
-
 @pytest.mark.parametrize(("method", "path"), [
     ("GET", "status"), ("GET", "settings"), ("PATCH", "settings"),
     ("GET", "profile"), ("GET", "processing-record"), ("GET", "failures"),

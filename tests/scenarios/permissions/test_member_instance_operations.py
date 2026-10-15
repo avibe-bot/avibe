@@ -23,7 +23,13 @@ from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_sessions, messages, resource_access_policies, resource_access_groups
 from storage.workbench_sessions_service import create_session
-from tests.ui_server_test_helpers import _save_config, csrf_headers, remote_peer, remote_session_cookie
+from tests.ui_server_test_helpers import (
+    _save_config,
+    csrf_headers,
+    permissions_backend_unreachable,
+    remote_peer,
+    remote_session_cookie,
+)
 from vibe import internal_client, remote_access, ui_server
 from vibe.authorization import INSTANCE_SCOPED_REFETCH_EVENTS, AuthorizationContext
 from vibe.sse_broker import broker
@@ -37,6 +43,7 @@ def operations(request, tmp_path, monkeypatch):
     config = _save_config(tmp_path, paired=True, instance_kind=request.param)
     ensure_sqlite_state()
     monkeypatch.setattr(ui_server, "_ensure_remote_access_monitoring", lambda *args: None)
+    permissions_backend_unreachable(monkeypatch)
     store = VibeAgentStore()
     store.ensure_builtin_default_agent(backend="codex")
     agent = store.require("codex")

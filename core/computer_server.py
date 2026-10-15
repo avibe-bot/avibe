@@ -13,6 +13,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import sys
@@ -29,6 +30,7 @@ if __package__ in {None, ""}:
         sys.path.insert(0, str(_PACKAGE_ROOT))
 
 from config.atomic_io import write_atomic
+from core.agent_core.ai.errors import redact_provider_text
 from core.computer_use import (
     COMPUTER_USE_LEASE_FILE,
     COMPUTER_USE_LEASE_LOCK_FILE,
@@ -40,6 +42,12 @@ from core.computer_use import (
     effective_computer_use_status,
     read_computer_use_state,
 )
+from core.computer_script_handles import (
+    ComputerScriptHandleError,
+    bind_handle_to_request,
+    parse_handle_descriptor,
+    validate_handle_is_current,
+)
 
 _LEASE_TTL_SECONDS = 60.0
 _LEASE_HEARTBEAT_SECONDS = 10.0
@@ -48,7 +56,11 @@ _UPSTREAM_RESPONSE_LIMIT = 128 * 1024 * 1024
 # transport deadline above that documented bound while still preventing a dead
 # reader from holding the desktop lease forever.
 _UPSTREAM_REQUEST_TIMEOUT_SECONDS = 180.0
+_UPSTREAM_DETAIL_LIMIT = 2048
+_UPSTREAM_DIAGNOSTIC_SCAN_LIMIT = 8192
+_UPSTREAM_DIAGNOSTIC_LOG_LIMIT = 20
 _ADMISSION_RETRY_LIMIT = 1
+_NO_SCRIPT_HANDLE = object()
 _PROXY_PROCESS_ENV_KEYS = (
     "HOME",
     "LANG",
@@ -75,8 +87,11 @@ _INPUT_TOOLS = frozenset(
 )
 _OBSERVE_TOOLS = frozenset({"get_window_state", "zoom"})
 _ALLOWED_TARGET_KEYS = frozenset({"kind", "pid", "window_id"})
+_UPSTREAM_NOT_DISPATCHED_CODES = frozenset({"foreground_consent_required"})
 _COMMAND_MODIFIERS = frozenset({"cmd", "command", "meta"})
 _SHIFT_MODIFIERS = frozenset({"shift"})
+
+logger = logging.getLogger(__name__)
 
 
 class ComputerServerError(RuntimeError):
@@ -485,6 +500,7 @@ class JsonRpcUpstream:
         stdout = self._process.stdout
         assert stdout is not None
         error: BaseException = UpstreamUnavailable("computer-use upstream exited")
+        malformed_lines = 0
         try:
             while True:
                 line = await stdout.readline()
@@ -492,7 +508,19 @@ class JsonRpcUpstream:
                     break
                 try:
                     message = json.loads(line)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as exc:
+                    detail = _bounded_diagnostic(line)
+                    malformed_lines += 1
+                    if malformed_lines <= _UPSTREAM_DIAGNOSTIC_LOG_LIMIT:
+                        logger.warning(
+                            "computer-use upstream returned malformed JSON: %s",
+                            detail or _bounded_diagnostic(str(exc)),
+                        )
+                    elif malformed_lines == _UPSTREAM_DIAGNOSTIC_LOG_LIMIT + 1:
+                        logger.warning(
+                            "computer-use upstream malformed JSON log limit reached; "
+                            "further lines suppressed"
+                        )
                     continue
                 request_id = message.get("id")
                 if isinstance(request_id, int):
@@ -501,8 +529,17 @@ class JsonRpcUpstream:
                         future.set_result(message)
         except asyncio.CancelledError:
             raise
-        except BaseException:
-            error = UpstreamUnavailable("computer-use upstream reader failed")
+        except BaseException as exc:
+            detail = _bounded_diagnostic(str(exc))
+            logger.warning(
+                "computer-use upstream reader failed (%s): %s",
+                type(exc).__name__,
+                detail or type(exc).__name__,
+            )
+            error = UpstreamUnavailable(
+                "computer-use upstream reader failed"
+                + (f": {detail}" if detail else "")
+            )
         finally:
             for future in tuple(self._pending.values()):
                 if not future.done():
@@ -511,8 +548,30 @@ class JsonRpcUpstream:
     async def _stderr_loop(self) -> None:
         stderr = self._process.stderr
         assert stderr is not None
-        while await stderr.readline():
-            pass
+        logged_lines = 0
+        try:
+            while True:
+                line = await stderr.readline()
+                if not line:
+                    return
+                detail = _bounded_diagnostic(line)
+                if detail and logged_lines < _UPSTREAM_DIAGNOSTIC_LOG_LIMIT:
+                    logger.warning("computer-use upstream stderr: %s", detail)
+                    logged_lines += 1
+                elif detail and logged_lines == _UPSTREAM_DIAGNOSTIC_LOG_LIMIT:
+                    logger.warning(
+                        "computer-use upstream stderr log limit reached; "
+                        "further lines suppressed"
+                    )
+                    logged_lines += 1
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            detail = _bounded_diagnostic(str(exc))
+            logger.warning(
+                "computer-use upstream stderr reader failed: %s",
+                detail or type(exc).__name__,
+            )
 
     async def close(self) -> None:
         stdin = self._process.stdin
@@ -599,8 +658,97 @@ def _load_snapshot(state_path: Path) -> tuple[list[dict[str, Any]], set[str]]:
     return advertised, accepted_session
 
 
-def _error_result(code: str, message: str | None = None, **params: Any) -> dict[str, Any]:
-    payload = {"code": code, "params": params}
+def _bounded_diagnostic(value: Any) -> str | None:
+    """Return a single-line diagnostic without carrying arbitrary payloads."""
+
+    if isinstance(value, bytes):
+        text = value[:_UPSTREAM_DIAGNOSTIC_SCAN_LIMIT].decode(
+            "utf-8",
+            errors="replace",
+        )
+    elif isinstance(value, str):
+        text = value[:_UPSTREAM_DIAGNOSTIC_SCAN_LIMIT]
+    else:
+        return None
+    text = "".join(
+        character
+        if character in "\r\n" or character >= " " and character != "\x7f"
+        else " "
+        for character in text
+    )
+    text = redact_provider_text(text)
+    text = " ".join(text.split())
+    if not text:
+        return None
+    if len(text) > _UPSTREAM_DETAIL_LIMIT:
+        return text[: _UPSTREAM_DETAIL_LIMIT - 3].rstrip() + "..."
+    return text
+
+
+def _diagnostic_candidate(value: Any) -> str | bytes | None:
+    if isinstance(value, (str, bytes)) and value.strip():
+        return value
+    return None
+
+
+def _diagnostic_from_mapping(value: Any) -> str | bytes | None:
+    if not isinstance(value, Mapping):
+        return None
+    for key in ("message", "reason", "detail", "error"):
+        detail = _diagnostic_candidate(value.get(key))
+        if detail:
+            return detail
+    return None
+
+
+def _diagnostic_from_content(value: Any) -> str | bytes | None:
+    if not isinstance(value, list):
+        return None
+    for item in value:
+        if not isinstance(item, Mapping) or item.get("type") != "text":
+            continue
+        detail = _diagnostic_candidate(item.get("text"))
+        if detail:
+            return detail
+    return None
+
+
+def _driver_error_params(value: Mapping[str, Any]) -> dict[str, Any]:
+    structured_params = value.get("params")
+    params = dict(structured_params) if isinstance(structured_params, dict) else {}
+    for key in ("message", "reason", "detail", "error"):
+        if key not in params:
+            continue
+        diagnostic = _bounded_diagnostic(params[key])
+        if diagnostic is None:
+            params.pop(key)
+        else:
+            params[key] = diagnostic
+    exit_code = value.get("exit_code")
+    if isinstance(exit_code, int) and not isinstance(exit_code, bool):
+        params.setdefault("exit_code", exit_code)
+    return params
+
+
+def _error_result(
+    code: str,
+    message: str | None = None,
+    *,
+    detail: str | bytes | None = None,
+    dispatched: bool | None = None,
+    result_params: Mapping[str, Any] | None = None,
+    **params: Any,
+) -> dict[str, Any]:
+    if dispatched is not None and dispatched is not False:
+        raise ValueError("computer-use errors may only declare dispatched=false")
+    payload_params = dict(result_params) if result_params is not None else {}
+    payload_params.update(params)
+    payload = {"code": code, "params": payload_params}
+    if dispatched is False:
+        payload["dispatched"] = False
+    bounded_detail = _bounded_diagnostic(detail)
+    if bounded_detail:
+        payload["detail"] = bounded_detail
     return {
         "content": [
             {
@@ -608,8 +756,26 @@ def _error_result(code: str, message: str | None = None, **params: Any) -> dict[
                 "text": json.dumps(payload, ensure_ascii=False, sort_keys=True),
             }
         ],
+        "structuredContent": payload,
         "isError": True,
     }
+
+
+def _not_dispatched_error_result(result: Mapping[str, Any]) -> dict[str, Any]:
+    structured = result.get("structuredContent")
+    if not isinstance(structured, Mapping):
+        return _error_result("computer_use_error", dispatched=False)
+    code = structured.get("code")
+    return _error_result(
+        code if isinstance(code, str) else "computer_use_error",
+        detail=structured.get("detail"),
+        dispatched=False,
+        result_params=(
+            structured.get("params")
+            if isinstance(structured.get("params"), Mapping)
+            else None
+        ),
+    )
 
 
 def _fold_tool_result(
@@ -618,19 +784,48 @@ def _fold_tool_result(
     tool_name: str | None = None,
 ) -> dict[str, Any]:
     if "error" in message:
-        return _error_result("upstream_error")
+        upstream_error = message.get("error")
+        detail = _diagnostic_from_mapping(upstream_error)
+        params: dict[str, Any] = {}
+        if isinstance(upstream_error, Mapping):
+            rpc_code = upstream_error.get("code")
+            if isinstance(rpc_code, (int, str)) and not isinstance(rpc_code, bool):
+                params["rpc_code"] = rpc_code
+            if detail is None:
+                detail = _diagnostic_from_mapping(upstream_error.get("data"))
+        return _error_result(
+            "upstream_error",
+            detail=detail,
+            result_params=params,
+        )
     result = deepcopy(message.get("result"))
     if not isinstance(result, dict):
         return _error_result("upstream_protocol_error")
     structured = result.pop("structuredContent", None)
     if result.get("isError") is True:
         if isinstance(structured, dict) and isinstance(structured.get("code"), str):
-            structured_params = structured.get("params")
-            if isinstance(structured_params, dict):
-                return _error_result(structured["code"], **structured_params)
-            return _error_result(structured["code"])
-        return _error_result("upstream_tool_error", tool=tool_name or "")
+            code = structured["code"]
+            detail = (
+                _diagnostic_from_mapping(structured)
+                or _diagnostic_from_mapping(structured.get("params"))
+                or _diagnostic_from_content(result.get("content"))
+            )
+            return _error_result(
+                code,
+                detail=detail,
+                dispatched=(
+                    False if code in _UPSTREAM_NOT_DISPATCHED_CODES else None
+                ),
+                result_params=_driver_error_params(structured),
+            )
+        return _error_result(
+            "upstream_tool_error",
+            detail=_diagnostic_from_content(result.get("content")),
+            tool=tool_name or "",
+        )
     if structured is not None:
+        if isinstance(structured, dict):
+            result["structuredContent"] = structured
         content = result.get("content")
         if not isinstance(content, list):
             content = []
@@ -1008,25 +1203,43 @@ class ComputerUseServer:
         self,
         name: str,
         arguments: Mapping[str, Any],
+        *,
+        handle_descriptor: Any = _NO_SCRIPT_HANDLE,
     ) -> dict[str, Any]:
         session = arguments.get("session")
         if not isinstance(session, str) or not session.strip():
             return _error_result(
                 "session_required",
                 "Every computer-use call requires the current Avibe session id.",
+                dispatched=False,
             )
         session = session.strip()
         if name not in COMPUTER_USE_TOOL_NAMES:
-            return _error_result("unknown_tool", tool=name)
+            return _error_result("unknown_tool", dispatched=False, tool=name)
         if not isinstance(arguments, dict):
-            return _error_result("invalid_arguments", "Tool arguments must be an object.")
+            return _error_result(
+                "invalid_arguments",
+                "Tool arguments must be an object.",
+                dispatched=False,
+            )
+        parsed_handle = None
+        if handle_descriptor is not _NO_SCRIPT_HANDLE:
+            try:
+                parsed_handle = parse_handle_descriptor(handle_descriptor)
+                bind_handle_to_request(parsed_handle, name, arguments)
+            except ComputerScriptHandleError as exc:
+                return _error_result(
+                    exc.code,
+                    dispatched=False,
+                    result_params=exc.params,
+                )
 
         lock = self._session_locks.setdefault(session, asyncio.Lock())
         async with lock:
             try:
                 _validate_input(name, arguments)
             except ComputerServerError as exc:
-                return _error_result(exc.code, str(exc))
+                return _error_result(exc.code, str(exc), dispatched=False)
 
             for admission_attempt in range(_ADMISSION_RETRY_LIMIT + 1):
                 acquisition: LeaseAcquisition | None = None
@@ -1039,6 +1252,7 @@ class ComputerUseServer:
                         return _error_result(
                             "computer_use_unavailable",
                             "Computer use is not ready.",
+                            dispatched=False,
                             status=status.status,
                             reason=status.reason,
                         )
@@ -1080,6 +1294,40 @@ class ComputerUseServer:
                             explicit_start=name == "start_session",
                         ),
                     )
+                    if handle_descriptor is not _NO_SCRIPT_HANDLE:
+                        async def discover(
+                            discovery_tool: str,
+                            discovery_arguments: Mapping[str, Any],
+                        ) -> dict[str, Any]:
+                            forwarded_discovery = {
+                                **discovery_arguments,
+                                "session": session,
+                            }
+                            if discovery_tool not in self._upstream_accepts_session:
+                                forwarded_discovery.pop("session", None)
+                            return await self._upstream_call(
+                                upstream,
+                                discovery_tool,
+                                forwarded_discovery,
+                            )
+
+                        try:
+                            validation_error = await self._run_while_lease_owned(
+                                heartbeat,
+                                validate_handle_is_current(
+                                    parsed_handle,
+                                    name,
+                                    discover,
+                                ),
+                            )
+                        except ComputerScriptHandleError as exc:
+                            return _error_result(
+                                exc.code,
+                                dispatched=False,
+                                result_params=exc.params,
+                            )
+                        if validation_error is not None:
+                            return _not_dispatched_error_result(validation_error)
                     self._require_observation(name, arguments, session_state)
                     await self._run_while_lease_owned(
                         heartbeat,
@@ -1142,6 +1390,7 @@ class ComputerUseServer:
                     return _error_result(
                         "desktop_lease_lost",
                         "The desktop lease changed before computer use completed.",
+                        dispatched=False if pre_forward else None,
                     )
                 except _DaemonGenerationChanged:
                     if upstream is not None:
@@ -1160,6 +1409,7 @@ class ComputerUseServer:
                     return _error_result(
                         "computer_use_unavailable",
                         "Computer use changed while the request was being admitted.",
+                        dispatched=False,
                         status="unavailable",
                         reason="daemon_generation_changed",
                     )
@@ -1173,7 +1423,11 @@ class ComputerUseServer:
                             self._lease_manager.release,
                             acquisition.lease,
                         )
-                    return _error_result(exc.code, str(exc))
+                    return _error_result(
+                        exc.code,
+                        str(exc),
+                        dispatched=False if pre_forward else None,
+                    )
                 except asyncio.CancelledError:
                     if (
                         acquisition is not None
@@ -1185,7 +1439,7 @@ class ComputerUseServer:
                             acquisition.lease,
                         )
                     raise
-                except UpstreamUnavailable:
+                except UpstreamUnavailable as exc:
                     if upstream is not None:
                         await self._discard_upstream(upstream)
                     if (
@@ -1197,9 +1451,17 @@ class ComputerUseServer:
                             self._lease_manager.release,
                             acquisition.lease,
                         )
+                    detail = _bounded_diagnostic(str(exc))
+                    logger.warning(
+                        "computer-use upstream unavailable during %s: %s",
+                        name,
+                        detail or type(exc).__name__,
+                    )
                     return _error_result(
                         "upstream_unavailable",
                         "The computer-use proxy exited. Observe again before retrying.",
+                        detail=detail,
+                        dispatched=False if pre_forward else None,
                     )
                 except Exception as exc:
                     if (
@@ -1211,8 +1473,17 @@ class ComputerUseServer:
                             self._lease_manager.release,
                             acquisition.lease,
                         )
+                    detail = _bounded_diagnostic(str(exc))
+                    logger.warning(
+                        "computer-use call failed during %s (%s): %s",
+                        name,
+                        type(exc).__name__,
+                        detail or type(exc).__name__,
+                    )
                     return _error_result(
                         "computer_use_error",
+                        detail=detail,
+                        dispatched=False if pre_forward else None,
                         error_type=type(exc).__name__,
                     )
                 finally:

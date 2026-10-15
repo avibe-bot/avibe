@@ -1,4 +1,4 @@
-"""Model Hub EngineAdapter interface. FINAL CONTRACT v11 (2026-10-02).
+"""Model Hub EngineAdapter interface. FINAL CONTRACT v15 (2026-10-15).
 
 This file is the canonical adapter boundary and must remain byte-identical to
 ``core/handlers/model_hub/adapter.py``. The adapter owns one-Source operations:
@@ -139,6 +139,25 @@ class RawOutcomeKind(str, Enum):
 
 
 @dataclass(frozen=True)
+class UpstreamRejection:
+    """Closed facts of an HTTP 400 the upstream returned before any output.
+
+    The only input of the capability-evidence rules (``model-hub-capability-model.md``
+    §3.2). L1 fills it from the error envelope: raw machine tokens, and the one
+    token each recognized message names. It never carries prose, and the
+    failover decision never reads it.
+    """
+
+    status: int
+    code: str | None = None  # raw machine code, e.g. "invalid_value"
+    error_type: str | None = None  # raw error type, e.g. "invalid_request_error"
+    param: str | None = None  # raw parameter path, e.g. "reasoning.effort"
+    invalid_value: str | None = None  # "Invalid value: '<value>'"
+    unsupported_tool_type: str | None = None  # "Unsupported tool type: <type>"
+    invalid_encrypted_content_block: str | None = None  # "Invalid encrypted_content in <kind> block"
+
+
+@dataclass(frozen=True)
 class RawCallOutcome:
     """Uninterpreted per-call result. Classification is L2's job, not L1's."""
 
@@ -159,7 +178,9 @@ class RawCallOutcome:
     # tokens billed for them whether or not the call ended well.
     usage: ProtocolUsageReport | None = None
     # Only failed HTTP responses supply retry advice: ASCII, at most 128
-    # characters, unparsed. L2 owns validation and the resulting retry policy.
+    # characters, unparsed. The Retry-After header, else a usage cap's own reset
+    # from the error envelope in that header's syntax. L2 owns validation and
+    # the resulting retry policy.
     retry_after: str | None = None
     # Aware UTC receipt time of those headers, before reading the error body.
     response_received_at: datetime | None = None
@@ -173,6 +194,11 @@ class RawCallOutcome:
     # Recognized local OS failure only, never an upstream code or error prose.
     # Display-only; does not participate in classification or Source health.
     os_errno: int | None = None
+    # A 400 before output, as closed tokens for the capability-evidence rules.
+    rejection: UpstreamRejection | None = None
+    # The search tools whose own completed item a served response carried, for
+    # the positive evidence written at settlement (``vibey-hosted-tools.md`` §3.2).
+    hosted_tools: frozenset[str] = frozenset()
 
 
 class ObservationOutcome(str, Enum):
@@ -409,6 +435,10 @@ class OAuthFlowState:
     # verbatim on one bounded line, for display beside ``error_key``. Null in
     # every other state and whenever there is nothing to add to the key.
     error_detail: str | None = None
+    # Native authorization/config commit succeeded, but this attempt's runtime
+    # application failed. This does not undo Source materialization or assert
+    # the runtime's current health.
+    application_failed: bool = False
 
 
 class InvokeHandle(Protocol):

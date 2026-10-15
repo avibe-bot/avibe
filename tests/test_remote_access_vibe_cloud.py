@@ -43,6 +43,17 @@ def _resolve_backend_test_to_public_address(monkeypatch):
     monkeypatch.setattr(remote_access, "_resolve_pairing_backend_addresses", resolve)
 
 
+@pytest.fixture(autouse=True)
+def _packaged_cloudflared_is_installed(monkeypatch):
+    """Starting the connector first installs a missing packaged pin, which downloads cloudflared.
+
+    The tests here resolve their connector binary themselves, as on a machine that
+    already holds the pin; ``tests/test_tunnel_recovery.py`` covers installing it.
+    """
+
+    monkeypatch.setattr(remote_access, "_cloudflared_pin_needed", lambda config=None: False)
+
+
 def _config() -> V2Config:
     config = V2Config(
         mode="self_host",
@@ -264,8 +275,15 @@ def test_parse_session_cookie_returns_payload_for_fresh_token() -> None:
     assert payload["vibe_instance_role"] == "owner"
 
 
-def test_parse_session_cookie_rejects_legacy_roleless_payload() -> None:
+def test_parse_session_cookie_rejects_legacy_roleless_payload(monkeypatch) -> None:
     config = _config()
+
+    # A roleless cookie has no stored authorization, so only the control plane
+    # could vouch for it; here, as when it is unreachable, nothing does.
+    def control_plane_unreachable(*_args, **_kwargs):
+        raise RuntimeError("resource_acl_device_unavailable")
+
+    monkeypatch.setattr(remote_access, "_device_json_request", control_plane_unreachable)
     issued_at = int(time.time())
     payload = {
         "email": "alex@example.com",

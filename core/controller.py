@@ -51,6 +51,7 @@ from core.web_ui_watchdog import watch_web_ui
 from core.vibe_agents import VibeAgent, VibeAgentStore
 from core.blocking import run_blocking
 from vibe.i18n import get_supported_languages, t as i18n_t
+from core.loop_watchdog import EventLoopWatchdog
 from vibe.runtime import current_process_owns_service_instance, mark_service_instance_started
 
 if TYPE_CHECKING:
@@ -263,6 +264,7 @@ class Controller:
         # Keep the driver proxy lazy so an enabled desktop toggle does not
         # create a driver process until an active Turn requests it.
         self.computer_use_server = None
+        self.computer_script_sessions = None
         self.runtime_ownership = RuntimeOwnershipProvider(
             self.session_turns._sqlite_engine()
         )
@@ -416,10 +418,25 @@ class Controller:
             user_context=instance_owner_context(),
         )
 
-    async def _model_hub_catalog_changed(self, backend: str) -> None:
-        """Follow a committed Model Hub catalog change for one backend."""
+    async def _start_vibey_without_a_model(self) -> None:
+        """Start a Vibey with nothing to run on, once a models.dev copy can describe a starting model.
 
-        from config.v2_config import V2Config
+        Only while the built-in Agent has no model: a person who emptied Vibey's list keeps
+        the Agent's model, so this never replaces a choice; it only makes an unrunnable
+        Agent runnable, as ``_reconcile_vibey_agent_model`` does.
+        """
+
+        vibey = self.vibe_agent_store.get_builtin_default_agent_for_backend("vibey", enabled_only=False)
+        if vibey is None or str(vibey.model or "").strip():
+            return
+        await self.model_hub_service.start_vibey_without_models()
+
+    async def _model_hub_catalog_changed(self, backend: str) -> None:
+        """Follow a committed Model Hub catalog change for one backend.
+
+        Model Hub's current config is read through ``model_hub_runtime``; the app
+        config (``self.config``) carries none of it, so nothing here copies it there.
+        """
 
         if backend == "vibey":
             try:
@@ -427,11 +444,6 @@ class Controller:
             except Exception:
                 # The catalog change stands; the next start reconciles again.
                 logger.warning("Vibey Agent model reconciliation failed", exc_info=True)
-        try:
-            latest = V2Config.load()
-        except FileNotFoundError:
-            return
-        self.config.model_hub = latest.model_hub
         # Each runtime moves to the committed catalog at its next turn;
         # nothing restarts or drains. A disabled backend has nothing to adopt.
         agent = getattr(getattr(self, "agent_service", None), "agents", {}).get(backend)
@@ -440,7 +452,12 @@ class Controller:
             await adopt_catalog()
 
     async def _seed_vibey_model_supply(self) -> None:
-        """Seed Vibey's Model Hub entry from existing Sources, then reconcile its built-in Agent's model."""
+        """Seed Vibey's Model Hub entry from existing Sources, then reconcile its built-in Agent's model.
+
+        A Vibey an earlier seed left with nothing to run on (an earlier build's empty seed,
+        or one that ran without a models.dev copy) starts here too, not only on the next
+        snapshot reconcile.
+        """
 
         model_hub_service = getattr(self, "model_hub_service", None)
         if model_hub_service is None:
@@ -449,6 +466,10 @@ class Controller:
             await model_hub_service.seed_vibey_supply()
         except Exception:
             logger.warning("Vibey starting model supply failed", exc_info=True)
+        try:
+            await self._start_vibey_without_a_model()
+        except Exception:
+            logger.warning("Vibey's starting model failed at startup", exc_info=True)
         try:
             self._reconcile_vibey_agent_model()
         except Exception:
@@ -1664,6 +1685,7 @@ class Controller:
         from core.services import sessions as workbench_sessions_service
         from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
         from storage.db import create_sqlite_engine
+        from storage.workbench_sessions_service import MAIN_SESSION_ID
 
         if (
             not isinstance(raw_session_id, str)
@@ -1671,7 +1693,10 @@ class Controller:
             or raw_session_id != raw_session_id.strip()
         ):
             raise ValueError("invalid Workbench session ID")
-        if raw_session_id == WORKSPACE_NOTICE_SESSION_ID:
+        if raw_session_id in {
+            WORKSPACE_NOTICE_SESSION_ID,
+            MAIN_SESSION_ID,
+        }:
             raise workbench_sessions_service.ReservedSessionError(raw_session_id)
 
         async def retire_computer_use_session() -> None:
@@ -1922,6 +1947,7 @@ class Controller:
         terminal_error: Optional[str] = None,
         delivery: Any = None,
         citations: Optional[CitationBundle] = None,
+        hosted: Optional[dict] = None,
     ):
         """Backward-compatible entrypoint; delegated to message dispatcher."""
         result = await self.message_dispatcher.emit_agent_message(
@@ -1942,6 +1968,7 @@ class Controller:
             # signature of every stand-in. The citation sidecar rides the same way.
             **({"delivery": delivery} if delivery is not None else {}),
             **({"citations": citations} if citations else {}),
+            **({"hosted": hosted} if hosted else {}),
         )
         manager = getattr(self, "session_turns", None)
         complete = getattr(manager, "on_terminal_delivery_complete", None)
@@ -2148,6 +2175,12 @@ class Controller:
         try:
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
+            # This thread runs the loop: the one thread an activation commit may hold
+            # the runtime boundary across its I/O on.
+            self.runtime_activation.bind_loop_thread()
+            # Names whatever blocks this loop while it blocks; see core/loop_watchdog.py.
+            self._loop_watchdog = EventLoopWatchdog(self._loop)
+            self._loop_watchdog.start()
             self._schedule_model_hub_snapshot_reconcile()
             self.show_git_checkpoint_service.start()
             # Internal control-IPC ASGI server for the Web UI / future
@@ -2199,6 +2232,10 @@ class Controller:
             except Exception as exc:
                 logger.debug("Internal control IPC cleanup skipped: %s", exc)
             self._internal_server_task = None
+            loop_watchdog = getattr(self, "_loop_watchdog", None)
+            if loop_watchdog is not None:
+                loop_watchdog.stop()
+                self._loop_watchdog = None
             if self._loop is not None:
                 try:
                     self._loop.stop()
@@ -2535,6 +2572,10 @@ class Controller:
             self._internal_server_task = None
 
         async def _close_computer_use_server() -> None:
+            script_sessions = getattr(self, "computer_script_sessions", None)
+            self.computer_script_sessions = None
+            if script_sessions is not None:
+                script_sessions.close_all()
             server = getattr(self, "computer_use_server", None)
             self.computer_use_server = None
             if server is not None:
@@ -2574,6 +2615,12 @@ class Controller:
         model_hub_turn_gateway = getattr(self, "model_hub_turn_gateway", None)
         if model_hub_turn_gateway is not None:
             _stop_loop_coroutine(model_hub_turn_gateway.close(), "Model Hub turn gateway")
+        # Turns settled up to here queued their mode stamps on the stamp writer.
+        # Wait at most 2 s, then abandon what is left; the writer is a daemon
+        # thread, so even a stamp blocked on a locked database cannot hold exit.
+        from modules.agents.model_hub import drain_turn_mode_stamps
+
+        drain_turn_mode_stamps(timeout=2.0)
         show_git_checkpoint_service = getattr(self, "show_git_checkpoint_service", None)
         if show_git_checkpoint_service is not None:
             show_git_checkpoint_service.stop()
@@ -2704,6 +2751,13 @@ class Controller:
                 except Exception:
                     logger.warning(
                         "Model Hub models.dev limit backfill failed after snapshot refresh",
+                        exc_info=True,
+                    )
+                try:
+                    await self._start_vibey_without_a_model()
+                except Exception:
+                    logger.warning(
+                        "Vibey's starting model failed after snapshot refresh",
                         exc_info=True,
                     )
             finally:
@@ -2953,6 +3007,13 @@ class Controller:
         except Exception:
             logger.warning(
                 "Model Hub built-in reconciliation failed during startup",
+                exc_info=True,
+            )
+        try:
+            asyncio.run(self.model_hub_service.reconcile_source_reasoning_tiers())
+        except Exception:
+            logger.warning(
+                "Model Hub could not derive saved Source tiers again during startup",
                 exc_info=True,
             )
         self.model_hub_turn_gateway = ModelHubTurnGateway(

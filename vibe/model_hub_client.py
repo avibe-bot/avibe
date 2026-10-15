@@ -17,6 +17,7 @@ _TRANSPORT_ERRORS = (
     OSError,
     internal_client.InternalServerUnavailable,
 )
+# How long the UI process waits for any Model Hub RPC; the Web UI's request deadline stays beyond it.
 MODEL_HUB_RPC_TIMEOUT_SECONDS = 300.0
 _REORDER_ORDER_UNSET = object()
 
@@ -293,6 +294,18 @@ class ModelHubRemoteService:
 
     async def quota_summary(self, *, force: bool = False) -> dict:
         return await _rpc("quota_summary", {"force": force})
+
+    async def hosted_tools_status(self) -> dict:
+        return await _rpc("hosted_tools_status", {})
+
+    async def set_hosted_tool(self, tool: str, setting: object) -> dict:
+        return await _rpc("set_hosted_tool", {"tool": tool, "setting": setting})
+
+    async def clear_hosted_refusals(self, tool: str, target: object) -> dict:
+        return await _rpc("clear_hosted_refusals", {"tool": tool, "target": target})
+
+    async def clear_source_evidence(self, source_id: str, target: object) -> dict:
+        return await _rpc("clear_source_evidence", {"source_id": source_id, "target": target})
 
     def agent_chain(self, backend: str, model_id: str) -> dict:
         return _rpc_sync(

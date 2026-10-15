@@ -108,7 +108,7 @@ def _guard_native_auth_boundaries(monkeypatch, _isolate_vibe_remote_home):
 
 
 def test_selected_cli_health_refusal_recovers_through_setup_http(monkeypatch, tmp_path):
-    """AUTH-SETUP-131: deterministic command boundary -> real HTTP setup projection.
+    """AUTH-SETUP-133: deterministic command boundary -> real HTTP setup projection.
 
     UI Wizard/final-admission consumption is covered separately; this does not
     claim the partial AUTH-SETUP-123 real-browser-to-real-API journey.
@@ -1458,7 +1458,6 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
                 side_effect=clear_oauth,
             ),
             patch("vibe.api.restart_backend", side_effect=restart_backend),
-            patch("vibe.api._read_claude_cli_oauth_signed_in", return_value=None),
         ):
             config = V2Config(
                 mode="self_host",
@@ -1472,13 +1471,16 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
             save_direct_auth_config(config)
 
             await runner.run(
-                ScenarioStep("confirm_oauth_is_active", capture_oauth_state),
+                ScenarioStep("confirm_native_material_is_observed", capture_oauth_state),
                 ScenarioStep("save_auth_token", save_auth_token),
                 ScenarioStep("launch_next_turn", capture_next_turn_env),
             )
 
-        self.assertEqual(harness.before_switch["active_auth_mode"], "oauth")
-        self.assertEqual(harness.save_result["active_auth_mode"], "api_key")
+        self.assertEqual(harness.before_switch["oauth_store_state"], "present")
+        self.assertEqual(harness.before_switch["active_auth_mode"], "none")
+        self.assertTrue(harness.before_switch["auth_mode_uncertain"])
+        self.assertEqual(harness.save_result["auth_mode"], "api_key")
+        self.assertTrue(harness.save_result["has_api_key"])
         self.assertEqual(harness.save_result["credential_type"], "auth_token")
         self.assertEqual(
             harness.save_result["settings_env_key_var"],
@@ -1506,7 +1508,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         )
         ScenarioExpect.step_history(
             runner,
-            ["confirm_oauth_is_active", "save_auth_token", "launch_next_turn"],
+            ["confirm_native_material_is_observed", "save_auth_token", "launch_next_turn"],
         )
 
     async def test_claude_oauth_to_api_key_probe_drops_stale_auth_token(self):
@@ -1599,7 +1601,6 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
                 side_effect=clear_oauth,
             ),
             patch("vibe.api.restart_backend", side_effect=restart_backend),
-            patch("vibe.api._read_claude_cli_oauth_signed_in", return_value=None),
             patch("core.agent_auth_service.ClaudeSDKClient", FakeClaudeSDKClient),
         ):
             config = V2Config(
@@ -1615,14 +1616,17 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
             save_direct_auth_config(config)
 
             await runner.run(
-                ScenarioStep("confirm_oauth_is_active", capture_oauth_state),
+                ScenarioStep("confirm_native_material_is_observed", capture_oauth_state),
                 ScenarioStep("save_api_key", save_api_key),
                 ScenarioStep("test_connection", run_connection_probe),
             )
             harness.saved_settings_env = read_claude_settings_env()
 
-        self.assertEqual(harness.before_switch["active_auth_mode"], "oauth")
-        self.assertEqual(harness.save_result["active_auth_mode"], "api_key")
+        self.assertEqual(harness.before_switch["oauth_store_state"], "present")
+        self.assertEqual(harness.before_switch["active_auth_mode"], "none")
+        self.assertTrue(harness.before_switch["auth_mode_uncertain"])
+        self.assertEqual(harness.save_result["auth_mode"], "api_key")
+        self.assertTrue(harness.save_result["has_api_key"])
         self.assertEqual(harness.save_result["credential_type"], "api_key")
         self.assertEqual(
             harness.save_result["settings_env_key_var"],
@@ -1660,7 +1664,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         )
         ScenarioExpect.step_history(
             runner,
-            ["confirm_oauth_is_active", "save_api_key", "test_connection"],
+            ["confirm_native_material_is_observed", "save_api_key", "test_connection"],
         )
 
     async def test_codex_connection_probe_reuses_persistent_app_server(self):
@@ -2126,7 +2130,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(source.id, flow["source_id"])
         self.assertEqual(
             (source.vendor, source.supply_channel, source.account_label),
-            ("anthropic", "native_cli", "owner@example.com"),
+            ("anthropic", "native_cli", None),
         )
         self.assertEqual(source.state.status, "standby")
 
@@ -2134,6 +2138,57 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(completed["flow"]["state"], "success")
         self.assertEqual(completed["source"]["id"], source.id)
+        receipt = harness.agent_auth.get_web_flow_status(flow_id)
+        self.assertTrue(receipt["authorization_completed"])
+        self.assertTrue(receipt["source_status"]["signed_in"])
+        harness.agent_auth._verify_login.assert_awaited_once()
+        harness.auth_status_reader.assert_not_called()
+
+    async def test_claude_receipt_separates_verification_commit_and_application(self):
+        """Scenario: AUTH-SETUP-910 — one flow, not inventory, owns each fact."""
+        for case in ("apply_failure", "commit_failure", "non_oauth", "unknown_method"):
+            with self.subTest(case=case):
+                state_dir = tempfile.TemporaryDirectory()
+                self.addCleanup(state_dir.cleanup)
+                harness = CustodiedNativeOAuthScenarioHarness(Path(state_dir.name))
+                if case == "apply_failure":
+                    harness.agent_auth._refresh_backend_runtime.side_effect = RuntimeError("fixture apply failed")
+                elif case == "commit_failure":
+                    harness.agent_auth._persist_backend_auth_mode = AsyncMock(side_effect=OSError("fixture commit failed"))
+                else:
+                    detail = {"loggedIn": True}
+                    if case == "non_oauth":
+                        detail["authMethod"] = "api-key"
+                    harness.agent_auth._verify_login.return_value = (True, json.dumps(detail))
+                started = await harness.service.oauth_start({"vendor": "anthropic", "channel": "native_cli"})
+                flow_id = started["flow"]["flow_id"]
+                await harness.service.oauth_submit({"flow_id": flow_id, "value": "auth-code#oauth-state"})
+                await harness.login_settled(flow_id)
+
+                receipt = harness.agent_auth.get_web_flow_status(flow_id)
+                self.assertEqual(receipt["authorization_completed"], case != "commit_failure")
+                completed = await harness.service.oauth_status(flow_id)
+                if case == "commit_failure":
+                    self.assertEqual(completed["flow"]["state"], "failed")
+                    self.assertEqual(V2Config.load().model_hub.sources, [])
+                elif case == "apply_failure":
+                    self.assertEqual(completed["flow"]["state"], "success")
+                    self.assertTrue(completed["flow"]["application_failed"])
+                    self.assertEqual(completed["source"]["state"]["status"], "standby")
+                    (source,) = V2Config.load().model_hub.sources
+                    # Runtime application is retried explicitly, not by polling
+                    # this receipt and not by creating another authorization.
+                    harness.agent_auth._refresh_backend_runtime.side_effect = None
+                    await harness.agent_auth._invoke_post_web_success_hook("claude", persist=False)
+                    replayed = await harness.service.oauth_status(flow_id)
+                    self.assertEqual(replayed["source"]["id"], source.id)
+                    self.assertTrue(replayed["flow"]["application_failed"])
+                    self.assertEqual(len(V2Config.load().model_hub.sources), 1)
+                else:
+                    self.assertFalse(receipt["source_status"]["signed_in"])
+                    self.assertEqual(completed["source"]["state"]["status"], "needs_action")
+                harness.agent_auth._verify_login.assert_awaited_once()
+                harness.auth_status_reader.assert_not_called()
 
     async def test_hub_reauth_requires_acknowledgement_and_reaches_consistent_terminal(self):
         """Scenario: AUTH-SETUP-109.
@@ -4360,8 +4415,6 @@ def test_instance_manager_backend_credentials_round_trip(monkeypatch, tmp_path, 
         _recover_interrupted_claude_oauth_settings_backup=Mock(),
     ))
     monkeypatch.setattr(api, "_clear_claude_oauth_credentials_after_api_key_save", lambda service, **kw: {"ok": True})
-    monkeypatch.setattr(api, "_read_claude_cli_oauth_signed_in", lambda *a, **kw: False)
-    monkeypatch.setattr(claude_config, "read_claude_oauth_signed_in", lambda: False)
     refreshed = []
     monkeypatch.setattr(api, "restart_backend", lambda name, **kw: refreshed.append(name) or {"ok": True})
     response = request("POST", "/api/backend/claude/auth", payload={
@@ -4646,6 +4699,83 @@ def test_explicit_opencode_model_recovery_preserves_agent_and_completes(monkeypa
         store.close()
 
 
+def test_a_new_install_starts_on_vibey_and_setup_completes_without_choosing_a_default(monkeypatch, tmp_path):
+    """AUTH-SETUP-132: first Agent read -> Vibey default -> runnable route -> completion keeps Vibey.
+
+    A fresh install with the native backends enabled records the built-in Vibey Agent as its
+    default on the first read; setup never writes a default for it. Once Vibey can run, setup
+    completes and Vibey is still the confirmed default. Every step is the HTTP route setup
+    calls; the browser's rule of keeping a recorded default that can run is the supporting test.
+    """
+    from core.vibe_agents import VibeAgentStore
+    from tests.test_model_hub_api import _service
+
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+    V2Config.default().save()
+    assert V2Config.load().agents.opencode.enabled and V2Config.load().agents.claude.enabled
+    service, store, _adapter = _service(tmp_path / "hub")
+    agents = VibeAgentStore()
+    service.named_agents_override = lambda backend: [
+        (agent.name, agent.model)
+        for agent in agents.list_agents(include_disabled=False)
+        if agent.backend == backend
+    ]
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    source = ModelHubSourceConfig(
+        id="src_vibey132",
+        kind="api_key",
+        vendor="custom",
+        display_name="Mock Lab",
+        protocol="openai_chat",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[ModelHubModelConfig(id="mock-large", provenance="discovered")],
+        credential_ref="cred_vibey132",
+    )
+    store.config.sources = [source]
+    store.config.agents["vibey"].sources.order = [source.id]
+    client = app.test_client()
+    headers = csrf_headers(client)
+    try:
+        listed = client.get("/api/agents").get_json()
+        vibey = next(row for row in listed["agents"] if row["backend"] == "vibey")
+        assert listed["default_agent_name"] == vibey["name"]
+
+        candidate = next(
+            row for row in client.get("/api/models/agents/vibey/models/candidates").get_json()["candidates"]["providers"]
+            if row["id"] == "mock-large"
+        )
+        added = {
+            "id": candidate["id"], "display_name": candidate["display_name"], "origin": candidate["origin"],
+            "models_dev_id": None, "context_window": None, "max_output_tokens": None,
+            "input_modalities": [], "output_modalities": [], "supports_tools": None,
+            "supports_reasoning": None, "reasoning_efforts": list(candidate["reasoning_efforts"]),
+            "locked": False, "routeable": True,
+        }
+        suppliers = [{"source_id": row["source_id"], "model_id": row["model_id"]} for row in candidate["suppliers"]]
+        written = client.put(
+            "/api/models/agents/vibey/models",
+            json={"baseline": [], "models": [added], "expected_suppliers": {"mock-large": suppliers}},
+            headers=headers,
+        )
+        assert written.status_code == 200, written.get_json()
+        named = client.patch(f"/api/agents/{vibey['name']}", json={"model": "mock-large"}, headers=headers)
+        assert named.status_code == 200, named.get_json()
+        supply = next(row for row in client.get("/api/models/agents").get_json()["agents"] if row["backend"] == "vibey")
+        route = next(row for row in supply["named_agents"] if row["name"] == vibey["name"])
+        assert route["supply_status"] in {"ok", "degraded"}
+
+        # Setup writes no default: completion keeps the one the new install recorded.
+        completed = client.post("/api/config", json={"setup_completed": True}, headers=headers)
+        assert completed.status_code == 200, completed.get_json()
+        assert V2Config.load().setup_completed
+        assert client.get("/api/agents").get_json()["default_agent_name"] == vibey["name"]
+        assert agents.get_default_agent().name == vibey["name"]
+    finally:
+        agents.close()
+
+
 def test_builtin_vibey_model_pick_completes_setup_without_a_cli(monkeypatch, tmp_path):
     """AUTH-SETUP-129: Vibey candidates -> catalog write -> Agent model -> runnable route -> completion.
 
@@ -4739,6 +4869,75 @@ def test_builtin_vibey_model_pick_completes_setup_without_a_cli(monkeypatch, tmp
         # With no CLI assistant able to run, setup enters on the built-in Agent.
         chosen = client.post("/api/agents/default", json={"name": vibey["name"]}, headers=headers)
         assert chosen.status_code == 200, chosen.get_json()
+        completed = client.post("/api/config", json={"setup_completed": True}, headers=headers)
+        assert completed.status_code == 200, completed.get_json()
+        assert V2Config.load().setup_completed
+        assert agents.get_default_agent().name == vibey["name"]
+    finally:
+        agents.close()
+
+
+def test_vibey_starts_on_a_sources_tool_capable_model_and_setup_completes_without_a_pick(monkeypatch, tmp_path):
+    """AUTH-SETUP-131: add source -> seed -> catalog change -> Agent model -> runnable route -> completion.
+
+    The setup's first source lists no model a built-in Agent runs, yet the built-in Vibey
+    Agent can run as soon as it is placed: the seed starts Vibey on the first listed model
+    models.dev describes as taking tool calls and answering in text, announces the catalog
+    change, and the controller gives the Agent that model. Setup then completes on the
+    Vibey default with no pick. Every step is the HTTP route setup calls, and the Hub
+    service is wired to the real Agent store and catalog-change handler as the controller
+    wires them.
+    """
+    from core.controller import Controller
+    from core.vibe_agents import VibeAgentStore
+    from tests.test_model_hub_api import _service
+
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+    V2Config.default().save()
+    service, store, _adapter = _service(tmp_path / "hub")
+    # The fake upstream lists claude-opus-4-6 then claude-sonnet-4-6; models.dev knows only the second.
+    service.models_dev_catalog = lambda: {"anthropic": {"name": "Anthropic", "models": {
+        "claude-sonnet-4-6": {"name": "Claude Sonnet 4.6", "tool_call": True,
+                              "modalities": {"input": ["text"], "output": ["text"]}},
+    }}}
+    agents = VibeAgentStore()
+    controller = Controller.__new__(Controller)
+    controller.config = V2Config.load()
+    controller.vibe_agent_store = agents
+    controller.model_hub_service = service
+    service.builtin_agent_models_override = controller._builtin_agent_models
+    service.backend_catalog_changed = controller._model_hub_catalog_changed
+    service.named_agents_override = lambda backend: [
+        (agent.name, agent.model)
+        for agent in agents.list_agents(include_disabled=False)
+        if agent.backend == backend
+    ]
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    headers = csrf_headers(client)
+    try:
+        vibey = next(row for row in client.get("/api/agents").get_json()["agents"] if row["backend"] == "vibey")
+        assert vibey["model"] is None
+        # A new install records the built-in Agent as its default.
+        recorded = client.post("/api/agents/default", json={"name": vibey["name"]}, headers=headers)
+        assert recorded.status_code == 200, recorded.get_json()
+
+        created = client.post(
+            "/api/models/sources",
+            json={"kind": "api_key", "vendor": "anthropic", "key": "sk-test-auth-setup-anthropic"},
+            headers=headers,
+        )
+        assert created.status_code == 201, created.get_json()
+
+        # No pick: the seed chose the first describable tool-capable model and the Agent took it.
+        assert agents.require(vibey["name"]).model == "claude-sonnet-4-6"
+        supply = next(row for row in client.get("/api/models/agents").get_json()["agents"] if row["backend"] == "vibey")
+        assert [row["id"] for row in supply["catalog_models"]] == ["claude-sonnet-4-6"]
+        route = next(row for row in supply["named_agents"] if row["name"] == vibey["name"])
+        assert route["effective_model_id"] == "claude-sonnet-4-6"
+        assert route["supply_status"] in {"ok", "degraded"}
+        assert route["route_reason"] != "route_unconfigured"
+
         completed = client.post("/api/config", json={"setup_completed": True}, headers=headers)
         assert completed.status_code == 200, completed.get_json()
         assert V2Config.load().setup_completed

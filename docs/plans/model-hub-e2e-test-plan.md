@@ -66,12 +66,12 @@ Out of scope (documented, not dropped silently):
 ### D. Per-turn routing, fallback, capability behavior (C41–C50, C74–C81)
 | ID | Steps | Expect | Status |
 |---|---|---|---|
-| D1 | add api_key source first, subscription-class source second | **current**: appended at tail (key burns first). Baseline assert-current; expected value flips with decision D-1 | baseline |
+| D1 | add api_key source first, subscription-class source second | the subscription is placed ahead of the key (decision D-1, #2156); a contract test owns it, since adding a subscription hermetically is impossible (a takeover validates its grant with the provider) | contract |
 | D2 | turn with hop0 healthy | served; provenance records hop; usage metered | assert |
 | D3 | hop0 → 429 before first output | same-turn failover to hop1; `switch` event; hop0 initial local cooldown 60–72s; chat copy unchanged (silent) | assert |
 | D4 | hop0 → quota (`insufficient_quota`) | fallback, cooldown 300s | assert |
 | D5 | hop0 → 401 (api_key, non-refreshable) | `credential_revoked` needs_action; UI shows repair action; no mid-turn refresh attempt | assert |
-| D6 | hop0 → 5xx | source backoff with positive bounded jitter; later valid Retry-After survives the managed engine and takes precedence | assert |
+| D6 | hop0 → 5xx | source backoff with positive bounded jitter; later valid Retry-After survives the managed engine and takes precedence | xfail: the engine never forwards an upstream error's headers (its status errors carry none, with or without `passthrough-headers`), so upstream advice never arrives |
 | D7 | stream interrupt after first output | terminal frame injected per protocol; **no replay/failover**; source still settles; next turn resolves hop1 (takeover pill visible) | assert |
 | D8 | cooldown `retry_at` elapses | hop0 becomes eligible; only recognized output or valid empty completion clears its state and emits `recover` | unit/loopback covered; local Incus outstanding |
 | D9 | all temporary hops keep failing | one closed recovery-exhausted result (Codex 400, Claude/OpenCode 424); localized final copy and original upstream provenance | gateway/scenario covered; local Incus outstanding |
@@ -160,7 +160,7 @@ Unit/contract suites already cover: config validation, guard structure, classifi
 
 ## 5. Owner decision ledger
 
-- **D-1 subscription-first placement.** Restore "subscription before API key" at placement time (surgical change in `_apply_source_placement`, reuse dead `recommended_source_order`), incl. one-time re-sort of existing configs? Current shipped contract says append-at-tail. Affects D1.
+- **D-1 subscription-first placement (decided, #2156).** A subscription is placed before API keys at placement time. Affects D1.
 - **D-2 `count_tokens` 404.** Serve it (proxy to upstream tokenizers or estimate) or document Claude Code context-estimation degradation in hub mode? Affects D11.
 - **D-3 missing `modelHub.*` browser i18n keys + absent Python-bundle codes.** Fix now (makes B11 pass) or baseline as expected-fail for this round?
 - **D-4 Retry-After honoring (approved 2026-09-09).** Use the later of
@@ -257,7 +257,9 @@ lane-to-lane.
 ### Suite conventions
 
 - pytest: files `tests/e2e/test_model_hub_*.py`, marker `e2e_model_hub`,
-  NOT part of default CI in these PRs. Scenario IDs from §3 (A1…H3) appear in
+  not part of pull-request CI. `.github/workflows/model-hub-e2e.yml` runs it
+  nightly and on demand, and a stable release needs a green run at its SHA
+  (`docs/release.md`). Scenario IDs from §3 (A1…H3) appear in
   test names or docstrings.
 - Playwright: lives in `ui/e2e/`, config `ui/playwright.config.ts`, dependency
   added explicitly to `ui/package.json` devDependencies, scripts

@@ -1625,3 +1625,88 @@ def test_im_agent_output_ranks_the_row_without_publishing(isolated_state, monkey
             .one()
         )
     assert row["last_active_at"] == RANK_NOW
+
+
+def _hosted_card(image_path: str) -> dict:
+    return {
+        "version": 1,
+        "call_id": "ig_01",
+        "tool": "image_generate",
+        "mode": "direct",
+        "status": "completed",
+        "subject": "a laptop at night",
+        "sources": [],
+        "images": [{"path": image_path, "mime": "image/png", "width": 2, "height": 1}],
+    }
+
+
+def test_a_hosted_card_rides_on_its_toolcall_row_and_its_image_joins_the_answer(isolated_state, tmp_path):
+    """The Web card reads ``content.hosted``; its image shares the answer's media URL.
+
+    A toolcall row is trace data and never passes the transcript's media rewrite,
+    so without its own registration the card could not show the image at all,
+    and the answer that links the same file could not be matched to it.
+    """
+    image = tmp_path / "image-3f2a.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\nimage")
+    engine = create_sqlite_engine()
+    now = "2026-10-14T00:00:00Z"
+    with engine.begin() as conn:
+        scope_id = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_hosted", now=now)
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_hosted",
+                scope_id=scope_id,
+                agent_name="vibey",
+                agent_backend="vibey",
+                agent_variant="default",
+                session_anchor="anchor_ses_hosted",
+                native_session_id="",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+    ctx = MessageContext(
+        user_id="workbench",
+        channel_id="ses_hosted",
+        platform="avibe",
+        platform_specific={"agent_session_id": "ses_hosted"},
+    )
+
+    persist_agent_message(
+        ctx, "toolcall", "🖼 Image generation · 1 image", hosted={**_hosted_card(str(image)), "response_id": "msg_response"}
+    )
+    persist_agent_message(ctx, "result", f"Done.\n\n![a laptop]({image.as_uri()})")
+
+    with engine.connect() as conn:
+        event = conn.execute(select(agent_events).where(agent_events.c.session_id == "ses_hosted")).mappings().one()
+        answer = conn.execute(select(messages).where(messages.c.session_id == "ses_hosted")).mappings().one()
+    card = json.loads(event["content_json"])["hosted"]
+    [stored] = card["images"]
+    assert {key: card[key] for key in ("call_id", "tool", "mode", "status", "subject")} == {
+        "call_id": "ig_01", "tool": "image_generate", "mode": "direct", "status": "completed",
+        "subject": "a laptop at night",
+    }
+    assert stored["path"] == str(image) and stored["bytes"] == image.stat().st_size
+    token = stored["media_url"].split("?")[0]
+    assert token.startswith("/api/media/")
+    assert token in answer["content_text"]
+    assert event["content_text"] == "🖼 Image generation · 1 image"
+    # Ordered before the response that carried it (``agent_activity_service``).
+    assert json.loads(event["metadata_json"])["precedes_message_id"] == "msg_response"
+
+
+def test_an_im_hosted_card_keeps_its_file_paths(isolated_state, tmp_path):
+    """Only the Workbench serves media URLs; an IM row stores the card as given."""
+    ctx = _slack_ctx()
+    mirror_inbound(ctx, "draw something")
+    card = _hosted_card(str(tmp_path / "image.png"))
+    persist_agent_message(ctx, "toolcall", "🖼 Image generation", hosted=card)
+
+    engine = create_sqlite_engine()
+    with engine.connect() as conn:
+        event = conn.execute(select(agent_events)).mappings().one()
+    assert json.loads(event["content_json"])["hosted"] == card

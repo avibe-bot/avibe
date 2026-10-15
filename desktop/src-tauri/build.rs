@@ -13,6 +13,8 @@ fn main() {
         "open_install_docs",
         "pet_ready",
         "pet_set_expanded",
+        "pet_hit_regions",
+        "pet_set_dismissed",
         "pet_bind",
         "pet_unbind",
         "pet_open",

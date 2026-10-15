@@ -13,6 +13,12 @@ the same response (C-3 [`loop-control.md`](loop-control.md) §2). When it is abs
 is exclusive. `read` and `bash` are concurrent; `write` and `edit` are exclusive. Pi instead runs a response's calls at
 the same time unless a tool opts out, and serializes `write` and `edit` only per file path, which `bash` bypasses.
 
+**Hosted tools** (Avibe, [`../vibey-hosted-tools.md`](../vibey-hosted-tools.md)) are not coding tools. Each enabled
+one (`web_search`, `x_search`) has its canonical spec in `core/agent_core/tools/hosted.py` and leads the Turn's tools.
+On a hop that runs it natively the provider runs the call. Anywhere else the model calls the same-named function, and
+its `execute` asks the gateway's executor bound for the Turn. The result's text is the record as `record_text` renders
+it, and `ToolResult.hosted` carries the record and execution onto `ToolResultMessage.hosted`.
+
 ## 1. Constants
 
 | Name | Value |
@@ -311,6 +317,10 @@ at most once and recovery can always decide whether it did; its identity is reco
 absolute deadline that survives handover and restarts; output on disk is bounded; files are kept until the call is
 durably settled; handover creates at most one Watch per job.
 
+The host starts the wrapper from a copy, under `<state>/agent_core/jobs/wrapper/`, of the wrapper and the files it
+loads beside itself, as the host read them when it was imported. An upgrade that installs its files before the service
+restarts therefore never puts a newer wrapper, whose argv may differ, under the running host.
+
 On Windows the wrapper's tree is a job object it creates and joins before it can run the command, named after the
 job and ended when the wrapper's handle to it closes. Every process the command starts is in it and cannot leave it.
 `kill` terminates the job object; a kill of the wrapper alone (`TerminateProcess`, which nothing can catch) also ends
@@ -354,3 +364,100 @@ stays bounded on every input whatever the script, and no value can add a line, f
 The rows hold only what the model read, so a field counts as unchanged only when its display equals what the model
 last read and is not cut: escaping is injective, but a cut display can look the same after its value changed, so a
 cut field is sent on every input rather than taken for unchanged.
+
+## 9. Project instructions (Avibe)
+
+The Agent reads the user's instruction files into its system prompt, as Pi does (`core/resource-loader.ts`
+`loadProjectContextFiles` and `core/system-prompt.ts` `renderProjectContext`). The native CLIs load their own, and
+Avibe's shared prompt tells every agent that `AGENTS.md` is what later Agents load first.
+
+**Which files, in order.**
+1. The global file: `AGENTS.md` in the Avibe home, `~/.avibe/AGENTS.md` by default or under `AVIBE_HOME`
+   (`config.paths.get_global_instructions_path`). It is one known path, so a user who keeps global principles
+   elsewhere can sync them to it.
+2. Each directory from the filesystem root down to the Session's cwd. Each contributes the first of these that is a
+   readable file: `AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, `CLAUDE.MD`. A candidate that is not a
+   file, or cannot be read, is skipped silently, and the next one is tried.
+
+How the files are read:
+- Symlinks are followed. A file reached twice (the same real path) is loaded once: as the global file if it is that
+  one, else at the directory nearest the cwd. The first readable candidate is its directory's file even when blank.
+- A linked git worktree nested inside its main repository has two copies of the same file: the main repository's is an
+  ancestor of the cwd, and the worktree root holds its own. Loading both would apply that repository's instructions
+  twice, so the main repository's file with the same name as the worktree root's is left out.
+  - This is Pi's rule. Finding the main repository reads the worktree's `.git` file and the `commondir` it points to.
+  - What is left out is a place: the main checkout's directory and the file's name. If both checkouts link one shared
+    file, the worktree's copy still loads.
+  - Instruction files themselves are read only from the ancestor chain and the global path.
+- A blank file is left out.
+- Each file is read as UTF-8, with a leading byte-order mark dropped and undecodable bytes replaced.
+- Each file is read only as far as the limit below, plus one character's bytes. Every Turn reads the files, so a
+  mistaken huge one costs no more than a full section.
+- A file's size:
+  - read whole, it is the size of its text as read, each undecodable byte counting as its three-byte replacement
+    character;
+  - otherwise, it is the size the file system reports.
+
+  Either way, the limit holds for what the section carries.
+- Of `.git` and `commondir`, only the one path line Git writes is read (8 KiB at most).
+
+**Where they enter.** A `<project_context>` section of the system prompt. It comes after the Agent's head (preamble,
+tools, guidelines) and before Avibe's injected sections:
+
+```text
+<project_context>
+Project-specific instructions and guidelines:
+More general files come first; where two conflict, the later, more specific one wins.
+A directory below the working directory may hold its own instruction file with more specific rules for that subtree: the first readable one of AGENTS.override.md, AGENTS.md, AGENTS.MD, CLAUDE.md, CLAUDE.MD in that directory, and only that one. Read it before working with files there.
+
+<project_instructions path="/Users/me/.avibe/AGENTS.md">
+...
+</project_instructions>
+
+<project_instructions path="/Users/me/src/app/AGENTS.md">
+...
+</project_instructions>
+</project_context>
+```
+
+- The first line is Pi's. The second and third are Avibe's.
+- Files below the cwd are not loaded. As Codex does in its prompt, the third line tells the Agent that a subtree may
+  hold its own file and to read it before working with files there. It states the loader's own rule for each
+  directory above: the candidates in their order, and only the first readable one counts.
+  - The line is constant, so it keeps the section cache-stable.
+  - It appears even when no file was loaded, since a subtree may still hold one. The section is then that line alone:
+    `<project_context>`, the line, `</project_context>`.
+- Each path is escaped (see Bound below) and never cut.
+- Three reasons for the place:
+  - It is Pi's order: rules, then project context, then skills.
+  - The head and these files are the same for every Session in that cwd, while Avibe's sections carry the Session's
+    own facts, so the provider's cache shares the longer prefix across Sessions.
+  - The Agent's own definition, in Avibe's sections, is more specific than a repository's guidance, and comes later.
+
+**Read every Turn, cache-stable.** The files are read again at the start of every Turn, from that Turn's cwd, so an
+edit takes effect on the next Turn. The section depends only on the files' paths and contents, never on times or
+modification stamps, so the system prompt changes only when a file does. What uses the Turn's system prompt gets the
+same section: the checkpoint turn and the request after a checkpoint (C-9), and a side turn (C-10). A fork Session reads
+its own at its first Turn.
+
+**Bound.** The section carries at most 65,536 bytes (64 KiB), about 16,000 tokens. That count includes the header,
+each file's path and markup, the files' text, and the notices, so the bound holds by construction, whatever the
+number of files or the length of their paths. The owner's own set (a global file, a workspace file, and a repository
+file) is about 31 KB, so Codex's 32 KiB default would already cut it.
+- **Who gets the room.** First the global file, then the files from the cwd upward. The most specific project file is
+  therefore the last to be cut. The section keeps the order above either way.
+- **A file the room cuts** keeps its first bytes, on a character boundary, and ends with:
+  `[Truncated: the first {shown} of {size} bytes. The instruction files share a 65,536-byte limit; read the file for the rest.]`
+- **Files that get no room** are named after the last block, as many as fit 1,024 bytes kept for this notice, then how
+  many more:
+  `[Not loaded, over the 65,536-byte limit for instruction files: {path} ({size} bytes); ...; and {count} more. Read them if the task needs them.]`
+- **Paths.** A path is escaped as the environment block's cwd is (§8). A path in the attribute also has `"` and `&` as
+  `\u0022` and `\u0026`. This stays injective, because escaping doubles every backslash.
+
+**Deviations from Pi.**
+- The global file is one path, `AGENTS.md` in the Avibe home, not the candidate list in the agent's own directory.
+- The total byte limit and its notices; Pi has no limit.
+- A file is loaded once per real path, not once per path string.
+- A blank file is left out.
+- An unreadable file is skipped silently. Pi warns on stderr, which the Agent has no place to show.
+- The precedence line, and the line about files below the cwd (Codex's approach).

@@ -114,7 +114,7 @@ def _bind_project(conn, project_id: str, *, revision: int, emails: list[str]) ->
 
 
 @pytest.fixture
-def turn_targets(tmp_path):
+def turn_targets(tmp_path, monkeypatch):
     """One real Agent on two real sessions: one this Editor may drive, one they may not.
 
     Both rows are written the way the product writes them — through
@@ -125,13 +125,14 @@ def turn_targets(tmp_path):
     from core.vibe_agents import VibeAgentStore
     from storage import projects_service, resource_access_service
     from storage.workbench_sessions_service import create_session
-    from tests.ui_server_test_helpers import _save_config
+    from tests.ui_server_test_helpers import _save_config, permissions_backend_unreachable
 
     # A stored snapshot is re-decided against the current pairing, so the
     # execution guard only answers at all on a paired installation whose durable
     # binding exists — the interactive path bootstraps it, exactly like this.
     config = _save_config(tmp_path, paired=True, instance_kind="organization")
     ensure_sqlite_state()
+    permissions_backend_unreachable(monkeypatch)
 
     from vibe import remote_access
 

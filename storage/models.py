@@ -375,6 +375,15 @@ agent_runs = Table(
             "and callback_terminal_turn_id is not null and session_id is not null"
         ),
     ),
+    # A callback child by the parent Run and actor it answers (migration 0066).
+    Index(
+        "ix_agent_runs_callback_parent",
+        "parent_run_id",
+        "source_actor",
+        "created_at",
+        "id",
+        sqlite_where=text("run_type = 'agent_run' and source_kind = 'callback'"),
+    ),
     # Leading-timestamp index for the run-graph window scan: updated_at bumps on
     # every state change, so it is the single column that scan filters on.
     Index("ix_agent_runs_updated", "updated_at"),
@@ -739,6 +748,16 @@ messages = Table(
         "type not in ('queued', 'pending', 'draft', 'harness_dedupe', 'silent', 'tool_call')",
         name="ck_messages_communication_type",
     ),
+)
+
+#: The turn a Message row belongs to, as ``ix_messages_turn_id`` indexes it
+#: (``20261012_0064``). A query must compile THIS text, through ``literal_column``,
+#: for the planner to use the index: SQLite matches an index expression by text,
+#: and a bound JSON path or a qualified column name is a different expression.
+#: The ``CASE json_valid`` guard keeps a malformed ``metadata_json`` writable.
+MESSAGE_TURN_ID_SQL = (
+    "CASE WHEN (json_valid(metadata_json) = 1) "
+    "THEN json_extract(metadata_json, '$.turn_id') END"
 )
 
 # Durable execution ownership for one logical Agent Turn per Session. The Turn
@@ -1250,6 +1269,9 @@ vault_secrets = Table(
     Column("ciphertext", Text, nullable=True),
     Column("nonce", Text, nullable=True),
     Column("wrap_meta", Text, nullable=True),
+    # JSON array of extra named field envelopes. The default field remains in the
+    # legacy ciphertext/nonce/wrap_meta columns for released-version compatibility.
+    Column("fields", Text, nullable=True),
     Column("public_meta", Text, nullable=True),  # JSON: desc / pubkey / address / op:// uri
     Column("policy", Text, nullable=True),  # JSON: allowed modes, allowed hosts, always_ask
     Column("last_used_at", String, nullable=True),

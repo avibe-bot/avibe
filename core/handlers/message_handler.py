@@ -11,8 +11,10 @@ from core.audio_asr import (
 )
 from core.agent_input import AgentInputMetadata
 from core.backend_failure import emit_backend_failure
+from core.delivery_target import routed_delivery_context
 from core.message_output import HARNESS_PROMPT_ECHO_SPEC_KEY
 from core.message_context import (
+    resolve_context_platform,
     resolve_context_thread_id,
 )
 from core.native_dispatch_phase import (
@@ -893,11 +895,24 @@ class MessageHandler(BaseHandler):
         request: AgentRequest | None,
         error: BaseException,
     ) -> None:
-        """Report one backend dispatch failure through the shared live boundary."""
+        """Report one backend dispatch failure through the shared live boundary.
 
-        error_text = self.formatter.format_error(
-            self._t("error.processMessageFailed", error=str(error))
-        )
+        Like every backend failure notice, the text carries no markup: the Workbench draws
+        notices as plain text. An IM sends it as its own markup, so the raw error is escaped
+        by the formatter of the platform the notice goes to, never the primary one's.
+        A Model Hub supply refusal is already the user's copy and names its own cause.
+        """
+
+        from modules.agents.model_hub import ModelSupplyRefusal
+
+        if isinstance(error, ModelSupplyRefusal):
+            error_text = f"❌ {error}"
+        else:
+            detail = str(error)
+            target = routed_delivery_context(context)
+            if resolve_context_platform(target) != "avibe":
+                detail = self._get_formatter(target).escape_special_chars(detail)
+            error_text = f"❌ {self._t('error.processMessageFailed', error=detail)}"
         await emit_backend_failure(
             self.controller,
             context,
@@ -905,6 +920,7 @@ class MessageHandler(BaseHandler):
             error_text,
             display_text=error_text,
             request=request,
+            cause=error,
         )
 
     async def _admit_human_delivery(

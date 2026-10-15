@@ -25,7 +25,8 @@ const i18n = createInstance();
 await i18n.init({ lng: 'en', resources: { en: { translation: en } } });
 const wrap = (node: React.ReactNode) => <I18nextProvider i18n={i18n}>{node}</I18nextProvider>;
 const connection = (patch: Partial<BackendConnectionState> = {}): BackendConnectionState => ({ ok: true, backend: 'claude', installed: true, enabled: true, auth: 'api_key', application: 'applied', ready: true, entry_eligible: true, ...patch });
-const native = (): ClaudeAuthState => ({ ok: true, auth_mode: 'api_key', active_auth_mode: 'api_key', has_api_key: true, api_key_length: 20, api_key_masked: 'sk-•••old', base_url: 'https://old.example', credential_type: 'api_key', has_oauth_credentials: true, settings_path: '/fixture/claude/settings.json', settings_exists: true, settings_env_has_key: true, settings_env_key_length: 20, settings_env_key_var: 'ANTHROPIC_API_KEY', settings_env_base_url: 'https://old.example', settings_conflict: false });
+const native = (): ClaudeAuthState => ({ ok: true, auth_mode: 'api_key', auth_managed_by: 'claude', active_auth_mode: 'none', auth_mode_uncertain: true, oauth_store_state: 'present', can_remove_oauth_credentials: true, has_api_key: true, api_key_length: 20, api_key_masked: 'sk-•••old', base_url: 'https://old.example', credential_type: 'api_key', has_oauth_credentials: true, settings_path: '/fixture/claude/settings.json', settings_exists: true, settings_env_has_key: true, settings_env_key_length: 20, settings_env_key_var: 'ANTHROPIC_API_KEY', settings_env_base_url: 'https://old.example', settings_conflict: false });
+const confirmedLabel = (backend: string) => backend === 'claude' ? en.onboarding.connection.nativeReady : en.onboarding.connection.connected;
 const codexNative = (patch: Partial<CodexAuthState> = {}): CodexAuthState => ({ ok: true, auth_mode: 'api_key', active_auth_mode: 'api_key', has_api_key: true, api_key_length: 20, api_key_masked: 'sk-•••old', base_url: 'https://old.example', has_chatgpt_tokens: true, credentials_store: 'file', file_store_active: true, ...patch });
 const deferred = <T,>() => { let resolve!: (value: T) => void; const promise = new Promise<T>((done) => { resolve = done; }); return { promise, resolve }; };
 /**
@@ -129,8 +130,8 @@ describe('shared Settings and onboarding connection owner', () => {
       await act(async () => mutation.resolve({ agent_backend_runtime: { hot_reconciled: outcome !== 'failed', restart_error: outcome === 'failed' ? 'fixture apply failed' : undefined } }));
       await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(3));
       await waitFor(() => expect(screen.queryByText(en.onboarding.connection.savedDisabled)).toBeNull());
-      if (outcome === 'applied') await screen.findByText(en.onboarding.connection.connected);
-      else { await screen.findByRole('alert'); expect(screen.queryByText(en.onboarding.connection.connected)).toBeNull(); }
+      if (outcome === 'applied') await screen.findByText(confirmedLabel(backend));
+      else { await screen.findByRole('alert'); expect(screen.queryByText(confirmedLabel(backend))).toBeNull(); }
       expect(keyInput.value).toBe('unsaved-fixture-key');
       expect((screen.getByLabelText(en.onboarding.connection.baseUrl) as HTMLInputElement).value).toBe('https://unsaved.invalid');
       expect(screen.getByRole('switch').getAttribute('aria-checked')).toBe('true');
@@ -194,15 +195,16 @@ describe('shared Settings and onboarding connection owner', () => {
     expect(screen.getByRole('button', { name: en.common.save }).hasAttribute('disabled')).toBe(true);
   });
   it.each(['claude', 'codex'] as const)('%s partial signout reads native state and does not toast unconditional success', async (backend) => {
-    mock.api.getClaudeAuth.mockResolvedValue({ ...native(), active_auth_mode: 'oauth', has_api_key: false });
+    mock.api.getClaudeAuth.mockResolvedValue({ ...native(), auth_mode: 'oauth', has_api_key: false });
     mock.api.getCodexAuth.mockResolvedValue(codexNative({ active_auth_mode: 'oauth', has_api_key: false }));
     render(wrap(<BackendConnectionForm backend={backend} />));
-    const button = await screen.findByRole('button', { name: en.settings.backends.oauthRemove });
-    mock.api.removeBackendAuth.mockResolvedValue({ ok: true, partial: true, detail: 'fixture partial logout', restart: { ok: false, message: 'fixture signout apply' } });
-    mock.api.getClaudeAuth.mockResolvedValue({ ...native(), active_auth_mode: 'none', has_api_key: false, has_oauth_credentials: false });
+    const removeLabel = backend === 'claude' ? en.settings.backends.oauthCleanStoredCredentials : en.settings.backends.oauthRemove;
+    const button = await screen.findByRole('button', { name: removeLabel });
+    (backend === 'claude' ? mock.api.removeClaudeOAuthCredentials : mock.api.removeBackendAuth).mockResolvedValue({ ok: true, partial: true, detail: 'fixture partial logout', restart: { ok: false, message: 'fixture signout apply' } });
+    mock.api.getClaudeAuth.mockResolvedValue({ ...native(), auth_mode: 'oauth', has_api_key: false, has_oauth_credentials: false, can_remove_oauth_credentials: false, oauth_store_state: 'absent' });
     mock.api.getCodexAuth.mockResolvedValue(codexNative({ active_auth_mode: 'none', has_api_key: false, has_chatgpt_tokens: false }));
     fireEvent.click(button);
-    await waitFor(() => expect(screen.queryByRole('button', { name: en.settings.backends.oauthRemove })).toBeNull());
+    await waitFor(() => expect(screen.queryByRole('button', { name: removeLabel })).toBeNull());
     expect((await screen.findByRole('alert')).textContent).toContain('fixture signout apply');
     expect(mock.toast.mock.calls.some(([, kind]) => kind === 'success')).toBe(false);
     expect(mock.toast.mock.calls.some(([, kind]) => kind === 'warning')).toBe(true);
@@ -237,7 +239,7 @@ describe('shared Settings and onboarding connection owner', () => {
       mock.api.getOpencodeProviders.mockResolvedValue({ ok: true, providers: [providerFixture()], permission_allowed: true });
       render(wrap(<Parent />));
       if (backend === 'opencode') fireEvent.click(await screen.findByText('Fixture', { exact: true }));
-      await screen.findByText(en.onboarding.connection.connected);
+      await screen.findByText(confirmedLabel(backend));
     };
     it(`${backend} Settings preserves queued on after an older off persistence rejection`, async () => {
       let rejectOff!: (error: Error) => void;
@@ -277,8 +279,8 @@ describe('shared Settings and onboarding connection owner', () => {
       const reads = mock.api.getBackendConnection.mock.calls.length;
       fireEvent.click(restart);
       await waitFor(() => expect(mock.api.getBackendConnection.mock.calls.length).toBe(reads + 1));
-      if (outcome === 'applied') await screen.findByText(en.onboarding.connection.connected);
-      else { await screen.findByRole('alert'); expect(screen.queryByText(en.onboarding.connection.connected)).toBeNull(); }
+      if (outcome === 'applied') await screen.findByText(confirmedLabel(backend));
+      else { await screen.findByRole('alert'); expect(screen.queryByText(confirmedLabel(backend))).toBeNull(); }
       expect((form.getByLabelText(en.onboarding.connection.baseUrl) as HTMLInputElement).value).toBe('https://draft.invalid');
       expect(mock.api.restartBackend).toHaveBeenCalledExactlyOnceWith(backend);
       expect(mock.api.mutateConfig).not.toHaveBeenCalled();
@@ -304,6 +306,102 @@ describe('shared Settings and onboarding connection owner', () => {
     fireEvent.click(refresh);
     await waitFor(() => expect(done).toHaveBeenCalledOnce());
     expect(mock.api.startOAuthWeb).toHaveBeenCalledOnce(); expect(mock.api.saveCodexAuth).not.toHaveBeenCalled();
+  });
+  it.each(['present', 'absent', 'unknown'] as const)('Claude inventory %s is not a login or launch-capability verdict', async (store) => {
+    mock.api.getClaudeAuth.mockResolvedValue({ ...native(), auth_mode: 'oauth', has_api_key: false,
+      oauth_store_state: store, has_oauth_credentials: store === 'present', can_remove_oauth_credentials: store !== 'absent' });
+    mock.api.getBackendConnection.mockResolvedValue(connection({ auth: 'external' }));
+    render(wrap(<BackendConnectionForm backend="claude" />));
+    await screen.findByText(en.onboarding.connection.nativeStore[store]);
+    expect(screen.getByText(en.onboarding.connection.nativeReady)).toBeTruthy();
+    expect(screen.queryByText(en.onboarding.connection.connected)).toBeNull();
+    expect(screen.queryByText(en.settings.backends.claudeOauthSignedIn)).toBeNull();
+    expect(screen.queryByText(en.settings.backends.claudeAuthorizationCompleted)).toBeNull();
+    expect(Boolean(screen.queryByRole('button', { name: en.settings.backends.oauthCleanStoredCredentials }))).toBe(store !== 'absent');
+    expect(mock.api.startOAuthWeb).not.toHaveBeenCalled();
+  });
+  it.each([true, false])('Claude key confirmation checks owned saved fields, not active mode (saved=%s)', async (saved) => {
+    const done = vi.fn();
+    render(wrap(<BackendConnectionForm backend="claude" initialMethod="api_key" onConnected={done} />));
+    const save = await screen.findByRole('button', { name: en.common.save });
+    mock.api.getClaudeAuth.mockResolvedValue({ ...native(), has_api_key: saved, oauth_store_state: 'unknown' });
+    fireEvent.click(save);
+    if (saved) await waitFor(() => expect(done).toHaveBeenCalledOnce());
+    else { await screen.findByRole('alert'); expect(done).not.toHaveBeenCalled(); }
+    expect(screen.queryByText(en.onboarding.connection.connected)).toBeNull();
+  });
+  it.each([
+    { state: 'success', receipt: true, unreadable: false },
+    { state: 'failed', receipt: true, unreadable: false },
+    { state: 'failed', receipt: true, unreadable: true },
+    { state: 'failed', receipt: false, unreadable: false },
+  ] as const)('AUTH-SETUP-910 Claude receipt survives application recovery ($state/$receipt/$unreadable)', async ({ state, receipt, unreadable }) => {
+    const inventory: ClaudeAuthState = { ...native(), auth_mode: 'oauth', has_api_key: false,
+      has_oauth_credentials: false, oauth_store_state: 'unknown', can_remove_oauth_credentials: true };
+    mock.api.getClaudeAuth.mockResolvedValue(inventory);
+    mock.api.getBackendConnection.mockResolvedValue(connection({ auth: 'external' }));
+    const done = vi.fn();
+    const view = render(wrap(<BackendConnectionForm backend="claude" compact onConnected={done} />));
+    const start = await screen.findByRole('button', { name: en.onboarding.connection.claudeSignIn });
+    mock.api.startOAuthWeb.mockResolvedValue({ ok: state === 'success', flow_id: 'receipt-owner', state,
+      authorization_completed: receipt, error: state === 'failed' ? 'fixture operation failure' : undefined });
+    mock.api.getBackendConnection.mockRejectedValue(new Error('fixture IPC'));
+    if (unreadable) mock.api.getClaudeAuth.mockRejectedValue(new Error('fixture inventory unavailable'));
+    fireEvent.click(start);
+    await screen.findAllByRole('alert');
+    expect(done).not.toHaveBeenCalled();
+    if (receipt) {
+      expect(screen.getByText(en.settings.backends.claudeAuthorizationCompleted)).toBeTruthy();
+      expect(mock.api.cancelOAuthWeb).not.toHaveBeenCalled();
+    } else {
+      expect(screen.queryByText(en.settings.backends.claudeAuthorizationCompleted)).toBeNull();
+      // An old file appearing afterwards cannot turn this failed operation into success.
+      mock.api.getClaudeAuth.mockResolvedValue({ ...inventory, oauth_store_state: 'present', has_oauth_credentials: true });
+    }
+    mock.api.getBackendConnection.mockResolvedValue(connection({ auth: 'external' }));
+    if (receipt) {
+      const refresh = screen.getByRole('button', { name: en.onboarding.connection.refresh });
+      await waitFor(() => expect(refresh.hasAttribute('disabled')).toBe(false));
+      fireEvent.click(refresh);
+    } else {
+      // A failed start committed nothing; only a fresh capability observation
+      // runs here, not a made-up authorization confirmation.
+      view.rerender(wrap(<BackendConnectionForm backend="claude" compact onConnected={done} connectionRevision={1} />));
+    }
+    await screen.findByText(en.onboarding.connection.nativeReady);
+    expect(done).toHaveBeenCalledTimes(receipt ? 1 : 0);
+    expect(mock.api.startOAuthWeb).toHaveBeenCalledOnce();
+    expect(mock.api.saveClaudeAuth).not.toHaveBeenCalled();
+    expect(screen.queryByText(en.onboarding.connection.connected)).toBeNull();
+  });
+  it.each(['method', 'login'] as const)('AUTH-SETUP-910 a newer Claude %s invalidates an older confirmation', async (action) => {
+    mock.api.getClaudeAuth.mockResolvedValue({ ...native(), auth_mode: 'oauth', has_api_key: false, oauth_store_state: 'unknown' });
+    mock.api.getBackendConnection.mockResolvedValue(connection({ auth: 'external' }));
+    const done = vi.fn();
+    render(wrap(<BackendConnectionForm backend="claude" compact onConnected={done} />));
+    const start = await screen.findByRole('button', { name: en.onboarding.connection.claudeSignIn });
+    mock.api.startOAuthWeb.mockResolvedValue({ ok: true, flow_id: 'old-confirmation', state: 'success', authorization_completed: true });
+    mock.api.getBackendConnection.mockRejectedValue(new Error('fixture IPC'));
+    fireEvent.click(start);
+    const refresh = await screen.findByRole('button', { name: en.onboarding.connection.refresh });
+    await waitFor(() => expect(refresh.hasAttribute('disabled')).toBe(false));
+    const older = deferred<BackendConnectionState>();
+    mock.api.getBackendConnection.mockReturnValueOnce(older.promise).mockResolvedValue(connection({ auth: 'external', application: 'failed', ready: false }));
+    fireEvent.click(refresh);
+    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(3));
+    if (action === 'method') fireEvent.click(within(await interactiveRadios(en.onboarding.connection.method)).getByRole('radio', { name: en.onboarding.connection.claudeCredentials }));
+    else {
+      mock.api.startOAuthWeb.mockRejectedValue(new Error('new attempt failed'));
+      fireEvent.click(screen.getByRole('button', { name: en.onboarding.connection.claudeSignIn }));
+      await screen.findByText('new attempt failed');
+    }
+    await act(async () => older.resolve(connection({ auth: 'external' })));
+    expect(done).not.toHaveBeenCalled();
+    expect(screen.queryByText(en.onboarding.connection.nativeReady)).toBeNull();
+    if (action === 'method') {
+      fireEvent.click(within(await interactiveRadios(en.onboarding.connection.method)).getByRole('radio', { name: en.onboarding.connection.claudeLogin }));
+      expect(screen.queryByText(en.settings.backends.claudeAuthorizationCompleted)).toBeNull();
+    }
   });
   it('cancelling Settings OAuth during confirmation discards its late native observation', async () => {
     mock.api.getCodexAuth.mockResolvedValue(codexNative({ active_auth_mode: 'none', has_api_key: false, has_chatgpt_tokens: false }));
@@ -373,16 +471,19 @@ describe('shared Settings and onboarding connection owner', () => {
   it('stale Claude token cleanup publishes partial removal and application failure separately', async () => {
     mock.api.getClaudeAuth.mockResolvedValue({ ...native(), active_auth_mode: 'none' });
     render(wrap(<BackendConnectionForm backend="claude" />));
+    const methods = await interactiveRadios(en.onboarding.connection.method);
+    fireEvent.click(within(methods).getByRole('radio', { name: en.onboarding.connection.claudeLogin }));
     const cleanupButton = await screen.findByRole('button', { name: en.settings.backends.oauthCleanStoredCredentials });
     mock.api.removeClaudeOAuthCredentials.mockResolvedValue({ ok: true, partial: true, warning: 'oauth_cleanup_failed', detail: 'fixture cleanup warning' });
-    mock.api.getClaudeAuth.mockResolvedValue({ ...native(), active_auth_mode: 'api_key', has_oauth_credentials: false });
+    mock.api.getClaudeAuth.mockResolvedValue({ ...native(), has_oauth_credentials: false, can_remove_oauth_credentials: false, oauth_store_state: 'absent' });
     const application = deferred<BackendConnectionState>();
     mock.api.getBackendConnection.mockReturnValue(application.promise);
     fireEvent.click(cleanupButton);
     await act(async () => application.resolve(connection({ application: 'failed', ready: false, entry_eligible: false, message: 'fixture apply failed' })));
-    await screen.findByText('sk-•••old');
     expect((await screen.findByRole('alert')).textContent).toContain('fixture apply failed');
     expect(screen.queryByRole('button', { name: en.settings.backends.oauthCleanStoredCredentials })).toBeNull();
+    fireEvent.click(within(await interactiveRadios(en.onboarding.connection.method)).getByRole('radio', { name: en.onboarding.connection.claudeCredentials }));
+    await screen.findByText('sk-•••old');
     await waitFor(() => expect(mock.toast.mock.calls.some(([message, kind]) => kind === 'warning' && message.includes('fixture cleanup warning'))).toBe(true));
     expect(mock.toast.mock.calls.some(([, kind]) => kind === 'success')).toBe(false);
   });
@@ -477,6 +578,8 @@ describe('shared Settings and onboarding connection owner', () => {
     mock.api.getClaudeAuth.mockResolvedValue({ ...native(), active_auth_mode: 'none' });
     mock.api.removeClaudeOAuthCredentials.mockResolvedValue({ ok: true });
     render(wrap(<BackendConnectionForm backend="claude" />));
+    const methods = await interactiveRadios(en.onboarding.connection.method);
+    fireEvent.click(within(methods).getByRole('radio', { name: en.onboarding.connection.claudeLogin }));
     fireEvent.click(await screen.findByRole('button', { name: en.settings.backends.oauthCleanStoredCredentials }));
     await waitFor(() => expect(mock.api.removeClaudeOAuthCredentials).toHaveBeenCalledOnce());
     expect(mock.api.getBackendConnection).toHaveBeenCalledWith('claude');

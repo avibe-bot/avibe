@@ -2097,12 +2097,22 @@ def test_config_routes_redact_platform_and_gateway_secrets(monkeypatch, tmp_path
 
 
 @pytest.mark.parametrize(
-    ("hub_switch", "gateway_enabled", "blocks"),
-    [("1", True, {}), ("1", False, {"vibey": "gateway_off"}), ("0", True, {"vibey": "hub_disabled"})],
+    ("hub_switch", "gateway_enabled", "source_channel", "blocks"),
+    [
+        ("1", True, "hub", {}),
+        # A Claude subscription Claude Code holds natively supplies no other backend.
+        ("1", True, "native_cli", {"vibey": "no_source"}),
+        ("1", True, None, {"vibey": "no_source"}),
+        ("1", False, "hub", {"vibey": "gateway_off"}),
+        ("0", True, "hub", {"vibey": "hub_disabled"}),
+    ],
 )
-def test_config_api_carries_why_the_model_hub_leaves_a_backend_no_model(monkeypatch, tmp_path, hub_switch, gateway_enabled, blocks):
+def test_config_api_carries_why_the_model_hub_leaves_a_backend_no_model(
+    monkeypatch, tmp_path, hub_switch, gateway_enabled, source_channel, blocks
+):
     """The Backends page shows the server's answer; it keeps no rule of its own."""
     from modules.agents.catalog import NATIVE_CLI_BACKENDS
+    from tests.scenario_harness.model_hub import source
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", hub_switch)
@@ -2113,6 +2123,10 @@ def test_config_api_carries_why_the_model_hub_leaves_a_backend_no_model(monkeypa
     for backend in NATIVE_CLI_BACKENDS:
         config.model_hub.agents[backend].mode = "direct"
     config.model_hub.enabled = gateway_enabled
+    if source_channel is not None:
+        config.model_hub.sources.append(
+            source("src_supply01", ["claude-opus-5-5"], kind="subscription", channel=source_channel)
+        )
     config.save()
 
     assert app.test_client().get("/api/config").get_json()["agent_supply_blocks"] == blocks

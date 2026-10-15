@@ -56,9 +56,10 @@ export const petComposer = {
     notify();
   },
   clearDraftIf(value: string) {
-    if (draft !== value) return;
+    if (draft !== value) return false;
     draft = '';
     notify();
+    return true;
   },
   requestListen() {
     if (pendingListen) return;

@@ -16,17 +16,14 @@ use std::time::Duration;
 
 use avibe_runtime_host::deep_link::parse_deep_link;
 use avibe_runtime_host::pet::{
-    anchor_from_window, area_for, choose_layout, clamp_anchor, default_anchor, rescale, restored_window_origin,
-    shortcut_label, valid_session_id, window_origin, window_size, LogicalRect, PetAnchor, PetBinding, PetIntent,
-    PetLayout, PetReady, PetStore, WorkArea, SHORTCUT_PRESETS,
+    anchor_from_window, area_for, clamp_anchor, default_anchor, hovering, rescale, restored_window_origin,
+    shortcut_label, valid_session_id, window_size, HitRect, LogicalRect, PetAnchor, PetBinding, PetIntent, PetLayout,
+    PetReady, PetStore, WorkArea, SHORTCUT_PRESETS,
 };
 use avibe_runtime_host::LoopbackOrigin;
 use serde::{Deserialize, Serialize};
 use tauri::menu::{CheckMenuItem, MenuItem, Submenu};
-use tauri::{
-    AppHandle, LogicalPosition, LogicalSize, Manager, Monitor, PhysicalPosition, WebviewUrl, WebviewWindow,
-    WebviewWindowBuilder,
-};
+use tauri::{AppHandle, Manager, Monitor, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use url::Url;
 
@@ -38,6 +35,7 @@ pub const SHORTCUT_MENU_PREFIX: &str = "pet-shortcut:";
 const PET_PATH: &str = "/pet";
 const SUMMON_EVENT: &str = "avibe:pet-summon";
 const BOUND_EVENT: &str = "avibe:pet-bound";
+const HOVER_EVENT: &str = "avibe:pet-hover";
 /// A drag settles before its anchor is saved, as the main window's frame does.
 const MOVE_SETTLE: Duration = Duration::from_millis(400);
 
@@ -74,6 +72,9 @@ pub struct Pet {
     /// The accelerator the OS refused, shown in the tray until a registration succeeds.
     shortcut_error: Mutex<Option<String>>,
     move_generation: Arc<AtomicU64>,
+    hit_regions: Mutex<Vec<HitRect>>,
+    poll_generation: AtomicU64,
+    poll_wake: Arc<tokio::sync::Notify>,
 }
 
 impl Pet {
@@ -87,6 +88,9 @@ impl Pet {
             }),
             shortcut_error: Mutex::new(None),
             move_generation: Arc::new(AtomicU64::new(0)),
+            hit_regions: Mutex::new(Vec::new()),
+            poll_generation: AtomicU64::new(0),
+            poll_wake: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -96,6 +100,16 @@ impl Pet {
 
     pub fn enabled(&self) -> bool {
         self.store().enabled()
+    }
+
+    fn page_loading(&self) {
+        self.store().page_loading();
+        lock(&self.hit_regions).clear();
+    }
+
+    fn window_gone(&self) {
+        self.store().window_gone();
+        lock(&self.hit_regions).clear();
     }
 }
 
@@ -288,9 +302,11 @@ fn reconcile_now(app: &AppHandle) -> Option<WebviewWindow> {
     match window {
         Some(window) if !change.destroy => return Some(window),
         Some(window) => {
+            pet.poll_generation.fetch_add(1, Ordering::SeqCst);
+            pet.poll_wake.notify_one();
             let _ = window.destroy();
             *lock(&pet.window_origin) = None;
-            pet.store().window_gone();
+            pet.window_gone();
         }
         None => {}
     }
@@ -312,15 +328,7 @@ fn build_window(app: &AppHandle, origin: &LoopbackOrigin) -> Option<WebviewWindo
     let scale = anchor_scale(app, None);
     let areas = work_areas(app, scale);
     let saved = pet.store().anchor().cloned();
-    let anchor = match (saved, areas.first()) {
-        (Some(saved), _) => clamp_anchor(&saved, &areas),
-        (None, Some(primary)) => default_anchor(primary),
-        (None, None) => PetAnchor {
-            x: 0.0,
-            y: 0.0,
-            monitor: None,
-        },
-    };
+    let anchor = initial_anchor(saved.as_ref(), &areas);
     let layout = PetLayout::default();
     *lock(&pet.frame) = Frame {
         expanded: false,
@@ -330,7 +338,7 @@ fn build_window(app: &AppHandle, origin: &LoopbackOrigin) -> Option<WebviewWindo
     let at = (anchor.x, anchor.y);
     let unit = area_for(&areas, at).map_or(1.0, |area| area.unit);
     let (x, y) = restored_window_origin(at, unit);
-    pet.store().page_loading();
+    pet.page_loading();
     let builder = WebviewWindowBuilder::new(app, PET_WINDOW, WebviewUrl::External(url))
         .initialization_script(DESKTOP_SHELL_MARKER)
         .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
@@ -357,13 +365,28 @@ fn build_window(app: &AppHandle, origin: &LoopbackOrigin) -> Option<WebviewWindo
                 let (x, y) = rescale((x, y), scale, 1.0);
                 let _ = window.set_position(PhysicalPosition::new(x.round() as i32, y.round() as i32));
             }
+            let _ = window.set_ignore_cursor_events(true);
+            start_cursor_poll(app);
             Some(window)
         }
         Err(error) => {
             eprintln!("The desktop pet window could not be created: {error}");
-            pet.store().window_gone();
+            pet.window_gone();
             None
         }
+    }
+}
+
+/// Both restored and first-use positions must remain reachable on short displays.
+fn initial_anchor(saved: Option<&PetAnchor>, areas: &[WorkArea]) -> PetAnchor {
+    match (saved, areas.first()) {
+        (Some(saved), _) => clamp_anchor(saved, areas),
+        (None, Some(primary)) => clamp_anchor(&default_anchor(primary), areas),
+        (None, None) => PetAnchor {
+            x: 0.0,
+            y: 0.0,
+            monitor: None,
+        },
     }
 }
 
@@ -378,11 +401,16 @@ pub fn wake(app: &AppHandle, intent: PetIntent) {
         let Some(window) = reconcile_now(&handle) else {
             // The Workbench has no Runtime yet; the summon waits for the
             // window that Runtime will bring.
-            pet.store().summon_before_window();
+            if intent != PetIntent::Release {
+                pet.store().summon_before_window(intent);
+            }
             return;
         };
-        let _ = window.show();
-        let _ = window.set_focus();
+        if intent != PetIntent::Release {
+            let _ = window.show();
+            pet.poll_wake.notify_one();
+            let _ = window.set_focus();
+        }
         let deliver = pet.store().summon(intent);
         if let Some(intent) = deliver {
             dispatch(&window, SUMMON_EVENT, &serde_json::json!({ "intent": intent }));
@@ -424,7 +452,7 @@ fn is_pet_page(origin: Option<&LoopbackOrigin>, url: &Url) -> bool {
 /// The pet window's own document is starting over: summons wait for it.
 pub fn page_loading(app: &AppHandle) {
     if let Some(pet) = app.try_state::<Pet>() {
-        pet.store().page_loading();
+        pet.page_loading();
     }
 }
 
@@ -585,13 +613,13 @@ pub fn pet_ready(window: WebviewWindow) -> Result<PetReady, String> {
     // window was built without focus.
     if ready.summon_pending.is_some() {
         let _ = window.show();
+        pet.poll_wake.notify_one();
         let _ = window.set_focus();
     }
     Ok(ready)
 }
 
-/// Grows the window to fit the panel, or shrinks it to the pet, keeping the
-/// pet where it is. The answer is the one placement the page renders from.
+/// Records the page state without moving or resizing the fixed mini window.
 #[tauri::command]
 pub fn pet_set_expanded(window: WebviewWindow, expanded: bool) -> Result<PetLayout, String> {
     ensure_pet_page(&window)?;
@@ -599,27 +627,107 @@ pub fn pet_set_expanded(window: WebviewWindow, expanded: bool) -> Result<PetLayo
 }
 
 fn set_expanded(window: &WebviewWindow, expanded: bool) -> Result<PetLayout, String> {
-    let app = window.app_handle();
-    let anchor = current_anchor(app, window).ok_or_else(|| "The pet window has no position.".to_owned())?;
-    let pet = app.state::<Pet>();
-    let previous = *lock(&pet.frame);
-    let layout = if expanded {
-        let areas = work_areas(app, window.scale_factor().unwrap_or(1.0));
-        match area_for(&areas, anchor) {
-            Some(area) => choose_layout(anchor, area.area),
-            None => PetLayout::default(),
-        }
-    } else {
-        previous.layout
-    };
+    let pet = window.state::<Pet>();
+    let layout = PetLayout::default();
     *lock(&pet.frame) = Frame { expanded, layout };
-    let (width, height) = window_size(expanded);
-    let (x, y) = window_origin(anchor, expanded, layout);
-    window
-        .set_size(LogicalSize::new(width, height))
-        .and_then(|()| window.set_position(LogicalPosition::new(x, y)))
-        .map_err(|_| "The pet window could not be resized.".to_owned())?;
     Ok(layout)
+}
+
+#[tauri::command]
+pub fn pet_hit_regions(window: WebviewWindow, rects: Vec<HitRect>) -> Result<(), String> {
+    ensure_pet_page(&window)?;
+    if rects.len() > 4096 || rects.iter().any(|rect| !rect.valid()) {
+        return Err("Invalid pet hit regions.".to_owned());
+    }
+    *lock(&window.state::<Pet>().hit_regions) = rects;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn pet_set_dismissed(window: WebviewWindow, session_id: String, ids: Vec<String>) -> Result<(), String> {
+    ensure_pet_page(&window)?;
+    window
+        .state::<Pet>()
+        .store()
+        .set_dismissed_ids(&session_id, ids)
+        .map_err(|_| "The dismissed pet cards could not be saved.".to_owned())
+}
+
+/// One poller per native window. All window calls and cursor-event toggles
+/// happen on the main thread; a hidden window waits for an explicit wake.
+fn start_cursor_poll(app: &AppHandle) {
+    let pet = app.state::<Pet>();
+    let generation = pet.poll_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    let wake = pet.poll_wake.clone();
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut ignoring = true;
+        // Hover the page cannot see itself: a webview in a window that is
+        // not key gets no hover on macOS. Reported only when it changes.
+        let mut hovered = false;
+        loop {
+            let handle = app.clone();
+            let (send, receive) = tokio::sync::oneshot::channel();
+            if app
+                .run_on_main_thread(move || {
+                    let pet = handle.state::<Pet>();
+                    if pet.poll_generation.load(Ordering::SeqCst) != generation {
+                        return;
+                    }
+                    let Some(window) = handle.get_webview_window(PET_WINDOW) else {
+                        return;
+                    };
+                    if !window.is_visible().unwrap_or(false) {
+                        if hovered {
+                            dispatch(&window, HOVER_EVENT, &serde_json::json!({ "hover": false }));
+                        }
+                        let _ = send.send((None, ignoring, false));
+                        return;
+                    }
+                    let (Ok(cursor), Ok(origin), Ok(scale), Ok(size)) = (
+                        handle.cursor_position(),
+                        window.outer_position(),
+                        window.scale_factor(),
+                        window.inner_size(),
+                    ) else {
+                        let _ = send.send((Some(100), ignoring, hovered));
+                        return;
+                    };
+                    let x = (cursor.x - origin.x as f64) / scale;
+                    let y = (cursor.y - origin.y as f64) / scale;
+                    let in_window =
+                        x >= 0.0 && y >= 0.0 && x < size.width as f64 / scale && y < size.height as f64 / scale;
+                    let (next, hover) = {
+                        let regions = lock(&pet.hit_regions);
+                        (
+                            !regions.iter().any(|rect| rect.contains(x, y)),
+                            in_window && hovering(&regions, x, y),
+                        )
+                    };
+                    if next != ignoring && window.set_ignore_cursor_events(next).is_ok() {
+                        ignoring = next;
+                    }
+                    if hover != hovered {
+                        dispatch(&window, HOVER_EVENT, &serde_json::json!({ "hover": hover }));
+                    }
+                    let _ = send.send((Some(if in_window { 16 } else { 100 }), ignoring, hover));
+                })
+                .is_err()
+            {
+                break;
+            }
+            let Ok((delay, applied, hover)) = receive.await else {
+                break;
+            };
+            ignoring = applied;
+            hovered = hover;
+            if let Some(delay) = delay {
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+            } else {
+                wake.notified().await;
+            }
+        }
+    });
 }
 
 #[derive(Serialize)]
@@ -687,6 +795,151 @@ pub fn pet_open(window: WebviewWindow, link: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_build_placement_keeps_the_image_and_dock_reachable_on_small_displays() {
+        let area = |name: &str, x, y, width, height, unit| WorkArea {
+            name: Some(name.into()),
+            area: LogicalRect { x, y, width, height },
+            unit,
+        };
+        let detached = PetAnchor {
+            x: 9000.0,
+            y: 9000.0,
+            monitor: Some("detached".into()),
+        };
+        let primary_125 = area("primary", 0.0, 0.0, 1366.0 / 1.25, 718.0 / 1.25, 1.0);
+        let side_150 = area("side", -1200.0, -180.0, 1200.0, 660.0, 1.5 / 1.25);
+        let cases = [
+            (
+                "detached display",
+                Some(detached.clone()),
+                vec![area("primary", 0.0, 0.0, 800.0, 550.0, 1.0)],
+                1.0,
+                "primary",
+            ),
+            (
+                "125% primary",
+                Some(detached.clone()),
+                vec![primary_125.clone()],
+                1.25,
+                "primary",
+            ),
+            (
+                "small laptop with full-size external connected",
+                Some(PetAnchor {
+                    x: 100.0,
+                    y: 500.0,
+                    monitor: Some("primary".into()),
+                }),
+                vec![
+                    primary_125.clone(),
+                    area("external", 1366.0 / 1.25, 0.0, 1920.0, 1080.0, 1.2),
+                ],
+                1.25,
+                "primary",
+            ),
+            (
+                "mixed DPI with negative origin",
+                Some(PetAnchor {
+                    monitor: Some("side".into()),
+                    ..detached.clone()
+                }),
+                vec![primary_125, side_150],
+                1.25,
+                "side",
+            ),
+            (
+                "negative primary",
+                Some(detached),
+                vec![area("primary", -800.0, -550.0, 800.0, 550.0, 1.0)],
+                1.0,
+                "primary",
+            ),
+            (
+                "first use on narrow display",
+                None,
+                vec![area("primary", 0.0, 0.0, 200.0, 500.0, 1.0)],
+                1.0,
+                "primary",
+            ),
+        ];
+        for (case, saved, areas, primary_scale, expected_display) in cases {
+            // This is build_window's actual anchor selection and coordinate
+            // conversion, including the target monitor's own logical scale.
+            let anchor = initial_anchor(saved.as_ref(), &areas);
+            let target = area_for(&areas, (anchor.x, anchor.y)).unwrap();
+            assert_eq!(target.name.as_deref(), Some(expected_display), "{case}");
+            let origin = restored_window_origin((anchor.x, anchor.y), target.unit);
+            let (dx, dy) = avibe_runtime_host::pet::pet_offset(false, PetLayout::default());
+            let image = (origin.0 + dx * target.unit, origin.1 + dy * target.unit);
+            let physical_image = rescale(image, primary_scale, 1.0);
+            let physical_unit = target.unit * primary_scale;
+            let physical_area = LogicalRect {
+                x: target.area.x * primary_scale,
+                y: target.area.y * primary_scale,
+                width: target.area.width * primary_scale,
+                height: target.area.height * primary_scale,
+            };
+            // CSS: 115px image; dock top 103px, height 40px, centred and
+            // narrower than the image. Both rects must fit in physical pixels.
+            assert!(physical_image.0 >= physical_area.x - 1e-9, "{case}");
+            assert!(physical_image.1 >= physical_area.y - 1e-9, "{case}");
+            assert!(
+                physical_image.0 + 115.0 * physical_unit <= physical_area.x + physical_area.width + 1e-9,
+                "{case}"
+            );
+            assert!(
+                physical_image.1 + 143.0 * physical_unit <= physical_area.y + physical_area.height + 1e-9,
+                "{case}"
+            );
+            assert_eq!(window_size(false), (460.0, 600.0));
+            assert_eq!(window_size(true), (460.0, 600.0));
+        }
+        assert_eq!(
+            initial_anchor(None, &[]),
+            PetAnchor {
+                x: 0.0,
+                y: 0.0,
+                monitor: None
+            }
+        );
+    }
+
+    #[test]
+    fn document_and_window_lifetimes_release_input_regions_and_fence_summons() {
+        let directory = tempfile::tempdir().unwrap();
+        let pet = Pet::new(directory.path().join("pet.json"));
+        let seed = || {
+            pet.store().page_ready();
+            lock(&pet.hit_regions).push(HitRect {
+                x: 10.0,
+                y: 20.0,
+                width: 100.0,
+                height: 50.0,
+                hover: false,
+            });
+        };
+        seed();
+        pet.page_loading();
+        assert!(lock(&pet.hit_regions).is_empty());
+        assert!(!pet.store().page_is_ready());
+        assert_eq!(pet.store().summon(PetIntent::Show), None);
+        // A reload/build keeps a queued summon until the replacement is ready.
+        pet.page_loading();
+        assert_eq!(pet.store().page_ready().summon_pending.unwrap().intent, PetIntent::Show);
+
+        seed();
+        pet.store().page_loading();
+        assert_eq!(pet.store().summon(PetIntent::Listen), None);
+        pet.window_gone();
+        assert!(lock(&pet.hit_regions).is_empty());
+        assert!(!pet.store().page_is_ready());
+        assert!(pet.store().page_ready().summon_pending.is_none());
+        // A fresh document may register its own regions after the old ones go.
+        seed();
+        assert!(lock(&pet.hit_regions)[0].contains(50.0, 40.0));
+    }
 
     #[test]
     fn the_pet_navigates_only_to_its_own_route_on_its_own_runtime() {

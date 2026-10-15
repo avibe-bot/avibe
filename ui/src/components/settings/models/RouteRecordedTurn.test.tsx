@@ -15,7 +15,7 @@ import { PERSISTED_TURN_CONTRACT_VERSIONS } from './types';
 import type { RouteHop, TurnProvenance } from './types';
 
 const record: TurnProvenance = {
-  contract_version: 11, turn_id: 'turn-recorded', ts: '2026-09-05T15:00:00Z', agent: 'codex', requested_model_id: 'requested-model',
+  contract_version: 15, turn_id: 'turn-recorded', ts: '2026-09-05T15:00:00Z', agent: 'codex', requested_model_id: 'requested-model',
   outcome: 'failed_terminal', failed_attempts: [], served: null, canceled_attempt: null, model_supply_state: null, blockers: [],
   terminal_error: { source_id: 'src_historical', configured_model_id: 'historical-model', channel: 'hub', reason: 'invalid_parameter', stream_started: false, http_status: 404, upstream_error_code: 'model_not_found' },
 };
@@ -74,6 +74,20 @@ describe('recorded turn error', () => {
     expect(screen.queryByText(/model not found/)).toBeNull();
     await user.click(screen.getByRole('button', { name: 'View error details' }));
     expect(screen.getByRole('dialog').querySelector('pre')?.textContent).toBe(JSON.stringify(historical, null, 2));
+  });
+  it('names a backend-reported failure and its kind instead of an upstream or protocol fault', async () => {
+    const user = userEvent.setup();
+    const reported: TurnProvenance = { ...record, terminal_error: {
+      source_id: 'src_historical', configured_model_id: 'historical-model', channel: 'hub', reason: 'backend_error',
+      stream_started: null, error_kind: 'stalled', backend_error_detail: 'provider sent no data for 600s',
+    } };
+    vi.spyOn(modelsApi, 'getAgentProvenance').mockResolvedValue(reported);
+    render(view());
+    expect(await screen.findByText('Latest recorded turn · Agent backend reported a failure')).toBeTruthy();
+    expect(screen.getByText('The model request timed out waiting for data')).toBeTruthy();
+    expect(screen.queryByText(/Protocol error|model not found/)).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'View error details' }));
+    expect(screen.getByRole('dialog').querySelector('pre')?.textContent).toBe(JSON.stringify(reported, null, 2));
   });
   it.each(['served', 'canceled', null] as const)('does not show an old error when latest outcome is %s', async (outcome) => {
     const read = vi.spyOn(modelsApi, 'getAgentProvenance').mockResolvedValue(outcome ? { ...record, outcome, terminal_error: null } : null);

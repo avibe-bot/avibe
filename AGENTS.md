@@ -241,6 +241,34 @@ Source-of-truth rule:
 - add new IM integrations under `modules/im/` and new agent backends under `modules/agents/`
 - no repo-wide formatter is enforced; keep diffs focused if you use Black/Ruff
 
+### Controller Event Loop
+
+- The controller's asyncio loop (`core/controller.py`) runs every session's
+  turns, the scheduler, and the local Model Hub gateway, so anything that blocks
+  it stalls all of them at once. IM transports run on their own threads and
+  loops.
+- Code reachable on that loop must not block it. Synchronous waits
+  (`time.sleep`, `subprocess.run` and similar, `Future.result()`, lock waits),
+  reads or rewrites of files that grow with use, and SQLite work that is not a
+  bounded, index-keyed statement belong on a thread (an existing executor or
+  `asyncio.to_thread`). Async-native equivalents such as `await asyncio.sleep()`
+  and `asyncio.create_subprocess_exec` are fine on the loop.
+- A query on a per-turn, per-message, or per-tick path must touch only rows
+  bounded by the work in hand, not by history. In `EXPLAIN QUERY PLAN`, a
+  growing table such as `messages`, `agent_events`, or `agent_runs` must be
+  reached by a `SEARCH` whose keys bound the matched rows that way, such as a
+  session or turn id, or a status that only live work has. An
+  `ORDER BY ... LIMIT` must not need a `USE TEMP B-TREE` over a growing set. Pin
+  the plan in a test, and add indexes through an alembic migration.
+- Keep write transactions short, and build them from such bounded statements.
+  While one holds SQLite's write lock, other writers wait for it, including
+  those on the loop, for up to the 5 s `busy_timeout` set in `storage/db.py`.
+- `core/loop_watchdog.py` reports controller-loop stalls in
+  `~/.avibe/logs/vibe_remote.log`; its module documents the detection threshold
+  and rate limits. A stall reported while the loop is serving work is a defect.
+  One reported during shutdown cleanup, after the loop has stopped, comes from
+  an expected bounded wait.
+
 ### Web UI Server
 
 - `vibe/ui_server.py` is served by FastAPI/uvicorn; new UI routes should use native async FastAPI patterns where practical.
