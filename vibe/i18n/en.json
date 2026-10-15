@@ -1165,7 +1165,11 @@
       "upstream_error": "The upstream service returned an error."
     },
     "hostedTools": {
-      "noExecutor": "No Source can run {tool} right now. Add a Source from one of these providers to use it: {vendors}.",
+      "noExecutor": {
+        "web_search": {"one": "No Source can run web search right now. Add an API key from {vendors}.", "several": "No Source can run web search right now. Add an API key from one of {vendors}."},
+        "x_search": {"one": "No Source can run X search right now. Add an API key from {vendors}.", "several": "No Source can run X search right now. Add an API key from one of {vendors}."}
+      },
+      "listSeparator": ", ",
       "providerRefused": "The executor's provider refused the call ({detail}).",
       "timedOut": "The executor call timed out.",
       "unreachable": "The executor could not be reached.",
@@ -1174,7 +1178,13 @@
       "didNotRun": "The executor did not run {tool}.",
       "responseEnded": "The executor's response ended as {status}.",
       "callFailed": "The provider's {tool} call failed.",
-      "triedSources": "Tried: {sources}."
+      "triedSources": "Tried: {sources}.",
+      "imageMissing": "The image endpoint returned no image data.",
+      "imageUnreadable": "The image endpoint returned an image that could not be used.",
+      "imageModelUnavailable": "{model} is no longer available this turn.",
+      "imageParamUnsupported": "{model} does not take {param}.",
+      "imageParamTakers": "Models that take it: {models}.",
+      "imageAlternatives": "Available: {models}."
     },
     "events": {
       "sourceFallback": "source",
@@ -1807,7 +1817,18 @@
       "gateway_refused": "the model gateway refused the call",
       "gateway_no_result": "the model gateway returned no result",
       "image_param_unsupported": "the chosen image model doesn't take one of the arguments",
-      "image_model_unavailable": "the chosen image model isn't available"
+      "image_model_unavailable": "the chosen image model isn't available",
+      "image_argument_invalid": "the image call had an argument it can't send",
+      "image_reference_unreadable": "a reference image couldn't be read",
+      "provider_refused": "the provider refused the call",
+      "provider_timed_out": "the call timed out",
+      "provider_unreachable": "couldn't reach the provider",
+      "provider_unreadable": "the provider's response couldn't be read",
+      "provider_too_large": "the provider's response was larger than allowed",
+      "provider_image_unusable": "the provider returned an image that couldn't be used",
+      "search_not_run": "the model answered without searching",
+      "search_failed": "the provider's search failed",
+      "response_ended_early": "the response ended early"
     },
     "tool": {
       "web_search": "Web search",
@@ -1819,6 +1840,7 @@
       "native": "native ({provider})",
       "proxy": "via {provider} proxy",
       "proxyModel": "via {provider} proxy ({model})",
+      "fallback": "{source} doesn't support it, now using {provider}",
       "direct": "direct ({provider})"
     },
     "count": {
@@ -1840,6 +1862,25 @@
       "failed": "failed: {error}",
       "incomplete": "incomplete: {error}",
       "pending": "cut off"
+    },
+    "image": {
+      "notOffered": "{model} is not an image model of this turn.",
+      "unknownArguments": "image_generate takes only model, prompt, size, images and n; it was given {names}.",
+      "noPrompt": "prompt must be the text of what to draw.",
+      "sizeForm": "size must be {pixels}, or {ratio}.",
+      "sizeFormUnsupported": "{model} does not take size {size}: it takes {form}.",
+      "badImages": "images must be 1 to {max} paths of reference images.",
+      "badCount": "n must be a whole number from 1 to {max}.",
+      "form": {
+        "pixels": "WIDTHxHEIGHT, such as 1024x1024",
+        "ratio": "an aspect ratio, such as 16:9"
+      },
+      "reference": {
+        "unreadable": "Cannot read the reference image {path}: {reason}.",
+        "notImage": "The reference image {path} is not an image (jpg, png, gif, webp).",
+        "tooLarge": "The reference image {path} is {size}, over the {limit} limit.",
+        "unsupported": "The reference image {path} is {mime}, which cannot be sent."
+      }
     }
   }
 }

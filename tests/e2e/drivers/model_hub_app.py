@@ -31,6 +31,8 @@ import psutil
 
 
 _MISSING = object()
+# The controller's ``sitecustomize``: its native-CLI scan sees only this harness's processes.
+_CONTROLLER_SITE = Path(__file__).resolve().parent / "controller_site"
 _MUTATION_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 _ENGINE_MANIFEST_PATH_ENV = "VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH"
 _SAFE_INHERITED_ENV = (
@@ -247,6 +249,10 @@ class ModelHubTestApp:
                     self.runtime_root / "dispatch.sock"
                 ),
                 "VIBE_SENTRY_DSN": "",
+                # OpenCode installs @opencode-ai/plugin from npm before its first
+                # request once a plugin is configured; offline, that install fails
+                # at once, and the Avibe plugin imports nothing from it.
+                "npm_config_offline": "true",
                 "NO_PROXY": "127.0.0.1,localhost",
                 "no_proxy": "127.0.0.1,localhost",
             }
@@ -440,7 +446,7 @@ class ModelHubTestApp:
         self._controller = subprocess.Popen(
             [sys.executable, "main.py", str(self.avibe_home)],
             cwd=self.repo_root,
-            env=self.env,
+            env={**self.env, "PYTHONPATH": str(_CONTROLLER_SITE)},
             stdout=self._controller_log,
             stderr=subprocess.STDOUT,
             start_new_session=True,

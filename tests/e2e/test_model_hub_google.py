@@ -97,7 +97,7 @@ async def test_real_google_frontend_uses_pinned_engine_and_reports_serving_origi
                 async with aiohttp.ClientSession() as client:
                     async with client.post(
                         base + endpoint,
-                        headers={"Authorization": f'Bearer {hop["token"]}'}, json=body,
+                        headers={"Authorization": f'Bearer {hop["token"]}', **hop["request_headers"]}, json=body,
                     ) as response:
                         raw = await response.read()
                         unsupported_reason = None

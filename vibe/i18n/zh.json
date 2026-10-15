@@ -1165,7 +1165,11 @@
       "upstream_error": "供应商返回错误。"
     },
     "hostedTools": {
-      "noExecutor": "当前没有可运行 {tool} 的来源。添加以下任一供应商的来源即可使用：{vendors}。",
+      "noExecutor": {
+        "web_search": {"one": "当前没有能运行网页搜索的供应商。请添加 {vendors} 的 API Key。", "several": "当前没有能运行网页搜索的供应商。请添加 {vendors} 其中一家的 API Key。"},
+        "x_search": {"one": "当前没有能运行 X 搜索的供应商。请添加 {vendors} 的 API Key。", "several": "当前没有能运行 X 搜索的供应商。请添加 {vendors} 其中一家的 API Key。"}
+      },
+      "listSeparator": "、",
       "providerRefused": "执行方的供应商拒绝了此次调用（{detail}）。",
       "timedOut": "执行方调用超时。",
       "unreachable": "无法连接执行方。",
@@ -1174,7 +1178,13 @@
       "didNotRun": "执行方没有运行 {tool}。",
       "responseEnded": "执行方的响应以 {status} 结束。",
       "callFailed": "供应商的 {tool} 调用失败。",
-      "triedSources": "已尝试：{sources}。"
+      "triedSources": "已尝试：{sources}。",
+      "imageMissing": "图像端点没有返回图像数据。",
+      "imageUnreadable": "图像端点返回的图像无法使用。",
+      "imageModelUnavailable": "本轮中 {model} 已不可用。",
+      "imageParamUnsupported": "{model} 不支持 {param}。",
+      "imageParamTakers": "支持它的模型：{models}。",
+      "imageAlternatives": "可用：{models}。"
     },
     "events": {
       "sourceFallback": "供应商",
@@ -1807,7 +1817,18 @@
       "gateway_refused": "模型网关拒绝了这次调用",
       "gateway_no_result": "模型网关没有返回结果",
       "image_param_unsupported": "所选图片模型不支持其中一个参数",
-      "image_model_unavailable": "所选图片模型当前不可用"
+      "image_model_unavailable": "所选图片模型当前不可用",
+      "image_argument_invalid": "图片调用的参数无法发送",
+      "image_reference_unreadable": "无法读取参考图片",
+      "provider_refused": "供应商拒绝了这次调用",
+      "provider_timed_out": "调用超时",
+      "provider_unreachable": "无法连接供应商",
+      "provider_unreadable": "无法读取供应商的回复",
+      "provider_too_large": "供应商的回复超出了大小上限",
+      "provider_image_unusable": "供应商返回的图片无法使用",
+      "search_not_run": "模型没有搜索就直接作答了",
+      "search_failed": "供应商的搜索失败了",
+      "response_ended_early": "回复提前结束了"
     },
     "tool": {
       "web_search": "网页搜索",
@@ -1819,6 +1840,7 @@
       "native": "原生（{provider}）",
       "proxy": "由 {provider} 代理",
       "proxyModel": "由 {provider} 代理（{model}）",
+      "fallback": "{source} 不支持，已改用 {provider}",
       "direct": "{provider} 直连"
     },
     "count": {
@@ -1840,6 +1862,25 @@
       "failed": "失败：{error}",
       "incomplete": "未完成：{error}",
       "pending": "已中断"
+    },
+    "image": {
+      "notOffered": "{model} 不是本轮可用的图片模型。",
+      "unknownArguments": "image_generate 只接受 model、prompt、size、images 和 n，却收到了 {names}。",
+      "noPrompt": "prompt 必须写明要画的内容。",
+      "sizeForm": "size 必须是{pixels}，或{ratio}。",
+      "sizeFormUnsupported": "{model} 不支持尺寸 {size}：它只接受{form}。",
+      "badImages": "images 必须是 1 到 {max} 个参考图片路径。",
+      "badCount": "n 必须是 1 到 {max} 之间的整数。",
+      "form": {
+        "pixels": "宽x高，例如 1024x1024",
+        "ratio": "宽高比，例如 16:9"
+      },
+      "reference": {
+        "unreadable": "无法读取参考图片 {path}：{reason}。",
+        "notImage": "参考图片 {path} 不是图片（jpg、png、gif、webp）。",
+        "tooLarge": "参考图片 {path} 有 {size}，超过 {limit} 的上限。",
+        "unsupported": "参考图片 {path} 是 {mime}，无法发送。"
+      }
     }
   }
 }

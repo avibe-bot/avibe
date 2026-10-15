@@ -445,6 +445,20 @@
             },
             "action": {
               "$ref": "#/definitions/HostedAction"
+            },
+            "fallback_from": {
+              "type": "object",
+              "required": [
+                "source_id"
+              ],
+              "additionalProperties": false,
+              "description": "A search call that ran as its function only because the turn's own Source refused it natively (C-6 `refused`): that Source, by id only. Absent when the call ran where it was declared, or where the vendor never offers the tool natively.",
+              "properties": {
+                "source_id": {
+                  "type": "string",
+                  "pattern": "^src_[a-z0-9]{8,}$"
+                }
+              }
             }
           },
           "if": {
@@ -629,6 +643,29 @@
                       }
                     }
                   }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "hosted"
+            ],
+            "properties": {
+              "tool_name": {
+                "const": "image_generate"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "hosted": {
+                "not": {
+                  "required": [
+                    "fallback_from"
+                  ]
                 }
               }
             }
@@ -943,7 +980,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 400,
-          "description": "Bounded and redacted. Model-facing English: the provider's own reason, or one Avibe wrote."
+          "description": "Bounded and redacted: the reason as text, which the model reads, the provider's own or one Avibe wrote. Every reason Avibe writes carries an error_code, the display key surfaces render in the viewer's language (#2589); a reason without one is shown as written: the provider's own, or the gateway's no-provider reason, whose useful part (the providers to add) is that call's own fact and which Avibe writes in the user's language."
         },
         "error_code": {
           "type": "string",

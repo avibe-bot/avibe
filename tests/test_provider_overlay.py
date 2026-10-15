@@ -185,9 +185,10 @@ def _image_edit(path: tuple, value: object):
 _IMAGE_MODEL = {
     "id": "grok-imagine-image",
     "description": "Grok Imagine: fast photoreal images",
-    "endpoint": "images",
     "params": ["size", "images"],
     "size_forms": ["ratio"],
+    "kinds": ["api_key"],
+    "request": {"response_format": "b64_json"},
     "prices": [{"price": {"unit": "image", "usd_per_1k": 20, "as_of": "2026-10-15", "url": "https://docs.x.ai/developers/pricing"}}],
 }
 _FAMILY = ("models", 0)
@@ -235,7 +236,13 @@ _PRICE = (*_X_SEARCH, "price")
         pytest.param("xai", _edit((*_PRICE, "extra", 0, "unit"), "image"), id="extra-unit-per-image"),
         pytest.param("xai", _edit(("executor_model",), " "), id="executor-model-blank"),
         pytest.param("xai", _edit(("image_models",), {}), id="image-models-not-a-list"),
-        pytest.param("xai", _image_edit(("endpoint",), "edits"), id="image-endpoint-unknown"),
+        pytest.param("xai", _image_edit(("kinds",), ["oauth"]), id="image-kind-unknown"),
+        pytest.param("xai", _image_edit(("kinds",), []), id="image-kinds-empty"),
+        # A fixed request field never overrides what the call itself names.
+        pytest.param("xai", _image_edit(("request",), {"n": 4}), id="image-request-sets-a-call-field"),
+        # A ratio-form size is sent as aspect_ratio: fixing it would override, or be overridden by, the call.
+        pytest.param("xai", _image_edit(("request",), {"aspect_ratio": "1:1"}), id="image-request-sets-the-ratio-field"),
+        pytest.param("xai", _image_edit(("request",), {"style": {"nested": True}}), id="image-request-not-scalar"),
         pytest.param("xai", _image_edit(("description",), "x" * 81), id="image-description-too-long"),
         pytest.param("xai", _image_edit(("params",), ["images", "quality"]), id="image-param-unknown"),
         pytest.param("xai", _image_edit(("size_forms",), []), id="image-size-without-forms"),
@@ -271,8 +278,8 @@ def test_an_image_model_entry_is_read_in_a_stable_form(monkeypatch, tmp_path):
     _use_bundled(monkeypatch, tmp_path, providers)
 
     (model,) = catalog.provider_image_models("xai")
-    assert (model.id, model.endpoint, model.params, model.size_forms) == (
-        "grok-imagine-image", "images", ("images", "size"), ("ratio",),
+    assert (model.id, model.params, model.size_forms, model.kinds, model.request) == (
+        "grok-imagine-image", ("images", "size"), ("ratio",), ("api_key",), {"response_format": "b64_json"},
     )
     assert [(price.price.unit, price.price.usd_per_1k, price.size) for price in model.prices] == [("image", 20, None)]
     assert catalog.provider_image_models("anthropic") == ()

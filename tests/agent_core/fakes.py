@@ -165,7 +165,9 @@ class InMemoryTranscriptStore:
                 return entry
         return (await self._append(session_id, [("input", message, {}, message_id)]))[0]
 
-    async def append_response(self, session_id, message: AssistantMessage, *, final: bool, request=None) -> ContextEntry:
+    async def append_response(
+        self, session_id, message: AssistantMessage, *, final: bool, request=None, replied=None, images=()
+    ) -> ContextEntry:
         payload = {"request": dict(request)} if request is not None else {}
         row = (await self._append(session_id, [("response", message, payload, None)]))[0]
         self.final[row.row_id] = final

@@ -62,17 +62,18 @@ SPECS = {
 EXECUTOR_MODELS = {"xai": "grok-fast", "openai": "gpt-mini", "anthropic": "claude-haiku"}
 
 
-def _image(model_id: str, description: str, *, price: float | None = None) -> ImageModelSpec:
+def _image(model_id: str, description: str, *, price: float | None = None, kinds=("api_key", "subscription")) -> ImageModelSpec:
     prices = (
         (ImageModelPrice(HostedToolPrice("image", price * 1000, date(2026, 10, 15), "https://docs.x.ai/pricing")),)
         if price is not None
         else ()
     )
-    return ImageModelSpec(model_id, description, "images", ("images", "size"), ("pixels",), prices)
+    return ImageModelSpec(model_id, description, ("images", "size"), ("pixels",), kinds=kinds, prices=prices)
 
 
 IMAGE_MODELS = {
-    "openai": (_image("gpt-image-2", "OpenAI's image model"),),
+    # Verified on API keys only: a subscription that lists the model is not offered it.
+    "openai": (_image("gpt-image-2", "OpenAI's image model", kinds=("api_key",)),),
     "xai": (_image("grok-imagine-image", "Grok Imagine", price=0.02),),
 }
 
@@ -139,25 +140,31 @@ def _evidence(tmp_path, *refused) -> HostedEvidence:
 
 
 @pytest.mark.parametrize(
-    "primary,tool,refused,native,replay",
+    "primary,tool,refused,native,replay,fallback",
     [
         # The overlay offers it and nothing refused it: assumed, with no evidence at all.
-        (XAI, "web_search", (), "assumed", "assumed"),
-        (XAI, "web_search", ((XAI, "grok-4.6", "web_search", "replay"),), "assumed", "unsupported"),
-        (XAI, "web_search", ((XAI, "grok-4.6", "web_search", "call"),), "unsupported", "unsupported"),
-        # OpenAI offers no X search: the function, whatever the evidence.
-        (OPENAI, "x_search", (), "unsupported", "unsupported"),
-        (CLAUDE_SUB, "web_search", (), "unsupported", "unsupported"),
-        (GEMINI, "web_search", (), "unsupported", "unsupported"),
+        (XAI, "web_search", (), "assumed", "assumed", False),
+        (XAI, "web_search", ((XAI, "grok-4.6", "web_search", "replay"),), "assumed", "unsupported", False),
+        # This Source refused it: a proxied call falls back from it.
+        (XAI, "web_search", ((XAI, "grok-4.6", "web_search", "call"),), "unsupported", "unsupported", True),
+        # OpenAI offers no X search: the function, whatever the evidence, and never a fallback.
+        (OPENAI, "x_search", (), "unsupported", "unsupported", False),
+        (OPENAI, "x_search", ((OPENAI, "gpt-6-astra", "x_search", "call"),), "unsupported", "unsupported", False),
+        (CLAUDE_SUB, "web_search", (), "unsupported", "unsupported", False),
+        (GEMINI, "web_search", (), "unsupported", "unsupported", False),
     ],
-    ids=["assumed", "replay-refused", "call-refused", "not-offered", "claude-subscription-never", "translated-never"],
+    ids=[
+        "assumed", "replay-refused", "call-refused", "not-offered", "not-offered-refused",
+        "claude-subscription-never", "translated-never",
+    ],
 )
-def test_a_hops_facts_come_from_priors_and_refusals(tmp_path, primary, tool, refused, native, replay):
-    """MH-HOSTED-001: nothing is probed; a tool is assumed where offered until a real request refuses it."""
+def test_a_hops_facts_come_from_priors_and_refusals(tmp_path, primary, tool, refused, native, replay, fallback):
+    """MH-HOSTED-001: nothing is probed; a tool is assumed where offered until a real request refuses it, and only
+    that refusal marks the hop as the one a proxied call falls back from."""
     facts = hosted_tool_facts(
         primary, primary.models[0].id, tool, evidence=_evidence(tmp_path, *refused), spec_for=_spec_for,
     )
-    assert (facts.native, facts.replay) == (native, replay)
+    assert (facts.native, facts.replay, facts.refused) == (native, replay, fallback)
     assert (facts.declaration is not None) is (native == "assumed")
 
 
@@ -195,6 +202,11 @@ def test_the_image_enum_is_deterministic_with_the_default_first(tmp_path):
     assert [choice.model_id for choice in choices.models] == ["grok-imagine-image"]
     assert (choices.saved_default_available, choices.default.model_id) == (False, "grok-imagine-image")
     assert image_choices(_config(sources=[CLAUDE_SUB, GEMINI]), evidence=evidence).models == ()
+    codex_sub = _source("src_osub0001", "openai", "openai_responses", "gpt-image-2", kind="subscription")
+    assert image_choices(_config(sources=[codex_sub]), evidence=evidence).models == ()
+    # An OpenAI key on a protocol whose engine entry has no images endpoints is never offered one.
+    on_messages = _source("src_oanth001", "openai", "anthropic", "gpt-6-astra")
+    assert image_choices(_config(sources=[on_messages]), evidence=evidence).models == ()
 
 
 def test_a_turn_freezes_its_tools_executors_and_image_enum_and_each_hop_states_its_own_facts(tmp_path):
@@ -225,6 +237,11 @@ def test_a_turn_freezes_its_tools_executors_and_image_enum_and_each_hop_states_i
             ],
             "default": {"source_id": "src_xai00001", "model_id": "grok-imagine-image"},
         },
+    }
+    # A hop whose Source refused a tool says so; the image enum stays the turn's.
+    refused = _evidence(tmp_path / "r", (XAI, "grok-4.6", "web_search", "call"))
+    assert hop_hosted_tools(turn, XAI, "grok-4.6", evidence=refused, spec_for=_spec_for)["web_search"] == {
+        "native": "unsupported", "replay": "unsupported", "refused": True,
     }
     # Off, or with no image model available, a tool is not declared at all.
     off = _config({"x_search": ModelHubHostedToolConfig(enabled=False)}, sources=[CLAUDE_SUB, OPENAI, GEMINI])

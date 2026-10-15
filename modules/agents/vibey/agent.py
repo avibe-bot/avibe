@@ -61,7 +61,8 @@ from core.agent_core.harness.store import ContextEntry
 from core.agent_core.tools.base import CallInstance
 from core.agent_core.tools.jobs import call_instance
 from core.agent_core.messages import (
-    HOSTED_TOOLS,
+    HOSTED_RESULT_TOOLS,
+    HostedImage,
     IMAGE_MIME_TYPES,
     AssistantMessage,
     TextBlock,
@@ -112,6 +113,7 @@ from storage.agent_transcript import (
     call_instance_result,
     final_outcome,
     render_text,
+    text_parts,
 )
 from storage.db import get_cached_sqlite_engine
 from storage.models import agent_events, agent_sessions, message_deliveries, messages, session_turns
@@ -192,6 +194,10 @@ class _Run:
     tool_calls: dict[str, ToolCallBlock] = field(default_factory=dict)
     # This run's committed responses by row id, for delivering them; released with the run.
     responses: dict[str, AssistantMessage] = field(default_factory=dict)
+    # The loop's decision for each response whether it replies (``has_reply``), committed with its row.
+    replied: dict[str, bool] = field(default_factory=dict)
+    # The images each final delivers with its reply, as committed with its row.
+    reply_images: dict[str, tuple[HostedImage, ...]] = field(default_factory=dict)
     # Steer attempts ``Agent.steer`` accepted into this run: reconcile's in-process evidence.
     accepted_steers: set[str] = field(default_factory=set)
     stop_requested: bool = False
@@ -631,7 +637,7 @@ class VibeyAgent(BaseAgent):
         # Job-backed tools receive the loop's tracking wrapper, so Stop kills foreground commands.
         tools = mark_skill_loads(
             (
-                *hosted_tools(turn.router, self._gateway_client, self.media),
+                *hosted_tools(turn.router, self._gateway_client, self.media, language=self._language),
                 *suite.create_tools(agent.jobs, self.media.image_sink(session_id)),
             )
         )
@@ -694,11 +700,15 @@ class VibeyAgent(BaseAgent):
             if run.stop_requested and reason == "aborted":
                 reason = "completed"
             run_failed_after_commit = reason not in _COMPLETED
-            failed = final_outcome(final) == "failed" or run_failed_after_commit
+            # Whether the final replies is the run's decision, committed with its row (``final_outcome``).
+            # Whether the final replies, and the images it delivers, are the run's, committed with its row.
+            replied = run.replied.get(run.final_row)
+            failed = final_outcome(final, replied=replied) == "failed" or run_failed_after_commit
             if failed:
                 self._log_failure(run, reason, kind, origin, diagnostic)
-            body, citations = self._display_with_citations(final, final=True)
-            body = self._with_hosted_images(run, body)
+            body, citations = self._display_with_citations(
+                final, final=True, replied=bool(replied), images=run.reply_images.get(run.final_row, ())
+            )
             if failed and not body.strip():
                 # A silent final whose run failed after the commit: like a final without text
                 # of its own (``_display_source``), its row carries the explanation.
@@ -1070,21 +1080,25 @@ class VibeyAgent(BaseAgent):
         content = ([text_block(rendered)] if rendered or not images else []) + images
         return UserMessage(content=tuple(content))
 
-    def _display_source(self, message: AssistantMessage, *, final: bool) -> str:
+    def _display_source(
+        self, message: AssistantMessage, *, final: bool, replied: bool = False, images: Sequence[HostedImage] = ()
+    ) -> str:
         """The text a surface renders a response from: its text blocks without silent blocks.
 
         Also the row's commit-time display (the store's renderer). A final without
         text of its own (``final_outcome`` failed) is explained by localized copy:
         the refusal or safety explanation, else the empty-reply one, so the row
-        never shows nothing for a failed Turn (loop-control.md section 2).
+        never shows nothing for a failed Turn (loop-control.md section 2). A final
+        carries the images its Turn generated (``images``), so its committed row is
+        the complete reply even if delivery never runs.
         """
         value = render_text(message)
-        # A final whose reply is a generated image has no text to show; its image
-        # is attached on delivery (``_with_hosted_images``), so there is nothing to explain.
-        if final and not value.strip() and not has_reply(message):
+        # A final that replies without text replies with its Turn's images, so there is nothing to explain.
+        if final and not value.strip() and not replied:
             kind = message.stop_reason if message.stop_reason in _EXPLAINED_STOPS else "empty_response"
-            return error_text(kind, self._language())
-        return strip_silent_blocks(value)
+            return self._with_images(error_text(kind, self._language()), images)
+        body = strip_silent_blocks(value)
+        return self._with_images(body, images) if final else body
 
     async def _avibe_sections(self, request: AgentRequest, cwd: str) -> tuple[str, Optional[dict]]:
         """Avibe's injected prompt sections and the skill catalog they offered.
@@ -1219,7 +1233,7 @@ class VibeyAgent(BaseAgent):
             logger.exception("Vibey could not show narration %s", row_id)
 
     def _display_with_citations(
-        self, message: AssistantMessage, *, final: bool
+        self, message: AssistantMessage, *, final: bool, replied: bool = False, images: Sequence[HostedImage] = ()
     ) -> tuple[str, Optional[CitationBundle]]:
         """The display text and, when the provider cited sources, the bundle that links them.
 
@@ -1227,26 +1241,26 @@ class VibeyAgent(BaseAgent):
         token that delivery writes out as a Markdown link (IM) and a badge (Web),
         through ``core.citations`` like every other backend's citations.
         """
-        blocks = [(block.text, block.citations or ()) for block in message.content if isinstance(block, TextBlock) and block.text]
-        if not any(citations for _, citations in blocks):
-            return self._display_source(message, final=final), None
+        blocks = [(separator, block.text, block.citations or ()) for separator, block in text_parts(message)]
+        if not any(citations for _, _, citations in blocks):
+            return self._display_source(message, final=final, replied=replied, images=images), None
         body, bundle = register_text_citations(
             blocks,
             unresolved_label=i18n_t("message.citationUnresolved", self._language()),
             transform=strip_silent_blocks,
         )
         if final and not body.strip():
-            return self._display_source(message, final=True), None
-        return body, bundle
+            return self._display_source(message, final=True, replied=replied, images=images), None
+        return (self._with_images(body, images) if final else body), bundle
 
-    def _with_hosted_images(self, run: _Run, body: str) -> str:
-        """The final reply with the run's generated images attached, as file links.
+    def _with_images(self, body: str, images: Sequence[HostedImage]) -> str:
+        """A final reply with its Turn's generated images attached, as file links.
 
         A file link is how every surface delivers a local file: IM uploads it as an
         attachment, and the Web shows it inline from the same media token its card
         registered. An image the reply already links is not attached twice.
         """
-        links = self._hosted_image_links(run, body)
+        links = self._image_links([(image.path, Path(image.path).name) for image in images], body)
         if not links:
             return body
         # A reply that is only images still says what it carries, as the Codex backend's does.
@@ -1254,15 +1268,15 @@ class VibeyAgent(BaseAgent):
         return f"{lead}\n\n{links}"
 
     @staticmethod
-    def _hosted_image_links(run: _Run, body: str) -> str:
-        """File links for the run's images that ``body`` does not already link.
+    def _image_links(images: Sequence[tuple[str, str]], body: str) -> str:
+        """File links for the ``(path, label)`` images that ``body`` does not already link.
 
         Only a link counts: the model is given each image's path as text, and a
         reply that mentions it in prose has still not delivered the file. A path
         that is not absolute names no file a surface could send, so it is skipped.
         """
         links = []
-        for path, label in run.hosted_images:
+        for path, label in images:
             if not os.path.isabs(path):
                 logger.warning("Vibey skipped a hosted image with a relative path: %s", path)
                 continue
@@ -1275,7 +1289,7 @@ class VibeyAgent(BaseAgent):
 
     async def _emit_orphan_images(self, run: _Run) -> None:
         """A run's generated images when it ends with no final reply to carry them."""
-        links = self._hosted_image_links(run, "")
+        links = self._image_links(run.hosted_images, "")
         if not links:
             return
         try:
@@ -1320,7 +1334,7 @@ class VibeyAgent(BaseAgent):
         """A proxied hosted call, once its result is committed: the record its executor returned."""
         call = run.tool_calls.get(event.tool_call_id)
         started = run.tool_started.pop(event.tool_call_id, None)
-        if call is None or call.name not in HOSTED_TOOLS:
+        if call is None or call.name not in HOSTED_RESULT_TOOLS:
             return
         try:
             result = await asyncio.to_thread(self._committed_tool_result, event.event_id)
@@ -1347,7 +1361,7 @@ class VibeyAgent(BaseAgent):
         return message if isinstance(message, ToolResultMessage) else None
 
     async def _emit_tool_started(self, run: _Run, event: ToolStarted) -> None:
-        if event.name in HOSTED_TOOLS:
+        if event.name in HOSTED_RESULT_TOOLS:
             # A proxied hosted call shows once, as its card, when its result lands.
             return
         call = run.tool_calls.get(event.tool_call_id)
@@ -1366,12 +1380,23 @@ class VibeyAgent(BaseAgent):
         except Exception:
             logger.exception("Vibey could not show tool %s", name)
 
-    def _on_response(self, session_id: str, row_id: str, message: AssistantMessage) -> None:
+    def _on_response(
+        self,
+        session_id: str,
+        row_id: str,
+        message: AssistantMessage,
+        replied: Optional[bool],
+        images: tuple[HostedImage, ...] = (),
+    ) -> None:
         """A response committed for the Session's run: keep what its delivery and tool events need."""
         run = self._run_for(session_id, None)
         if run is None:
             return
         run.responses[row_id] = message
+        if replied is not None:
+            run.replied[row_id] = replied
+        if images:
+            run.reply_images[row_id] = images
         run.tool_calls.update({call.id: call for call in message.tool_calls})
         self._note_tokens(run, message)
 

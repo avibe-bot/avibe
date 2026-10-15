@@ -1540,7 +1540,7 @@ class TestTextBlockCitations:
     def test_a_ranged_citation_is_attributed_where_its_span_ends(self):
         text = "Domain filters shipped. Codex is on Windows."
         registered, bundle = register_text_citations(
-            [(text, [self.cite(self.FILTERS, "Changelog", 0, len("Domain filters shipped."))])],
+            [("", text, [self.cite(self.FILTERS, "Changelog", 0, len("Domain filters shipped."))])],
             unresolved_label=UNRESOLVED,
         )
         body, citations = finalize_citations(registered, bundle)
@@ -1556,8 +1556,8 @@ class TestTextBlockCitations:
         """Anthropic cites a block, not a span: the link closes that block, in the joined text."""
         registered, bundle = register_text_citations(
             [
-                ("The posts this week:", []),
-                ("Codex is on Windows.", [self.cite(self.WINDOWS, "The Codex app is now on Windows")]),
+                ("", "The posts this week:", []),
+                ("\n\n", "Codex is on Windows.", [self.cite(self.WINDOWS, "The Codex app is now on Windows")]),
             ],
             unresolved_label=UNRESOLVED,
         )
@@ -1574,8 +1574,8 @@ class TestTextBlockCitations:
         code = "Run `vibe status` now."
         registered, bundle = register_text_citations(
             [
-                (silent, [self.cite(self.FILTERS, start=len("Visible.<silent>internal"), end=len("Visible.<silent>internal"))]),
-                (code, [self.cite(self.WINDOWS, start=len("Run `vibe"), end=len("Run `vibe"))]),
+                ("", silent, [self.cite(self.FILTERS, start=len("Visible.<silent>internal"), end=len("Visible.<silent>internal"))]),
+                ("\n\n", code, [self.cite(self.WINDOWS, start=len("Run `vibe"), end=len("Run `vibe"))]),
             ],
             unresolved_label=UNRESOLVED,
             transform=strip_silent_blocks,
@@ -1588,7 +1588,7 @@ class TestTextBlockCitations:
     def test_a_block_the_display_rules_remove_takes_its_citations_with_it(self):
         """An unranged citation sits after its block; when the whole block is silent, nothing is left to cite."""
         registered, bundle = register_text_citations(
-            [("<silent>internal note</silent>", [self.cite(self.WINDOWS, "The Codex app is now on Windows")])],
+            [("", "<silent>internal note</silent>", [self.cite(self.WINDOWS, "The Codex app is now on Windows")])],
             unresolved_label=UNRESOLVED,
             transform=strip_silent_blocks,
         )
@@ -1596,7 +1596,7 @@ class TestTextBlockCitations:
 
     def test_text_without_citations_is_the_plain_display(self):
         registered, bundle = register_text_citations(
-            [("One.", []), ("Two.", [])], unresolved_label=UNRESOLVED
+            [("", "One.", []), ("\n\n", "Two.", [])], unresolved_label=UNRESOLVED
         )
         assert (registered, bundle) == ("One.\n\nTwo.", None)
 

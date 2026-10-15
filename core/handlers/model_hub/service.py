@@ -60,8 +60,10 @@ from vibe.backend_model_catalog import (
     bundled_client_presets_once,
     bundled_provider_overlay,
     hosted_tool_spec,
+    provider_image_models,
 )
 from vibe.i18n import t as i18n_t
+from vibe.model_hub_runtime.client import RESPONSE_TOO_LARGE
 from vibe.model_hub_runtime.api_key_vendors import (
     catalog_api_key_vendor_label,
     pinned_api_key_protocol,
@@ -103,6 +105,7 @@ from .catalog_admission import (
 from .classification import (
     ResolutionDecision,
     classify_outcome,
+    machine_codes_name_model,
     names_model_refusal,
     source_settlement_allowed,
     source_settlement_rule,
@@ -136,16 +139,27 @@ from .hosted_executor import (
     call_timeout,
     executor_request,
     executor_streams,
+    Failure,
     failed_record,
+    failure,
     parse_call,
     provider_charges,
     responses_result,
 )
-from .hosted_turn import ExecutorSlot, TurnHostedTools
+from .hosted_images import (
+    IMAGE_RESPONSE_MAX_BYTES,
+    IMAGE_TIMEOUT_SECONDS,
+    image_request,
+    image_result,
+    parse_image_call,
+    unsupported_argument,
+)
+from .hosted_turn import IMAGE_TOOL, ExecutorSlot, TurnHostedTools
 from .hosted_tools import (
     ExecutorCandidate,
     HostedEvidence,
     HostedToolSettingRefused,
+    admitted_image,
     apply_hosted_tool_put,
     clear_request,
     engine_stamp,
@@ -831,22 +845,25 @@ def _call_usage(outcome: RawCallOutcome | None, observed: ProtocolSSEState | Non
     return observed.usage if usage is None and observed is not None else usage
 
 
-def _executor_failure(outcome: RawCallOutcome | None, say: Callable[..., str], *, refused: str | None) -> str | None:
-    """How a proxied hosted call failed, in the user's language; None when it succeeded.
+def _executor_failure(outcome: RawCallOutcome | None, say: Callable[..., str], *, refused: str | None) -> Failure | None:
+    """How a proxied hosted call failed, in the user's language and by its code; None when it succeeded.
 
     ``refused`` names a bound the response itself broke (size, nesting).
     """
 
     if refused is not None:
-        return say(refused)
+        return failure(say, refused)
     if outcome is None or outcome.kind is RawOutcomeKind.SUCCESS:
         return None
+    if outcome.error_code == RESPONSE_TOO_LARGE:
+        # The engine client cut an answer past its bound while it downloaded.
+        return failure(say, "modelHub.hostedTools.tooLarge")
     if outcome.kind is RawOutcomeKind.TIMEOUT:
-        return say("modelHub.hostedTools.timedOut")
+        return failure(say, "modelHub.hostedTools.timedOut")
     if outcome.kind is RawOutcomeKind.NETWORK_ERROR:
-        return say("modelHub.hostedTools.unreachable")
+        return failure(say, "modelHub.hostedTools.unreachable")
     if outcome.kind is RawOutcomeKind.PROTOCOL_ERROR:
-        return say("modelHub.hostedTools.unreadable")
+        return failure(say, "modelHub.hostedTools.unreadable")
     # The provider's own machine code and its redacted, bounded detail stay verbatim.
     detail = " ".join(
         part for part in (
@@ -856,11 +873,26 @@ def _executor_failure(outcome: RawCallOutcome | None, say: Callable[..., str], *
     )
     if outcome.upstream_detail:
         detail = f"{detail}: {outcome.upstream_detail}" if detail else outcome.upstream_detail
-    return say("modelHub.hostedTools.providerRefused", detail=detail or outcome.kind.value)
+    return failure(say, "modelHub.hostedTools.providerRefused", detail=detail or outcome.kind.value)
 
 
 def _cost_payload(cost: HostedCost) -> dict[str, Any]:
     return {"basis": cost.basis} if cost.usd is None else {"basis": cost.basis, "usd": cost.usd}
+
+
+@dataclass(frozen=True)
+class _HostedUpstreamCall:
+    """How one upstream call a hosted tool made ended (``ModelHubService._hosted_upstream_call``)."""
+
+    # The Source as the call's final admission saw it: what the call reports (billing, cost, name) follows it.
+    source: ModelHubSourceConfig
+    outcome: RawCallOutcome | None
+    # A bound the response broke, as a failure key to show.
+    refused: str | None
+    timed_out: bool
+    usage: ProtocolUsageReport | None
+    # Whether the provider could have charged for it: it reported tokens or produced a response.
+    billable: bool
 
 
 @dataclass(frozen=True)
@@ -6514,23 +6546,170 @@ class ModelHubService:
             if not attempt.moves_on:
                 break
         if not attempts:
-            vendors = ", ".join(catalog_api_key_vendor_label(vendor) or vendor for vendor in executor_vendors(tool))
-            return {"record": failed_record(say("modelHub.hostedTools.noExecutor", tool=tool, vendors=vendors))}
+            vendors = [catalog_api_key_vendor_label(vendor) or vendor for vendor in executor_vendors(tool)]
+            form = "one" if len(vendors) == 1 else "several"
+            listed = say("modelHub.hostedTools.listSeparator").join(vendors)
+            # Which providers to add is this call's own fact: worded in the user's language and shown as written.
+            no_source = Failure(say(f"modelHub.hostedTools.noExecutor.{tool}.{form}", vendors=listed), None)
+            return {"record": failed_record(no_source)}
         # The record is the last attempt's; earlier billable ones are listed, each with its own billing.
         last = attempts[-1]
         record = last.record
         if last.moves_on:
             # Every candidate was tried and failed: say which, so the user sees whether retrying or those Sources is the issue.
             tried = ", ".join(dict.fromkeys(attempt.source.display_name for attempt in attempts))
+            # Its reason keeps its code; the Sources tried follow in its text.
+            last_failure = Failure(record["error"], record["error_code"])
             record = failed_record(
-                f"{record.get('error') or ''} {say('modelHub.hostedTools.triedSources', sources=tried)}".strip(),
-                record.get("sources"),
+                last_failure.also(say("modelHub.hostedTools.triedSources", sources=tried)), record.get("sources"),
             )
         execution = last.execution()
         failed_attempts = [attempt.failed_attempt() for attempt in attempts[:-1] if attempt.billable]
         if failed_attempts:
             execution["failed_attempts"] = failed_attempts
         return {"record": record, "execution": execution}
+
+    async def run_image_tool(self, payload: object, *, turn: TurnHostedTools | None, language: str = "en") -> dict:
+        """Run one ``image_generate`` call directly on the images endpoint of the model it names (§7.4).
+
+        ``turn`` is what the caller's live turn froze: a model outside its enum
+        is refused, unrun. There is no chain and no fallback: a failed call says
+        which other models the turn offers, and the model may call again with
+        one. The call is metered on its Source and never changes Source health.
+        """
+
+        def say(key: str, **params: str) -> str:
+            return i18n_t(key, language, **params)
+
+        try:
+            # Reference images are megabytes of base64: validated off the controller loop.
+            call = await asyncio.to_thread(parse_image_call, payload)
+        except ExecutorCallRefused as refused:
+            raise ModelHubError(refused.code, status=refused.status) from None
+        choice = next((item for item in (turn.images if turn is not None else ()) if item.model_id == call.model), None)
+        if turn is None or IMAGE_TOOL not in turn.tools or choice is None:
+            raise ModelHubError("tool_not_enabled", status=409)
+        others = [item.model_id for item in turn.images if item.model_id != call.model]
+
+        def failed(reason: Failure) -> dict:
+            # The other models follow the reason in its text; its code stays its own.
+            if others:
+                reason = reason.also(say("modelHub.hostedTools.imageAlternatives", models=", ".join(others)))
+            return {"record": failed_record(reason)}
+
+        unsupported = unsupported_argument(call, choice.spec)
+        if unsupported is not None:
+            takers = [item.model_id for item in turn.images if unsupported_argument(call, item.spec) is None]
+            text = say("modelHub.hostedTools.imageParamUnsupported", model=call.model, param=unsupported)
+            if takers:
+                text = f"{text} {say('modelHub.hostedTools.imageParamTakers', models=', '.join(takers))}"
+            return {"record": failed_record(Failure(text, "image_param_unsupported"))}
+
+        async def admitted() -> ModelHubSourceConfig | None:
+            # The config grows with use: read it off the controller loop.
+            config = await asyncio.to_thread(self.store.load)
+            return admitted_image(config, choice, evidence=self.hosted_evidence())
+
+        unavailable = Failure(say("modelHub.hostedTools.imageModelUnavailable", model=call.model), "image_model_unavailable")
+        source = await admitted()
+        if source is None:
+            return failed(unavailable)
+        # Its reference images become data URLs: megabytes, built off the controller loop.
+        request = ModelHubRequest(await asyncio.to_thread(image_request, call, choice.spec), protocol="openai_images")
+        body = bytearray()
+
+        async def feed(chunk: bytes) -> None:
+            if len(body) + len(chunk) > IMAGE_RESPONSE_MAX_BYTES:
+                raise ExecutorResponseRefused("modelHub.hostedTools.tooLarge")
+            body.extend(chunk)
+
+        called = await self._hosted_upstream_call(
+            source, call.model, request, stream=False,
+            deadline=asyncio.get_running_loop().time() + IMAGE_TIMEOUT_SECONDS, feed=feed,
+            admitted_now=admitted,
+        )
+        if called is None:
+            return failed(unavailable)
+        source = called.source
+        outcome = called.outcome
+        failed_reason = _executor_failure(outcome, say, refused=called.refused)
+        # The bytearray itself goes to the worker: no copy of the answer on the loop.
+        # Every images endpoint offered makes one image when the call names no n.
+        result = await asyncio.to_thread(image_result, body, say, asked=call.n or 1) if failed_reason is None else None
+        execution: dict[str, Any] = {
+            "mode": "direct",
+            "executor_origin": {"provider": source.vendor, "api": source.protocol, "model": call.model},
+            "executor_source_id": source.id,
+            "executor_billing": source.billing,
+        }
+        cost = self._image_call_cost(
+            source, choice.spec, usage=called.usage, images=len(result.images) if result is not None else 0,
+            generation=result.generation if result is not None else None,
+        )
+        if cost is not None:
+            execution["cost"] = _cost_payload(cost)
+        if result is None or result.record["status"] != "completed":
+            if outcome is not None and outcome.kind is not RawOutcomeKind.SUCCESS:
+                await self._learn_image_refusal(source, call.model, outcome)
+            if failed_reason is None and result is not None:
+                failed_reason = Failure(result.record["error"], result.record.get("error_code"))
+            answer = failed(failed_reason or failure(say, "modelHub.hostedTools.unreadable"))
+            return {**answer, "execution": execution}
+        await self.record_hosted_success(source, call.model, IMAGE_TOOL, "direct")
+        answer: dict[str, Any] = {"record": result.record, "execution": execution, "images": [
+            {"data": data} for data in result.images
+        ]}
+        if result.generation is not None:
+            answer["generation"] = dict(result.generation)
+        return answer
+
+    async def _learn_image_refusal(self, source: ModelHubSourceConfig, model_id: str, outcome: RawCallOutcome) -> None:
+        """The image narrow rule (§3.2): an upstream refusal of the model or of the endpoint, before any output.
+
+        The engine's own refusals reach here as local failures, never as an
+        upstream status, so they never teach. A refusal of the endpoint itself
+        (a 404: the path is not served) holds for every image model the Source
+        registers there, so sibling models do not each fail once.
+        """
+
+        if outcome.kind is not RawOutcomeKind.HTTP_ERROR or outcome.stream_started:
+            return
+        detail = f"{outcome.http_status} {outcome.error_code or outcome.error_type or 'error'}"[:64]
+        feature = EvidenceFeature.hosted(IMAGE_TOOL, "call")
+        if outcome.http_status in {400, 404} and machine_codes_name_model(outcome):
+            refused = [model_id]
+        elif outcome.http_status == 404:
+            refused = [
+                spec.id for spec in provider_image_models(source.vendor) if source.kind in spec.kinds
+            ] or [model_id]
+        else:
+            return
+        await self.record_hosted_refusals(source, [(refused_id, feature, detail) for refused_id in refused])
+
+    def _image_call_cost(
+        self,
+        source: ModelHubSourceConfig,
+        spec: ImageModelSpec,
+        *,
+        usage: Optional[ProtocolUsageReport],
+        images: int,
+        generation: Mapping[str, str] | None,
+    ) -> Optional[HostedCost]:
+        """One image call's cost: included, the list price per delivered image, else its tokens; None when unknown."""
+
+        if source.billing == "monthly":
+            return HostedCost(basis="included", usd=None)
+        size = (generation or {}).get("size")
+        quality = (generation or {}).get("quality")
+        matching = [
+            entry for entry in spec.prices
+            if entry.size in {None, size} and entry.quality in {None, quality}
+        ]
+        if matching and images:
+            # The most specific price that applies to what was delivered.
+            price = max(matching, key=lambda entry: (entry.size is not None) + (entry.quality is not None)).price
+            return HostedCost(basis="list", usd=round(price.usd_per_1k / 1000 * images, 6))
+        return self.hosted_call_cost(source, spec.id, (), usage=usage, counts={})
 
     async def _executor_attempt(
         self,
@@ -6551,6 +6730,82 @@ class ModelHubService:
         stream = executor_streams(source)
         reader = ResponsesStreamReader() if stream else None
         body = bytearray()
+
+        async def feed(chunk: bytes) -> None:
+            if reader is not None:
+                await asyncio.to_thread(reader.feed, chunk)
+            elif len(body) + len(chunk) > EXECUTOR_RESPONSE_MAX_BYTES:
+                raise ExecutorResponseRefused("modelHub.hostedTools.tooLarge")
+            else:
+                body.extend(chunk)
+
+        async def admitted_now() -> ModelHubSourceConfig | None:
+            final = await asyncio.to_thread(self._admitted_executor, slot, tool)
+            return final.source if final is not None else None
+
+        called = await self._hosted_upstream_call(
+            source, model_id, request, stream=stream, deadline=deadline, feed=feed, admitted_now=admitted_now,
+        )
+        if called is None:
+            return None
+        source = called.source
+        outcome = called.outcome
+        failed = _executor_failure(outcome, say, refused=called.refused)
+        if reader is not None:
+            result = await asyncio.to_thread(responses_result, tool, reader.readout, say, failed=failed)
+        elif failed is not None:
+            result = None
+        else:
+            # The bytearray itself goes to the worker: no copy of up to the response budget on the loop.
+            result = await asyncio.to_thread(anthropic_result, body, say)
+        # The call's cost is the pricing module's, from what the meter saw and what the provider reported.
+        counts, reported_usd = provider_charges(source.protocol, result.usage if result is not None else None)
+        cost = self.hosted_call_cost(
+            source, model_id, (tool,), usage=called.usage, counts=counts, reported_usd=reported_usd,
+        )
+        if outcome is not None and tool in outcome.hosted_tools and result is not None and result.record["status"] == "completed":
+            # A proxy call is a native call on the executor Source: the same positive evidence (§3.2).
+            await self.record_hosted_success(source, model_id, tool, "executor")
+        # A response that broke a bound reached nothing of Vibey's, so it is a failure before output here (§6
+        # step 4): the next candidate is tried. A timeout spent the chain's one deadline.
+        moves_on = called.refused is not None
+        if (
+            outcome is not None and outcome.kind is not RawOutcomeKind.SUCCESS
+            and called.refused is None and not called.timed_out
+        ):
+            moves_on = await self._executor_moves_on(source, model_id, tool, request, outcome)
+        return _ExecutorAttempt(
+            source=source,
+            model_id=model_id,
+            record=(
+                result.record if result is not None
+                else failed_record(failed or failure(say, "modelHub.hostedTools.unreadable"))
+            ),
+            cost=cost,
+            billable=called.billable,
+            moves_on=moves_on,
+        )
+
+    async def _hosted_upstream_call(
+        self,
+        source: ModelHubSourceConfig,
+        model_id: str,
+        request: ModelHubRequest,
+        *,
+        stream: bool,
+        deadline: float,
+        feed: Callable[[bytes], Awaitable[None]],
+        admitted_now: Callable[[], Awaitable[ModelHubSourceConfig | None]],
+    ) -> _HostedUpstreamCall | None:
+        """One upstream call a hosted tool makes on its own behalf; None when it was never admitted.
+
+        ``admitted_now`` admits the call again on the snapshot it is made on,
+        under the mutation lock. ``feed`` takes the response as it arrives and
+        raises ``ExecutorResponseRefused`` when it breaks a bound. The call is
+        metered on its Source however it ends, and it never settles Source
+        health: it is a tool call, not the turn's model hop.
+        """
+
         handle = None
         cancelled_observed: ProtocolSSEState | None = None
         outcome: RawCallOutcome | None = None
@@ -6578,10 +6833,10 @@ class ModelHubService:
                 try:
                     # Admitted again on the snapshot the call is made on, under the lock. The call and
                     # everything it reports (billing, cost, the Source's name) follow that snapshot.
-                    final = await asyncio.to_thread(self._admitted_executor, slot, tool)
+                    final = await admitted_now()
                     if final is None:
                         return
-                    source = final.source
+                    source = final
                     if not self._engine_synced:
                         continue
                     try:
@@ -6602,12 +6857,7 @@ class ModelHubService:
             if handle.stream is not None:
                 try:
                     async for chunk in handle.stream:
-                        if reader is not None:
-                            await asyncio.to_thread(reader.feed, chunk)
-                        elif len(body) + len(chunk) > EXECUTOR_RESPONSE_MAX_BYTES:
-                            raise ExecutorResponseRefused("modelHub.hostedTools.tooLarge")
-                        else:
-                            body.extend(chunk)
+                        await feed(chunk)
                 except ExecutorResponseRefused as broken:
                     # The response broke a bound: the call failed, and nothing more
                     # of it is read. Its usage is still metered, from the outcome
@@ -6628,7 +6878,7 @@ class ModelHubService:
                     # not hold the call past its deadline or the gateway's shutdown.
                     await asyncio.wait_for(handle.close_stream(), timeout=ENGINE_TRANSPORT_TIMEOUT_SECONDS)
             except (asyncio.TimeoutError, Exception):
-                logger.warning("Model Hub hosted-tool executor stream did not close cleanly", exc_info=True)
+                logger.warning("Model Hub hosted-tool call stream did not close cleanly", exc_info=True)
             finally:
                 if handle is not None or cancelled_observed is not None:
                     await self._meter_call(
@@ -6651,7 +6901,7 @@ class ModelHubService:
                 )
         except ModelHubError as error:
             if not admitted:
-                logger.info("Model Hub hosted-tool executor was not reached: %s", error.code)
+                logger.info("Model Hub hosted-tool call was not reached: %s", error.code)
                 return None
             outcome = RawCallOutcome(
                 kind=RawOutcomeKind.NETWORK_ERROR, http_status=None, error_code=error.code, redacted_message=None,
@@ -6671,39 +6921,17 @@ class ModelHubService:
                 raise cancelled
         if not admitted:
             return None
-        failure = _executor_failure(outcome, say, refused=refused)
-        if reader is not None:
-            result = await asyncio.to_thread(responses_result, tool, reader.readout, say, failure=failure)
-        elif failure is not None:
-            result = None
-        else:
-            # The bytearray itself goes to the worker: no copy of up to the response budget on the loop.
-            result = await asyncio.to_thread(anthropic_result, body, say)
         usage = _call_usage(outcome, handle.observed if handle is not None else cancelled_observed)
-        # The call's cost is the pricing module's, from what the meter saw and what the provider reported.
-        counts, reported_usd = provider_charges(source.protocol, result.usage if result is not None else None)
-        cost = self.hosted_call_cost(source, model_id, (tool,), usage=usage, counts=counts, reported_usd=reported_usd)
-        if outcome is not None and tool in outcome.hosted_tools and result is not None and result.record["status"] == "completed":
-            # A proxy call is a native call on the executor Source: the same positive evidence (§3.2).
-            await self.record_hosted_success(source, model_id, tool, "executor")
-        # A response that broke a bound reached nothing of Vibey's, so it is a failure before output here (§6
-        # step 4): the next candidate is tried. A timeout spent the chain's one deadline.
-        moves_on = refused is not None
-        if outcome is not None and outcome.kind is not RawOutcomeKind.SUCCESS and refused is None and not timed_out:
-            moves_on = await self._executor_moves_on(source, model_id, tool, request, outcome)
-        return _ExecutorAttempt(
+        return _HostedUpstreamCall(
             source=source,
-            model_id=model_id,
-            record=(
-                result.record if result is not None
-                else failed_record(failure or say("modelHub.hostedTools.unreadable"))
-            ),
-            cost=cost,
+            outcome=outcome,
+            refused=refused,
+            timed_out=timed_out,
+            usage=usage,
             # A call that produced nothing and reported no tokens was not billed.
             billable=usage is not None or (
                 outcome is not None and (outcome.stream_started or outcome.kind is RawOutcomeKind.SUCCESS)
             ),
-            moves_on=moves_on,
         )
 
     async def _executor_moves_on(

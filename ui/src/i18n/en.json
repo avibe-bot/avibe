@@ -4967,7 +4967,18 @@
           "gateway_refused": "The model gateway refused the call.",
           "gateway_no_result": "The model gateway returned no result.",
           "image_param_unsupported": "The chosen image model doesn't take one of the arguments.",
-          "image_model_unavailable": "The chosen image model isn't available."
+          "image_model_unavailable": "The chosen image model isn't available.",
+          "image_argument_invalid": "The image call had an argument it can't send.",
+          "image_reference_unreadable": "A reference image couldn't be read.",
+          "provider_refused": "The provider refused the call.",
+          "provider_timed_out": "The call timed out.",
+          "provider_unreachable": "Couldn't reach the provider.",
+          "provider_unreadable": "The provider's response couldn't be read.",
+          "provider_too_large": "The provider's response was larger than allowed.",
+          "provider_image_unusable": "The provider returned an image that couldn't be used.",
+          "search_not_run": "The model answered without searching.",
+          "search_failed": "The provider's search failed.",
+          "response_ended_early": "The response ended early."
         },
         "mode": {
           "native": "Native · {{provider}}",
@@ -5000,6 +5011,12 @@
         "ranNative": "Ran natively on {{where}}",
         "ranProxy": "Run by proxy executor {{where}}",
         "ranDirect": "Ran directly on {{where}}",
+        "fallback": {
+          "ranOn": "{{from}} doesn't support {{toolInline}}, so {{provider}} ({{source}}) ran it",
+          "ran": "{{from}} doesn't support {{toolInline}}, so {{provider}} ran it",
+          "kept": "Used from now on; clear it in Models › Tools",
+          "keptManager": "Used from now on; an instance manager can clear it in Models › Tools"
+        },
         "duration": "took {{seconds}} s",
         "alsoSearched": "Also searched: {{queries}}",
         "image": {

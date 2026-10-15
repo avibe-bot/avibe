@@ -27,6 +27,14 @@ GitHub-only pre-releases use the `gh-vX.Y.ZrcN` format, such as
 must include an installable wheel containing `ui/dist` and
 `vibe/show_runtime/*.tgz`, plus the source distribution.
 
+## Release E2E
+
+Pull-request CI does not run the hermetic Model Hub E2E (`-m e2e_model_hub`).
+`Model Hub release E2E` runs it nightly and on demand on a clean runner, with
+the pinned engine and the latest agent CLIs. Before tagging a stable `v*`
+release, dispatch it on the release commit and require a green run at that
+exact SHA; a strict `xfail` names a known, tracked gap, not a pass to ignore.
+
 ## Managed-runtime manifests
 
 Published managed-runtime manifests are availability contracts. Keep their

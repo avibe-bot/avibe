@@ -346,10 +346,10 @@ FAILED_WITH_PARTIAL = {**WEB_CALL, "status": "failed"}
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("case", "bound", "handles", "error", "sources", "executed"), [
     # No Source can run it: the record says which providers' Sources could.
-    ("no_candidate", None, [], "No Source can run web_search right now", [], False),
-    ("source_removed", (XAI, "grok-4.6"), [], "No Source can run web_search right now", [], False),
+    ("no_candidate", None, [], "No Source can run web search right now. Add an API key from one of Anthropic, OpenAI, xAI.", [], False),
+    ("source_removed", (XAI, "grok-4.6"), [], "No Source can run web search right now. Add an API key from one of Anthropic, OpenAI, xAI.", [], False),
     # A new base URL or credential is a new identity, which the turn's chain was not built for.
-    ("source_identity_changed", (XAI, "grok-4.6"), [], "No Source can run web_search right now", [], False),
+    ("source_identity_changed", (XAI, "grok-4.6"), [], "No Source can run web search right now. Add an API key from one of Anthropic, OpenAI, xAI.", [], False),
     # The only candidate failed: its failure, and the Sources tried.
     ("provider_refused", (XAI, "grok-4.6"),
      [InvokeHandle(_outcome(RawOutcomeKind.HTTP_ERROR, status=429, code="rate_limit_error", source_id=XAI))],
@@ -392,6 +392,14 @@ async def test_a_proxied_call_that_cannot_complete_is_a_failed_record(
     assert status == 200
     assert answer["record"]["status"] == "failed"
     assert error in answer["record"]["error"]
+    # Each reason the gateway words carries the code its reader's surface shows it by (#2589).
+    # Which providers to add is the call's own fact: that reason has no code and is shown as written.
+    assert answer["record"].get("error_code") == {
+        "no_candidate": None, "source_removed": None,
+        "source_identity_changed": None, "provider_refused": "provider_refused",
+        "tool_never_ran": "search_not_run", "call_failed_with_partial_results": "search_failed",
+        "stream_failed_after_items": "provider_refused",
+    }[case]
     assert answer["record"]["sources"] == sources
     assert ("execution" in answer) is executed
     assert len(service.adapter.invocations) == int(executed)
@@ -506,7 +514,7 @@ async def test_failure_text_is_in_the_users_language(tmp_path):
         service, "x_search", {"arguments": {"query": "q"}}, language="zh",
     )
     assert status == 200
-    assert answer["record"]["error"] == "当前没有可运行 x_search 的来源。添加以下任一供应商的来源即可使用：xAI。"
+    assert answer["record"]["error"] == "当前没有能运行 X 搜索的供应商。请添加 xAI 的 API Key。"
 
 
 @pytest.mark.asyncio
@@ -709,6 +717,7 @@ async def test_only_a_response_that_completed_completes_the_call(tmp_path, case,
     assert answer_status == 200
     assert answer["record"]["status"] == status
     assert error in answer["record"]["error"]
+    assert answer["record"]["error_code"] == ("provider_unreadable" if "could not be read" in error else "response_ended_early")
     assert answer["record"]["sources"] == sources
     assert _hosted_result("web_search", answer).record.status == status
 
@@ -741,7 +750,7 @@ async def test_a_turn_keeps_its_tools_and_executor_order_until_the_next_turn(tmp
         _bind(service, "web_search", (OPENAI, "gpt-6-astra"))
         _bind(service, "x_search", (XAI, "grok-4.6"))
         again = await router.resolve_hop("menu-alias", process_scope="vibey:freeze", turn_id="turn-freeze")
-        assert again["hosted_tools"].keys() == first["hosted_tools"].keys() == {"web_search"}
+        assert again["hosted_tools"].keys() == first["hosted_tools"].keys() == {"web_search", "image_generate"}
         status, answer = await search(again, "web_search")
         assert status == 200 and answer["execution"]["executor_source_id"] == XAI
         assert (await search(again, "x_search"))[0] == 409

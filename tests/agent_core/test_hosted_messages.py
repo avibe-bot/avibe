@@ -22,6 +22,7 @@ from core.agent_core.messages import (
     FailedAttempt,
     HostedAction,
     HostedCost,
+    HostedFallback,
     HostedImage,
     HostedNative,
     HostedRecord,
@@ -128,6 +129,8 @@ def _produced() -> list:
                 cost=HostedCost(basis="list", usd=0.03),
                 failed_attempts=(FailedAttempt("src_o9p8q7r6s5", "metered", HostedCost(basis="list", usd=0.01)),),
             ),
+            # The turn's own Source refused X search natively, so the call ran as its function.
+            fallback_from=HostedFallback("src_relaygpt01"),
         ),
     )
     included = ToolResultMessage(
@@ -306,6 +309,10 @@ VIOLATIONS = {
     "proxy-billing": _set(PROXIED, ("hosted", "execution", "executor_billing"), "free"),
     "failed-attempt-billing": _set(PROXIED, ("hosted", "execution", "failed_attempts", 0, "billing"), "free"),
     "proxy-images-on-x-search": _set(PROXIED, ("hosted", "record", "images"), []),
+    # Only a search tool runs as its function; an image call is always direct.
+    "fallback-on-image-generate": _set(IMAGE, ("hosted", "fallback_from"), {"source_id": "src_relaygpt01"}),
+    "fallback-names-no-source-id": _set(PROXIED, ("hosted", "fallback_from", "source_id"), "relay-gpt"),
+    "fallback-with-a-name": _set(PROXIED, ("hosted", "fallback_from", "name"), "relay-gpt"),
 }
 
 

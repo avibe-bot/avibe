@@ -31,6 +31,7 @@ from core.agent_core.messages import (
     ProxyExecution,
     ToolCallBlock,
 )
+from core.message_output import plain_untrusted_text
 from vibe.i18n import t as i18n_t
 
 HOSTED_ACTIVITY_VERSION = 1
@@ -54,7 +55,8 @@ class HostedActivity:
     # How it ran: natively by the model's provider, by a search executor, or by an image endpoint directly.
     mode: Literal["native", "proxy", "direct"]
     status: str
-    # Model-facing English; ``error_code`` names the reasons Avibe worded itself.
+    # The reason as text: the provider's own, or Avibe's, which always carries ``error_code``, the display key this
+    # module and the Web card render in the viewer's language (#2589).
     error: Optional[str]
     # What the call was about: the query, prompt, page or thread it named.
     subject: Optional[str]
@@ -84,6 +86,10 @@ class HostedActivity:
     # The committed response row a native call came in. Its card is ordered just
     # before that row, as the call happened before the text that reads its result.
     response_id: Optional[str] = None
+    # The Source that refused to run this search natively, so it ran by proxy instead (``hosted.fallback_from``),
+    # with its current name.
+    fallback_source_id: Optional[str] = None
+    fallback_source_name: Optional[str] = None
 
     @property
     def completed(self) -> bool:
@@ -126,6 +132,11 @@ class HostedActivity:
         payload.update({key: value for key, value in optional.items() if value is not None})
         if self.extra_queries:
             payload["extra_queries"] = list(self.extra_queries)
+        if self.fallback_source_id is not None:
+            fallback: dict[str, Any] = {"source_id": self.fallback_source_id}
+            if self.fallback_source_name is not None:
+                fallback["source_name"] = self.fallback_source_name
+            payload["fallback_from"] = fallback
         if self.cost is not None:
             cost: dict[str, Any] = {"basis": self.cost.basis, "calls": self.cost_calls}
             if self.cost.usd is not None:
@@ -251,7 +262,8 @@ def proxy_activity(
     return HostedActivity(
         call_id=call.id,
         tool=call.name,
-        mode=execution.mode if execution is not None else "proxy",
+        # An image call is direct even when it was refused before it ran, with no execution to say so.
+        mode=execution.mode if execution is not None else ("direct" if call.name == "image_generate" else "proxy"),
         status=result.record.status,
         error=result.record.error,
         error_code=result.record.error_code,
@@ -261,7 +273,12 @@ def proxy_activity(
         provider=execution.executor_origin.provider if execution is not None else None,
         source_id=execution.executor_source_id if execution is not None else None,
         source_name=source_names(execution.executor_source_id) if execution is not None else None,
-        model=execution.executor_origin.model if execution is not None else None,
+        model=(
+            execution.executor_origin.model
+            if execution is not None
+            # The model a refused image call named: it never moves to another (§7.4).
+            else ran.model if ran is not None else None
+        ),
         sources=tuple(result.record.sources),
         images=tuple(result.record.images or ()),
         size=(ran.size if ran is not None and ran.size else size),
@@ -270,6 +287,10 @@ def proxy_activity(
         cost=cost,
         cost_calls=1,
         duration_ms=duration_ms,
+        fallback_source_id=result.fallback_from.source_id if result.fallback_from is not None else None,
+        fallback_source_name=(
+            source_names(result.fallback_from.source_id) if result.fallback_from is not None else None
+        ),
         cost_at_least=at_least,
     )
 
@@ -315,7 +336,15 @@ def _clip(text: str, limit: int = LINE_SUBJECT_MAX_CHARS) -> str:
     return flat if len(flat) <= limit else flat[: limit - 1].rstrip() + "…"
 
 
-def _ran(activity: HostedActivity, lang: str) -> list[Optional[str]]:
+def _untrusted(text: str, escape: Callable[[str], str]) -> str:
+    """Text Avibe did not write (a model's query, a provider's error, a user's Source or model name), as the IM line
+    carries it: its mentions and masked links made inert for every platform, then escaped for the destination's
+    markup. A platform escape alone leaves Discord's ``@everyone`` and ``[label](url)`` live."""
+
+    return escape(plain_untrusted_text(text))
+
+
+def _ran(activity: HostedActivity, lang: str, escape: Callable[[str], str]) -> list[Optional[str]]:
     """How a completed call ran and what it produced, as the IM line names them.
 
     A direct image call names the image model and the image's size rather than a vendor: the model is what the call
@@ -326,12 +355,16 @@ def _ran(activity: HostedActivity, lang: str) -> list[Optional[str]]:
         first = activity.images[0] if activity.images else None
         size = f"{first.width}×{first.height}" if first is not None and first.width and first.height else None
         more = _count(activity, lang) if len(activity.images) > 1 else None
-        return [activity.model, size, more]
+        return [_untrusted(activity.model, escape) if activity.model else None, size, more]
     vendor = _vendor_label(activity.provider)
     if not vendor:
         mode = None
+    elif activity.mode == "proxy" and activity.fallback_source_id is not None:
+        # Why it ran by proxy: the turn's own Source refused the native tool (§8.3, mockup 06).
+        refused_by = _untrusted(activity.fallback_source_name or activity.fallback_source_id, escape)
+        mode = i18n_t("hostedTools.mode.fallback", lang, source=refused_by, provider=vendor)
     elif activity.mode == "proxy" and activity.model:
-        mode = i18n_t("hostedTools.mode.proxyModel", lang, provider=vendor, model=activity.model)
+        mode = i18n_t("hostedTools.mode.proxyModel", lang, provider=vendor, model=_untrusted(activity.model, escape))
     else:
         mode = i18n_t(f"hostedTools.mode.{activity.mode}", lang, provider=vendor)
     return [mode, _count(activity, lang)]
@@ -393,10 +426,12 @@ def hosted_line(activity: HostedActivity, lang: str, *, escape: Callable[[str], 
     emoji = "🖼" if activity.tool == "image_generate" else "🔎"
     parts: list[Optional[str]] = [f"{emoji} {i18n_t(f'hostedTools.tool.{activity.tool}', lang)}"]
     if activity.subject:
-        parts[0] += " " + i18n_t("hostedTools.quoted", lang, subject=escape(_clip(activity.subject)))
+        parts[0] += " " + i18n_t("hostedTools.quoted", lang, subject=_untrusted(_clip(activity.subject), escape))
     if activity.completed:
-        parts.extend(_ran(activity, lang))
+        parts.extend(_ran(activity, lang, escape))
     else:
-        parts.append(i18n_t(f"hostedTools.status.{activity.status}", lang, error=escape(_error_text(activity, lang))))
+        parts.append(
+            i18n_t(f"hostedTools.status.{activity.status}", lang, error=_untrusted(_error_text(activity, lang), escape))
+        )
     parts.append(_cost(activity, lang))
     return " · ".join(part for part in parts if part)

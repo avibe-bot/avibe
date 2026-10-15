@@ -2352,6 +2352,7 @@ def test_direct_mode_refuses_chain_and_probe(tmp_path):
 
 
 def test_new_subscription_joins_only_the_agents_its_catalog_serves(tmp_path):
+    """D1: a later subscription is placed ahead of API keys, where its fixed catalog serves the menu (D-1, #2156)."""
     key = _source("src_placekey01", ("claude-opus-4-6",))
     config = _config([key])
     service, _, _ = _service(tmp_path, config)

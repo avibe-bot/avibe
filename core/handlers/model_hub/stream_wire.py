@@ -354,6 +354,14 @@ def _responses_terminal_event(
     }
 
 
+def _images_terminal_event(
+    key: str,
+    message: str,
+    _next_sequence_number: int,
+) -> dict[str, object]:
+    return {"error": {"type": "server_error", "code": key, "message": message}}
+
+
 def _chat_terminal_event(
     key: str,
     message: str,
@@ -827,6 +835,26 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
             input_paths=(("prompt_tokens",),),
             cached_input_paths=(("prompt_tokens_details", "cached_tokens"),),
             output_paths=(("completion_tokens",),),
+        ),
+    ),
+    # The engine's images endpoints (vibey-hosted-tools.md §7.4): a buffered JSON
+    # answer only; ``image_generate`` never streams, so nothing here is streamed.
+    "openai_images": ProtocolStreamTaxonomy(
+        terminal_envelopes=(),
+        model_output_envelopes=(),
+        success_literal=None,
+        sequence_number_path=None,
+        # https://platform.openai.com/docs/api-reference/images/object
+        buffered_error_envelope_paths=(("error",),),
+        buffered_output_array_path=("data",),
+        terminal_event_name=None,
+        render_terminal_event=_images_terminal_event,
+        usage=ProtocolUsageTaxonomy(
+            # https://platform.openai.com/docs/api-reference/images/object#images-object-usage
+            container_paths=(("usage",),),
+            input_paths=(("input_tokens",),),
+            cached_input_paths=(("input_tokens_details", "cached_tokens"),),
+            output_paths=(("output_tokens",),),
         ),
     ),
 }

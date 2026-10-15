@@ -150,13 +150,14 @@ The evidence store, its record and its owner are the capability model's §3. v2 
   - `Unsupported tool type: <type>` for a declared type → hosted tool `call`;
   - `Invalid encrypted_content in search_result block` while the request replays a web-search result → `web_search`
     `replay`;
-  - **new:** an upstream image endpoint that refuses the model or the endpoint before producing anything (a 404, or a
-    400 naming the model or endpoint as unsupported, as a relay without the vendor's image endpoint answers) →
-    `image_generate` `call` for that (Source, model); a refusal of the endpoint itself (the path is not served) is
-    written for every image model the overlay lists for that Source on that endpoint kind, so sibling models do not
-    each fail once. Only an upstream refusal counts: the images path goes through
-    `_is_local_model_registration_failure`, and the engine's own refusals never teach, neither CPA's "only supported
-    on /v1/images/generations and /v1/images/edits" nor a route 404 that Avibe's own engine config caused. The record
+  - **new:** an upstream image endpoint that refuses the model or the endpoint before producing anything →
+    `image_generate` `call`. A 400 or 404 whose machine code names the model (`model_not_found`, `unknown_model`) is
+    written for that (Source, model); any other 404 is a refusal of the endpoint itself (the path is not served, as a
+    relay without the vendor's image endpoint answers) and is written for every image model the Source registers
+    there, so sibling models do not each fail once. Only an upstream refusal counts: the images path goes through
+    `_is_local_model_registration_failure`, which recognizes the engine's own refusals as local, so they never
+    teach: neither "unknown provider for model <routed>" nor its images handler's "Model <routed> is not supported
+    on /v1/images/generations or /v1/images/edits". The record
     is stamped and retired by the wire stamp like any negative. The enum drops that pair from the next turn (§7.2), and the refusal shows and
     clears on the image card like a search refusal (§8.1);
   - **new:** xAI's plain-text refusal of a replayed payload, `Could not decrypt the provided encrypted_content`,
@@ -549,8 +550,8 @@ E2E stay.
   ```json
   {"name": "image_generate",
    "parameters": {"type": "object", "required": ["model", "prompt"], "properties": {
-     "model": {"enum": ["gpt-image-2", "grok-imagine-image", "gemini-3.1-flash-image"],
-               "description": "gpt-image-2: … (default) · grok-imagine-image: … · gemini-3.1-flash-image: …"},
+     "model": {"enum": ["gpt-image-2", "gemini-2.5-flash-image", "gemini-3-pro-image-preview"],
+               "description": "gpt-image-2: … (default) · gemini-2.5-flash-image: … · gemini-3-pro-image-preview: …"},
      "prompt": {"type": "string"},
      "size": {"type": "string", "description": "e.g. 1024x1024, 1536x1024; or an aspect ratio such as 16:9"},
      "images": {"type": "array", "items": {"type": "string"}, "maxItems": 4, "description": "paths of reference images to edit"},
@@ -606,24 +607,34 @@ Unchanged from v1 §7.3 (owner decision, 2026-10-13 19:14), with the producer no
   (relative to the session's cwd, under the same file permissions) and with its checks (a supported image type,
   within `read`'s inline limit), and sends the bytes base64 in `images`. A path the agent could not `read` is
   refused before any call, with a `failed` record whose error names the path.
-- **Per model kind** (the overlay entry says which):
-  - **OpenAI gpt-image family** (an OpenAI API key, or the Codex subscription backend) and **xAI grok-imagine**:
-    the engine's `/v1/images/generations`, or `/v1/images/edits` when `images` is present.
-  - **Gemini image models** (Nano Banana): the chat route with the image response modality, on the Source's own
-    protocol.
-- **Every route is unverified today** (gateway lane, 2026-10-15). The pinned engine (v8.0.23-3) contains the images
-  code (the Codex executor's direct Image API path, `gpt-image-2` entries, `grok-imagine-image-quality`, and
-  "model %s is only supported on /v1/images/generations and /v1/images/edits"), and `passthrough` keeps the images
-  endpoints enabled. None of it is reachable from Avibe yet:
-  - the engine adapter and `EngineClient` post only to the protocol endpoints, so they gain an images invoke path;
-  - `stream_wire` has no images taxonomy (outcome and usage), so it gains one;
-  - a custom (OpenAI-compatible chat) Source's image model needs the engine's per-model `image: true` flag, which
-    `config.py` never writes.
-- **Route verification is the implementation's job, not the user's.** Each image path gets one hermetic engine E2E
-  (the real engine, a stub upstream), like §7.1's harness: Codex OAuth images, an OpenAI API key, xAI
-  grok-imagine, and a Gemini image model (e.g. Nano Banana 2, `gemini-3.1-flash-image`) through the chat route
-  with the image modality. A model whose route is not verified ships without an overlay entry, so it is never
-  offered and the UI never needs an "unverified" tag.
+- **One path: the engine's images endpoints.** Every image model runs through `/v1/images/generations`, or
+  `/v1/images/edits` when the call carries reference images, as a buffered JSON call (`EngineClient`'s
+  `openai_images` request protocol, with its own `stream_wire` taxonomy for the outcome and usage). The overlay
+  entry's `request` holds the fixed fields the model needs (JPEG at quality 90 for GPT Image, so a file fits `read`'s
+  inline cap; base64 results for Gemini), and the call adds `prompt`, `n`, `size` in pixels or `aspect_ratio` for a
+  ratio, and each reference image as a `data:` URL. An API-key Source's engine entry registers its vendor's image
+  models, and an OpenAI-compatible entry flags each with the engine's per-model `image: true`, without which the
+  engine's images handler refuses a non-GPT-Image name.
+- **What was verified** (gateway lane, 2026-10-15, the pinned engine v8.0.23-3 against a stub upstream,
+  `tests/e2e/test_model_hub_images.py`):
+  - **An OpenAI API key** (`gpt-image-2`): generations and edits reach `{base}/images/generations|edits` with the
+    body unchanged but for the bare model id, and the answer comes back byte for byte. The engine serves it through
+    its Codex executor's direct Image API path.
+  - **A Gemini API key** (`gemini-2.5-flash-image`, `gemini-3-pro-image-preview`): the flagged entry reaches
+    Google's OpenAI-compatible `images/generations`, the only image path Google documents on that layer (its chat
+    route does not return images for these models). No reference images: Google documents generation only.
+  - **xAI grok-imagine is not reachable**: the engine's images handler accepts an xAI image model only under an
+    empty, `xai` or `grok` prefix and then routes the bare id, which `force-model-prefix` never registers (unchanged
+    in v8.0.28). That 400 is the engine's own refusal, recognized as local, never learned. xAI ships with no image
+    models until the engine or the xAI rendering changes.
+  - **A Codex (ChatGPT) subscription is not offered images.** The engine runs it through the same direct Image API
+    function against `https://chatgpt.com/backend-api/codex`, a host no stub can stand in for (an OAuth auth file
+    takes no base URL), so no hermetic E2E verifies it. The overlay's `kinds: ["api_key"]` keeps the subscription
+    out. Codex CLI itself calls `chatgpt.com/backend-api/codex/images/generations`, so the path very likely works;
+    one real call at a release E2E, with the owner's approval, can turn it on.
+- **Route verification is the implementation's job, not the user's.** A model whose route is not verified ships
+  without an overlay entry, or without the credential kind it was not verified on, so it is never offered and the
+  UI never needs an "unverified" tag.
 - **Authorized by the turn's enum.** The gateway resolves the Source from the turn's frozen `image_generate` enum
   (§3.4): a model outside it is 409 `tool_not_enabled`, and the chosen (Source, model) is admitted on the final
   snapshot (`runs_on`, identity, and no current refusal: a pair refused earlier in the turn fails locally with
@@ -636,12 +647,8 @@ Unchanged from v1 §7.3 (owner decision, 2026-10-13 19:14), with the producer no
 - **No idle cut for a buffered call.** The engine client's 120 s socket-read bound applies only to streamed calls on
   the measured Sources, so a buffered images call longer than 120 s is not cut; the tool's call deadline bounds it.
   If an images path ever streams partial images, those partials must keep feeding the idle bound.
-- **A Codex-subscription image runs through a chat model inside the engine.** The engine's Codex executor uses
-  either the direct Image API or the hosted `image_generation` tool on a base model
-  (`multimedia.gpt-image-2-base-model`, default `gpt-5.4-mini`), so such a call is billed and limited as a model
-  call. The subscription E2E covers whichever path the engine takes.
-- **No silent fallback.** A failed call returns a `failed` record whose error names the alternatives ("gpt-image-2
-  failed: <reason>. Available: grok-imagine-image, gemini-3.1-flash-image"). The model may call again with another
+- **No silent fallback.** A failed call returns a `failed` record whose error names the alternatives ("<reason>.
+  Available: gemini-2.5-flash-image, gemini-3-pro-image-preview"). The model may call again with another
   model; the gateway never switches on its own.
 - **The result names the model used**, in `ProxyExecution` and in the path record.
 
@@ -734,6 +741,21 @@ Unchanged: the tool card (query, mode "native · xAI API key" or "via Anthropic 
 when metered, sources, failure reason); citations through the existing citation contract; the IM one-liner
 `🔎 Web search "query" · native (xAI) · 6 sources · $0.01`. The image card shows the prompt, the image, the model
 used and the cost; IM attaches the file.
+
+**When a search ran by proxy because the turn's own Source refused it** (`hosted.fallback_from`, set by Vibey on a
+hop whose C-6 facts say `refused`), both surfaces say so, so the switch is never silent:
+- the Web card keeps a note in view, collapsed or expanded: "relay-gpt 不支持网页搜索，已改用 Anthropic（relay-claude）"
+  with "之后自动沿用，可在 模型 › 工具 中清除" for a reader who can manage the instance, and "之后自动沿用，实例管理员可在
+  模型 › 工具 中清除" for anyone else, who cannot open Models;
+- the IM line names it in place of how the call ran: "🔎 网页搜索 “…” · relay-gpt 不支持，已改用 Anthropic · 6 个来源 · $0.01".
+Like every claim about how a call ran, the note shows only for a completed call. The refusing Source is named by
+its current name (`source_names`), and the note
+disappears once the refusal is cleared and the hop is native again.
+
+**Untrusted text on the IM line.** The subject (a model's query or prompt), a provider's error, and a user's Source or
+model name are not Avibe's words. `hosted_line` passes each through `core.message_output.plain_untrusted_text`
+(mentions and masked links made inert on every platform) and then the destination's escape. A platform escape alone
+leaves Discord's `@everyone`, `<@id>` and `[label](url)` live.
 
 ## 9. Defaults, cost and privacy
 

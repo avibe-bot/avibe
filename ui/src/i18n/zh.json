@@ -4967,7 +4967,18 @@
           "gateway_refused": "模型网关拒绝了这次调用。",
           "gateway_no_result": "模型网关没有返回结果。",
           "image_param_unsupported": "所选图片模型不支持其中一个参数。",
-          "image_model_unavailable": "所选图片模型当前不可用。"
+          "image_model_unavailable": "所选图片模型当前不可用。",
+          "image_argument_invalid": "图片调用的参数无法发送。",
+          "image_reference_unreadable": "无法读取参考图片。",
+          "provider_refused": "供应商拒绝了这次调用。",
+          "provider_timed_out": "调用超时。",
+          "provider_unreachable": "无法连接供应商。",
+          "provider_unreadable": "无法读取供应商的回复。",
+          "provider_too_large": "供应商的回复超出了大小上限。",
+          "provider_image_unusable": "供应商返回的图片无法使用。",
+          "search_not_run": "模型没有搜索就直接作答了。",
+          "search_failed": "供应商的搜索失败了。",
+          "response_ended_early": "回复提前结束了。"
         },
         "mode": {
           "native": "原生 · {{provider}}",
@@ -5000,6 +5011,12 @@
         "ranNative": "原生执行：{{where}}",
         "ranProxy": "代理执行：{{where}}",
         "ranDirect": "直连执行：{{where}}",
+        "fallback": {
+          "ranOn": "{{from}} 不支持{{toolInline}}，已改用 {{provider}}（{{source}}）",
+          "ran": "{{from}} 不支持{{toolInline}}，已改用 {{provider}}",
+          "kept": "之后自动沿用，可在 模型 › 工具 中清除",
+          "keptManager": "之后自动沿用，实例管理员可在 模型 › 工具 中清除"
+        },
         "duration": "用时 {{seconds}} 秒",
         "alsoSearched": "还搜索了：{{queries}}",
         "image": {

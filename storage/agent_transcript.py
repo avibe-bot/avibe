@@ -76,6 +76,7 @@ from core.agent_core.harness.projection import open_tool_calls
 from core.agent_core.harness.store import ContextEntry, EntryKind
 from core.agent_core.messages import (
     AssistantMessage,
+    HostedImage,
     HostedToolBlock,
     TextBlock,
     ToolResultMessage,
@@ -115,35 +116,64 @@ _EVENT_TYPE_BY_KIND: dict[str, str] = {
 }
 _KIND_BY_EVENT_TYPE = {event_type: kind for kind, event_type in _EVENT_TYPE_BY_KIND.items()}
 
-# ``render(message, final=...)``: a response row's commit-time display text.
+# ``render(message, final=..., replied=..., images=...)``: a response row's commit-time display text; ``replied`` is
+# the decision ``final_outcome`` takes, and ``images`` those a final delivers with its reply.
 DisplayRenderer = Callable[..., str]
 _T = TypeVar("_T")
 FinalOutcome = Literal["completed", "failed"]
 
 
-def final_outcome(message: AssistantMessage) -> FinalOutcome:
-    """The Turn outcome a committed final response determines by itself.
+def final_outcome(message: AssistantMessage, *, replied: Optional[bool] = None) -> FinalOutcome:
+    """The Turn outcome of a committed final response.
 
     The one rule, shared by the row's type at commit and live settlement: a final
-    reply without usable content, or explicitly stopped at its output limit,
-    failed. Partial text must not turn a provider's incomplete final into a
-    successful result. Pending-input responses are not finals. Failures only
-    a live run can observe after the commit are applied by the live caller.
+    that does not reply, or explicitly stopped at its output limit, failed. Whether
+    it replies is the loop's decision (``has_reply``), taken as given; without one
+    (``replied`` None), the response alone decides. Partial text must not turn a
+    provider's incomplete final into a successful result. Pending-input responses
+    are not finals. Failures only a live run can observe after the commit are
+    applied by the live caller.
     """
-    return "completed" if has_reply(message) and message.stop_reason != "length" else "failed"
+    if replied is None:
+        replied = has_reply(message)
+    return "completed" if replied and message.stop_reason != "length" else "failed"
 
 
-def _response_type(message: AssistantMessage, *, final: bool, display_text: str) -> str:
+def _response_type(message: AssistantMessage, *, final: bool, display_text: str, replied: bool) -> str:
     if not final:
         return "assistant"
-    if final_outcome(message) == "failed":
+    if final_outcome(message, replied=replied) == "failed":
         return "error"
     return "result" if display_text.strip() else "assistant"
 
 
-def render_text(message: AssistantMessage, *, final: bool = False) -> str:
-    """Default display copy of a response: its text blocks, verbatim, in order."""
-    return "\n\n".join(block.text for block in message.content if isinstance(block, TextBlock) and block.text)
+#: What a response's display puts between two text blocks another block (a tool or hosted call, thinking) separates.
+PARAGRAPH_BREAK = "\n\n"
+
+
+def text_parts(message: AssistantMessage) -> list[tuple[str, TextBlock]]:
+    """A response's text blocks as its display joins them: each non-empty block with what goes before it.
+
+    Adjacent blocks are one span of prose and join as written: a provider may split
+    its answer into many, as Anthropic does at every cited span. A paragraph break
+    goes only where another block came between two of them.
+    """
+    parts: list[tuple[str, TextBlock]] = []
+    separated = False
+    for block in message.content:
+        if not isinstance(block, TextBlock):
+            separated = True
+        elif block.text:
+            parts.append((PARAGRAPH_BREAK if parts and separated else "", block))
+            separated = False
+    return parts
+
+
+def render_text(
+    message: AssistantMessage, *, final: bool = False, replied: bool = True, images: Sequence[HostedImage] = ()
+) -> str:
+    """Default display copy of a response: its text blocks, verbatim, in order, joined as ``text_parts`` says."""
+    return "".join(separator + block.text for separator, block in text_parts(message))
 
 
 class TranscriptError(RuntimeError):
@@ -229,6 +259,8 @@ class SQLiteTranscriptStore:
         *,
         final: bool,
         request: Optional[Mapping[str, Any]] = None,
+        replied: Optional[bool] = None,
+        images: Sequence[HostedImage] = (),
         agent_name: Optional[str] = None,
     ) -> ContextEntry:
         if not isinstance(message, AssistantMessage):
@@ -237,7 +269,9 @@ class SQLiteTranscriptStore:
         if request is not None:
             response["request"] = dict(request)  # C-9 ``ModelResponse.request``: the anchor's request facts
         model = _canonical(response, "response")
-        display_text = self._render(message, final=final)
+        if replied is None:
+            replied = has_reply(message)
+        display_text = self._render(message, final=final, replied=replied, images=tuple(images))
 
         def work(conn: Connection) -> ContextEntry:
             origin = _turn_origin(conn, session_id, agent_name)
@@ -250,7 +284,7 @@ class SQLiteTranscriptStore:
                 author="agent",
                 source="agent",
                 author_name=origin.agent_name,
-                message_type=_response_type(message, final=final, display_text=display_text),
+                message_type=_response_type(message, final=final, display_text=display_text, replied=replied),
                 text=display_text,
                 content={"model": model},
             )

@@ -56,7 +56,7 @@ from vibe.model_hub_runtime import supervisor as supervisor_module
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
 from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_catalog, official_models_dev_provider
 from vibe.model_hub_runtime.client import EngineClient, EngineClientError, EngineConnection
-from vibe.model_hub_runtime.config import write_engine_config
+from vibe.model_hub_runtime.config import expected_model_names, write_engine_config
 from vibe.model_hub_runtime.environment import engine_subprocess_environment
 from vibe.model_hub_runtime.installer import (
     EngineRuntimeManager,
@@ -1702,7 +1702,9 @@ def test_config_generation_is_private_and_never_logs_secrets(
             "alias": "model-a",
             "display-name": "model-a #0",
             "thinking": {"levels": ["high", "low"]},
-        }
+        },
+        # An OpenAI key's engine entry registers the vendor's image models too (vibey-hosted-tools.md §7.4).
+        {"name": "gpt-image-2", "alias": "gpt-image-2", "display-name": "gpt-image-2 #0"},
     ]
     assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
     assert stat.S_IMODE(store.auth_dir.stat().st_mode) == 0o700
@@ -1790,9 +1792,50 @@ def test_engine_config_declares_text_only_input_only_on_openai_compatibility_mod
     ]
     for key in ("codex-api-key", "claude-api-key"):
         [entry] = payload[key]
-        assert entry["models"] == [
-            {"name": "text-model", "alias": "text-model", "display-name": "text-model #0"}
-        ]
+        assert entry["models"][0] == {"name": "text-model", "alias": "text-model", "display-name": "text-model #0"}
+        assert all("input-modalities" not in model for model in entry["models"])
+
+
+def test_an_api_key_engine_entry_registers_its_vendors_image_models(tmp_path: Path) -> None:
+    """MH-HOSTED-GATEWAY-007: image_generate routes only models the engine registered; an OpenAI-compatible entry
+    serves the images endpoints only for a model it flags, and reload verification expects them all."""
+
+    store = EngineStateStore(tmp_path / "state")
+    instance_dir, runtime_secrets = store.prepare_instance("install-1")
+    refs = {
+        "openai": store.store_api_key("openai-secret", vendor="openai", protocol="openai_responses"),
+        "gemini": store.store_api_key("gemini-secret", vendor="gemini", protocol="openai_chat"),
+        "custom": store.store_api_key("custom-secret", base_url="https://api.example.test/v1"),
+    }
+    store.sync_sources([
+        _binding(refs["openai"], source_id="src_openai0001", vendor="openai", protocol="openai_responses",
+                 base_url=None, model_ids=("gpt-6-astra",)),
+        _binding(refs["gemini"], source_id="src_gemini0001", vendor="gemini", protocol="openai_chat",
+                 base_url=None, model_ids=("gemini-3-flash", "gemini-2.5-flash-image")),
+        _binding(refs["custom"], source_id="src_custom0001", model_ids=("model-a",)),
+    ])
+    config_path = instance_dir / "config.yaml"
+    write_engine_config(
+        config_path, host="127.0.0.1", port=18231, auth_dir=store.auth_dir, runtime_secrets=runtime_secrets,
+        sources=store.list_sources(), state_store=store,
+    )
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+    def models(entry):
+        return {model["name"]: model.get("image") for model in entry["models"]}
+
+    [openai] = payload["codex-api-key"]
+    assert models(openai) == {"gpt-6-astra": None, "gpt-image-2": None}
+    custom, gemini = sorted(payload["openai-compatibility"], key=lambda entry: entry["base-url"])
+    # Listed as a chat model or not, an image model is flagged, and registered once.
+    assert models(gemini) == {
+        "gemini-3-flash": None, "gemini-2.5-flash-image": True, "gemini-3-pro-image-preview": True,
+    }
+    assert models(custom) == {"model-a": None}
+    sources = {source.source_id: source for source in store.list_sources()}
+    expected = expected_model_names(store.list_sources(), store, "0")
+    assert f'{sources["src_openai0001"].prefix}/gpt-image-2' in expected
+    assert f'{sources["src_gemini0001"].prefix}/gemini-3-pro-image-preview' in expected
 
 
 def _rendered_text_only(tmp_path: Path, model_ids: tuple[str, ...], text_only: tuple[str, ...]) -> set[str]:
@@ -7499,8 +7542,8 @@ def test_slow_source_prelude_is_bounded_without_blocking_other_routes(
                 return None
 
         class Session:
-            async def post(self, *_args, json=None, **_kwargs):
-                source_id = "src_slow0001" if str(json["model"]).startswith("slow/") else "src_fast0001"
+            async def post(self, *_args, data=None, **_kwargs):
+                source_id = "src_slow0001" if str(json.loads(data)["model"]).startswith("slow/") else "src_fast0001"
                 return Response(source_id)
 
             async def close(self) -> None:

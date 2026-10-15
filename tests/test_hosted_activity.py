@@ -18,6 +18,7 @@ from core.agent_core.messages import (
     FailedAttempt,
     HostedAction,
     HostedCost,
+    HostedFallback,
     HostedImage,
     HostedNative,
     HostedRecord,
@@ -31,6 +32,7 @@ from core.agent_core.messages import (
     ToolCallBlock,
 )
 from core.hosted_activity import hosted_line, native_activities, proxy_activity
+from modules.im.formatters.discord_formatter import DiscordFormatter
 from vibe.i18n import t as i18n_t
 
 FIXTURE = json.loads(
@@ -183,8 +185,27 @@ def proxy_retried():
     )
 
 
+def proxy_fallback():
+    """A web search on a hop whose own Source (relay-gpt) refused it natively, so relay-claude ran it by proxy."""
+    return proxy_activity(
+        ToolCallBlock(id="call_w7", name="web_search", arguments={"query": "Anthropic announcements October 2026"}),
+        HostedResult(
+            record=HostedRecord(status="completed", sources=(DEVDAY,)),
+            execution=ProxyExecution(
+                executor_origin=Origin(provider="anthropic", api="anthropic", model="claude-haiku-5-5"),
+                executor_source_id="src_relayclaude",
+                executor_billing="metered",
+                cost=HostedCost(basis="list", usd=0.01),
+            ),
+            fallback_from=HostedFallback("src_relaygpt1"),
+        ),
+        source_names=NAMES,
+    )
+
+
 @pytest.mark.parametrize(
-    "build", [native_web_search, proxy_x_search, direct_image, proxy_failed, proxy_unreachable, proxy_retried]
+    "build",
+    [native_web_search, proxy_x_search, direct_image, proxy_failed, proxy_unreachable, proxy_retried, proxy_fallback],
 )
 def test_payloads_match_the_shape_the_web_card_renders(build):
     """MH-HOSTED-UI-009: every mode and outcome the card distinguishes, from the canonical records each producer writes.
@@ -253,6 +274,9 @@ def test_a_response_scoped_summary_is_shown_once():
             " · gpt-image-2 · 1536×1024",
         ),
         (proxy_failed, "zh", "🔎 X 搜索 “from:OpenAI” · 失败：no Source is verified for X search"),
+        # A proxy that ran because the turn's own Source refused the tool says so, in place of how it ran.
+        (proxy_fallback, "zh", "🔎 网页搜索 “Anthropic announcements October 2026” · relay-gpt 不支持，已改用 Anthropic · 1 个来源 · ≈ $0.01"),
+        (proxy_fallback, "en", "🔎 Web search “Anthropic announcements October 2026” · relay-gpt doesn't support it, now using Anthropic · 1 source · ≈ $0.01"),
     ],
 )
 def test_the_im_line_states_tool_query_mode_count_and_known_cost(build, lang, line):
@@ -347,6 +371,37 @@ def test_a_proxied_calls_cost_counts_every_billed_attempt(failed, last, cost, li
     assert payload.get("cost") == cost
     line = hosted_line(activity, "en")
     assert line.endswith(f" · {line_tail}") if line_tail else "$" not in line
+
+
+HOSTILE = ("@everyone", "<@123456789>", "[Models](https://example.invalid)")
+
+
+def _slots(text: str):
+    """The IM line's untrusted slots, each carrying *text*: what a model, a provider or a user wrote."""
+    fallback = replace(proxy_fallback(), fallback_source_name=text)
+    return {
+        "subject": proxy_activity(
+            _x_call("call_s1", text), HostedResult(record=HostedRecord(status="completed"), execution=XAI)
+        ),
+        "error": proxy_activity(
+            _x_call("call_e1", "q"), HostedResult(record=HostedRecord(status="failed", error=f"refused: {text}"))
+        ),
+        "fallback source": fallback,
+        "executor model": replace(proxy_x_search(), model=text),
+        "image model": replace(direct_image(), model=text),
+    }
+
+
+@pytest.mark.parametrize("text", HOSTILE)
+@pytest.mark.parametrize("slot", ["subject", "error", "fallback source", "executor model", "image model"])
+def test_the_im_line_leaves_no_mention_or_masked_link_live_in_untrusted_text(slot, text):
+    """MH-HOSTED-UI-010: a query, a provider's error, and a user's Source or model name are not Avibe's words. The
+    line neutralizes their mentions and masked links before the platform escape, which alone leaves Discord's
+    ``@everyone``, ``<@id>`` and ``[label](url)`` live (DiscordBot sends without ``allowed_mentions``)."""
+
+    line = hosted_line(_slots(text)[slot], "en", escape=DiscordFormatter().escape_special_chars)
+    assert text not in line
+    assert "@everyone" not in line and "<@1" not in line and "](" not in line
 
 
 def test_the_im_line_escapes_the_quoted_subject_for_its_destination():
