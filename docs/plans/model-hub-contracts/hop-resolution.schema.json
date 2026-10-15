@@ -42,7 +42,7 @@
     },
     "hosted_tools": {
       "type": "object",
-      "description": "One entry per hosted tool the turn declares (vibey-hosted-tools.md §3.4). A search tool's entry is the primary hop's facts: `native` is `assumed` when the tool runs on the hop (`runs_on`) and no current negative `call` evidence exists, else `unsupported`; `declaration` and `include` (the overlay's wire declaration and Responses include values) are present exactly when `native` is `assumed`; `replay` is `assumed` when `native` is, the protocol replays natively and no current negative `replay` evidence exists. `image_generate` lists the image models the user's Sources make available, default first, and is absent when the tool is off or no model is available. The turn's first resolution freezes the tool set and the image models; later hops change only `native` and `replay`. A request carrying native content is pinned with x-avibe-pin-source: source_id.",
+      "description": "One entry per hosted tool the turn declares (vibey-hosted-tools.md §3.4). A search tool's entry is the primary hop's facts: `native` is `assumed` when the tool runs on the hop (`runs_on`) and no current negative `call` evidence exists, else `unsupported`; `refused` is `true` exactly when that negative `call` evidence, not `runs_on`, is why; `declaration` and `include` (the overlay's wire declaration and Responses include values) are present exactly when `native` is `assumed`; `replay` is `assumed` when `native` is, the protocol replays natively and no current negative `replay` evidence exists. `image_generate` lists the image models the user's Sources make available, default first, and is absent when the tool is off or no model is available. The turn's first resolution freezes the tool set and the image models; later hops change only `native`, `replay` and `refused`. A request carrying native content is pinned with x-avibe-pin-source: source_id.",
       "additionalProperties": false,
       "properties": {
         "web_search": {
@@ -83,6 +83,10 @@
                 "assumed",
                 "unsupported"
               ]
+            },
+            "refused": {
+              "const": true,
+              "description": "Present exactly when the tool runs on the hop but current negative `call` evidence for the hop's (Source, model) makes `native` `unsupported`: this Source refused it, so a proxied call is a fallback from it."
             }
           },
           "if": {
@@ -96,7 +100,12 @@
             "required": [
               "declaration",
               "include"
-            ]
+            ],
+            "not": {
+              "required": [
+                "refused"
+              ]
+            }
           },
           "else": {
             "not": {
@@ -153,6 +162,10 @@
                 "assumed",
                 "unsupported"
               ]
+            },
+            "refused": {
+              "const": true,
+              "description": "Present exactly when the tool runs on the hop but current negative `call` evidence for the hop's (Source, model) makes `native` `unsupported`: this Source refused it, so a proxied call is a fallback from it."
             }
           },
           "if": {
@@ -166,7 +179,12 @@
             "required": [
               "declaration",
               "include"
-            ]
+            ],
+            "not": {
+              "required": [
+                "refused"
+              ]
+            }
           },
           "else": {
             "not": {

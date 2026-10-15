@@ -3100,6 +3100,8 @@ def _without(entry: dict, key: str) -> dict:
         {"web_search": {**_NATIVE_SEARCH, "native": []}},
         {"web_search": {**_NATIVE_SEARCH, "include": "web_search_call.action.sources"}},
         {"web_search": {**_PROXY_SEARCH, "executor": None}},
+        {"web_search": {**_PROXY_SEARCH, "refused": False}},
+        {"web_search": {**_NATIVE_SEARCH, "refused": True}},
         {"image_generate": {**_IMAGES, "models": []}},
         {"image_generate": {**_IMAGES, "default": {"source_id": "src_executor01", "model_id": "grok-imagine"}}},
         {"image_generate": {**_IMAGES, "models": [{**_IMAGES["models"][0], "params": ["quality"]}]}},
@@ -3107,7 +3109,8 @@ def _without(entry: dict, key: str) -> dict:
     ],
     ids=[
         "absent", "unknown-tool", "assumed-without-declaration", "unsupported-with-include", "extra-field",
-        "no-replay", "unknown-fact", "unhashable-fact", "include-not-a-list", "v1-executor", "no-image-models",
+        "no-replay", "unknown-fact", "unhashable-fact", "include-not-a-list", "v1-executor", "refused-not-true",
+        "refused-on-a-native-tool", "no-image-models",
         "default-not-first", "unknown-image-param", "image-source-not-a-source-id",
     ],
 )
@@ -3124,6 +3127,80 @@ def test_a_hop_with_an_invalid_hosted_tool_entry_is_refused(hosted_tools) -> Non
 
     with pytest.raises(HopResolutionError, match="hosted"):
         selection_from_hop(hop)
+
+
+@pytest.mark.parametrize("refused", [True, False], ids=["refused-by-its-source", "never-offered-natively"])
+async def test_a_proxied_search_names_the_source_that_refused_it(refused) -> None:
+    """MH-HOSTED-VIBEY-004 (vibey-hosted-tools.md §3.5): a search call runs as its function either because the turn's
+    own Source refused the tool natively (C-6 ``refused``) or because its vendor never offers it. Only the first is a
+    fallback: the result names that Source by id, which the card and the IM line show by its current name."""
+    import httpx
+
+    from core.agent_core.messages import HostedFallback
+    from core.agent_core.tools.hosted import hosted_tool_spec
+    from modules.agents.vibey.models import selection_from_hop
+    from modules.agents.vibey.tools import HostedTool
+
+    hop = ModelHubLaunch(
+        backend="vibey", channel="hub", requested_model="relay-gpt", target_model="relay-gpt",
+        runtime_model="gpt-6-astra", context_window=200000, max_output_tokens=4096, supports_tools=True,
+        source_id="src_relaygpt01", source_identity="sha256:relay-identity",
+        gateway_base_url="http://hub.invalid/vibey", gateway_token="hub-token",
+        protocol="openai_responses", provider="openai",
+    ).to_hop_resolution()
+    hop["hosted_tools"] = {"web_search": {"native": "unsupported", "replay": "unsupported", **({"refused": True} if refused else {})}}
+    endpoint = selection_from_hop(hop).endpoint
+    answer = {"record": {"status": "completed", "sources": []}, "execution": {
+        "mode": "proxy", "executor_origin": {"provider": "anthropic", "api": "anthropic", "model": "claude-haiku-5-5"},
+        "executor_source_id": "src_relayclaude1", "executor_billing": "metered",
+    }}
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, json=answer))) as client:
+        result = await HostedTool(hosted_tool_spec("web_search"), lambda: endpoint, client).execute({"query": "q"}, None)  # type: ignore[arg-type]
+
+    assert result.hosted.fallback_from == (HostedFallback("src_relaygpt01") if refused else None)
+    assert result.hosted.execution.executor_source_id == "src_relayclaude1"
+
+
+async def test_a_search_its_source_refused_names_that_source_through_the_real_gateway(tmp_path, monkeypatch) -> None:
+    """MH-HOSTED-VIBEY-004, closed loop at the seam: the gateway holds a current refusal of web search natively on the
+    turn's Source, so the hop it resolves says ``refused``; Vibey's proxied search runs on the executor chain and names
+    that Source as where it fell back from (``hosted.fallback_from``), by id."""
+    import httpx
+
+    from core.handlers.model_hub import hosted_tools as hosted_tools_module
+    from core.handlers.model_hub.capability_evidence import EvidenceFeature
+    from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
+    from core.agent_core.messages import HostedFallback
+    from config.v2_config import ModelHubHostedToolConfig
+    from modules.agents.model_hub import ModelHubRuntimeRouter
+    from modules.agents.vibey.models import HubModelRouter, selection_from_hop
+    from modules.agents.vibey.tools import hosted_tools
+    from tests.test_model_hub_hosted_executor import OPENAI, XAI, _served_by_openai, _sources
+    from tests.test_model_hub_vibey_consumer import _vibey_service
+
+    monkeypatch.setattr(hosted_tools_module, "provider_executor_model", {"openai": "gpt-6-astra"}.get)
+    service = _vibey_service(tmp_path, _sources(), handles=[_served_by_openai()])
+    service.store.config.hosted_tools["web_search"] = ModelHubHostedToolConfig(enabled=True, executor_order=(OPENAI,))
+    xai = next(source for source in service.store.config.sources if source.id == XAI)
+    await service.record_hosted_refusals(xai, [("grok-4.6", EvidenceFeature.hosted("web_search", "call"), "refused")])
+    gateway = ModelHubTurnGateway(service)
+    hub = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+
+    async def resolve():
+        return selection_from_hop(await hub.resolve_hop("menu-alias", process_scope="vibey:fallback", turn_id="turn-fb"))
+
+    try:
+        router = HubModelRouter(resolve, lambda protocol: None, first=await resolve())
+        assert router.preflight.endpoint.source_id == XAI and router.preflight.endpoint.hosted_tools["web_search"].refused
+        async with httpx.AsyncClient(trust_env=False) as client:
+            (search,) = [tool for tool in hosted_tools(router, client) if tool.spec.name == "web_search"]
+            result = await search.execute({"query": "q"}, None)  # type: ignore[arg-type]
+    finally:
+        await gateway.close()
+
+    assert not result.is_error, result.content[0].text
+    assert result.hosted.fallback_from == HostedFallback(XAI)
+    assert result.hosted.execution.executor_source_id == OPENAI
 
 
 # How a stream breaks off: the connection simply ends, or CLIProxyAPI (Model Hub's engine) reports the upstream

@@ -158,21 +158,25 @@ class HostedEvidence:
 class HostedToolFacts:
     """What priors and evidence say about one search tool on one hop (§3.4).
 
-    ``declaration`` and ``include`` are set exactly when ``native`` is ``assumed``.
+    ``declaration`` and ``include`` are set exactly when ``native`` is ``assumed``. ``refused`` says the tool runs on
+    the hop but the hop's (Source, model) refused a call, the one ``unsupported`` a proxied call falls back from.
     """
 
     native: Assumption
     replay: Assumption
     declaration: Optional[Mapping[str, Any]] = None
     include: tuple[str, ...] = ()
+    refused: bool = False
 
 
 def hosted_tool_facts(
     source: ModelHubSourceConfig, model_id: str, tool: str, *, evidence: HostedEvidence, spec_for: SpecLookup
 ) -> HostedToolFacts:
     spec = runs_on(source, model_id, tool, spec_for=spec_for)
-    if spec is None or evidence.unsupported(source, model_id, EvidenceFeature.hosted(tool, "call")):
+    if spec is None:
         return HostedToolFacts(native="unsupported", replay="unsupported")
+    if evidence.unsupported(source, model_id, EvidenceFeature.hosted(tool, "call")):
+        return HostedToolFacts(native="unsupported", replay="unsupported", refused=True)
     replay: Assumption = (
         "assumed"
         if "replay" in HOSTED_TOOL_ASPECTS[tool]
@@ -380,6 +384,8 @@ def hop_hosted_tools(
         if facts.native == "assumed":
             entry["declaration"] = dict(facts.declaration or {})
             entry["include"] = list(facts.include)
+        if facts.refused:
+            entry["refused"] = True
         entries[tool] = entry
     if turn.images:
         entries[IMAGE_TOOL] = {

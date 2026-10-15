@@ -680,7 +680,9 @@ These rows describe the wire mapping the `ai` lane implements.
 
 - **Proxy.** A search tool that a hop does not run natively is its canonical function, and a call to it runs on the
   gateway's executor chain, which the gateway resolves from the live Turn. The result keeps the record on
-  `ToolResultMessage.hosted`, with `execution.mode: proxy`. An `image_generate` call is an ordinary tool call and
+  `ToolResultMessage.hosted`, with `execution.mode: proxy`. A call on a hop whose facts say the hop's own Source refused
+  the tool natively (C-6 `refused`) also records that Source as `hosted.fallback_from: {source_id}`, by id only, so
+  a surface can say where the tool fell back from; a tool the vendor never offers natively records none. An `image_generate` call is an ordinary tool call and
   result everywhere, with `execution.mode: direct`; its images are files the record lists.
 
 An Anthropic citation covers its whole text block, so it carries no range.

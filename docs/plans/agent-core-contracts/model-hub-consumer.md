@@ -77,11 +77,14 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
          exactly when `native` is `assumed`;
        - `replay` is `assumed` when `native` is, the protocol replays natively (`anthropic`, `openai_responses`),
          and no current negative `replay` evidence exists; otherwise `unsupported`;
+       - `refused: true`, present exactly when the tool runs on the hop but current negative `call` evidence for the
+         hop's (Source, model) makes `native` `unsupported`: that Source refused the tool, so a proxied call is a
+         fallback from it. It is absent when the tool does not run on the hop;
      - **`image_generate`** gives `{models: [{source_id, model_id, description, params, size_forms}], default:
        {source_id, model_id}}`: the image models the user's Sources make available, default first. It is absent when
        the tool is off or no image model is available, so `models` is never empty.
      - The turn's first resolution freezes the tool set, each search tool's executor order and the image models on
-       the turn trace; later hops of the turn change only `native` and `replay`. A settings change applies from the
+       the turn trace; later hops of the turn change only `native`, `replay` and `refused`. A settings change applies from the
        next turn.
    - **The gateway never rewrites hosted content.** Vibey pins every request that carries a native declaration, a
      native hosted payload or an in-flight continuation, with `x-avibe-pin-source`.

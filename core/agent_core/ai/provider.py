@@ -46,18 +46,23 @@ class HostedToolRoute:
     The agent declares the tool natively exactly when Model Hub assumes the hop runs it (``native: assumed``), with
     the wire ``declaration`` and the Responses ``include`` values; otherwise (``proxy``) as the same-named function,
     which the gateway's executor chain runs. ``replay`` is whether a hosted payload may go back verbatim to this hop.
+    ``refused``: the hop's own Source would run the tool but refused it (a current refusal, C-6 ``refused``), so a call
+    here is a fallback from that Source.
     """
 
     mode: Literal["native", "proxy"]
     replay: bool
     declaration: Optional[Mapping[str, Any]] = None
     include: tuple[str, ...] = ()
+    refused: bool = False
 
     def __post_init__(self) -> None:
         if self.mode not in ("native", "proxy"):
             raise ValueError(f"unknown hosted tool mode: {self.mode!r}")
-        if not isinstance(self.replay, bool):
-            raise ValueError("hosted replay must be a boolean")
+        if not isinstance(self.replay, bool) or not isinstance(self.refused, bool):
+            raise ValueError("hosted replay and refused must be booleans")
+        if self.refused and self.mode != "proxy":
+            raise ValueError("a tool its Source refused runs as its function")
         if self.mode == "proxy":
             if self.declaration is not None or self.include:
                 raise ValueError("a proxy hosted tool has no native declaration or include")
