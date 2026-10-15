@@ -4875,15 +4875,20 @@ def test_coalescing_preserves_known_threads_when_graphql_is_unavailable(tmp_path
         module, path, [_success_state(_ci_run(head=COALESCED_HEAD), clean=True)], token=None,
         extra_args=(*options, "--allow-unauthenticated", *replay),
     )
-    assert (rc, output) == (124, "")
+    if replay == ("--catch-up",):
+        assert rc == 0 and "issue_comment #601" in output
+    else:
+        assert (rc, output) == (124, "")
+    assert "success candidate" not in output
     assert payload["review_thread_states"] == {"thread-1": False}
-    assert payload["snapshot"]["review_threads"] == {"thread-1": False}
+    effective = payload.get(module.STAGED_KEY, {}).get("cursors", payload)
+    assert effective["snapshot"]["review_threads"] == {"thread-1": False}
 
     # Only an authenticated resolved observation can unblock the paired result.
     rc, output, _ = _ci_cycle(
         module, path, [_success_state(_ci_run(head=COALESCED_HEAD), clean=True,
                                      review_threads=[{"id": "thread-1", "isResolved": True}])],
-        extra_args=options,
+        delivery="2", extra_args=options,
     )
     assert rc == 0 and "success candidate" in output
 
@@ -5047,6 +5052,37 @@ def test_coalesced_candidate_explicitly_rejects_a_pinned_ci_head_mismatch(tmp_pa
     )
     assert rc == 0 and "pr_head" in output
     assert "success candidate" not in output
+
+
+@pytest.mark.parametrize("kind", ["issue_comments", "reviews"])
+@pytest.mark.parametrize("ci_complete", [False, True])
+@pytest.mark.parametrize("catch_up", [False, True])
+def test_coalescing_preserves_requested_clean_verdict_replay(tmp_path, kind, ci_complete, catch_up):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    run = _ci_run(head=COALESCED_HEAD) if ci_complete else _ci_run(
+        head=COALESCED_HEAD, status="in_progress", conclusion=None,
+    )
+    verdict = _clean_codex_comment()
+    if kind == "reviews":
+        verdict = {**verdict, "state": "COMMENTED", "commit_id": COALESCED_HEAD}
+    state = _success_state(run, **{kind: [verdict]})
+    cursor = "issue_comment_cursor" if kind == "issue_comments" else "review_cursor"
+    _managed_state(module, path, "wat_9", **_complete_pr_baseline_fields(module, state),
+                   **{cursor: 601}, actions=module.normalize_selected_runs({"CI": [run]}))
+    flags = ("--catch-up",) if catch_up else (("--since-issue-comment-id", "0") if kind == "issue_comments" else ("--since-review-id", "0"))
+    rc, output, payload = _ci_cycle(
+        module, path, [state], extra_args=("--coalesce-success", *flags),
+    )
+    event = "issue_comment #601" if kind == "issue_comments" else "review #601"
+    assert rc == 0 and event in output
+    if not catch_up:
+        assert "GitHub Actions" not in output  # Explicit PR replay baselines unrelated CI.
+    assert payload[module.STAGED_KEY]["cursors"][cursor] == 601
+    rc, output, _ = _ci_cycle(
+        module, path, [state], delivery="2", extra_args=("--coalesce-success",),
+    )
+    assert (rc, output) == (124, "")
 
 
 @pytest.mark.parametrize("intermediate", ["missing", "nonterminal", "older-attempt", "partial"])

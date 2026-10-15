@@ -379,7 +379,9 @@ that durable pre-event snapshot, including activity that landed while the Agent
 follow-up was running.
 
 Use `--catch-up` only when deliberately processing historical activity. It is
-not a substitute for the pre-action baseline in a review loop.
+not a substitute for the pre-action baseline in a review loop. Catch-up and
+explicit `--since-*-id` cursors replay requested verdicts as ordinary activity,
+even with `--coalesce-success`; normal monitoring still defers half-success.
 
 Prefer `--actionable-only` for review loops. Without it the waiter wakes the Agent
 for every comment on the PR, including the `@codex review` triggers the loop itself

@@ -74,8 +74,8 @@ do not load them routinely. They introduce no additional delivery gates.
   manual/E2E checks, dependencies, and a **Known-by-design ledger** for intentional
   non-changes. Reply to repeated intentional findings with that ledger entry.
 - Use one durable combined PR + CI Watch per owner/concern through
-  `background-watch-hook`: `wait_pr.py`, `--forever`, required `--workflow` names,
-  `--coalesce-success`; no fixed `--sha` during a normal delivery loop.
+  `background-watch-hook`'s preferred mode: `wait_pr.py`, `--forever`, required
+  `--workflow` names; no fixed `--sha` during a normal delivery loop.
   Set `--timeout 0` on both supervisor and waiter; do not impose a lifetime cap.
 - Seed one complete owner-specific baseline and arm the Watch before the first
   watched push or review trigger. For a new PR, create it first, then immediately

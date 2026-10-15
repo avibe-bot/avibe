@@ -2683,7 +2683,7 @@ def main() -> int:
                 actionable_only=args.actionable_only,
                 ignored_authors=ignored_authors,
                 ignore_patterns=ignore_patterns,
-                coalesce_success=args.coalesce_success,
+                coalesce_success=args.coalesce_success and not (args.catch_up or explicit_replay),
             )
             return PRReport(activity[0], activity[1:], state)
 
