@@ -89,8 +89,22 @@ Preparation:
    `asset_release_tag`, and the six Avibe-owned planned URLs, but contains no
    `size_bytes`, `sha256`, or `binary_sha256` fields. Do not edit the packaged
    manifest for this step.
-3. Use the first-class candidate mode, which reuses the strict build/archive
-   loop and official builder flags:
+3. Use the first-class candidate mode, which reuses the strict build/archive loop and
+   official builder flags. The builder records the effective fixed settings
+   (`CGO_ENABLED=0`, `-trimpath`, and `-buildvcs=false`) in the generated
+   manifest. Candidate metadata may omit those fields, in which case the fixed
+   invocation values are recorded; contradictory values fail before any target
+   build. Strict mode keeps rejecting mismatched pinned bytes.
+
+   The builder also gives both strict and candidate builds one controlled Go
+   environment: `GO111MODULE=on`, `GOENV=off`, `GOTOOLCHAIN=local`,
+   `GOWORK=off`, `GOFIPS140=off`, `GODEBUG`/`GOFLAGS`/`GOEXPERIMENT` empty,
+   and the documented baseline architecture levels
+   (`GOAMD64=v1` or `GOARM64=v8.0`, with other architecture-level variables
+   cleared). It preserves only cache/download settings that do not change build
+   identity. The exact Go version is recorded in the candidate manifest and is
+   the same pin consumed by the publication workflow; the workflow fails closed
+   if that manifest pin is missing or malformed.
 
    ```bash
    python3 scripts/build_model_hub_engine.py \
@@ -112,23 +126,39 @@ Preparation:
 
    ```python
    import shlex
+   from pathlib import Path
 
    probe = runner.run(
        tenant_exec(
            target,
-           f"{ACCEPTANCE_PYTHON} -c "
+           f"cd /tmp && {ACCEPTANCE_PYTHON} -I -c "
            + shlex.quote(
+               "import sys; "
+               "from pathlib import Path; "
                "from core.managed_runtime import runtime_platform_tag; "
                "from vibe.model_hub_runtime.installer import EngineRuntimeManager; "
+               "paths = [Path(__import__('core').__file__).resolve(), "
+               "Path(__import__('vibe').__file__).resolve()]; "
+               "prefix = Path(sys.prefix).resolve(); "
+               "assert all(prefix == path or prefix in path.parents for path in paths), "
+               "(prefix, paths); "
                "print(runtime_platform_tag()); "
-               "print(EngineRuntimeManager(offline=True).host_platform())"
+               "print(EngineRuntimeManager(offline=True).host_platform()); "
+               "print(prefix); "
+               "print(*paths, sep='\\n')"
            ),
        ),
        capture=True,
    )
-   raw_platform, asset_platform = probe.stdout.strip().splitlines()
+   raw_platform, asset_platform, prefix, *module_paths = probe.stdout.strip().splitlines()
    if asset_platform not in {"linux-amd64", "linux-arm64"}:
        raise SystemExit(f"unsupported Incus Model Hub platform: {raw_platform} -> {asset_platform}")
+   if not module_paths or any(
+       not (Path(path).resolve() == Path(prefix).resolve()
+            or Path(prefix).resolve() in Path(path).resolve().parents)
+       for path in module_paths
+   ):
+       raise SystemExit("platform probe did not import the candidate normal wheel")
    ```
 
    The installer is the source of truth for these aliases: `linux-x64` selects

@@ -45,6 +45,7 @@ ASSET_TAG_RE = re.compile(
 VERSION_RE = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 SOURCE_SHA_RE = re.compile(r"[0-9a-f]{40}")
+GO_VERSION_RE = re.compile(r"go[0-9]+\.[0-9]+\.[0-9]+")
 MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
 
 
@@ -86,6 +87,20 @@ def _required_string(payload: dict, key: str, context: str) -> str:
     if not isinstance(value, str) or not value:
         raise ReleaseGuardError(f"{context}.{key} must be a non-empty string")
     return value
+
+
+def manifest_go_version(manifest_path: Path) -> str:
+    """Return the exact stable Go pin used by source publication and recovery."""
+
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ReleaseGuardError(f"cannot read Model Hub engine manifest: {exc}") from exc
+    build = payload.get("build") if isinstance(payload, dict) else None
+    version = build.get("go_version") if isinstance(build, dict) else None
+    if not isinstance(version, str) or GO_VERSION_RE.fullmatch(version) is None:
+        raise ReleaseGuardError("Model Hub engine manifest build.go_version must be an exact stable Go version")
+    return version
 
 
 def load_release_spec(manifest_path: Path) -> ReleaseSpec:
@@ -396,6 +411,10 @@ def _build_parser() -> argparse.ArgumentParser:
     fetch_source.add_argument("--output-dir", type=Path, required=True)
     verify = subparsers.add_parser("verify", help="Verify a materialized release directory.")
     verify.add_argument("--asset-dir", type=Path, required=True)
+    subparsers.add_parser(
+        "go-version",
+        help="Print and validate the exact stable Go version recorded in the manifest.",
+    )
     publish_draft = subparsers.add_parser(
         "publish-draft", help="Repair and verify a draft using manifest-pinned assets before publication.",
     )
@@ -413,6 +432,9 @@ def main(argv: list[str] | None = None) -> int:
             spec = fetch_upstream_assets(args.manifest, args.output_dir)
         elif args.command == "publish-draft":
             spec = publish_draft_release(args.manifest, args.asset_dir, repository=args.repo)
+        elif args.command == "go-version":
+            print(manifest_go_version(args.manifest))
+            return 0
         else:
             spec = verify_release_assets(args.manifest, args.asset_dir)
     except ReleaseGuardError as exc:

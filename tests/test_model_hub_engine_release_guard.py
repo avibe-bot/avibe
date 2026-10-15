@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import subprocess
+import sys
 import tarfile
 from pathlib import Path
 
@@ -82,6 +83,77 @@ def _fake_download(remote: dict[str, bytes]):
         destination.write_bytes(payload)
 
     return download
+
+
+def test_manifest_go_version_cli_accepts_alternate_stable_pin(tmp_path: Path) -> None:
+    manifest_path, _owned, _built = _manifest(tmp_path)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["build"] = {"go_version": "go1.27.1"}
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(guard.REPO_ROOT / "scripts/model_hub_engine_release_guard.py"),
+            "--manifest",
+            str(manifest_path),
+            "go-version",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "go1.27.1"
+
+
+@pytest.mark.parametrize(
+    "build",
+    [{}, {"go_version": "1.27.1"}, {"go_version": "go1.27"}, {"go_version": "go1.27.1-beta1"}],
+)
+def test_manifest_go_version_cli_rejects_missing_or_nonstable_pin(tmp_path: Path, build: dict) -> None:
+    manifest_path, _owned, _built = _manifest(tmp_path)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["build"] = build
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(guard.REPO_ROOT / "scripts/model_hub_engine_release_guard.py"),
+            "--manifest",
+            str(manifest_path),
+            "go-version",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "exact stable Go version" in result.stderr
+
+
+def test_publication_workflow_reads_go_pin_from_packaged_manifest() -> None:
+    import yaml
+
+    workflow = yaml.safe_load(
+        (guard.REPO_ROOT / ".github/workflows/model-hub-engine-release-guard.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    steps = workflow["jobs"]["build-patched-source"]["steps"]
+    resolve = next(step for step in steps if step.get("id") == "go_pin")
+    setup = next(step for step in steps if str(step.get("uses", "")).startswith("actions/setup-go@"))
+
+    assert "go-version" in resolve["run"]
+    assert "model_hub_engine_release_guard.py" in resolve["run"]
+    assert "go-version" in resolve["run"]
+    assert setup["with"]["go-version"] == "${{ steps.go_pin.outputs.go_version }}"
+    assert 'go-version: "1.26.9"' not in (guard.REPO_ROOT / ".github/workflows/model-hub-engine-release-guard.yml").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_fetch_owned_release_materializes_exact_verified_assets(

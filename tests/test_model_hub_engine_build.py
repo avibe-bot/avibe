@@ -282,9 +282,24 @@ def test_candidate_mode_writes_real_digests_and_owned_urls_without_pinned_hashes
     ]
     manifest = _candidate_manifest(tmp_path, source_sha=source_sha, patches=patches)
     monkeypatch.setattr(builder, "REPO_ROOT", tmp_path)
+    for name, value in {
+        "GOAMD64": "v4",
+        "GOARM64": "v9.5,lse,crypto",
+        "GOFLAGS": "-tags=hostile",
+        "GOEXPERIMENT": "hostile",
+        "GOFIPS140": "v1.0.0",
+        "GODEBUG": "hostile=1",
+        "GO111MODULE": "off",
+        "GO_EXTLINK_ENABLED": "1",
+        "GOTOOLCHAIN": "auto",
+        "GOWORK": "hostile.work",
+    }.items():
+        monkeypatch.setenv(name, value)
+    commands: list[tuple[list[str], dict[str, str] | None]] = []
     real_run = builder._run
 
     def fake_run(command, *, cwd=None, env=None):
+        commands.append((list(command), dict(env) if env is not None else None))
         if command[:2] == ["go", "version"]:
             return "go version go1.26.0 darwin/arm64\n"
         if command[:2] == ["go", "build"]:
@@ -340,6 +355,25 @@ def test_candidate_mode_writes_real_digests_and_owned_urls_without_pinned_hashes
         not any(key in asset for key in ("size_bytes", "sha256", "binary_sha256"))
         for asset in candidate_payload["assets"]
     )
+    assert generated_payload["build"]["cgo_enabled"] is False
+    assert generated_payload["build"]["trimpath"] is True
+    assert generated_payload["build"]["buildvcs"] is False
+    assert {env["GOFLAGS"] for command, env in commands if command[:2] == ["go", "build"]} == {""}
+    assert {env["GOEXPERIMENT"] for command, env in commands if command[:2] == ["go", "build"]} == {""}
+    assert {env["GOFIPS140"] for command, env in commands if command[:2] == ["go", "build"]} == {"off"}
+    assert {env["GODEBUG"] for command, env in commands if command[:2] == ["go", "build"]} == {""}
+    assert {env["GO111MODULE"] for command, env in commands if command[:2] == ["go", "build"]} == {"on"}
+    assert {env["GO_EXTLINK_ENABLED"] for command, env in commands if command[:2] == ["go", "build"]} == {"0"}
+    assert {env["GOENV"] for command, env in commands if command[:2] == ["go", "build"]} == {"off"}
+    assert {env["GOTOOLCHAIN"] for command, env in commands if command[:2] == ["go", "build"]} == {"local"}
+    assert {env["GOWORK"] for command, env in commands if command[:2] == ["go", "build"]} == {"off"}
+    version_envs = [
+        env for command, env in commands if command[:2] == ["go", "version"]
+    ]
+    assert version_envs
+    assert all(env["GOENV"] == "off" for env in version_envs)
+    assert all(env["GOTOOLCHAIN"] == "local" for env in version_envs)
+    assert all(env["GO111MODULE"] == "on" for env in version_envs)
     assert {asset["platform"] for asset in generated_payload["assets"]} == set(FIXTURE_TARGETS)
     assert generated_payload["assets"] != candidate_payload["assets"]
     for asset in generated_payload["assets"]:
@@ -368,3 +402,56 @@ def test_candidate_mode_writes_real_digests_and_owned_urls_without_pinned_hashes
         go_binary="go",
     )
     assert guard.verify_release_assets(patchless_manifest, patchless_output).version == "v7.3.16"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("cgo_enabled", True), ("trimpath", False), ("buildvcs", True)],
+)
+def test_candidate_rejects_contradictory_fixed_build_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: bool,
+) -> None:
+    source = tmp_path / "source"
+    (source / "cmd" / "server").mkdir(parents=True)
+    for name, data in FIXTURE_DOCUMENTS.items():
+        (source / name).write_bytes(data)
+    subprocess.run(["git", "init", "--quiet", str(source)], check=True)
+    subprocess.run(
+        ["git", "-C", str(source), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(source), "config", "user.name", "Test"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "--quiet", "-m", "fixture"], check=True)
+    source_sha = subprocess.check_output(
+        ["git", "-C", str(source), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+    manifest = _candidate_manifest(tmp_path, source_sha=source_sha, patches=[])
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["build"][field] = value
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(builder, "REPO_ROOT", tmp_path)
+    commands: list[list[str]] = []
+
+    def unexpected_run(command, *, cwd=None, env=None):
+        del cwd, env
+        commands.append(list(command))
+        raise AssertionError("candidate metadata should fail before invoking a command")
+
+    monkeypatch.setattr(builder, "_run", unexpected_run)
+    with pytest.raises(builder.BuildError, match=field):
+        builder.build_source_release(
+            manifest,
+            tmp_path / f"rejected-{field}",
+            candidate=True,
+            source_repository=str(source),
+            go_binary="go",
+        )
+    assert commands == []
