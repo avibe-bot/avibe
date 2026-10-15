@@ -5,7 +5,7 @@ declare global {
     readonly __AVIBE_DESKTOP_VERSION__?: string;
     /** The macOS shell grants Tauri window dragging to this page. */
     readonly __AVIBE_DESKTOP_DRAG__?: true;
-    /** Legacy shell capability marker; session selection is now main-only. */
+    /** The shell supports the desktop pet IPC. Conversation selection is main-only. */
     readonly __AVIBE_DESKTOP_PET__?: true;
   }
 }
@@ -35,4 +35,12 @@ export function desktopDragRegion(): '' | undefined {
   // Runtime UI version: a desktop shell can load an older loopback Workbench
   // whose HTML predates the optional metadata tag.
   return isDesktopShell() && window.__AVIBE_DESKTOP_DRAG__ === true ? '' : undefined;
+}
+
+/**
+ * Retained capability probe for the native shell's frontend contract.
+ * Main-only mini no longer exposes a Workbench "Show in pet" action.
+ */
+export function canShowInDesktopPet(): boolean {
+  return isDesktopShell() && window.__AVIBE_DESKTOP_PET__ === true;
 }

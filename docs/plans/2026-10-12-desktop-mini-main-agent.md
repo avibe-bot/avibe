@@ -499,22 +499,30 @@ GET /api/sessions/main
   again. Retain the user's draft and document send ledger across transient failures.
 - **No switcher.** The bubble's switch button, the entire recent-session picker,
   its "Talk to Vibey" option and the Workbench "Show in pet" action are removed.
-  No frontend caller invokes `pet_bind` or `pet_unbind`. Summons still open/listen
+  The only allowed binding write is `pet_bind("ses_main")` after successful main
+  resolution, to normalize native dismissal storage. No caller writes another
+  session or invokes `pet_unbind`. Summons still open/listen
   through the existing shell flow and wait for a usable main.
 - **Persisted compatibility.** Existing `pet.json` shapes still load unchanged.
   Legacy `binding` values and bound events never select a conversation, including
-  when they arrive after main has resolved. No native or persisted-format migration
-  is part of this PR.
+  when they arrive after main has resolved. The existing native IPC normalizes empty or other persisted bindings to
+  `ses_main`; the file format and native code remain unchanged.
 - **Unavailable.** A 403, `409 main_session_invalid`, `409 main_session_archived`,
   `builtin_agent_unavailable`, or a transport failure shows the existing localized
   unavailable message and "Open in Avibe". No arbitrary-session fallback. Pending
   resolution shows the existing loading copy; reconnect/reactivation can recover.
-- **Native boundary / known gap.** The existing native dismissal writer accepts
-  only its persisted binding. If that legacy binding equals the resolved main,
-  dismissal persistence still works. Otherwise dismissals last in the current
-  document; persisting them across restarts needs a separately scoped native change.
-  The frontend does not restore binding writes to bypass this boundary. §11.3's
-  restart-persistence requirement is deferred for that legacy shape.
+- **Dismissal persistence.** After main resolves successfully, compare the legacy
+  binding from `pet_ready` with `ses_main`. If different, make at most one
+  `pet_bind("ses_main")` attempt per surface epoch. Serialize dismissal writes
+  after this normalization, so closes made during the IPC are preserved even
+  though native binding clears the old dismissal list. An already-main file
+  needs no binding write. A failed normalization does not retry in a loop;
+  a later epoch may try again. This preserves §11.3 for new installs and upgrades.
+  The last successfully resolved main owns document dismissals, even during a
+  temporary lookup failure. Only a manual × adds an id; stop exits are transient
+  presentation state. Forget the id when it disappears from the healthy eligible
+  activity snapshot (and has no unread Inbox reply), or when its next turn starts.
+  New turns also cancel pending exit animations, so an old close cannot hide them.
 - **Turn failures remain visible.** A foreground terminal failure notice is shown
   in the reply bubble/detail, with "Fix in Avibe" when it names a next step. Detached
   completions and replayed failures do not replace the current exchange. Live step
@@ -532,7 +540,7 @@ GET /api/sessions/main
    (§6).
 3. **Dismiss persistence.** There is no server state for dismissed cards.
    Keep the dismissed ids in `pet.json`, so a dismissed card stays gone across
-   restarts. Forget an id once its item disappears from the turn state. This
+   restarts. Forget an id when its eligible activity disappears or a new turn starts (§10). This
    adds an optional field, so older files keep loading.
 
 ## 12. Prototype-only (do not copy)

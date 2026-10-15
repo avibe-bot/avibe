@@ -1,5 +1,34 @@
 import { expect, test } from '@playwright/test';
 
+for (const theme of ['light', 'dark']) {
+  for (const lang of ['en', 'zh']) {
+    test(`collapsed bubble spacing and action copy (${theme}, ${lang})`, async ({ page }) => {
+      await page.goto(`/e2e/pet-mini/fixture.html?scenario=personal&lang=${lang}`);
+      await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
+      await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
+      await expect(page.locator('.pet-mini-stage')).toHaveCSS('color', theme === 'dark' ? 'rgb(255, 255, 255)' : 'rgb(23, 23, 28)');
+      await page.evaluate(async () => {
+        await Promise.all(document.getAnimations()
+          .filter((animation) => animation.effect?.getTiming().iterations !== Infinity)
+          .map((animation) => animation.finished.catch(() => {})));
+      });
+      const gap = await page.evaluate(() =>
+        document.querySelector('.pet-mini-reply-bubble')!.getBoundingClientRect().top
+        - document.querySelector('.pet-mini-collapsed')!.getBoundingClientRect().bottom);
+      expect(gap).toBeGreaterThanOrEqual(13);
+      expect(gap).toBeLessThanOrEqual(15);
+      await expect(page.locator('.pet-mini-reply-toggle')).toContainText(lang === 'zh' ? /已回复：\S/ : /Replied: \S/);
+      await expect(page.locator('.pet-avatar [aria-label]').last()).toHaveAttribute('aria-label', lang === 'zh' ? /正在干活 · \d/ : /Working · \d/);
+      await page.locator('.pet-mini-collapsed').click();
+      const stop = page.locator('.pet-mini-stop').first();
+      await expect(stop).toHaveAttribute('aria-label', lang === 'zh' ? /^停止：.+/ : /^Stop: .+/);
+      await stop.click();
+      await expect(stop).toHaveAttribute('aria-label', lang === 'zh' ? '停止？' : 'Stop?');
+      expect(await page.evaluate(() => window.petFixtureStops)).toEqual([]);
+    });
+  }
+}
+
 test('an unmounted surface releases desktop input and a remount reports fresh regions', async ({ page }) => {
   await page.goto('/e2e/pet-mini/fixture.html');
   await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
@@ -220,6 +249,6 @@ for (const trigger of ['reconnect', 'reactivation']) {
     await page.getByRole('textbox').fill('recovered');
     await page.getByRole('textbox').press('Enter');
     await expect.poll(() => page.evaluate(() => window.petFixtureSends)).toEqual([{ sessionId: 'ses_main', payload: { text: 'recovered' } }]);
-    expect(await page.evaluate(() => JSON.parse(localStorage.getItem('avibe.pet.devBinding')!).binding)).toBe('legacy-session');
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem('avibe.pet.devBinding')!).binding)).toBe('ses_main');
   });
 }

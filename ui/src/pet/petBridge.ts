@@ -3,7 +3,7 @@ import { openLinkInNewContext } from '@/lib/pwaNavigation';
 
 /** Native window/layout transport. pet_ready still parses legacy persisted
  * bindings for backwards compatibility; only GET /api/sessions/main selects
- * the conversation. This frontend never invokes pet_bind or pet_unbind. */
+ * the conversation. The only binding write normalizes native storage to main. */
 
 export type PetIntent = 'listen' | 'show' | 'release';
 
@@ -107,6 +107,19 @@ export const petBridge = {
     const invoke = shellInvoke();
     if (!invoke) return;
     await invoke('pet_set_dismissed', { sessionId, ids });
+  },
+
+  /** Normalize native dismissal storage; callers cannot choose another session. */
+  bindMain: async (): Promise<PetBinding> => {
+    const invoke = shellInvoke();
+    if (invoke) return parseBinding(await invoke('pet_bind', { sessionId: 'ses_main' }));
+    devMemory = { binding: 'ses_main', revision: readDevBinding().revision + 1 };
+    try {
+      window.localStorage.setItem(DEV_BINDING_KEY, JSON.stringify(devMemory));
+    } catch {
+      // Browser preview without storage keeps the normalized state in memory.
+    }
+    return devMemory;
   },
 
   /** Moves the native window with the pointer (`start-dragging`). */

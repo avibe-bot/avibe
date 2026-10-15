@@ -31,10 +31,9 @@ const POSES: Record<PetPose, string> = {
 const BREATHING_SETTLE_MS = 30 * 1000;
 
 /**
- * `badge`: unread replies (top right). `activities`: background work for the
- * session (delegated runs, watches, tasks), shown as a small count at the
- * bottom left so it is visible while the pet is collapsed; it never changes
- * the pose, which reflects only the agent itself.
+ * `badge`: unread replies (top right). `activities`: running eligible cards,
+ * shown at bottom left even while collapsed. The caller derives the pose
+ * from the same activity set.
  */
 export const PetAvatar: React.FC<{ pose: PetPose; badge?: number; activities?: number }> = ({
   pose,
@@ -58,7 +57,7 @@ export const PetAvatar: React.FC<{ pose: PetPose; badge?: number; activities?: n
       {activities > 0 && (
         <span
           className="absolute bottom-1 left-1 flex h-5 min-w-5 items-center justify-center rounded-full border border-mint/40 bg-mint-soft px-1.5 text-[11px] font-semibold leading-none text-mint-ink"
-          aria-label={t('chat.activities.running', { count: activities })}
+          aria-label={t('pet.runningBadge', { count: activities })}
         >
           {activities > 99 ? '99+' : activities}
         </span>

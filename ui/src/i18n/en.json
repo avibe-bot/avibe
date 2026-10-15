@@ -5951,7 +5951,8 @@
     "mainAgentTitle": "Vibey",
     "thinking": "Thinking",
     "waiting": "Waiting",
-    "repliedPrefix": "Replied:",
+    "repliedPrefix": "Replied: {{text}}",
+    "runningBadge": "Working · {{count}}",
     "untitledTask": "Untitled task",
     "dismiss": "Dismiss task",
     "voiceContinue": "Continue voice input",
@@ -5987,7 +5988,7 @@
       "unknown": "In progress"
     },
     "stop": {
-      "stop": "Stop",
+      "stop": "Stop: {{title}}",
       "pause": "Pause",
       "confirmStop": "Stop?",
       "confirmPause": "Pause?",

@@ -799,4 +799,4 @@ to {
   border-top:1px solid color-mix(in srgb,var(--pet-ink) 8%,transparent);
   scrollbar-width:thin}
 .pet-mini-bubble-history .pet-mini-detail-inner { padding:8px 14px }
-.pet-mini-collapsed { margin-bottom:14px }
+.pet-mini-swap:has(.pet-mini-collapsed) { padding-bottom:14px }

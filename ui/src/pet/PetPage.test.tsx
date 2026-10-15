@@ -276,7 +276,7 @@ describe('PetPage setup', () => {
 describe('main-only resolution', () => {
   const mainResult = (): WorkbenchSessionReadResult => ({ status: 200, session: session('S'), capabilities: { can_chat: true } });
 
-  it('ignores legacy ready/bound state and never writes a binding', async () => {
+  it('ignores legacy ready/bound state and never selects another session', async () => {
     const legacy = JSON.stringify({ binding: 'legacy', revision: 9 });
     localStorage.setItem('avibe.pet.devBinding', legacy);
     const invoke = vi.fn(async (command: string) => command === 'pet_ready'
@@ -297,6 +297,64 @@ describe('main-only resolution', () => {
     expect(api.listSessions).not.toHaveBeenCalled();
     const { petShell } = await import('./petShell');
     expect(petShell.dismissed()).not.toContain('unrelated');
+  });
+
+  it.each([null, 'legacy-session', 'ses_main'])('normalizes persisted binding %s to main and persists a card close', async (persisted) => {
+    mainSession('ses_main');
+    canUseAgents = true;
+    runningAgents = workingIn('T');
+    const invoke = vi.fn(async (command: string) => {
+      if (command === 'pet_ready') return { binding: persisted, revision: 4, dismissed_ids: [], summon_pending: null };
+      if (command === 'pet_bind') return { binding: 'ses_main', revision: 5 };
+      return { panel_side: 'left', panel_edge: 'bottom' };
+    });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    render(<PetPage />); summon('show');
+    const close = await screen.findByLabelText('pet.dismiss');
+    if (persisted !== 'ses_main') await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_bind', { sessionId: 'ses_main' }));
+    await userEvent.click(close);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_set_dismissed', { sessionId: 'ses_main', ids: ['T'] }));
+    await emit((h) => h.onConnected?.());
+    expect(invoke.mock.calls.filter(([command]) => command === 'pet_bind')).toHaveLength(persisted === 'ses_main' ? 0 : 1);
+    expect(invoke.mock.calls.some(([command]) => command === 'pet_unbind')).toBe(false);
+  });
+
+  it('queues a close behind main normalization and does not lose it when native bind clears old dismissals', async () => {
+    mainSession('ses_main'); canUseAgents = true; runningAgents = workingIn('T');
+    const pendingBind = deferred<unknown>();
+    const invoke = vi.fn((command: string) => {
+      if (command === 'pet_ready') return Promise.resolve({ binding: null, revision: 0, dismissed_ids: [], summon_pending: null });
+      if (command === 'pet_bind') return pendingBind.promise;
+      return Promise.resolve({ panel_side: 'left', panel_edge: 'bottom' });
+    });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    render(<PetPage />); summon('show');
+    await userEvent.click(await screen.findByLabelText('pet.dismiss'));
+    const { petShell } = await import('./petShell');
+    await waitFor(() => expect(petShell.dismissed()).toEqual(['T']));
+    await act(async () => pendingBind.resolve({ binding: 'ses_main', revision: 1 }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_set_dismissed', { sessionId: 'ses_main', ids: ['T'] }));
+    expect(invoke.mock.calls.filter(([command]) => command === 'pet_bind')).toHaveLength(1);
+  });
+
+  it('does not retry failed main normalization until the authorization epoch changes', async () => {
+    mainSession('ses_main');
+    const invoke = vi.fn(async (command: string) => {
+      if (command === 'pet_ready') return { binding: 'legacy-session', revision: 4, dismissed_ids: [], summon_pending: null };
+      if (command === 'pet_bind') throw new Error('disk unavailable');
+      return { panel_side: 'left', panel_edge: 'bottom' };
+    });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    render(<PetPage />);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_bind', { sessionId: 'ses_main' }));
+    await emit((h) => h.onConnected?.());
+    await emit((h) => h.onConnected?.());
+    expect(invoke.mock.calls.filter(([command]) => command === 'pet_bind')).toHaveLength(1);
+    await emit((h) => h.onAuthorizationChanged?.({}));
+    await waitFor(() => expect(invoke.mock.calls.filter(([command]) => command === 'pet_bind')).toHaveLength(2));
   });
 
   it.each(['reconnect', 'reactivation'])('recovers a failed main lookup on %s without a polling loop', async (trigger) => {
@@ -853,7 +911,7 @@ describe('PetPage review fixes, round 9', () => {
       render(<PetPage />);
       await screen.findByLabelText('pet.toggle');
       await act(async () => {});
-      expect(screen.queryByLabelText('chat.activities.running')).toBeNull();
+      expect(screen.queryByLabelText('pet.runningBadge')).toBeNull();
       expect(pose()).toBe('idle');
     } finally {
       api.getTurnState.mockImplementation(async () => idleTurn);
@@ -1336,7 +1394,7 @@ describe('desktop mini v2 interaction contract', () => {
     const pause = api.cancelSession;
     pause.mockImplementationOnce(() => pending.promise);
     mainSession('S'); render(<PetPage />); await showDetail();
-    const stop = await screen.findByLabelText('pet.stop.confirmStop');
+    const stop = await screen.findByLabelText('pet.stop.stop');
     vi.useFakeTimers();
     fireEvent.click(stop); fireEvent.click(stop);
     expect(screen.getByText('pet.stop.stopping')).toBeTruthy();
@@ -1348,7 +1406,7 @@ describe('desktop mini v2 interaction contract', () => {
     turn([{ ...activity(id, kind), label: 'Allowed replacement' }]);
     await emit((h) => h.onRunsUpdated?.({}));
     expect(screen.getByText('Allowed replacement')).toBeTruthy();
-    const freshStop = screen.getByLabelText('pet.stop.confirmStop');
+    const freshStop = screen.getByLabelText('pet.stop.stop');
     expect(freshStop.hasAttribute('disabled')).toBe(false);
     fireEvent.click(freshStop);
     expect(freshStop.classList.contains('is-confirm')).toBe(true);
@@ -1395,7 +1453,7 @@ describe('desktop mini v2 interaction contract', () => {
     const pending = deferred<{ ok: boolean }>();
     api.cancelSession.mockImplementationOnce(() => pending.promise);
     mainSession('S'); render(<PetPage />); await showDetail();
-    const stop = await screen.findByLabelText('pet.stop.confirmStop');
+    const stop = await screen.findByLabelText('pet.stop.stop');
     fireEvent.click(stop); fireEvent.click(stop);
     turn([]);
     await resolveMainAs('B');
@@ -1408,7 +1466,7 @@ describe('desktop mini v2 interaction contract', () => {
     expect(await screen.findByText('Fresh S card')).toBeTruthy();
     await act(async () => pending.resolve({ ok: true }));
     expect(screen.queryByText('pet.stop.stopped')).toBeNull();
-    expect(screen.getByLabelText('pet.stop.confirmStop').hasAttribute('disabled')).toBe(false);
+    expect(screen.getByLabelText('pet.stop.stop').hasAttribute('disabled')).toBe(false);
   });
 
   it.each(['success', 'uncertain'])('preserves user text while fencing a late send %s after authorization changes', async (outcome) => {
@@ -1759,7 +1817,7 @@ describe('desktop mini v2 interaction contract', () => {
     turn([activity('run:r1', 'agent_run')]);
     await emit((h) => h.onRunsUpdated?.({}));
     await waitFor(() => expect(pose()).toBe('running'));
-    expect(screen.queryByLabelText('pet.stop.confirmStop')).toBeNull();
+    expect(screen.queryByLabelText('pet.stop.stop')).toBeNull();
   });
 
 
@@ -1834,8 +1892,8 @@ describe('desktop mini v2 interaction contract', () => {
   it('requires a second press, uses the native watch id, and retains the stopped row through linger and both exit beats', async () => {
     turn([activity('watch:w1', 'watch'), activity('run:r1', 'agent_run')]);
     mainSession('S'); render(<PetPage />); await showDetail();
-    const stop = await screen.findByLabelText('pet.stop.confirmStop');
-    expect(screen.getAllByLabelText('pet.stop.confirmStop')).toHaveLength(1);
+    const stop = await screen.findByLabelText('pet.stop.stop');
+    expect(screen.getAllByLabelText('pet.stop.stop')).toHaveLength(1);
     const pending = deferred<{ ok: boolean }>();
     api.cancelSession.mockImplementationOnce(() => pending.promise);
     vi.useFakeTimers();
@@ -1862,7 +1920,7 @@ describe('desktop mini v2 interaction contract', () => {
 
   it('expires confirmation at 3s and lets a failed pause be retried', async () => {
     turn([activity('task:t1', 'task')]); mainSession('S'); render(<PetPage />); await showDetail();
-    const stop = await screen.findByLabelText('pet.stop.confirmStop');
+    const stop = await screen.findByLabelText('pet.stop.stop');
     vi.useFakeTimers(); fireEvent.click(stop);
     await act(async () => vi.advanceTimersByTime(3000));
     expect(stop.classList.contains('is-confirm')).toBe(false);
@@ -2033,5 +2091,141 @@ describe('Personal Agent review invariants', () => {
     expect(api.getVaultRequests.mock.calls.filter(([filter]) => filter?.session === 'other')).toHaveLength(2);
     expect(api.getVaultRequests.mock.calls.filter(([filter]) => filter?.session === 'new')).toHaveLength(1);
     expect(api.getTurnState.mock.calls.filter(([id]) => id === 'new')).toHaveLength(1);
+  });
+});
+
+describe('Personal Agent review: history and lifecycle', () => {
+  it.each(['disappeared', 'new-turn', 'new-turn-during-outage'])('forgets a manual dismissal when %s', async (reason) => {
+    mainSession('ses_main'); canUseAgents = true; runningAgents = workingIn('T');
+    const invoke = vi.fn(async (command: string) => command === 'pet_ready'
+      ? { binding: 'ses_main', revision: 1, dismissed_ids: [], summon_pending: null }
+      : { panel_side: 'left', panel_edge: 'bottom' });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    render(<PetPage />); summon('show');
+    await userEvent.click(await screen.findByLabelText('pet.dismiss'));
+    const { petShell } = await import('./petShell');
+    await waitFor(() => expect(petShell.dismissed()).toEqual(['T']));
+    if (reason === 'disappeared') {
+      runningAgents = { ...runningAgents, agents: [] };
+      await emit((h) => h.onRunsUpdated?.({}));
+    } else {
+      if (reason === 'new-turn-during-outage') {
+        api.getMainSession.mockRejectedValueOnce(new Error('offline'));
+        await emit((h) => h.onConnected?.());
+        await screen.findByText('pet.vibeyUnavailable');
+      }
+      await emit((h) => h.onTurnStart?.({ session_id: 'T' }));
+    }
+    await waitFor(() => expect(petShell.dismissed()).toEqual([]));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_set_dismissed', { sessionId: 'ses_main', ids: [] }));
+    runningAgents = workingIn('T');
+    await emit((h) => h.onConnected?.());
+    await waitFor(() => expect(document.querySelector('[data-session-id="T"]')).toBeTruthy());
+  });
+
+  it('cancels an old manual exit when the next turn starts before its animation ends', async () => {
+    canUseAgents = true; runningAgents = workingIn('T');
+    render(<PetPage />); summon('show');
+    const close = await screen.findByLabelText('pet.dismiss');
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(close);
+      expect(document.querySelector('.is-leaving')).toBeTruthy();
+      await emit((h) => h.onTurnStart?.({ session_id: 'T' }));
+      await act(async () => vi.advanceTimersByTime(500));
+      const { petShell } = await import('./petShell');
+      expect(petShell.dismissed()).toEqual([]);
+      expect(document.querySelector('[data-session-id="T"]')).toBeTruthy();
+      expect(document.querySelector('.is-leaving')).toBeNull();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('renders reference sidecars in current and historical Markdown', async () => {
+    const reference = (id: string, title: string) => ({ references: [{ kind: 'session', session_id: id, title }] });
+    tails.S = [
+      message('old-user', 'S', { author: 'user', type: 'user', text: 'Read #<older>', content: reference('older', '旧项目') }),
+      message('old-result', 'S', { text: 'Done #<old-result-ref>', content: reference('old-result-ref', 'Old result') }),
+      message('current-user', 'S', { author: 'user', type: 'user', text: 'Summarize #<current>', content: reference('current', '当前项目') }),
+      message('current-result', 'S', { text: 'See #<result-ref>', content: reference('result-ref', 'Latest result') }),
+    ];
+    render(<PetPage />); await showDetail();
+    const detail = within(document.querySelector('.pet-mini-detail') as HTMLElement);
+    for (const title of ['#旧项目', '#Old result', '#当前项目', '#Latest result']) expect(detail.getByText(title)).toBeTruthy();
+    expect(document.querySelector('.pet-mini-detail')?.textContent).not.toMatch(/#</);
+  });
+
+  it.each([false, true])('preserves document dismissals across an outage (native bind succeeds: %s)', async (persistable) => {
+    mainSession('ses_main'); canUseAgents = true; runningAgents = workingIn('T');
+    const invoke = vi.fn(async (command: string) => {
+      if (command === 'pet_ready') return { binding: null, revision: 0, dismissed_ids: [], summon_pending: null };
+      if (command === 'pet_bind') {
+        if (!persistable) throw new Error('storage unavailable');
+        return { binding: 'ses_main', revision: 1 };
+      }
+      return { panel_side: 'left', panel_edge: 'bottom' };
+    });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    render(<PetPage />); summon('show');
+    await userEvent.click(await screen.findByLabelText('pet.dismiss'));
+    const { petShell } = await import('./petShell');
+    await waitFor(() => expect(petShell.dismissed()).toEqual(['T']));
+    api.getMainSession.mockRejectedValueOnce(new Error('offline'));
+    await emit((h) => h.onConnected?.());
+    await screen.findByText('pet.vibeyUnavailable');
+    expect(petShell.dismissed()).toEqual(['T']);
+    await emit((h) => h.onConnected?.());
+    await waitFor(() => expect(petShell.currentBinding()).toBe('ses_main'));
+    expect(petShell.dismissed()).toEqual(['T']);
+    expect(document.querySelector('[data-session-id="T"]')).toBeNull();
+  });
+
+  it('shows loading during slow reauthorization while preserving the draft', async () => {
+    render(<PetPage />); summon('listen');
+    await userEvent.type(await screen.findByRole('textbox'), 'unsent draft');
+    const pending = deferred<WorkbenchSessionReadResult>();
+    api.getMainSession.mockReturnValueOnce(pending.promise);
+    await emit((h) => h.onAuthorizationChanged?.({}));
+    expect(screen.getByRole('status').textContent).toContain('common.loading');
+    expect(screen.getByRole('button', { name: 'pet.openInAvibe' })).toBeTruthy();
+    expect(screen.queryByRole('textbox')).toBeNull();
+    await act(async () => pending.resolve({ status: 200, session: session('S'), capabilities: { can_chat: true } }));
+    expect((await screen.findByRole('textbox') as HTMLTextAreaElement).value).toBe('unsent draft');
+    expect(screen.queryByText('common.loading')).toBeNull();
+  });
+
+  it.each(['idle-then-running', 'new-turn', 'unread'])('does not turn a stop exit into a manual dismissal before %s', async (next) => {
+    canUseAgents = true; runningAgents = workingIn('T');
+    api.getTurnState.mockImplementation(async (id) => ({ ...idleTurn, in_flight: id === 'T' }));
+    api.cancelSession.mockResolvedValue({ ok: true });
+    render(<PetPage />); summon('show');
+    const stop = await screen.findByLabelText('pet.stop.stop');
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(stop); fireEvent.click(stop);
+      await act(async () => {});
+      await act(async () => vi.advanceTimersByTime(2500));
+      await act(async () => vi.advanceTimersByTime(500));
+      expect(document.querySelector('[data-session-id="T"]')).toBeNull();
+      const { petShell } = await import('./petShell');
+      expect(petShell.dismissed()).not.toContain('T');
+      if (next === 'idle-then-running') {
+        runningAgents = { ...runningAgents, agents: runningAgents.agents.map((row) => ({ ...row, state: 'idle' })) };
+        await emit((h) => h.onRunsUpdated?.({}));
+        runningAgents = workingIn('T');
+        await emit((h) => h.onRunsUpdated?.({}));
+      } else if (next === 'new-turn') {
+        await emit((h) => h.onTurnStart?.({ session_id: 'T' }));
+      } else {
+        runningAgents = { ...runningAgents, agents: runningAgents.agents.map((row) => ({ ...row, state: 'idle' })) };
+        act(() => {
+          unreadBySession = { T: 1 }; inboxVersion += 1; inboxListeners.forEach((listener) => listener());
+        });
+        await emit((h) => h.onRunsUpdated?.({}));
+      }
+      expect(document.querySelector('[data-session-id="T"]')).toBeTruthy();
+      expect(petShell.dismissed()).not.toContain('T');
+    } finally { vi.useRealTimers(); }
   });
 });

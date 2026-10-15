@@ -13,7 +13,7 @@ import { usePageActive } from '@/lib/pageActivity';
 import { usePendingVaultRequests } from '@/lib/usePendingVaultRequests';
 import { useVaultRequestRefresh } from '@/lib/useVaultRequestRefresh';
 import { vaultRequestType } from '@/lib/vaultRequestPlacement';
-import { referenceToMarker, type SessionReference } from '@/lib/mentions';
+import { referenceToMarker, type MentionReference, type SessionReference } from '@/lib/mentions';
 import { ShowPageVoiceDictation } from '@/lib/showPageVoiceDictation';
 import { VoiceTranscriptionError } from '@/lib/voiceTranscription';
 
@@ -40,7 +40,7 @@ const EMPTY_INBOX: InboxSession[] = [];
 const REFUSED_SEND_STATUSES = new Set([400, 403, 404, 409, 422]);
 const sendRefused = (error: unknown) => error instanceof ApiError && REFUSED_SEND_STATUSES.has(error.status);
 
-type StopPhase = 'confirm' | 'stopping' | 'stopped' | 'failed';
+type StopPhase = 'confirm' | 'stopping' | 'stopped' | 'exited' | 'failed';
 type PetCard = {
   id: string;
   sessionId: string;
@@ -212,6 +212,9 @@ const PetSurface: React.FC = () => {
   const data = usePetSession(binding);
   const epoch = data.epoch;
   const canChat = capabilities.can_chat && data.canChat === true;
+  useEffect(() => {
+    if (canChat) petShell.normalizeMain(epoch);
+  }, [canChat, epoch]);
   const { requests: vaultRequests } = usePendingVaultRequests(data.canChat === true ? binding ?? '' : '');
   const unreadCount = binding ? inbox.unreadBySession[binding] ?? 0 : 0;
   const state = derivePetState({
@@ -345,9 +348,35 @@ const PetSurface: React.FC = () => {
     return [...fresh, ...ordered];
   }, [activities, orderedIds]);
   const visibleCards = useMemo(
-    () => sortedActivities.filter((card) => !dismissed.includes(card.id)),
-    [dismissed, sortedActivities],
+    () => sortedActivities.filter((card) => !dismissed.includes(card.id) && stops[card.id] !== 'exited'),
+    [dismissed, sortedActivities, stops],
   );
+  const clearStopExit = useCallback((id: string) => {
+    if (!epoch.isCurrent() || (!leavingIds.current.has(id) && !['stopped', 'exited'].includes(stopPhases.current[id]))) return;
+    delete stopPhases.current[id];
+    window.clearTimeout(stopTimers.current[id]);
+    window.clearTimeout(dismissTimers.current[id]);
+    leavingIds.current.delete(id);
+    setStops({ ...stopPhases.current });
+    setLeaving((current) => current.filter((item) => item !== id));
+    setRetainedCards((current) => { const next = { ...current }; delete next[id]; return next; });
+  }, [epoch]);
+  // A stop exit only hides the just-cancelled turn. Idle/disappeared rows,
+  // unread results and new turns remain eligible for the next card.
+  useEffect(() => {
+    if (!runningAgents.ok) return;
+    for (const [id, phase] of Object.entries(stops)) {
+      const card = liveCards.find((item) => item.id === id);
+      if (phase === 'exited' && (!card?.running || card.hasUnread || card.needsInput)) clearStopExit(id);
+    }
+  }, [stops, liveCards, runningAgents.ok, clearStopExit]);
+  useEffect(() => api.connectWorkbenchEvents({
+    onTurnStart: ({ session_id }) => {
+      if (!epoch.isCurrent()) return;
+      clearStopExit(session_id);
+      petShell.forgetDismissed(session_id);
+    },
+  }), [api, clearStopExit, epoch]);
   const cardNeedsInput = liveCards.some((card) => card.needsInput);
   const cardUnread = visibleCards.reduce((total, card) => total + (inbox.unreadBySession[card.sessionId] ?? 0), 0);
   useEffect(() => {
@@ -422,18 +451,21 @@ const PetSurface: React.FC = () => {
   const draftMarkers = draftReferences.map(referenceToMarker);
   const inputDraft = draftMarkers.length ? draftMarkers.reduce((text, marker) => text.replaceAll(marker, ''), draft).trimStart() : draft;
 
-  const dismiss = useCallback((id: string) => {
+  const dismiss = useCallback((id: string, manual = true) => {
     if (!epoch.isCurrent() || leavingIds.current.has(id)) return;
     leavingIds.current.add(id);
     const card = visibleCards.find((item) => item.id === id);
     if (card) setRetainedCards((current) => ({ ...current, [id]: card }));
     setLeaving((current) => [...current, id]);
     const remove = () => {
-      if (!epoch.isCurrent()) return;
-      if (binding) {
+      if (!epoch.isCurrent() || !leavingIds.current.has(id)) return;
+      if (binding && manual) {
         petShell.setDismissed(binding, [...new Set([...petShell.dismissed(), id])]);
-        setLeaving((current) => current.filter((item) => item !== id));
+      } else if (!manual) {
+        stopPhases.current[id] = 'exited';
+        setStops({ ...stopPhases.current });
       }
+      setLeaving((current) => current.filter((item) => item !== id));
       leavingIds.current.delete(id);
       setRetainedCards((current) => { const next = { ...current }; delete next[id]; return next; });
     };
@@ -464,7 +496,7 @@ const PetSurface: React.FC = () => {
       if (!epoch.isCurrent()) return;
       if (!result.ok) throw new Error('stop failed');
       updatePhase('stopped');
-      stopTimers.current[card.id] = window.setTimeout(() => dismiss(card.id), STOP_LINGER_MS);
+      stopTimers.current[card.id] = window.setTimeout(() => dismiss(card.id, false), STOP_LINGER_MS);
     }).catch(() => {
       if (!epoch.isCurrent()) return;
       updatePhase('failed');
@@ -540,7 +572,9 @@ const PetSurface: React.FC = () => {
   useLayoutEffect(() => {
     const node = collapsedRef.current;
     if (!node || expanded) return;
-    const measure = () => setCollapsedHeight(node.getBoundingClientRect().height);
+    // The entrance scales this wrapper; layout height must include its spacing
+    // without capturing that transient transform.
+    const measure = () => setCollapsedHeight(node.offsetHeight);
     measure();
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
     observer?.observe(node);
@@ -548,8 +582,9 @@ const PetSurface: React.FC = () => {
   }, [expanded, visibleCards.length]);
 
   const queued = (data.turn?.pending_input_count ?? 0) > 0;
+  const resolvingMain = data.canChat === null;
   const showReplyBubble = Boolean(
-    binding
+    binding && !resolvingMain
     && (data.running || optimisticTitle || exchange.user || exchange.results.length > 0 || failure || uncertain
       || queued || vaultRequests.length > 0 || quickReplies),
   );
@@ -652,7 +687,7 @@ const PetSurface: React.FC = () => {
           )}
           </div>
         </div>
-        <SpeechSlot open={voice.listening || composing || showReplyBubble || !binding}>
+        <SpeechSlot open={voice.listening || composing || showReplyBubble || resolvingMain || !binding}>
           {voice.listening ? <Marquee text={voice.preview} listeningLabel={t('pet.voice.listening')} /> : composing && canChat && !uncertain ? (
           <>
           {voice.error && <p className="pet-mini-input-note" role="status">{t(`pet.voice.${voice.error}`)}</p>}
@@ -704,7 +739,7 @@ const PetSurface: React.FC = () => {
               uncertain={uncertain}
               onInspect={() => { void petBridge.open(sessionLink(binding)).then(() => { if (epoch.isCurrent()) setUncertain(binding, false); }).catch(() => undefined); }}
             />
-          ) : !binding ? (
+          ) : resolvingMain || !binding ? (
             <div className="pet-mini-reply-bubble pet-mini-detail-inner" data-pet-hit role="status">
               <p className="pet-mini-detail-muted">{t(data.canChat === null ? 'common.loading' : 'pet.vibeyUnavailable')}</p>
               <Button variant="link" size="sm" className="px-0" onClick={() => void petBridge.open('avibe://settings')}>{t('pet.openInAvibe')}</Button>
@@ -978,7 +1013,7 @@ const ExpandedCards: React.FC<{ cards: PetCard[]; leaving: string[]; onReference
 const CardBody: React.FC<{ card: PetCard; expanded: boolean; t: (key: string, options?: Record<string, unknown>) => string; phase?: StopPhase; onDismiss?: () => void; onStop?: () => void; onClick?: () => void }> = ({ card, expanded, t, phase, onDismiss, onStop, onClick }) => {
   const running = card.running && phase !== 'stopped' && phase !== 'stopping';
   const subtitle = phase === 'stopping' ? t('pet.stop.stopping') : phase === 'stopped' ? t('pet.stop.stopped') : phase === 'failed' ? t('pet.stop.failed') : card.status;
-  const stopText = t('pet.stop.confirmStop');
+  const stopText = phase === 'confirm' ? t('pet.stop.confirmStop') : t('pet.stop.stop', { title: card.title });
   const Reference = expanded ? 'button' : 'span';
   return (
     <article className={clsx('pet-mini-card', card.needsInput && 'is-needs-input')} title={card.title} data-session-id={card.sessionId} data-pet-hit>
@@ -1015,7 +1050,7 @@ const MainReplyBubble: React.FC<Omit<MainDetailProps, 'visible'> & { open: boole
   const last = props.exchange.results.at(-1);
   const summary = props.running ? t('pet.thinking')
     : props.failure ? `${t('pet.failedPrefix')} ${props.failure.text.trim()}`
-        : last?.text?.trim() ? `${t('pet.repliedPrefix')} ${last.text.trim()}`
+        : last?.text?.trim() ? t('pet.repliedPrefix', { text: last.text.trim() })
           : t('pet.waiting');
   return (
     <div className="pet-mini-reply-bubble" data-pet-hit>
@@ -1061,9 +1096,9 @@ const MainDetail: React.FC<MainDetailProps> = (props) => {
     .filter((message) => message.type === 'user' || message.type === 'result').slice(-6);
   return (
     <div className="pet-mini-detail-inner">
-      {history.map((message) => <div key={message.id} className={message.author === 'user' ? 'pet-mini-detail-user' : 'pet-mini-detail-result'}><Markdown content={message.text} softBreaks /></div>)}
-      {props.exchange.user && <div className="pet-mini-detail-user"><Markdown content={props.exchange.user.text} softBreaks /></div>}
-      {props.exchange.results.map((message, index) => <div ref={index === props.exchange.results.length - 1 ? lastResultRef : undefined} key={message.id} className="pet-mini-detail-result"><Markdown content={message.text} softBreaks /></div>)}
+      {history.map((message) => <div key={message.id} className={message.author === 'user' ? 'pet-mini-detail-user' : 'pet-mini-detail-result'}><Markdown content={message.text} references={(message.content as { references?: MentionReference[] })?.references} softBreaks /></div>)}
+      {props.exchange.user && <div className="pet-mini-detail-user"><Markdown content={props.exchange.user.text} references={(props.exchange.user.content as { references?: MentionReference[] })?.references} softBreaks /></div>}
+      {props.exchange.results.map((message, index) => <div ref={index === props.exchange.results.length - 1 ? lastResultRef : undefined} key={message.id} className="pet-mini-detail-result"><Markdown content={message.text} references={(message.content as { references?: MentionReference[] })?.references} softBreaks /></div>)}
       {props.failure && (
         <div className="pet-mini-detail-notice" role="status">
           <p>{props.failure.text}</p>
