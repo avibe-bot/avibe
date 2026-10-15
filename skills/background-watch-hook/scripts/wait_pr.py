@@ -662,8 +662,7 @@ def _coalesced_review_state(
                 clean = kind != "review_comments" and _is_codex_clean_pass(item, head)
                 outcomes.append((observation, clean))
 
-    baseline_head = ((baseline or {}).get("pull_request") or {}).get("head_sha")
-    if not initialize and baseline_head == head:
+    if not initialize and same_head:
         outcomes.extend(
             (_review_observation("reactions", item), True) for item in state["reactions"]
             if _is_codex_pass_reaction(item) and int(item["id"]) > reaction_floor
@@ -1809,6 +1808,9 @@ def _validate_saved_success_batch(saved: dict[str, Any]) -> None:
     reaction_seen = value.get("reaction_seen", 0)
     if not isinstance(reaction_seen, int) or isinstance(reaction_seen, bool) or reaction_seen < 0:
         raise StateFileUnusableError("Saved success_batch is malformed: invalid reaction watermark")
+    threads = value.get("thread_states", {})
+    if not isinstance(threads, dict) or any(not isinstance(key, str) or not isinstance(flag, bool) for key, flag in threads.items()):
+        raise StateFileUnusableError("Saved success_batch is malformed: invalid observed thread states")
     seen = value.get("review_seen", {})
     if not isinstance(seen, dict) or any(not isinstance(key, str) or not isinstance(fp, str) for key, fp in seen.items()):
         raise StateFileUnusableError("Saved success_batch is malformed: invalid semantic observation history")
@@ -2434,6 +2436,7 @@ def main() -> int:
     review_comment_fingerprints = _saved_fingerprints(saved, REVIEW_COMMENT_FINGERPRINTS_KEY)
     issue_comment_fingerprints = _saved_fingerprints(saved, ISSUE_COMMENT_FINGERPRINTS_KEY)
     review_thread_states = _saved_review_thread_states(saved)
+    latest_review_thread_states = dict((saved.get(SUCCESS_BATCH_KEY) or {}).get("thread_states", review_thread_states))
     # Normal monitoring always compares one complete normalized snapshot. Numeric
     # cursors, fingerprints, and thread maps only explain that change in the report;
     # they never decide independently whether to wake. Explicit replay/catch-up is
@@ -2471,7 +2474,9 @@ def main() -> int:
             ignore_self_comments=not args.include_self_comments,
             actionable_only=args.actionable_only, ignored_authors=ignored_authors,
             ignore_patterns=ignore_patterns,
-            committed_snapshot={"review_threads": dict(review_thread_states)},
+            committed_snapshot={"review_threads": dict(
+                latest_review_thread_states if args.coalesce_success else review_thread_states
+            )},
             review_threads_available=token is not None,
         )
 
@@ -2526,6 +2531,8 @@ def main() -> int:
             "outcome": None, "notified": None, "reaction_seen": _saved_int(saved, "reaction_cursor") or 0,
         }
     ) if args.coalesce_success else None
+    if args.coalesce_success and token is not None:
+        latest_review_thread_states = _review_thread_state_map(state.get("review_threads") or [])
     if args.coalesce_success and (args.seed_state or not resumed or explicit_replay):
         success_batch, _ = _coalesced_review_state(
             _visible_success_state(), None, snapshot, initialize=True,
@@ -2540,6 +2547,8 @@ def main() -> int:
             and all(_pr_observation_snapshot(state)["review_threads"].values())
         ):
             success_batch["notified"] = _actions_success_signature(selected_actions)
+    if args.coalesce_success:
+        success_batch = {**success_batch, "thread_states": dict(latest_review_thread_states)}
     success_observed = success_batch
     success_observation_snapshot = snapshot
     success_observation_state = None
@@ -2615,12 +2624,16 @@ def main() -> int:
 
         def _observe_success_state() -> None:
             nonlocal success_observed, success_observation_snapshot, success_observation_state, success_revoked
+            nonlocal latest_review_thread_states
             if not args.coalesce_success or state is success_observation_state:
                 return
             visible = _visible_success_state()
+            if token is not None:
+                latest_review_thread_states = _review_thread_state_map(visible.get("review_threads") or [])
             success_observed, revoked = _coalesced_review_state(
                 visible, success_observed, success_observation_snapshot, reaction_cursor=reaction_cursor,
             )
+            success_observed["thread_states"] = dict(latest_review_thread_states)
             success_revoked = success_revoked or revoked
             success_observation_snapshot = _pr_observation_snapshot(visible)
             success_observation_state = state

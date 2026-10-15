@@ -4684,7 +4684,7 @@ def test_malformed_deferred_success_evidence_does_not_overwrite_history(tmp_path
 def test_preferred_combined_watch_examples_parse_with_the_same_success_policy():
     module = _load_module()
     body = (Path(__file__).resolve().parents[1] / "skills/background-watch-hook/SKILL.md").read_text()
-    preferred = body.split("### Preferred PR + CI watch", 1)[1].split("One-shot watch:", 1)[0]
+    preferred = body.split("Preferred PR + CI watch", 1)[1].split("One-shot watch:", 1)[0]
     commands = re.findall(
         r'uv run --no-project "\$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py"[^\n]*',
         preferred.replace("\\\n", " "),
@@ -4966,6 +4966,49 @@ def test_coalescing_remembers_semantics_across_missing_rows_and_timestamp_change
     assert (rc, output) == (124, "")
     restored["issue_comments"].append(_clean_codex_comment(603))
     rc, output, _ = _ci_cycle(module, path, [restored], delivery="3", extra_args=options)
+    assert rc == 0 and "success candidate" in output
+
+
+def test_coalescing_preserves_latest_threads_when_settle_reports_an_older_transition(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    unresolved = [{"id": "thread-1", "isResolved": False}]
+    baseline = _success_state(pending, review_threads=unresolved)
+    _managed_state(module, path, "wat_9", **_complete_pr_baseline_fields(module, baseline),
+                   actions=module.normalize_selected_runs({"CI": [pending]}))
+    options = ("--coalesce-success",)
+    current = _success_state(pending, clean=True, review_threads=unresolved)
+    assert _ci_cycle(module, path, [current], extra_args=options)[:2] == (124, "")
+    resolved = {**current, "review_threads": [{"id": "thread-1", "isResolved": True}]}
+    rc, output, _ = _ci_cycle(module, path, [resolved, current], settle=1, extra_args=options)
+    assert rc == 0 and "success candidate" not in output
+    rc, output, payload = _ci_cycle(
+        module, path, [_success_state(_ci_run(head=COALESCED_HEAD), clean=True)], delivery="2", token=None,
+        extra_args=(*options, "--allow-unauthenticated"),
+    )
+    assert (rc, output) == (124, "")
+    assert payload[module.SUCCESS_BATCH_KEY]["thread_states"] == {"thread-1": False}
+
+
+def test_coalescing_binds_a_new_reaction_after_restart_to_the_latest_observed_head(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
+    options = ("--coalesce-success",)
+    returned = _success_state({**pending, "run_attempt": 2})
+    rc, output, _ = _ci_cycle(
+        module, path, [_success_state(head="b" * 40), returned], settle=1, extra_args=options,
+    )
+    assert rc == 0 and "success candidate" not in output
+    reaction = {"id": 701, "content": "+1", "user": {"login": "chatgpt-codex-connector[bot]"}}
+    fresh = {**returned, "reactions": [reaction]}
+    rc, output, payload = _ci_cycle(module, path, [fresh], delivery="2", extra_args=options)
+    assert rc == 0 and "success candidate" not in output
+    assert payload[module.STAGED_KEY]["cursors"][module.SUCCESS_BATCH_KEY]["review"]["id"] == 701
+    green = {**fresh, "actions": [_ci_run(head=COALESCED_HEAD, attempt=2)]}
+    rc, output, _ = _ci_cycle(module, path, [green], delivery="3", extra_args=options)
     assert rc == 0 and "success candidate" in output
 
 
