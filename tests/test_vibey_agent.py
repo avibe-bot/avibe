@@ -2839,49 +2839,86 @@ async def test_an_image_call_is_checked_against_the_turns_models_and_its_referen
         assert record.error.startswith(error) and record.error_code == code and result.hosted.execution is None
 
 
-async def test_vibeys_image_tool_runs_on_the_gateways_image_endpoint_from_the_hop_it_resolves(tmp_path):
+async def test_vibeys_image_tool_runs_on_the_gateways_image_endpoint_from_the_hop_it_resolves(tmp_path, monkeypatch):
     """MH-HOSTED-VIBEY-007, closed loop at the seam: Vibey builds ``image_generate`` from the hop the real gateway
     resolves, reads a reference image from the session's directory, and calls the gateway's real image endpoint,
     whose recording engine answers as the images endpoint does. What Vibey sends is what the endpoint accepts, and
-    what it answers is what Vibey saves."""
+    what it answers is what Vibey saves. Each result reaches the user through the hosted-activity reader the card and
+    the IM line render (``core/hosted_activity``): direct, the model, its Source, the files and the cost, and a call
+    refused before it ran in the user's language."""
+    from dataclasses import replace as replaced
+
     import httpx
 
+    from core.agent_core.messages import ToolCallBlock
+    from core.handlers.model_hub import hosted_tools as hosted_tools_module
     from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
+    from core.hosted_activity import hosted_line, proxy_activity
     from modules.agents.model_hub import ModelHubRuntimeRouter
     from modules.agents.vibey.models import HubModelRouter, selection_from_hop
     from modules.agents.vibey.tools import hosted_tools
-    from tests.test_model_hub_hosted_images import GEMINI, OPENAI, PNG, _served, _sources
+    from tests.test_model_hub_hosted_images import GEMINI, OPENAI, PNG, PRICED, _served, _sources
     from tests.test_model_hub_vibey_consumer import _vibey_service
 
+    # GPT Image at a list price per delivered size, taking reference images.
+    bundled = hosted_tools_module.provider_image_models
+    priced = replaced(PRICED, params=("images", "n", "size"))
+    monkeypatch.setattr(
+        hosted_tools_module, "provider_image_models", lambda vendor: (priced,) if vendor == "openai" else bundled(vendor)
+    )
     (tmp_path / "cat.png").write_bytes(base64.b64decode(PNG))
     service = _vibey_service(tmp_path, _sources(), handles=[_served(PNG, source_id=GEMINI), _served(PNG, size="1536x1024")])
     gateway = ModelHubTurnGateway(service)
     router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+    names = {GEMINI: "Gemini key", OPENAI: "OpenAI key"}
+
     async def resolve():
         return selection_from_hop(await router.resolve_hop("menu-alias", process_scope="vibey:image", turn_id="turn-image"))
 
+    calls = (
+        {"model": "gemini-2.5-flash-image", "prompt": "a cat", "size": "16:9"},
+        {"model": "gpt-image-2", "prompt": "make it blue", "images": ["cat.png"]},
+        # Refused before it ran: Gemini takes no reference images.
+        {"model": "gemini-2.5-flash-image", "prompt": "make it red", "images": ["cat.png"]},
+    )
     try:
         turn = HubModelRouter(resolve, lambda protocol: None, first=await resolve())
         async with httpx.AsyncClient(trust_env=False) as client:
-            tools = hosted_tools(turn, client, MediaSnapshots(None, tmp_path / "media"))
+            tools = hosted_tools(turn, client, MediaSnapshots(None, tmp_path / "media"), language=lambda: "zh")
             (tool,) = [tool for tool in tools if tool.spec.name == "image_generate"]
-            drawn = await tool.execute(
-                {"model": "gemini-2.5-flash-image", "prompt": "a cat", "size": "16:9"}, _tool_context(tmp_path)
-            )
-            edited = await tool.execute(
-                {"model": "gpt-image-2", "prompt": "make it blue", "images": ["cat.png"]}, _tool_context(tmp_path)
-            )
+            results = [await tool.execute(arguments, _tool_context(tmp_path)) for arguments in calls]
     finally:
         await gateway.close()
 
     assert service.adapter.invocations == [(GEMINI, "gemini-2.5-flash-image", "vibey"), (OPENAI, "gpt-image-2", "vibey")]
     assert service.adapter.requests[1]["images"] == [{"image_url": f"data:image/png;base64,{PNG}"}]
-    for result, model in ((drawn, "gemini-2.5-flash-image"), (edited, "gpt-image-2")):
+    drawn, edited, refused = (
+        proxy_activity(ToolCallBlock(f"call_{n}", "image_generate", arguments), result.hosted, source_names=names.get)
+        for n, (arguments, result) in enumerate(zip(calls, results))
+    )
+    for activity, result, (source, model) in (
+        (drawn, results[0], (GEMINI, "gemini-2.5-flash-image")),
+        (edited, results[1], (OPENAI, "gpt-image-2")),
+    ):
         assert not result.is_error, result.content[0].text
         (image,) = result.hosted.record.images
         assert Path(image.path).read_bytes() == base64.b64decode(PNG) and image.mime == "image/png"
-        assert result.hosted.execution.mode == "direct" and result.hosted.action.model == model
-    assert (edited.hosted.record.images[0].width, edited.hosted.record.images[0].height) == (1536, 1024)
+        card = activity.to_payload()
+        assert (card["mode"], card["status"], card["model"]) == ("direct", "completed", model)
+        assert (card["source_id"], card["source_name"]) == (source, names[source])
+        assert [item["path"] for item in card["images"]] == [image.path]
+    assert edited.to_payload()["images"][0]["width"] == 1536 and edited.to_payload()["cost"] == {
+        "basis": "list", "calls": 1, "usd": 0.07,
+    }
+    assert "cost" not in drawn.to_payload()  # unpriced, never zero
+    assert hosted_line(edited, "en") == '🖼 Image generation “make it blue” · direct (OpenAI) · 1 image · ≈ $0.07'
+    # Refused before it ran: still direct, naming the model it was refused for, and why in the user's language.
+    card = refused.to_payload()
+    assert (card["mode"], card["status"], card["model"], card["error_code"]) == (
+        "direct", "failed", "gemini-2.5-flash-image", "image_param_unsupported",
+    )
+    assert card["error"] == "gemini-2.5-flash-image 不支持 images。 支持它的模型：gpt-image-2。"
+    assert hosted_line(refused, "zh") == "🖼 图片生成 “make it red” · 失败：所选图片模型不支持其中一个参数"
 
 
 def _image_entry(*model_ids: str) -> dict:
