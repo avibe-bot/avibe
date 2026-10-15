@@ -13,7 +13,7 @@ from modules.agents.catalog import AGENT_BACKENDS
 from storage import message_deliveries, messages_service
 from storage.agent_session_rows import reserve_write_lock
 from storage.db import create_sqlite_engine
-from storage.models import messages, session_turns
+from storage.models import agent_sessions, messages, session_turns
 from tests.backend_failure_retry_helpers import reserve_failure_retry, seed_failed_notice
 from tests.test_session_delivery_fsm import _context, _fsm_schema_template, managers  # noqa: F401
 from tests.test_ui_session_stream import _accepted_dispatch, _make_session, isolated_state  # noqa: F401
@@ -514,23 +514,30 @@ def test_failure_retry_unwritten_original_batch(managers, texts):
     assert "continue" not in starts[0][1]
 
 
+@pytest.mark.parametrize("backend", AGENT_BACKENDS)
 @pytest.mark.parametrize("not_written", [False, True])
-def test_failure_retry_web_controller_round_trip(isolated_state, tmp_path, monkeypatch, not_written):
-    """MESSAGE-DELIVERY-026: Web -> real admission -> native boundary -> replay."""
+def test_failure_retry_web_controller_round_trip(isolated_state, tmp_path, monkeypatch, not_written, backend):
+    """MESSAGE-DELIVERY-026: include hidden resume across both real HTTP consumers.
+
+    A mocked internal client misses empty-input rejection and loss of durable
+    provenance when submit constructs a user DeliveryRequest.
+    """
     import httpx
     from core import internal_server
     from tests.test_internal_server import _bind_test_native_start, _build_controller_double
     from vibe import ui_server
 
-    session_id, notice, _turn, _inputs = _retry_notice(tmp_path, not_written=not_written)
+    session_id, notice, _turn, _inputs = _retry_notice(tmp_path, backend=backend, not_written=not_written)
     engine = create_sqlite_engine()
     controller = _build_controller_double()
     internal_app = internal_server.create_app(controller)
     manager = controller.session_turns
     starts = []
+    contexts = []
 
     async def capture_run(sid, context, text, *, logical_turn_id=None, **kwargs):
         starts.append((sid, text))
+        contexts.append(context)
         _bind_test_native_start(engine, context)
         manager._terminalize_durable_turn(
             logical_turn_id,
@@ -551,30 +558,71 @@ def test_failure_retry_web_controller_round_trip(isolated_state, tmp_path, monke
     client = ui_server.app.test_client()
     headers = csrf_headers(client)
     url = f"/api/sessions/{session_id}/messages"
-    first = client.post(url, json={"retry_for": notice["id"]}, headers=headers)
+    first = client.post(
+        url, json={"retry_for": notice["id"], "text": "不要重放工具调用", "metadata": {"vibey_resume": False}},
+        headers=headers,
+    )
     duplicate = client.post(url, json={"retry_for": notice["id"]}, headers=headers)
     assert first.status_code == duplicate.status_code == 201
     assert first.get_json()["id"] == duplicate.get_json()["id"]
-    assert starts == [(session_id, "检查这张图" if not_written else "continue")]
+    resume = backend == "vibey" and not not_written
+    assert starts == [(session_id, "检查这张图" if not_written else "" if resume else "continue")]
+    assert contexts[0].platform_specific["vibey_resume"] is resume
+    assert contexts[0].platform_specific["vibey_source_turn_id"] == (_turn["id"] if resume else None)
+    with engine.connect() as conn:
+        accepted = messages_service.get_message(conn, first.get_json()["id"])
+        retry = message_deliveries.get_delivery(conn, first.get_json()["id"])
+    assert retry["state"] == "accepted"
+    assert accepted["type"] == ("agent_initiated" if resume else "user")
 
 
-def test_failure_retry_queue_drain_rechecks_the_boundary(managers):
-    """MESSAGE-DELIVERY-028: a deferred retry cannot overtake newer work."""
+@pytest.mark.parametrize("change", ["newer_turn", "backend_after_unwritten_start"])
+def test_failure_retry_queue_drain_rechecks_the_boundary(managers, change):
+    """MESSAGE-DELIVERY-028: revalidate a real retry after its queue wait.
+
+    Once a start was claimed, no-write recovery belongs to the Turn FSM rather
+    than the notice's unclaimed-retry guard. That path still must not dispatch a
+    hidden resume to a newly selected native backend.
+    """
     manager, _other, engine, _engine_b, starts = managers
+    backend = "codex" if change == "newer_turn" else "vibey"
+
+    def context(sid):
+        value = _context(sid)
+        value.platform_specific["agent_session_target"]["agent_backend"] = backend
+        return value
+
+    manager.bind_context(context)
     with engine.begin() as conn:
-        notice, _turn, _inputs = seed_failed_notice(conn, session_id="ses_fsm")
+        conn.execute(update(agent_sessions).where(agent_sessions.c.id == "ses_fsm").values(agent_backend=backend))
+        notice, _turn, _inputs = seed_failed_notice(conn, session_id="ses_fsm", backend=backend)
         retry = reserve_failure_retry(conn, notice)
 
     async def queue_then_drain():
-        manager.begin_backend_drain("codex")
-        queued = await manager.deliver(
-            DeliveryRequest(session_id="ses_fsm", priority="p3", content="continue", delivery_id=retry["id"]),
-            context=_context(),
-        )
-        assert queued.state == "queued"
-        with engine.begin() as conn:
-            seed_failed_notice(conn, session_id="ses_fsm")
-        await manager.end_backend_drain("codex")
+        nonlocal backend
+        if change == "newer_turn":
+            manager.begin_backend_drain(backend)
+        admitted = await manager.deliver(manager._request_from_delivery(retry), context=context("ses_fsm"))
+        if change == "newer_turn":
+            assert admitted.state == "queued"
+            with engine.begin() as conn:
+                seed_failed_notice(conn, session_id="ses_fsm")
+            await manager.end_backend_drain(backend)
+        else:
+            assert admitted.state == "claimed"
+            assert [text for _turn, text in starts] == [""]
+            manager._terminalize_durable_turn(
+                admitted.turn_id, "not_written", settled_by="pre_write_failure",
+                evidence_kind="definitive_prewrite_failure",
+            )
+            starts.clear()
+            backend = "opencode"
+            with engine.begin() as conn:
+                queued = message_deliveries.get_delivery(conn, retry["id"])
+                assert queued["state"] == "queued"
+                assert message_deliveries.failure_retry_binding(queued, unclaimed_only=True) is None
+                conn.execute(update(agent_sessions).where(agent_sessions.c.id == "ses_fsm").values(agent_backend=backend))
+            await manager.drain_delivery_queue("ses_fsm")
 
     asyncio.run(queue_then_drain())
     with engine.connect() as conn:

@@ -2001,6 +2001,21 @@ class SessionTurnManager:
                     raise RuntimeError("runtime-rejected Delivery queue fallback lost")
             return None
 
+        # Admission can claim an older queued segment, and FIFO may resolve its
+        # runtime only after inspecting input. Gate the actual claimed backend
+        # here as well, using each durable row rather than the waking request.
+        incompatible_resumes = [
+            delivery for delivery in deliveries
+            if backend != "vibey"
+            and delivery_store.is_vibey_resume_payload(delivery_store.delivery_payload(delivery))
+        ]
+        if incompatible_resumes:
+            for delivery in incompatible_resumes:
+                cls._retire_delivery_not_written(
+                    conn, session_id, str(delivery["id"]), reason="backend_changed"
+                )
+            return None
+
         denied_remote = [
             (delivery, reason)
             for delivery in deliveries
@@ -2843,18 +2858,22 @@ class SessionTurnManager:
             if request.has_content is not None
             else bool(request.content)
         )
-        internal_vibey_resume = delivery_store.is_vibey_resume_payload(
-            {
-                "type": request.message_type,
-                "author": request.author,
-                "source": request.source,
-                "metadata": request.metadata,
-            }
-        )
         if not content_present and request.content == "":
             request = replace(request, content=None)
-        if request.priority == "p3" and not content_present and not internal_vibey_resume:
-            raise ValueError("P3 requires content")
+        if request.priority == "p3" and not content_present:
+            delivery = None
+            if request.delivery_id:
+                with self._sqlite_engine().connect() as conn:
+                    delivery = delivery_store.get_delivery(conn, request.delivery_id)
+            # submit() is a wake-up, not the producer of hidden retry provenance.
+            # Neither its default user fields nor caller-supplied markers decide
+            # whether an empty Delivery is an authorized continuation.
+            if not (
+                delivery is not None
+                and delivery["session_id"] == request.session_id
+                and delivery_store.is_vibey_resume_payload(delivery_store.delivery_payload(delivery))
+            ):
+                raise ValueError("P3 requires content")
         backend, resolved_context = self._delivery_backend(
             request.session_id,
             context,
@@ -2876,14 +2895,6 @@ class SessionTurnManager:
         start_context: MessageContext | None = None
         retry_denial: str | None = None
         delivery: dict[str, Any]
-        internal_vibey_resume = delivery_store.is_vibey_resume_payload(
-            {
-                "type": request.message_type,
-                "author": request.author,
-                "source": request.source,
-                "metadata": request.metadata,
-            }
-        )
         backend_draining = backend in self._draining_backends
         with self._runtime_start_owner(request.session_id, backend) as start_owner, self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
@@ -2912,7 +2923,7 @@ class SessionTurnManager:
                 state="queued",
             )
             if (
-                internal_vibey_resume
+                delivery_store.is_vibey_resume_payload(delivery_store.delivery_payload(delivery))
                 and backend != "vibey"
                 and delivery["state"] in {"queued", "reserved"}
             ):
@@ -4360,6 +4371,13 @@ class SessionTurnManager:
                 for row in deliveries
                 if not self._has_resolvable_delivery_input(conn, row)
             }
+            # The final routing context is rebuilt after claim. Both that route
+            # and the bound Turn must still support the hidden control input.
+            if str(turn["backend"]) != "vibey" or self._context_backend(resolved) != "vibey":
+                invalid_delivery_ids.update(
+                    str(row["id"]) for row in deliveries
+                    if delivery_store.is_vibey_resume_payload(delivery_store.delivery_payload(row))
+                )
             remote_authorization_denials = {
                 str(row["id"]): reason
                 for row in deliveries
