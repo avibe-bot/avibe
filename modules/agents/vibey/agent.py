@@ -53,6 +53,7 @@ from core.agent_core.agent.events import (
 )
 from core.agent_core.agent.hooks import AgentInput
 from core.agent_core.agent.loop import Agent
+from core.agent_core.ai.provider import RETRYABLE_ERROR_KINDS
 from core.agent_core.agent.models import ModelSelection
 from core.agent_core.agent.recovery import settle_open_calls
 from core.agent_core.harness.context import ContextConfig
@@ -125,6 +126,8 @@ BACKEND = "vibey"
 # Final responses whose empty text is explained by the stop itself (loop-control.md section 2).
 _EXPLAINED_STOPS = ("length", "refusal", "safety")
 _COMPLETED = ("completed", "ended_by_hook")
+_AUTO_CONTINUATION_KINDS = frozenset((*RETRYABLE_ERROR_KINDS, "unknown"))
+_MAX_AUTO_CONTINUATIONS = 5
 _JOB_PRUNE_INTERVAL_S = 3600.0
 
 
@@ -200,6 +203,9 @@ class _Run:
     reply_images: dict[str, tuple[HostedImage, ...]] = field(default_factory=dict)
     # Steer attempts ``Agent.steer`` accepted into this run: reconcile's in-process evidence.
     accepted_steers: set[str] = field(default_factory=set)
+    # Automatic transcript-only continuations already spent by this Turn. The
+    # initial model call is not counted; the limit is five additional attempts.
+    continuations: int = 0
     stop_requested: bool = False
     # When each tool call started (monotonic), for a proxied hosted call's duration.
     tool_started: dict[str, float] = field(default_factory=dict)
@@ -352,19 +358,52 @@ class VibeyAgent(BaseAgent):
             await indicator.delete_ack_message(request)
         accept_catalog(self.controller, context, skill_catalog, backend=BACKEND)
         agent_input: Optional[AgentInput] = AgentInput(input_id, message)
+        transcript_resume = bool((context.platform_specific or {}).get("message_metadata", {}).get("vibey_resume"))
         while agent_input is not None:
             if turn.stop_requested:
                 # A Stop acknowledged before this run could abort: no run starts. An input
                 # left unconsumed is admitted at the Session's next resume (T3).
                 turn.reason = "aborted"
                 break
-            async for event in turn.agent.run(agent_input, turn_id=turn.turn_id):
+            stream = (
+                turn.agent.resume(agent_input, turn_id=turn.turn_id)
+                if transcript_resume
+                else turn.agent.run(agent_input, turn_id=turn.turn_id)
+            )
+            transcript_resume = False
+            async for event in stream:
                 await self._on_event(turn, event)
+            if self._can_auto_continue(turn) and turn.continuations < _MAX_AUTO_CONTINUATIONS:
+                # Finish T2 before asking the same Agent to build its next request.
+                # Accepted P1 inputs are admitted into the transcript, but never
+                # become an implicit user-visible continuation message.
+                await self._settle_left_open(runtime)
+                await self._admit_returned_inputs(turn)
+                turn.continuations += 1
+                turn.reason = None
+                turn.cause = None
+                turn.final_row = None
+                transcript_resume = True
+                continue
             agent_input = await self._continuing_input(turn)
         if turn.reason not in _COMPLETED:
             await self._settle_left_open(runtime)
         await self._settle(turn)
         self._maybe_backfill_session_title(request, session_id)
+
+    @staticmethod
+    def _can_auto_continue(run: _Run) -> bool:
+        """Whether the failed request can safely be retried from committed context."""
+
+        cause = run.cause
+        return bool(
+            not run.stop_requested
+            and run.reason == "error"
+            and not run.final_row
+            and cause is not None
+            and cause.origin == "source"
+            and cause.kind in _AUTO_CONTINUATION_KINDS
+        )
 
     async def _settle_stopped(self, turn: _Run) -> None:
         """A Stop before the loop started: the Turn settles as stopped, nothing dispatched."""

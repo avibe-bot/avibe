@@ -12159,10 +12159,16 @@ async def sessions_messages_create(session_id: str):
             attachment_specs = resolve_attachment_specs(
                 conn, session_id=session_id, attachments=content.get("attachments") or []
             )
+    internal_resume = bool(
+        retry_for
+        and message.get("type") == "agent_initiated"
+        and (message.get("metadata") or {}).get("vibey_resume") is True
+    )
     if (
         not dispatch_text.strip()
         and not attachment_specs
         and not (retry_for and message.get("state") == "accepted")
+        and not internal_resume
     ):
         from storage import message_deliveries
 

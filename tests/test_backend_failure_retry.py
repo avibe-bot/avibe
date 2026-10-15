@@ -306,8 +306,11 @@ def test_failure_retry_canonical_continue_and_draft(isolated_state, tmp_path, ba
         )
     assert response.status_code == 201
     body = response.get_json()
-    assert body["text"] == "continue"
-    assert body["draft_advanced"] is False
+    expected_text = "" if backend == "vibey" else "continue"
+    assert body["text"] == expected_text
+    if backend == "vibey":
+        assert body["type"] == "agent_initiated"
+        assert body["metadata"]["vibey_resume"] is True
     assert body["draft"] == draft
     assert body["retry_notice"]["content"]["failure_retry"]["state"] == "accepted"
     assert dispatch.await_args.args[0]["files"] == []

@@ -1239,6 +1239,149 @@ async def test_output_limited_final_is_a_failed_row_with_length_cause(
     assert "kind=length" in caplog.text
 
 
+async def test_a_transient_failure_continues_from_the_same_transcript_without_a_notice(
+    engine, session, tmp_path, published
+) -> None:
+    from core.agent_core.ai.provider import ProviderError
+
+    failure = ProviderError("server", "temporary upstream failure", False)
+    harness = _Harness(
+        engine,
+        tmp_path,
+        "telegram",
+        [[failure]] * 5 + [[Done(assistant("recovered"))]],
+    )
+
+    await harness.agent.handle_message(harness.request("finish the task"))
+
+    assert len(harness.provider.requests) == 6
+    assert harness.rows("notify") == []
+    assert harness.controller.im_client.sent == ["recovered"]
+    assert harness.controller.terminals[-1]["is_error"] is False
+
+
+async def test_a_continuation_reuses_a_committed_tool_result_without_rerunning_the_tool(
+    engine, session, tmp_path, published
+) -> None:
+    from core.agent_core.ai.provider import ProviderError
+
+    call = ToolCallBlock(id="call_1", name="echo", arguments={})
+    tool = FakeTool("echo")
+    harness = _Harness(
+        engine,
+        tmp_path,
+        "telegram",
+        [
+            [Done(assistant("", calls=(call,)))],
+            [ProviderError("server", "temporary upstream failure", False)],
+            [Done(assistant("done"))],
+        ],
+        tools=[tool],
+    )
+
+    await harness.agent.handle_message(harness.request("run the tool"))
+
+    assert len(tool.calls) == 1
+    assert len(harness.provider.requests) == 3
+    assert harness.rows("notify") == []
+    assert harness.controller.im_client.sent == ["🔧 echo {}", "done"]
+
+
+async def test_vibey_retry_resumes_the_existing_transcript_without_a_continue_message(
+    engine, session, tmp_path, published
+) -> None:
+    from core.agent_core.ai.provider import ProviderError
+    from storage import messages_service
+    from tests.backend_failure_retry_helpers import reserve_failure_retry
+
+    first_failure = ProviderError("invalid_request", "request rejected", False)
+    harness = _Harness(
+        engine,
+        tmp_path,
+        "avibe",
+        [[first_failure], [Done(assistant("recovered"))]],
+    )
+    first = harness.request("finish the task")
+    await harness.agent.handle_message(first)
+    with engine.begin() as conn:
+        message_deliveries.terminalize_turn(
+            conn,
+            _turn(first.context),
+            outcome="failed",
+            settled_by="terminal_result",
+            evidence_kind="terminal_result",
+        )
+
+    with engine.connect() as conn:
+        notice = next(
+            row
+            for row in messages_service.list_session_messages(conn, session_id=SESSION)["messages"]
+            if row["type"] == "notify"
+        )
+    with engine.begin() as conn:
+        retry = reserve_failure_retry(conn, notice)
+        turn_id = message_deliveries.new_turn_id()
+        claimed = message_deliveries.claim_start_batch(
+            conn,
+            turn_id=turn_id,
+            session_id=SESSION,
+            backend="vibey",
+            deliveries=[retry],
+            dispatch_text="",
+        )
+        retry_delivery = claimed["deliveries"][0]
+
+    retry_context = _context("avibe", SESSION, turn_id=turn_id, delivery_id=retry_delivery["id"])
+    retry_context.platform_specific["message_metadata"] = {"vibey_resume": True}
+    retry_context.message_id = retry_delivery["id"]
+    with engine.begin() as conn:
+        current_turn = message_deliveries.get_turn(conn, turn_id)
+        assert message_deliveries.bind_native_start(
+            conn,
+            turn_id,
+            expected_version=int(current_turn["version"]),
+            runtime_key="runtime",
+            runtime_turn_id=turn_id,
+            native_turn_id=f"vibey:{harness.agent._instance}:{turn_id}",
+        )
+        assert message_deliveries.materialize_start_acceptance(
+            conn,
+            turn_id=turn_id,
+            evidence={"kind": "test_acceptance"},
+        )
+    retry_request = AgentRequest(
+        **{
+            **first.__dict__,
+            "context": retry_context,
+            "message": "",
+            "user_message": "",
+        }
+    )
+
+    await harness.agent.handle_message(retry_request)
+
+    assert harness.controller.im_client.sent[-1] == "recovered"
+    assert len(harness.rows("user")) == 1
+    assert len(harness.rows("agent_initiated")) == 1
+    assert "continue" not in [row["content_text"] or "" for row in harness.rows("user")]
+
+
+async def test_a_transient_failure_shows_one_notice_after_five_continuations(
+    engine, session, tmp_path, published
+) -> None:
+    from core.agent_core.ai.provider import ProviderError
+
+    failure = ProviderError("server", "temporary upstream failure", False)
+    harness = _Harness(engine, tmp_path, "telegram", [[failure]] * 6)
+
+    await harness.agent.handle_message(harness.request("finish the task"))
+
+    assert len(harness.provider.requests) == 6
+    assert len(harness.rows("notify")) == 1
+    assert harness.controller.im_client.sent == [f"❌ {i18n_t('vibeyAgent.error.server', 'en')}"]
+    assert harness.controller.terminals[-1]["is_error"] is True
+
+
 @pytest.mark.parametrize("language", ["en", "zh"])
 async def test_a_provider_stall_is_not_shown_as_a_connection_failure(
     engine, session, tmp_path, published, language
@@ -1247,7 +1390,7 @@ async def test_a_provider_stall_is_not_shown_as_a_connection_failure(
     from core.agent_core.ai.provider import ProviderError
 
     stall = ProviderError("stalled", "provider sent no data for 600s", False)
-    harness = _Harness(engine, tmp_path, "telegram", [[stall]], language=language)
+    harness = _Harness(engine, tmp_path, "telegram", [[stall]] * 6, language=language)
 
     await harness.agent.handle_message(harness.request("write the page"))
 
@@ -1271,7 +1414,7 @@ async def test_a_failed_run_logs_its_kind_and_redacted_diagnostic_and_its_notice
     failure = ProviderError(
         "unknown", f"upstream refused\nAuthorization: Bearer {secret}", False, partial=partial
     )
-    harness = _Harness(engine, tmp_path, "telegram", [[failure]], language="zh")
+    harness = _Harness(engine, tmp_path, "telegram", [[failure]] * 6, language="zh")
     request = harness.request("dispatch it")
 
     with caplog.at_level(logging.WARNING, logger="modules.agents.vibey.agent"):
@@ -1318,7 +1461,7 @@ async def test_model_hub_records_a_source_stall_as_the_backend_reported_it(engin
     from tests.test_model_hub_l3 import _assert_valid
 
     stall = ProviderError("stalled", "provider sent no data for 600s\n\u202e上游 key=sk-proj-stall0secret0value", False)
-    harness = _Harness(engine, tmp_path, "telegram", [[stall]])
+    harness = _Harness(engine, tmp_path, "telegram", [[stall]] * 6)
     registry = TurnCorrelationRegistry(BoundedProvenanceStore(tmp_path / "provenance.json"))
     router = ModelHubRuntimeRouter(
         service=SimpleNamespace(), turn_gateway=SimpleNamespace(correlation=registry), overlay_path=tmp_path / "overlay.json"
@@ -3226,11 +3369,10 @@ _THINKING_DROPS = {
 
 @pytest.mark.parametrize("drop", sorted(_THINKING_DROPS))
 @pytest.mark.parametrize("drops", [1, 2])
-async def test_a_stream_that_drops_after_thinking_alone_gets_one_retry_then_its_own_copy(
+async def test_a_stream_that_drops_after_thinking_alone_gets_provider_retry_then_transcript_continuation(
     engine, session, tmp_path, published, drops, drop
 ) -> None:
-    """Owner decision 2026-10-11: one retry after a stream that carried only thinking; a second drop shows the
-    drop's own copy, never the generic line."""
+    """A thinking-only provider drop is retried by the request loop, then by Vibey's transcript continuation."""
     import httpx
 
     from modules.agents.vibey.models import registry_providers
@@ -3239,7 +3381,7 @@ async def test_a_stream_that_drops_after_thinking_alone_gets_one_retry_then_its_
         {"provider": "upstream", "api": "openai_responses", "model": "served-model", "source": "src_upstream01"},
         separators=(",", ":"),
     )
-    ending, copy = _THINKING_DROPS[drop]
+    ending, _copy = _THINKING_DROPS[drop]
     thinking_then_cut = (
         'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1"}}\n\n'
         'data: {"type":"response.reasoning_summary_text.delta","output_index":0,"delta":"**Checking the catalog**"}\n\n'
@@ -3261,11 +3403,9 @@ async def test_a_stream_that_drops_after_thinking_alone_gets_one_retry_then_its_
         harness.controller.hub_protocol = "openai_responses"
         await harness.agent.handle_message(harness.request("hello"))
 
-    assert len(sent) == 2 and sent[1]["input"] == sent[0]["input"]
-    if drops == 1:
-        assert harness.controller.im_client.sent == ["hi"]
-    else:
-        assert harness.controller.im_client.sent == [f"❌ {i18n_t(f'vibeyAgent.error.{copy}', 'en')}"]
+    assert len(sent) == drops + 1
+    assert all(request["input"] == sent[0]["input"] for request in sent[1:])
+    assert harness.controller.im_client.sent == ["hi"]
 
 
 async def test_a_turn_runs_bash_through_the_real_job_host(engine, session, tmp_path, published) -> None:

@@ -2484,12 +2484,17 @@ class SessionTurnManager:
                 return raw_session_id
         return session_id
 
-    @staticmethod
     def _has_resolvable_delivery_input(
+        self,
         conn: Connection,
         delivery: dict[str, Any],
     ) -> bool:
         payload = delivery_store.delivery_payload(delivery)
+        if (
+            payload.get("type") == "agent_initiated"
+            and (payload.get("metadata") or {}).get("vibey_resume") is True
+        ):
+            return True
         from core.workbench_media import resolve_attachment_specs
 
         specs = resolve_attachment_specs(
@@ -2833,9 +2838,13 @@ class SessionTurnManager:
             if request.has_content is not None
             else bool(request.content)
         )
+        internal_vibey_resume = (
+            request.message_type == "agent_initiated"
+            and (request.metadata or {}).get("vibey_resume") is True
+        )
         if not content_present and request.content == "":
             request = replace(request, content=None)
-        if request.priority == "p3" and not content_present:
+        if request.priority == "p3" and not content_present and not internal_vibey_resume:
             raise ValueError("P3 requires content")
         backend, resolved_context = self._delivery_backend(
             request.session_id,

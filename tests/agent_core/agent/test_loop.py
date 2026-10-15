@@ -95,9 +95,30 @@ def make_agent(provider, *, store=None, session_id="session", tools=(), hooks=()
 async def collect(agent, row_id="input", value="hello", turn_id="turn"):
     return [event async for event in agent.run(input_row(row_id, value), turn_id=turn_id)]
 
-
 def user_texts(request):
     return [message.content[0].text for message in request.messages if isinstance(message, UserMessage)]
+
+
+async def test_resume_reuses_the_committed_transcript_without_consuming_an_input():
+    provider = ScriptedProvider(
+        [
+            [ProviderError("server", "temporary upstream failure", False)],
+            [Done(assistant("recovered"))],
+        ]
+    )
+    agent = make_agent(provider)
+    original = input_row("input", "hello")
+
+    first = [event async for event in agent.run(original, turn_id="turn")]
+    second = [event async for event in agent.resume(original, turn_id="turn")]
+
+    assert first[-1].reason == "error"
+    assert second[-1].reason == "completed"
+    assert [row.row_id for row in await agent.store.load("session") if row.kind == "input"] == ["input"]
+    assert [row.message.content[0].text for row in await agent.store.load("session") if row.kind == "response"] == [
+        "recovered"
+    ]
+    assert len(provider.requests) == 2
 
 
 async def test_C1_tool_set_is_captured_per_request_and_unavailable_calls_are_errors():

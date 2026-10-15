@@ -3,7 +3,8 @@
 ## Contract
 
 The retry button is a user action on one authoritative backend-failure notice,
-not a new backend retry protocol or an automatic retry policy.
+not a new backend retry protocol. Vibey's bounded automatic continuation is an
+adapter-local policy over the same committed transcript.
 
 - Only an attached `notify` with `event=backend_failure`, a `failure_id`, and a
   durable `turn_id` can offer the action. Ordinary notifications, detached
@@ -36,8 +37,12 @@ not a new backend retry protocol or an automatic retry policy.
   rechecks access, archive/read-only status, current Turn, and pending input.
   A newer task, another live owner, or an unresolved native start blocks it.
 - A normal failed Turn continues through the existing P3 Delivery admission
-  with the literal backend input `continue`. It does not roll back history,
-  replay already attempted tools, or pretend to resume an arbitrary native Turn.
+  with the literal backend input `continue`. Vibey is the deliberate exception:
+  an accepted Vibey Turn retries from its committed transcript through a hidden
+  `agent_initiated` Delivery, so no visible `continue` Message is created. It
+  also performs up to five additional transcript continuations automatically
+  for transient provider failures before emitting the failure notice. Neither
+  path rolls back transcript history or replays a committed tool call.
 - A proven `not_written` Turn reuses its retained, unaccepted initial Delivery
   and the normal queue/admission path, preserving its prompt and attachments.
   Unknown native acceptance is not proof that replay is safe.
@@ -71,7 +76,9 @@ unaccepted continuations can be reserved again only while the failed-Turn
 boundary still holds. Server-owned `backend_failure_retry` Delivery history
 binds the notice, source Turn, and exact retained batch for admission and queue
 drain checks. Once a native start is claimed, subsequent recovery stays owned
-by the existing Turn state machine.
+by the existing Turn state machine. For Vibey, the continuation marker is kept
+in the hidden Delivery snapshot and the Agent loop resumes without consuming a
+new user input row.
 
 A retained original may already be queued before the click. Its action projects
 `reserved` until the controller records this action's P3 admission or claims a
@@ -84,9 +91,11 @@ message reads derive the same action state from durable storage.
 The Web notification renderer uses the existing design-system Button with
 localized labels (`重试` / `Retry`, `已请求重试` / `Retry requested`). It exposes
 no action on read-only Sessions and cannot invoke a retry twice while submitting.
-This first change targets the external Web conversation surface. All three
-backend adapters benefit from the shared admission path without separate retry
-implementations; IM-specific notification button rendering is not added here.
+This first change targets the external Web conversation surface. Native backend
+adapters retain the shared admission path and literal `continue` behavior;
+Vibey additionally uses its loop resume path for accepted retries and automatic
+transient-failure continuations. IM-specific notification button rendering is
+not added here.
 
 ## Validation
 
@@ -96,8 +105,8 @@ implementations; IM-specific notification button rendering is not added here.
 - Real storage/admission tests: same-notice concurrency and duplicate delivery,
   pre-write prompt/attachment preservation, failed submission recovery, and
   composer draft preservation.
-- Web route tests: access checks, canonical server-generated payload, source
-  notice update, and reloading persisted action state.
+- Agent-core and Vibey adapter tests: transcript-only resume, bounded automatic
+  continuation, hidden Vibey Retry input, and committed tool-result reuse.
 - UI tests: eligible notification, ineligible/read-only rows, pending/accepted
   feedback, failure recovery, and draft-independent action; mounted ChatPage
   preservation of newer Activity/thinking after replayed notices, with ordinary

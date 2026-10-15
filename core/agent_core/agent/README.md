@@ -21,11 +21,19 @@ agent = Agent(
 agent.set_tools(build_tools(jobs=agent.jobs))
 async for event in agent.run(AgentInput(message_id, rendered_input), turn_id=turn_id):
     await deliver(event)
+# Continue from committed context without writing another input row.
+async for event in agent.resume(AgentInput(message_id, rendered_input), turn_id=turn_id):
+    await deliver(event)
 # Return accepted but unconsumed inputs after an early end, abort, or error.
 pending = await agent.take_pending_inputs()
 ```
 
-C-9 is on when the adapter passes `context=ContextConfig(host=..., scratch_dir=...)`
+`resume(input, turn_id=...)` reruns the loop from the committed transcript without
+consuming `input`; the input is only provided to `before_run` for setup compatibility.
+It is subject to the same one-active-run and pending-input ownership rules as
+`run`. The adapter decides whether a failed run is safe to resume and owns any
+retry budget.
+
 (`harness/context.py`); in v1 such an Agent takes no user hooks (a configuration
 error). Every conversation request then goes through one pipeline: projection,
 `budget()` on that request, the C-9 stage (stop, clear, checkpoint at T, overflow
