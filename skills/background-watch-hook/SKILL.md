@@ -267,13 +267,17 @@ quiet in this mode, while its error/failure text remains reportable. Unknown
 verdict formats are surfaced rather than silently interpreted as success.
 
 Deferred evidence lives in the same owner-specific state file and pending delivery
-transaction. Retain the latest ordered bot outcome and reaction-ID high-water mark
-through every poll and settle fetch, including temporary missing rows. A later clean
-verdict may supersede an earlier error, but restoring old evidence cannot erase a
-newer failure. Compare semantic verdicts, not timestamps or profile metadata.
+transaction. Retain the latest ordered bot outcome, per-resource semantic history,
+and reaction-ID high-water mark through every poll and settle fetch, including
+temporary missing rows. The latest observation is independently head-tagged; an
+older retained PR event cannot erase a valid verdict on the subsequently observed
+head. A later clean verdict may supersede an earlier error, but restoring old
+evidence or changing its metadata cannot erase a newer failure.
 A head change, changed/deleted verdict, or newer bot finding/error invalidates the
-deferred review; CI from another SHA cannot complete its pair. Fail-fast CI still
-rejects older attempts and retains all previously notified partial failures.
+deferred review; CI from another SHA cannot complete its pair. Preserve known
+unresolved threads when GraphQL is unavailable, rather than treating absence as
+resolution. Fail-fast CI rejects older attempts, preserves terminal observations
+and prior partial failures, and reports an observed failure without settling it away.
 A combined success is deduplicated across ordinary polls and restarts. A new CI
 run/attempt or recovery after a reported problem can produce a fresh pair.
 

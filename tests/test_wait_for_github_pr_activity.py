@@ -4086,7 +4086,7 @@ def _managed_state(module, path, watch_id: str | None, **fields) -> None:
     )
 
 
-def _run_managed(module, state_file, fetch, *, delivery: str = "", extra_args=()):
+def _run_managed(module, state_file, fetch, *, delivery: str = "", extra_args=(), token="token"):
     """One managed cycle over ``state_file``, told when this watch last delivered."""
 
     env = {module.WATCH_ID_ENV: "wat_9", module.LAST_DELIVERY_ENV: delivery}
@@ -4094,8 +4094,8 @@ def _run_managed(module, state_file, fetch, *, delivery: str = "", extra_args=()
     with (
         patch.dict("os.environ", env, clear=False),
         patch.object(module, "_fetch_state", side_effect=fetch),
-        patch.object(module, "get_token", return_value="token"),
-        patch.object(module, "get_authenticated_login", return_value="tester"),
+        patch.object(module, "get_token", return_value=token),
+        patch.object(module, "get_authenticated_login", return_value="tester" if token else None),
         patch(
             "sys.argv",
             [
@@ -4308,7 +4308,7 @@ def _seed_ci_state(module, path, *runs, workflows=("CI",), head="head-1", owner=
     )
 
 
-def _ci_cycle(module, path, states, *, delivery="1", workflows=("CI",), settle=0, sha=None, extra_args=()):
+def _ci_cycle(module, path, states, *, delivery="1", workflows=("CI",), settle=0, sha=None, extra_args=(), token="token"):
     """Use real cursor IO in tmp_path, fake GitHub, and a bounded virtual clock."""
     clock = 0.0
     polls = iter(states)
@@ -4335,6 +4335,7 @@ def _ci_cycle(module, path, states, *, delivery="1", workflows=("CI",), settle=0
             path,
             fetch,
             delivery=delivery,
+            token=token,
             extra_args=(
                 *ci_args, *sha_args, "--interval", "1", "--timeout", "100",
                 "--settle", str(settle), *extra_args,
@@ -4768,7 +4769,7 @@ def test_coalescing_retains_settle_invalidation_after_the_error_row_disappears(t
     assert (rc, output) == (124, "")
 
 
-def test_coalescing_binds_the_retained_report_and_batch_to_the_same_head(tmp_path):
+def test_coalescing_does_not_restore_old_reactions_when_report_head_differs(tmp_path):
     module = _load_module()
     path = tmp_path / "ci.json"
     pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
@@ -4782,7 +4783,8 @@ def test_coalescing_binds_the_retained_report_and_batch_to_the_same_head(tmp_pat
     rc, output, payload = _ci_cycle(module, path, [transient, restored, restored], settle=1, extra_args=options)
     assert rc == 0 and "success candidate" not in output
     staged = payload[module.STAGED_KEY]["cursors"]
-    assert staged[module.SUCCESS_BATCH_KEY]["head_sha"] == staged["head_sha"]
+    assert staged[module.SUCCESS_BATCH_KEY]["head_sha"] == COALESCED_HEAD
+    assert staged["head_sha"] == "b" * 40
     assert staged[module.SUCCESS_BATCH_KEY]["review"] is None
     rc, output, _ = _ci_cycle(module, path, [restored], delivery="2", extra_args=options)
     assert "success candidate" not in output
@@ -4816,7 +4818,8 @@ def test_coalesced_failure_never_reports_or_commits_an_older_attempt(tmp_path):
     assert payload["actions"]["CI"][0]["run_attempt"] == 2
 
 
-def test_coalesced_partial_failure_reports_preserve_all_acknowledged_failures(tmp_path):
+@pytest.mark.parametrize("regression", ["missing", "nonterminal"])
+def test_coalesced_partial_failure_reports_preserve_all_acknowledged_failures(tmp_path, regression):
     module = _load_module()
     path = tmp_path / "ci.json"
     first = _ci_run(head=COALESCED_HEAD, conclusion="failure")
@@ -4826,7 +4829,10 @@ def test_coalesced_partial_failure_reports_preserve_all_acknowledged_failures(tm
     rc, output, _ = _ci_cycle(module, path, [_success_state(first, pending)], extra_args=options)
     assert rc == 0 and "failure" in output
     second = {**pending, "status": "completed", "conclusion": "failure"}
-    rc, output, _ = _ci_cycle(module, path, [_success_state(second)], delivery="2", extra_args=options)
+    partial = _success_state(second) if regression == "missing" else _success_state(
+        {**first, "status": "in_progress", "conclusion": None}, second,
+    )
+    rc, output, _ = _ci_cycle(module, path, [partial], delivery="2", extra_args=options)
     assert rc == 0 and "failure" in output
     rc, output, payload = _ci_cycle(
         module, path, [_success_state(first, second)], delivery="3", extra_args=options,
@@ -4849,6 +4855,118 @@ def test_coalescing_replays_unbound_reactions_as_activity(tmp_path, replay):
     )
     assert rc == 0 and "pr_reaction #701" in output
     assert "success candidate" not in output
+
+
+@pytest.mark.parametrize("replay", [(), ("--catch-up",), ("--since-reaction-id", "0")])
+def test_coalescing_preserves_known_threads_when_graphql_is_unavailable(tmp_path, replay):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    unresolved = [{"id": "thread-1", "isResolved": False}]
+    baseline = _success_state(pending, review_threads=unresolved)
+    _managed_state(module, path, "wat_9", **_complete_pr_baseline_fields(module, baseline),
+                   actions=module.normalize_selected_runs({"CI": [pending]}))
+    options = ("--coalesce-success",)
+    rc, output, _ = _ci_cycle(
+        module, path, [_success_state(pending, clean=True, review_threads=unresolved)], extra_args=options,
+    )
+    assert (rc, output) == (124, "")
+    rc, output, payload = _ci_cycle(
+        module, path, [_success_state(_ci_run(head=COALESCED_HEAD), clean=True)], token=None,
+        extra_args=(*options, "--allow-unauthenticated", *replay),
+    )
+    assert (rc, output) == (124, "")
+    assert payload["review_thread_states"] == {"thread-1": False}
+    assert payload["snapshot"]["review_threads"] == {"thread-1": False}
+
+    # Only an authenticated resolved observation can unblock the paired result.
+    rc, output, _ = _ci_cycle(
+        module, path, [_success_state(_ci_run(head=COALESCED_HEAD), clean=True,
+                                     review_threads=[{"id": "thread-1", "isResolved": True}])],
+        extra_args=options,
+    )
+    assert rc == 0 and "success candidate" in output
+
+
+@pytest.mark.parametrize("phase", ["startup", "settle"])
+def test_coalescing_never_settles_away_an_observed_ci_failure(tmp_path, phase):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
+    failed = _success_state(_ci_run(head=COALESCED_HEAD, conclusion="failure"))
+    states = [failed, _success_state()]
+    if phase == "settle":
+        states.insert(0, _success_state(pending, issue_comments=[{
+            "id": 601, "body": "Please inspect this", "user": {"login": "human"},
+        }]))
+    rc, output, payload = _ci_cycle(
+        module, path, states, settle=1, extra_args=("--coalesce-success",),
+    )
+    assert rc == 0 and "GitHub Actions failure" in output
+    assert payload[module.STAGED_KEY]["cursors"]["actions"]["CI"][0]["conclusion"] == "failure"
+
+
+def test_coalescing_preserves_a_fresh_reaction_for_the_latest_observed_head(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
+    options = ("--coalesce-success",)
+    reaction = {"id": 701, "content": "+1", "user": {"login": "chatgpt-codex-connector[bot]"}}
+    returned = _success_state({**pending, "run_attempt": 2})
+    fresh = {**returned, "reactions": [reaction]}
+    rc, output, payload = _ci_cycle(
+        module, path, [_success_state(head="b" * 40), returned, fresh], settle=1, extra_args=options,
+    )
+    assert rc == 0 and "success candidate" not in output
+    observed = payload[module.STAGED_KEY]["cursors"][module.SUCCESS_BATCH_KEY]
+    assert observed["head_sha"] == COALESCED_HEAD and observed["review"]["id"] == 701
+    rc, output, _ = _ci_cycle(module, path, [fresh], delivery="2", extra_args=options)
+    assert "success candidate" not in output
+    green = {**fresh, "actions": [_ci_run(head=COALESCED_HEAD, attempt=2)]}
+    rc, output, _ = _ci_cycle(module, path, [green], delivery="3", extra_args=options)
+    assert rc == 0 and "success candidate" in output
+
+
+def test_coalescing_never_silences_a_finding_appended_to_a_progress_summary(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
+    summary = {**_clean_codex_comment(), "body": (
+        "<!-- codex-pull-request-review-summary -->\n"
+        "| Review | Status | Commit | Review trigger |\n| --- | --- | --- | --- |\n"
+        f"| Code Review | **Completed** | `{COALESCED_HEAD[:7]}` | New commits |\n"
+        "[P1] Fix the authentication bypass before merging."
+    )}
+    rc, output, _ = _ci_cycle(
+        module, path, [_success_state(pending, issue_comments=[summary])], extra_args=("--coalesce-success",),
+    )
+    assert rc == 0 and "issue_comment #601" in output
+    assert "success candidate" not in output
+
+
+def test_coalescing_remembers_semantics_across_missing_rows_and_timestamp_changes(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
+    options = ("--coalesce-success",)
+    _ci_cycle(module, path, [_success_state(pending, clean=True)], extra_args=options)
+    rc, output, _ = _ci_cycle(
+        module, path, [_success_state(pending, issue_comments=[_codex_error()])], extra_args=options,
+    )
+    assert rc == 0 and "success candidate" not in output
+    old_clean = {**_clean_codex_comment(), "updated_at": "2026-10-15T08:01:00Z"}
+    restored = _success_state(_ci_run(head=COALESCED_HEAD), issue_comments=[old_clean])
+    rc, output, _ = _ci_cycle(module, path, [restored], delivery="2", extra_args=options)
+    assert "success candidate" not in output
+    rc, output, _ = _ci_cycle(module, path, [restored], delivery="3", extra_args=options)
+    assert (rc, output) == (124, "")
+    restored["issue_comments"].append(_clean_codex_comment(603))
+    rc, output, _ = _ci_cycle(module, path, [restored], delivery="3", extra_args=options)
+    assert rc == 0 and "success candidate" in output
 
 
 @pytest.mark.parametrize("intermediate", ["missing", "nonterminal", "older-attempt", "partial"])
