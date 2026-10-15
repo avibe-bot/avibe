@@ -159,6 +159,11 @@ def selection_from_hop(hop: Mapping[str, Any], *, gateway_base_url: Optional[str
     efforts = raw.get("reasoning_efforts") or []
     if not isinstance(efforts, (list, tuple)) or not all(isinstance(item, str) for item in efforts):
         raise HopResolutionError("hop capability reasoning_efforts must be a list of strings")
+    steps = raw.get("context_price_steps") or []
+    if not isinstance(steps, (list, tuple)) or not all(
+        isinstance(size, int) and not isinstance(size, bool) and size > 0 for size in steps
+    ):
+        raise HopResolutionError("hop capability context_price_steps must be a list of positive integers")
     capabilities = ModelCapabilities(
         context_window=_optional(raw.get("context_window"), int, "context_window"),
         input_limit=_optional(raw.get("input_limit"), int, "input_limit"),
@@ -167,6 +172,7 @@ def selection_from_hop(hop: Mapping[str, Any], *, gateway_base_url: Optional[str
         supports_images=_optional(raw.get("supports_images"), bool, "supports_images"),
         supports_reasoning=_optional(raw.get("supports_reasoning"), bool, "supports_reasoning"),
         reasoning_efforts=tuple(efforts),
+        context_price_steps=tuple(sorted(steps)),
     )
     base_url = hop["base_url"]
     if protocol == "google":

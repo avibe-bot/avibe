@@ -2,7 +2,9 @@
 
 A valuation, never a bill: it answers "what would this usage have cost at the
 vendor's published API price", so a subscriber can see whether the plan pays for
-itself. Nothing in resolution, admission, or cooldown reads it.
+itself. Nothing in routing, admission, or cooldown reads it. Hop resolution only
+reports where a model's price steps up with its context (`context_price_steps`),
+which Vibey's context management keeps below (C-9 `context.md` section 1).
 
 Prices come from two places, highest precedence first: the user's hand-edited
 override file (`<state dir>/model_hub_prices.json`), then the models.dev catalog
@@ -182,6 +184,23 @@ def context_tier_size(price: Optional[ModelPrice], context_input_tokens: int) ->
     if price is None:
         return 0
     return max((size for size, _rates in price.context_tiers if context_input_tokens > size), default=0)
+
+
+def context_price_steps(price: Optional[ModelPrice]) -> tuple[int, ...]:
+    """The context sizes past which a call costs more than at the base rates, ascending.
+
+    Each context tier with an input, cache read, or output rate above the base
+    one; a tier no dearer than the base is no step. A model with no price, or a
+    flat one, has none.
+    """
+
+    if price is None:
+        return ()
+    return tuple(
+        size
+        for size, rates in price.context_tiers
+        if rates.input > price.input or rates.cache_read > price.cache_read or rates.output > price.output
+    )
 
 
 def context_tier_price(price: ModelPrice, size: int) -> ModelPrice:
