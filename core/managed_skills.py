@@ -1220,37 +1220,11 @@ def render_skill_catalog_blocks(skills: Sequence[ManagedSkill]) -> list[Rendered
     return blocks
 
 
-def _agent_visible_skill_directory(skill: ManagedSkill) -> Path:
-    """Prefer the named live built-in path when it currently points at this Skill."""
-
-    snapshot_dir = skill.directory.parent
-    if _SNAPSHOT_ID_RE.fullmatch(snapshot_dir.name) is None:
-        return skill.directory
-    umbrella = (
-        snapshot_dir.parent.parent
-        if snapshot_dir.parent.name == BUILTIN_SNAPSHOTS_DIRNAME
-        else snapshot_dir.parent
-    )
-    live = umbrella / skill.directory.name
-    try:
-        live_stat = live.stat()
-        skill_stat = skill.directory.stat(follow_symlinks=False)
-    except OSError:
-        return skill.directory
-    if (
-        stat.S_ISDIR(live_stat.st_mode)
-        and stat.S_ISDIR(skill_stat.st_mode)
-        and _directory_identity(live_stat) == _directory_identity(skill_stat)
-    ):
-        return _absolute_path(live)
-    return skill.directory
-
-
 def render_skill_content(skill: ManagedSkill) -> str:
     if skill.body is None:
         raise ValueError("Skill body was not loaded")
     name = html.escape(skill.name, quote=True)
-    directory = html.escape(str(_agent_visible_skill_directory(skill)), quote=True)
+    directory = html.escape(str(skill.directory), quote=True)
     directory = "".join(
         f"&#x{ord(char):X};" if unicodedata.category(char).startswith("C") else char for char in directory
     )
@@ -1771,7 +1745,7 @@ def publish_builtin_skills(
 
     umbrella.mkdir(parents=True, exist_ok=True)
     snapshots_root.mkdir(mode=0o700, exist_ok=True)
-    lock_path = umbrella / f".publish-{snapshot_id}.lock"
+    lock_path = umbrella / ".publish.lock"
     with MigrationFileLock(lock_path, timeout_seconds=None):
         if _readable_snapshot_dir(destination) is not None:
             _ensure_readable_snapshot(destination)

@@ -92,18 +92,19 @@ authoritative runtime home returned by `config.paths.get_vibe_remote_dir()`:
 <resolved-avibe-home>/builtin-skills/.snapshots/<runtime-snapshot>/<name>/
 ```
 
-The named live path is the agent-facing directory. The content-addressed
-snapshot remains the immutable runtime tree so overlapping old and new Avibe
-processes can keep using the snapshot each one advertised. Existing hash-named
-snapshot directories remain readable in place.
+The named live path is a current-publication convenience for browsing the
+latest built-in set. Agents load from the bound snapshot directory so companion
+files stay on the tree that process advertised. Existing hash-named snapshot
+directories remain readable in place.
 
 This honors an explicit `AVIBE_HOME` and the existing legacy-home migration
 rules. Snapshot publication must not independently select or create
 `$HOME/.avibe`, because a still-authoritative `$HOME/.vibe_remote` directory
 must remain the single state home when migration cannot complete.
 
-The live Skill path is directly readable by the agent. It is separate from
-user-managed Skills and has the highest resolution priority.
+Named live paths are directly readable on disk. Load still advertises the bound
+snapshot path. Built-ins remain separate from user-managed Skills and have the
+highest resolution priority.
 
 ### 4.2 Project compatibility roots
 
@@ -343,6 +344,9 @@ Publication is atomic and content-addressed so overlapping old and new Avibe
 processes can keep using the snapshot each one advertised. After a snapshot is
 in place, Avibe atomically updates `builtin-skills/<name>` to the current
 snapshot and removes named live links that no longer exist in that snapshot.
+Live-link publication is serialized across snapshot IDs so overlapping
+publishers cannot mix catalogs. Agents still receive the bound snapshot path
+when they load a Skill.
 Published snapshots are not a user customization surface. V1 does not
 garbage-collect old snapshots, detect later manual tampering, or repair user
 changes there.

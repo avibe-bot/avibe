@@ -1369,6 +1369,21 @@ def test_publication_keeps_complete_versioned_snapshots_and_executable_modes(
             f"{BUILTIN_SNAPSHOTS_DIRNAME}/{new_id}/current"
         )
         assert not (destination / "retired").exists()
+    project = tmp_path / "project"
+    project.mkdir()
+    loaded = load_skill(
+        "current",
+        resolved_skills=_isolated_resolve(
+            project,
+            tmp_path,
+            avibe_home=tmp_path,
+            builtin_snapshot_id=new_id,
+        ),
+    )
+    assert loaded is not None
+    output = render_skill_content(loaded)
+    assert str(_published_snapshot(destination, new_id) / "current") in output
+    assert f'directory="{destination / "current"}"' not in output
 
 
 def test_publication_keeps_legacy_hash_snapshots_and_exposes_named_live_paths(
@@ -1401,8 +1416,8 @@ def test_publication_keeps_legacy_hash_snapshots_and_exposes_named_live_paths(
         assert loaded is not None
         output = render_skill_content(loaded)
         assert 'name="alpha"' in output
-        assert str(destination / "alpha") in output
-        assert snapshot_id not in output
+        assert str(legacy / "alpha") in output
+        assert f'directory="{destination / "alpha"}"' not in output
 
 
 def test_publication_opens_snapshot_files_in_binary_mode_when_available(
@@ -1490,6 +1505,54 @@ def test_concurrent_publication_reuses_one_snapshot(tmp_path: Path) -> None:
 
     assert ids[0] == ids[1]
     assert (_published_snapshot(destination, ids[0]) / "alpha" / "SKILL.md").is_file()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Live links are skipped when symlink creation is unavailable")
+def test_concurrent_publication_of_distinct_snapshots_keeps_one_coherent_live_catalog(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    destination = tmp_path / "builtin-skills"
+    _write_skill(first, "alpha", "alpha", "Alpha")
+    _write_skill(first, "beta", "beta", "Beta")
+    _write_skill(second, "alpha", "alpha", "Alpha")
+    _write_skill(second, "gamma", "gamma", "Gamma")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        ids = list(
+            pool.map(
+                lambda source: publish_builtin_skills(
+                    source_root=source,
+                    destination_root=destination,
+                ),
+                (first, second),
+            )
+        )
+
+    first_id, second_id = ids
+    assert first_id != second_id
+    live_names = {path.name for path in destination.iterdir() if path.is_symlink()}
+    assert live_names in ({"alpha", "beta"}, {"alpha", "gamma"})
+    winner = first_id if live_names == {"alpha", "beta"} else second_id
+    assert Path(os.readlink(destination / "alpha")).parts[-2] == winner
+    assert not (destination / ("gamma" if winner == first_id else "beta")).exists()
+
+    project = tmp_path / "project"
+    project.mkdir()
+    loaded = load_skill(
+        "alpha",
+        resolved_skills=_isolated_resolve(
+            project,
+            tmp_path,
+            avibe_home=tmp_path,
+            builtin_snapshot_id=first_id,
+        ),
+    )
+    assert loaded is not None
+    assert str(_published_snapshot(destination, first_id) / "alpha") in render_skill_content(
+        loaded
+    )
 
 
 def test_publication_reclaims_interrupted_staging_and_retries(tmp_path: Path) -> None:
