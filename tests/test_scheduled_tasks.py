@@ -20415,10 +20415,14 @@ def test_a_reset_rebind_persists_its_whole_recovery_whatever_the_mirror_publishe
 
 
 
-def test_a_reservation_a_cancellation_strands_is_given_back(tmp_path: Path, monkeypatch) -> None:
-    """#2649: a per-run session is reserved off the loop. A cancellation that arrives while it is being reserved waits
-    for the reservation to land, then gives the session back before it propagates: nothing was dispatched to it, and a
-    per-run reservation carries no definition stamp the orphan sweep could find it by."""
+@pytest.mark.parametrize("cancelled_during", ["_reserve_runtime_session", "_require_execution_agent_access"])
+def test_a_cancellation_during_a_per_run_fires_store_steps_is_answered_at_its_dispatch(
+    tmp_path: Path, monkeypatch, cancelled_during: str
+) -> None:
+    """#2649: a per-run fire's store steps run on the runtime-work door, but its cancellation points stay where the loop
+    had them. A cancellation that arrives while the reservation or a pre-dispatch step runs is answered at the dispatch,
+    which already holds the reserved session -- so a reservation is never stranded between steps, where nothing owns it
+    and the orphan sweep cannot find it (a per-run reservation carries no definition stamp)."""
 
     store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
     task = store.add_task(
@@ -20430,20 +20434,49 @@ def test_a_reservation_a_cancellation_strands_is_given_back(tmp_path: Path, monk
         timezone_name="UTC",
         deliver_key="slack::channel::C123",
     )
+    dispatched: list[str] = []
+    answered: list[str] = []
+
+    async def submit_scheduled(session_id, _context, _prompt, **_kwargs):
+        dispatched.append(session_id)
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            answered.append(session_id)
+            raise
+
     service = ScheduledTaskService(
-        controller=SimpleNamespace(platform_settings_managers={"slack": object()}, im_clients={}),
+        controller=SimpleNamespace(
+            platform_settings_managers={"slack": object()},
+            im_clients={},
+            session_turn_gate=SimpleNamespace(submit_scheduled=submit_scheduled),
+        ),
         store=store,
         request_store=TaskExecutionStore(tmp_path / "task_requests"),
     )
     entered, release = threading.Event(), threading.Event()
     released: list[str] = []
 
-    def slow_reservation(**_kwargs) -> str:
-        entered.set()
-        assert release.wait(5)
-        return "ses-reserved-1"
+    def step(name: str, result):
+        def run(*_args, **_kwargs):
+            if name == cancelled_during:
+                entered.set()
+                assert release.wait(5)
+            return result
 
-    monkeypatch.setattr(service, "_reserve_runtime_session", slow_reservation)
+        return run
+
+    async def build_context(*_args, **_kwargs):
+        return SimpleNamespace()
+
+    monkeypatch.setattr(service, "_reserve_runtime_session", step("_reserve_runtime_session", "ses-reserved-1"))
+    monkeypatch.setattr(
+        scheduled_tasks,
+        "resolve_session_id_target",
+        step("resolve_session_id_target", SimpleNamespace(session_key=parse_session_key("slack::channel::C123"))),
+    )
+    monkeypatch.setattr(service, "_require_execution_agent_access", step("_require_execution_agent_access", None))
+    monkeypatch.setattr(service, "_build_context", build_context)
     monkeypatch.setattr(
         service, "_release_reserved_session", lambda session_id, *, reason: released.append(session_id) or True
     )
@@ -20458,4 +20491,100 @@ def test_a_reservation_a_cancellation_strands_is_given_back(tmp_path: Path, monk
             await fire
 
     asyncio.run(_go())
-    assert released == ["ses-reserved-1"]
+    assert dispatched == ["ses-reserved-1"], "the cancellation was answered before the dispatch adopted the reservation"
+    assert answered == ["ses-reserved-1"]
+    assert released == []
+
+
+def test_a_cancellation_during_a_binding_recovery_still_reports_the_change_it_committed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """#2649: the pinned-binding recovery runs on the runtime-work door. A cancellation that arrives while it runs waits
+    for it, and the change it committed still gets its result stamp, its recovery marker and its notice: the cancellation
+    is answered at the next real await, as on the loop, not between the recovery and its bookkeeping."""
+
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = store.add_task(
+        session_key="",
+        session_id="sesdoesnotexist",
+        session_policy="existing",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+    )
+    service = _binding_service(tmp_path, store, [])
+    notices = _spy_binding_notices(service)
+    entered, release = threading.Event(), threading.Event()
+    recover = service._recover_pinned_session_binding
+
+    def slow_recovery(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return recover(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_recover_pinned_session_binding", slow_recovery)
+
+    async def _go() -> None:
+        fire = asyncio.create_task(service._execute_task(task, execution_id="exec-1", disable_one_shot=False))
+        assert await asyncio.to_thread(entered.wait, 5)
+        fire.cancel()
+        await asyncio.sleep(0.05)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await fire
+
+    asyncio.run(_go())
+    assert [notice.action for notice in notices] == ["failing"], "the committed binding change was never reported"
+    current = store.get_task(task.id)
+    assert current is not None and "sesdoesnotexist" in (current.last_error or "")
+    assert current.metadata.get(BINDING_RECOVERY_METADATA_KEY, {}).get("action") == "failing", (
+        "the change's recovery marker was never recorded"
+    )
+
+
+def test_an_older_mirror_capture_never_undoes_a_newer_one(tmp_path: Path) -> None:
+    """#2649: ``reconcile_jobs`` captures the mirror on a thread, so captures may complete out of order. Each is ordered
+    by the mirror generation it actually read -- not by when it was submitted -- so a capture submitted first but taken
+    after a disable applies the disable, even when a later-submitted capture of the older mirror landed before it."""
+
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = store.add_task(
+        session_key="slack::channel::C123",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+    )
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={"slack": object()}, im_clients={}),
+        store=store,
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+    )
+    service.scheduler = _StubScheduler()
+    capture = store.list_tasks_with_generation
+    first_waits, first_entered = threading.Event(), threading.Event()
+    calls: list[int] = []
+
+    def ordered_capture():
+        calls.append(len(calls))
+        if len(calls) == 1:
+            first_entered.set()
+            assert first_waits.wait(5)
+        return capture()
+
+    store.list_tasks_with_generation = ordered_capture  # type: ignore[method-assign]
+
+    async def _go() -> None:
+        first = asyncio.create_task(service._reconcile_jobs_off_loop())
+        assert await asyncio.to_thread(first_entered.wait, 5)
+        await service._reconcile_jobs_off_loop()  # submitted second, captures the enabled mirror, lands first
+        assert service.scheduler.get_job(task.id) is not None
+        store.set_enabled(task.id, False)
+        first_waits.set()
+        await first  # submitted first, captures the disabled mirror, lands last
+
+    asyncio.run(_go())
+    assert service.scheduler.get_job(task.id) is None, "an older mirror capture undid the disable a newer one applied"

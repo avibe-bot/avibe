@@ -1288,7 +1288,8 @@ class ScheduledTaskStore:
         self.path = path or (paths.get_state_dir() / "scheduled_tasks.json")
         self._sqlite = SQLiteBackgroundTaskStore() if path is None else None
         self._signature: Optional[_PathSignature] = None
-        self._tasks: Dict[str, ScheduledTask] = {}
+        # The published mirror and its generation, one tuple so a reader takes both at once.
+        self._published: tuple[int, Dict[str, ScheduledTask]] = (0, {})
         #: Set when a failed write left this mirror INCOMPLETE, cleared by the reload
         #: that repairs it. See ``maybe_reload`` and ``_reload_after_lost_write``.
         self._reload_required = False
@@ -1408,9 +1409,24 @@ class ScheduledTaskStore:
     # loop never waits behind a writer that holds ``_reload_lock`` across SQLite I/O
     # on a worker thread, and never sees an edit the database has not accepted.
 
+    @property
+    def _tasks(self) -> Dict[str, ScheduledTask]:
+        return self._published[1]
+
+    @_tasks.setter
+    def _tasks(self, tasks: Dict[str, ScheduledTask]) -> None:
+        # Every publication is a new generation, so a reader can tell which of two
+        # mirrors it captured is newer, whatever order the captures complete in.
+        self._published = (self._published[0] + 1, tasks)
+
     def list_tasks(self) -> list[ScheduledTask]:
-        tasks = self._tasks
-        return sorted(tasks.values(), key=lambda item: (item.created_at, item.id))
+        return self.list_tasks_with_generation()[1]
+
+    def list_tasks_with_generation(self) -> tuple[int, list[ScheduledTask]]:
+        """The published mirror, sorted, with the generation it was published as."""
+
+        generation, tasks = self._published
+        return generation, sorted(tasks.values(), key=lambda item: (item.created_at, item.id))
 
     def get_task(self, task_id: str) -> Optional[ScheduledTask]:
         return self._tasks.get(task_id)
@@ -4068,9 +4084,8 @@ class ScheduledTaskService:
         # until its settlement has landed.
         self._cancel_settlements: set["asyncio.Task[None]"] = set()
         self._settling_claim_ids: set[str] = set()
-        # Mirror reads for ``reconcile_jobs``, numbered, and the newest one applied.
-        self._job_reconcile_reads = 0
-        self._job_reconcile_applied = 0
+        # The store and mirror generation ``reconcile_jobs`` last applied.
+        self._job_reconcile_applied: tuple[Any, int] = (None, 0)
         self._one_shot_job_identities: Dict[str, tuple[str, str, str, str]] = {}
         self._running = False
         self._watch_store_restart_count = 0
@@ -5029,6 +5044,30 @@ class ScheduledTaskService:
             raise asyncio.CancelledError
         return result
 
+    async def _store_step(self, operation, /, *args, **kwargs):  # noqa: ANN001, ANN202
+        """One store step of a claimed execution: on the runtime-work door, with the
+        cancellation point it had on the loop.
+
+        These steps ran synchronously on the loop before #2649, so a cancellation could
+        land only at the execution's next real await -- the dispatch, the command, a
+        delivery -- with every step before it complete and its result in hand. It still
+        does: a cancellation that arrives while a step runs waits for the step to land,
+        the step's result is returned, and the cancellation is re-armed for the next
+        await that is not itself a store step. So a result a step committed (a
+        reservation, a binding recovery, a settlement) is never dropped between steps,
+        and each cancellation is answered where the execution always answered it.
+        """
+
+        result, cancelled = await self._run_runtime_sync_settled(operation, *args, **kwargs)
+        if cancelled:
+            current = asyncio.current_task()
+            if current is not None:
+                # Caught, not answered: take its request back and re-arm it, so it is
+                # delivered once, with the count an ``asyncio.timeout`` around it expects.
+                current.uncancel()
+                current.cancel()
+        return result
+
     async def _run_runtime_sync_settled(self, operation, /, *args, **kwargs):  # noqa: ANN001, ANN202
         """``_run_runtime_sync`` for a caller that answers a cancellation itself, from what
         the step committed: returns ``(result, cancelled)`` and raises nothing for it."""
@@ -5660,7 +5699,7 @@ class ScheduledTaskService:
     def reconcile_jobs(self) -> None:
         if not self._owns_service_instance():
             return
-        self._apply_job_reconcile(self._next_job_reconcile_read(), self.store.list_tasks())
+        self._apply_job_reconcile(self.store, *self.store.list_tasks_with_generation())
 
     async def _reconcile_jobs_off_loop(self) -> None:
         """``reconcile_jobs`` for a claimed execution: the mirror read (which waits on the
@@ -5669,19 +5708,17 @@ class ScheduledTaskService:
 
         if not self._owns_service_instance():
             return
-        read = self._next_job_reconcile_read()
-        self._apply_job_reconcile(read, await self._run_runtime_sync(self.store.list_tasks))
+        store = self.store
+        self._apply_job_reconcile(store, *await self._store_step(store.list_tasks_with_generation))
 
-    def _next_job_reconcile_read(self) -> int:
-        self._job_reconcile_reads += 1
-        return self._job_reconcile_reads
-
-    def _apply_job_reconcile(self, read: int, tasks: list[ScheduledTask]) -> None:
-        # Reads may land out of order once one waits on a thread: only a read newer than
-        # the last one applied may change the jobs, so an older mirror never undoes a newer.
-        if read <= self._job_reconcile_applied:
+    def _apply_job_reconcile(self, store: Any, generation: int, tasks: list[ScheduledTask]) -> None:
+        # Captures may complete out of order once one waits on a thread: only a mirror at
+        # least as new as the last one applied may change the jobs, so an older mirror
+        # never undoes a newer one. Ordered by the generation each capture actually read.
+        applied_store, applied_generation = self._job_reconcile_applied
+        if applied_store is store and generation < applied_generation:
             return
-        self._job_reconcile_applied = read
+        self._job_reconcile_applied = (store, generation)
         desired_ids = set()
         desired_job_ids = set()
         for task in tasks:
@@ -8324,7 +8361,7 @@ class ScheduledTaskService:
     ) -> tuple[TaskExecutionRequest, bool]:
         # One store step, on the door the claim itself runs through: a cancellation that
         # arrives meanwhile is answered once the start (or the requeue) has landed.
-        return await self._run_runtime_sync(self._start_claimed_execution, request)
+        return await self._store_step(self._start_claimed_execution, request)
 
     def _start_claimed_execution(
         self,
@@ -8424,7 +8461,7 @@ class ScheduledTaskService:
                 # that created this Run. Only that transaction stamps the Run as
                 # its owner; cron fires keep the invalidation-aware fast path.
                 consumed_generation = task_schedule_generation(request.metadata)
-                task = await self._run_runtime_sync(
+                task = await self._store_step(
                     self._load_claimed_task,
                     request.task_id or "",
                     consumed_one_shot=consumed_generation is not None,
@@ -8477,8 +8514,8 @@ class ScheduledTaskService:
                     raise ValueError("hook request requires prompt")
                 user_context = self._resource_user_context(request.metadata)
                 if request.session_policy == "create_per_run":
-                    session_id = await self._reserve_runtime_session_for_fire(
-                        run_id=request.id,
+                    session_id = await self._store_step(
+                        self._reserve_runtime_session,
                         agent_name=request.agent_name,
                         agent_id=request.agent_id,
                         deliver_key=request.deliver_key,
@@ -8560,7 +8597,7 @@ class ScheduledTaskService:
                         requeue_metadata[
                             AGENT_RUN_DELIVERY_OUTCOME_METADATA_KEY
                         ] = result.delivery_outcome
-                    await self._run_runtime_sync(
+                    await self._store_step(
                         self.request_store.requeue, request.id, metadata=requeue_metadata
                     )
             else:
@@ -8633,9 +8670,7 @@ class ScheduledTaskService:
             if should_complete:
                 # The settlement's store steps run on the door, in their own order, so
                 # none of them commits on the loop; the scheduler jobs follow on the loop.
-                # A cancellation that arrives meanwhile is answered from what landed: the
-                # retired job still drops before it propagates.
-                (_written_status, projected, retired), settle_cancelled = await self._run_runtime_sync_settled(
+                _written_status, projected, retired = await self._store_step(
                     self._settle_claimed_request,
                     request,
                     ok=not error,
@@ -8654,8 +8689,6 @@ class ScheduledTaskService:
                 )
                 if retired is not None:
                     self._retire_one_shot_job(retired)
-                if settle_cancelled:
-                    raise asyncio.CancelledError
                 if projected:
                     await self._reconcile_jobs_off_loop()
             if reconcile_delivery_on_return and session_id:
@@ -8874,17 +8907,17 @@ class ScheduledTaskService:
         # command from the definition as it stood then, and the executor re-read the
         # definition after claiming. This is the copy that will actually run.
         non_owner_retired_expectation = (
-            await self._run_runtime_sync(self.store._read_state, task)
+            await self._store_step(self.store._read_state, task)
             if schedule_generation is None
             and task.schedule_type == "at"
             and task.retired_at is not None
             else None
         )
-        await self._run_runtime_sync(self._record_executed_command, execution_id, task)
+        await self._store_step(self._record_executed_command, execution_id, task)
 
         spawn_cwd = (
             task.cwd
-            or await self._run_runtime_sync(self._bound_session_workdir, task)
+            or await self._store_step(self._bound_session_workdir, task)
             or self._runtime_default_workdir()
         )
         if not spawn_cwd:
@@ -8911,7 +8944,7 @@ class ScheduledTaskService:
                     timeout_seconds=effective_timeout,
                     label=f"scheduled task {task.id}",
                     # The worker record lands, on the door, before the spec is written.
-                    on_spawn=lambda pid, identity: self._run_runtime_sync(
+                    on_spawn=lambda pid, identity: self._store_step(
                         self._require_command_worker_record, execution_id, identity
                     ),
                     max_output_bytes=COMMAND_TASK_OUTPUT_CAP_BYTES,
@@ -8998,7 +9031,7 @@ class ScheduledTaskService:
                 # stop raises: by the time control is here the runner has reaped
                 # the tree, so the stored identity now names a dead pid that the
                 # OS is free to hand to something else.
-                await self._run_runtime_sync(self._clear_command_worker, execution_id)
+                await self._store_step(self._clear_command_worker, execution_id)
 
         # THE ESCALATION IS COMPOSED BEFORE THE STAMP AND QUEUED BY IT. A definition
         # carrying ``on_failure == "agent"`` owes the user ONE Agent turn per failed
@@ -9034,7 +9067,7 @@ class ScheduledTaskService:
                 parent_run_id=execution_id,
                 metadata=dict(task.metadata or {}),
             )
-        stamped = await self._run_runtime_sync(
+        stamped = await self._store_step(
             self.store.mark_task_result,
             task.id,
             error=error,
@@ -9192,7 +9225,7 @@ class ScheduledTaskService:
         session_key = task.session_key
         if not metadata_allows_harness_runtime(task.metadata):
             error = HARNESS_ACCESS_FORBIDDEN_CODE
-            if not await self._run_runtime_sync(self.store.suspend_task, task.id, error=error):
+            if not await self._store_step(self.store.suspend_task, task.id, error=error):
                 logger.warning(
                     "Remote-origin scheduled task %s changed before it could be suspended",
                     task.id,
@@ -9211,7 +9244,7 @@ class ScheduledTaskService:
         # retry belongs here -- before the fire, so a cleanup that succeeds is off the
         # books whatever this run does, and outside the ``try`` because it reports
         # itself and must never be mistaken for the run's own failure.
-        await self._run_runtime_sync(self._retry_orphaned_reservations, task)
+        await self._store_step(self._retry_orphaned_reservations, task)
         if task.has_command:
             # A command definition runs a subprocess instead of prompting an Agent, so
             # none of the session/binding machinery below applies to it. An
@@ -9226,8 +9259,8 @@ class ScheduledTaskService:
             )
         try:
             if task.session_policy == "create_per_run":
-                session_id = await self._reserve_runtime_session_for_fire(
-                    run_id=execution_id,
+                session_id = await self._store_step(
+                    self._reserve_runtime_session,
                     agent_name=task.agent_name,
                     agent_id=agent_id,
                     deliver_key=task.deliver_key,
@@ -9263,7 +9296,7 @@ class ScheduledTaskService:
             # re-reserve one, anything else is user-pinned and gets paused. Either
             # way the user is told exactly once.
             logger.error("Scheduled task %s has an unresolvable session binding: %s", task.id, exc)
-            binding_change = await self._run_runtime_sync(self._recover_pinned_session_binding, task, exc)
+            binding_change = await self._store_step(self._recover_pinned_session_binding, task, exc)
             error = binding_change.detail
             failure_code = FAILURE_CODE_UNRESOLVABLE_TARGET
             if binding_change.action == "rebound" and binding_change.new_session_id:
@@ -9310,7 +9343,7 @@ class ScheduledTaskService:
         except Exception as exc:
             error = str(exc)
             logger.error("Scheduled task %s failed: %s", task.id, exc, exc_info=True)
-        if not await self._run_runtime_sync(
+        if not await self._store_step(
             self.store.mark_task_result,
             task.id,
             error=error,
@@ -9395,7 +9428,7 @@ class ScheduledTaskService:
         from core.session_turns import TurnSubmissionResult
 
         target_info = (
-            await self._run_runtime_sync(resolve_session_id_target, session_id) if session_id else None
+            await self._store_step(resolve_session_id_target, session_id) if session_id else None
         )
         target = target_info.session_key if target_info else parse_session_key(session_key or "")
         delivery_target = self._resolve_delivery_target(
@@ -9453,7 +9486,7 @@ class ScheduledTaskService:
                     "target_was_busy": state.target_was_busy,
                 }
             if isinstance(state, TurnSubmissionResult) and state.delivery_status == "canceled":
-                await self._run_runtime_sync(
+                await self._store_step(
                     self.request_store.settle_without_result,
                     execution_id,
                     terminal_status="canceled",
@@ -9526,7 +9559,7 @@ class ScheduledTaskService:
         error_text = self._t(
             SETTLEMENT_I18N_KEYS.get(settled_by, SETTLEMENT_I18N_KEYS[SETTLED_BY_NO_TERMINAL_RESULT])
         )
-        supported, _settled = await self._run_runtime_sync(
+        supported, _settled = await self._store_step(
             self._settle_agent_run_without_result,
             execution_id,
             settled_by=settled_by,
@@ -10352,7 +10385,7 @@ class ScheduledTaskService:
         longer reflects (HFR-266).
         """
 
-        task = await self._run_runtime_sync(self.store.get_task, change.task_id)
+        task = await self._store_step(self.store.get_task, change.task_id)
         if task is None:
             return
         recorded = task.metadata.get(BINDING_RECOVERY_METADATA_KEY) if isinstance(task.metadata, dict) else None
@@ -10396,7 +10429,7 @@ class ScheduledTaskService:
                 "settings_preserved": change.settings_preserved,
             }
         try:
-            recorded_recovery = await self._run_runtime_sync(
+            recorded_recovery = await self._store_step(
                 self.store.record_binding_recovery,
                 change.task_id,
                 recovery_payload,
@@ -10633,27 +10666,6 @@ class ScheduledTaskService:
             service.close()
         if not session_id:
             raise ValueError("failed to reserve runtime session")
-        return session_id
-
-    async def _reserve_runtime_session_for_fire(self, *, run_id: str, **reservation: Any) -> str:
-        """Reserve a per-run session off the loop, answering a cancellation from what landed.
-
-        The reservation is one store step a cancellation cannot split. If one arrived
-        while it ran, the session it reserved was never dispatched to and nothing adopts
-        it (a per-run reservation carries no definition stamp for the orphan sweep to
-        find), so it is given back before the cancellation propagates.
-        """
-
-        session_id, cancelled = await self._run_runtime_sync_settled(
-            self._reserve_runtime_session, **reservation
-        )
-        if cancelled:
-            await self._run_runtime_sync_settled(
-                self._release_reserved_session,
-                session_id,
-                reason=f"run {run_id} was canceled before it used its reserved session",
-            )
-            raise asyncio.CancelledError
         return session_id
 
     def _release_reserved_session(self, session_id: str, *, reason: str) -> bool:
@@ -10992,9 +11004,9 @@ class ScheduledTaskService:
         _capture_dispatch_result: bool = False,
     ) -> Optional[str] | TaskDispatchResult:
         target_info = (
-            await self._run_runtime_sync(resolve_session_id_target, session_id) if session_id else None
+            await self._store_step(resolve_session_id_target, session_id) if session_id else None
         )
-        await self._run_runtime_sync(
+        await self._store_step(
             self._require_execution_agent_access,
             agent_name=agent_name,
             target_info=target_info,
@@ -11143,7 +11155,7 @@ class ScheduledTaskService:
         if native_session_fork is None and target_info and not str(target_info.native_session_id or "").strip():
             native_session_fork = fork_metadata_from_session_metadata(getattr(target_info, "metadata", None))
 
-        definition_name, definition_prompt = await self._run_runtime_sync(
+        definition_name, definition_prompt = await self._store_step(
             self._definition_display_fields, task_id
         )
 
