@@ -64,7 +64,11 @@ def _refuse(service, source, model_id, tool, aspect, *, engine=None):
             ),
             source_identity=identity_digest(source), detail="400 invalid_request_error",
         ),
-        live=service.store.config.sources,
+        live=lambda: service.store.config.sources,
+        # The wire this refusal was learned under, as the process that learned it rendered it.
+        wire_for=lambda source, model_id: wire_stamp(
+            engine=engine or service.engine_stamp, avibe=service.avibe_release, source=source, model_id=model_id,
+        ),
     )
 
 
@@ -626,7 +630,8 @@ def test_a_replay_is_admitted_exactly_where_the_hops_facts_assume_it(tmp_path, r
                 status="unsupported", observed_at=NOW, wire=evidence.wire_for(source, "grok-4.6"),
                 source_identity=identity_digest(source), detail="400 invalid_request_error",
             ),
-            live=[source],
+            live=lambda: [source],
+            wire_for=evidence.wire_for,
         )
     content = HostedContent(replays=frozenset({"web_search"}))
     assert admits(content, source=source, model_id="grok-4.6", spec_for=hosted_tool_spec, evidence=evidence) is admitted
