@@ -1305,6 +1305,7 @@ def test_publication_overwrites_the_named_catalog_and_preserves_executable_modes
     assert second == destination
     assert not (destination / "retired").exists()
     assert (destination / "current" / "SKILL.md").is_file()
+    assert (destination.parent / ".builtin-skills.previous" / "retired" / "SKILL.md").is_file()
 
 
 def test_publication_opens_snapshot_files_in_binary_mode_when_available(
@@ -1527,7 +1528,6 @@ def test_publication_copies_only_the_bounded_enumeration(
     source = tmp_path / "source"
     destination = tmp_path / "builtin-skills"
     _write_skill(source, "alpha", "alpha", "Alpha")
-    monkeypatch.setattr(managed_skills, "BUILTIN_TREE_MAX_BYTES", 128)
     original_snapshot_entries = managed_skills._snapshot_entries
     source_enumerations = 0
 
@@ -1537,16 +1537,16 @@ def test_publication_copies_only_the_bounded_enumeration(
         if Path(root) == source:
             source_enumerations += 1
             if source_enumerations == 1:
-                (source / "late.bin").write_bytes(b"x" * 129)
+                (source / "late.bin").write_bytes(b"late")
         return entries
 
     monkeypatch.setattr(managed_skills, "_snapshot_entries", enumerate_then_add_late_entry)
 
-    catalog = publish_builtin_skills(source_root=source, destination_root=destination)
+    with pytest.raises(RuntimeError, match="source changed"):
+        publish_builtin_skills(source_root=source, destination_root=destination)
 
-    assert catalog == destination
-    assert source_enumerations == 1
-    assert not (destination / "late.bin").exists()
+    assert source_enumerations == 2
+    assert not destination.exists()
 
 
 def test_publication_charges_file_growth_at_copy_time(
@@ -1717,19 +1717,41 @@ def test_bound_reader_uses_previous_catalog_while_live_is_missing(
     assert [skill.name for skill in resolve_skills(cwd)] == ["previous"]
 
 
-def test_publication_restores_live_catalog_from_previous_after_interrupted_swap(
+def test_publication_keeps_previous_catalog_after_successful_swap(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "source"
     destination = tmp_path / "builtin-skills"
     previous = destination.parent / ".builtin-skills.previous"
     _write_skill(source, "current", "current", "Current")
-    _write_skill(previous, "previous", "previous", "Previous")
+    _write_skill(destination, "previous", "previous", "Previous")
 
     assert publish_builtin_skills(source_root=source, destination_root=destination) == destination
     assert (destination / "current" / "SKILL.md").is_file()
-    assert not previous.exists()
+    assert (previous / "previous" / "SKILL.md").is_file()
     assert not (destination / "previous").exists()
+
+
+def test_publication_rejects_source_changes_before_swap(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "builtin-skills"
+    skill_file = _write_skill(source, "alpha", "alpha", "Alpha", "Old\n")
+    original_copy = managed_skills._copy_snapshot_entries
+
+    def copy_then_rewrite(entries, destination_root):
+        original_copy(entries, destination_root)
+        skill_file.write_text(
+            "---\nname: alpha\ndescription: Alpha\n---\nNew\n",
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(managed_skills, "_copy_snapshot_entries", copy_then_rewrite)
+
+    with pytest.raises(RuntimeError, match="source changed"):
+        publish_builtin_skills(source_root=source, destination_root=destination)
 
 
 def test_publication_restores_previous_if_live_swap_fails(

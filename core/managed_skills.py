@@ -128,6 +128,7 @@ class _SnapshotEntry:
     relative: str
     relative_bytes: bytes
     is_directory: bool
+    token: tuple[int, int, int, int, int]
 
 
 def _strip_yaml_comment(value: str) -> str:
@@ -1465,8 +1466,11 @@ def _snapshot_entries(root: Path) -> list[_SnapshotEntry]:
             reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
             if reparse_flag and file_attributes & reparse_flag:
                 raise RuntimeError(f"Built-in Skill path is a reparse point: {relative}")
+            token = _stat_token(child_stat)
             if stat.S_ISDIR(child_stat.st_mode):
-                entries.append(_SnapshotEntry(Path(child.path), relative, relative_bytes, True))
+                entries.append(
+                    _SnapshotEntry(Path(child.path), relative, relative_bytes, True, token)
+                )
                 child_directories.append((Path(child.path), child_parts))
             elif stat.S_ISREG(child_stat.st_mode):
                 file_bytes += int(child_stat.st_size)
@@ -1474,7 +1478,9 @@ def _snapshot_entries(root: Path) -> list[_SnapshotEntry]:
                     raise RuntimeError(
                         f"Built-in Skill tree exceeds {BUILTIN_TREE_MAX_BYTES:,} bytes"
                     )
-                entries.append(_SnapshotEntry(Path(child.path), relative, relative_bytes, False))
+                entries.append(
+                    _SnapshotEntry(Path(child.path), relative, relative_bytes, False, token)
+                )
             else:
                 raise RuntimeError(f"Built-in Skill path is not a directory or regular file: {relative}")
         if relative_parts and accepted_children == 0:
@@ -1576,6 +1582,15 @@ def _validate_builtin_catalog(root: Path) -> None:
             raise RuntimeError("Built-in Skill frontmatter exceeds the 8 MiB catalog budget")
 
 
+def _source_manifest(entries: Sequence[_SnapshotEntry]) -> tuple[tuple[bytes, bool, tuple[int, int, int, int, int]], ...]:
+    return tuple((entry.relative_bytes, entry.is_directory, entry.token) for entry in entries)
+
+
+def _assert_source_unchanged(source: Path, entries: Sequence[_SnapshotEntry]) -> None:
+    if _source_manifest(_snapshot_entries(source)) != _source_manifest(entries):
+        raise RuntimeError("Built-in Skill source changed during publication")
+
+
 def _remove_snapshot_staging(path: Path) -> None:
     try:
         value = path.lstat()
@@ -1628,6 +1643,7 @@ def publish_builtin_skills(
         try:
             _copy_snapshot_entries(entries, staging)
             _validate_builtin_catalog(staging)
+            _assert_source_unchanged(source, entries)
             if os.path.lexists(destination):
                 try:
                     destination_stat = destination.stat(follow_symlinks=False)
@@ -1643,7 +1659,6 @@ def publish_builtin_skills(
                 if os.path.lexists(backup) and not os.path.lexists(destination):
                     os.rename(backup, destination)
                 raise
-            _remove_snapshot_staging(backup)
         finally:
             if os.path.lexists(staging):
                 _remove_snapshot_staging(staging)
