@@ -44,6 +44,11 @@ from vibe.claude_model_catalog import DEFAULT_CLAUDE_MODEL_ALIASES
 
 logger = logging.getLogger(__name__)
 
+# What a message Avibe sends may notify (#2673): a user it names, never @everyone, @here or a role. Text Avibe relays
+# (an agent's reply, a model's query, a provider's error) is not all its own words, and discord.py otherwise resolves
+# every mention in it. ``replied_user`` keeps discord.py's default.
+USERS_ONLY_MENTIONS = discord.AllowedMentions(everyone=False, users=True, roles=False)
+
 _RUNTIME_RETRY_INITIAL_SECONDS = 1.0
 _RUNTIME_RETRY_MAX_SECONDS = 30.0
 
@@ -95,7 +100,9 @@ class DiscordBot(BaseIMClient):
         self._stop_event = threading.Event()
 
     def _new_client(self) -> discord.Client:
-        client = discord.Client(intents=self._intents)
+        # Every send, edit and interaction reply inherits this unless it passes its own (none does): text Avibe
+        # relays can ping a user it names, but never @everyone, @here or a role, whoever wrote it (#2673).
+        client = discord.Client(intents=self._intents, allowed_mentions=USERS_ONLY_MENTIONS)
         client.on_ready = self._on_ready_event
         client.on_message = self._on_message_event
         return client
