@@ -36,6 +36,7 @@ from storage.agent_session_rows import (
     WORKSPACE_NOTICE_SESSION_ID,
     create_agent_session_row,
     new_session_id,
+    normalize_workdir,
     normalize_session_project_base,
     reserve_write_lock,
     snapshot_scope_workdir,
@@ -448,6 +449,7 @@ def create_session(
     conn: Connection,
     *,
     scope_id: Optional[str],
+    session_id: Optional[str] = None,
     agent_backend: str,
     agent_name: Optional[str] = None,
     agent_id: Optional[str] = None,
@@ -455,10 +457,12 @@ def create_session(
     model: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
     title: Optional[str] = None,
+    workdir: Optional[str] = None,
     visibility: str = "foreground",
     metadata: Optional[dict[str, Any]] = None,
     authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
     user_context: Any = None,
+    workdir_prepared: bool = False,
 ) -> dict[str, Any]:
     """Create a session in a Scope or as a standalone session.
 
@@ -611,11 +615,14 @@ def create_session(
     if metadata:
         metadata_payload.update(metadata)
 
-    session_id = new_session_id(conn)
-    workdir = scope_row.get("workdir") or os.getcwd()
+    session_id = str(session_id or new_session_id(conn))
     if scope_id is None:
-        workdir = str(paths.get_show_page_dir(session_id))
-        Path(workdir).mkdir(parents=True, exist_ok=True)
+        provided_workdir = normalize_workdir(workdir)
+        workdir = provided_workdir or str(paths.get_show_page_dir(session_id))
+        if provided_workdir is None or not workdir_prepared:
+            Path(workdir).mkdir(parents=True, exist_ok=True)
+    else:
+        workdir = scope_row.get("workdir") or os.getcwd()
     create_agent_session_row(
         conn,
         session_id=session_id,
@@ -637,11 +644,138 @@ def create_session(
     return get_session(conn, session_id, authorization_context=authorization)
 
 
-# The desktop mini's conversation, until sessions get a built-in ``main`` type
-# (docs/plans/2026-10-12-desktop-mini-main-agent.md §10.1). The association lives in
-# server-owned ``state_meta``, one key per principal, never in client-writable
-# session metadata: a marker any editor can set on their own session (or inherit by
-# forking) would let them hand someone else's mini a conversation they control.
+MAIN_SESSION_ID = "ses_main"
+MAIN_SESSION_METADATA_KEY = "kind"
+MAIN_SESSION_METADATA_VALUE = "main"
+MAIN_SESSION_WORKDIR_DIRNAME = "main"
+MAIN_SESSION_WORKDIR_COMPONENT = "owner"
+MAIN_SESSION_UPDATABLE_FIELDS = frozenset({"model", "reasoning_effort", "title", "pinned"})
+
+
+class MainSessionArchivedError(PermissionError):
+    """Raised when the fixed main-session row is already archived."""
+
+    code = "main_session_archived"
+
+    def __init__(self) -> None:
+        super().__init__(self.code)
+
+
+class MainSessionInvariantError(RuntimeError):
+    """Raised when the fixed main-session row no longer has its built-in shape."""
+
+    code = "main_session_invalid"
+
+    def __init__(self, reason: str) -> None:
+        self.reason = str(reason)
+        super().__init__(self.code)
+
+
+def main_session_workdir() -> str:
+    """Return the fixed singleton main-session workdir."""
+
+    return str(paths.get_vibe_remote_dir() / MAIN_SESSION_WORKDIR_DIRNAME / MAIN_SESSION_WORKDIR_COMPONENT)
+
+
+def _main_builtin_agent(conn: Connection, agent_name: str) -> dict[str, Any]:
+    from core.vibe_agents import VibeAgentStore, is_builtin_default_agent
+
+    row = conn.execute(
+        select(agents)
+        .where(
+            agents.c.name == str(agent_name or "").strip(),
+            agents.c.backend == "vibey",
+            agents.c.enabled == 1,
+            agents.c.archived_at.is_(None),
+            agents.c.source == "builtin",
+        )
+        .limit(1)
+    ).mappings().first()
+    if row is None or not is_builtin_default_agent(VibeAgentStore._from_row(row)):
+        raise MainSessionInvariantError("built-in Vibey Agent is unavailable")
+    return dict(row)
+
+
+def _validate_main_session_row(
+    row: Mapping[str, Any],
+    *,
+    agent: Mapping[str, Any],
+    workdir: str,
+) -> None:
+    if row.get("status") == "archived":
+        raise MainSessionArchivedError()
+    metadata = _load_metadata(row.get("metadata_json"))
+    expected = {
+        "id": MAIN_SESSION_ID,
+        "scope_id": None,
+        "agent_id": agent["id"],
+        "agent_name": agent["name"],
+        "agent_backend": "vibey",
+        "agent_variant": "vibey",
+        "session_anchor": MAIN_SESSION_ID,
+        "workdir": workdir,
+        "status": "active",
+        "visibility": "foreground",
+    }
+    for field, value in expected.items():
+        if row.get(field) != value:
+            raise MainSessionInvariantError(f"{field} does not match the built-in main session")
+    if metadata.get(MAIN_SESSION_METADATA_KEY) != MAIN_SESSION_METADATA_VALUE:
+        raise MainSessionInvariantError("metadata.kind does not identify the main session")
+
+
+def ensure_main_session(
+    conn: Connection,
+    *,
+    agent_name: str,
+    title: Optional[str] = None,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Resolve the stable built-in main session, creating it on first use."""
+
+    context = require_instance_role(authorization_context, "owner")
+    if desktop_mini_owner_key(context) is None:
+        raise ProjectAccessDeniedError
+    workdir = main_session_workdir()
+    row = conn.execute(
+        select(agent_sessions).where(agent_sessions.c.id == MAIN_SESSION_ID)
+    ).mappings().first()
+    if row is not None and row.get("status") == "archived":
+        raise MainSessionArchivedError()
+    builtin_agent = _main_builtin_agent(conn, agent_name)
+    if row is not None:
+        _validate_main_session_row(row, agent=builtin_agent, workdir=workdir)
+        return get_session(conn, MAIN_SESSION_ID, authorization_context=context)
+
+    Path(workdir).mkdir(parents=True, exist_ok=True)
+    # The fixed primary key makes deletion idempotent, while the write lock closes
+    # the read/insert race when two first turns arrive together.
+    reserve_write_lock(conn)
+    row = conn.execute(
+        select(agent_sessions).where(agent_sessions.c.id == MAIN_SESSION_ID)
+    ).mappings().first()
+    if row is not None:
+        _validate_main_session_row(row, agent=builtin_agent, workdir=workdir)
+        return get_session(conn, MAIN_SESSION_ID, authorization_context=context)
+
+    return create_session(
+        conn,
+        scope_id=None,
+        session_id=MAIN_SESSION_ID,
+        agent_backend="",
+        agent_name=agent_name,
+        title=title,
+        workdir=workdir,
+        metadata={MAIN_SESSION_METADATA_KEY: MAIN_SESSION_METADATA_VALUE},
+        authorization_context=context,
+        workdir_prepared=True,
+    )
+
+
+# Legacy desktop mini conversation support. The association lives in server-owned
+# ``state_meta``, one key per principal, never in client-writable session metadata:
+# a marker any editor can set on their own session (or inherit by forking) would let
+# them hand someone else's mini a conversation they control.
 DESKTOP_MINI_SESSION_META_PREFIX = "desktop_mini_session:"
 
 
@@ -868,13 +1002,37 @@ def update_session(
     machine-owned chat in every user's session list — and also ``scope_id``, which would
     mint a fake project row and put the session inside a scoped clear's reach. Each of
     those is silent until the next notice's heal, so an ack could be earned against a
-    surface showing nothing in between.
+    surface showing nothing in between. The fixed main session has a narrower exception:
+    its title, model, reasoning effort and pin state remain user-editable, while identity,
+    placement and lifecycle fields stay reserved.
 
     ``system`` itself is not assignable in the other direction either: see the
     ``visibility`` branch below.
     """
-    authorization = require_instance_role(authorization_context, "editor")
-    if str(session_id) == WORKSPACE_NOTICE_SESSION_ID:
+    is_main_session = str(session_id) == MAIN_SESSION_ID
+    authorization = require_instance_role(
+        authorization_context,
+        "owner" if is_main_session else "editor",
+    )
+    requested_fields = {
+        name
+        for name, value in (
+            ("title", title),
+            ("agent_id", agent_id),
+            ("agent_name", agent_name),
+            ("agent_backend", agent_backend),
+            ("agent_variant", agent_variant),
+            ("model", model),
+            ("reasoning_effort", reasoning_effort),
+            ("visibility", visibility),
+            ("pinned", pinned),
+            ("scope_id", scope_id),
+        )
+        if value is not _UNSET
+    }
+    if str(session_id) == WORKSPACE_NOTICE_SESSION_ID or (
+        is_main_session and not requested_fields.issubset(MAIN_SESSION_UPDATABLE_FIELDS)
+    ):
         raise ReservedSessionError(str(session_id))
     reserve_write_lock(conn)
     existing = conn.execute(
@@ -1657,7 +1815,7 @@ def archive_session(
     Checked BEFORE the existence lookup so the answer is the same on every install,
     whether or not the lazily-created row exists yet.
     """
-    if str(session_id) == WORKSPACE_NOTICE_SESSION_ID:
+    if str(session_id) in {WORKSPACE_NOTICE_SESSION_ID, MAIN_SESSION_ID}:
         raise ReservedSessionError(str(session_id))
     context = require_instance_role(authorization_context, "editor")
     existing = conn.execute(

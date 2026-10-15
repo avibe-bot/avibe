@@ -1192,7 +1192,7 @@
         "executor_billing"
       ],
       "additionalProperties": false,
-      "description": "What ran a hosted call outside the model: a search executor (`proxy`) or an image endpoint (`direct`). `cost` sums every billable attempt, `failed_attempts` included, and is absent when no price is known.",
+      "description": "What ran a hosted call outside the model: a search executor (`proxy`) or an image endpoint (`direct`). `cost` is this attempt's own, absent when no price is known; `failed_attempts` lists the earlier billed attempts, and the display totals them (`core/hosted_activity`).",
       "properties": {
         "mode": {
           "enum": [

@@ -44,6 +44,7 @@ capability:
     - tests/test_model_hub_declared_tools.py
     - tests/test_model_hub_l3.py
     - tests/test_model_hub_hosted_executor.py
+    - tests/test_model_hub_hosted_evidence.py
     - tests/test_model_hub_usage.py
     - tests/test_ui_server_fastapi.py
     - tests/test_model_hub_quota.py
@@ -196,6 +197,10 @@ scenarios:
       - tests/test_model_hub_capability_evidence.py::test_a_success_never_replaces_a_refusal_and_never_routes
       - tests/test_model_hub_capability_evidence.py::test_successes_reach_memory_at_once_and_the_file_at_most_hourly
       - tests/test_model_hub_capability_evidence.py::test_the_newest_success_is_kept_whatever_order_settlements_land_in
+      - tests/test_model_hub_capability_evidence.py::test_the_newest_refusal_is_kept_whatever_order_settlements_land_in
+      - tests/test_model_hub_capability_evidence.py::test_a_refusal_learned_under_a_superseded_wire_never_replaces_the_current_one
+      - tests/test_model_hub_capability_evidence.py::test_a_current_refusal_replaces_one_from_an_older_engine_whatever_its_time
+      - tests/test_model_hub_capability_evidence.py::test_a_write_reads_the_sources_as_they_are_when_it_runs
       - tests/test_model_hub_capability_evidence.py::test_a_refusal_holds_in_memory_when_its_write_fails
       - tests/test_model_hub_capability_evidence.py::test_a_clear_is_persisted_before_it_takes_effect
       - tests/test_model_hub_capability_evidence.py::test_a_changed_source_identity_is_pruned_at_the_next_write
@@ -212,6 +217,8 @@ scenarios:
     test: tests/test_model_hub_hosted_tools_config.py::test_the_tools_api_writes_one_field_of_one_tool_at_a_time
     related_tests:
       - tests/test_model_hub_hosted_tools_config.py::test_an_image_models_card_price_is_only_an_unqualified_list_price
+      - tests/test_model_hub_hosted_tools_config.py::test_an_estimated_image_price_of_zero_is_no_unit_price
+      - tests/test_model_hub_hosted_tools_resolution.py::test_a_relay_is_any_endpoint_but_the_vendors_own_by_the_engines_endpoint_identity
       - tests/test_model_hub_hosted_tools_resolution.py::test_the_tools_read_states_saved_and_effective_values_and_what_real_use_showed
       - tests/test_model_hub_hosted_tools_resolution.py::test_a_put_changes_only_the_fields_it_names
       - tests/test_model_hub_hosted_tools_resolution.py::test_a_put_refuses_what_the_contract_forbids
@@ -2495,6 +2502,7 @@ scenarios:
       - tests/e2e/test_model_hub_images.py::test_each_offered_image_path_reaches_the_vendors_images_endpoint
       - tests/e2e/test_model_hub_images.py::test_only_an_upstream_refusal_teaches_that_a_source_lacks_an_image_model
 next_priority:
+  - MH-HOSTED-UI-012
   - MH-PROTOCOL-004
   - MH-RUNTIME-001
   - MH-OAUTH-B-001

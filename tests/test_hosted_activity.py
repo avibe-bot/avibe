@@ -7,6 +7,7 @@ fixture the Web card tests render, so producer and consumer read one shape.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ import pytest
 from core.agent_core.messages import (
     HOSTED_ERROR_CODES,
     AssistantMessage,
+    FailedAttempt,
     HostedAction,
     HostedCost,
     HostedImage,
@@ -291,6 +293,40 @@ def test_the_im_line_names_a_subscription_and_a_shared_response_cost():
         )
     )[-1]
     assert hosted_line(shared, "en") == "🔎 Web search “b” · native (Anthropic) · 1 source · ≈ $0.02 for 2 calls"
+
+
+def _attempt(source_id: str, billing: str, cost: HostedCost | None):
+    return FailedAttempt(source_id=source_id, billing=billing, cost=cost)
+
+
+@pytest.mark.parametrize(
+    ("failed", "last", "cost", "line_cost"),
+    [
+        # A metered failure before the call that ran: both charges, and how many calls they cover.
+        ((("src_relaygpt1", "metered", HostedCost(basis="list", usd=0.02)),), HostedCost(basis="reported", usd=0.11),
+         {"basis": "list", "usd": 0.13, "calls": 2}, "≈ $0.13 for 2 calls"),
+        ((("src_relaygpt1", "metered", HostedCost(basis="reported", usd=0.02)),), HostedCost(basis="reported", usd=0.11),
+         {"basis": "reported", "usd": 0.13, "calls": 2}, "$0.13 for 2 calls"),
+        # A subscription attempt adds no money.
+        ((("src_chatgpt01", "monthly", HostedCost(basis="included")),), HostedCost(basis="reported", usd=0.11),
+         {"basis": "reported", "usd": 0.11, "calls": 2}, "$0.11 for 2 calls"),
+        # A billed attempt with no known price: the total is unknown, never shown smaller than it was.
+        ((("src_relaygpt1", "metered", None),), HostedCost(basis="reported", usd=0.11), None, None),
+    ],
+)
+def test_a_proxied_calls_cost_counts_every_billed_attempt(failed, last, cost, line_cost):
+    """MH-HOSTED-GATEWAY-005: the card and the IM line show what the whole executor chain cost, never less."""
+
+    activity = proxy_activity(
+        _x_call("call_x5", "from:OpenAI"),
+        HostedResult(
+            record=HostedRecord(status="completed", sources=POSTS[:1]),
+            execution=replace(XAI, cost=last, failed_attempts=tuple(_attempt(*item) for item in failed)),
+        ),
+    )
+    assert activity.to_payload().get("cost") == cost
+    line = hosted_line(activity, "en")
+    assert line.endswith(f" · {line_cost}") if line_cost else "$" not in line
 
 
 def test_the_im_line_escapes_the_quoted_subject_for_its_destination():

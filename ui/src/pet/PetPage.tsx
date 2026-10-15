@@ -148,8 +148,7 @@ const PetSurface: React.FC = () => {
   const data = usePetSession(binding, petShell.unbind);
   const epoch = data.epoch;
   const canChat = capabilities.can_chat && data.canChat === true;
-  // Interim main-agent rule (spec §10.1): with nothing bound, the mini binds the
-  // caller's Vibey conversation, which the server creates on first use. A session
+  // Bind the stable main session when the shell has no current session. A session
   // it already handed out is never re-bound once it was cleared as invalid, so a
   // bad answer cannot turn into a bind/clear loop.
   const ensured = useRef<{ generation: number; ids: Set<string>; inFlight: boolean }>({ generation: -1, ids: new Set(), inFlight: false });
@@ -162,7 +161,9 @@ const PetSurface: React.FC = () => {
     if (ensured.current.inFlight) return;
     const current = ensured.current;
     current.inFlight = true;
-    void api.ensureDesktopMiniSession().then((session) => {
+    void api.getMainSession().then((result) => {
+      const session = result.session;
+      if (!session || result.capabilities?.can_chat === false) return;
       if (!epoch.isCurrent() || current.ids.has(session.id)) return;
       current.ids.add(session.id);
       petShell.pick(session.id, epoch.isAuthorizationCurrent);
@@ -626,8 +627,12 @@ const SessionPicker: React.FC<{ onPick: (sessionId: string) => void; onBack?: ()
     if (vibeyPending) return;
     setVibeyPending(true);
     setVibeyError(null);
-    api.ensureDesktopMiniSession().then((session) => {
-      if (mounted.current) onPick(session.id);
+    api.getMainSession().then((result) => {
+      if (!result.session) {
+        if (mounted.current) setVibeyError(t('pet.vibeyUnavailable'));
+        return;
+      }
+      if (mounted.current) onPick(result.session.id);
     }, (error: unknown) => {
       if (mounted.current) setVibeyError(error instanceof ApiError && error.code === 'no_chat_project' ? t('pet.noChatProject') : t('pet.vibeyUnavailable'));
     }).finally(() => { if (mounted.current) setVibeyPending(false); });

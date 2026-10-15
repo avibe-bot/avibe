@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import gzip
 import json
+import threading
 from dataclasses import replace
 from datetime import timedelta
 
@@ -196,10 +197,18 @@ async def test_a_proxied_search_runs_one_native_request_and_answers_its_canonica
     )
     service = _vibey_service(tmp_path, _sources(), handles=[LiveInvokeHandle(served, frames)])
     _bind(service, tool, executor)
-    status, answer = await _call(service, tool, {
-        "arguments": arguments,
-    })
+    admitting_threads = []
+    admit = service._admitted_executor
+
+    def recorded(*args):
+        admitting_threads.append(threading.current_thread())
+        return admit(*args)
+
+    service._admitted_executor = recorded
+    status, answer = await _call(service, tool, {"arguments": arguments})
     assert status == 200, answer
+    # Admission reads the config, which grows with use: at the chain step and again under the lock, off the loop.
+    assert len(admitting_threads) == 2 and threading.main_thread() not in admitting_threads
     assert service.adapter.invocations == [(executor[0], executor[1], "vibey")]
     sent = service.adapter.requests[0]
     assert sent.protocol == "openai_responses"
@@ -464,6 +473,30 @@ async def test_the_chain_moves_on_only_past_a_source_failure(
 
 
 @pytest.mark.asyncio
+async def test_a_call_reports_the_source_as_its_final_admission_saw_it(tmp_path):
+    """MH-HOSTED-GATEWAY-005: a Source edited while the engine is prepared runs and is billed as it now stands."""
+
+    service = _vibey_service(tmp_path, _sources(), handles=[
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=XAI), _responses(WEB_CALL, WEB_ANSWER)),
+    ])
+    _bind(service, "web_search", (XAI, "grok-4.6"))
+    prepare = service._prepare_engine_for_demand
+
+    async def edited_meanwhile(*args, **kwargs):
+        # Billing and the name are not the Source's identity, so it is still admitted.
+        service.store.config.sources = [
+            replace(item, billing="monthly", display_name="xAI team plan") if item.id == XAI else item
+            for item in service.store.config.sources
+        ]
+        await prepare(*args, **kwargs)
+
+    service._prepare_engine_for_demand = edited_meanwhile
+    status, answer = await _call(service, "web_search", {"arguments": {"query": "q"}})
+    assert status == 200 and answer["record"]["status"] == "completed"
+    assert (answer["execution"]["executor_billing"], answer["execution"]["cost"]) == ("monthly", {"basis": "included"})
+
+
+@pytest.mark.asyncio
 async def test_failure_text_is_in_the_users_language(tmp_path):
     """MH-HOSTED-GATEWAY-005: the record's error is user-visible on the tool card, so it is localized."""
 
@@ -596,13 +629,15 @@ async def test_a_turn_owns_its_proxied_calls(tmp_path):
             await asyncio.wait_for(completion, timeout=5)
             assert blocked.cancelled.is_set() and finished == [1]
             pending.cancel()
-            # The turn no longer admits work: a new call is refused before anything runs.
-            async with client.post(
-                f'{hop["base_url"]}/hosted-tools/web_search',
-                headers={"Authorization": f'Bearer {hop["token"]}', **hop["request_headers"]}, data=body,
-            ) as response:
-                assert response.status == 409
-                assert (await response.json())["error"]["code"] == "turn_not_live"
+            # The turn no longer admits work: a new call is refused before anything runs, and before its body is
+            # read, so even a malformed one is answered as the closed turn it came from.
+            for data in (body, b"not json"):
+                async with client.post(
+                    f'{hop["base_url"]}/hosted-tools/web_search',
+                    headers={"Authorization": f'Bearer {hop["token"]}', **hop["request_headers"]}, data=data,
+                ) as response:
+                    assert response.status == 409
+                    assert (await response.json())["error"]["code"] == "turn_not_live"
     finally:
         await gateway.close()
     assert len(service.adapter.invocations) == 1
@@ -794,7 +829,7 @@ async def test_an_encoded_proxy_call_body_is_refused(tmp_path):
         async with aiohttp.ClientSession(auto_decompress=False) as client:
             async with client.post(
                 f'{hop["base_url"]}/hosted-tools/web_search',
-                headers={"Authorization": f'Bearer {hop["token"]}', "Content-Encoding": "gzip"},
+                headers={"Authorization": f'Bearer {hop["token"]}', **hop["request_headers"], "Content-Encoding": "gzip"},
                 data=gzip.compress(json.dumps({"arguments": {"query": "q"}}).encode()),
             ) as response:
                 assert response.status == 400
@@ -820,23 +855,24 @@ class _CountedHandle(LiveInvokeHandle):
 
 @pytest.mark.asyncio
 async def test_a_buffered_executor_response_is_bounded(tmp_path, monkeypatch):
-    """MH-HOSTED-GATEWAY-005: an oversized buffered body fails the call instead of growing without bound.
+    """MH-HOSTED-GATEWAY-005: an oversized buffered body fails the attempt instead of growing without bound.
 
-    Once refused, the response is not read any further, and the call is still metered from its outcome.
+    Once refused, the response is not read any further, and the attempt is still metered from its outcome. Nothing
+    reached Vibey, so the chain tries its next candidate; the oversized attempt is listed as billed.
     """
 
     monkeypatch.setattr(service_module, "EXECUTOR_RESPONSE_MAX_BYTES", 64)
     oversized = b"{" + b" " * 128
     usage = ProtocolUsageReport.of(input_tokens=900, cached_input_tokens=0, output_tokens=40)
     handle = _CountedHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=ANTHROPIC, usage=usage), (oversized, b"}"))
-    service = _vibey_service(tmp_path, _sources(), handles=[handle])
-    _bind(service, "web_search", (ANTHROPIC, "claude-haiku-4-5"))
-    status, answer = await _call(service, "web_search", {
-        "arguments": {"query": "q"},
-    })
+    service = _vibey_service(tmp_path, _sources(), handles=[handle, _served_by_openai()])
+    _chain(service, "web_search", (ANTHROPIC, "claude-haiku-4-5"), (OPENAI, "gpt-6-astra"))
+    status, answer = await _call(service, "web_search", {"arguments": {"query": "q"}})
     assert status == 200
-    assert answer["record"]["status"] == "failed" and "larger than allowed" in answer["record"]["error"]
-    assert "execution" in answer
+    assert [entry[0] for entry in service.adapter.invocations] == [ANTHROPIC, OPENAI]
+    assert answer["record"]["status"] == "completed"
+    assert answer["execution"]["executor_source_id"] == OPENAI
+    assert [attempt["source_id"] for attempt in answer["execution"]["failed_attempts"]] == [ANTHROPIC]
     assert handle.read == [oversized]
     assert _usage_of(service, ANTHROPIC)
 

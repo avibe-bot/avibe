@@ -103,6 +103,11 @@ DEGRADED = [
     # Saved values are never resolved: an order naming a Source that is gone is kept and skipped when read.
     ("order-source-gone", {"web_search": {"executor_order": ["src_gone0001"]}}, {"web_search": (True, ("src_gone0001",), None)}, False),
     ("entry-not-an-object", {"x_search": None}, {"x_search": OFF}, True),
+    # The writer omits an unset field, so a present null is damage like any other bad value.
+    ("null-order", {"web_search": {"executor_order": None}}, {"web_search": OFF}, True),
+    ("null-default", {"image_generate": {"default_model": None}}, {"image_generate": OFF}, True),
+    # Automatic is the order's absence; an empty list would read as a saved order that behaves as automatic.
+    ("empty-order", {"web_search": {"executor_order": []}}, {"web_search": OFF}, True),
 ]
 
 
@@ -208,7 +213,8 @@ def _refuse(service, source, model_id, feature):
             observed_at=service.now(), wire=evidence.wire_for(source, model_id),
             source_identity=identity_digest(source), detail="400 invalid_request_error",
         ),
-        live=[source],
+        live=lambda: [source],
+        wire_for=evidence.wire_for,
     )
 
 
@@ -332,4 +338,20 @@ def test_an_image_models_card_price_is_only_an_unqualified_list_price(tmp_path, 
     status = service.hosted_tools_status()["hosted_tools"]
     _validate_status(status)
     image = next(tool for tool in status["tools"] if tool["name"] == "image_generate")
+    assert [model["price"] for model in image["models"]] == [expected]
+
+
+@pytest.mark.parametrize("valued,expected", [(0.0, None), (0.067, {"usd": 0.067, "basis": "estimated"})])
+def test_an_estimated_image_price_of_zero_is_no_unit_price(tmp_path, monkeypatch, valued, expected):
+    """MH-HOSTED-004: an estimate the pricing owner values at zero means the rate is unknown, never a free image."""
+    from types import SimpleNamespace
+
+    from core.handlers.model_hub import hosted_tools as hosted_tools_module
+    from vibe.backend_model_catalog import ImageModelSpec
+
+    spec = ImageModelSpec("gemini-3-image", "Nano Banana", "images", ("images",), (), tokens_per_image=1290)
+    monkeypatch.setattr(hosted_tools_module, "provider_image_models", lambda vendor: (spec,) if vendor == "xai" else ())
+    service, _store = _api_service(tmp_path)
+    monkeypatch.setattr(service, "hosted_call_cost", lambda *_args, **_kwargs: SimpleNamespace(usd=valued))
+    image = next(tool for tool in service.hosted_tools_status()["hosted_tools"]["tools"] if tool["name"] == "image_generate")
     assert [model["price"] for model in image["models"]] == [expected]

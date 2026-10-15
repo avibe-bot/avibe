@@ -3074,9 +3074,17 @@ def is_model_hub_model_id(value: object) -> bool:
 
 
 def model_hub_executor_order(value: object, *, tool: str) -> tuple[str, ...]:
-    """A saved executor order: distinct Source ids. The one grammar the config loader and the API share."""
+    """A saved executor order: one or more distinct Source ids (automatic is its absence, never an empty list).
 
-    if not isinstance(value, list) or not all(is_model_hub_source_id(item) for item in value) or len(set(value)) != len(value):
+    The one grammar the config loader and the API share.
+    """
+
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(is_model_hub_source_id(item) for item in value)
+        or len(set(value)) != len(value)
+    ):
         raise ValueError(f"Config 'model_hub.hosted_tools.{tool}.executor_order' must be distinct Source ids")
     return tuple(value)
 
@@ -3129,13 +3137,16 @@ class ModelHubHostedToolConfig:
         enabled = payload.get("enabled", True)
         if not isinstance(enabled, bool):
             raise ValueError(f"Config 'model_hub.hosted_tools.{tool}.enabled' must be a boolean")
-        # Only the fields this tool knows are read; another tool's field was ignored above.
-        order = payload.get("executor_order") if "executor_order" in known else None
-        default = payload.get("default_model") if "default_model" in known else None
+        # Only the fields this tool knows are read; another tool's field was ignored above. A field is decided by its
+        # presence: the writer omits an unset one, so a present null is damage and goes through the grammar.
+        has_order = "executor_order" in known and "executor_order" in payload
+        has_default = "default_model" in known and "default_model" in payload
         return cls(
             enabled=enabled,
-            executor_order=model_hub_executor_order(order, tool=tool) if order is not None else None,
-            default_image=ModelHubImageModelChoice.from_payload(default, tool=tool) if default is not None else None,
+            executor_order=model_hub_executor_order(payload["executor_order"], tool=tool) if has_order else None,
+            default_image=(
+                ModelHubImageModelChoice.from_payload(payload["default_model"], tool=tool) if has_default else None
+            ),
         )
 
     def to_payload(self) -> dict:

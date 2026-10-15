@@ -55,6 +55,11 @@ logger = logging.getLogger(__name__)
 
 _PROCESSING_RECORD_CURSOR_RE = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
 _PROCESSING_RECORD_ENTRY_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,256}\Z")
+_COMPUTER_SCRIPT_REQUEST_MAX_BYTES = 8 * 1024 * 1024
+
+
+class _RequestBodyTooLarge(RuntimeError):
+    """An internal request exceeded its route-specific hard limit."""
 
 
 def _create_controller_loop_server(config: Any) -> Any:
@@ -188,6 +193,16 @@ def create_app(
         manager = SessionTurnManager(controller)
         controller.session_turns = manager
     manager.bind_context(_build_session_context)
+
+    from core.computer_script_sessions import (
+        ComputerScriptSessionError,
+        ComputerScriptSessionManager,
+    )
+
+    computer_script_sessions = getattr(controller, "computer_script_sessions", None)
+    if not isinstance(computer_script_sessions, ComputerScriptSessionManager):
+        computer_script_sessions = ComputerScriptSessionManager(manager)
+        controller.computer_script_sessions = computer_script_sessions
 
     # The turn registry (``session_id -> Turn``) is owned by the manager and tests
     # inspect it via ``app.state``. Flush intents live on each ``Turn`` (set by
@@ -726,6 +741,170 @@ def create_app(
             "tool": tool,
             "session_id": caller_session_id,
             "result": result,
+        }
+
+    def _computer_script_error(
+        exc: ComputerScriptSessionError,
+        *,
+        dispatched: bool | None = None,
+    ) -> JSONResponse:
+        content: dict[str, Any] = {
+            "ok": False,
+            "error": exc.code,
+            "params": {},
+        }
+        if dispatched is False:
+            content["dispatched"] = False
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=content,
+        )
+
+    @app.post("/internal/computer-script/open")
+    async def _computer_script_open(request: Request) -> Any:
+        payload = await _safe_json(request)
+        if set(payload) != {"caller_session_id", "timeout_seconds"}:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "invalid_computer_script_open_request",
+                    "params": {},
+                },
+            )
+        caller_session_id = payload.get("caller_session_id")
+        if not isinstance(caller_session_id, str) or not caller_session_id.strip():
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "invalid_computer_script_open_request",
+                    "params": {},
+                },
+            )
+        try:
+            opened = computer_script_sessions.open(
+                caller_session_id.strip(),
+                payload.get("timeout_seconds"),
+            )
+        except ComputerScriptSessionError as exc:
+            return _computer_script_error(exc)
+        return {"ok": True, **opened}
+
+    @app.post("/internal/computer-script/request")
+    async def _computer_script_request(request: Request) -> Any:
+        try:
+            payload = await _bounded_json_object(
+                request,
+                limit=_COMPUTER_SCRIPT_REQUEST_MAX_BYTES,
+            )
+        except _RequestBodyTooLarge:
+            return JSONResponse(
+                status_code=413,
+                content={
+                    "ok": False,
+                    "error": "computer_script_request_too_large",
+                    "params": {
+                        "limit_bytes": _COMPUTER_SCRIPT_REQUEST_MAX_BYTES,
+                    },
+                    "dispatched": False,
+                },
+            )
+        if set(payload) != {
+            "connection_token",
+            "tool",
+            "arguments",
+            "descriptor",
+        }:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "invalid_computer_script_request",
+                    "params": {},
+                    "dispatched": False,
+                },
+            )
+        connection_token = payload.get("connection_token")
+        tool = payload.get("tool")
+        arguments = payload.get("arguments")
+        descriptor = payload.get("descriptor")
+        if (
+            not isinstance(connection_token, str)
+            or not connection_token
+            or not isinstance(tool, str)
+            or not isinstance(arguments, dict)
+        ):
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "invalid_computer_script_request",
+                    "params": {},
+                    "dispatched": False,
+                },
+            )
+        try:
+            caller_session_id, forwarded = (
+                computer_script_sessions.prepare_tool_request(
+                    connection_token,
+                    tool,
+                    arguments,
+                )
+            )
+        except ComputerScriptSessionError as exc:
+            return _computer_script_error(exc, dispatched=False)
+
+        computer_server = getattr(controller, "computer_use_server", None)
+        if computer_server is None:
+            from core.computer_server import ComputerUseServer
+
+            try:
+                computer_server = ComputerUseServer()
+            except Exception:
+                logger.exception("Computer Use server initialization failed")
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "ok": False,
+                        "error": "computer_use_unavailable",
+                        "params": {},
+                        "dispatched": False,
+                    },
+                )
+            controller.computer_use_server = computer_server
+
+        result = await computer_server.call_tool(
+            tool,
+            forwarded,
+            handle_descriptor=descriptor,
+        )
+        return {
+            "ok": result.get("isError") is not True,
+            "tool": tool,
+            "session_id": caller_session_id,
+            "result": result,
+        }
+
+    @app.post("/internal/computer-script/close")
+    async def _computer_script_close(request: Request) -> Any:
+        payload = await _safe_json(request)
+        connection_token = payload.get("connection_token")
+        if set(payload) != {"connection_token"} or not isinstance(
+            connection_token,
+            str,
+        ):
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "invalid_computer_script_close_request",
+                    "params": {},
+                },
+            )
+        return {
+            "ok": True,
+            "closed": computer_script_sessions.close(connection_token),
         }
 
     @app.post("/internal/show-access/settings-read")
@@ -1578,6 +1757,32 @@ async def _safe_json(request: Request) -> dict[str, Any]:
     except Exception:
         body = {}
     return body if isinstance(body, dict) else {}
+
+
+async def _bounded_json_object(
+    request: Request,
+    *,
+    limit: int,
+) -> dict[str, Any]:
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared_length = int(content_length)
+        except ValueError:
+            declared_length = -1
+        if declared_length > limit:
+            raise _RequestBodyTooLarge
+
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > limit:
+            raise _RequestBodyTooLarge
+        body.extend(chunk)
+    try:
+        payload = await asyncio.to_thread(json.loads, bytes(body))
+    except (TypeError, ValueError, RecursionError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 async def _build_dispatch_payload(payload: dict[str, Any]) -> tuple[str, MessageContext]:

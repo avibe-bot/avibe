@@ -871,6 +871,8 @@ def _cost_payload(cost: HostedCost) -> dict[str, Any]:
 class _HostedUpstreamCall:
     """How one upstream call a hosted tool made ended (``ModelHubService._hosted_upstream_call``)."""
 
+    # The Source as the call's final admission saw it: what the call reports (billing, cost, name) follows it.
+    source: ModelHubSourceConfig
     outcome: RawCallOutcome | None
     # A bound the response broke, as a failure key to show.
     refused: str | None
@@ -6135,7 +6137,8 @@ class ModelHubService:
             usage=ProtocolUsageReport.of(input_tokens=0, cached_input_tokens=0, output_tokens=spec.tokens_per_image),
             counts={},
         )
-        if cost is None or cost.usd is None:
+        if cost is None or not cost.usd:
+            # An estimate of zero means the model's rate is unknown, never that an image is free.
             return None
         return {"usd": cost.usd, "basis": "estimated"}
 
@@ -6196,7 +6199,7 @@ class ModelHubService:
         """Clear under the Source mutation lock, so the identities it keeps are the ones the config holds."""
 
         try:
-            await asyncio.to_thread(self.capability_evidence.clear, matches, live=config.sources)
+            await asyncio.to_thread(self.capability_evidence.clear, matches, live=lambda: config.sources)
         except OSError:
             logger.warning("Model Hub could not persist an evidence clear; nothing changed", exc_info=True)
             raise ModelHubError("state_write_failed", status=500) from None
@@ -6225,7 +6228,12 @@ class ModelHubService:
             for model_id, feature, detail in refusals
         ]
         if records:
-            await asyncio.to_thread(self.capability_evidence.write_refusals, records, live=self.store.load().sources)
+            await asyncio.to_thread(
+                self.capability_evidence.write_refusals,
+                records,
+                live=lambda: self.store.load().sources,
+                wire_for=evidence.wire_for,
+            )
 
     async def record_hosted_success(
         self, source: ModelHubSourceConfig, model_id: str, tool: str, mode: str,
@@ -6243,7 +6251,7 @@ class ModelHubService:
             mode=mode,  # type: ignore[arg-type]
         )
         await asyncio.to_thread(
-            self.capability_evidence.note_success, record, live=self.store.load().sources, now=record.observed_at,
+            self.capability_evidence.note_success, record, live=lambda: self.store.load().sources, now=record.observed_at,
         )
 
     def _effort_refused(self, source: ModelHubSourceConfig, model_id: str, request: Any) -> bool:
@@ -6337,25 +6345,24 @@ class ModelHubService:
         )
         if learned is None:
             return None
-        try:
-            # Routing state: memory takes it before the re-render that follows, even if the file write fails.
-            await asyncio.to_thread(
-                self.capability_evidence.write_refusal,
-                EvidenceRecord(
-                    source_id=source.id,
-                    model_id=model_id,
-                    feature=learned.feature,
-                    status="unsupported",
-                    observed_at=self.now(),
-                    wire=self.hosted_evidence().wire_for(source, model_id),
-                    source_identity=identity_digest(source),
-                    detail=learned.detail,
-                ),
-                live=self.store.load().sources,
-            )
-        except ValueError:
-            # The Source changed identity while the request ran: the refusal describes nothing that exists now.
-            logger.info("Model Hub dropped capability evidence for a Source that changed identity")
+        evidence = self.hosted_evidence()
+        # Routing state: memory takes it before the re-render that follows, even if the file write fails. The store
+        # drops it if the Source or the model's rendering changed while the request ran.
+        await asyncio.to_thread(
+            self.capability_evidence.write_refusal,
+            EvidenceRecord(
+                source_id=source.id,
+                model_id=model_id,
+                feature=learned.feature,
+                status="unsupported",
+                observed_at=self.now(),
+                wire=evidence.wire_for(source, model_id),
+                source_identity=identity_digest(source),
+                detail=learned.detail,
+            ),
+            live=lambda: self.store.load().sources,
+            wire_for=evidence.wire_for,
+        )
         return learned
 
     def _admits_hosted(self, content: HostedContent, source: ModelHubSourceConfig, model_id: str) -> bool:
@@ -6404,14 +6411,17 @@ class ModelHubService:
         basis, usd = priced
         return HostedCost(basis=basis, usd=None if usd is None else round(usd, 6))
 
-    def _admitted_executor(self, config: ModelHubConfig, slot: ExecutorSlot, tool: str) -> ExecutorCandidate | None:
-        """The chain's candidate as this snapshot admits it, else None (``vibey-hosted-tools.md`` §6).
+    def _admitted_executor(self, slot: ExecutorSlot, tool: str) -> ExecutorCandidate | None:
+        """The chain's candidate as the current snapshot admits it, else None (``vibey-hosted-tools.md`` §6).
 
         The turn froze the order, not the Sources' runtime: a Source that is
         removed, no longer runs the tool on its executor model, or has refused
         it since is passed over, and so is one whose identity (base URL,
-        credential, ...) changed since the chain was built.
+        credential, ...) changed since the chain was built. It reads the config,
+        which grows with use: call it off the controller loop.
         """
+
+        config = self.store.load()
 
         return next(
             (
@@ -6522,10 +6532,12 @@ class ModelHubService:
                 text = f"{text} {say('modelHub.hostedTools.imageParamTakers', models=', '.join(takers))}"
             return {"record": {**failed_record(text), "error_code": "image_param_unsupported"}}
 
-        def admitted() -> ModelHubSourceConfig | None:
-            return admitted_image(self.store.load(), choice, evidence=self.hosted_evidence())
+        async def admitted() -> ModelHubSourceConfig | None:
+            # The config grows with use: read it off the controller loop.
+            config = await asyncio.to_thread(self.store.load)
+            return admitted_image(config, choice, evidence=self.hosted_evidence())
 
-        source = admitted()
+        source = await admitted()
         if source is None:
             return failed(say("modelHub.hostedTools.imageModelUnavailable", model=call.model), "image_model_unavailable")
         request = ModelHubRequest(image_request(call, choice.spec), protocol="openai_images")
@@ -6539,10 +6551,11 @@ class ModelHubService:
         called = await self._hosted_upstream_call(
             source, call.model, request, stream=False,
             deadline=asyncio.get_running_loop().time() + IMAGE_TIMEOUT_SECONDS, feed=feed,
-            admitted_now=lambda: admitted() is not None,
+            admitted_now=admitted,
         )
         if called is None:
             return failed(say("modelHub.hostedTools.imageModelUnavailable", model=call.model), "image_model_unavailable")
+        source = called.source
         outcome = called.outcome
         failure = _executor_failure(outcome, say, refused=called.refused)
         # The bytearray itself goes to the worker: no copy of the answer on the loop.
@@ -6631,7 +6644,7 @@ class ModelHubService:
         """Call one executor candidate; None when this snapshot does not admit it, so nothing ran."""
 
         tool, model_id = call.tool, slot.model_id
-        candidate = self._admitted_executor(self.store.load(), slot, tool)
+        candidate = await asyncio.to_thread(self._admitted_executor, slot, tool)
         if candidate is None:
             return None
         source = candidate.source
@@ -6648,12 +6661,16 @@ class ModelHubService:
             else:
                 body.extend(chunk)
 
+        async def admitted_now() -> ModelHubSourceConfig | None:
+            final = await asyncio.to_thread(self._admitted_executor, slot, tool)
+            return final.source if final is not None else None
+
         called = await self._hosted_upstream_call(
-            source, model_id, request, stream=stream, deadline=deadline, feed=feed,
-            admitted_now=lambda: self._admitted_executor(self.store.load(), slot, tool) is not None,
+            source, model_id, request, stream=stream, deadline=deadline, feed=feed, admitted_now=admitted_now,
         )
         if called is None:
             return None
+        source = called.source
         outcome = called.outcome
         failure = _executor_failure(outcome, say, refused=called.refused)
         if reader is not None:
@@ -6671,7 +6688,9 @@ class ModelHubService:
         if outcome is not None and tool in outcome.hosted_tools and result is not None and result.record["status"] == "completed":
             # A proxy call is a native call on the executor Source: the same positive evidence (§3.2).
             await self.record_hosted_success(source, model_id, tool, "executor")
-        moves_on = False
+        # A response that broke a bound reached nothing of Vibey's, so it is a failure before output here (§6
+        # step 4): the next candidate is tried. A timeout spent the chain's one deadline.
+        moves_on = called.refused is not None
         if (
             outcome is not None and outcome.kind is not RawOutcomeKind.SUCCESS
             and called.refused is None and not called.timed_out
@@ -6698,7 +6717,7 @@ class ModelHubService:
         stream: bool,
         deadline: float,
         feed: Callable[[bytes], Awaitable[None]],
-        admitted_now: Callable[[], bool],
+        admitted_now: Callable[[], Awaitable[ModelHubSourceConfig | None]],
     ) -> _HostedUpstreamCall | None:
         """One upstream call a hosted tool makes on its own behalf; None when it was never admitted.
 
@@ -6716,7 +6735,7 @@ class ModelHubService:
         refused: str | None = None
 
         async def invoke() -> None:
-            nonlocal handle, outcome, admitted, refused, cancelled_observed
+            nonlocal handle, outcome, admitted, refused, cancelled_observed, source
             while True:
                 await self._prepare_engine_for_demand()
                 await self._mutation_lock.acquire()
@@ -6734,8 +6753,12 @@ class ModelHubService:
                     release_owner()
 
                 try:
-                    if not admitted_now():
+                    # Admitted again on the snapshot the call is made on, under the lock. The call and
+                    # everything it reports (billing, cost, the Source's name) follow that snapshot.
+                    final = await admitted_now()
+                    if final is None:
                         return
+                    source = final
                     if not self._engine_synced:
                         continue
                     try:
@@ -6822,6 +6845,7 @@ class ModelHubService:
             return None
         usage = _call_usage(outcome, handle.observed if handle is not None else cancelled_observed)
         return _HostedUpstreamCall(
+            source=source,
             outcome=outcome,
             refused=refused,
             timed_out=timed_out,
@@ -9736,7 +9760,9 @@ class ModelHubService:
         proven = resolved.hosted_calls & outcome.hosted_tools
         if not proven or resolved.origin is None:
             return
-        source = next((item for item in self.store.load().sources if item.id == resolved.source_id), None)
+        # The config grows with use: read it off the controller loop.
+        config = await asyncio.to_thread(self.store.load)
+        source = next((item for item in config.sources if item.id == resolved.source_id), None)
         if source is None or identity_digest(source) != resolved.origin.identity:
             return
         for tool in sorted(proven):

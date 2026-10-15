@@ -713,6 +713,15 @@ class ModelHubTurnGateway:
             return refused(401, "authentication_error")
         tool = request.match_info["tool"]
         image = tool == IMAGE_TOOL
+
+        def live_turn() -> tuple[str, TurnHostedTools | None] | None:
+            return self.correlation.live_hosted_turn(
+                backend="vibey", token=token, request_metadata=_request_metadata("vibey", request),
+            )
+
+        # A turn that admits no more work is answered first, before its body is read.
+        if live_turn() is None:
+            return refused(409, "turn_not_live")
         # Every step proportional to the request or the answer runs off the
         # controller loop. A search call's arguments are small; an image call
         # adds its reference images, each within read's inline limit. The bound
@@ -729,11 +738,9 @@ class ModelHubTurnGateway:
             payload = await asyncio.to_thread(json.loads, raw)
         except (ValueError, RecursionError):
             return refused(400, "invalid_request_error")
-        # Checked and owned with no await between them: once admitted, the
+        # Checked again and owned with no await between them: once admitted, the
         # call belongs to its turn, and stopping or finalizing the turn ends it.
-        live = self.correlation.live_hosted_turn(
-            backend="vibey", token=token, request_metadata=_request_metadata("vibey", request),
-        )
+        live = live_turn()
         if live is None:
             return refused(409, "turn_not_live")
         try:

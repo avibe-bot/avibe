@@ -264,6 +264,7 @@ class Controller:
         # Keep the driver proxy lazy so an enabled desktop toggle does not
         # create a driver process until an active Turn requests it.
         self.computer_use_server = None
+        self.computer_script_sessions = None
         self.runtime_ownership = RuntimeOwnershipProvider(
             self.session_turns._sqlite_engine()
         )
@@ -1687,6 +1688,7 @@ class Controller:
         from core.services import sessions as workbench_sessions_service
         from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
         from storage.db import create_sqlite_engine
+        from storage.workbench_sessions_service import MAIN_SESSION_ID
 
         if (
             not isinstance(raw_session_id, str)
@@ -1694,7 +1696,10 @@ class Controller:
             or raw_session_id != raw_session_id.strip()
         ):
             raise ValueError("invalid Workbench session ID")
-        if raw_session_id == WORKSPACE_NOTICE_SESSION_ID:
+        if raw_session_id in {
+            WORKSPACE_NOTICE_SESSION_ID,
+            MAIN_SESSION_ID,
+        }:
             raise workbench_sessions_service.ReservedSessionError(raw_session_id)
 
         async def retire_computer_use_session() -> None:
@@ -2567,6 +2572,10 @@ class Controller:
             self._internal_server_task = None
 
         async def _close_computer_use_server() -> None:
+            script_sessions = getattr(self, "computer_script_sessions", None)
+            self.computer_script_sessions = None
+            if script_sessions is not None:
+                script_sessions.close_all()
             server = getattr(self, "computer_use_server", None)
             self.computer_use_server = None
             if server is not None:

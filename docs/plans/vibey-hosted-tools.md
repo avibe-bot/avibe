@@ -230,8 +230,8 @@ The evidence store, its record and its owner are the capability model's §3. v2 
     - `status: {latest_ok, refused[]}` (§8.1): `latest_ok` is `{source_id, model_id, mode: "native" | "executor" |
       "direct", at}` or null (`direct` for an image call), the latest positive record; `refused[]` is `[{source_id, model_id, aspect, at, reason}]`, the
       current negative records, with `aspect` `call` or `replay` and `reason` the record's detail (HTTP status and
-      upstream machine code, never provider prose); `verified[]` is `[{source_id, model_id, mode, at}]`, the persisted
-      positive records, one per pair, from which the Source chips derive (hosted evidence lives on this read, which
+      upstream machine code, never provider prose); `verified[]` is `[{source_id, model_id, mode, at}]`, the positive
+      records in memory (current, not as of the last hourly file write), one per pair, from which the Source chips derive (hosted evidence lives on this read, which
       the clears answer; the Source read keeps effort evidence);
     - `latest_ok` is the newest identity-valid success in memory (§3.2), not the newest file record;
     - search tools: `executor_order` (saved, null when automatic), `effective_order` (as the gateway would try now),
@@ -518,7 +518,8 @@ These rules are C-1 rows in `cross-provider.md` and per-protocol rows in `conver
     attempt `included` gives `included`; the basis is `reported` only when every summed figure is reported, else
     `list` (shown with ≈); an attempt without a `cost` makes the total a lower bound, shown as "at least $X" /
     "至少 $X", never as complete. With `failed_attempts`, the card also names the attempt count ("3 attempts" /
-    "尝试 3 次").
+    "尝试 3 次"). B1 ships the sum, its basis and the attempt count (as the projection's `calls`); until D2 adds the
+    lower-bound form, an attempt without a `cost` leaves the total unknown rather than shown as complete.
   - The executor request is a short model request because no vendor exposes search without a model: Anthropic,
     OpenAI's public API, xAI and Google all run search inside a model call.
 - **The result is the canonical record** (v1's rules, unchanged): a `HostedRecord` with `sources[]` in the
