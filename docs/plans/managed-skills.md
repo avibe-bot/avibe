@@ -358,7 +358,9 @@ enumerated source before swapping so a mid-copy source change cannot land as a
 hybrid catalog. A publication failure binds an empty
 `AVIBE_BUILTIN_SKILLS_ROOT` so this process does not keep serving a previous
 catalog, and omits built-ins without substituting a different version's
-content.
+content. A nonempty but invalid explicit catalog root, such as a relative path
+from a restored poll, also binds that empty sentinel so the shell cannot inherit
+a different catalog.
 
 ## 11. Installation Defaults
 

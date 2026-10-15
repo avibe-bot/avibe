@@ -1853,11 +1853,23 @@ def test_managed_skill_environment_can_retain_an_explicit_builtin_catalog(
     )
 
     assert env[BUILTIN_SKILLS_ROOT_ENV] == str(catalog_root.resolve())
-    invalid = managed_skill_environment(
-        working_directory,
-        builtin_catalog_root="relative-catalog",
-    )
-    assert BUILTIN_SKILLS_ROOT_ENV not in invalid
+
+
+def test_managed_skill_environment_disables_an_invalid_explicit_catalog(
+    tmp_path: Path,
+    caplog,
+) -> None:
+    working_directory = tmp_path / "project"
+    working_directory.mkdir()
+
+    with caplog.at_level("WARNING", logger="core.managed_skills"):
+        env = managed_skill_environment(
+            working_directory,
+            builtin_catalog_root="relative-catalog",
+        )
+
+    assert env[BUILTIN_SKILLS_ROOT_ENV] == ""
+    assert "Ignoring invalid built-in Skill catalog root" in caplog.text
 
 
 def test_bound_builtin_root_survives_avibe_home_change(monkeypatch, tmp_path: Path) -> None:

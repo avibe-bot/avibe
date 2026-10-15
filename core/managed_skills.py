@@ -1727,6 +1727,9 @@ def managed_skill_environment(
         root = Path(bound_root).expanduser()
         if root.is_absolute():
             env[BUILTIN_SKILLS_ROOT_ENV] = str(_absolute_path(root))
+        else:
+            logger.warning("Ignoring invalid built-in Skill catalog root: %s", bound_root)
+            env[BUILTIN_SKILLS_ROOT_ENV] = ""
     elif builtin_catalog_root is not None or BUILTIN_SKILLS_ROOT_ENV in os.environ:
         env[BUILTIN_SKILLS_ROOT_ENV] = ""
     else:
