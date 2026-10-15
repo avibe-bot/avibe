@@ -1128,39 +1128,23 @@ class VibeyAgent(BaseAgent):
         from core.workbench_media import file_attachments_from_specs, resolve_attachment_specs
 
         with self._engine.connect() as conn:
-            recovery_inputs = (
-                select(
-                    messages.c.id,
-                    messages.c.content_text,
-                    messages.c.content_json,
-                )
-                .where(
-                    messages.c.session_id == session_id,
-                    sql_text(VIBEY_RECOVERY_INPUT_PREDICATE),
-                )
-                .cte("vibey_recovery_inputs")
-                .prefix_with("MATERIALIZED")
-            )
+            # CROSS JOIN fixes SQLite's loop order: start with indexed live
+            # inputs, then seek their Deliveries/Turns. A materialized CTE alone
+            # still lets the planner scan all historical accepted Deliveries.
             rows = conn.execute(
-                select(
-                    recovery_inputs.c.id,
-                    recovery_inputs.c.content_text,
-                    recovery_inputs.c.content_json,
-                    message_deliveries.c.id.label("delivery_id"),
-                    message_deliveries.c.turn_role,
-                    session_turns.c.dispatch_text.label("turn_dispatch_text"),
-                )
-                .select_from(
-                    recovery_inputs.join(
-                        message_deliveries,
-                        message_deliveries.c.message_id == recovery_inputs.c.id,
-                    ).join(session_turns, session_turns.c.id == message_deliveries.c.turn_id)
-                )
-                .where(
-                    message_deliveries.c.state == "accepted",
-                    session_turns.c.backend == BACKEND,
-                )
-                .order_by(message_deliveries.c.materialized_at, message_deliveries.c.turn_position, recovery_inputs.c.id)
+                sql_text(
+                    "select messages.id, messages.content_text, messages.content_json, "
+                    "message_deliveries.id as delivery_id, message_deliveries.turn_role, "
+                    "session_turns.dispatch_text as turn_dispatch_text "
+                    "from messages cross join message_deliveries "
+                    "on message_deliveries.message_id = messages.id "
+                    "cross join session_turns on session_turns.id = message_deliveries.turn_id "
+                    f"where {VIBEY_RECOVERY_INPUT_PREDICATE} "
+                    "and messages.session_id = :session_id "
+                    "and message_deliveries.state = 'accepted' and session_turns.backend = :backend "
+                    "order by message_deliveries.materialized_at, message_deliveries.turn_position, messages.id"
+                ),
+                {"session_id": session_id, "backend": BACKEND},
             ).mappings().all()
             inputs = []
             seen: set[str] = set()
@@ -1757,27 +1741,16 @@ class VibeyAgent(BaseAgent):
     def _sessions_with_unconsumed_inputs(self) -> list[str]:
         """Sessions with inputs accepted into a ``vibey`` Turn that no run consumed (T3)."""
         with self._engine.connect() as conn:
-            recovery_inputs = (
-                select(messages.c.id, messages.c.session_id)
-                .where(
-                    messages.c.session_id.is_not(None),
-                    sql_text(VIBEY_RECOVERY_INPUT_PREDICATE),
-                )
-                .cte("vibey_recovery_inputs")
-                .prefix_with("MATERIALIZED")
-            )
             rows = conn.execute(
-                select(recovery_inputs.c.session_id)
-                .select_from(
-                    recovery_inputs.join(
-                        message_deliveries,
-                        message_deliveries.c.message_id == recovery_inputs.c.id,
-                    ).join(session_turns, session_turns.c.id == message_deliveries.c.turn_id)
-                )
-                .where(
-                    message_deliveries.c.state == "accepted",
-                    session_turns.c.backend == BACKEND,
-                )
+                sql_text(
+                    "select messages.session_id from messages "
+                    "cross join message_deliveries on message_deliveries.message_id = messages.id "
+                    "cross join session_turns on session_turns.id = message_deliveries.turn_id "
+                    f"where {VIBEY_RECOVERY_INPUT_PREDICATE} "
+                    "and messages.session_id is not null "
+                    "and message_deliveries.state = 'accepted' and session_turns.backend = :backend"
+                ),
+                {"backend": BACKEND},
             ).scalars()
             return sorted({str(session_id) for session_id in rows if session_id is not None})
 

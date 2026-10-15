@@ -148,7 +148,7 @@ def _recovery_query_plan(
     statements: list[tuple[str, Any]] = []
 
     def capture(_conn, _cursor, statement, parameters, _context, _executemany):
-        if "message_deliveries" in statement.lower() and "vibey_recovery_inputs" in statement.lower():
+        if "message_deliveries" in statement.lower() and "context_seq is null" in statement.lower():
             statements.append((statement, parameters))
 
     event.listen(engine, "before_cursor_execute", capture)
@@ -173,6 +173,9 @@ def test_migration_round_trip_owns_the_recovery_index(tmp_path: Path) -> None:
             "select name from sqlite_master where type = 'index' and name = ?",
             (_MIGRATION._INDEX,),
         ).fetchone() is None
+        assert conn.execute(
+            "select name from sqlite_master where type = 'index' and name = ?", (_MIGRATION._DELIVERY_INDEX,)
+        ).fetchone() is None
 
     run_migrations(db_path)
     with sqlite3.connect(db_path) as conn:
@@ -187,12 +190,16 @@ def test_migration_round_trip_owns_the_recovery_index(tmp_path: Path) -> None:
             "session_id",
             "id",
         ]
+        assert [item[2] for item in conn.execute(f"pragma index_info({_MIGRATION._DELIVERY_INDEX})")] == ["message_id"]
 
     command.downgrade(alembic_config(db_path), _MIGRATION.down_revision)
     with sqlite3.connect(db_path) as conn:
         assert conn.execute(
             "select name from sqlite_master where type = 'index' and name = ?",
             (_MIGRATION._INDEX,),
+        ).fetchone() is None
+        assert conn.execute(
+            "select name from sqlite_master where type = 'index' and name = ?", (_MIGRATION._DELIVERY_INDEX,)
         ).fetchone() is None
 
 
@@ -329,7 +336,10 @@ def test_recovery_queries_seek_the_partial_index(recovery_engine) -> None:
         assert "USING INDEX ix_messages_vibey_recovery_input" in plan, (
             f"session_plan={session_plan}; global_plan={global_plan}"
         )
-        assert "SCAN messages" not in plan
+        assert "USING INDEX ix_message_deliveries_message (message_id=?)" in plan, plan
+        for table in ("messages", "message_deliveries", "session_turns"):
+            assert f"SCAN {table}" not in plan, plan
+            assert f"SEARCH {table}" in plan, plan
     assert "context_seq=? AND session_id=?" in session_plan
     assert "context_seq=?" in global_plan
     assert VIBEY_RECOVERY_INPUT_PREDICATE in _MIGRATION.CREATE_INDEX_SQL

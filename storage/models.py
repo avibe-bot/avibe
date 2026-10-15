@@ -1080,6 +1080,11 @@ message_deliveries = Table(
         ),
     ),
     Index("ix_message_deliveries_session_state", "session_id", "state", "submitted_at", "id"),
+    Index(
+        "ix_message_deliveries_message",
+        "message_id",
+        sqlite_where=text("message_id is not null"),
+    ),
     Index("ix_message_deliveries_turn", "turn_id", "turn_position"),
     Index(
         "uq_message_deliveries_turn_position",

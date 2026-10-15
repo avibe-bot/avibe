@@ -146,8 +146,10 @@ these complete boundary fixes (no new retry service or state machine):
   newly admitted sequence numbers with the same Agent's current pins.
 - Hidden control rows stay out of model context and out of the indexed population
   of recoverable inputs. Recovery must not resolve attachments or fetch Delivery
-  snapshots for historical hidden rows. Query-plan and migration tests protect
-  this storage boundary.
+  snapshots for historical hidden rows. Recovery seeks Messages first, then
+  their Deliveries by indexed `message_id`, and Turns by primary key; tests
+  reject historical scans at every join, not only the Message table. Migration
+  upgrade, downgrade, and head-schema repair preserve those indexes.
 
 Validation uses real Web-to-internal dispatch, FIFO backend changes, provider
 classification through continuation, returned steers, repeated user retries,

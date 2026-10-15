@@ -605,13 +605,13 @@ def _unended_input_seq(conn: Connection, session_id: str, entries: Sequence[Cont
     ).all()
     awaiting_input = set(
         conn.execute(
-            select(message_deliveries.c.turn_id)
-            .select_from(message_deliveries.join(messages, messages.c.id == message_deliveries.c.message_id))
-            .where(
-                messages.c.session_id == session_id,
-                text(VIBEY_RECOVERY_INPUT_PREDICATE),
-                message_deliveries.c.state == "accepted",
-            )
+            text(
+                "select message_deliveries.turn_id from messages "
+                "cross join message_deliveries on message_deliveries.message_id = messages.id "
+                f"where {VIBEY_RECOVERY_INPUT_PREDICATE} "
+                "and messages.session_id = :session_id and message_deliveries.state = 'accepted'"
+            ),
+            {"session_id": session_id},
         ).scalars()
     )
     inputs = sorted(seq for _, _, seq in turns if seq is not None)

@@ -8,8 +8,8 @@ Python made every resume walk and hydrate the whole retry history.
 The partial index contains only real recovery candidates.  Its predicate is
 shared with ``storage.models`` and the three recovery queries so SQLite can
 seek the growing Message table by ``context_seq`` and, for a Session query, by
-``session_id``.  The explicit query predicate remains necessary for databases
-that have not applied this migration yet.
+``session_id``. A companion Delivery ``message_id`` index bounds the next join
+by each live candidate rather than scanning accepted Delivery history.
 
 Revision ID: 20261016_0067
 Revises: 20261015_0066
@@ -37,13 +37,19 @@ _RECOVERY_INPUT_PREDICATE = (
     "case when json_valid(metadata_json) = 1 then metadata_json else '{}' end, "
     "'$.vibey_resume') is 'true')"
 )
-# Exported so a head-schema repair path can reuse the exact DDL if this index is
-# later added to that repair inventory.  The predicate must not be retyped:
-# SQLite's partial-index matcher is syntax-sensitive.
+# Head-schema repair reuses this exact DDL; SQLite's partial-index matcher is
+# syntax-sensitive.
 DROP_INDEX_SQL = f"drop index if exists {_INDEX}"
 CREATE_INDEX_SQL = (
     f"create index {_INDEX} on messages (context_seq, session_id, id) "
     f"where {_RECOVERY_INPUT_PREDICATE}"
+)
+
+
+_DELIVERY_INDEX = "ix_message_deliveries_message"
+DROP_DELIVERY_INDEX_SQL = f"drop index if exists {_DELIVERY_INDEX}"
+CREATE_DELIVERY_INDEX_SQL = (
+    f"create index {_DELIVERY_INDEX} on message_deliveries (message_id) where message_id is not null"
 )
 
 
@@ -56,14 +62,16 @@ def _tables(bind) -> set[str]:
 
 def upgrade() -> None:
     bind = op.get_bind()
-    if "messages" not in _tables(bind):
-        return
-    bind.exec_driver_sql(DROP_INDEX_SQL)
-    bind.exec_driver_sql(CREATE_INDEX_SQL)
+    tables = _tables(bind)
+    if "messages" in tables:
+        bind.exec_driver_sql(DROP_INDEX_SQL)
+        bind.exec_driver_sql(CREATE_INDEX_SQL)
+    if "message_deliveries" in tables:
+        bind.exec_driver_sql(DROP_DELIVERY_INDEX_SQL)
+        bind.exec_driver_sql(CREATE_DELIVERY_INDEX_SQL)
 
 
 def downgrade() -> None:
     bind = op.get_bind()
-    if "messages" not in _tables(bind):
-        return
+    bind.exec_driver_sql(DROP_DELIVERY_INDEX_SQL)
     bind.exec_driver_sql(DROP_INDEX_SQL)
