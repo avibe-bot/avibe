@@ -2178,6 +2178,9 @@ class Controller:
         try:
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
+            # This thread runs the loop: the one thread an activation commit may hold
+            # the runtime boundary across its I/O on.
+            self.runtime_activation.bind_loop_thread()
             # Names whatever blocks this loop while it blocks; see core/loop_watchdog.py.
             self._loop_watchdog = EventLoopWatchdog(self._loop)
             self._loop_watchdog.start()

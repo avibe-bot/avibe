@@ -8354,9 +8354,12 @@ class ScheduledTaskService:
         if registry is None or identity is None:
             return self.request_store.claim(pending.id)
 
-        committed = registry.commit_if_current(
+        # On the runtime-work door, off the loop: the claim never holds the boundary
+        # across its write. A claim that lost to a retirement goes back to the queue.
+        committed = registry.commit_then_confirm(
             identity,
             lambda: self.request_store.claim(pending.id),
+            compensate=lambda claimed: claimed is not None and self.request_store.requeue(claimed.id),
         )
         request = committed.value if committed.admitted else None
         if request is not None:
@@ -8410,9 +8413,13 @@ class ScheduledTaskService:
 
         activation_registry = self._runtime_activation_registry()
         if activation_registry is not None and activation_identity is not None:
-            committed = activation_registry.commit_if_current(
+            # Off the loop, like the claim. A start that lost to a retirement needs no
+            # compensation of its own: the requeue below gives the claim back and
+            # clears the marker with it.
+            committed = activation_registry.commit_then_confirm(
                 activation_identity,
                 commit_start,
+                compensate=None,
             )
             if not committed.admitted:
                 self.request_store.requeue(request.id)

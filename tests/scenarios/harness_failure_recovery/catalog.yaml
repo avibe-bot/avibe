@@ -2420,7 +2420,7 @@ scenarios:
     kind: concurrency
     layer: contract
     backend: shared
-    test: tests/test_runtime_activation.py::test_hfr_137_claim_first_requeues_when_cleanup_wins_before_pid
+    test: tests/test_runtime_activation.py::test_hfr_137_claim_that_loses_to_cleanup_during_its_write_is_given_back
   - id: HFR-138
     name: ownership handoffs stay visible in one SQLite generation
     status: covered
