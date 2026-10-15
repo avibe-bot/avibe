@@ -63,6 +63,7 @@ from vibe.backend_model_catalog import (
     provider_image_models,
 )
 from vibe.i18n import t as i18n_t
+from vibe.model_hub_runtime.client import RESPONSE_TOO_LARGE
 from vibe.model_hub_runtime.api_key_vendors import (
     catalog_api_key_vendor_label,
     pinned_api_key_protocol,
@@ -845,6 +846,9 @@ def _executor_failure(outcome: RawCallOutcome | None, say: Callable[..., str], *
         return say(refused)
     if outcome is None or outcome.kind is RawOutcomeKind.SUCCESS:
         return None
+    if outcome.error_code == RESPONSE_TOO_LARGE:
+        # The engine client cut an answer past its bound while it downloaded.
+        return say("modelHub.hostedTools.tooLarge")
     if outcome.kind is RawOutcomeKind.TIMEOUT:
         return say("modelHub.hostedTools.timedOut")
     if outcome.kind is RawOutcomeKind.NETWORK_ERROR:

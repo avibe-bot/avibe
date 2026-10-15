@@ -181,6 +181,8 @@ NOT_AN_IMAGE = base64.b64encode(b"plain text, not an image").decode()
     ({"created": 1, "data": [{"b64_json": "not base64!"}]}, "could not be used"),
     ({"created": 1, "data": [{"b64_json": NOT_AN_IMAGE}]}, "could not be used"),
     ({"created": 1, "data": [{"b64_json": PNG}, {"b64_json": PNG}], "oversized": True}, "larger than allowed"),
+    # A call asks for at most four images: an answer with more is not kept at all.
+    ({"created": 1, "data": [{"b64_json": PNG}] * 5}, "larger than allowed"),
 ])
 async def test_only_usable_images_complete_the_call(tmp_path, monkeypatch, answer_body, error):
     """MH-HOSTED-GATEWAY-007: completion is an allow-list; a URL is never fetched; the call is still metered."""
@@ -278,3 +280,38 @@ async def test_an_image_call_costs_its_delivered_images_at_their_list_price(tmp_
     (status, answer), _ = await _call(service, {"model": "gpt-image-2", "prompt": "a cat", "n": 2})
     assert status == 200 and answer["record"]["status"] == "completed"
     assert answer["execution"].get("cost") == cost
+
+
+async def test_an_image_answer_is_bounded_while_it_downloads(monkeypatch):
+    """MH-HOSTED-GATEWAY-007: a relay that never stops is cut at the bound, before it reaches the disk spool."""
+
+    from aiohttp import web
+
+    from tests.test_model_hub_retry_advice import _engine, _source as _engine_source
+    from vibe.model_hub_runtime import client as client_module
+
+    monkeypatch.setitem(client_module._BUFFERED_RESPONSE_MAX_BYTES, "openai_images", 256 * 1024)
+    sent = []
+
+    async def respond(request):
+        response = web.StreamResponse(headers={"Content-Type": "application/json"})
+        await response.prepare(request)
+        try:
+            for _ in range(64):
+                chunk = b"x" * (64 * 1024)
+                await response.write(chunk)
+                sent.append(len(chunk))
+        except (ConnectionResetError, RuntimeError):
+            pass
+        return response
+
+    async with _engine(respond) as (client, requests):
+        handle = await client.invoke(
+            _engine_source("openai_responses"), "model-a", {"prompt": "a cat"}, stream=False,
+            request_protocol="openai_images",
+        )
+        outcome = await handle.outcome()
+        await handle.close_stream()
+    assert requests[0][0] == "/v1/images/generations"
+    assert (outcome.kind, outcome.error_code) == (RawOutcomeKind.NETWORK_ERROR, "response_too_large")
+    assert handle.stream is None

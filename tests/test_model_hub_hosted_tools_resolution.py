@@ -198,6 +198,9 @@ def test_the_image_enum_is_deterministic_with_the_default_first(tmp_path):
     assert image_choices(_config(sources=[CLAUDE_SUB, GEMINI]), evidence=evidence).models == ()
     codex_sub = _source("src_osub0001", "openai", "openai_responses", "gpt-image-2", kind="subscription")
     assert image_choices(_config(sources=[codex_sub]), evidence=evidence).models == ()
+    # An OpenAI key on a protocol whose engine entry has no images endpoints is never offered one.
+    on_messages = _source("src_oanth001", "openai", "anthropic", "gpt-6-astra")
+    assert image_choices(_config(sources=[on_messages]), evidence=evidence).models == ()
 
 
 def test_a_turn_freezes_its_tools_executors_and_image_enum_and_each_hop_states_its_own_facts(tmp_path):

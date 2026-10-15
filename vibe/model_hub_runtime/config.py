@@ -14,7 +14,7 @@ from vibe.model_hub_runtime.api_key_vendors import (
     openai_compatible_endpoint,
     validate_api_key_auth_scheme,
 )
-from vibe.backend_model_catalog import provider_image_models
+from vibe.backend_model_catalog import IMAGE_PROTOCOLS, provider_image_models
 from vibe.model_hub_runtime.state import EngineStateError, EngineStateStore, RuntimeSecrets, SourceRecord
 
 # The engine rotates main.log at 10 MB and deletes the oldest rotated files beyond this total.
@@ -241,10 +241,6 @@ def expected_model_names(
     return expected
 
 
-# The protocols whose engine entries serve the images endpoints (vibey-hosted-tools.md §7.4).
-_IMAGE_PROTOCOLS = frozenset({"openai_responses", "openai_chat"})
-
-
 def image_model_ids(source: SourceRecord) -> tuple[str, ...]:
     """The vendor's image models an API-key Source's engine entry registers, so ``image_generate`` can route them.
 
@@ -252,7 +248,7 @@ def image_model_ids(source: SourceRecord) -> tuple[str, ...]:
     entry serves the images endpoints.
     """
 
-    if source.protocol not in _IMAGE_PROTOCOLS:
+    if source.protocol not in IMAGE_PROTOCOLS:
         return ()
     return tuple(spec.id for spec in provider_image_models(source.vendor) if "api_key" in spec.kinds)
 

@@ -137,6 +137,9 @@ def image_result(body: bytes | bytearray, say: Say) -> ImageResult:
     data = answer.get("data") if isinstance(answer, dict) else None
     if not isinstance(data, list) or not data or not all(isinstance(item, dict) for item in data):
         return ImageResult(failed_record(say("modelHub.hostedTools.imageMissing")))
+    if len(data) > MAX_IMAGES_PER_CALL:
+        # A call asks for at most four; more is not what was asked for, and none of it is kept.
+        return ImageResult(failed_record(say("modelHub.hostedTools.tooLarge")))
     images: list[str] = []
     total = 0
     for item in data:

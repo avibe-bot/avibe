@@ -240,6 +240,8 @@ _PRICE = (*_X_SEARCH, "price")
         pytest.param("xai", _image_edit(("kinds",), []), id="image-kinds-empty"),
         # A fixed request field never overrides what the call itself names.
         pytest.param("xai", _image_edit(("request",), {"n": 4}), id="image-request-sets-a-call-field"),
+        # A ratio-form size is sent as aspect_ratio: fixing it would override, or be overridden by, the call.
+        pytest.param("xai", _image_edit(("request",), {"aspect_ratio": "1:1"}), id="image-request-sets-the-ratio-field"),
         pytest.param("xai", _image_edit(("request",), {"style": {"nested": True}}), id="image-request-not-scalar"),
         pytest.param("xai", _image_edit(("description",), "x" * 81), id="image-description-too-long"),
         pytest.param("xai", _image_edit(("params",), ["images", "quality"]), id="image-param-unknown"),

@@ -682,7 +682,10 @@ OVERLAY_SEARCH_TOOLS: tuple[str, ...] = ("web_search", "x_search")
 # The credential kinds an image model's route may be offered on; absent means every kind.
 IMAGE_MODEL_KINDS: tuple[str, ...] = ("api_key", "subscription")
 # What a call names itself; an image model's fixed request fields may not set them.
-IMAGE_CALL_FIELDS: frozenset[str] = frozenset({"model", "prompt", "size", "n", "images", "stream"})
+IMAGE_CALL_FIELDS: frozenset[str] = frozenset({"model", "prompt", "size", "aspect_ratio", "n", "images", "stream"})
+# The protocols whose engine entries serve the images endpoints (vibey-hosted-tools.md §7.4): an image model is
+# offered, registered and called on a Source of one of them only.
+IMAGE_PROTOCOLS: frozenset[str] = frozenset({"openai_responses", "openai_chat"})
 IMAGE_MODEL_PARAMS: tuple[str, ...] = ("images", "n", "size")
 IMAGE_SIZE_FORMS: tuple[str, ...] = ("pixels", "ratio")
 # One line in every request's tool block: bounded so a catalog line cannot grow every prompt prefix.

@@ -33,6 +33,7 @@ from core.handlers.model_hub.adapter import (
 from core.handlers.model_hub.async_owner import run_owned_in_thread
 from core.handlers.model_hub.classification import UPSTREAM_MACHINE_ERROR_CODES
 from core.handlers.model_hub.events import bounded_diagnostic_detail
+from core.handlers.model_hub.hosted_images import IMAGE_RESPONSE_MAX_BYTES
 from core.handlers.model_hub.json_wire import (
     JSONEvent,
     JSONPath,
@@ -70,6 +71,11 @@ _ENGINE_TRANSPORT_FAILURE = re.compile(
 # This threshold only selects memory or a temporary file; it never rejects or
 # truncates upstream response bytes.
 _PRELUDE_MEMORY_BYTES = 256 * 1024
+# A buffered answer is spooled whole before it is read. An image answer is bounded while it downloads, so a
+# relay that never stops cannot fill the disk before the image call rejects it (vibey-hosted-tools.md §7.4).
+_BUFFERED_RESPONSE_MAX_BYTES: Mapping[str, int] = {"openai_images": IMAGE_RESPONSE_MAX_BYTES}
+# The machine code of a buffered answer cut at that bound; L1's own, never an upstream's.
+RESPONSE_TOO_LARGE = "response_too_large"
 _ERROR_OBSERVATION_BYTES = 256 * 1024
 # Projecting a response body that has already arrived is local work. It has
 # its own budget so the client's connection budget never limits it.
@@ -642,7 +648,24 @@ class EngineClient:
                 buffered_body = _StreamPrelude()
                 prelude = buffered_body
                 await buffered_body.write_async(first)
-                await _read_response_into(response.content, buffered_body)
+                bound = _BUFFERED_RESPONSE_MAX_BYTES.get(request_protocol)
+                try:
+                    await _read_response_into(
+                        response.content, buffered_body, max_bytes=None if bound is None else bound - len(first),
+                    )
+                except _ResponseTooLarge:
+                    buffered_body.close()
+                    response.close()
+                    await session.close()
+                    # A local cut, like a transport failure: nothing past the bound was read or observed.
+                    return ended(_outcome(
+                        kind=RawOutcomeKind.NETWORK_ERROR,
+                        source=source,
+                        model_id=model_id,
+                        http_status=response.status,
+                        error_code=RESPONSE_TOO_LARGE,
+                        message="upstream response exceeded its bound",
+                    ))
                 observation = await _observe_buffered_protocol_response_async(
                     observe_buffered_protocol_response,
                     request_protocol,
@@ -1518,11 +1541,22 @@ def _project_raw_error_fields(
     return types[0] if types else None, codes[0] if codes else None, candidates
 
 
+class _ResponseTooLarge(Exception):
+    """A buffered response grew past the bound its request protocol sets."""
+
+
 async def _read_response_into(
     content: aiohttp.StreamReader,
     target: _StreamPrelude,
+    *,
+    max_bytes: int | None = None,
 ) -> None:
+    received = 0
     while chunk := await content.read(_STREAM_CHUNK_BYTES):
+        received += len(chunk)
+        if max_bytes is not None and received > max_bytes:
+            # Stop reading: what is past the bound is never written anywhere.
+            raise _ResponseTooLarge
         await target.write_async(chunk)
 
 

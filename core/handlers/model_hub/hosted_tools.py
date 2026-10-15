@@ -35,6 +35,7 @@ from config.v2_config import (
     model_hub_executor_order,
 )
 from vibe.backend_model_catalog import (
+    IMAGE_PROTOCOLS,
     HostedToolSpec,
     ImageModelSpec,
     bundled_provider_vendors,
@@ -268,10 +269,15 @@ class ImageChoices:
 
 
 def _serves_image(source: ModelHubSourceConfig, spec: ImageModelSpec) -> bool:
-    """The image model's route was verified on this kind of credential, and the Source serves the model."""
+    """The image model's route was verified on this kind of credential, and the Source serves the model.
+
+    Only a Source whose protocol's engine entry serves the images endpoints is offered one: the engine refuses the
+    rest on its own, and that refusal is never learned, so it would be offered on every turn.
+    """
 
     return (
         source.supply_channel == "hub"
+        and source.protocol in IMAGE_PROTOCOLS
         and source.kind in spec.kinds
         and credential_eligible(source)
         and _serves(source, spec.id)
