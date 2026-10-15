@@ -349,7 +349,7 @@ def test_an_estimated_image_price_of_zero_is_no_unit_price(tmp_path, monkeypatch
     from core.handlers.model_hub import hosted_tools as hosted_tools_module
     from vibe.backend_model_catalog import ImageModelSpec
 
-    spec = ImageModelSpec("gemini-3-image", "Nano Banana", "images", ("images",), (), tokens_per_image=1290)
+    spec = ImageModelSpec("gemini-3-image", "Nano Banana", ("images",), (), tokens_per_image=1290)
     monkeypatch.setattr(hosted_tools_module, "provider_image_models", lambda vendor: (spec,) if vendor == "xai" else ())
     service, _store = _api_service(tmp_path)
     monkeypatch.setattr(service, "hosted_call_cost", lambda *_args, **_kwargs: SimpleNamespace(usd=valued))

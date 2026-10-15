@@ -46,6 +46,7 @@ capabilities:
       - tests/e2e/test_model_hub_usage_events.py
       - tests/e2e/test_model_hub_service_acceptance.py
       - tests/e2e/test_model_hub_codex_image.py
+      - tests/e2e/test_model_hub_images.py
     harness:
       - tests/scenario_harness/model_hub.py
     unit_or_contract_tests:
@@ -101,6 +102,7 @@ capabilities:
       - tests/test_model_hub_l3.py
       - tests/test_model_hub_hosted_executor.py
       - tests/test_model_hub_hosted_evidence.py
+      - tests/test_model_hub_hosted_images.py
       - tests/test_model_hub_usage.py
       - tests/test_ui_server_fastapi.py
       - tests/test_model_hub_quota.py
