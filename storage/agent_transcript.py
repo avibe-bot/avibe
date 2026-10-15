@@ -90,6 +90,7 @@ from storage import agent_events_service, media_service, messages_service
 from storage.agent_session_rows import reserve_write_lock
 from storage.message_deliveries import TURN_OWNER_STATES
 from storage.models import agent_events, agent_sessions, message_deliveries, messages, scopes, session_turns
+from storage.vibey_recovery import VIBEY_RECOVERY_INPUT_PREDICATE
 
 INPUT_TYPES = ("user", "harness", "agent_initiated", "annotation")
 # A final response is ``result``, or ``error`` when ``final_outcome`` says it failed:
@@ -608,8 +609,7 @@ def _unended_input_seq(conn: Connection, session_id: str, entries: Sequence[Cont
             .select_from(message_deliveries.join(messages, messages.c.id == message_deliveries.c.message_id))
             .where(
                 messages.c.session_id == session_id,
-                messages.c.context_seq.is_(None),
-                messages.c.type.in_(INPUT_TYPES),
+                text(VIBEY_RECOVERY_INPUT_PREDICATE),
                 message_deliveries.c.state == "accepted",
             )
         ).scalars()

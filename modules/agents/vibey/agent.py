@@ -37,7 +37,7 @@ from types import SimpleNamespace
 from typing import Any, AsyncIterator, Callable, Mapping, Optional, Sequence
 
 import httpx
-from sqlalchemy import and_, select
+from sqlalchemy import and_, select, text as sql_text
 from sqlalchemy.engine import Engine
 
 from config import paths
@@ -117,6 +117,7 @@ from storage.agent_transcript import (
 )
 from storage.db import get_cached_sqlite_engine
 from storage.models import agent_events, agent_sessions, message_deliveries, messages, session_turns
+from storage.vibey_recovery import VIBEY_RECOVERY_INPUT_PREDICATE
 from vibe.i18n import t as i18n_t
 
 logger = logging.getLogger(__name__)
@@ -1127,30 +1128,39 @@ class VibeyAgent(BaseAgent):
         from core.workbench_media import file_attachments_from_specs, resolve_attachment_specs
 
         with self._engine.connect() as conn:
-            rows = conn.execute(
+            recovery_inputs = (
                 select(
                     messages.c.id,
                     messages.c.content_text,
                     messages.c.content_json,
+                )
+                .where(
+                    messages.c.session_id == session_id,
+                    sql_text(VIBEY_RECOVERY_INPUT_PREDICATE),
+                )
+                .cte("vibey_recovery_inputs")
+                .prefix_with("MATERIALIZED")
+            )
+            rows = conn.execute(
+                select(
+                    recovery_inputs.c.id,
+                    recovery_inputs.c.content_text,
+                    recovery_inputs.c.content_json,
                     message_deliveries.c.id.label("delivery_id"),
                     message_deliveries.c.turn_role,
                     session_turns.c.dispatch_text.label("turn_dispatch_text"),
                 )
                 .select_from(
-                    messages.join(message_deliveries, message_deliveries.c.message_id == messages.c.id).join(
-                        session_turns, session_turns.c.id == message_deliveries.c.turn_id
-                    )
+                    recovery_inputs.join(
+                        message_deliveries,
+                        message_deliveries.c.message_id == recovery_inputs.c.id,
+                    ).join(session_turns, session_turns.c.id == message_deliveries.c.turn_id)
                 )
                 .where(
-                    and_(
-                        messages.c.session_id == session_id,
-                        messages.c.context_seq.is_(None),
-                        messages.c.type.in_(INPUT_TYPES),
-                        message_deliveries.c.state == "accepted",
-                        session_turns.c.backend == BACKEND,
-                    )
+                    message_deliveries.c.state == "accepted",
+                    session_turns.c.backend == BACKEND,
                 )
-                .order_by(message_deliveries.c.materialized_at, message_deliveries.c.turn_position, messages.c.id)
+                .order_by(message_deliveries.c.materialized_at, message_deliveries.c.turn_position, recovery_inputs.c.id)
             ).mappings().all()
             inputs = []
             seen: set[str] = set()
@@ -1163,9 +1173,7 @@ class VibeyAgent(BaseAgent):
                     conn, session_id=session_id, attachments=list(content.get("attachments") or [])
                 )
                 delivery = delivery_store.get_delivery(conn, row["delivery_id"])
-                if delivery is None or delivery_store.is_vibey_resume_payload(
-                    delivery_store.execution_delivery_payload(conn, delivery)
-                ):
+                if delivery is None:
                     continue
                 # A Turn's initial input is sent as the Turn's dispatch text, which the Turn owner
                 # derived from its Delivery batch (attachment notes, merged scheduled inputs) and
@@ -1749,29 +1757,29 @@ class VibeyAgent(BaseAgent):
     def _sessions_with_unconsumed_inputs(self) -> list[str]:
         """Sessions with inputs accepted into a ``vibey`` Turn that no run consumed (T3)."""
         with self._engine.connect() as conn:
-            rows = conn.execute(
-                select(messages.c.session_id, message_deliveries.c.id.label("delivery_id"))
-                .select_from(
-                    messages.join(message_deliveries, message_deliveries.c.message_id == messages.c.id).join(
-                        session_turns, session_turns.c.id == message_deliveries.c.turn_id
-                    )
-                )
+            recovery_inputs = (
+                select(messages.c.id, messages.c.session_id)
                 .where(
                     messages.c.session_id.is_not(None),
-                    messages.c.context_seq.is_(None),
-                    messages.c.type.in_(INPUT_TYPES),
+                    sql_text(VIBEY_RECOVERY_INPUT_PREDICATE),
+                )
+                .cte("vibey_recovery_inputs")
+                .prefix_with("MATERIALIZED")
+            )
+            rows = conn.execute(
+                select(recovery_inputs.c.session_id)
+                .select_from(
+                    recovery_inputs.join(
+                        message_deliveries,
+                        message_deliveries.c.message_id == recovery_inputs.c.id,
+                    ).join(session_turns, session_turns.c.id == message_deliveries.c.turn_id)
+                )
+                .where(
                     message_deliveries.c.state == "accepted",
                     session_turns.c.backend == BACKEND,
                 )
-            ).all()
-            candidate_ids = set()
-            for session_id, delivery_id in rows:
-                delivery = delivery_store.get_delivery(conn, delivery_id)
-                if delivery is not None and not delivery_store.is_vibey_resume_payload(
-                    delivery_store.execution_delivery_payload(conn, delivery)
-                ):
-                    candidate_ids.add(session_id)
-            return sorted(candidate_ids)
+            ).scalars()
+            return sorted({str(session_id) for session_id in rows if session_id is not None})
 
     def _session_workdir(self, session_id: str) -> str:
         with self._engine.connect() as conn:
