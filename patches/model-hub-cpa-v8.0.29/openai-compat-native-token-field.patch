@@ -1,0 +1,157 @@
+diff --git a/internal/runtime/executor/helps/openai_compat_max_tokens.go b/internal/runtime/executor/helps/openai_compat_max_tokens.go
+index 71915c5b..9819da97 100644
+--- a/internal/runtime/executor/helps/openai_compat_max_tokens.go
++++ b/internal/runtime/executor/helps/openai_compat_max_tokens.go
+@@ -55,6 +55,13 @@ func NormalizeOpenAIMaxTokens(payload []byte, useMaxCompletionTokens bool) []byt
+ 		return payload
+ 	}
+ 
++	// Avibe leaves the option at its zero value so the caller's native field
++	// reaches the upstream unchanged. An explicit true still opts into the
++	// canonical max_completion_tokens spelling below.
++	if !useMaxCompletionTokens {
++		return payload
++	}
++
+ 	if useMaxCompletionTokens {
+ 		if hasMaxTokens && !hasMaxCompletionTokens {
+ 			val := gjson.GetBytes(payload, "max_tokens")
+diff --git a/internal/runtime/executor/helps/openai_compat_max_tokens_test.go b/internal/runtime/executor/helps/openai_compat_max_tokens_test.go
+index f1bd20aa..4f060378 100644
+--- a/internal/runtime/executor/helps/openai_compat_max_tokens_test.go
++++ b/internal/runtime/executor/helps/openai_compat_max_tokens_test.go
+@@ -147,27 +147,22 @@ func TestNormalizeOpenAIMaxTokens(t *testing.T) {
+ 		}
+ 	})
+ 
+-	t.Run("useMaxCompletionTokens=false converts max_completion_tokens to max_tokens", func(t *testing.T) {
++	// Avibe: false leaves the caller's native field unchanged.
++	t.Run("useMaxCompletionTokens=false keeps native max_completion_tokens", func(t *testing.T) {
+ 		input := []byte(`{"model":"deepseek","max_completion_tokens":1024,"messages":[]}`)
+ 		got := NormalizeOpenAIMaxTokens(input, false)
+ 
+-		if v := gjson.GetBytes(got, "max_tokens"); !v.Exists() || v.Int() != 1024 {
+-			t.Fatalf("max_tokens = %v, want 1024; out=%s", v, string(got))
+-		}
+-		if gjson.GetBytes(got, "max_completion_tokens").Exists() {
+-			t.Fatalf("max_completion_tokens should be deleted; out=%s", string(got))
++		if string(got) != string(input) {
++			t.Fatalf("payload changed; out=%s", string(got))
+ 		}
+ 	})
+ 
+-	t.Run("useMaxCompletionTokens=false preserves existing max_tokens and removes max_completion_tokens", func(t *testing.T) {
++	t.Run("useMaxCompletionTokens=false keeps both native fields", func(t *testing.T) {
+ 		input := []byte(`{"model":"deepseek","max_tokens":512,"max_completion_tokens":2048}`)
+ 		got := NormalizeOpenAIMaxTokens(input, false)
+ 
+-		if v := gjson.GetBytes(got, "max_tokens"); !v.Exists() || v.Int() != 512 {
+-			t.Fatalf("max_tokens = %v, want 512; out=%s", v, string(got))
+-		}
+-		if gjson.GetBytes(got, "max_completion_tokens").Exists() {
+-			t.Fatalf("max_completion_tokens should be deleted; out=%s", string(got))
++		if string(got) != string(input) {
++			t.Fatalf("payload changed; out=%s", string(got))
+ 		}
+ 	})
+ 
+@@ -199,11 +194,8 @@ func TestNormalizeOpenAIMaxTokens(t *testing.T) {
+ 		input := []byte(`{"model":"deepseek","max_completion_tokens":null}`)
+ 		got := NormalizeOpenAIMaxTokens(input, false)
+ 
+-		if v := gjson.GetBytes(got, "max_tokens"); !v.Exists() || v.Type != gjson.Null {
+-			t.Fatalf("max_tokens = %v, want null; out=%s", v, string(got))
+-		}
+-		if gjson.GetBytes(got, "max_completion_tokens").Exists() {
+-			t.Fatalf("max_completion_tokens should be deleted; out=%s", string(got))
++		if string(got) != string(input) {
++			t.Fatalf("payload changed; out=%s", string(got))
+ 		}
+ 	})
+ 
+diff --git a/internal/runtime/executor/openai_compat_executor_max_tokens_test.go b/internal/runtime/executor/openai_compat_executor_max_tokens_test.go
+index ff455092..9713812e 100644
+--- a/internal/runtime/executor/openai_compat_executor_max_tokens_test.go
++++ b/internal/runtime/executor/openai_compat_executor_max_tokens_test.go
+@@ -119,7 +119,7 @@ func TestOpenAICompatExecutor_MaxTokensNormalization(t *testing.T) {
+ 		}
+ 	})
+ 
+-	t.Run("Execute chat request with max_completion_tokens and use-max-completion-tokens=false converts to max_tokens", func(t *testing.T) {
++	t.Run("Execute chat request with max_completion_tokens and use-max-completion-tokens=false preserves max_completion_tokens", func(t *testing.T) {
+ 		gotBody = nil
+ 		payload := []byte(`{"model":"alias-legacy","messages":[{"role":"user","content":"hi"}],"max_completion_tokens":512}`)
+ 		_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+@@ -133,11 +133,11 @@ func TestOpenAICompatExecutor_MaxTokensNormalization(t *testing.T) {
+ 			t.Fatalf("Execute error: %v", err)
+ 		}
+ 
+-		if got := gjson.GetBytes(gotBody, "max_tokens").Int(); got != 512 {
+-			t.Fatalf("max_tokens = %d, want 512; body=%s", got, string(gotBody))
++		if got := gjson.GetBytes(gotBody, "max_completion_tokens").Int(); got != 512 {
++			t.Fatalf("max_completion_tokens = %d, want 512; body=%s", got, string(gotBody))
+ 		}
+-		if gjson.GetBytes(gotBody, "max_completion_tokens").Exists() {
+-			t.Fatalf("max_completion_tokens should be absent; body=%s", string(gotBody))
++		if gjson.GetBytes(gotBody, "max_tokens").Exists() {
++			t.Fatalf("max_tokens should be absent; body=%s", string(gotBody))
+ 		}
+ 	})
+ 
+@@ -221,11 +221,11 @@ func TestOpenAICompatExecutor_MaxTokensNormalization(t *testing.T) {
+ 			t.Fatalf("Execute error: %v", err)
+ 		}
+ 
+-		if got := gjson.GetBytes(gotBody, "max_tokens"); !got.Exists() || got.Type != gjson.Null {
+-			t.Fatalf("max_tokens = %v, want null; body=%s", got, string(gotBody))
++		if got := gjson.GetBytes(gotBody, "max_completion_tokens"); !got.Exists() || got.Type != gjson.Null {
++			t.Fatalf("max_completion_tokens = %v, want null; body=%s", got, string(gotBody))
+ 		}
+-		if gjson.GetBytes(gotBody, "max_completion_tokens").Exists() {
+-			t.Fatalf("max_completion_tokens should be absent; body=%s", string(gotBody))
++		if gjson.GetBytes(gotBody, "max_tokens").Exists() {
++			t.Fatalf("max_tokens should be absent; body=%s", string(gotBody))
+ 		}
+ 	})
+ }
+@@ -293,7 +293,7 @@ func TestOpenAICompatExecutor_MaxTokensNormalizationStream(t *testing.T) {
+ 		}
+ 	})
+ 
+-	t.Run("ExecuteStream with use-max-completion-tokens=false emits max_tokens", func(t *testing.T) {
++	t.Run("ExecuteStream with use-max-completion-tokens=false preserves max_completion_tokens", func(t *testing.T) {
+ 		gotBody = nil
+ 		payload := []byte(`{"model":"alias-legacy","messages":[{"role":"user","content":"hi"}],"max_completion_tokens":256}`)
+ 		res, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+@@ -309,11 +309,11 @@ func TestOpenAICompatExecutor_MaxTokensNormalizationStream(t *testing.T) {
+ 		for range res.Chunks {
+ 		}
+ 
+-		if got := gjson.GetBytes(gotBody, "max_tokens").Int(); got != 256 {
+-			t.Fatalf("max_tokens = %d, want 256; body=%s", got, string(gotBody))
++		if got := gjson.GetBytes(gotBody, "max_completion_tokens").Int(); got != 256 {
++			t.Fatalf("max_completion_tokens = %d, want 256; body=%s", got, string(gotBody))
+ 		}
+-		if gjson.GetBytes(gotBody, "max_completion_tokens").Exists() {
+-			t.Fatalf("max_completion_tokens should be absent; body=%s", string(gotBody))
++		if gjson.GetBytes(gotBody, "max_tokens").Exists() {
++			t.Fatalf("max_tokens should be absent; body=%s", string(gotBody))
+ 		}
+ 	})
+ 
+@@ -405,11 +405,11 @@ func TestOpenAICompatExecutor_MaxTokensNormalizationStream(t *testing.T) {
+ 		for range res.Chunks {
+ 		}
+ 
+-		if got := gjson.GetBytes(gotBody, "max_tokens"); !got.Exists() || got.Type != gjson.Null {
+-			t.Fatalf("max_tokens = %v, want null; body=%s", got, string(gotBody))
++		if got := gjson.GetBytes(gotBody, "max_completion_tokens"); !got.Exists() || got.Type != gjson.Null {
++			t.Fatalf("max_completion_tokens = %v, want null; body=%s", got, string(gotBody))
+ 		}
+-		if gjson.GetBytes(gotBody, "max_completion_tokens").Exists() {
+-			t.Fatalf("max_completion_tokens should be absent; body=%s", string(gotBody))
++		if gjson.GetBytes(gotBody, "max_tokens").Exists() {
++			t.Fatalf("max_tokens should be absent; body=%s", string(gotBody))
+ 		}
+ 	})
+ }
