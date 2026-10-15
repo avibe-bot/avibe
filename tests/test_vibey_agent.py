@@ -3724,7 +3724,7 @@ async def test_a_proxied_hosted_result_shows_once_its_result_is_committed(engine
 
     await harness.agent._on_event(run, ToolFinished("turn", 1, call.id, entry.row_id, False))
 
-    assert harness.controller.im_client.sent[-1:] == ["🔎 X search “from:OpenAI” · via xAI proxy · 1 post · $0.11"]
+    assert harness.controller.im_client.sent[-1:] == ["🔎 X search “from:OpenAI” · via xAI proxy (grok-4.6) · 1 post · $0.11"]
 
 
 def test_an_image_is_attached_unless_the_reply_already_links_it(tmp_path) -> None:

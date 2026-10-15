@@ -1793,6 +1793,7 @@
     "mode": {
       "native": "原生（{provider}）",
       "proxy": "由 {provider} 代理",
+      "proxyModel": "由 {provider} 代理（{model}）",
       "direct": "{provider} 直连"
     },
     "count": {

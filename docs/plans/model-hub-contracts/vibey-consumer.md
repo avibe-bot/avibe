@@ -10,6 +10,10 @@ adapter remain C-8 work.
 returns the serialized `HopResolution` in `hop-resolution.schema.json`. It calls
 the existing `resolve("vibey", ...)`; `ModelHubLaunch.to_hop_resolution()` projects
 that launch. There is no second planner, credential store, or upstream client.
+Its `capabilities.context_price_steps` are where the target model's list price
+rises with its context (`pricing.context_price_steps`), read from the price table
+the usage writer already holds, so resolution does no I/O for them; a hop
+resolved before the first table is read reports none.
 
 The backend id is `vibey`. It has a fixed catalog (ordinary editable model rows),
 no native protocol pin, no native CLI, and no Direct mode. Until its starting

@@ -128,6 +128,9 @@ class ModelCapabilities:
     supports_images: Optional[bool] = None
     supports_reasoning: Optional[bool] = None
     reasoning_efforts: tuple[str, ...] = ()
+    #: The context sizes past which the model's list price steps up, ascending; empty when flat or unknown. C-9 keeps
+    #: the compaction threshold below the smallest one it can (``context.md`` section 1).
+    context_price_steps: tuple[int, ...] = ()
 
 
 class MediaLoader(Protocol):

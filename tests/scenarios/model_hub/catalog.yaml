@@ -243,7 +243,7 @@ scenarios:
     layer: unit
     test:
       - 'ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-008: shows a native and a proxied call the same way, each with how it ran and its known cost'
-      - 'ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-008: shows a direct image call with how it ran, its file and the prompt it rendered, and no cost when none is known'
+      - 'ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-008: shows a direct image call by its model and Source, with its size, file and prompt, and no cost when none is known'
       - 'ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-008: shows a total an unpriced attempt left only as a lower bound'
   - id: MH-HOSTED-UI-009
     name: A hosted call's card payload is projected from the canonical C-1 records in the shape the Web renders

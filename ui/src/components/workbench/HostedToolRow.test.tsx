@@ -59,7 +59,7 @@ describe('hosted tool cards', () => {
     within(native).getByText('2 sources');
 
     const proxy = row('call_x1');
-    within(proxy).getByText('Via xAI proxy');
+    within(proxy).getByText('Via xAI proxy · grok-4.6');
     within(proxy).getByText('$0.11');
     within(proxy).getByText('2 posts');
 
@@ -81,14 +81,14 @@ describe('hosted tool cards', () => {
     within(failed).getByText('no Source is verified for X search');
   });
 
-  it('MH-HOSTED-UI-008: shows a direct image call with how it ran, its file and the prompt it rendered, and no cost when none is known', () => {
+  it('MH-HOSTED-UI-008: shows a direct image call by its model and Source, with its size, file and prompt, and no cost when none is known', () => {
     renderGroup([{
       ...fixture.direct_image,
       images: [{ ...fixture.direct_image.images[0], media_url: '/api/media/tok_3f2a?w=1536&h=1024', bytes: 1_993_000 }],
     }]);
     const image = row('call_ig1');
     within(image).getByText('image_generate');
-    within(image).getByText('Direct · OpenAI');
+    within(image).getByText('gpt-image-2 · relay-gpt');
     within(image).getByText('1 image · 1536×1024');
     expect(image.textContent).not.toMatch(/\$/);
 
@@ -98,7 +98,10 @@ describe('hosted tool cards', () => {
     expect((figure.querySelector('img') as HTMLImageElement).getAttribute('src')).toBe('/api/media/tok_3f2a?w=1536&h=1024');
     within(figure).getByRole('link', { name: '3f2a.png' });
     within(figure).getByText('1.9 MB');
-    within(figure).getByText('Revised prompt');
+    // The image as made: model and size, then where it ran.
+    within(figure).getByText('gpt-image-2 · 1536×1024');
+    within(figure).getByText('relay-gpt');
+    within(figure).getByText('Prompt');
     within(figure).getByText(fixture.direct_image.revised_prompt);
   });
 
@@ -155,7 +158,7 @@ describe('hosted tool cards', () => {
   it('reads in Chinese with the same facts', () => {
     renderGroup(['proxy_x_search'], 'zh');
     const proxy = row('call_x1');
-    within(proxy).getByText('由 xAI 代理');
+    within(proxy).getByText('由 xAI 代理 · grok-4.6');
     within(proxy).getByText('2 条帖子');
   });
 });

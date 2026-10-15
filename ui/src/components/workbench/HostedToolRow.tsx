@@ -4,7 +4,7 @@
 // sources or image it produced. Every mode draws the same card from the same record.
 import * as React from 'react';
 import { useTranslation } from 'react-i18next';
-import { AtSign, Check, ChevronRight, CircleSlash, Download, FileImage, Globe, Image as ImageIcon, TriangleAlert, Waypoints, WandSparkles, Zap } from 'lucide-react';
+import { AtSign, Check, ChevronRight, CircleSlash, Download, FileImage, Globe, Image as ImageIcon, TriangleAlert, Type, Waypoints } from 'lucide-react';
 import clsx from 'clsx';
 
 import { ChatImage } from '../ui/chat-image';
@@ -83,15 +83,21 @@ export const HostedModeChip: React.FC<{ card: HostedActivity }> = ({ card }) => 
     );
   }
   const vendor = vendorLabel(card.provider);
-  if (!vendor) return null;
   if (card.mode === 'direct') {
+    // An image call names the model it picked and where it ran, not a vendor: the model is the choice.
+    const where = card.source_name ?? vendor;
+    const label = card.model && where
+      ? t('chat.agentActivity.hosted.mode.directModel', { model: card.model, source: where })
+      : vendor && t('chat.agentActivity.hosted.mode.direct', { provider: vendor });
+    if (!label) return null;
     return (
       <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-cyan/40 bg-cyan-soft px-2 py-px text-[11px] font-medium text-cyan-ink">
-        <Zap className="size-3" aria-hidden="true" />
-        {t('chat.agentActivity.hosted.mode.direct', { provider: vendor })}
+        <ImageIcon className="size-3" aria-hidden="true" />
+        {label}
       </span>
     );
   }
+  if (!vendor) return null;
   return card.mode === 'native' ? (
     <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-mint/40 bg-mint-soft px-2 py-px text-[11px] font-medium text-mint-ink">
       <Check className="size-3" aria-hidden="true" />
@@ -100,7 +106,9 @@ export const HostedModeChip: React.FC<{ card: HostedActivity }> = ({ card }) => 
   ) : (
     <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-cyan/40 bg-cyan-soft px-2 py-px text-[11px] font-medium text-cyan-ink">
       <Waypoints className="size-3" aria-hidden="true" />
-      {t('chat.agentActivity.hosted.mode.proxy', { provider: vendor })}
+      {card.model
+        ? t('chat.agentActivity.hosted.mode.proxyModel', { provider: vendor, model: card.model })
+        : t('chat.agentActivity.hosted.mode.proxy', { provider: vendor })}
     </span>
   );
 };
@@ -131,7 +139,18 @@ export const HostedImageFigure: React.FC<{ card: HostedActivity; image: HostedAc
         : null}
       <figcaption className="flex flex-col">
         <span className="flex flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2 text-[11px] text-muted">
-          <HostedModeChip card={card} />
+          {card.mode === 'direct' && card.model
+            ? (
+                <>
+                  {/* The image as made: the model and its size, then where it ran. */}
+                  <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-cyan/40 bg-cyan-soft px-2 py-px font-medium text-cyan-ink">
+                    <ImageIcon className="size-3" aria-hidden="true" />
+                    {image.width && image.height ? `${card.model} · ${image.width}×${image.height}` : card.model}
+                  </span>
+                  {(card.source_name ?? vendorLabel(card.provider)) && <span>{card.source_name ?? vendorLabel(card.provider)}</span>}
+                </>
+              )
+            : <HostedModeChip card={card} />}
           {cost && <span>{cost}</span>}
           <span className="ml-auto inline-flex min-w-0 items-center gap-1.5">
             <FileImage className="size-3.5 shrink-0 text-cyan-ink" aria-hidden="true" />
@@ -145,8 +164,8 @@ export const HostedImageFigure: React.FC<{ card: HostedActivity; image: HostedAc
         {card.revised_prompt && (
           <span className="flex flex-col gap-1 border-t border-border px-3 py-2">
             <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-muted">
-              <WandSparkles className="size-3" aria-hidden="true" />
-              {t('chat.agentActivity.hosted.image.revisedPrompt')}
+              <Type className="size-3" aria-hidden="true" />
+              {t('chat.agentActivity.hosted.image.prompt')}
             </span>
             <span className="text-[12px] leading-relaxed text-foreground/90">{card.revised_prompt}</span>
           </span>
@@ -173,7 +192,7 @@ const HostedDetail: React.FC<{ card: HostedActivity }> = ({ card }) => {
           {completed && (card.mode === 'native'
             ? <Check className="size-3 shrink-0 text-mint-ink" aria-hidden="true" />
             : card.mode === 'direct'
-              ? <Zap className="size-3 shrink-0 text-cyan-ink" aria-hidden="true" />
+              ? <ImageIcon className="size-3 shrink-0 text-cyan-ink" aria-hidden="true" />
               : <Waypoints className="size-3 shrink-0 text-cyan-ink" aria-hidden="true" />)}
           <span className="min-w-0">{facts.join(' · ')}</span>
         </div>
