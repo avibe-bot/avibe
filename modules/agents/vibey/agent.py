@@ -113,6 +113,7 @@ from storage.agent_transcript import (
     call_instance_result,
     final_outcome,
     render_text,
+    text_parts,
 )
 from storage.db import get_cached_sqlite_engine
 from storage.models import agent_events, agent_sessions, message_deliveries, messages, session_turns
@@ -1240,8 +1241,8 @@ class VibeyAgent(BaseAgent):
         token that delivery writes out as a Markdown link (IM) and a badge (Web),
         through ``core.citations`` like every other backend's citations.
         """
-        blocks = [(block.text, block.citations or ()) for block in message.content if isinstance(block, TextBlock) and block.text]
-        if not any(citations for _, citations in blocks):
+        blocks = [(separator, block.text, block.citations or ()) for separator, block in text_parts(message)]
+        if not any(citations for _, _, citations in blocks):
             return self._display_source(message, final=final, replied=replied, images=images), None
         body, bundle = register_text_citations(
             blocks,
