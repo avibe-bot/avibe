@@ -95,7 +95,7 @@ from .address_repair import (
     payload_carries_credential_address,
     repair_credential_addresses,
 )
-from .async_owner import await_owned_task
+from .async_owner import await_owned_task, run_owned_in_thread
 from .catalog_admission import (
     admissible_backend_model,
     backend_model_admission_error,
@@ -1658,7 +1658,19 @@ class ModelHubService:
         wake-up are loop state and stay on the loop.
         """
 
-        canonical = await asyncio.to_thread(self._persist_config, config.to_payload())
+        worker = asyncio.create_task(asyncio.to_thread(self._persist_config, config.to_payload()))
+        try:
+            canonical = await asyncio.shield(worker)
+        except asyncio.CancelledError as cancelled:
+            # The write is underway in its thread and will land. Hold the caller, and the mutation lock it holds,
+            # until it has, and publish it: otherwise a later write could start from the older snapshot and be
+            # overwritten when this one finishes.
+            try:
+                canonical = await await_owned_task(worker)
+            except BaseException:
+                raise cancelled from None
+            self._publish_saved(canonical)
+            raise cancelled
         return self._publish_saved(canonical)
 
     def _publish_saved(self, canonical: ModelHubConfig) -> ModelHubConfig:
@@ -9342,7 +9354,8 @@ class ModelHubService:
 
         try:
             async with self._mutation_lock:
-                await asyncio.to_thread(self.store.mutate, clear_current)
+                # Held under the mutation lock until the write lands, even if the caller is cancelled.
+                await run_owned_in_thread(self.store.mutate, clear_current)
             return
         except ValueError as exc:
             if "recovery warnings" not in str(exc):

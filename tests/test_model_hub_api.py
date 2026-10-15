@@ -10753,3 +10753,31 @@ async def test_a_config_save_never_holds_the_controller_loop(tmp_path):
     await writing
     assert released_in_time == [True]
     assert store.config.hosted_tools["web_search"].enabled is False
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_save_holds_the_mutation_lock_until_its_write_lands(tmp_path):
+    """The write runs on in its thread after the caller is cancelled; releasing the lock early would let a later
+    write start from the older snapshot and be overwritten when this one lands."""
+    import threading
+
+    service, store, _adapter = _service(tmp_path)
+    entered, release = threading.Event(), threading.Event()
+    save = store.save
+
+    def held_save(config):
+        entered.set()
+        assert release.wait(5)
+        save(config)
+
+    store.save = held_save
+    writing = asyncio.create_task(service.set_hosted_tool("web_search", {"enabled": False}))
+    assert await asyncio.to_thread(entered.wait, 5)
+    writing.cancel()
+    await asyncio.sleep(0.05)
+    assert service._mutation_lock.locked()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await writing
+    assert not service._mutation_lock.locked()
+    assert store.config.hosted_tools["web_search"].enabled is False
