@@ -1075,18 +1075,18 @@ class TextCitation(Protocol):
 
 
 def register_text_citations(
-    blocks: Iterable[tuple[str, Iterable[TextCitation]]],
+    blocks: Iterable[tuple[str, str, Iterable[TextCitation]]],
     *,
     unresolved_label: str,
-    separator: str = "\n\n",
     transform: Callable[[str], str] = lambda text: text,
 ) -> tuple[str, Optional[CitationBundle]]:
     """Register the citations providers attach to text blocks, as ``register_citations`` does markers.
 
-    The one builder from ``(text, TextBlock.citations)`` to the delivered shape
-    (``vibey-hosted-tools.md`` §4.2): each block's text joined by ``separator``,
-    with an opaque token where each citation is written out at delivery, and the
-    bundle that writes Markdown links plus the Web's badge sidecar.
+    The one builder from ``(separator, text, TextBlock.citations)`` to the delivered
+    shape (``vibey-hosted-tools.md`` §4.2): each block's text after its separator,
+    what goes before it in the display (nothing between adjacent blocks, which are
+    one span of prose), with an opaque token where each citation is written out at
+    delivery, and the bundle that writes Markdown links plus the Web's badge sidecar.
 
     A citation with a range is attributed where its cited span ends (OpenAI and
     xAI ``url_citation``); one without covers its whole block, so it is
@@ -1096,8 +1096,8 @@ def register_text_citations(
     left out rather than written as a stray marker.
     """
     sources: dict[str, CitationSource] = {}
-    parts: list[str] = []
-    for block_index, (text, citations) in enumerate(blocks):
+    joined = ""
+    for block_index, (separator, text, citations) in enumerate(blocks):
         at: dict[int, list[str]] = {}
         # A block the display rules remove entirely shows nothing to cite; its
         # end-of-block citation would otherwise survive past the removed text.
@@ -1112,8 +1112,9 @@ def register_text_citations(
         for offset in sorted(at, reverse=True):
             marker = f"{_START}cite{_SEP}{_SEP.join(at[offset])}{_END}"
             marked = marked[:offset] + marker + marked[offset:]
-        parts.append(marked)
-    joined = transform(separator.join(part for part in parts if part))
+        if marked:
+            joined += (separator if joined else "") + marked
+    joined = transform(joined)
     if not sources:
         return joined, None
     registered, bundle = register_citations(joined, sources, unresolved_label=unresolved_label)

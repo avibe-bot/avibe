@@ -275,13 +275,14 @@ scenarios:
       - tests/test_agent_transcript.py::test_a_final_commits_as_the_loops_reply_decision_says
       - tests/agent_core/agent/test_loop.py::test_a_reply_counts_the_images_of_the_tool_result_that_committed_not_the_writer_that_lost
   - id: MH-HOSTED-UI-011
-    name: Vibey delivers a native hosted call as its IM line and Web card, and its answer with provider citations as links
+    name: Vibey delivers a native hosted call as its IM line and Web card, and its answer with provider citations as links, an answer split into adjacent text blocks reading as written
     status: covered
     kind: contract
     layer: contract
     test: tests/test_vibey_agent.py::test_a_native_hosted_call_reaches_im_as_one_line_with_its_cited_answer
     related_tests:
       - tests/test_vibey_agent.py::test_a_native_hosted_call_reaches_the_workbench_as_a_card_and_cited_answer
+      - tests/test_vibey_agent.py::test_an_answer_split_into_adjacent_text_blocks_reads_as_written
       - tests/test_vibey_agent.py::test_a_proxied_hosted_result_shows_once_its_result_is_committed
   - id: MH-HOSTED-UI-014
     name: A hosted call that did not complete shows its status and any known charge, and claims neither how it ran nor what it found, on the IM line and the Web card (collapsed or expanded)

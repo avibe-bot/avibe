@@ -1,0 +1,181 @@
+{
+  "_recorded": "A real Vibey turn on claude-sonnet-5 through Model Hub (an Anthropic API-key Source) with native web_search, from the regression environment at 073746d4c: the committed response's C-1 content blocks. Every encrypted_content, encrypted_index and signature value is replaced with <dropped>.",
+  "content": [
+    {
+      "type": "thinking",
+      "text": "",
+      "signature": "<dropped>"
+    },
+    {
+      "type": "hosted_tool",
+      "id": "srvtoolu_01M3sEMqZAL6JWbXkmCZZmuA",
+      "tool": "web_search",
+      "action": {
+        "type": "search",
+        "queries": [
+          "avibe-bot/avibe latest release GitHub"
+        ]
+      },
+      "record": {
+        "status": "completed",
+        "sources": [
+          {
+            "url": "https://github.com/avibe-bot/avibe/releases/tag/v3.1.1",
+            "title": "Release v3.1.1 · avibe-bot/avibe · GitHub"
+          },
+          {
+            "url": "https://github.com/avibe-bot/avibe/releases/tag/v3.1.2",
+            "title": "Release v3.1.2 · avibe-bot/avibe · GitHub"
+          },
+          {
+            "url": "https://github.com/avibe-bot/avibe/releases/tag/v3.1.3",
+            "title": "Release v3.1.3 · avibe-bot/avibe · GitHub"
+          },
+          {
+            "url": "https://github.com/avibe-bot/avibe/releases/tag/gh-v3.1.2rc8",
+            "title": "Release gh-v3.1.2rc8 · avibe-bot/avibe · GitHub"
+          },
+          {
+            "url": "https://github.com/avibe-bot/avibe/releases/tag/gh-v3.1.2rc9",
+            "title": "Release gh-v3.1.2rc9 · avibe-bot/avibe · GitHub"
+          },
+          {
+            "url": "https://github.com/avibe-bot/avibe/releases/tag/gh-v3.1.1rc20",
+            "title": "Release gh-v3.1.1rc20 · avibe-bot/avibe · GitHub"
+          },
+          {
+            "url": "https://github.com/avibe-bot/avibe/releases/tag/gh-v3.1.2rc7",
+            "title": "Release gh-v3.1.2rc7 · avibe-bot/avibe · GitHub"
+          },
+          {
+            "url": "https://github.com/avibe-bot/avibe/releases/tag/gh-v3.1.2rc4",
+            "title": "Release gh-v3.1.2rc4 · avibe-bot/avibe · GitHub"
+          },
+          {
+            "url": "https://github.com/avibe-bot/avibe/releases/tag/gh-v3.1.2rc3",
+            "title": "Release gh-v3.1.2rc3 · avibe-bot/avibe · GitHub"
+          }
+        ]
+      },
+      "native": {
+        "source_id": "src_5302e8a5ebc5cfb9",
+        "payload": [
+          {
+            "type": "server_tool_use",
+            "id": "srvtoolu_01M3sEMqZAL6JWbXkmCZZmuA",
+            "name": "web_search",
+            "input": {
+              "query": "avibe-bot/avibe latest release GitHub"
+            }
+          },
+          {
+            "type": "web_search_tool_result",
+            "tool_use_id": "srvtoolu_01M3sEMqZAL6JWbXkmCZZmuA",
+            "content": [
+              {
+                "type": "web_search_result",
+                "title": "Release v3.1.1 · avibe-bot/avibe · GitHub",
+                "url": "https://github.com/avibe-bot/avibe/releases/tag/v3.1.1",
+                "encrypted_content": "<dropped>",
+                "page_age": null
+              },
+              {
+                "type": "web_search_result",
+                "title": "Release v3.1.2 · avibe-bot/avibe · GitHub",
+                "url": "https://github.com/avibe-bot/avibe/releases/tag/v3.1.2",
+                "encrypted_content": "<dropped>",
+                "page_age": null
+              },
+              {
+                "type": "web_search_result",
+                "title": "Release v3.1.3 · avibe-bot/avibe · GitHub",
+                "url": "https://github.com/avibe-bot/avibe/releases/tag/v3.1.3",
+                "encrypted_content": "<dropped>",
+                "page_age": null
+              },
+              {
+                "type": "web_search_result",
+                "title": "Release gh-v3.1.2rc8 · avibe-bot/avibe · GitHub",
+                "url": "https://github.com/avibe-bot/avibe/releases/tag/gh-v3.1.2rc8",
+                "encrypted_content": "<dropped>",
+                "page_age": null
+              },
+              {
+                "type": "web_search_result",
+                "title": "Release gh-v3.1.2rc9 · avibe-bot/avibe · GitHub",
+                "url": "https://github.com/avibe-bot/avibe/releases/tag/gh-v3.1.2rc9",
+                "encrypted_content": "<dropped>",
+                "page_age": null
+              },
+              {
+                "type": "web_search_result",
+                "title": "Release gh-v3.1.1rc20 · avibe-bot/avibe · GitHub",
+                "url": "https://github.com/avibe-bot/avibe/releases/tag/gh-v3.1.1rc20",
+                "encrypted_content": "<dropped>",
+                "page_age": null
+              },
+              {
+                "type": "web_search_result",
+                "title": "Release gh-v3.1.2rc7 · avibe-bot/avibe · GitHub",
+                "url": "https://github.com/avibe-bot/avibe/releases/tag/gh-v3.1.2rc7",
+                "encrypted_content": "<dropped>",
+                "page_age": null
+              },
+              {
+                "type": "web_search_result",
+                "title": "Release gh-v3.1.2rc4 · avibe-bot/avibe · GitHub",
+                "url": "https://github.com/avibe-bot/avibe/releases/tag/gh-v3.1.2rc4",
+                "encrypted_content": "<dropped>",
+                "page_age": null
+              },
+              {
+                "type": "web_search_result",
+                "title": "Release gh-v3.1.2rc3 · avibe-bot/avibe · GitHub",
+                "url": "https://github.com/avibe-bot/avibe/releases/tag/gh-v3.1.2rc3",
+                "encrypted_content": "<dropped>",
+                "page_age": null
+              }
+            ],
+            "caller": {
+              "type": "direct"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "text",
+      "text": "The latest Avibe release on GitHub (avibe-bot/avibe) is "
+    },
+    {
+      "type": "text",
+      "text": "v3.1.3",
+      "citations": [
+        {
+          "url": "https://github.com/avibe-bot/avibe/releases/tag/v3.1.3",
+          "title": "Release v3.1.3 · avibe-bot/avibe · GitHub",
+          "cited_text": "- Release v3.1.3 · avibe-bot/avibe\n\n# Choose a tag to compare\n## No results found\n@github-actions github-actions released this 03 Oct 16:12\n\n· 3 commi..."
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "text": ", released October 3, which "
+    },
+    {
+      "type": "text",
+      "text": "disables thinking display updates up front for Claude Code sessions launched through Model Hub to avoid HTTP 400 compatibility errors",
+      "citations": [
+        {
+          "url": "https://github.com/avibe-bot/avibe/releases/tag/v3.1.3",
+          "title": "Release v3.1.3 · avibe-bot/avibe · GitHub",
+          "cited_text": "Avibe v3.1.3 Highlights Claude Code sessions launched through Model Hub now disable thinking display updates up front, avoiding HTTP 400 compatibility..."
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "text": "."
+    }
+  ]
+}

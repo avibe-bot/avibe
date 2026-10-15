@@ -59,6 +59,7 @@ from core.agent_core.messages import (
     ToolResultMessage,
     UserMessage,
     text,
+    message_from_dict,
     message_to_dict,
 )
 from core.agent_core.tools.base import CallInstance, JobStatus, ToolResult, ToolSpec
@@ -4031,6 +4032,75 @@ async def test_a_native_hosted_call_reaches_im_as_one_line_with_its_cited_answer
     [answer] = [item for item in sent if item.startswith("Domain filters shipped.")]
     # The citation is a Markdown link where its span ends.
     assert f"]({CHANGELOG})" in answer
+
+
+RELEASE = "https://github.com/avibe-bot/avibe/releases/tag/v3.1.3"
+
+
+def _recorded_cited_answer(*, cited: bool = True, said_first: str = "") -> list:
+    """A real Anthropic native web search turn (``tests/fixtures/anthropic_cited_answer.json``): the answer is five
+    adjacent text blocks, split at its two cited spans. ``said_first`` puts a sentence before the search."""
+    recorded = json.loads((Path(__file__).parent / "fixtures" / "anthropic_cited_answer.json").read_text())
+    content = recorded["content"]
+    if not cited:
+        content = [{key: value for key, value in block.items() if key != "citations"} for block in content]
+    if said_first:
+        content = [content[0], {"type": "text", "text": said_first}, *content[1:]]
+    message = message_from_dict({
+        "role": "assistant",
+        "content": content,
+        "origin": {"provider": ORIGIN.provider, "api": ORIGIN.api, "model": ORIGIN.model},
+        "stop_reason": "stop",
+        "hosted_summary": {"counts": {}, "cited_sources": []},
+    })
+    return [[Done(message)]]
+
+
+@pytest.mark.parametrize(
+    ("cited", "said_first", "answer"),
+    [
+        (
+            True,
+            "",
+            f"The latest Avibe release on GitHub (avibe-bot/avibe) is v3.1.3 [github.com]({RELEASE}), released "
+            "October 3, which disables thinking display updates up front for Claude Code sessions launched through "
+            f"Model Hub to avoid HTTP 400 compatibility errors [github.com]({RELEASE}).",
+        ),
+        (
+            False,
+            "",
+            "The latest Avibe release on GitHub (avibe-bot/avibe) is v3.1.3, released October 3, which disables "
+            "thinking display updates up front for Claude Code sessions launched through Model Hub to avoid HTTP 400 "
+            "compatibility errors.",
+        ),
+        # Text the search came between is two paragraphs.
+        (
+            False,
+            "Let me check the releases.",
+            "Let me check the releases.\n\nThe latest Avibe release on GitHub (avibe-bot/avibe) is v3.1.3, released "
+            "October 3, which disables thinking display updates up front for Claude Code sessions launched through "
+            "Model Hub to avoid HTTP 400 compatibility errors.",
+        ),
+    ],
+    ids=["recorded", "uncited", "text-before-the-search"],
+)
+async def test_an_answer_split_into_adjacent_text_blocks_reads_as_written(
+    engine, session, tmp_path, published, cited, said_first, answer
+) -> None:
+    """MH-HOSTED-UI-011: Anthropic splits its answer into adjacent text blocks at every cited span. They are one span
+    of prose: the reply joins them as written, each citation link closing its span, and breaks a paragraph only where
+    another block, such as the search itself, came between two texts. The Workbench row and the IM reply agree."""
+    rows = {}
+    for platform in ("avibe", "telegram"):
+        harness = _Harness(engine, tmp_path / platform, platform, _recorded_cited_answer(cited=cited, said_first=said_first))
+        await harness.agent.handle_message(harness.request("what is the latest avibe release?"))
+        rows[platform] = harness.rows("result")[-1]
+        if platform == "telegram":
+            assert answer in harness.controller.im_client.sent
+
+    assert rows["avibe"]["content_text"] == answer
+    citations = json.loads(rows["avibe"]["content_json"]).get("citations") or []
+    assert [citation["url"] for citation in citations] == ([RELEASE] if cited else [])
 
 
 async def test_a_native_hosted_call_reaches_the_workbench_as_a_card_and_cited_answer(

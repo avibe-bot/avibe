@@ -147,11 +147,33 @@ def _response_type(message: AssistantMessage, *, final: bool, display_text: str,
     return "result" if display_text.strip() else "assistant"
 
 
+#: What a response's display puts between two text blocks another block (a tool or hosted call, thinking) separates.
+PARAGRAPH_BREAK = "\n\n"
+
+
+def text_parts(message: AssistantMessage) -> list[tuple[str, TextBlock]]:
+    """A response's text blocks as its display joins them: each non-empty block with what goes before it.
+
+    Adjacent blocks are one span of prose and join as written: a provider may split
+    its answer into many, as Anthropic does at every cited span. A paragraph break
+    goes only where another block came between two of them.
+    """
+    parts: list[tuple[str, TextBlock]] = []
+    separated = False
+    for block in message.content:
+        if not isinstance(block, TextBlock):
+            separated = True
+        elif block.text:
+            parts.append((PARAGRAPH_BREAK if parts and separated else "", block))
+            separated = False
+    return parts
+
+
 def render_text(
     message: AssistantMessage, *, final: bool = False, replied: bool = True, images: Sequence[HostedImage] = ()
 ) -> str:
-    """Default display copy of a response: its text blocks, verbatim, in order."""
-    return "\n\n".join(block.text for block in message.content if isinstance(block, TextBlock) and block.text)
+    """Default display copy of a response: its text blocks, verbatim, in order, joined as ``text_parts`` says."""
+    return "".join(separator + block.text for separator, block in text_parts(message))
 
 
 class TranscriptError(RuntimeError):
