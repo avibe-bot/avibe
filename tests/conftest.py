@@ -636,11 +636,13 @@ class _ForeignSignalGuard:
 
     The test owns its ``subprocess.Popen`` children and any process it has
     signalled as its own; the founder rule keeps an orphan in a spawned child's
-    group signalable after reparenting hides it from ancestry. The ``tmp_path``
+    group signalable after reparenting hides it from ancestry. The directory
     rule covers a detached grandchild, which keeps nothing else that ties it to
-    the test and is what harnesses such as the Model Hub e2e driver clean up by.
-    It is the only grant over processes outside the tree, so it names this
-    test's directory, never the shared temp root. A pid that names no process
+    the test and is what harnesses such as the Model Hub e2e driver clean up by:
+    a process whose command line names this test's ``tmp_path``, or a fresh
+    directory the test claimed for its own runtime (``claim_test_directory``).
+    It is the only grant over processes outside the tree, so it names the
+    test's own directories, never a shared temp root. A pid that names no process
     gets the ESRCH the real call would raise, delivered to nothing, because a
     descendant the test collected may exit before it is signalled. Signal 0 is
     a liveness probe and passes.
@@ -662,7 +664,7 @@ class _ForeignSignalGuard:
     def __init__(self, test_temp: Path) -> None:
         self.me = _REAL_OS_GETPID()
         # The whole final component: `test_x1` must not claim `test_x10`.
-        self.names_test_temp = process_reaper.names_path(test_temp)
+        self.names_own_directory = [process_reaper.names_path(test_temp)]
         self.owned: set[int] = set()
         # Every pid psutil listed while this test ran: a scan finds real processes by design.
         self.listed: set[int] = set()
@@ -695,7 +697,7 @@ class _ForeignSignalGuard:
             cmdline = _REAL_PSUTIL_PROCESS(pid).cmdline()
         except psutil.Error:
             cmdline = []
-        if any(self.names_test_temp(part) for part in cmdline):
+        if any(names(part) for names in self.names_own_directory for part in cmdline):
             self.owned.add(pid)
             return True
         return False
@@ -790,6 +792,22 @@ class _ForeignSignalGuard:
 
 # The running test's guard, or None between tests and in opted-out tests.
 _active_signal_guard: _ForeignSignalGuard | None = None
+
+
+def claim_test_directory(path: Path) -> None:
+    """Let the running test signal the processes whose command line names ``path``.
+
+    For a harness that roots its runtime in a fresh directory of its own outside
+    ``tmp_path``, such as the Model Hub e2e app under ``/tmp``, whose socket
+    paths would not fit under ``tmp_path``. Claim only a directory this test
+    just created with a unique name, never a shared root. Both spellings are
+    claimed, as written and as resolved: on macOS ``/tmp`` is ``/private/tmp``,
+    and what the app starts names whichever spelling it was handed.
+    """
+
+    if _active_signal_guard is not None:
+        for spelling in dict.fromkeys((os.path.abspath(path), os.path.realpath(path))):
+            _active_signal_guard.names_own_directory.append(process_reaper.names_path(Path(spelling)))
 
 
 def _called_from_product(caller) -> bool:
