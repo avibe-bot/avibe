@@ -1378,8 +1378,14 @@ describe('connection dialog frame', () => {
     expect(rows()).toEqual([{ title: 'OpenAI', id: 'openai' }, { title: 'Qwen', id: 'alibaba-cn' }]);
 
     fireEvent.click(screen.getByRole('button', { name: /More providers \(2\)/ }));
-    // Both stay reachable under More, under what they were configured as.
-    expect(rows().slice(2)).toEqual([{ title: 'gemini', id: 'gemini' }, { title: '内部中转', id: 'dashscope' }]);
+    // Both stay reachable under More, under what they were configured as. Their
+    // display order follows the user's locale, so the identity contract is order-free.
+    const moreRows = rows().slice(2);
+    expect(moreRows).toHaveLength(2);
+    expect(moreRows).toEqual(expect.arrayContaining([
+      { title: 'gemini', id: 'gemini' },
+      { title: '内部中转', id: 'dashscope' },
+    ]));
     // And they are drawn as what they are — an address you supply, the same
     // mark the custom vendor has always used — not as the brand they sit next to.
     const mark = (id: string) => nodes().find((node) => node.querySelector('small')?.textContent === id)
