@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useLayoutEffect, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
-import { ArrowLeft, ArrowLeftRight, ChevronRight, ExternalLink, KeyRound, X } from 'lucide-react';
+import { ChevronRight, ExternalLink, KeyRound, X } from 'lucide-react';
 
 import { ApiError, useApi, type InboxSession, type RunningAgent, type VaultRequest, type WorkbenchMessage } from '@/context/ApiContext';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
@@ -26,7 +26,6 @@ import { derivePetPose, derivePetState, latestExchange, latestFailureNotice, ope
 import { useConversationAgentSnapshot } from './useConversationAgentWorking';
 import { usePetSession, type PetSurfaceEpoch } from './usePetSession';
 import { usePetSetup } from './usePetSetup';
-import { useSessionSwitcher } from './useSessionSwitcher';
 import { usePetReplyActivities } from './usePetReplyActivities';
 import { FencedSource } from './fencedSource';
 import './pet-mini.css';
@@ -205,37 +204,15 @@ function useVisibleActivityActions(enabled: boolean, epoch: PetSurfaceEpoch, ses
 const PetSurface: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
-  const rawBinding = usePetBinding();
-  const binding = rawBinding ?? null;
+  const binding = usePetBinding();
   const { capabilities } = useInstanceAuthorization();
   const inbox = useWorkbenchInbox();
   const { expanded, setPanel } = usePetPanel();
   const { draft, references: draftReferences, uncertain, sending, listenPending, setDraft, setUncertain } = usePetComposer(binding);
-  const data = usePetSession(binding, petShell.unbind);
+  const data = usePetSession(binding);
   const epoch = data.epoch;
   const canChat = capabilities.can_chat && data.canChat === true;
-  // Bind the stable main session when the shell has no current session. A session
-  // it already handed out is never re-bound once it was cleared as invalid, so a
-  // bad answer cannot turn into a bind/clear loop.
-  const ensured = useRef<{ generation: number; ids: Set<string>; inFlight: boolean }>({ generation: -1, ids: new Set(), inFlight: false });
-  useEffect(() => {
-    if (rawBinding !== null || !capabilities.can_chat) return;
-    const state = ensured.current;
-    if (state.generation !== epoch.authorizationGeneration) {
-      ensured.current = { generation: epoch.authorizationGeneration, ids: new Set(), inFlight: false };
-    }
-    if (ensured.current.inFlight) return;
-    const current = ensured.current;
-    current.inFlight = true;
-    void api.getMainSession().then((result) => {
-      const session = result.session;
-      if (!session || result.capabilities?.can_chat === false) return;
-      if (!epoch.isCurrent() || current.ids.has(session.id)) return;
-      current.ids.add(session.id);
-      petShell.pick(session.id, epoch.isAuthorizationCurrent);
-    }, () => undefined).finally(() => { current.inFlight = false; });
-  }, [rawBinding, capabilities.can_chat, api, epoch]);
-  const { requests: vaultRequests } = usePendingVaultRequests(binding ?? '');
+  const { requests: vaultRequests } = usePendingVaultRequests(data.canChat === true ? binding ?? '' : '');
   const unreadCount = binding ? inbox.unreadBySession[binding] ?? 0 : 0;
   const state = derivePetState({
     session: data.session,
@@ -267,7 +244,6 @@ const PetSurface: React.FC = () => {
   const [composing, setComposing] = useState(false);
   const [stops, setStops] = useState<Record<string, StopPhase>>({});
   const dismissed = usePetDismissed();
-  const [switcherOpen, setSwitcherOpen] = useState(false);
   const [optimisticTitle, setOptimisticTitle] = useState('');
   const reducedMotion = useReducedMotion();
   const [leaving, setLeaving] = useState<string[]>([]);
@@ -282,7 +258,6 @@ const PetSurface: React.FC = () => {
   const previousBinding = useRef(binding);
   useLayoutEffect(() => {
     setDetailOpen(false);
-    setSwitcherOpen(false);
     // Authorization changes remove authorized presentation, not the user's text.
     if (previousBinding.current !== binding) {
       setComposing(false);
@@ -306,9 +281,7 @@ const PetSurface: React.FC = () => {
   }, [binding, epoch]);
   useEffect(() => {
     if (expanded) return;
-    // Collapsing leaves the switcher too, so the next expand shows the cards.
     setDetailOpen(false);
-    setSwitcherOpen(false);
   }, [expanded]);
   // The shell reports hover over Vibey and the dock: macOS gives a webview no
   // hover while its window is not key, and the pet never takes focus itself.
@@ -523,7 +496,6 @@ const PetSurface: React.FC = () => {
       return;
     }
     void setPanel(true);
-    setSwitcherOpen(false);
     if (intent === 'listen') {
       hotkeyHeld.current = true;
       petComposer.requestListen();
@@ -547,13 +519,12 @@ const PetSurface: React.FC = () => {
       if (event.key !== 'Escape') return;
       if (voice.listening) voice.cancel();
       else if (composing) closeComposer();
-      else if (switcherOpen) setSwitcherOpen(false);
       else if (detailOpen) setDetailOpen(false);
       else void setPanel(false);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [closeComposer, composing, detailOpen, setPanel, switcherOpen, voice]);
+  }, [closeComposer, composing, detailOpen, setPanel, voice]);
 
   useEffect(() => {
     const node = inputRef.current;
@@ -662,18 +633,10 @@ const PetSurface: React.FC = () => {
   return (
     <div ref={rootRef} className="pet-mini-stage" data-pet-root data-busy={busy} data-state={state}>
       <div className={clsx('pet-mini-column', voice.listening && 'is-voice-active')}>
-        <div className={clsx('pet-mini-cards', voice.listening && 'is-hidden')} inert={voice.listening || undefined} aria-label={expanded ? t('pet.panel') : undefined} style={{ height: expanded ? (!binding || switcherOpen || visibleCards.length > 0 ? STACK_HEIGHT : 'auto') : collapsedHeight }}>
+        <div className={clsx('pet-mini-cards', voice.listening && 'is-hidden')} inert={voice.listening || undefined} aria-label={expanded ? t('pet.panel') : undefined} style={{ height: expanded ? (visibleCards.length > 0 ? STACK_HEIGHT : 'auto') : collapsedHeight }}>
           <div ref={collapsedRef} key={expanded ? 'expanded' : 'collapsed'} className="pet-mini-swap is-switching" onAnimationEnd={(event) => { if (event.target === event.currentTarget) event.currentTarget.classList.remove('is-switching'); }}>
-          {expanded && (!binding || switcherOpen) ? (
-            <SessionPicker canStartVibey={capabilities.can_chat} onBack={binding ? () => setSwitcherOpen(false) : undefined} onPick={(sessionId) => {
-              if (!epoch.isCurrent()) return;
-              petShell.pick(sessionId, epoch.isAuthorizationCurrent);
-              setSwitcherOpen(false);
-            }} />
-          ) : (expanded || visibleCards.length > 0) && (
-            expanded ? visibleCards.length === 0 ? (
-              !showReplyBubble && <div className="pet-mini-action-row"><SwitchSessionButton onClick={() => setSwitcherOpen(true)} label={t('pet.switchSession')} /></div>
-            ) : (
+          {visibleCards.length > 0 && (
+            expanded ? (
               <ExpandedCards
                 cards={visibleCards}
                 leaving={leaving}
@@ -681,7 +644,6 @@ const PetSurface: React.FC = () => {
                 onDismiss={dismiss}
                 stops={stops}
                 onStop={setStop}
-                onSwitch={!showReplyBubble ? () => setSwitcherOpen(true) : undefined}
                 t={(key, options) => String(t(key as never, options as never))}
               />
             ) : (
@@ -690,7 +652,7 @@ const PetSurface: React.FC = () => {
           )}
           </div>
         </div>
-        <SpeechSlot open={voice.listening || composing || (showReplyBubble && !switcherOpen)}>
+        <SpeechSlot open={voice.listening || composing || showReplyBubble || !binding}>
           {voice.listening ? <Marquee text={voice.preview} listeningLabel={t('pet.voice.listening')} /> : composing && canChat && !uncertain ? (
           <>
           {voice.error && <p className="pet-mini-input-note" role="status">{t(`pet.voice.${voice.error}`)}</p>}
@@ -721,7 +683,7 @@ const PetSurface: React.FC = () => {
             </div>
           </form>
           </>
-          ) : showReplyBubble && !switcherOpen && binding ? (
+          ) : showReplyBubble && binding ? (
             <MainReplyBubble
               open={detailOpen}
               onToggle={() => setDetailOpen((open) => !open)}
@@ -741,8 +703,12 @@ const PetSurface: React.FC = () => {
               onChoose={choose}
               uncertain={uncertain}
               onInspect={() => { void petBridge.open(sessionLink(binding)).then(() => { if (epoch.isCurrent()) setUncertain(binding, false); }).catch(() => undefined); }}
-              onSwitch={() => setSwitcherOpen(true)}
             />
+          ) : !binding ? (
+            <div className="pet-mini-reply-bubble pet-mini-detail-inner" data-pet-hit role="status">
+              <p className="pet-mini-detail-muted">{t(data.canChat === null ? 'common.loading' : 'pet.vibeyUnavailable')}</p>
+              <Button variant="link" size="sm" className="px-0" onClick={() => void petBridge.open('avibe://settings')}>{t('pet.openInAvibe')}</Button>
+            </div>
           ) : null}
         </SpeechSlot>
       </div>
@@ -751,57 +717,6 @@ const PetSurface: React.FC = () => {
   );
 };
 
-const SwitchSessionButton: React.FC<{ onClick: () => void; label: string }> = ({ onClick, label }) => (
-  <button type="button" className="pet-mini-chip" data-pet-hit aria-label={label} onClick={onClick}><ArrowLeftRight aria-hidden />{label}</button>
-);
-
-const SessionPicker: React.FC<{ onPick: (sessionId: string) => void; onBack?: () => void; canStartVibey: boolean }> = ({ onPick, onBack, canStartVibey }) => {
-  const { t } = useTranslation();
-  const api = useApi();
-  const { sessions, loading } = useSessionSwitcher(true);
-  const [vibeyError, setVibeyError] = useState<string | null>(null);
-  const [vibeyPending, setVibeyPending] = useState(false);
-  const mounted = useRef(true);
-  useEffect(() => {
-    mounted.current = true;
-    return () => { mounted.current = false; };
-  }, []);
-  const pickVibey = () => {
-    if (vibeyPending) return;
-    setVibeyPending(true);
-    setVibeyError(null);
-    api.getMainSession().then((result) => {
-      if (!result.session) {
-        if (mounted.current) setVibeyError(t('pet.vibeyUnavailable'));
-        return;
-      }
-      if (mounted.current) onPick(result.session.id);
-    }, (error: unknown) => {
-      if (mounted.current) setVibeyError(error instanceof ApiError && error.code === 'no_chat_project' ? t('pet.noChatProject') : t('pet.vibeyUnavailable'));
-    }).finally(() => { if (mounted.current) setVibeyPending(false); });
-  };
-  return (
-    <div className="pet-mini-panel" aria-label={t('pet.chooseSession')}>
-      <div className="pet-mini-scroll">
-        {onBack && (
-          <div className="pet-mini-action-row">
-            <button type="button" className="pet-mini-chip" data-pet-hit onClick={onBack}><ArrowLeft aria-hidden />{t('common.back')}</button>
-          </div>
-        )}
-        <div className="pet-mini-session-picker" data-pet-hit>
-          {canStartVibey && <button type="button" onClick={pickVibey} disabled={vibeyPending} className="pet-mini-session-option is-vibey">{t('pet.talkToVibey')}</button>}
-          {vibeyError && <p className="pet-mini-detail-muted">{vibeyError}</p>}
-          {sessions.length === 0 && <p className="pet-mini-detail-muted">{loading ? t('common.loading') : t('pet.noSessions')}</p>}
-          {sessions.map((session) => (
-            <button key={session.id} type="button" onClick={() => onPick(session.id)} className="pet-mini-session-option">
-              {session.title || t('pet.untitled')}
-            </button>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-};
 
 function useReducedMotion() {
   const [reduced, setReduced] = useState(() => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false);
@@ -1018,7 +933,7 @@ const CollapsedCards: React.FC<{ cards: PetCard[]; onOpen: () => void; t: (key: 
   );
 };
 
-const ExpandedCards: React.FC<{ cards: PetCard[]; leaving: string[]; onReference: (card: PetCard) => void; onSwitch?: () => void; onDismiss: (id: string) => void; stops: Record<string, StopPhase>; onStop: (card: PetCard) => void; t: (key: string, options?: Record<string, unknown>) => string }> = ({ cards, leaving, onReference, onSwitch, onDismiss, stops, onStop, t }) => {
+const ExpandedCards: React.FC<{ cards: PetCard[]; leaving: string[]; onReference: (card: PetCard) => void; onDismiss: (id: string) => void; stops: Record<string, StopPhase>; onStop: (card: PetCard) => void; t: (key: string, options?: Record<string, unknown>) => string }> = ({ cards, leaving, onReference, onDismiss, stops, onStop, t }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [edges, setEdges] = useState({ top: 0, bottom: 0 });
   const measure = useCallback(() => {
@@ -1041,7 +956,6 @@ const ExpandedCards: React.FC<{ cards: PetCard[]; leaving: string[]; onReference
   return (
     <div className="pet-mini-panel">
       <div ref={scrollRef} onScroll={measure} className="pet-mini-scroll" style={{ maskImage: mask, WebkitMaskImage: mask }}>
-        {onSwitch && <div className="pet-mini-action-row"><SwitchSessionButton onClick={onSwitch} label={t('pet.switchSession')} /></div>}
         <ul className="pet-mini-list">
           {cards.map((card) => {
             const phase = stops[card.id];
@@ -1094,7 +1008,7 @@ const CardBody: React.FC<{ card: PetCard; expanded: boolean; t: (key: string, op
   );
 };
 
-type MainDetailProps = { epoch: PetSurfaceEpoch; voiceNeedsCloud: boolean; canChat: boolean; visible: boolean; onSwitch: () => void; binding: string; exchange: ReturnType<typeof latestExchange>; messages: WorkbenchMessage[]; failure: WorkbenchMessage | null; running: boolean; queued: boolean; markRead: (sessionId: string, untilMessageId?: string) => Promise<boolean>; onRead: () => void; vaultRequestIds: string[]; quickReplies: ReturnType<typeof openQuickReplies>; onChoose: (message: WorkbenchMessage, choice: string) => Promise<boolean>; uncertain: boolean; onInspect: () => void };
+type MainDetailProps = { epoch: PetSurfaceEpoch; voiceNeedsCloud: boolean; canChat: boolean; visible: boolean; binding: string; exchange: ReturnType<typeof latestExchange>; messages: WorkbenchMessage[]; failure: WorkbenchMessage | null; running: boolean; queued: boolean; markRead: (sessionId: string, untilMessageId?: string) => Promise<boolean>; onRead: () => void; vaultRequestIds: string[]; quickReplies: ReturnType<typeof openQuickReplies>; onChoose: (message: WorkbenchMessage, choice: string) => Promise<boolean>; uncertain: boolean; onInspect: () => void };
 
 const MainReplyBubble: React.FC<Omit<MainDetailProps, 'visible'> & { open: boolean; onToggle: () => void }> = ({ open, onToggle, ...props }) => {
   const { t } = useTranslation();
@@ -1147,7 +1061,6 @@ const MainDetail: React.FC<MainDetailProps> = (props) => {
     .filter((message) => message.type === 'user' || message.type === 'result').slice(-6);
   return (
     <div className="pet-mini-detail-inner">
-      <div className="pet-mini-action-row"><SwitchSessionButton onClick={props.onSwitch} label={t('pet.switchSession')} /></div>
       {history.map((message) => <div key={message.id} className={message.author === 'user' ? 'pet-mini-detail-user' : 'pet-mini-detail-result'}><Markdown content={message.text} softBreaks /></div>)}
       {props.exchange.user && <div className="pet-mini-detail-user"><Markdown content={props.exchange.user.text} softBreaks /></div>}
       {props.exchange.results.map((message, index) => <div ref={index === props.exchange.results.length - 1 ? lastResultRef : undefined} key={message.id} className="pet-mini-detail-result"><Markdown content={message.text} softBreaks /></div>)}

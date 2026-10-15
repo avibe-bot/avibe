@@ -1,42 +1,9 @@
 import { isDesktopShell } from '@/lib/desktopShell';
 import { openLinkInNewContext } from '@/lib/pwaNavigation';
 
-/**
- * The desktop pet's channel to the native shell. This file is the contract the
- * shell implements (docs/plans/2026-10-01-desktop-pet.md, "Shell ↔ pet IPC"):
- *
- * Page → shell, Tauri commands granted only to the `pet` window:
- *   pet_ready() -> PetBinding & { summon_pending: { intent } | null }
- *   pet_set_expanded({ expanded }) -> PetLayout
- *   pet_bind({ sessionId }) -> PetBinding & { shown: boolean }
- *   pet_unbind({ sessionId }) -> PetBinding   compare-and-clear
- *   pet_open({ link })                   any link the deep-link parser accepts
- *   plugin:window|start_dragging         the `start-dragging` permission
- *
- * Workbench → shell, granted only to the `main` window ("Show in pet"):
- *   pet_bind({ sessionId }) -> PetBinding & { shown: boolean }
- *                                        also brings the pet forward; `shown`
- *                                        is false while the pet is turned off
- *
- * Shell → page, DOM events dispatched on `window` by a shell-evaluated script
- * (the same channel as the Settings… menu, so no event permission is needed):
- *   avibe:pet-summon  detail { intent }  only after pet_ready(); earlier summons
- *                                        are returned by pet_ready() instead
- *   avibe:pet-bound   detail { session_id: string | null, revision }
- *   avibe:pet-hover   detail { hover: boolean }  the cursor entered or left
- *                                        the hit rects reported with `hover`;
- *                                        a webview in a window that is not
- *                                        key gets no hover of its own on macOS
- *
- * `revision` is the shell's binding revision: it grows by one on every change
- * to the binding, and every answer and event carries the revision it reflects.
- * Answers and events travel on different channels and may arrive out of
- * order, so the page applies only a revision newer than the last it applied.
- *
- * Outside the shell (a browser tab during development) the bridge keeps the
- * binding in localStorage with the same fixed mini layout, so the route
- * stays usable without the native window.
- */
+/** Native window/layout transport. pet_ready still parses legacy persisted
+ * bindings for backwards compatibility; only GET /api/sessions/main selects
+ * the conversation. This frontend never invokes pet_bind or pet_unbind. */
 
 export type PetIntent = 'listen' | 'show' | 'release';
 
@@ -102,16 +69,6 @@ const readDevBinding = (): PetBinding => {
   return devMemory;
 };
 
-const writeDevBinding = (sessionId: string | null): PetBinding => {
-  devMemory = { binding: sessionId, revision: readDevBinding().revision + 1 };
-  try {
-    window.localStorage.setItem(DEV_BINDING_KEY, JSON.stringify(devMemory));
-  } catch {
-    /* storage unavailable: the binding lasts for this page only */
-  }
-  return devMemory;
-};
-
 export const petBridge = {
   /** True inside the native pet window. */
   native: (): boolean => shellInvoke() !== null,
@@ -150,35 +107,6 @@ export const petBridge = {
     const invoke = shellInvoke();
     if (!invoke) return;
     await invoke('pet_set_dismissed', { sessionId, ids });
-  },
-
-  bind: async (sessionId: string): Promise<PetBinding> => {
-    const invoke = shellInvoke();
-    if (!invoke) return writeDevBinding(sessionId);
-    return parseBinding(await invoke('pet_bind', { sessionId }));
-  },
-
-  /** Clears the binding only if it is still `sessionId`. */
-  unbind: async (sessionId: string): Promise<PetBinding> => {
-    const invoke = shellInvoke();
-    if (!invoke) {
-      const current = readDevBinding();
-      return current.binding === sessionId ? writeDevBinding(null) : current;
-    }
-    return parseBinding(await invoke('pet_unbind', { sessionId }));
-  },
-
-  /**
-   * The Workbench's "Show in pet": binds the pet to `sessionId` and brings it
-   * forward. `shown` is false while the pet is turned off; the binding is kept
-   * for when it is turned on.
-   */
-  showInPet: async (sessionId: string): Promise<{ shown: boolean }> => {
-    const invoke = shellInvoke();
-    if (!invoke) throw new Error('the desktop pet is only available in the Avibe desktop app');
-    const result = (await invoke('pet_bind', { sessionId })) as { shown?: unknown } | null;
-    parseBinding(result);
-    return { shown: result?.shown === true };
   },
 
   /** Moves the native window with the pointer (`start-dragging`). */
@@ -220,26 +148,13 @@ export const onPetHover = (handler: (hover: boolean) => void): (() => void) => {
 /** Subscribe to shell events; returns the unsubscribe function. */
 export const onPetEvents = (handlers: {
   summon?: (intent: PetIntent) => void;
-  bound?: (binding: PetBinding) => void;
 }): (() => void) => {
   const summon = (event: Event) => {
     const intent = (event as CustomEvent<{ intent?: unknown }>).detail?.intent;
     handlers.summon?.(isIntent(intent) ? intent : 'show');
   };
-  const bound = (event: Event) => {
-    const detail = (event as CustomEvent<{ session_id?: unknown; revision?: unknown }>).detail;
-    let binding: PetBinding;
-    try {
-      binding = parseBinding({ binding: detail?.session_id, revision: detail?.revision });
-    } catch {
-      return; // Without a revision the event cannot be ordered, so it is not applied.
-    }
-    handlers.bound?.(binding);
-  };
   window.addEventListener(PET_SUMMON_EVENT, summon);
-  window.addEventListener(PET_BOUND_EVENT, bound);
   return () => {
     window.removeEventListener(PET_SUMMON_EVENT, summon);
-    window.removeEventListener(PET_BOUND_EVENT, bound);
   };
 };

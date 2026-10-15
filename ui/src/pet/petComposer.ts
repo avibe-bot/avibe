@@ -94,7 +94,7 @@ export function usePetComposer(binding: string | null): {
 } {
   useSyncExternalStore(subscribe, () => version);
   useEffect(() => {
-    petComposer.bind(binding);
+    if (binding) petComposer.bind(binding);
   }, [binding]);
   return {
     // A draft belongs to the session it was typed for. Until bind lands,

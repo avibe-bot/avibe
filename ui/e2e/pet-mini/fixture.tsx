@@ -19,6 +19,9 @@ declare global {
     petFixtureSends: { sessionId: string; payload: unknown }[];
     petFixtureOpens: string[];
     petFixtureStops: unknown[];
+    petFixtureMainReads: number;
+    setPetMainAvailable: (available: boolean) => void;
+    petFixtureConnection: (connected: boolean) => void;
   }
 }
 window.petLayoutHitRegions = [];
@@ -29,11 +32,10 @@ window.petFixtureStops = [];
 petBridge.open = async (link) => { window.petFixtureOpens.push(link); };
 const hasMain = params.get('main') !== 'false';
 const layers = Number(params.get('layers') ?? 3);
-const sessionCount = Number(params.get('sessions') ?? 1);
 const personal = params.get('scenario') === 'personal';
 const title = personal ? '检查桌宠 mini 的交互' : 'A long unbroken title '.repeat(40);
 const session = {
-  id: 'pet-layout', scope_id: 'fixture', title, agent_backend: 'codex',
+  id: 'ses_main', scope_id: 'fixture', title, agent_backend: 'codex',
   capabilities: { can_chat: true },
   status: 'active', visibility: 'foreground', agent_status: 'idle', metadata: {},
 };
@@ -62,8 +64,11 @@ const requests = personal ? [{
   session: { id: 'ses_fixture_0' }, expires_at: null,
 }] : [];
 const unread = personal ? { ses_fixture_2: 1 } : {};
-const switcherSessions = [session, ...Array.from({ length: sessionCount - 1 }, (_, i) => ({ ...session, id: `fixture-session-${i}`, title: `Session ${i + 1} ${title}` }))];
-localStorage.setItem('avibe.pet.devBinding', JSON.stringify({ binding: session.id, revision: 1 }));
+// A legacy file must not steer reads or sends away from main.
+localStorage.setItem('avibe.pet.devBinding', JSON.stringify({ binding: 'legacy-session', revision: 1 }));
+let mainAvailable = params.get('offline') !== 'true';
+window.petFixtureMainReads = 0;
+window.setPetMainAvailable = (available) => { mainAvailable = available; };
 
 // Every API read is fixture-owned. Unexpected calls fail rather than reaching a
 // user's runtime; the Vite proxy also points at an unused local port.
@@ -71,6 +76,11 @@ window.fetch = async (input, init) => {
   const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, location.origin);
   const path = url.pathname;
   const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { 'Content-Type': 'application/json' } });
+  if (path === '/api/sessions/main') {
+    window.petFixtureMainReads += 1;
+    if (!mainAvailable) return new Response(JSON.stringify({ error: 'temporarily_unavailable' }), { status: 503, headers: { 'Content-Type': 'application/json' } });
+    return json({ session, capabilities: { can_chat: true } });
+  }
   if (init?.method === 'POST' && path.endsWith('/messages')) {
     const payload = JSON.parse(String(init.body));
     window.petFixtureSends.push({ sessionId: path.split('/')[3], payload });
@@ -80,36 +90,43 @@ window.fetch = async (input, init) => {
     window.petFixtureStops.push(path.split('/')[3]);
     return json({ ok: true });
   }
-  if (path.endsWith('/turn-state') && !path.includes('pet-layout')) return json({ in_flight: true, foreground: 'running' });
+  if (path.endsWith('/turn-state') && !path.includes('ses_main')) return json({ in_flight: true, foreground: 'running' });
   if (path.endsWith('/mark-read')) return json({ updated: 1, unread_by_session: unread });
   const payloads: Record<string, unknown> = {
     '/api/csrf-token': { csrf_token: 'fixture-only-token' },
     '/api/config': { mode: 'self_host', setup_state: { needs_setup: false } },
     '/api/session': { remote: false, instance_kind: 'personal', capabilities: OWNER_INSTANCE_CAPABILITIES },
-    '/api/sessions/pet-layout': session,
-    '/api/sessions/pet-layout/messages': { messages, next_after_id: null, next_before_id: null },
-    '/api/sessions/pet-layout/turn-state': {
+    '/api/sessions/ses_main': session,
+    '/api/sessions/ses_main/messages': { messages, next_after_id: null, next_before_id: null },
+    '/api/sessions/ses_main/turn-state': {
       foreground: 'idle', in_flight: false, native_turn_started: false, pending_input_count: 0,
       background_activities: [], pending_activity_output_count: 0, connection: 'connected',
     },
     '/api/vault/requests': { ok: true, requests: requests.filter((request) => !url.searchParams.get('session') || request.session.id === url.searchParams.get('session')) },
     '/api/asr/status': { available: false },
     '/api/running-agents': { ok: true, agents, counts: { total: agents.length, active: agents.length, idle: 0, orphan: 0, by_backend: {} } },
-    '/api/sessions': { sessions: switcherSessions, next_before_id: null },
+    '/api/sessions': { sessions: [session], next_before_id: null },
     '/api/inbox': { ok: true, sessions: [], unread_by_session: unread, total_unread: Object.values(unread).reduce((a, b) => a + b, 0), next_before_id: null },
   };
   if (!(path in payloads)) throw new Error(`Unexpected pet fixture request: ${path}`);
   return json(payloads[path]);
 };
-// A disconnected event stream is sufficient for this fixed layout fixture.
-class FixtureEvents {
+// Fixture-owned real EventTarget: exercise the provider's reconnect path.
+const streams = new Set<FixtureEvents>();
+class FixtureEvents extends EventTarget {
   static OPEN = 1;
   readyState = 1;
-  addEventListener() {}
-  removeEventListener() {}
-  close() {}
+  constructor() { super(); streams.add(this); }
+  close() { streams.delete(this); }
 }
 window.EventSource = FixtureEvents as unknown as typeof EventSource;
+window.petFixtureConnection = (connected) => {
+  for (const stream of streams) {
+    stream.dispatchEvent(new MessageEvent('workbench.events.bridge.status', {
+      data: JSON.stringify({ type: 'workbench.events.bridge.status', data: { connected } }),
+    }));
+  }
+};
 
 const root = createRoot(document.getElementById('root')!);
 window.setPetLayoutVisible = (visible) => root.render(

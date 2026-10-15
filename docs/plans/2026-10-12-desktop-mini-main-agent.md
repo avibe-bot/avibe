@@ -16,10 +16,11 @@ Status: ready for implementation, v2 (2026-10-12). Supersedes v1 of this file.
   #2408) stays the base for binding, IPC, the shortcut, `pet.json`, poses and
   mark-read. This spec changes the layout and interaction on top of it.
 
-> P1 amendment (2026-10-15): §§4.2, 4.3, 5.2 and 8 supersede the v2 main-card
+> P1 amendment (2026-10-15): §§4.2, 4.3, 5.2, 8 and 10 supersede the v2 main-card
 > and background-card descriptions elsewhere in this document. Layout, shell,
 > voice, dock, motion and timing remain v2. References to main-card detail now
-> mean the reply bubble's expandable detail.
+> mean the reply bubble's expandable detail. §10 now uses the shipped owner-only
+> main endpoint; the binding switcher and Workbench binding action are removed.
 
 ## 1. What changes, in one walk-through
 
@@ -477,78 +478,47 @@ image); layered pose animation is deferred. Preserve reduced-motion behavior.
   the pet page only, like the other pet commands, and must recheck its
   caller.
 
-## 10. Main agent session (dependency; owned by another lane)
+## 10. Main agent session (implemented; main-only)
 
-- **Model:**
-  - sessions get a built-in type (`main`, `memory`, `ops`, …);
-  - each user has their **own** `main`;
-  - `main` is a writable session with **normal visibility** (the pet's
-    validity rule accepts it);
-  - it is **built in at install** (upgrades must create it too);
-  - it **cannot be archived or deleted**;
-  - its **id is stable** across context rotation.
-- **Lookup API — not built yet; mock it.** Proposed contract:
+`GET /api/sessions/main` shipped in #2637. The mini uses this endpoint through
+`api.getMainSession()` as its only conversation selector:
 
-  ```
-  GET /api/sessions/main
-  200 { "session": WorkbenchSession, "capabilities": { "can_chat": bool } }
-  ```
+```
+GET /api/sessions/main
+200 { "session": WorkbenchSession, "capabilities": { "can_chat": true } }
+```
 
-  - The pet reads the main session only through one client function,
-    `api.getMainSession()`.
-  - Until the endpoint exists, the function returns the session the pet is
-    bound to today (the user-picked binding from `pet_ready()`), in the same
-    shape. Under this mock, keep a way to pick the session (for example in
-    the main card's detail header).
-  - When the endpoint lands: call it on start, on reconnect and after
-    authorization changes. Then remove the switcher, "在桌宠中显示" and the
-    binding writes. Older `pet.json` files that contain `binding` must still
-    load; ignore the field (persisted-shape rule).
-
-### 10.1 Interim: the mini talks to Vibey (owner decision, 2026-10-13)
-
-Until the `main` type exists, the mini's main agent is a Vibey conversation
-(the built-in Agent, `backend: vibey`).
-
-- **One per person, created on first use.** `POST /api/desktop-mini/session`
-  (Editor) returns the caller's conversation, creating it the first time in
-  their most recently active Project they can chat in. A session needs a
-  Project so it has a Workbench sidebar home and "在 Avibe 中打开" lands on it.
-  It is an ordinary foreground session, so the Workbench shows and manages it
-  like any other. Which session belongs to whom is recorded server-side in
-  `state_meta` (`desktop_mini_session:<principal>`, principal `local` or
-  `remote:<sub>`), never in session metadata a client can write or a fork can
-  copy.
-- **Who the caller is.** The principal comes from the request's authorization
-  context, never from a second lookup that could fall back: a remote context
-  without a subject owns nothing and is refused.
-- **Reuse.** The same session is returned while it is still what creation
-  would produce: active, foreground, a Project the caller can chat in, still on
-  the built-in Agent (a Workbench route change makes it an ordinary chat), which
-  the caller may use. Title, model and effort are the user's to change. An archived session, an archived Project or lost
-  access gets a new one. With no chat Project at all the answer is
-  `409 no_chat_project`, and the mini asks the user to create a Project.
-- **Binding.** The mini binds that session whenever nothing is bound. An
-  existing binding is kept; the switcher offers "和歪比对话" to move to it.
-- **Switcher navigation.** The switcher opens only from "切换会话", or by
-  itself when nothing is bound. While a session is bound it has a "返回"
-  control that goes back to the cards, and collapsing the panel leaves it. A
-  bound session with nothing to show (no exchange, no sub-tasks) expands to the
-  "切换会话" control alone, never to the switcher, so picking such a session
-  does not reopen the list.
-  A session the mini already bound and then cleared as invalid is not
-  re-bound automatically, so a bad answer cannot loop.
-- **A turn Vibey cannot run is shown.** When the latest exchange ended in a
-  backend failure notice (for example no model source), the main card's
-  subtitle reads "没跑起来：<notice>" (the exchange ends at its foreground
-  terminal row, by the transcript's own rule, so detached completions and
-  replayed failures never decide it), and the detail shows the notice as plain
-  text with "在 Avibe 中处理" when it names a next step. That opens the session,
-  where the Workbench draws "Open Models" for those who manage the instance.
-- **Not in this change.** A live step label ("Ran command", …) for the main
-  card still waits on §11.1; the server already computes `status_label` for
-  the IM status bubble and can expose it later.
-- When `main` lands, this endpoint is replaced by `GET /api/sessions/main`.
+- **Owner-only in this release.** The instance owner uses the stable `ses_main`
+  session. Non-owner 403 is an accepted unavailable state; per-member main
+  sessions and permission expansion are outside P1.
+- **Lifecycle and recovery.** Resolve main on startup, reconnect and authorization
+  change, and retry on page reactivation after transient failures. Use the existing
+  authorization epoch and `FencedSource` request ordering. No new polling loop.
+  Transcript/runtime reads wait for main's explicit chat grant. Authorization
+  changes immediately invalidate pending reads and action callbacks before resolving
+  again. Retain the user's draft and document send ledger across transient failures.
+- **No switcher.** The bubble's switch button, the entire recent-session picker,
+  its "Talk to Vibey" option and the Workbench "Show in pet" action are removed.
+  No frontend caller invokes `pet_bind` or `pet_unbind`. Summons still open/listen
+  through the existing shell flow and wait for a usable main.
+- **Persisted compatibility.** Existing `pet.json` shapes still load unchanged.
+  Legacy `binding` values and bound events never select a conversation, including
+  when they arrive after main has resolved. No native or persisted-format migration
+  is part of this PR.
+- **Unavailable.** A 403, `409 main_session_invalid`, `409 main_session_archived`,
+  `builtin_agent_unavailable`, or a transport failure shows the existing localized
+  unavailable message and "Open in Avibe". No arbitrary-session fallback. Pending
+  resolution shows the existing loading copy; reconnect/reactivation can recover.
+- **Native boundary / known gap.** The existing native dismissal writer accepts
+  only its persisted binding. If that legacy binding equals the resolved main,
+  dismissal persistence still works. Otherwise dismissals last in the current
+  document; persisting them across restarts needs a separately scoped native change.
+  The frontend does not restore binding writes to bypass this boundary. §11.3's
+  restart-persistence requirement is deferred for that legacy shape.
+- **Turn failures remain visible.** A foreground terminal failure notice is shown
+  in the reply bubble/detail, with "Fix in Avibe" when it names a next step. Detached
+  completions and replayed failures do not replace the current exchange. Live step
+  labels still wait on §11.1; the mini shows "Thinking" meanwhile.
 
 ## 11. Backend gaps (not in this delivery; degrade gracefully)
 

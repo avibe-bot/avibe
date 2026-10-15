@@ -2,9 +2,8 @@
  * One input of the pet, read from an authoritative API and kept fresh by live
  * events. Every read is fenced twice:
  *
- * - by key: a result applies only while its key (the bound session, or the
- *   switcher's constant key while it is open) is still current, so switching
- *   from A to B never shows A's state;
+ * - by key: a result applies only while its session or authorization key
+ *   is still current, so an old context never supplies a new context's state;
  * - by order: starting a read and merging a live event both advance the
  *   generation, and a result applies only if nothing newer happened on this
  *   source since it started. A merge that overtakes an in-flight read schedules
