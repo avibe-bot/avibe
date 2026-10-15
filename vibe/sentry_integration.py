@@ -16,6 +16,11 @@ from urllib.parse import quote, urlsplit
 from config.v2_config import V2Config
 from config import paths
 
+try:
+    from sentry_sdk.transport import HttpTransport as _SentryHttpTransport
+except Exception:  # pragma: no cover - the dependency is required in packaged builds
+    _SentryHttpTransport = None
+
 logger = logging.getLogger(__name__)
 
 # Fill this with the real project DSN to make Sentry default-on across deployments.
@@ -194,10 +199,27 @@ _STRING_REPLACEMENTS = (
 # the noise; short ones (below the boundary length) match only as a whole word.
 _KNOWN_SECRET_MIN_LENGTH = 4
 _KNOWN_SECRET_BOUNDARY_LENGTH = 12
-_KNOWN_SECRETS_LOCK = threading.Lock()
+# These caps bound the process-lifetime observation set and the compiled matcher.
+# They are deliberately fail-closed: once a cap is exceeded, old observations are
+# retained and telemetry is dropped rather than evicting a still-usable secret.
+_KNOWN_SECRET_MAX_VALUES = 4096
+_KNOWN_SECRET_MAX_VALUE_BYTES = 256 * 1024
+_KNOWN_SECRET_MAX_PATTERN_BYTES = 512 * 1024
+_KNOWN_SECRET_MAX_FILE_BYTES = 1024 * 1024
+_KNOWN_SECRETS_LOCK = threading.RLock()
 # path -> (file signature, secret values last read from it)
-_known_secret_files_state: dict[str, tuple[tuple[int, int, int], frozenset[str]]] = {}
+_known_secret_files_state: dict[str, tuple[tuple[int, int, int, int], frozenset[str]]] = {}
+_known_secret_values: set[str] = set()
 _known_secrets: tuple[frozenset[str] | None, re.Pattern[str] | None] = (None, None)
+_known_secret_collection_uncertain = False
+
+
+class _DropEnvelope(Exception):
+    """Private, secret-free signal used to fail closed before HTTP serialization."""
+
+    pass
+
+
 _ONE_DAY_SECONDS = 60 * 60 * 24
 _NOISY_EVENT_TTL_SECONDS = _ONE_DAY_SECONDS
 _NOISY_EVENT_CACHE_LIMIT = 128
@@ -265,9 +287,17 @@ def _minimize_breadcrumb(crumb: dict[str, Any]) -> dict[str, Any]:
 
 
 def _minimize_span(span: dict[str, Any]) -> dict[str, Any]:
-    if not str(span.get("op") or "").startswith("subprocess"):
+    operation = str(span.get("op") or span.get("name") or "")
+    if not operation.startswith("subprocess"):
         return span
-    return {**span, "description": _program_name(span.get("description")), "data": {}}
+    minimized = dict(span)
+    for key in ("description", "name"):
+        if key in span:
+            minimized[key] = _program_name(span.get(key))
+    for key in ("data", "attributes"):
+        if key in span:
+            minimized[key] = {}
+    return minimized
 
 
 def _minimize_event(event: dict[str, Any]) -> dict[str, Any]:
@@ -366,70 +396,124 @@ def _secret_alternative(spelling: str) -> str:
     return escaped
 
 
-def _read_secret_values(path: Path, value_keys: frozenset[str], signature: tuple[int, int, int]) -> frozenset[str]:
+def _read_secret_values(
+    path: Path, value_keys: frozenset[str], signature: tuple[int, int, int, int]
+) -> tuple[frozenset[str], bool]:
     cached = _known_secret_files_state.get(str(path))
     if cached is not None and cached[0] == signature:
-        return cached[1]
+        return cached[1], False
+    if signature[2] > _KNOWN_SECRET_MAX_FILE_BYTES:
+        return (cached[1] if cached is not None else frozenset()), True
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        # An unreadable file keeps the values it last had and blocks nothing else;
-        # its signature is not recorded, so the next event reads it again.
-        return cached[1] if cached is not None else frozenset()
+        raw = path.read_bytes()
+        after = path.stat()
+    except OSError:
+        return (cached[1] if cached is not None else frozenset()), True
+    after_signature = (after.st_ino, after.st_mtime_ns, after.st_size, after.st_mode & 0o7777)
+    if len(raw) != signature[2] or after_signature != signature:
+        return (cached[1] if cached is not None else frozenset()), True
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return (cached[1] if cached is not None else frozenset()), True
     found: set[str] = set()
     _collect_secret_values(data, found, value_keys=value_keys)
     values = frozenset(found)
     _known_secret_files_state[str(path)] = (signature, values)
-    return values
+    return values, False
+
+
+def _compile_secret_pattern(values: frozenset[str]) -> tuple[re.Pattern[str] | None, bool]:
+    spellings = {spelling for value in values for spelling in _secret_spellings(value)}
+    source = "|".join(_secret_alternative(spelling) for spelling in sorted(spellings, key=len, reverse=True))
+    if len(source.encode("utf-8")) > _KNOWN_SECRET_MAX_PATTERN_BYTES:
+        return None, True
+    try:
+        return (re.compile(source) if source else None), False
+    except re.error:
+        return None, True
+
+
+def _refresh_known_secret_state() -> bool:
+    """Refresh observed stores without ever evicting process-lifetime values."""
+
+    global _known_secrets, _known_secret_collection_uncertain
+    with _KNOWN_SECRETS_LOCK:
+        uncertain = False
+        present: set[str] = set()
+        try:
+            files = _known_secret_files()
+        except OSError:
+            files = []
+            uncertain = True
+        for path, value_keys in files:
+            try:
+                stat = path.stat()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                uncertain = True
+                continue
+            path_key = str(path)
+            present.add(path_key)
+            signature = (stat.st_ino, stat.st_mtime_ns, stat.st_size, stat.st_mode & 0o7777)
+            values, read_uncertain = _read_secret_values(path, value_keys, signature)
+            uncertain |= read_uncertain
+            if read_uncertain:
+                continue
+            new_values = values - _known_secret_values
+            new_value_bytes = sum(len(value.encode("utf-8")) for value in new_values)
+            current_value_bytes = sum(len(value.encode("utf-8")) for value in _known_secret_values)
+            if (
+                len(_known_secret_values) + len(new_values) > _KNOWN_SECRET_MAX_VALUES
+                or current_value_bytes + new_value_bytes > _KNOWN_SECRET_MAX_VALUE_BYTES
+            ):
+                uncertain = True
+                continue
+            _known_secret_values.update(new_values)
+
+        for stale in set(_known_secret_files_state) - present:
+            del _known_secret_files_state[stale]
+
+        if not uncertain and _known_secrets[0] == frozenset(_known_secret_values):
+            _known_secret_collection_uncertain = False
+            return True
+
+        pattern, pattern_uncertain = _compile_secret_pattern(frozenset(_known_secret_values))
+        uncertain |= pattern_uncertain
+        if not uncertain:
+            _known_secrets = (frozenset(_known_secret_values), pattern)
+        _known_secret_collection_uncertain = uncertain
+        return not uncertain
 
 
 def _known_secret_pattern() -> re.Pattern[str] | None:
-    """Match each credential Avibe stores, whatever text surrounds it.
+    """Return the in-memory matcher; filesystem work belongs to startup/worker code."""
 
-    Patterns cannot see a secret in prose, an unfamiliar URL, or an extra layer of
-    escaping; the exact value can. Files are read as plain JSON (no config
-    migration or logging inside a Sentry hook) and each is re-read only when it
-    changes.
-    """
-
-    global _known_secrets
     with _KNOWN_SECRETS_LOCK:
-        values: set[str] = set()
-        present: set[str] = set()
-        for path, value_keys in _known_secret_files():
-            try:
-                stat = path.stat()
-            except OSError:
-                continue
-            present.add(str(path))
-            values |= _read_secret_values(path, value_keys, (stat.st_ino, stat.st_mtime_ns, stat.st_size))
-        for stale in set(_known_secret_files_state) - present:
-            del _known_secret_files_state[stale]
-        current = frozenset(values)
-        cached_values, cached_pattern = _known_secrets
-        if cached_values == current:
-            return cached_pattern
-        spellings = {spelling for value in current for spelling in _secret_spellings(value)}
-        pattern = (
-            re.compile("|".join(_secret_alternative(spelling) for spelling in sorted(spellings, key=len, reverse=True)))
-            if spellings
-            else None
-        )
-        _known_secrets = (current, pattern)
-        return pattern
+        return _known_secrets[1]
+
+
+def _known_secret_collection_is_complete() -> bool:
+    with _KNOWN_SECRETS_LOCK:
+        return not _known_secret_collection_uncertain
 
 
 _SENTRY_PROTOCOL_KEYS = frozenset(
     {
         "abs_path",
+        "baggage",
         "breadcrumbs",
         "category",
         "colno",
         "contexts",
+        "content_type",
         "data",
         "debug_meta",
         "description",
         "dist",
+        "dsn",
+        "entries",
         "environment",
         "event_id",
         "exception",
@@ -438,8 +522,11 @@ _SENTRY_PROTOCOL_KEYS = frozenset(
         "filename",
         "function",
         "grouping_config",
+        "host",
         "in_app",
         "instruction_offset",
+        "item_count",
+        "length",
         "level",
         "line",
         "lineno",
@@ -457,7 +544,10 @@ _SENTRY_PROTOCOL_KEYS = frozenset(
         "release",
         "request",
         "response",
+        "sample_rates",
+        "section",
         "sdk",
+        "sent_at",
         "server_name",
         "span_id",
         "spans",
@@ -466,7 +556,9 @@ _SENTRY_PROTOCOL_KEYS = frozenset(
         "status",
         "tags",
         "thread_id",
+        "threads",
         "timestamp",
+        "trace",
         "trace_id",
         "transaction",
         "transaction_info",
@@ -494,11 +586,12 @@ _SENTRY_PROTOCOL_CONTAINERS = frozenset(
         "sdk",
         "spans",
         "stacktrace",
+        "threads",
         "user",
         "values",
     }
 )
-_USER_MAP_KEYS = frozenset({"contexts", "cookies", "data", "env", "extra", "headers", "tags", "vars"})
+_USER_MAP_KEYS = frozenset({"attributes", "contexts", "cookies", "data", "env", "extra", "headers", "tags", "vars"})
 
 
 def _redaction_child_mode(mode: str, key: str) -> str:
@@ -866,7 +959,7 @@ def before_send_transaction(event: dict[str, Any], hint: dict[str, Any]) -> Opti
     return _scrub_outgoing(event)
 
 
-def _scrub_outgoing(event: dict[str, Any]) -> dict[str, Any]:
+def _scrub_outgoing(event: dict[str, Any], *, breadcrumb: bool = False) -> dict[str, Any]:
     # Match stored credentials before normalization, then once again after it.
     # The second pass covers values that arrived through before_breadcrumb or were
     # transformed by URL/delimiter minimization into another spelling.
@@ -874,7 +967,8 @@ def _scrub_outgoing(event: dict[str, Any]) -> dict[str, Any]:
     protected: Any = event
     if known_secrets is not None:
         protected = _redact_matches(protected, known_secrets)
-    scrubbed = scrub_data(_minimize_event(protected))
+    minimized = _minimize_breadcrumb(protected) if breadcrumb else _minimize_event(protected)
+    scrubbed = scrub_data(minimized)
     if known_secrets is not None:
         scrubbed = _redact_matches(scrubbed, known_secrets)
     return scrubbed
@@ -882,13 +976,160 @@ def _scrub_outgoing(event: dict[str, Any]) -> dict[str, Any]:
 
 def before_breadcrumb(crumb: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any]:
     del hint
-    return _scrub_outgoing(crumb)
+    return _scrub_outgoing(crumb, breadcrumb=True)
+
+
+_STRUCTURED_ITEM_TYPES = frozenset(
+    {"event", "transaction", "log", "trace_metric", "span", "session", "sessions", "client_report", "check_in"}
+)
+_DROPPED_ITEM_TYPES = frozenset({"attachment", "profile", "profile_chunk"})
+_HEADER_PROTOCOL_KEYS = frozenset(
+    {
+        "baggage",
+        "content_type",
+        "dsn",
+        "event_id",
+        "host",
+        "item_count",
+        "length",
+        "platform",
+        "sample_rates",
+        "sdk",
+        "section",
+        "sent_at",
+        "trace",
+        "type",
+    }
+)
+
+
+def _immutable_json_copy(value: Any) -> Any:
+    """Copy only JSON-shaped values so unsupported payloads fail closed."""
+
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, dict):
+        if any(not isinstance(key, str) for key in value):
+            raise _DropEnvelope
+        return {key: _immutable_json_copy(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_immutable_json_copy(item) for item in value]
+    raise _DropEnvelope
+
+
+def _header_contains_secret(value: Any, pattern: re.Pattern[str] | None) -> bool:
+    if pattern is None:
+        return False
+    if isinstance(value, dict):
+        return any(_header_contains_secret(item, pattern) for item in value.values())
+    if isinstance(value, list):
+        return any(_header_contains_secret(item, pattern) for item in value)
+    return isinstance(value, str) and pattern.search(value) is not None
+
+
+def _scrub_header_value(value: Any, pattern: re.Pattern[str] | None) -> Any:
+    if isinstance(value, dict):
+        scrubbed: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise _DropEnvelope
+            if key in _HEADER_PROTOCOL_KEYS:
+                copied = _immutable_json_copy(item)
+                if _header_contains_secret(copied, pattern):
+                    raise _DropEnvelope
+                scrubbed[key] = copied
+            elif key in _DROPPED_KEYS or _is_sensitive_key(key):
+                scrubbed[key] = _REDACTED
+            else:
+                scrubbed[key] = _scrub_header_value(item, pattern)
+        return scrubbed
+    if isinstance(value, list):
+        return [_scrub_header_value(item, pattern) for item in value]
+    if isinstance(value, str):
+        scrubbed = _redact_string(value)
+        return pattern.sub(_REDACTED, scrubbed) if pattern is not None else scrubbed
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    raise _DropEnvelope
+
+
+def _scrub_item_payload(payload: Any, item_type: str, pattern: re.Pattern[str] | None) -> Any:
+    copied = _immutable_json_copy(payload)
+    if pattern is not None:
+        copied = _redact_matches(copied, pattern)
+    if item_type in {"event", "transaction"}:
+        if not isinstance(copied, dict):
+            raise _DropEnvelope
+        copied = _minimize_event(copied)
+    elif item_type == "span" and isinstance(copied, dict) and isinstance(copied.get("items"), list):
+        copied = {**copied, "items": [_minimize_span(item) if isinstance(item, dict) else item for item in copied["items"]]}
+    copied = scrub_data(copied)
+    if pattern is not None:
+        copied = _redact_matches(copied, pattern)
+    return _immutable_json_copy(copied)
+
+
+def _scrub_envelope(envelope: Any) -> Any:
+    """Return a new envelope, or refuse it before the SDK serializer sees it."""
+
+    if not _refresh_known_secret_state() or not _known_secret_collection_is_complete():
+        raise _DropEnvelope
+    pattern = _known_secret_pattern()
+    try:
+        from sentry_sdk.envelope import Envelope, Item, PayloadRef
+
+        headers = _scrub_header_value(envelope.headers, pattern)
+        items = []
+        for item in envelope.items:
+            item_type = item.type
+            if item_type in _DROPPED_ITEM_TYPES:
+                continue
+            if item_type not in _STRUCTURED_ITEM_TYPES:
+                continue
+            payload = item.payload.json
+            if payload is None:
+                continue
+            scrubbed_payload = _scrub_item_payload(payload, item_type, pattern)
+            scrubbed_headers = _scrub_header_value(item.headers, pattern)
+            items.append(Item(payload=PayloadRef(json=scrubbed_payload), headers=scrubbed_headers))
+        if not items:
+            raise _DropEnvelope
+        return Envelope(headers=headers, items=items)
+    except _DropEnvelope:
+        raise
+    except Exception as exc:
+        del exc
+        raise _DropEnvelope from None
+
+
+if _SentryHttpTransport is not None:
+
+    class _RedactingHttpTransport(_SentryHttpTransport):
+        """Pinned SDK HTTP transport with final worker-side envelope scrubbing."""
+
+        def __init__(self, options: dict[str, Any]) -> None:
+            import sentry_sdk
+
+            if sentry_sdk.VERSION != "2.56.0" or not hasattr(_SentryHttpTransport, "_serialize_envelope"):
+                raise RuntimeError("unsupported sentry-sdk transport serialization seam")
+            super().__init__(options)
+
+        def _serialize_envelope(self, envelope: Any) -> tuple[Optional[str], Any]:
+            scrubbed = _scrub_envelope(envelope)
+            return super()._serialize_envelope(scrubbed)
+
+else:  # pragma: no cover - only reachable in an incomplete installation
+    _RedactingHttpTransport = None
 
 
 def init_sentry(config: V2Config, component: str, enable_fastapi: bool = False) -> bool:
     options = resolve_sentry_options()
     if not options:
         return False
+    if _RedactingHttpTransport is None:
+        logger.warning("Sentry initialization skipped: supported transport seam unavailable")
+        return False
+    _refresh_known_secret_state()
 
     try:
         import sentry_sdk
@@ -934,6 +1175,8 @@ def init_sentry(config: V2Config, component: str, enable_fastapi: bool = False) 
             traces_sample_rate=options["traces_sample_rate"],
             profiles_sample_rate=options["profiles_sample_rate"],
             send_client_reports=False,
+            spotlight=False,
+            transport=_RedactingHttpTransport,
             send_default_pii=True,
             server_name=socket.gethostname(),
         )

@@ -34,6 +34,11 @@ def _isolate_user_state(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CACHE_HOME", str(home / "cache"))
     monkeypatch.setenv("XDG_STATE_HOME", str(home / "state"))
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe"))
+    with sentry_integration._KNOWN_SECRETS_LOCK:
+        sentry_integration._known_secret_files_state.clear()
+        sentry_integration._known_secret_values.clear()
+        sentry_integration._known_secrets = (None, None)
+        sentry_integration._known_secret_collection_uncertain = False
 
 
 def test_resolve_sentry_options_prefers_environment(monkeypatch):
@@ -151,6 +156,8 @@ def test_init_sentry_disables_client_discard_reports(monkeypatch):
 
     assert sentry_integration.init_sentry(_config(), component="service") is True
     assert init_kwargs["send_client_reports"] is False
+    assert init_kwargs["spotlight"] is False
+    assert init_kwargs["transport"] is sentry_integration._RedactingHttpTransport
 
 
 def test_run_ui_server_skips_sentry_when_config_load_fails(monkeypatch):
@@ -469,6 +476,7 @@ def test_before_send_redacts_stored_credentials_in_any_text(monkeypatch, tmp_pat
     (state / "instances" / "i1" / "runtime-secrets.json").write_text(
         json.dumps({"management_key": "mh-management-s3cret", "gateway_token": "mh-gateway-s3cret"})
     )
+    assert sentry_integration._refresh_known_secret_state()
 
     def send(message, extra=None):
         event = {"logentry": {"message": message}, "breadcrumbs": {"values": [{"message": message}]}}
@@ -488,9 +496,9 @@ def test_before_send_redacts_stored_credentials_in_any_text(monkeypatch, tmp_pat
         assert secret not in first
     assert "rejected [Filtered] and [Filtered] (openai); short [Filtered]!" in first
 
-    (state / "credentials" / "cred_broken.json").write_text("{not json")
     config.lark.app_secret = "lark-rotated-s3cret"
     config.save()
+    assert sentry_integration._refresh_known_secret_state()
     rotated = send("lark auth failed for lark-rotated-s3cret (cli_x)")
     assert "lark-rotated-s3cret" not in rotated
     assert "(cli_x)" in rotated
@@ -559,9 +567,19 @@ def test_known_secret_matching_survives_normalization_and_early_breadcrumbs(monk
     config = _config()
     config.lark = LarkConfig(app_secret="demo%3Acredential")
     config.save()
+    assert sentry_integration._refresh_known_secret_state()
 
     breadcrumb = sentry_integration.before_breadcrumb(
         {"message": "early breadcrumb demo%3Acredential"}, {}
+    )
+    subprocess_breadcrumb = sentry_integration.before_breadcrumb(
+        {
+            "type": "subprocess",
+            "category": "subprocess",
+            "message": "/usr/bin/git push demo%3Acredential",
+            "data": {"credential": "demo%3Acredential"},
+        },
+        {},
     )
     event = {
         "message": "event demo%3Acredential and normalized demo:credential",
@@ -573,6 +591,8 @@ def test_known_secret_matching_survives_normalization_and_early_breadcrumbs(monk
     assert "demo%3Acredential" not in rendered
     assert "demo:credential" not in rendered
     assert breadcrumb["message"] == "early breadcrumb [Filtered]"
+    assert subprocess_breadcrumb["message"] == "git"
+    assert subprocess_breadcrumb["data"] == {}
 
 
 def test_known_secret_redaction_preserves_protocol_keys_and_filters_user_maps(monkeypatch, tmp_path):
@@ -584,11 +604,14 @@ def test_known_secret_redaction_preserves_protocol_keys_and_filters_user_maps(mo
     config = _config()
     config.lark = LarkConfig(app_secret="type")
     config.save()
+    assert sentry_integration._refresh_known_secret_state()
 
     sent = sentry_integration.before_send(
         {
             "message": "failure type",
             "exception": {"values": [{"type": "ValueError", "value": "type"}]},
+            "threads": {"values": [{"type": "type", "stacktrace": {"frames": [{"type": "type"}]}}]},
+            "contexts": {"trace": {"type": "type", "values": "type"}},
             "spans": [{"op": "http.client", "data": {"type": "type"}}],
             "extra": {"type": "type"},
         },
@@ -598,25 +621,49 @@ def test_known_secret_redaction_preserves_protocol_keys_and_filters_user_maps(mo
     assert sent["message"] == "failure [Filtered]"
     assert sent["exception"]["values"][0]["type"] == "ValueError"
     assert sent["exception"]["values"][0]["value"] == "[Filtered]"
+    assert sent["threads"]["values"][0]["type"] == "[Filtered]"
+    assert sent["threads"]["values"][0]["stacktrace"]["frames"][0]["type"] == "[Filtered]"
+    assert sent["contexts"]["trace"]["[Filtered]"] == "[Filtered]"
     assert sent["spans"][0]["data"] == {"[Filtered]": "[Filtered]"}
+
+    config.lark.app_secret = "threads"
+    config.save()
+    assert sentry_integration._refresh_known_secret_state()
+    shape = sentry_integration.before_send(
+        {"threads": {"values": [{"type": "threads"}]}, "extra": {"threads": "threads"}}, {}
+    )
+    assert "threads" in shape
+    assert shape["threads"]["values"][0]["type"] == "[Filtered]"
+    assert shape["extra"] == {"[Filtered]": "[Filtered]"}
     assert sent["extra"] == {"[Filtered]": "[Filtered]"}
 
 
 def test_performance_transactions_are_scrubbed_like_events(monkeypatch, tmp_path):
     """Transactions skip ``before_send``; their spans must not carry what events may not."""
+    import gzip
+
     import sentry_sdk
+    from sentry_sdk.envelope import Envelope
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setenv("VIBE_SENTRY_DSN", "http://public@127.0.0.1:9/1")
     monkeypatch.setenv("VIBE_SENTRY_TRACES_SAMPLE_RATE", "1.0")
     sent = []
 
-    class Capture(sentry_sdk.transport.Transport):
-        def capture_envelope(self, envelope):
-            sent.extend(item.get_bytes().decode("utf-8") for item in envelope.items)
+    class Response:
+        status = 200
+        headers = {}
+        data = b""
+        content = b""
 
-    real_init = sentry_sdk.init
-    monkeypatch.setattr(sentry_sdk, "init", lambda **options: real_init(transport=Capture(), **options))
+        def close(self):
+            return None
+
+    def request(_transport, _method, _endpoint_type, body, headers):
+        sent.append((body, headers))
+        return Response()
+
+    monkeypatch.setattr(sentry_integration._RedactingHttpTransport, "_request", request)
     try:
         assert sentry_integration.init_sentry(_config(), component="service") is True
         with sentry_sdk.start_transaction(op="task", name="refresh"):
@@ -632,10 +679,174 @@ def test_performance_transactions_are_scrubbed_like_events(monkeypatch, tmp_path
         sentry_sdk.get_client().close(timeout=0)
         sentry_sdk.get_global_scope().set_client(None)
 
-    (payload,) = [item for item in sent if '"type":"transaction"' in item]
+    (body, headers), = sent
+    raw = gzip.decompress(body) if headers.get("Content-Encoding") == "gzip" else body
+    envelope = Envelope.deserialize(raw)
+    payload = next(item.get_bytes().decode("utf-8") for item in envelope.items if item.type == "transaction")
     assert "s3cret" not in payload
     assert "https://discord.com/[Filtered]" in payload
 
+
+def test_worker_scrub_retains_rotated_secret_after_enqueue(monkeypatch, tmp_path):
+    """A value queued before rotation remains covered by the process-lifetime union."""
+    import gzip
+
+    import sentry_sdk
+    from config.v2_config import LarkConfig
+    from sentry_sdk.envelope import Envelope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    config.lark = LarkConfig(app_secret="old-worker-s3cret")
+    config.save()
+    monkeypatch.setenv("VIBE_SENTRY_DSN", "http://public@127.0.0.1:9/1")
+    assert sentry_integration.init_sentry(config, component="service") is True
+    sent = []
+
+    class Response:
+        status = 200
+        headers = {}
+        data = b""
+        content = b""
+
+        def close(self):
+            return None
+
+    def request(_transport, _method, _endpoint_type, body, headers):
+        sent.append((body, headers))
+        return Response()
+
+    monkeypatch.setattr(sentry_integration._RedactingHttpTransport, "_request", request)
+    transport = sentry_sdk.get_client().transport
+    envelope = Envelope()
+    envelope.add_event({"message": "old-worker-s3cret"})
+    transport.capture_envelope(envelope)
+
+    config.lark.app_secret = "new-worker-s3cret"
+    config.save()
+    sentry_sdk.flush(timeout=2)
+    assert transport._worker.is_alive
+    transport.kill()
+    assert not transport._worker.is_alive
+
+    try:
+        (body, headers), = sent
+        raw = gzip.decompress(body) if headers.get("Content-Encoding") == "gzip" else body
+        assert "old-worker-s3cret" not in raw.decode("utf-8")
+    finally:
+        sentry_sdk.get_client().close(timeout=0)
+        sentry_sdk.get_global_scope().set_client(None)
+
+
+def test_worker_drops_envelope_when_secret_read_is_uncertain(monkeypatch, tmp_path):
+    import sentry_sdk
+    from config import paths
+    from config.v2_config import LarkConfig
+    from sentry_sdk.envelope import Envelope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    config.lark = LarkConfig(app_secret="uncertain-worker-s3cret")
+    config.save()
+    monkeypatch.setenv("VIBE_SENTRY_DSN", "http://public@127.0.0.1:9/1")
+    assert sentry_integration.init_sentry(config, component="service") is True
+    sent = []
+
+    class Response:
+        status = 200
+        headers = {}
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        sentry_integration._RedactingHttpTransport,
+        "_request",
+        lambda _transport, _method, _endpoint_type, body, headers: sent.append(body) or Response(),
+    )
+    paths.get_config_path().write_text("{not json", encoding="utf-8")
+    envelope = Envelope()
+    envelope.add_event({"message": "uncertain-worker-s3cret"})
+    sentry_sdk.get_client().transport.capture_envelope(envelope)
+    sentry_sdk.flush(timeout=2)
+
+    try:
+        assert sent == []
+    finally:
+        sentry_sdk.get_client().close(timeout=0)
+        sentry_sdk.get_global_scope().set_client(None)
+
+
+def test_worker_scrub_drops_attachments_and_unknown_raw_items(monkeypatch, tmp_path):
+    from config.v2_config import LarkConfig
+    from sentry_sdk.envelope import Envelope, Item
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    config.lark = LarkConfig(app_secret="raw-item-s3cret")
+    config.save()
+    assert sentry_integration._refresh_known_secret_state()
+
+    envelope = Envelope(headers={"trace": {"trace_id": "trace-id"}, "diagnostic": "raw-item-s3cret"})
+    envelope.add_event({"message": "raw-item-s3cret"})
+    envelope.add_item(Item(payload=b"raw-item-s3cret", type="attachment"))
+    envelope.add_item(Item(payload=b"raw-item-s3cret", type="future_item"))
+
+    scrubbed = sentry_integration._scrub_envelope(envelope)
+    assert envelope.items[0].payload.json["message"] == "raw-item-s3cret"
+    assert [item.type for item in scrubbed.items] == ["event"]
+    assert "raw-item-s3cret" not in scrubbed.serialize().decode("utf-8")
+
+    only_attachment = Envelope(items=[Item(payload=b"raw-item-s3cret", type="attachment")])
+    with pytest.raises(sentry_integration._DropEnvelope):
+        sentry_integration._scrub_envelope(only_attachment)
+
+    unsafe_headers = Envelope(headers={"trace": {"secret": "raw-item-s3cret"}})
+    unsafe_headers.add_event({"message": "safe"})
+    with pytest.raises(sentry_integration._DropEnvelope):
+        sentry_integration._scrub_envelope(unsafe_headers)
+
+
+def test_worker_scrub_covers_default_structured_item_families(monkeypatch, tmp_path):
+    from config.v2_config import LarkConfig
+    from sentry_sdk.envelope import Envelope, Item, PayloadRef
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    config.lark = LarkConfig(app_secret="structured-item-s3cret")
+    config.save()
+    assert sentry_integration._refresh_known_secret_state()
+    payloads = {
+        "log": {"items": [{"body": "structured-item-s3cret", "attributes": {"secret": "structured-item-s3cret"}}]},
+        "trace_metric": {"items": [{"name": "structured-item-s3cret", "attributes": {"secret": "structured-item-s3cret"}}]},
+        "span": {"items": [{"name": "structured-item-s3cret", "attributes": {"secret": "structured-item-s3cret"}}]},
+        "session": {"sid": "structured-item-s3cret"},
+        "sessions": {"aggregates": [{"sid": "structured-item-s3cret"}]},
+        "client_report": {"discarded_events": [{"reason": "structured-item-s3cret"}]},
+        "check_in": {"check_in_id": "structured-item-s3cret"},
+    }
+
+    for item_type, payload in payloads.items():
+        envelope = Envelope(items=[Item(payload=PayloadRef(json=payload), type=item_type)])
+        scrubbed = sentry_integration._scrub_envelope(envelope)
+        assert scrubbed.items[0].type == item_type
+        assert "structured-item-s3cret" not in scrubbed.serialize().decode("utf-8")
+
+
+    from config.v2_config import LarkConfig
+    from sentry_sdk.envelope import Envelope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    config.lark = LarkConfig(app_secret="overflow-worker-s3cret")
+    config.save()
+    monkeypatch.setattr(sentry_integration, "_KNOWN_SECRET_MAX_VALUES", 0)
+
+    assert not sentry_integration._refresh_known_secret_state()
+    envelope = Envelope()
+    envelope.add_event({"message": "overflow-worker-s3cret"})
+    with pytest.raises(sentry_integration._DropEnvelope):
+        sentry_integration._scrub_envelope(envelope)
 
 @pytest.mark.parametrize("unit", ["\\", "a.", "x-api-"])
 def test_scrub_data_stays_linear_on_pathological_text(unit):
