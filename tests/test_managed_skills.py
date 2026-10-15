@@ -1508,6 +1508,53 @@ def test_concurrent_publication_reuses_one_snapshot(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Live links are skipped when symlink creation is unavailable")
+def test_publication_reclaims_stale_live_links_when_umbrella_exceeds_root_limit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "builtin-skills"
+    _write_skill(source, "retired", "retired", "Retired")
+    publish_builtin_skills(source_root=source, destination_root=destination)
+    assert (destination / "retired").is_symlink()
+
+    for path in sorted((source / "retired").rglob("*"), reverse=True):
+        path.unlink() if path.is_file() else path.rmdir()
+    (source / "retired").rmdir()
+    _write_skill(source, "current", "current", "Current")
+    monkeypatch.setattr(managed_skills, "DISCOVERY_ROOT_MAX_CHILDREN", 2)
+
+    publish_builtin_skills(source_root=source, destination_root=destination)
+
+    assert (destination / "current").is_symlink()
+    assert not (destination / "retired").exists()
+
+
+def test_publication_removes_stale_live_link_when_symlink_refresh_is_skipped(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "builtin-skills"
+    _write_skill(source, "alpha", "alpha", "Alpha", "Old\n")
+    old_id = publish_builtin_skills(source_root=source, destination_root=destination)
+    live = destination / "alpha"
+    if not live.is_symlink():
+        live.symlink_to(Path(f"{BUILTIN_SNAPSHOTS_DIRNAME}/{old_id}/alpha"), target_is_directory=True)
+    _write_skill(source, "alpha", "alpha", "Alpha", "New\n")
+
+    def fail_symlink(*_args, **_kwargs):
+        raise OSError("symlink privilege not held")
+
+    monkeypatch.setattr(managed_skills, "_optional_live_skill_links", lambda: True)
+    monkeypatch.setattr(managed_skills.os, "symlink", fail_symlink)
+
+    new_id = publish_builtin_skills(source_root=source, destination_root=destination)
+    assert new_id != old_id
+    assert not live.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Live links are skipped when symlink creation is unavailable")
 def test_concurrent_publication_of_distinct_snapshots_keeps_one_coherent_live_catalog(
     tmp_path: Path,
 ) -> None:
@@ -1588,12 +1635,20 @@ def test_publication_rejects_nonportable_and_wrong_type_paths(tmp_path: Path) ->
         publish_builtin_skills(source_root=valid_source, destination_root=destination)
 
 
+def test_publication_rejects_builtin_directory_name_mismatch(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    _write_skill(source, "legacy-folder", "current-name", "Mismatch")
+
+    with pytest.raises(RuntimeError, match="directory must match"):
+        publish_builtin_skills(source_root=source, destination_root=tmp_path / "out")
+
+
 def test_publication_rejects_duplicate_declared_builtin_names(tmp_path: Path) -> None:
     source = tmp_path / "source"
     _write_skill(source, "first", "shared-name", "First")
     _write_skill(source, "second", "shared-name", "Second")
 
-    with pytest.raises(RuntimeError, match="unique declared names"):
+    with pytest.raises(RuntimeError, match="directory must match"):
         publish_builtin_skills(source_root=source, destination_root=tmp_path / "out")
 
 

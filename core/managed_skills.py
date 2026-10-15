@@ -1592,6 +1592,10 @@ def _validate_builtin_catalog(root: Path) -> None:
         )
         if skill is None:
             raise RuntimeError(f"Built-in Skill is invalid: {name}")
+        if skill.name != name:
+            raise RuntimeError(
+                f"Built-in Skill directory must match its declared name: {name} != {skill.name}"
+            )
         if skill.name in declared_names:
             raise RuntimeError(f"Built-in Skills must have unique declared names: {skill.name}")
         declared_names.add(skill.name)
@@ -1646,6 +1650,10 @@ def _is_builtin_live_link(path: Path) -> bool:
     )
 
 
+def _optional_live_skill_links() -> bool:
+    return os.name == "nt"
+
+
 def _live_skill_link_matches(path: Path, umbrella: Path, snapshot: Path, skill_name: str) -> bool:
     expected = Path(_relative_live_skill_target(umbrella, snapshot, skill_name))
     try:
@@ -1673,17 +1681,41 @@ def _install_live_skill_link(umbrella: Path, snapshot: Path, skill_name: str) ->
     except OSError as exc:
         if os.path.lexists(staging):
             _remove_snapshot_staging(staging)
-        if os.name == "nt":
+        if _optional_live_skill_links():
             logger.warning("Skipping live built-in Skill path on this platform: %s", skill_name)
+            if _is_builtin_live_link(live):
+                try:
+                    live.unlink()
+                except OSError:
+                    logger.warning(
+                        "Could not remove stale live built-in Skill path: %s",
+                        live,
+                        exc_info=True,
+                    )
             return
         raise RuntimeError(f"Cannot publish live built-in Skill path: {skill_name}") from exc
 
 
+def _umbrella_children(umbrella: Path) -> list[tuple[str, Path, os.stat_result]]:
+    children: list[tuple[str, Path, os.stat_result]] = []
+    try:
+        with os.scandir(umbrella) as entries:
+            for enumerated, entry in enumerate(entries, start=1):
+                if enumerated > DISCOVERY_CLASS_MAX_CHILDREN:
+                    raise RuntimeError("Built-in Skill live catalog exceeds the enumeration budget")
+                try:
+                    entry_stat = os.stat(entry.path, follow_symlinks=False)
+                except OSError:
+                    continue
+                children.append((entry.name, Path(entry.path), entry_stat))
+    except OSError:
+        return []
+    children.sort(key=lambda item: item[0])
+    return children
+
+
 def _reclaim_stale_live_skill_links(umbrella: Path, keep_names: set[str]) -> None:
-    children = _root_children(umbrella)
-    if children is None:
-        return
-    for name, child, child_stat in children:
+    for name, child, child_stat in _umbrella_children(umbrella):
         if name in keep_names or name.startswith(".") or _SNAPSHOT_ID_RE.fullmatch(name):
             continue
         if not stat.S_ISLNK(child_stat.st_mode) or not _is_builtin_live_link(child):
