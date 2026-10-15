@@ -182,9 +182,8 @@ def test_restore_rebinds_persisted_remote_caller_context(monkeypatch) -> None:
             "AVIBE_CALLER_SESSION_PROOF": "stale-process-proof",
         },
         "opencode_managed_skill_project_base": "/tmp",
-        "opencode_managed_skill_builtin_snapshot": {
-            "id": "d" * 64,
-            "root": "/old-avibe-home/builtin-skills/" + "d" * 64,
+        "opencode_managed_skill_builtin_catalog": {
+            "root": "/old-avibe-home/builtin-skills",
         },
     }
     agent, _, _, _ = _build_agent({"oc-1": poll})
@@ -216,9 +215,9 @@ def test_restore_rebinds_persisted_remote_caller_context(monkeypatch) -> None:
     assert bound[0]["path"] == binding_path
     assert bound[0]["extra_env"]["AVIBE_CALLER_RESOURCE_CONTEXT"] == '{"sub":"user-1"}'
     assert bound[0]["extra_env"]["AVIBE_SKILL_PROJECT_BASE"] == str(Path("/tmp").resolve())
-    assert bound[0]["extra_env"]["AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID"] == "d" * 64
+    assert "AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID" not in bound[0]["extra_env"]
     assert bound[0]["extra_env"]["AVIBE_BUILTIN_SKILLS_ROOT"] == (
-        "/old-avibe-home/builtin-skills/" + "d" * 64
+        "/old-avibe-home/builtin-skills"
     )
     assert "IGNORED_ENV" not in bound[0]["extra_env"]
     assert "AVIBE_CALLER_SESSION_PROOF" not in bound[0]["extra_env"]

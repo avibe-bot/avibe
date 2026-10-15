@@ -1517,14 +1517,14 @@ def test_session_handler_recreates_cached_claude_client_when_skill_bindings_chan
     context = MessageContext(user_id="U123", channel_id="C123", platform="slack")
 
     first_client = _run_session(handler, context)
-    skill_env["AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID"] = "a" * 64
+    skill_env["AVIBE_BUILTIN_SKILLS_ROOT"] = "/old-avibe-home/builtin-skills"
     second_client = _run_session(handler, context)
 
     assert first_client is not second_client
     assert first_client.disconnects == 1
     assert len(captured["clients"]) == 2
-    assert "AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID" not in first_client.options.env
-    assert second_client.options.env["AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID"] == "a" * 64
+    assert "AVIBE_BUILTIN_SKILLS_ROOT" not in first_client.options.env
+    assert second_client.options.env["AVIBE_BUILTIN_SKILLS_ROOT"] == "/old-avibe-home/builtin-skills"
 
 
 def test_session_handler_recreates_terminated_cached_client_before_dispatch(

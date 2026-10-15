@@ -11,7 +11,6 @@ import pytest
 from core import managed_skills
 from core.managed_skills import (
     BUILTIN_SKILLS_ROOT_ENV,
-    BUILTIN_SKILLS_SNAPSHOT_ENV,
     CATALOG_DESCRIPTION_MAX_CHARS,
     CATALOG_PAGE_MAX_BYTES,
     CATALOG_PAGE_SIZE,
@@ -31,7 +30,6 @@ from core.managed_skills import (
     render_skill_content,
     render_skill_list,
     resolve_skills,
-    snapshot_tree_digest,
 )
 from core.system_prompt_injection import build_system_prompt_injection
 from modules.im import MessageContext
@@ -62,7 +60,7 @@ def _isolated_resolve(cwd: Path, tmp_path: Path, **kwargs):
         codex_home=kwargs.pop("codex_home", tmp_path / "codex-home"),
         claude_home=kwargs.pop("claude_home", tmp_path / "claude-home"),
         xdg_config_home=kwargs.pop("xdg_config_home", tmp_path / "xdg-home"),
-        builtin_snapshot_id=kwargs.pop("builtin_snapshot_id", ""),
+        builtin_catalog_root=kwargs.pop("builtin_catalog_root", ""),
         **kwargs,
     )
 
@@ -73,7 +71,6 @@ def _isolate_live_commands(monkeypatch, tmp_path: Path) -> tuple[Path, Path]:
     cwd.mkdir()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setenv("AVIBE_HOME", str(home / ".avibe"))
-    monkeypatch.setenv(BUILTIN_SKILLS_SNAPSHOT_ENV, "")
     monkeypatch.setenv(BUILTIN_SKILLS_ROOT_ENV, "")
     return home, cwd
 
@@ -305,8 +302,7 @@ def test_resolution_applies_all_precedence_dimensions(tmp_path: Path) -> None:
     nested = project / "packages" / "app"
     nested.mkdir(parents=True)
     (project / ".git").mkdir()
-    snapshot_id = "a" * 64
-    builtin_root = avibe_home / "builtin-skills" / snapshot_id
+    builtin_root = avibe_home / "builtin-skills"
 
     _write_skill(home / ".agents" / "skills", "shared", "shared", "global agents")
     _write_skill(home / ".codex" / "skills", "global-family", "global-family", "codex")
@@ -324,7 +320,7 @@ def test_resolution_applies_all_precedence_dimensions(tmp_path: Path) -> None:
         codex_home=home / ".codex",
         claude_home=home / ".claude",
         xdg_config_home=home / ".config",
-        builtin_snapshot_id=snapshot_id,
+        builtin_catalog_root=builtin_root,
     )
     by_name = {skill.name: skill for skill in skills}
 
@@ -346,7 +342,7 @@ def test_global_roots_honor_backend_home_overrides(tmp_path: Path, monkeypatch) 
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_home))
-    monkeypatch.setenv(BUILTIN_SKILLS_SNAPSHOT_ENV, "")
+    monkeypatch.setenv(BUILTIN_SKILLS_ROOT_ENV, "")
 
     _write_skill(codex_home / "skills", "codex", "codex", "Codex")
     _write_skill(claude_home / "skills", "claude", "claude", "Claude")
@@ -365,7 +361,7 @@ def test_bound_global_roots_do_not_follow_later_relative_overrides(tmp_path: Pat
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "bound-codex"))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "bound-claude"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "bound-xdg"))
-    monkeypatch.setenv(BUILTIN_SKILLS_SNAPSHOT_ENV, "")
+    monkeypatch.setenv(BUILTIN_SKILLS_ROOT_ENV, "")
     bound = managed_skill_environment(cwd)
     monkeypatch.setenv("CODEX_HOME", "relative-codex")
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", "relative-claude")
@@ -391,7 +387,7 @@ def test_codex_system_skills_are_a_low_priority_global_compatibility_root(
     codex_home = home / ".codex"
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
-    monkeypatch.setenv(BUILTIN_SKILLS_SNAPSHOT_ENV, "")
+    monkeypatch.setenv(BUILTIN_SKILLS_ROOT_ENV, "")
 
     user = _write_skill(home / ".agents" / "skills", "shared", "shared", "User")
     _write_skill(codex_home / "skills" / ".system", "shared", "shared", "System")
@@ -413,7 +409,7 @@ def test_codex_system_container_counts_toward_the_user_root_enumeration_limit(
     codex_home = home / ".codex"
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
-    monkeypatch.setenv(BUILTIN_SKILLS_SNAPSHOT_ENV, "")
+    monkeypatch.setenv(BUILTIN_SKILLS_ROOT_ENV, "")
     monkeypatch.setattr(managed_skills, "DISCOVERY_ROOT_MAX_CHILDREN", 1)
 
     _write_skill(codex_home / "skills", "user-skill", "user-skill", "User")
@@ -429,7 +425,7 @@ def test_empty_backend_home_overrides_fall_back_to_default_roots(tmp_path: Path,
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setenv("CODEX_HOME", "")
     monkeypatch.setenv("XDG_CONFIG_HOME", "")
-    monkeypatch.setenv(BUILTIN_SKILLS_SNAPSHOT_ENV, "")
+    monkeypatch.setenv(BUILTIN_SKILLS_ROOT_ENV, "")
 
     _write_skill(home / ".codex" / "skills", "codex", "codex", "Codex")
     _write_skill(home / ".config" / "opencode" / "skills", "opencode", "opencode", "OpenCode")
@@ -686,7 +682,7 @@ def test_system_prompt_catalog_is_backend_neutral_for_remote_sessions(
     home = tmp_path / "home"
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setenv("AVIBE_HOME", str(home / ".avibe"))
-    monkeypatch.setenv(BUILTIN_SKILLS_SNAPSHOT_ENV, "")
+    monkeypatch.setenv(BUILTIN_SKILLS_ROOT_ENV, "")
     _write_skill(cwd / ".agents" / "skills", "shared", "shared", "Shared")
     resource_context = {
         "sub": "member-1",
@@ -805,8 +801,7 @@ def test_discovery_ignores_zero_directory_entry_identities(tmp_path: Path, monke
     """
 
     _, cwd = _isolate_live_commands(monkeypatch, tmp_path)
-    monkeypatch.delenv(BUILTIN_SKILLS_SNAPSHOT_ENV)
-    monkeypatch.delenv(BUILTIN_SKILLS_ROOT_ENV)
+    monkeypatch.delenv(BUILTIN_SKILLS_ROOT_ENV, raising=False)
     root = cwd / ".agents" / "skills"
     _write_skill(root, "alpha", "alpha", "Alpha")
     _write_skill(root, "beta", "beta", "Beta")
@@ -1024,8 +1019,8 @@ def test_builtin_and_compatibility_inputs_have_independent_budgets(tmp_path: Pat
     cwd = tmp_path / "project"
     cwd.mkdir()
     avibe_home = tmp_path / "avibe-home"
-    snapshot_id = "b" * 64
-    _write_skill(avibe_home / "builtin-skills" / snapshot_id, "builtin", "builtin", "Built-in")
+    builtin_root = avibe_home / "builtin-skills"
+    _write_skill(builtin_root, "builtin", "builtin", "Built-in")
     _write_skill(cwd / ".agents" / "skills", "project", "project", "Project")
     _write_skill(tmp_path / "home" / ".agents" / "skills", "global", "global", "Global")
     monkeypatch.setattr(managed_skills, "DISCOVERY_CLASS_MAX_CANDIDATES", 1)
@@ -1034,7 +1029,7 @@ def test_builtin_and_compatibility_inputs_have_independent_budgets(tmp_path: Pat
         cwd,
         tmp_path,
         avibe_home=avibe_home,
-        builtin_snapshot_id=snapshot_id,
+        builtin_catalog_root=builtin_root,
     )
     assert [skill.name for skill in skills] == ["builtin", "project"]
 
@@ -1174,7 +1169,7 @@ def test_enabled_claude_plugin_skills_join_the_managed_catalog(
         claude_home=claude_home,
         claude_cli_path="/opt/claude-custom",
         xdg_config_home=home / ".config",
-        builtin_snapshot_id="",
+        builtin_catalog_root="",
     )
 
     assert [skill.name for skill in skills] == ["format-code"]
@@ -1248,7 +1243,7 @@ def test_claude_plugin_discovery_fails_closed_when_capture_fails(
         codex_home=home / ".codex",
         claude_home=claude_home,
         xdg_config_home=home / ".config",
-        builtin_snapshot_id="",
+        builtin_catalog_root="",
     ) == []
 
 
@@ -1277,59 +1272,14 @@ def test_enabled_claude_plugin_skill_overrides_codex_system_default(
         claude_home=claude_home,
         claude_cli_path="/opt/claude-custom",
         xdg_config_home=home / ".config",
-        builtin_snapshot_id="",
+        builtin_catalog_root="",
     )
 
     assert len(skills) == 1
     assert skills[0].directory == plugin_skill.parent.resolve()
 
 
-def test_snapshot_v1_digest_fixture_is_stable(tmp_path: Path) -> None:
-    root = tmp_path / "source"
-    skill_file = root / "alpha" / "SKILL.md"
-    skill_file.parent.mkdir(parents=True)
-    skill_file.write_bytes(b"---\nname: alpha\ndescription: Alpha\n---\nAlpha body\n")
-    script = root / "alpha" / "scripts" / "run.sh"
-    script.parent.mkdir()
-    script.write_bytes(b"#!/bin/sh\nprintf alpha\n")
-    skill_file.chmod(0o644)
-    script.chmod(0o644)
-
-    assert snapshot_tree_digest(root) == "00ee8932422279760a9cbe6a7b4e8ffb57c5a3e9ba3fee5a94c216ce2d72a848"
-
-
-@pytest.mark.skipif(os.name == "nt", reason="Windows has no POSIX executable mode")
-def test_mode_only_change_produces_a_new_snapshot_id(tmp_path: Path) -> None:
-    root = tmp_path / "source"
-    script = _write_skill(root, "alpha", "alpha", "Alpha").parent / "run.sh"
-    script.write_text("echo alpha\n", encoding="utf-8")
-    script.chmod(0o644)
-    first = snapshot_tree_digest(root)
-    script.chmod(0o755)
-    assert snapshot_tree_digest(root) != first
-
-
-def test_snapshot_digest_charges_file_growth_after_enumeration(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    source = tmp_path / "source"
-    skill_file = _write_skill(source, "alpha", "alpha", "Alpha")
-    monkeypatch.setattr(managed_skills, "BUILTIN_TREE_MAX_BYTES", 128)
-    original_snapshot_entries = managed_skills._snapshot_entries
-
-    def enumerate_then_grow_file(root: Path):
-        entries = original_snapshot_entries(root)
-        skill_file.write_bytes(b"x" * 129)
-        return entries
-
-    monkeypatch.setattr(managed_skills, "_snapshot_entries", enumerate_then_grow_file)
-
-    with pytest.raises(RuntimeError, match="128 bytes"):
-        snapshot_tree_digest(source)
-
-
-def test_publication_keeps_complete_versioned_snapshots_and_executable_modes(
+def test_publication_overwrites_the_named_catalog_and_preserves_executable_modes(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "source"
@@ -1339,22 +1289,21 @@ def test_publication_keeps_complete_versioned_snapshots_and_executable_modes(
     helper.write_text("echo old\n", encoding="utf-8")
     helper.chmod(0o755)
 
-    old_id = publish_builtin_skills(source_root=source, destination_root=destination)
-    old_snapshot = destination / old_id
-    assert (old_snapshot / "retired" / "SKILL.md").is_file()
+    first = publish_builtin_skills(source_root=source, destination_root=destination)
+    assert first == destination
+    assert (destination / "retired" / "SKILL.md").is_file()
     if os.name != "nt":
-        assert (old_snapshot / "retired" / "run.sh").stat().st_mode & 0o111
+        assert (destination / "retired" / "run.sh").stat().st_mode & 0o111
 
     for path in sorted((source / "retired").rglob("*"), reverse=True):
         path.unlink() if path.is_file() else path.rmdir()
     (source / "retired").rmdir()
     _write_skill(source, "current", "current", "Current", "New\n")
-    new_id = publish_builtin_skills(source_root=source, destination_root=destination)
+    second = publish_builtin_skills(source_root=source, destination_root=destination)
 
-    assert new_id != old_id
-    assert (old_snapshot / "retired" / "SKILL.md").is_file()
-    assert not (destination / new_id / "retired").exists()
-    assert (destination / new_id / "current" / "SKILL.md").is_file()
+    assert second == destination
+    assert not (destination / "retired").exists()
+    assert (destination / "current" / "SKILL.md").is_file()
 
 
 def test_publication_opens_snapshot_files_in_binary_mode_when_available(
@@ -1379,11 +1328,12 @@ def test_publication_opens_snapshot_files_in_binary_mode_when_available(
     monkeypatch.setattr(managed_skills.os, "O_BINARY", binary_flag, raising=False)
     monkeypatch.setattr(managed_skills.os, "open", tracking_open)
 
-    snapshot_id = publish_builtin_skills(source_root=source, destination_root=destination)
+    catalog = publish_builtin_skills(source_root=source, destination_root=destination)
 
+    assert catalog == destination
     assert destination_flags
     assert all(flags & binary_flag for flags in destination_flags)
-    assert (destination / snapshot_id / "alpha" / "SKILL.md").read_bytes().endswith(
+    assert (destination / "alpha" / "SKILL.md").read_bytes().endswith(
         b"Line one\r\nLine two\n"
     )
 
@@ -1396,9 +1346,10 @@ def test_publication_preserves_each_executable_bit(tmp_path: Path) -> None:
     helper.write_text("echo alpha\n", encoding="utf-8")
     helper.chmod(0o744)
 
-    snapshot_id = publish_builtin_skills(source_root=source, destination_root=destination)
+    catalog = publish_builtin_skills(source_root=source, destination_root=destination)
 
-    assert (destination / snapshot_id / "alpha" / "run.sh").stat().st_mode & 0o111 == 0o100
+    assert catalog == destination
+    assert (destination / "alpha" / "run.sh").stat().st_mode & 0o111 == 0o100
 
 
 def test_publication_ignores_install_generated_python_bytecode(tmp_path: Path) -> None:
@@ -1410,9 +1361,10 @@ def test_publication_ignores_install_generated_python_bytecode(tmp_path: Path) -
     (cache.parent / "helper.py").write_text("print('source')\n", encoding="utf-8")
     destination = tmp_path / "runtime"
 
-    snapshot_id = publish_builtin_skills(source_root=source, destination_root=destination)
+    catalog = publish_builtin_skills(source_root=source, destination_root=destination)
 
-    assert not (destination / snapshot_id / "alpha" / "scripts" / "__pycache__").exists()
+    assert catalog == destination
+    assert not (destination / "alpha" / "scripts" / "__pycache__").exists()
 
 
 def test_publication_rejects_empty_companion_directories(tmp_path: Path) -> None:
@@ -1424,13 +1376,13 @@ def test_publication_rejects_empty_companion_directories(tmp_path: Path) -> None
         publish_builtin_skills(source_root=source, destination_root=tmp_path / "runtime")
 
 
-def test_concurrent_publication_reuses_one_snapshot(tmp_path: Path) -> None:
+def test_concurrent_publication_replaces_one_named_catalog(tmp_path: Path) -> None:
     source = tmp_path / "source"
     destination = tmp_path / "builtin-skills"
     _write_skill(source, "alpha", "alpha", "Alpha")
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        ids = list(
+        catalogs = list(
             pool.map(
                 lambda _: publish_builtin_skills(
                     source_root=source,
@@ -1440,22 +1392,21 @@ def test_concurrent_publication_reuses_one_snapshot(tmp_path: Path) -> None:
             )
         )
 
-    assert ids[0] == ids[1]
-    assert (destination / ids[0] / "alpha" / "SKILL.md").is_file()
+    assert catalogs[0] == catalogs[1] == destination
+    assert (destination / "alpha" / "SKILL.md").is_file()
 
 
 def test_publication_reclaims_interrupted_staging_and_retries(tmp_path: Path) -> None:
     source = tmp_path / "source"
     destination = tmp_path / "builtin-skills"
     _write_skill(source, "alpha", "alpha", "Alpha")
-    snapshot_id = snapshot_tree_digest(source)
-    staging = destination / f".snapshot-{snapshot_id}.staging"
+    staging = destination.parent / ".builtin-skills.staging"
     staging.mkdir(parents=True)
     (staging / "partial").write_text("interrupted", encoding="utf-8")
 
-    assert publish_builtin_skills(source_root=source, destination_root=destination) == snapshot_id
+    assert publish_builtin_skills(source_root=source, destination_root=destination) == destination
     assert not staging.exists()
-    assert (destination / snapshot_id / "alpha" / "SKILL.md").is_file()
+    assert (destination / "alpha" / "SKILL.md").is_file()
 
 
 def test_publication_rejects_nonportable_and_wrong_type_paths(tmp_path: Path) -> None:
@@ -1467,9 +1418,7 @@ def test_publication_rejects_nonportable_and_wrong_type_paths(tmp_path: Path) ->
 
     valid_source = tmp_path / "valid"
     _write_skill(valid_source, "alpha", "alpha", "Alpha")
-    snapshot_id = snapshot_tree_digest(valid_source)
-    destination.mkdir(parents=True)
-    (destination / snapshot_id).write_text("not a directory", encoding="utf-8")
+    destination.write_text("not a directory", encoding="utf-8")
     with pytest.raises(RuntimeError, match="not a directory|unavailable"):
         publish_builtin_skills(source_root=valid_source, destination_root=destination)
 
@@ -1586,16 +1535,17 @@ def test_publication_copies_only_the_bounded_enumeration(
         entries = original_snapshot_entries(root)
         if Path(root) == source:
             source_enumerations += 1
-            if source_enumerations == 3:
+            if source_enumerations == 1:
                 (source / "late.bin").write_bytes(b"x" * 129)
         return entries
 
     monkeypatch.setattr(managed_skills, "_snapshot_entries", enumerate_then_add_late_entry)
 
-    snapshot_id = publish_builtin_skills(source_root=source, destination_root=destination)
+    catalog = publish_builtin_skills(source_root=source, destination_root=destination)
 
-    assert source_enumerations == 3
-    assert not (destination / snapshot_id / "late.bin").exists()
+    assert catalog == destination
+    assert source_enumerations == 1
+    assert not (destination / "late.bin").exists()
 
 
 def test_publication_charges_file_growth_at_copy_time(
@@ -1614,7 +1564,7 @@ def test_publication_charges_file_growth_at_copy_time(
         entries = original_snapshot_entries(root)
         if Path(root) == source:
             source_enumerations += 1
-            if source_enumerations == 3:
+            if source_enumerations == 1:
                 skill_file.write_bytes(b"x" * 129)
         return entries
 
@@ -1678,15 +1628,50 @@ def test_workbench_management_acl_does_not_narrow_runtime_catalog(
     cwd = tmp_path / "project"
     cwd.mkdir()
     avibe_home = home / ".avibe"
-    snapshot_id = "d" * 64
+    builtin_root = avibe_home / "builtin-skills"
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setenv("AVIBE_HOME", str(avibe_home))
-    monkeypatch.setenv(BUILTIN_SKILLS_SNAPSHOT_ENV, snapshot_id)
-    _write_skill(avibe_home / "builtin-skills" / snapshot_id, "builtin", "builtin", "Built-in")
+    monkeypatch.setenv(BUILTIN_SKILLS_ROOT_ENV, str(builtin_root))
+    _write_skill(builtin_root, "builtin", "builtin", "Built-in")
+    _write_skill(
+        builtin_root / ("a" * 64),
+        "legacy",
+        "legacy",
+        "Legacy hashed snapshot",
+    )
     _write_skill(cwd / ".agents" / "skills", "project", "project", "Project")
     skills = resolve_skills(cwd)
 
     assert [skill.name for skill in skills] == ["builtin", "project"]
+
+
+def test_unbound_legacy_hashed_catalog_is_replaced_on_resolve(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    home, cwd = _isolate_live_commands(monkeypatch, tmp_path)
+    monkeypatch.delenv(BUILTIN_SKILLS_ROOT_ENV, raising=False)
+    hashed = home / ".avibe" / "builtin-skills" / ("a" * 64)
+    _write_skill(hashed, "legacy", "legacy", "Legacy")
+
+    names = {skill.name for skill in resolve_skills(cwd)}
+
+    assert "legacy" not in names
+    assert "use-avibe" in names
+    assert (home / ".avibe" / "builtin-skills" / "use-avibe" / "SKILL.md").is_file()
+    assert not hashed.exists()
+
+
+def test_missing_legacy_snapshot_bind_uses_named_catalog(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    home, cwd = _isolate_live_commands(monkeypatch, tmp_path)
+    catalog = home / ".avibe" / "builtin-skills"
+    _write_skill(catalog, "builtin", "builtin", "Built-in")
+    monkeypatch.setenv(BUILTIN_SKILLS_ROOT_ENV, str(catalog / ("a" * 64)))
+
+    assert [skill.name for skill in resolve_skills(cwd)] == ["builtin"]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="symlink fixture requires POSIX semantics")
@@ -1699,23 +1684,20 @@ def test_publication_rejects_symlinks(tmp_path: Path) -> None:
         publish_builtin_skills(source_root=source, destination_root=tmp_path / "out")
 
 
-def test_bound_working_directory_and_snapshot_are_inherited(monkeypatch, tmp_path: Path) -> None:
+def test_bound_working_directory_and_catalog_are_inherited(monkeypatch, tmp_path: Path) -> None:
     home, advertised_cwd = _isolate_live_commands(monkeypatch, tmp_path)
     other_cwd = tmp_path / "other"
     other_cwd.mkdir()
     _write_skill(advertised_cwd / ".agents" / "skills", "advertised", "advertised", "Here")
     _write_skill(other_cwd / ".agents" / "skills", "other", "other", "There")
-    snapshot_id = "c" * 64
     monkeypatch.setenv(SKILL_WORKING_DIR_ENV, str(advertised_cwd))
-    monkeypatch.setenv(BUILTIN_SKILLS_SNAPSHOT_ENV, snapshot_id)
     monkeypatch.chdir(other_cwd)
 
     assert [skill.name for skill in resolve_skills()] == ["advertised"]
     assert managed_skill_environment(advertised_cwd) == {
         SKILL_WORKING_DIR_ENV: str(advertised_cwd.resolve()),
-        BUILTIN_SKILLS_SNAPSHOT_ENV: snapshot_id,
         BUILTIN_SKILLS_ROOT_ENV: str(
-            (Path(os.environ["AVIBE_HOME"]) / "builtin-skills" / snapshot_id).resolve()
+            (Path(os.environ["AVIBE_HOME"]) / "builtin-skills").resolve()
         ),
         SKILL_HOME_ENV: str(home.resolve()),
         SKILL_CODEX_HOME_ENV: str((home / ".codex").resolve()),
@@ -1752,37 +1734,30 @@ def test_managed_skill_environment_binds_configured_claude_cli_path(
     )
 
 
-def test_managed_skill_environment_can_retain_an_explicit_builtin_snapshot(
+def test_managed_skill_environment_can_retain_an_explicit_builtin_catalog(
     tmp_path: Path,
 ) -> None:
     working_directory = tmp_path / "project"
     working_directory.mkdir()
-    snapshot_id = "d" * 64
-    snapshot_root = tmp_path / "old-home" / "builtin-skills" / snapshot_id
+    catalog_root = tmp_path / "old-home" / "builtin-skills"
 
     env = managed_skill_environment(
         working_directory,
-        builtin_snapshot_id=snapshot_id,
-        builtin_snapshot_root=snapshot_root,
+        builtin_catalog_root=catalog_root,
     )
 
-    assert env[BUILTIN_SKILLS_SNAPSHOT_ENV] == snapshot_id
-    assert env[BUILTIN_SKILLS_ROOT_ENV] == str(snapshot_root.resolve())
+    assert env[BUILTIN_SKILLS_ROOT_ENV] == str(catalog_root.resolve())
     invalid = managed_skill_environment(
         working_directory,
-        builtin_snapshot_id="invalid",
-        builtin_snapshot_root=snapshot_root,
+        builtin_catalog_root="relative-catalog",
     )
-    assert BUILTIN_SKILLS_SNAPSHOT_ENV not in invalid
     assert BUILTIN_SKILLS_ROOT_ENV not in invalid
 
 
 def test_bound_builtin_root_survives_avibe_home_change(monkeypatch, tmp_path: Path) -> None:
     home, cwd = _isolate_live_commands(monkeypatch, tmp_path)
-    snapshot_id = "e" * 64
-    original_root = home / "first-avibe" / "builtin-skills" / snapshot_id
+    original_root = home / "first-avibe" / "builtin-skills"
     _write_skill(original_root, "builtin", "builtin", "Built-in")
-    monkeypatch.setenv(BUILTIN_SKILLS_SNAPSHOT_ENV, snapshot_id)
     monkeypatch.setenv(BUILTIN_SKILLS_ROOT_ENV, str(original_root.resolve()))
     monkeypatch.setenv("AVIBE_HOME", str(home / "second-avibe"))
 

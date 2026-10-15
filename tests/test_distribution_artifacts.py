@@ -145,15 +145,16 @@ from pathlib import Path
 from core.managed_skills import builtin_skills_source, load_skill, prepare_builtin_skills
 source = builtin_skills_source()
 assert source.name == "builtin_skills_source"
-snapshot = prepare_builtin_skills()
+catalog = prepare_builtin_skills()
 skill = load_skill("use-avibe")
 assert skill is not None and skill.body and skill.directory.name == "use-avibe"
-root = Path(os.environ["AVIBE_HOME"]) / "builtin-skills" / snapshot
+root = Path(os.environ["AVIBE_HOME"]) / "builtin-skills"
+assert catalog == root
 files = {}
 for path in root.rglob("*"):
     if path.is_file():
         files[path.relative_to(root).as_posix()] = {"sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "mode": path.stat().st_mode & 0o777}
-print(json.dumps({"snapshot": snapshot, "files": files}, sort_keys=True))
+print(json.dumps({"catalog": str(catalog), "files": files}, sort_keys=True))
 '''
     result = subprocess.run([str(python), "-c", probe], cwd=tmp_path,
                             env={**os.environ, "AVIBE_HOME": str(avibe_home)},
@@ -162,7 +163,7 @@ print(json.dumps({"snapshot": snapshot, "files": files}, sort_keys=True))
     observed = json.loads(result.stdout.strip())
     expected = _expected_builtin_skills_snapshot()
     assert observed["files"] == expected
-    assert len(observed["snapshot"]) == 64
+    assert Path(observed["catalog"]).name == "builtin-skills"
 
 
 def _expected_builtin_skills_snapshot() -> dict[str, dict[str, int | str]]:
