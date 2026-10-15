@@ -223,7 +223,7 @@ export const HostedCapabilityChips: React.FC<{
 }> = ({ modelId, capabilities, refusedEfforts = [], pendingTools, sourceBusy, onClearTool, onClearEffort }) => (
   <span className="flex min-w-0 flex-wrap items-center gap-1.5">
     {capabilities.map((capability) => (
-      <CapabilityChip key={capability.tool} capability={capability} modelId={modelId} clearing={pendingTools.has(capability.tool)} onClear={onClearTool} />
+      <CapabilityChip key={`${capability.tool}:${capability.evidence.kind === 'ok' ? 'ok' : capability.evidence.refusal.aspect}`} capability={capability} modelId={modelId} clearing={pendingTools.has(capability.tool)} onClear={onClearTool} />
     ))}
     {refusedEfforts.map((refused) => (
       <EffortChip key={refused.effort} refused={refused} modelId={modelId} clearing={sourceBusy} onClear={onClearEffort} />

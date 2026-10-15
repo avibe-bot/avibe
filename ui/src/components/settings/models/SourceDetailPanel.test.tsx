@@ -1402,7 +1402,8 @@ describe('SourceDetailPanel hosted-tool capability chips', () => {
   const run = (verified: HostedSuccess[], refusals: HostedRefusal[]) => ({ latest_ok: null, verified, refused: refusals });
   const status = (): HostedToolsStatus => ({
     tools: [
-      { name: 'web_search', enabled: true, status: run([ok('model-a')], [refused('model-b', 'replay')]), executor_order: null, effective_order: [], executor_candidates: [] },
+      // model-b runs web search but refused a replay of its results; model-a refused nothing.
+      { name: 'web_search', enabled: true, status: run([ok('model-a'), ok('model-b')], [refused('model-b', 'replay')]), executor_order: null, effective_order: [], executor_candidates: [] },
       // A later refusal on a pair that once ran the tool: the refusal is what routes.
       { name: 'x_search', enabled: true, status: run([ok('model-a', '2026-10-10T08:00:00Z')], [refused('model-a')]), executor_order: null, effective_order: [], executor_candidates: [] },
       { name: 'image_generate', enabled: true, status: run([], []), default_model: null, effective_default: null, models: [], image_offered_by: [] },
@@ -1428,8 +1429,10 @@ describe('SourceDetailPanel hosted-tool capability chips', () => {
 
   it('MH-HOSTED-UI-006: draws one chip per feature with a record, a refusal over a success, and nothing for an unused model', () => {
     renderChips(status(), { models: twoModels.models.map(efforts) });
+    // A call refusal wins over the call's success.
     expect(chips('model-a')).toEqual(['web_search:ok', 'x_search:refused']);
-    expect(chips('model-b')).toEqual(['web_search:replay', 'effort:xhigh']);
+    // A replay refusal is its own feature: it sits beside the success, as the model still runs the tool.
+    expect(chips('model-b')).toEqual(['web_search:ok', 'web_search:replay', 'effort:xhigh']);
     cleanup();
 
     renderChips({ tools: [] });

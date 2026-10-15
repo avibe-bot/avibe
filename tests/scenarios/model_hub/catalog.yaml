@@ -458,6 +458,7 @@ scenarios:
       - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-006: says when the capability read failed instead of drawing a Source with no evidence'
       - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-006: adds no capability column when no model has evidence'
       - 'ui/src/components/settings/models/hostedTools.test.ts::MH-HOSTED-UI-006: gives each pair one record, a refusal over a success and a call refusal over a replay one'
+      - 'ui/src/components/settings/models/hostedTools.test.ts::MH-HOSTED-UI-006: gives a Source model one capability per feature, a call refusal hiding the success and the replay'
       - 'ui/src/components/settings/models/hostedTools.test.ts::MH-HOSTED-UI-006: gives a Source model one capability per tool with a record, in catalog order'
   - id: MH-HOSTED-UI-007
     name: Hosted-tool writes and clears run one at a time and a read never overlaps one, so the screen holds the newest committed state
