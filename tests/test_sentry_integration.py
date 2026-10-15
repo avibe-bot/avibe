@@ -37,8 +37,10 @@ def _isolate_user_state(monkeypatch, tmp_path):
     with sentry_integration._KNOWN_SECRETS_LOCK:
         sentry_integration._known_secret_files_state.clear()
         sentry_integration._known_secret_values.clear()
-        sentry_integration._known_secrets = (None, None)
+        sentry_integration._known_secret_snapshot = (False, None, None)
         sentry_integration._known_secret_collection_uncertain = False
+        sentry_integration._known_secret_collection_overflowed = False
+    assert sentry_integration._refresh_known_secret_state()
 
 
 def test_resolve_sentry_options_prefers_environment(monkeypatch):
@@ -611,7 +613,10 @@ def test_known_secret_redaction_preserves_protocol_keys_and_filters_user_maps(mo
             "message": "failure type",
             "exception": {"values": [{"type": "ValueError", "value": "type"}]},
             "threads": {"values": [{"type": "type", "stacktrace": {"frames": [{"type": "type"}]}}]},
-            "contexts": {"trace": {"type": "type", "values": "type"}},
+            "contexts": {
+                "trace": {"type": "type", "values": "type"},
+                "custom": {"type": "type"},
+            },
             "spans": [{"op": "http.client", "data": {"type": "type"}}],
             "extra": {"type": "type"},
         },
@@ -623,7 +628,9 @@ def test_known_secret_redaction_preserves_protocol_keys_and_filters_user_maps(mo
     assert sent["exception"]["values"][0]["value"] == "[Filtered]"
     assert sent["threads"]["values"][0]["type"] == "[Filtered]"
     assert sent["threads"]["values"][0]["stacktrace"]["frames"][0]["type"] == "[Filtered]"
-    assert sent["contexts"]["trace"]["[Filtered]"] == "[Filtered]"
+    assert sent["contexts"]["trace"]["type"] == "[Filtered]"
+    assert sent["contexts"]["trace"]["values"] == "[Filtered]"
+    assert sent["contexts"]["custom"]["[Filtered]"] == "[Filtered]"
     assert sent["spans"][0]["data"] == {"[Filtered]": "[Filtered]"}
 
     config.lark.app_secret = "threads"
@@ -636,6 +643,80 @@ def test_known_secret_redaction_preserves_protocol_keys_and_filters_user_maps(mo
     assert shape["threads"]["values"][0]["type"] == "[Filtered]"
     assert shape["extra"] == {"[Filtered]": "[Filtered]"}
     assert sent["extra"] == {"[Filtered]": "[Filtered]"}
+
+
+def test_capture_hook_uses_published_snapshot_while_worker_refresh_blocks(monkeypatch, tmp_path):
+    import threading
+
+    from config.v2_config import LarkConfig
+
+    config = _config()
+    config.lark = LarkConfig(app_secret="hook-s3cret")
+    config.save()
+    assert sentry_integration._refresh_known_secret_state()
+    original_files = sentry_integration._known_secret_files
+    scan_entered = threading.Event()
+    release_scan = threading.Event()
+    hook_finished = threading.Event()
+
+    def blocked_files():
+        scan_entered.set()
+        assert release_scan.wait(2)
+        return original_files()
+
+    monkeypatch.setattr(sentry_integration, "_known_secret_files", blocked_files)
+    refresh = threading.Thread(target=sentry_integration._refresh_known_secret_state)
+    refresh.start()
+    assert scan_entered.wait(1)
+
+    def capture_breadcrumb():
+        result = sentry_integration.before_breadcrumb({"message": "ordinary warning"}, {})
+        assert result == {"message": "ordinary warning"}
+        hook_finished.set()
+
+    hook = threading.Thread(target=capture_breadcrumb)
+    hook.start()
+    try:
+        assert hook_finished.wait(1)
+    finally:
+        release_scan.set()
+        refresh.join(2)
+        hook.join(2)
+    assert hook_finished.is_set()
+
+
+def test_init_sentry_disables_spotlight_env_bypass(monkeypatch, tmp_path):
+    import sentry_sdk
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv("VIBE_SENTRY_DSN", "http://public@127.0.0.1:9/1")
+    monkeypatch.setenv("SENTRY_SPOTLIGHT", "true")
+    sent = []
+
+    class Response:
+        status = 200
+        headers = {}
+        data = b""
+        content = b""
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        sentry_integration._RedactingHttpTransport,
+        "_request",
+        lambda _transport, _method, _endpoint_type, body, headers: sent.append(body) or Response(),
+    )
+    try:
+        assert sentry_integration.init_sentry(_config(), component="service") is True
+        client = sentry_sdk.get_client()
+        assert client.spotlight is None
+        sentry_sdk.capture_message("spotlight disabled")
+        sentry_sdk.flush(timeout=2)
+        assert sent
+    finally:
+        sentry_sdk.get_client().close(timeout=0)
+        sentry_sdk.get_global_scope().set_client(None)
 
 
 def test_performance_transactions_are_scrubbed_like_events(monkeypatch, tmp_path):
@@ -687,9 +768,73 @@ def test_performance_transactions_are_scrubbed_like_events(monkeypatch, tmp_path
     assert "https://discord.com/[Filtered]" in payload
 
 
+def test_real_sdk_event_shapes_preserve_protocol_ownership(monkeypatch, tmp_path):
+    import gzip
+    import json
+
+    import sentry_sdk
+    from config.v2_config import LarkConfig, TelegramConfig
+    from sentry_sdk.envelope import Envelope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv("VIBE_SENTRY_DSN", "http://public@127.0.0.1:9/1")
+    config = _config()
+    config.slack.signing_secret = "logentry"
+    config.lark = LarkConfig(app_secret="frames")
+    config.telegram = TelegramConfig(bot_token="type")
+    config.save()
+    sent = []
+
+    class Response:
+        status = 200
+        headers = {}
+        data = b""
+        content = b""
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        sentry_integration._RedactingHttpTransport,
+        "_request",
+        lambda _transport, _method, _endpoint_type, body, headers: sent.append((body, headers)) or Response(),
+    )
+    try:
+        assert sentry_integration.init_sentry(config, component="service") is True
+        sentry_sdk.capture_event(
+            {
+                "message": "schema ownership",
+                "logentry": {"message": "failure"},
+                "exception": {
+                    "values": [
+                        {"type": "ValueError", "stacktrace": {"frames": [{"filename": "worker.py"}]}}
+                    ]
+                },
+                "contexts": {
+                    "trace": {"type": "trace", "trace_id": "a" * 32, "span_id": "b" * 16},
+                    "custom": {"type": "type"},
+                },
+            }
+        )
+        sentry_sdk.flush(timeout=2)
+    finally:
+        sentry_sdk.get_client().close(timeout=0)
+        sentry_sdk.get_global_scope().set_client(None)
+
+    (body, headers), = sent
+    raw = gzip.decompress(body) if headers.get("Content-Encoding") == "gzip" else body
+    envelope = Envelope.deserialize(raw)
+    payload = json.loads(next(item.get_bytes() for item in envelope.items if item.type == "event"))
+    assert payload["logentry"]["message"] == "failure"
+    assert payload["exception"]["values"][0]["stacktrace"]["frames"][0]["filename"] == "worker.py"
+    assert payload["contexts"]["trace"]["type"] == "trace"
+    assert payload["contexts"]["custom"] == {"[Filtered]": "[Filtered]"}
+
+
 def test_worker_scrub_retains_rotated_secret_after_enqueue(monkeypatch, tmp_path):
     """A value queued before rotation remains covered by the process-lifetime union."""
     import gzip
+    import threading
 
     import sentry_sdk
     from config.v2_config import LarkConfig
@@ -717,13 +862,25 @@ def test_worker_scrub_retains_rotated_secret_after_enqueue(monkeypatch, tmp_path
         return Response()
 
     monkeypatch.setattr(sentry_integration._RedactingHttpTransport, "_request", request)
+    original_files = sentry_integration._known_secret_files
+    scan_entered = threading.Event()
+    release_scan = threading.Event()
+
+    def blocked_files():
+        scan_entered.set()
+        assert release_scan.wait(2)
+        return original_files()
+
+    monkeypatch.setattr(sentry_integration, "_known_secret_files", blocked_files)
     transport = sentry_sdk.get_client().transport
     envelope = Envelope()
     envelope.add_event({"message": "old-worker-s3cret"})
     transport.capture_envelope(envelope)
+    assert scan_entered.wait(2)
 
     config.lark.app_secret = "new-worker-s3cret"
     config.save()
+    release_scan.set()
     sentry_sdk.flush(timeout=2)
     assert transport._worker.is_alive
     transport.kill()
@@ -824,6 +981,8 @@ def test_worker_scrub_covers_default_structured_item_families(monkeypatch, tmp_p
         "sessions": {"aggregates": [{"sid": "structured-item-s3cret"}]},
         "client_report": {"discarded_events": [{"reason": "structured-item-s3cret"}]},
         "check_in": {"check_in_id": "structured-item-s3cret"},
+        "profile": {"sample": "structured-item-s3cret"},
+        "profile_chunk": {"sample": "structured-item-s3cret"},
     }
 
     for item_type, payload in payloads.items():
@@ -833,6 +992,7 @@ def test_worker_scrub_covers_default_structured_item_families(monkeypatch, tmp_p
         assert "structured-item-s3cret" not in scrubbed.serialize().decode("utf-8")
 
 
+def test_worker_scrub_fails_closed_on_observation_overflow(monkeypatch, tmp_path):
     from config.v2_config import LarkConfig
     from sentry_sdk.envelope import Envelope
 
@@ -843,10 +1003,28 @@ def test_worker_scrub_covers_default_structured_item_families(monkeypatch, tmp_p
     monkeypatch.setattr(sentry_integration, "_KNOWN_SECRET_MAX_VALUES", 0)
 
     assert not sentry_integration._refresh_known_secret_state()
+    assert sentry_integration._known_secret_files_state == {}
+    assert "overflow-worker-s3cret" not in sentry_integration._known_secret_values
+    config_path = sentry_integration.paths.get_config_path()
+    config_path.unlink()
+    assert not sentry_integration._refresh_known_secret_state()
+    assert sentry_integration._scrub_outgoing({"message": "overflow-worker-s3cret"}) is None
+    assert sentry_integration.before_send({"message": "overflow-worker-s3cret"}, {}) is None
     envelope = Envelope()
     envelope.add_event({"message": "overflow-worker-s3cret"})
     with pytest.raises(sentry_integration._DropEnvelope):
         sentry_integration._scrub_envelope(envelope)
+
+
+def test_worker_scrub_fails_closed_on_file_state_overflow(monkeypatch, tmp_path):
+    monkeypatch.setattr(sentry_integration, "_KNOWN_SECRET_MAX_FILES", 0)
+    config = _config()
+    config.save()
+
+    assert not sentry_integration._refresh_known_secret_state()
+    assert sentry_integration._known_secret_files_state == {}
+    assert not sentry_integration._known_secret_collection_is_complete()
+
 
 @pytest.mark.parametrize("unit", ["\\", "a.", "x-api-"])
 def test_scrub_data_stays_linear_on_pathological_text(unit):
