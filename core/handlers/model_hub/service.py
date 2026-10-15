@@ -163,7 +163,7 @@ from .hosted_tools import (
     apply_hosted_tool_put,
     clear_request,
     engine_stamp,
-    executor_candidates,
+    executor_candidate,
     executor_vendors,
     freeze_turn_tools,
     hop_hosted_tools,
@@ -6493,18 +6493,11 @@ class ModelHubService:
         """
 
         config = self.store.load()
-
-        return next(
-            (
-                candidate
-                for candidate in executor_candidates(
-                    config, tool, evidence=self.hosted_evidence(), spec_for=hosted_tool_spec,
-                )
-                if (candidate.source.id, candidate.model_id) == (slot.source_id, slot.model_id)
-                and identity_digest(candidate.source) == slot.identity
-            ),
-            None,
-        )
+        source = next((item for item in config.sources if item.id == slot.source_id), None)
+        if source is None or identity_digest(source) != slot.identity:
+            return None
+        # The frozen model while it stays listed and runnable, even if the Source now lists one its vendor prefers.
+        return executor_candidate(source, slot.model_id, tool, evidence=self.hosted_evidence(), spec_for=hosted_tool_spec)
 
     async def run_hosted_tool(
         self,

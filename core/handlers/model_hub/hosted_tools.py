@@ -232,12 +232,9 @@ def executor_candidates(
     candidates: dict[str, ExecutorCandidate] = {}
     for source in _vibey_order(config):
         model_id = listed_executor_model(source)
-        if model_id is None:
-            continue
-        spec = runs_on(source, model_id, tool, spec_for=spec_for)
-        if spec is None or evidence.unsupported(source, model_id, EvidenceFeature.hosted(tool, "call")):
-            continue
-        candidates[source.id] = ExecutorCandidate(source, model_id, spec.declaration, tuple(spec.include), spec.price)
+        candidate = executor_candidate(source, model_id, tool, evidence=evidence, spec_for=spec_for) if model_id else None
+        if candidate is not None:
+            candidates[source.id] = candidate
     order = hosted_tool_setting(config, tool).executor_order or ()
     first = [candidates[source_id] for source_id in order if source_id in candidates]
     return tuple(first + [candidate for source_id, candidate in candidates.items() if source_id not in order])
@@ -259,6 +256,24 @@ def listed_executor_model(source: ModelHubSourceConfig) -> Optional[str]:
         if snapshots:
             return snapshots[-1]
     return None
+
+
+def executor_candidate(
+    source: ModelHubSourceConfig, model_id: str, tool: str, *, evidence: HostedEvidence, spec_for: SpecLookup
+) -> Optional[ExecutorCandidate]:
+    """This (Source, model) as an executor of ``tool``, or None: listed, running the tool, and not refused it.
+
+    The one rule for building a chain and for admitting a turn's frozen slot
+    again, so a slot stays good while its model is still listed and runnable,
+    even after the Source lists a model its vendor prefers.
+    """
+
+    if not any(model.id == model_id and not model.retired for model in source.models):
+        return None
+    spec = runs_on(source, model_id, tool, spec_for=spec_for)
+    if spec is None or evidence.unsupported(source, model_id, EvidenceFeature.hosted(tool, "call")):
+        return None
+    return ExecutorCandidate(source, model_id, spec.declaration, tuple(spec.include), spec.price)
 
 
 def executor_vendors(tool: str) -> tuple[str, ...]:

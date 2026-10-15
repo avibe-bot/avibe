@@ -236,6 +236,7 @@ _PRICE = (*_X_SEARCH, "price")
         pytest.param("xai", _edit((*_PRICE, "extra", 0, "unit"), "image"), id="extra-unit-per-image"),
         pytest.param("xai", _edit(("executor_models", 0), " "), id="executor-model-blank"),
         pytest.param("xai", _edit(("executor_models",), "grok-4.20-0309-non-reasoning"), id="executor-models-not-a-list"),
+        pytest.param("xai", _edit(("executor_models",), []), id="executor-models-empty"),
         pytest.param(
             "xai", _edit(("executor_models",), ["grok-4.20-0309-non-reasoning"] * 2), id="executor-model-repeated",
         ),

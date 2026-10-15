@@ -19,7 +19,7 @@ from datetime import timedelta
 import aiohttp
 import pytest
 
-from config.v2_config import ModelHubHostedToolConfig
+from config.v2_config import ModelHubModelConfig, ModelHubHostedToolConfig
 from core.agent_core.messages import HostedCost, message_from_dict
 from core.handlers.model_hub import service as service_module
 from core.handlers.model_hub.adapter import InvokeCancelledError, RawOutcomeKind, UpstreamRejection
@@ -429,6 +429,31 @@ NARROW = replace(
     _refusal(400, "invalid_request_error", XAI),
     rejection=UpstreamRejection(status=400, code="invalid_request_error", unsupported_tool_type="web_search"),
 )
+
+
+@pytest.mark.asyncio
+async def test_a_frozen_executor_slot_runs_while_its_model_stays_listed(tmp_path):
+    """MH-HOSTED-GATEWAY-005: a turn froze its slot on a fallback model; the Source then lists the model its vendor
+    prefers. The frozen model is still listed and runnable, so the call runs on it instead of finding no executor."""
+
+    body = json.dumps({
+        "type": "message", "role": "assistant", "stop_reason": "end_turn",
+        "content": [{"type": "text", "text": "no results"}], "usage": {"input_tokens": 10, "output_tokens": 2},
+    }).encode()
+    service = _vibey_service(tmp_path, _sources(), handles=[
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=ANTHROPIC), (body,)),
+    ])
+    _bind(service, "web_search", (ANTHROPIC, "claude-haiku-4-5"))
+    _EXECUTOR_MODELS["anthropic"] = ("claude-haiku-5-5", "claude-haiku-4-5")
+
+    def preferred_now_listed(_hop):
+        source = next(item for item in service.store.config.sources if item.id == ANTHROPIC)
+        source.models.append(ModelHubModelConfig(id="claude-haiku-5-5", provenance="discovered"))
+
+    status, answer = await _call(service, "web_search", {"arguments": {"query": "q"}}, after_launch=preferred_now_listed)
+    assert status == 200
+    assert service.adapter.invocations == [(ANTHROPIC, "claude-haiku-4-5", "vibey")]
+    assert answer["execution"]["executor_origin"]["model"] == "claude-haiku-4-5"
 
 
 # Each vendor's own answer for a model it does not serve, as its API sends it.

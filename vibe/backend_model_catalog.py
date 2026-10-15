@@ -886,8 +886,8 @@ def _overlay_vendor(raw: object) -> ProviderVendorOverlay:
     if not isinstance(image_models, list):
         raise ValueError("image_models must be a list")
     executor_models = vendor.get("executor_models", [])
-    if not isinstance(executor_models, list):
-        raise ValueError("executor_models must be a list")
+    if not isinstance(executor_models, list) or ("executor_models" in vendor and not executor_models):
+        raise ValueError("executor_models must be a non-empty list")
     executor_ids = tuple(_overlay_token(item, "executor_models") for item in executor_models)
     if len(set(executor_ids)) != len(executor_ids):
         raise ValueError("executor_models must not repeat a model")
