@@ -284,7 +284,13 @@ def _is_codex_clean_pass(item: dict[str, Any], head_sha: str) -> bool:
     if str(item.get("state") or "").lower() in {"changes_requested", "dismissed"}:
         return False
     body = str(item.get("body") or "")
-    if not re.search(r"Codex Review:\s*Didn['’]t find any major issues\b", body, re.IGNORECASE):
+    if (
+        not re.search(r"Codex Review:\s*Didn['’]t find any major issues\b", body, re.IGNORECASE)
+        or re.search(
+            r"\b(error|errors|failed|failures?|something went wrong|changes requested|found issues|needs? changes|P[0-3])\b",
+            body, re.IGNORECASE,
+        )
+    ):
         return False
     reviewed = item.get("commit_id")
     if not isinstance(reviewed, str) or not reviewed:
@@ -298,7 +304,7 @@ def _is_codex_progress(item: dict[str, Any]) -> bool:
     if (
         not _is_codex_item(item)
         or "<!-- codex-pull-request-review-summary -->" not in body
-        or re.search(r"\b(failed|failure|error|something went wrong)\b", body, re.IGNORECASE)
+        or re.search(r"\b(failed|failures?|errors?|something went wrong)\b", body, re.IGNORECASE)
     ):
         return False
     statuses = [
@@ -307,7 +313,11 @@ def _is_codex_progress(item: dict[str, Any]) -> bool:
         and cells[2].strip() != "Status" and cells[2].strip(": -")
     ]
     return bool(statuses) and all(
-        re.match(r"^[\W_]*(queued|pending|running|in progress|completed)\b", status, re.IGNORECASE)
+        re.fullmatch(
+            r"[\W_]*(queued|pending|running|in progress|completed)[\W_]*"
+            r"(?:since\s+)?(?:<relative-time\b[^>]*>[^<]*</relative-time>\s*)?",
+            status, re.IGNORECASE,
+        )
         for status in statuses
     )
 
@@ -567,33 +577,60 @@ def _normalized_pr_snapshot(
     }
 
 
+def _review_observation(kind: str, item: dict[str, Any]) -> dict[str, Any]:
+    fields = {
+        "reviews": ("state", "body", "commit_id"),
+        "issue_comments": ("body",),
+        "review_comments": ("body", "path"),
+        "reactions": ("content",),
+    }[kind]
+    normalized = _normalized_item_map([item], fields=fields)
+    if _is_codex_item(item):
+        for value in normalized.values():
+            value["author"] = "chatgpt-codex-connector"
+    encoded = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+    return {
+        "kind": kind, "id": item["id"],
+        "fingerprint": hashlib.sha256(encoded.encode()).hexdigest(),
+        "order": [str(item.get("updated_at") or item.get("submitted_at") or item.get("created_at") or ""),
+                  int(item["id"])],
+    }
+
+
 def _coalesced_review_state(
     state: dict[str, Any],
     previous: dict[str, Any] | None,
     baseline: dict[str, Any] | None,
     *,
+    reaction_cursor: int = 0,
     initialize: bool = False,
 ) -> tuple[dict[str, Any], bool]:
-    """Remember deferred review evidence in the existing delivery transaction.
+    """Advance monotonic observations, independently of notification progress.
 
-    Only a newly observed reaction at an unchanged head is a completion candidate.
-    A SHA-bearing clean verdict can also be adopted when initially seeding. Unknown
-    bot activity is never treated as a pass, nor swallowed by this helper.
+    Retain the latest bot outcome even when its response row disappears. Retain
+    reaction IDs across head epochs so an old reaction cannot become a new pass.
     """
 
     head = _current_pr_head_sha(state.get("pull_request"))
-    same_head = bool(previous and previous.get("head_sha") == head)
-    batch = dict(previous) if same_head else {"head_sha": head, "review": None, "notified": None}
+    previous = previous or {}
+    same_head = str(previous.get("head_sha") or "").casefold() == head.casefold()
+    reaction_floor = max(
+        reaction_cursor, previous.get("reaction_seen", 0),
+        max((int(key) for key in (baseline or {}).get("reactions", {})), default=0),
+    )
+    batch = dict(previous) if same_head else {
+        "head_sha": head, "review": None, "outcome": None, "notified": None,
+    }
+    batch["reaction_seen"] = max(reaction_floor, max_id(state["reactions"]))
     evidence = batch.get("review")
     revoked = False
     if evidence:
         item = next((item for item in state[evidence["kind"]] if item.get("id") == evidence["id"]), None)
-        if item is None or _item_fingerprint(item) != evidence["fingerprint"]:
+        if item is None or _review_observation(evidence["kind"], item)["fingerprint"] != evidence["fingerprint"]:
             batch.update(review=None, notified=None)
             revoked = True
 
-    clean: list[tuple[str, dict[str, Any]]] = []
-    problem = False
+    outcomes: list[tuple[dict[str, Any], bool]] = []
     for kind, fields in (
         ("reviews", ("state", "body", "commit_id")),
         ("issue_comments", ("body",)),
@@ -607,27 +644,31 @@ def _coalesced_review_state(
                 continue
             normalized = _normalized_item_map([item], fields=fields)
             changed = old_items.get(str(item.get("id"))) != normalized.get(str(item.get("id")))
-            if kind != "review_comments" and _is_codex_clean_pass(item, head):
-                if initialize or changed:
-                    clean.append((kind, item))
-            elif changed and not initialize:
-                problem = True
+            if initialize or changed:
+                clean = kind != "review_comments" and _is_codex_clean_pass(item, head)
+                outcomes.append((_review_observation(kind, item), clean))
 
     baseline_head = ((baseline or {}).get("pull_request") or {}).get("head_sha")
     if not initialize and baseline_head == head:
-        old_reactions = (baseline or {}).get("reactions", {})
-        clean.extend(
-            ("reactions", item) for item in state["reactions"]
-            if _is_codex_pass_reaction(item) and str(item.get("id")) not in old_reactions
+        outcomes.extend(
+            (_review_observation("reactions", item), True) for item in state["reactions"]
+            if _is_codex_pass_reaction(item) and int(item["id"]) > reaction_floor
         )
-    if problem:
-        batch.update(review=None, notified=None)
-    elif clean:
-        kind, item = max(clean, key=lambda pair: (
-            str(pair[1].get("updated_at") or pair[1].get("submitted_at") or pair[1].get("created_at") or ""),
-            int(pair[1].get("id") or 0),
-        ))
-        batch["review"] = {"kind": kind, "id": item["id"], "fingerprint": _item_fingerprint(item)}
+    if outcomes:
+        outcome, clean = max(outcomes, key=lambda pair: tuple(pair[0]["order"]))
+        last_outcome = batch.get("outcome")
+        if (
+            last_outcome is None or tuple(outcome["order"]) > tuple(last_outcome["order"])
+            or (
+                outcome["order"] == last_outcome["order"]
+                and outcome["kind"] == last_outcome["kind"] and outcome["id"] == last_outcome["id"]
+                and outcome["fingerprint"] != last_outcome["fingerprint"]
+            )
+        ):
+            batch["outcome"] = outcome
+            batch["review"] = outcome if clean else None
+            if not clean:
+                batch["notified"] = None
     return batch, revoked and batch.get("review") is None
 
 
@@ -902,11 +943,12 @@ def _render_activity(
 
         visible_reviews = [item for item in visible_reviews if not quiet(item)]
         visible_issue_comments = [item for item in visible_issue_comments if not quiet(item)]
-        if not has_head_event:
+        defer_reactions = not has_head_event and snapshot is not None
+        if defer_reactions:
             new_reactions = []
-        current_snapshot = _quiet_success_snapshot(current_snapshot, defer_reactions=not has_head_event)
+        current_snapshot = _quiet_success_snapshot(current_snapshot, defer_reactions=defer_reactions)
         if snapshot is not None:
-            snapshot = _quiet_success_snapshot(snapshot, defer_reactions=not has_head_event)
+            snapshot = _quiet_success_snapshot(snapshot, defer_reactions=defer_reactions)
     snapshot_changed = snapshot is not None and current_snapshot != snapshot
     if snapshot is not None and not snapshot_changed:
         return (
@@ -1750,15 +1792,25 @@ def _validate_saved_success_batch(saved: dict[str, Any]) -> None:
     notified = value.get("notified")
     if notified is not None and not isinstance(notified, str):
         raise StateFileUnusableError("Saved success_batch is malformed: invalid notification signature")
-    review = value.get("review")
-    if review is not None and (
-        not isinstance(review, dict)
-        or review.get("kind") not in {"reviews", "issue_comments", "reactions"}
-        or not isinstance(review.get("id"), (int, str))
-        or isinstance(review.get("id"), bool)
-        or not isinstance(review.get("fingerprint"), str)
-    ):
-        raise StateFileUnusableError("Saved success_batch is malformed: invalid review evidence")
+    reaction_seen = value.get("reaction_seen", 0)
+    if not isinstance(reaction_seen, int) or isinstance(reaction_seen, bool) or reaction_seen < 0:
+        raise StateFileUnusableError("Saved success_batch is malformed: invalid reaction watermark")
+    for key in ("review", "outcome"):
+        review = value.get(key)
+        if review is None:
+            continue
+        if (
+            not isinstance(review, dict)
+            or review.get("kind") not in {"reviews", "issue_comments", "review_comments", "reactions"}
+            or not isinstance(review.get("id"), (int, str))
+            or isinstance(review.get("id"), bool)
+            or not isinstance(review.get("fingerprint"), str)
+            or not isinstance(review.get("order"), list)
+            or len(review["order"]) != 2
+            or not isinstance(review["order"][0], str)
+            or not isinstance(review["order"][1], int)
+        ):
+            raise StateFileUnusableError("Saved success_batch is malformed: invalid review evidence")
 
 
 def _actions_success_signature(selected: dict[str, Any]) -> str:
@@ -1806,6 +1858,22 @@ def _observe_actions(
             known[run.get("id")] = run
         observed[workflow] = list(known.values())
     return normalize_selected_runs(observed)
+
+
+def _without_older_attempts(
+    selected: dict[str, list[dict[str, Any]]], observed: dict[str, Any],
+) -> dict[str, list[dict[str, Any]]]:
+    """Missing inventory does not hide a new failure; an older attempt does."""
+
+    result = {}
+    for workflow, runs in selected.items():
+        known = {run["id"]: run for run in observed.get(workflow, [])}
+        result[workflow] = [
+            run for run in runs
+            if not isinstance(attempt := known.get(run.get("id"), {}).get("run_attempt"), int)
+            or (isinstance(run.get("run_attempt"), int) and run["run_attempt"] >= attempt)
+        ]
+    return result
 
 
 def _ci_enabled(args: argparse.Namespace) -> bool:
@@ -2416,19 +2484,37 @@ def main() -> int:
         if ci_enabled else {}
     )
 
+    def _visible_success_state() -> dict[str, Any]:
+        visible = dict(state)
+        for kind in ("reviews", "review_comments", "issue_comments"):
+            visible[kind] = _visible_activity_items(
+                state[kind], viewer_login=viewer_login,
+                ignore_self_comments=not args.include_self_comments,
+                ignored_authors=ignored_authors, ignore_patterns=ignore_patterns,
+            )
+        return visible
+
     success_batch = (
         saved.get(SUCCESS_BATCH_KEY) or {
-            "head_sha": tracked_head_sha or observed_head_sha, "review": None, "notified": None,
+            "head_sha": tracked_head_sha or observed_head_sha, "review": None,
+            "outcome": None, "notified": None, "reaction_seen": _saved_int(saved, "reaction_cursor") or 0,
         }
     ) if args.coalesce_success else None
     if args.coalesce_success and (args.seed_state or not resumed or explicit_replay):
-        success_batch, _ = _coalesced_review_state(state, None, snapshot, initialize=True)
+        success_batch, _ = _coalesced_review_state(
+            _visible_success_state(), None, snapshot, initialize=True,
+            reaction_cursor=_saved_int(saved, "reaction_cursor") or 0,
+        )
         _baseline_output, baseline_failed = render_actions_result(
             repo=args.repo, branch=args.branch, head_sha=args.sha or observed_head_sha,
             selected=selected_actions, success_conclusions=success_conclusions,
         )
         if not args.catch_up and success_batch["review"] and _baseline_output and not baseline_failed:
             success_batch["notified"] = _actions_success_signature(selected_actions)
+    success_observed = success_batch
+    success_observation_snapshot = snapshot
+    success_observation_state = None
+    success_revoked = False
 
     if token is None:
         bootstrap_requests = requests_per_poll_count
@@ -2498,6 +2584,24 @@ def main() -> int:
             file=sys.stderr,
         )
 
+        def _observe_success_state() -> None:
+            nonlocal success_observed, success_observation_snapshot, success_observation_state, success_revoked
+            if not args.coalesce_success or state is success_observation_state:
+                return
+            visible = _visible_success_state()
+            success_observed, revoked = _coalesced_review_state(
+                visible, success_observed, success_observation_snapshot, reaction_cursor=reaction_cursor,
+            )
+            success_revoked = success_revoked or revoked
+            success_observation_snapshot = _normalized_pr_snapshot(
+                visible, ignore_self_comments=False, actionable_only=args.actionable_only,
+                review_threads_available=token is not None,
+            )
+            success_observation_state = state
+
+        def _active_actions() -> dict[str, list[dict[str, Any]]]:
+            return _without_older_attempts(selected_actions, actions_observed) if args.coalesce_success else selected_actions
+
         def _render(cursors: tuple[int, int, int, int, str]) -> PRReport:
             activity = _render_activity(
                 repo=args.repo,
@@ -2536,6 +2640,19 @@ def main() -> int:
             if not ci_enabled:
                 return pr_result
 
+            _observe_success_state()
+            if args.coalesce_success:
+                batch = dict(success_observed)
+                report_head = _current_pr_head_sha(pr_result.pr_state.get("pull_request"))
+                if str(batch.get("head_sha") or "").casefold() != report_head.casefold():
+                    # A retained transient-head report must not commit another
+                    # head's review latch, even when settle returns to that SHA.
+                    batch = {
+                        "head_sha": report_head, "review": None, "outcome": None,
+                        "notified": None, "reaction_seen": batch.get("reaction_seen", 0),
+                    }
+                pr_result = pr_result._replace(success_batch=batch)
+
             # A transient PR head can itself be retained as evidence. Never
             # attach another head's CI verdict to that observation's baseline.
             if _current_pr_head_sha(pr_result.pr_state.get("pull_request")).casefold() != (
@@ -2544,23 +2661,14 @@ def main() -> int:
                 return pr_result
 
             if args.coalesce_success:
-                visible_state = dict(state)
-                for kind in ("reviews", "review_comments", "issue_comments"):
-                    visible_state[kind] = _visible_activity_items(
-                        state[kind], viewer_login=viewer_login,
-                        ignore_self_comments=not args.include_self_comments,
-                        ignored_authors=ignored_authors, ignore_patterns=ignore_patterns,
-                    )
-                batch, revoked = _coalesced_review_state(visible_state, success_batch, snapshot)
-                pr_result = pr_result._replace(success_batch=batch)
-                if revoked and pr_result.output is None:
+                if success_revoked and batch.get("review") is None and pr_result.output is None:
                     pr_result = pr_result._replace(output=(
                         f"Codex review evidence changed or was removed for {args.repo}#{args.pr}; "
                         "re-evaluate the current head."
                     ))
                 ci_output, failed = render_actions_result(
                     repo=args.repo, branch=args.branch, head_sha=_active_ci_head_sha(),
-                    selected=selected_actions, success_conclusions=success_conclusions,
+                    selected=_active_actions(), success_conclusions=success_conclusions,
                     fail_fast=True,
                 )
                 raw_threads = state.get("review_threads") or []
@@ -2598,12 +2706,13 @@ def main() -> int:
             actions_output = _render_new_actions()
             if actions_output is None:
                 return pr_result
-            reported_actions = normalize_selected_runs(selected_actions)
+            reported_actions = normalize_selected_runs(_active_actions())
             output = actions_output if pr_result.output is None else f"{pr_result.output}\n{actions_output}"
             return pr_result._replace(output=output, actions=reported_actions)
 
         def _render_new_actions() -> str | None:
-            current_actions = normalize_selected_runs(selected_actions)
+            active_actions = _active_actions()
+            current_actions = normalize_selected_runs(active_actions)
             # A push starts a new CI epoch even if it returns to an earlier SHA.
             previous = actions_snapshot if _same_actions_head() else None
             if previous is not None and current_actions == previous:
@@ -2612,7 +2721,7 @@ def main() -> int:
                 repo=args.repo,
                 branch=args.branch,
                 head_sha=_active_ci_head_sha(),
-                selected=selected_actions,
+                selected=active_actions,
                 success_conclusions=success_conclusions,
                 fail_fast=args.coalesce_success,
             )
@@ -2640,7 +2749,10 @@ def main() -> int:
             # result. The existing pending transaction covers this state too.
             report_head = args.sha or _current_pr_head_sha(report.pr_state.get("pull_request"))
             if report.actions is not None:
-                actions_snapshot = report.actions
+                actions_snapshot = (
+                    _observe_actions(actions_snapshot or {}, report.actions, report_head)
+                    if args.coalesce_success else report.actions
+                )
             elif actions_head_sha is None or actions_head_sha.casefold() != report_head.casefold():
                 actions_snapshot = {workflow: [] for workflow in args.workflow}
             actions_head_sha = report_head
@@ -2657,25 +2769,26 @@ def main() -> int:
                 actions_observed = _observe_actions(
                     actions_observed, normalize_selected_runs(selected_actions), _active_ci_head_sha()
                 )
+            _observe_success_state()
 
         def _actions_waiting_for_terminal_result() -> bool:
             if not ci_enabled:
                 return False
             current_actions = normalize_selected_runs(selected_actions)
             previous = actions_snapshot if _same_actions_head() else None
-            if _actions_snapshot_regressed(current_actions, actions_observed):
-                return True
-            if previous is not None and current_actions == previous:
-                return False
             actions_output, failed = render_actions_result(
                 repo=args.repo,
                 branch=args.branch,
                 head_sha=_active_ci_head_sha(),
-                selected=selected_actions,
+                selected=_active_actions(),
                 success_conclusions=success_conclusions,
                 fail_fast=args.coalesce_success,
             )
             if args.coalesce_success and failed:
+                return False
+            if _actions_snapshot_regressed(current_actions, actions_observed):
+                return True
+            if previous is not None and current_actions == previous:
                 return False
             return actions_output is None
 

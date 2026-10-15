@@ -14,13 +14,25 @@ Observable invariants:
 - Keep the original owner-specific state file, pending transaction, at-least-once replay, and delivery acknowledgement. Reporting policy participates in cursor ownership. Existing activity-mode Watches remain unchanged; enabling a different policy requires a separately established pre-action baseline, not reseeding an armed Watch.
 - Recognized SHA-bearing clean comments/reviews and newly observed Codex PR-body `+1` reactions are the supported success shapes. Unknown/ambiguous evidence is surfaced for judgment, not silently accepted as a merge gate.
 
+## Observation and delivery invariants
+
+Success batching must track monotonic observations, not replaceable response snapshots. The current head retains the latest ordered bot outcome, including an invalidating error/finding; a later clean verdict in the same batch supersedes an earlier error, but restoring an older row cannot supersede a newer outcome. Compare semantic evidence, not timestamps or user-profile metadata. Keep a reaction-ID high-water mark across head changes, initialized from the durable reaction cursor. Explicit unbound reaction replay remains ordinary activity.
+
+Advance those observations on every successful poll and settle fetch. Rendering a candidate must not commit delivery progress; the existing pending transaction still owns acknowledgement. Bind the report's PR head and deferred batch to the same observation, including transient A-to-B-to-A fetch sequences.
+
+Fail-fast CI may tolerate missing inventory, never an older run attempt. Merge acknowledged partial failure inventories instead of replacing previously notified run IDs. Preserve the existing complete-inventory requirement for a success candidate.
+
+Malformed batching state fails only the affected waiter, with the original evidence intact and the supervisor's existing error notification. It is deferred delivery/notification history, not disposable optional-feature configuration. Clearing it can lose the only review evidence or notification watermark. This does not affect Avibe service startup; see the same distinction for Actions history in `docs/plans/watch-actions-dedup.md`.
+
 ## Validation evidence
 
 - With only the new parser flag present, both arrival-order regressions failed because the unchanged waiter emitted a single success (`rc=0` instead of the expected quiet wait).
-- The focused PR waiter, Actions waiter, repository guidance, and Harness Skill guidance suite passes: **321 tests**. The related CLI Watch tests also passed in the earlier combined run; that run's only failure was the newly added documentation-command extractor, corrected and revalidated by the focused suite.
+- The focused PR waiter, Actions waiter, repository guidance, and Harness Skill guidance suite passes after the full observation-history repair: **339 tests**. The related CLI Watch tests also passed in the earlier combined run; that run's only failure was the newly added documentation-command extractor, corrected and revalidated by the focused suite.
 - Changed-file Ruff, `git diff --check`, and `askill validate skills/background-watch-hook/SKILL.md` pass.
 - The normal Codex summary table shape was checked against a live read-only PR response. Its normal Running/Completed updates are quiet; failure and unrecognized statuses remain visible.
-- Independent read-only review, current-head GitHub Codex review, and required CI remain delivery gates, not waived by these local results.
+- First-head independent review found ordered-outcome, reaction-epoch, settle, replay, and partial-CI-history regressions. Fourteen focused cases were run against the original `3c88ae3d1` waiter and failed for those intended behavioral reasons, including metadata-only invalidation. They now exercise the monotonic-observation contract rather than a collection of special-case retries.
+- GitHub first-head findings on exact summary statuses and seeded stale passes are covered by suffix-status and initialization ordering regressions. The malformed-history suggestion is intentionally not adopted for the delivery-state reason above.
+- Independent read-only re-review, current-head GitHub Codex review, and required CI remain delivery gates, not waived by these local results.
 
 ## Known by design
 
@@ -29,6 +41,7 @@ Observable invariants:
 - Head, lifecycle, thread, human-request, and unknown-result activity can still wake the Agent; the notification reduction is deliberately limited to recognized green/progress payloads.
 - Error payloads use the existing bounded rendering and link back to the full GitHub object, which the follow-up fetches.
 - No existing Watch was replaced, no service was restarted, and no installed built-in Skill snapshot was upgraded.
+- Fail-closed notification-history corruption is intentional; it stops the affected waiter and sends the existing terminal failure notice, not Avibe startup. Do not silently discard deferred evidence or an undelivered transaction.
 
 ## Owning boundaries and scope
 

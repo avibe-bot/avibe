@@ -4350,6 +4350,7 @@ def _clean_codex_comment(comment_id=601, *, head=COALESCED_HEAD, author="chatgpt
         "id": comment_id,
         "body": f"Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** `{head[:7]}`",
         "user": {"login": author},
+        "created_at": f"2026-10-15T08:00:{comment_id % 60:02d}Z",
         "html_url": f"https://github.com/example/repo/pull/153#issuecomment-{comment_id}",
     }
 
@@ -4512,9 +4513,14 @@ def test_deferred_review_is_invalidated_until_a_new_clean_verdict(tmp_path, inva
     assert (rc, output) == (124, "")
     items = {}
     if invalidation == "edit-to-error":
-        items = {"issue_comments": [{**_clean_codex_comment(), "body": "Something went wrong"}]}
+        items = {"issue_comments": [{
+            **_clean_codex_comment(), "body": "Something went wrong", "updated_at": "2026-10-15T08:00:02Z",
+        }]}
     elif invalidation == "finding":
-        items = {"issue_comments": [_clean_codex_comment()], "review_comments": [_review_comment(501)]}
+        items = {
+            "issue_comments": [_clean_codex_comment()],
+            "review_comments": [_review_comment(501, created_at="2026-10-15T08:00:02Z")],
+        }
     broken = _success_state(_ci_run(head=COALESCED_HEAD), **items)
     rc, output, _ = _ci_cycle(module, path, [broken], extra_args=options)
     assert rc == 0
@@ -4572,7 +4578,10 @@ def test_coalescing_resets_old_head_evidence_without_mixing_ci(tmp_path):
     assert f"@{new_head[:12]}" in output
 
 
-@pytest.mark.parametrize("status", ["Running", "Completed", "Something went wrong", "Unavailable"])
+@pytest.mark.parametrize("status", [
+    "Running", "Completed", "Something went wrong", "Unavailable",
+    "Completed with errors", "Completed / findings", "Running slowly",
+])
 def test_coalescing_ignores_codex_summary_progress_but_not_errors(tmp_path, status):
     module = _load_module()
     path = tmp_path / "ci.json"
@@ -4602,6 +4611,32 @@ def test_coalescing_policy_requires_ci_and_has_independent_cursor_ownership():
     coalesced = parser.parse_args([*base, "--workflow", "CI", "--coalesce-success"])
     assert module._watch_identity(ordinary) != module._watch_identity(coalesced)
     assert module._watch_identity(ordinary) not in module._legacy_watch_identity_aliases(coalesced, None)
+
+
+@pytest.mark.parametrize("metadata", ["timestamp", "profile", "bot-alias"])
+def test_deferred_review_ignores_nonsemantic_metadata_changes(tmp_path, metadata):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
+    options = ("--coalesce-success",)
+    rc, output, _ = _ci_cycle(module, path, [_success_state(pending, clean=True)], extra_args=options)
+    assert (rc, output) == (124, "")
+    verdict = _clean_codex_comment()
+    if metadata == "timestamp":
+        verdict["updated_at"] = "2026-10-15T08:00:00Z"
+    elif metadata == "profile":
+        verdict["user"] = {**verdict["user"], "avatar_url": "https://example.com/new-avatar.png"}
+    else:
+        verdict["user"] = {"login": "chatgpt-codex-connector"}
+    rc, output, _ = _ci_cycle(
+        module, path, [_success_state(pending, issue_comments=[verdict])], extra_args=options,
+    )
+    assert (rc, output) == (124, "")
+    rc, output, _ = _ci_cycle(
+        module, path, [_success_state(_ci_run(head=COALESCED_HEAD), issue_comments=[verdict])], extra_args=options,
+    )
+    assert rc == 0 and "success candidate" in output
 
 
 @pytest.mark.parametrize("new_ci", ["rerun", "new-run"])
@@ -4658,6 +4693,162 @@ def test_preferred_combined_watch_examples_parse_with_the_same_success_policy():
     assert all(arg.coalesce_success and arg.actionable_only for arg in args)
     assert all(module._validate_ci_args(arg) is None for arg in args)
     assert module._watch_identity(args[0]) == module._watch_identity(args[1])
+
+
+def _codex_error(comment_id=602):
+    return {**_clean_codex_comment(comment_id), "body": "Something went wrong. Please try again."}
+
+
+def test_coalescing_retains_a_later_clean_verdict_in_the_same_error_batch(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
+    options = ("--coalesce-success",)
+    comments = [_codex_error(601), _clean_codex_comment(602)]
+    rc, output, payload = _ci_cycle(
+        module, path, [_success_state(pending, issue_comments=comments)], extra_args=options,
+    )
+    assert rc == 0 and "Something went wrong" in output
+    assert payload[module.STAGED_KEY]["cursors"][module.SUCCESS_BATCH_KEY]["review"]["id"] == 602
+    rc, output, _ = _ci_cycle(
+        module, path, [_success_state(_ci_run(head=COALESCED_HEAD), issue_comments=comments)],
+        delivery="2", extra_args=options,
+    )
+    assert rc == 0 and "success candidate" in output
+
+
+def test_coalescing_initialization_respects_the_latest_existing_bot_outcome():
+    module = _load_module()
+    state = _success_state(issue_comments=[_clean_codex_comment(), _codex_error(602)])
+    batch, _ = module._coalesced_review_state(state, None, None, initialize=True)
+    assert batch["review"] is None
+    assert batch["outcome"]["id"] == 602
+
+
+def test_coalescing_does_not_rebind_a_restored_old_reaction_after_a_push(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
+    options = ("--coalesce-success",)
+    reaction = {"id": 701, "content": "+1", "user": {"login": "chatgpt-codex-connector[bot]"}}
+    rc, output, _ = _ci_cycle(
+        module, path, [_success_state(pending, reactions=[reaction])], extra_args=options,
+    )
+    assert (rc, output) == (124, "")
+    new_head = "b" * 40
+    moved = _success_state(_ci_run(head=new_head), head=new_head)
+    rc, output, _ = _ci_cycle(module, path, [moved], extra_args=options)
+    assert rc == 0 and "pr_head" in output
+    rc, output, _ = _ci_cycle(
+        module, path, [{**moved, "reactions": [reaction]}], delivery="2", extra_args=options,
+    )
+    assert (rc, output) == (124, "")
+
+
+def test_coalescing_retains_settle_invalidation_after_the_error_row_disappears(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
+    options = ("--coalesce-success",)
+    _ci_cycle(module, path, [_success_state(pending, clean=True)], extra_args=options)
+    first = _success_state(pending, issue_comments=[_clean_codex_comment(), _codex_error()])
+    restored = _success_state(_ci_run(head=COALESCED_HEAD), clean=True)
+    rc, output, payload = _ci_cycle(module, path, [first, restored, restored], settle=1, extra_args=options)
+    assert rc == 0 and "Something went wrong" in output
+    assert "success candidate" not in output
+    assert payload[module.STAGED_KEY]["cursors"][module.SUCCESS_BATCH_KEY]["review"] is None
+    rc, output, _ = _ci_cycle(module, path, [restored], delivery="2", extra_args=options)
+    # The fallback report retained the error's PR snapshot; its later deletion
+    # remains ordinary PR activity, but cannot resurrect the old clean verdict.
+    assert "success candidate" not in output
+    rc, output, _ = _ci_cycle(module, path, [restored], delivery="3", extra_args=options)
+    assert (rc, output) == (124, "")
+
+
+def test_coalescing_binds_the_retained_report_and_batch_to_the_same_head(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
+    options = ("--coalesce-success",)
+    reaction = {"id": 701, "content": "+1", "user": {"login": "chatgpt-codex-connector[bot]"}}
+    original = _success_state(pending, reactions=[reaction])
+    _ci_cycle(module, path, [original], extra_args=options)
+    transient = _success_state(head="b" * 40)
+    restored = {**original, "actions": [_ci_run(head=COALESCED_HEAD)]}
+    rc, output, payload = _ci_cycle(module, path, [transient, restored, restored], settle=1, extra_args=options)
+    assert rc == 0 and "success candidate" not in output
+    staged = payload[module.STAGED_KEY]["cursors"]
+    assert staged[module.SUCCESS_BATCH_KEY]["head_sha"] == staged["head_sha"]
+    assert staged[module.SUCCESS_BATCH_KEY]["review"] is None
+    rc, output, _ = _ci_cycle(module, path, [restored], delivery="2", extra_args=options)
+    assert "success candidate" not in output
+
+
+@pytest.mark.parametrize("suffix", ["Something went wrong. Please try again.", "P1: fix the race", "Changes requested"])
+def test_coalescing_surfaces_mixed_clean_and_error_text(tmp_path, suffix):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
+    mixed = _clean_codex_comment()
+    mixed["body"] += "\n\n" + suffix
+    rc, output, _ = _ci_cycle(
+        module, path, [_success_state(pending, issue_comments=[mixed])], extra_args=("--coalesce-success",),
+    )
+    assert rc == 0 and "issue_comment #601" in output
+    assert "success candidate" not in output
+
+
+def test_coalesced_failure_never_reports_or_commits_an_older_attempt(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    current = _ci_run(head=COALESCED_HEAD, attempt=2)
+    _seed_ci_state(module, path, current, head=COALESCED_HEAD)
+    old_failure = _ci_run(head=COALESCED_HEAD, attempt=1, conclusion="failure")
+    rc, output, payload = _ci_cycle(
+        module, path, [_success_state(old_failure)], extra_args=("--coalesce-success",),
+    )
+    assert (rc, output) == (124, "")
+    assert payload["actions"]["CI"][0]["run_attempt"] == 2
+
+
+def test_coalesced_partial_failure_reports_preserve_all_acknowledged_failures(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    first = _ci_run(head=COALESCED_HEAD, conclusion="failure")
+    pending = _ci_run(8, head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
+    options = ("--coalesce-success",)
+    rc, output, _ = _ci_cycle(module, path, [_success_state(first, pending)], extra_args=options)
+    assert rc == 0 and "failure" in output
+    second = {**pending, "status": "completed", "conclusion": "failure"}
+    rc, output, _ = _ci_cycle(module, path, [_success_state(second)], delivery="2", extra_args=options)
+    assert rc == 0 and "failure" in output
+    rc, output, payload = _ci_cycle(
+        module, path, [_success_state(first, second)], delivery="3", extra_args=options,
+    )
+    assert (rc, output) == (124, "")
+    assert {run["id"] for run in payload["actions"]["CI"]} == {7, 8}
+
+
+@pytest.mark.parametrize("replay", [("--catch-up",), ("--since-reaction-id", "0")])
+def test_coalescing_replays_unbound_reactions_as_activity(tmp_path, replay):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    green = _ci_run(head=COALESCED_HEAD)
+    reaction = {"id": 701, "content": "+1", "user": {"login": "chatgpt-codex-connector[bot]"}}
+    state = _success_state(green, reactions=[reaction])
+    _managed_state(module, path, "wat_9", **_complete_pr_baseline_fields(module, state),
+                   actions=module.normalize_selected_runs({"CI": [green]}))
+    rc, output, _ = _ci_cycle(
+        module, path, [state], extra_args=("--coalesce-success", *replay),
+    )
+    assert rc == 0 and "pr_reaction #701" in output
+    assert "success candidate" not in output
 
 
 @pytest.mark.parametrize("intermediate", ["missing", "nonterminal", "older-attempt", "partial"])

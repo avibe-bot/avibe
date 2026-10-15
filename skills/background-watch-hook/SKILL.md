@@ -267,8 +267,13 @@ quiet in this mode, while its error/failure text remains reportable. Unknown
 verdict formats are surfaced rather than silently interpreted as success.
 
 Deferred evidence lives in the same owner-specific state file and pending delivery
-transaction. A head change, changed/deleted verdict, or new bot findings/errors
-invalidates the deferred review; CI from another SHA cannot complete its pair.
+transaction. Retain the latest ordered bot outcome and reaction-ID high-water mark
+through every poll and settle fetch, including temporary missing rows. A later clean
+verdict may supersede an earlier error, but restoring old evidence cannot erase a
+newer failure. Compare semantic verdicts, not timestamps or profile metadata.
+A head change, changed/deleted verdict, or newer bot finding/error invalidates the
+deferred review; CI from another SHA cannot complete its pair. Fail-fast CI still
+rejects older attempts and retains all previously notified partial failures.
 A combined success is deduplicated across ordinary polls and restarts. A new CI
 run/attempt or recovery after a reported problem can produce a fresh pair.
 
@@ -283,6 +288,9 @@ The reporting mode is part of cursor ownership. Enable it on a new, pre-action
 seed and Watch with the same arguments; do not append it to an armed activity-mode
 Watch, replace its cursor, or reseed between rounds. Existing Watches and installed
 Skill snapshots retain their configured behavior until deliberately rolled out.
+Malformed deferred notification history is a waiter failure, not permission to
+silently discard evidence or reseed. The supervisor reports that failure; Avibe
+service startup is unaffected.
 
 The durable Actions snapshot is the notification baseline, not the latest poll.
 Missing runs, nonterminal responses, and older rerun attempts do not erase a
