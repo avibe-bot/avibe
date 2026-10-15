@@ -12,6 +12,7 @@ import json
 
 from sqlalchemy import select
 
+from core.agent_core.ai.errors import classify_error
 from core.agent_core.ai.provider import Done, ProviderError
 from core.agent_core.harness.context import compaction_payload
 from core.agent_core.harness.projection import context_view
@@ -94,8 +95,7 @@ async def test_returned_steer_is_pinned_when_the_failed_request_auto_continues(
     async def fail(request, cancel):
         entered.set()
         await release.wait()
-        # Explicit continuation permission is installed by the provider-boundary lane.
-        yield ProviderError("server", "temporary streaming failure", False)
+        yield classify_error(status=503, body="temporary streaming failure", streamed=True)
 
     harness = _Harness(engine, tmp_path, "avibe", [fail, [Done(assistant("recovered"))]])
     agents = _record_agents(monkeypatch, harness)
