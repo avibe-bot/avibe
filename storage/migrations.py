@@ -823,6 +823,7 @@ _AGENT_RUNS_INDEX_REVISION_MODULES = (
     "storage.alembic.versions.20260728_0041_agent_runs_owed_notice_backoff_index",
     "storage.alembic.versions.20260729_0042_agent_runs_definition_streak_index",
     "storage.alembic.versions.20260811_0051_callback_terminal_turn_identity",
+    "storage.alembic.versions.20261015_0066_agent_runs_callback_parent_index",
 )
 #: Columns the managed indexes read. A head-shaped database has all of them, but
 #: this helper is also reached from ``_repair_head_required_columns`` on older drifted
@@ -837,6 +838,9 @@ _AGENT_RUNS_INDEX_COLUMNS = frozenset(
         "session_id",
         "run_type",
         "source_kind",
+        "parent_run_id",
+        "source_actor",
+        "id",
     }
 )
 
