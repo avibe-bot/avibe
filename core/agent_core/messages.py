@@ -51,6 +51,8 @@ HOSTED_ERROR_CODES: tuple[str, ...] = (
     "gateway_no_result",
     "image_param_unsupported",
     "image_model_unavailable",
+    "image_argument_invalid",
+    "image_reference_unreadable",
 )
 COST_BASES: tuple[str, ...] = ("reported", "list", "included")
 SOURCE_BILLINGS: tuple[str, ...] = ("monthly", "metered")
@@ -350,9 +352,10 @@ class HostedImage:
 class HostedRecord:
     """Per-call facts. ``images`` is set exactly for ``image_generate`` (possibly empty).
 
-    ``error`` is the provider's own reason, or one Avibe wrote, which the model reads too. ``error_code`` names a reason
-    Avibe wrote (``HOSTED_ERROR_CODES``), only beside an ``error``; a surface shows a known code's copy in its reader's
-    language, so such an ``error`` may stay English. Any other reason Avibe writes is in the user's language.
+    ``error`` carries the reason as text, which the model reads: the provider's own, or one Avibe wrote. Every reason
+    Avibe writes carries an ``error_code`` (``HOSTED_ERROR_CODES``, #2589), only beside an ``error``: the display key,
+    which the Web card and the IM line render as that code's copy in the viewer's language. A reason without one is
+    the provider's, shown as it said it.
     """
 
     status: HostedStatus

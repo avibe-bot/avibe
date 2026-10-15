@@ -1788,7 +1788,9 @@
       "gateway_refused": "模型网关拒绝了这次调用",
       "gateway_no_result": "模型网关没有返回结果",
       "image_param_unsupported": "所选图片模型不支持其中一个参数",
-      "image_model_unavailable": "所选图片模型当前不可用"
+      "image_model_unavailable": "所选图片模型当前不可用",
+      "image_argument_invalid": "图片调用的参数无法发送",
+      "image_reference_unreadable": "无法读取参考图片"
     },
     "tool": {
       "web_search": "网页搜索",

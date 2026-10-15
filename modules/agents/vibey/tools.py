@@ -179,7 +179,7 @@ class ImageGenerateTool:
         try:
             references = await asyncio.to_thread(_reference_images, arguments.get("images") or (), cwd)
         except _ReferenceUnreadable as refused:
-            return _failed(self.spec.name, _reference_refusal(refused, self._say), None)
+            return _failed(self.spec.name, _reference_refusal(refused, self._say), "image_reference_unreadable")
         if references:
             arguments["images"] = references
         hosted, answer = await _gateway_call(self.route(), self.client, self.spec.name, arguments)
@@ -220,9 +220,10 @@ _IMAGE_ARGUMENTS = ("model", "prompt", "size", "images", "n")
 Say = Callable[..., str]
 
 
-def _image_refusal(models: ImageModels, arguments: dict[str, Any], say: Say) -> Optional[tuple[str, Optional[str]]]:
+def _image_refusal(models: ImageModels, arguments: dict[str, Any], say: Say) -> Optional[tuple[str, str]]:
     """Why the Turn's frozen image models refuse ``arguments`` before anything runs (§7.2), worded by ``say``, with the
-    error code Avibe writes for it; None when the call may go out. It refuses what the gateway, the execution boundary,
+    error code every reason Avibe writes carries, which a surface shows in its reader's language (#2589); None when
+    the call may go out. It refuses what the gateway, the execution boundary,
     would, so a bad call costs nothing, and words the reasons the gateway also writes as the gateway does; a refusal
     names the models that do take the call. An empty ``images`` is no reference image, and is left out of the call."""
 
@@ -230,7 +231,7 @@ def _image_refusal(models: ImageModels, arguments: dict[str, Any], say: Say) -> 
         del arguments["images"]
     unknown = sorted(set(arguments) - set(_IMAGE_ARGUMENTS))
     if unknown:
-        return say("hostedTools.image.unknownArguments", names=", ".join(unknown)), None
+        return say("hostedTools.image.unknownArguments", names=", ".join(unknown)), "image_argument_invalid"
     chosen = next((model for model in models.models if model.model_id == arguments.get("model")), None)
     if chosen is None:
         available = ", ".join(model.model_id for model in models.models)
@@ -238,18 +239,18 @@ def _image_refusal(models: ImageModels, arguments: dict[str, Any], say: Say) -> 
         return f"{reason} {say('modelHub.hostedTools.imageAlternatives', models=available)}", "image_model_unavailable"
     prompt = arguments.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
-        return say("hostedTools.image.noPrompt"), None
+        return say("hostedTools.image.noPrompt"), "image_argument_invalid"
     if "size" in arguments and size_form(arguments["size"]) is None:
         forms = {form: say(f"hostedTools.image.form.{form}") for form in ("pixels", "ratio")}
-        return say("hostedTools.image.sizeForm", **forms), None
+        return say("hostedTools.image.sizeForm", **forms), "image_argument_invalid"
     images = arguments.get("images")
     if "images" in arguments and (
         not isinstance(images, list) or not all(isinstance(path, str) and path for path in images) or len(images) > MAX_IMAGES
     ):
-        return say("hostedTools.image.badImages", max=str(MAX_IMAGES)), None
+        return say("hostedTools.image.badImages", max=str(MAX_IMAGES)), "image_argument_invalid"
     n = arguments.get("n", 1)
     if isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= MAX_IMAGES:
-        return say("hostedTools.image.badCount", max=str(MAX_IMAGES)), None
+        return say("hostedTools.image.badCount", max=str(MAX_IMAGES)), "image_argument_invalid"
     unsupported = _unsupported(chosen, arguments)
     if unsupported is None:
         return None

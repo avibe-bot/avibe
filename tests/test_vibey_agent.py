@@ -2784,20 +2784,22 @@ async def test_an_image_the_endpoint_returns_is_saved_through_the_media_sink_and
         ({"model": "gemini-3.1-flash-image", "prompt": "a cat", "size": "16:9", "n": 2},
          "gemini-3.1-flash-image does not take n.", "image_param_unsupported", "en"),
         # The forms the image endpoint accepts, no wider.
-        ({"model": "gpt-image-2", "prompt": "a cat", "size": "8x8"}, "size must be WIDTHxHEIGHT", None, "en"),
+        ({"model": "gpt-image-2", "prompt": "a cat", "size": "8x8"}, "size must be WIDTHxHEIGHT",
+         "image_argument_invalid", "en"),
         ({"model": "gpt-image-2", "prompt": "a cat", "quality": "high"},
-         "image_generate takes only model, prompt, size, images and n; it was given quality.", None, "en"),
+         "image_generate takes only model, prompt, size, images and n; it was given quality.", "image_argument_invalid",
+         "en"),
         ({"model": "gpt-image-2", "prompt": "a cat", "images": ["missing.jpg"]},
-         "Cannot read the reference image missing.jpg: ", None, "en"),
+         "Cannot read the reference image missing.jpg: ", "image_reference_unreadable", "en"),
         ({"model": "gpt-image-2", "prompt": "a cat", "images": ["notes.txt"]},
-         "The reference image notes.txt is not an image (jpg, png, gif, webp).", None, "en"),
+         "The reference image notes.txt is not an image (jpg, png, gif, webp).", "image_reference_unreadable", "en"),
         # Every reason is worded in the user's language, the ones the gateway also writes as the gateway does.
         ({"model": "gemini-3.1-flash-image", "prompt": "a cat", "images": ["cat.jpg"]},
          "gemini-3.1-flash-image 不支持 images。 支持它的模型：gpt-image-2。", "image_param_unsupported", "zh"),
         ({"model": "gpt-image-2", "prompt": "a cat", "size": "8x8"},
-         "size 必须是宽x高，例如 1024x1024，或宽高比，例如 16:9。", None, "zh"),
+         "size 必须是宽x高，例如 1024x1024，或宽高比，例如 16:9。", "image_argument_invalid", "zh"),
         ({"model": "gpt-image-2", "prompt": "a cat", "images": ["notes.txt"]},
-         "参考图片 notes.txt 不是图片（jpg、png、gif、webp）。", None, "zh"),
+         "参考图片 notes.txt 不是图片（jpg、png、gif、webp）。", "image_reference_unreadable", "zh"),
         ({"model": "gpt-image-2", "prompt": "make it blue", "images": ["cat.jpg"], "n": 2}, None, None, "en"),
         # An empty list is no reference image: the call goes out without it.
         ({"model": "gemini-3.1-flash-image", "prompt": "a cat", "images": [], "size": "16:9"}, None, None, "en"),
@@ -2812,8 +2814,8 @@ async def test_an_image_call_is_checked_against_the_turns_models_and_its_referen
 ):
     """§7.2, §7.4: Vibey refuses an argument the turn's frozen models do not take before anything runs, and names
     what does take it; a reference image is read as ``read`` reads it, relative to the session's directory, and sent
-    as base64. A path the agent could not read fails the call before it is sent. The reason is in the user's
-    language, which the card and the IM line show."""
+    as base64. A path the agent could not read fails the call before it is sent. Every reason carries its code, the
+    display key the card and the IM line render in the viewer's language (#2589), and its text is in the user's."""
     import httpx
 
     (tmp_path / "cat.jpg").write_bytes(_JPEG)

@@ -1788,7 +1788,9 @@
       "gateway_refused": "the model gateway refused the call",
       "gateway_no_result": "the model gateway returned no result",
       "image_param_unsupported": "the chosen image model doesn't take one of the arguments",
-      "image_model_unavailable": "the chosen image model isn't available"
+      "image_model_unavailable": "the chosen image model isn't available",
+      "image_argument_invalid": "the image call had an argument it can't send",
+      "image_reference_unreadable": "a reference image couldn't be read"
     },
     "tool": {
       "web_search": "Web search",
