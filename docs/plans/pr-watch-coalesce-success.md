@@ -7,7 +7,7 @@ The bundled combined PR/CI waiter gains an opt-in `--coalesce-success` reporting
 Observable invariants:
 
 - A current-head CI success alone or a recognized current-head Codex clean-pass alone does not emit a report or create an Agent turn.
-- Once both are present for the same head, emit one combined success candidate. The follow-up Agent still verifies all delivery/merge gates; the waiter does not authorize a merge.
+- Once both are present for the same head, emit one combined success candidate. Bind the candidate and notification signature to that head, the selected semantic review evidence, and the CI verdict inventory; stronger review evidence must wake the Agent even when CI is unchanged. The follow-up Agent still verifies all delivery/merge gates; the waiter does not authorize a merge.
 - New CI failures report even if another requested workflow is missing or running. Review findings, Codex infrastructure errors, lifecycle/head changes, and unfamiliar review payloads remain reportable.
 - Preserve successful review evidence while CI is pending, including across a restart and a problem-only report. Invalidate it on a new head, changed/deleted evidence, or new bot findings/errors.
 - Never combine an old-head pass with new-head CI. A PR-body reaction is only a completion candidate when this durable observer first sees it after the unchanged head's baseline. Existing or head-transition reactions are not manufactured into head-bound passes.
@@ -31,7 +31,7 @@ The second reviewed head exposed the same observation-retention class at additio
 ## Validation evidence
 
 - With only the new parser flag present, both arrival-order regressions failed because the unchanged waiter emitted a single success (`rc=0` instead of the expected quiet wait).
-- The focused PR waiter, Actions waiter, repository guidance, and Harness Skill guidance suite passes after the complete observation-history repair: **350 tests**. The related CLI Watch tests also passed in the earlier combined run; that run's only failure was the newly added documentation-command extractor, corrected and revalidated by the focused suite.
+- The focused PR waiter, Actions waiter, repository guidance, and Harness Skill guidance suite passes after the complete observation-history repair: **352 tests**. The related CLI Watch tests also passed in the earlier combined run; that run's only failure was the newly added documentation-command extractor, corrected and revalidated by the focused suite.
 - Changed-file Ruff, `git diff --check`, and `askill validate skills/background-watch-hook/SKILL.md` pass.
 - The normal Codex summary table shape was checked against a live read-only PR response. Its normal Running/Completed updates are quiet; failure and unrecognized statuses remain visible.
 - First-head independent review found ordered-outcome, reaction-epoch, settle, replay, and partial-CI-history regressions. Fourteen focused cases were run against the original `3c88ae3d1` waiter and failed for those intended behavioral reasons, including metadata-only invalidation. They now exercise the monotonic-observation contract rather than a collection of special-case retries.

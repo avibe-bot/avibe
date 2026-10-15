@@ -1832,8 +1832,14 @@ def _validate_saved_success_batch(saved: dict[str, Any]) -> None:
             raise StateFileUnusableError("Saved success_batch is malformed: invalid review evidence")
 
 
-def _actions_success_signature(selected: dict[str, Any]) -> str:
-    encoded = json.dumps(normalize_selected_runs(selected), sort_keys=True, separators=(",", ":"))
+def _combined_success_signature(selected: dict[str, Any], batch: dict[str, Any]) -> str:
+    review = batch["review"]
+    material = {
+        "head": str(batch["head_sha"]).casefold(),
+        "review": {key: review[key] for key in ("kind", "id", "fingerprint")},
+        "actions": normalize_selected_runs(selected),
+    }
+    encoded = json.dumps(material, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode()).hexdigest()
 
 
@@ -2546,7 +2552,7 @@ def main() -> int:
             not args.catch_up and success_batch["review"] and _baseline_output and not baseline_failed
             and all(_pr_observation_snapshot(state)["review_threads"].values())
         ):
-            success_batch["notified"] = _actions_success_signature(selected_actions)
+            success_batch["notified"] = _combined_success_signature(selected_actions, success_batch)
     if args.coalesce_success:
         success_batch = {**success_batch, "thread_states": dict(latest_review_thread_states)}
     success_observed = success_batch
@@ -2723,9 +2729,10 @@ def main() -> int:
                     batch["notified"] = None
                 elif (
                     ci_output and batch.get("review")
+                    and str(batch["head_sha"]).casefold() == _active_ci_head_sha().casefold()
                     and not _actions_snapshot_regressed(normalize_selected_runs(selected_actions), actions_observed)
                 ):
-                    signature = _actions_success_signature(selected_actions)
+                    signature = _combined_success_signature(selected_actions, batch)
                     if batch.get("notified") != signature:
                         evidence = batch["review"]
                         item = next(item for item in state[evidence["kind"]] if item.get("id") == evidence["id"])

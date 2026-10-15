@@ -275,8 +275,9 @@ deferred review; CI from another SHA cannot complete its pair. Preserve known
 unresolved threads when GraphQL is unavailable, rather than treating absence as
 resolution. Fail-fast CI rejects older attempts, preserves terminal observations
 and prior partial failures, and reports an observed failure without settling it away.
-A combined success is deduplicated across ordinary polls and restarts. A new CI
-run/attempt or recovery after a reported problem can produce a fresh pair.
+A combined success is deduplicated across ordinary polls and restarts using both
+CI verdicts and semantic review evidence. A new CI run/attempt, stronger review
+proof, or recovery after a reported problem can produce a fresh pair.
 
 Without `--coalesce-success`, combined mode retains the activity stream: each PR
 change is reportable and CI reports once all requested workflows have terminal

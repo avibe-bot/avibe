@@ -5012,6 +5012,43 @@ def test_coalescing_binds_a_new_reaction_after_restart_to_the_latest_observed_he
     assert rc == 0 and "success candidate" in output
 
 
+def test_coalescing_reawakens_for_stronger_review_evidence_with_unchanged_ci(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
+    options = ("--coalesce-success",)
+    reaction = {
+        "id": 701, "content": "+1", "created_at": "2026-10-15T08:00:00Z",
+        "user": {"login": "chatgpt-codex-connector[bot]"},
+    }
+    state = _success_state(_ci_run(head=COALESCED_HEAD), reactions=[reaction])
+    rc, output, _ = _ci_cycle(module, path, [state], extra_args=options)
+    assert rc == 0 and "success candidate" in output and "pr_reaction #701" in output
+    # The Agent rejected the reaction's epoch proof and requested a SHA verdict.
+    state = {**state, "issue_comments": [_clean_codex_comment()]}
+    rc, output, _ = _ci_cycle(module, path, [state], delivery="2", extra_args=options)
+    assert rc == 0 and "success candidate" in output and "issue_comment #601" in output
+    rc, output, _ = _ci_cycle(module, path, [state], delivery="3", extra_args=options)
+    assert (rc, output) == (124, "")
+
+
+def test_coalesced_candidate_explicitly_rejects_a_pinned_ci_head_mismatch(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
+    # The fetcher already drops this mismatch; also protect the composite
+    # consumer if fixed-SHA polling is later allowed to retain that CI inventory.
+    moved = _success_state(_ci_run(head=COALESCED_HEAD), head="b" * 40, clean=True)
+    rc, output, _ = _ci_cycle(
+        module, path, [_success_state(pending), moved], sha=COALESCED_HEAD,
+        extra_args=("--coalesce-success",),
+    )
+    assert rc == 0 and "pr_head" in output
+    assert "success candidate" not in output
+
+
 @pytest.mark.parametrize("intermediate", ["missing", "nonterminal", "older-attempt", "partial"])
 def test_combined_ci_does_not_reannounce_observed_results_after_snapshot_regression(tmp_path, intermediate):
     module = _load_module()
