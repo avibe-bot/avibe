@@ -4959,7 +4959,8 @@
         },
         "mode": {
           "native": "Native · {{provider}}",
-          "proxy": "Via {{provider}} proxy"
+          "proxy": "Via {{provider}} proxy",
+          "direct": "Direct · {{provider}}"
         },
         "status": {
           "failed": "Failed",
@@ -4970,6 +4971,7 @@
           "included": "Included in subscription",
           "list": "≈ ${{usd}}",
           "reported": "${{usd}}",
+          "atLeast": "at least {{cost}}",
           "calls_one": "{{cost}} for {{count}} call",
           "calls_other": "{{cost}} for {{count}} calls"
         },
@@ -4983,6 +4985,7 @@
         },
         "ranNative": "Ran natively on {{where}}",
         "ranProxy": "Run by proxy executor {{where}}",
+        "ranDirect": "Ran directly on {{where}}",
         "duration": "took {{seconds}} s",
         "alsoSearched": "Also searched: {{queries}}",
         "image": {

@@ -3,7 +3,7 @@
 // ``hostedActivity.fixture.json``). The row's ``text`` is the IM line; the Web
 // renders the card from these fields instead.
 
-export type HostedToolName = 'web_search' | 'x_search' | 'image_generation';
+export type HostedToolName = 'web_search' | 'x_search' | 'image_generate';
 
 export type HostedActivitySource = {
   url: string;
@@ -26,7 +26,8 @@ export type HostedActivity = {
   version: 1;
   call_id: string;
   tool: HostedToolName;
-  mode: 'native' | 'proxy';
+  /** Natively in the model's response, by a search executor, or on an image endpoint directly. */
+  mode: 'native' | 'proxy' | 'direct';
   status: 'completed' | 'failed' | 'incomplete' | 'pending';
   /** Model-facing English, shown as is only for a provider's own reason. */
   error?: string;
@@ -47,11 +48,12 @@ export type HostedActivity = {
   quality?: string;
   revised_prompt?: string;
   duration_ms?: number;
-  /** Absent when no price is known: unknown is never shown as zero. ``calls`` is how many calls it covers. */
-  cost?: { basis: 'reported' | 'list' | 'included'; usd?: number; calls: number };
+  /** Absent when no price is known: unknown is never shown as zero. ``calls`` is how many calls it covers, and
+   *  ``at_least`` marks a lower bound: an attempt reported no price. */
+  cost?: { basis: 'reported' | 'list' | 'included'; usd?: number; calls: number; at_least?: boolean };
 };
 
-const TOOLS: readonly string[] = ['web_search', 'x_search', 'image_generation'];
+const TOOLS: readonly string[] = ['web_search', 'x_search', 'image_generate'];
 const STATUSES: readonly string[] = ['completed', 'failed', 'incomplete', 'pending'];
 
 /** The card a row carries, or undefined for anything that is not one this client reads. */
@@ -60,7 +62,7 @@ export const hostedActivityFrom = (raw: unknown): HostedActivity | undefined => 
   const card = raw as Record<string, unknown>;
   if (card.version !== 1 || typeof card.call_id !== 'string') return undefined;
   if (typeof card.tool !== 'string' || !TOOLS.includes(card.tool)) return undefined;
-  if (card.mode !== 'native' && card.mode !== 'proxy') return undefined;
+  if (card.mode !== 'native' && card.mode !== 'proxy' && card.mode !== 'direct') return undefined;
   if (typeof card.status !== 'string' || !STATUSES.includes(card.status)) return undefined;
   return {
     ...(card as unknown as HostedActivity),

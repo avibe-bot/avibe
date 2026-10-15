@@ -1807,7 +1807,8 @@
       "included": "included in subscription",
       "list": "≈ ${usd}",
       "reported": "${usd}",
-      "calls": "{cost} for {calls} calls"
+      "calls": "{cost} for {calls} calls",
+      "atLeast": "at least {cost}"
     },
     "status": {
       "failed": "failed: {error}",
