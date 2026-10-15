@@ -432,9 +432,11 @@ class Controller:
         await self.model_hub_service.start_vibey_without_models()
 
     async def _model_hub_catalog_changed(self, backend: str) -> None:
-        """Follow a committed Model Hub catalog change for one backend."""
+        """Follow a committed Model Hub catalog change for one backend.
 
-        from config.v2_config import V2Config
+        Model Hub's current config is read through ``model_hub_runtime``; the app
+        config (``self.config``) carries none of it, so nothing here copies it there.
+        """
 
         if backend == "vibey":
             try:
@@ -442,11 +444,6 @@ class Controller:
             except Exception:
                 # The catalog change stands; the next start reconciles again.
                 logger.warning("Vibey Agent model reconciliation failed", exc_info=True)
-        try:
-            latest = V2Config.load()
-        except FileNotFoundError:
-            return
-        self.config.model_hub = latest.model_hub
         # Each runtime moves to the committed catalog at its next turn;
         # nothing restarts or drains. A disabled backend has nothing to adopt.
         agent = getattr(getattr(self, "agent_service", None), "agents", {}).get(backend)

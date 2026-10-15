@@ -34,6 +34,7 @@ from typing import Any, Optional
 import pytest
 from sqlalchemy import select, update
 
+from config.v2_config import ModelHubConfig
 from core.agent_core.agent.events import NAMED_ERROR_KINDS, ToolFinished
 from core.agent_core.agent.recovery import UNRECORDED_EFFECT
 from core.agent_core.ai.provider import Done
@@ -213,6 +214,10 @@ class _Controller:
         self.hub_limits = {"context_window": 32000, "max_output_tokens": 4096}
         # HopResolution.hosted_tools as Model Hub resolves it for the hop.
         self.hub_hosted_tools: dict = {}
+        # The hop's Source, and the Sources Model Hub holds now (``model_hub_runtime.snapshot``). Like the
+        # service's app config, ``config`` carries no Model Hub state.
+        self.hub_source_id = "src_test"
+        self.hub_sources: list = []
         self.agent: Optional[VibeyAgent] = None
         self.agent_service = SimpleNamespace(
             mark_runtime_turn_started=self._native_start,
@@ -224,7 +229,9 @@ class _Controller:
             model_hub_turn_id_for_task=lambda: None,
             _build_context=lambda session_id: _context(platform, session_id, turn_id="redelivery", delivery_id=""),
         )
-        self.model_hub_runtime = SimpleNamespace(resolve=self._resolve)
+        self.model_hub_runtime = SimpleNamespace(
+            resolve=self._resolve, snapshot=lambda: ModelHubConfig(sources=list(self.hub_sources))
+        )
         self.message_dispatcher = ConsolidatedMessageDispatcher(self)
 
     # --- controller ---------------------------------------------------------
@@ -258,7 +265,7 @@ class _Controller:
             requested_model=requested_model,
             target_model=requested_model,
             runtime_model=requested_model,
-            source_id="src_test",
+            source_id=self.hub_source_id,
             source_identity="sha256:test-source-identity",
             gateway_base_url="http://hub.invalid/vibey",
             gateway_token="hub-token",
@@ -4122,6 +4129,50 @@ async def test_a_native_hosted_call_reaches_the_workbench_as_a_card_and_cited_an
     [citation] = json.loads(result["content_json"])["citations"]
     assert citation["url"] == CHANGELOG
     assert result["content_text"].startswith("Domain filters shipped.") and f"]({CHANGELOG})" in result["content_text"]
+
+
+@pytest.mark.parametrize("platform", ["telegram", "avibe"])
+async def test_a_fallback_names_a_source_that_existed_before_the_service_started(
+    engine, session, tmp_path, published, platform
+) -> None:
+    """MH-HOSTED-VIBEY-004: the turn's own Source refused web search natively, so the model's search runs by proxy
+    and the card and IM line say where it fell back from. The Source existed before the agent was built, as on every
+    upgraded install: its name comes from Model Hub as it is now, never the app config the agent was built with,
+    which carries no Model Hub state, so the note never shows the raw id."""
+    import httpx
+
+    from tests.test_model_hub_l3 import _source
+
+    refusing = "src_642f42a4dc86"
+    answer = {"record": {"status": "completed", "sources": []}, "execution": {
+        "mode": "proxy", "executor_origin": {"provider": "openai", "api": "openai_responses", "model": "gpt-6-luna"},
+        "executor_source_id": "src_ed2426efbf28", "executor_billing": "metered",
+    }}
+    call = ToolCallBlock(id="toolu_1", name="web_search", arguments={"query": "avibe 3.2.1"})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, json=answer))) as client:
+        harness = _Harness(
+            engine,
+            tmp_path,
+            platform,
+            [[Done(AssistantMessage((call,), ORIGIN, "tool_use"))], [Done(assistant("done"))]],
+            gateway_client=client,
+        )
+        # Both Sources were in Model Hub before the agent above was built.
+        harness.controller.hub_sources = [
+            _source(refusing, "Fake OpenAI A"), _source("src_ed2426efbf28", "Fake OpenAI B")
+        ]
+        harness.controller.hub_source_id = refusing
+        harness.controller.hub_hosted_tools = {"web_search": {"native": "unsupported", "replay": "unsupported", "refused": True}}
+        await harness.agent.handle_message(harness.request("what is new in avibe 3.2.1?"))
+
+    with engine.connect() as conn:
+        [event] = conn.execute(
+            select(agent_events).where(agent_events.c.session_id == SESSION, agent_events.c.event_type == "tool_call")
+        ).mappings().all()
+    card = json.loads(event["content_json"])["hosted"]
+    assert card["fallback_from"] == {"source_id": refusing, "source_name": "Fake OpenAI A"}
+    assert card["source_name"] == "Fake OpenAI B"
+    assert "Fake OpenAI A" in event["content_text"] and refusing not in event["content_text"].replace("\\", "")
 
 
 async def test_a_proxied_hosted_result_shows_once_its_result_is_committed(engine, session, tmp_path, published) -> None:
