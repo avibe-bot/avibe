@@ -1,10 +1,10 @@
 // A hosted tool call in the execution-process group (`vibey-hosted-tools.md` §6.4,
-// design.pen frames DA8aJ and t2P7VH): the query, how it ran (natively, or by which
-// executor), what it cost when known, and the sources or image it produced. A
-// native and a proxied call draw the same card from the same record.
+// design.pen frames DA8aJ and t2P7VH): the query, how it ran (natively, by which
+// executor, or directly on an image endpoint), what it cost when known, and the
+// sources or image it produced. Every mode draws the same card from the same record.
 import * as React from 'react';
 import { useTranslation } from 'react-i18next';
-import { AtSign, Check, ChevronRight, CircleSlash, Download, FileImage, Globe, Image as ImageIcon, TriangleAlert, Waypoints, WandSparkles } from 'lucide-react';
+import { AtSign, Check, ChevronRight, CircleSlash, Download, FileImage, Globe, Image as ImageIcon, TriangleAlert, Waypoints, WandSparkles, Zap } from 'lucide-react';
 import clsx from 'clsx';
 
 import { ChatImage } from '../ui/chat-image';
@@ -15,7 +15,13 @@ import { hostedCompleted, type HostedActivity, type HostedActivityImage, type Ho
 const TOOL_ICON: Record<HostedToolName, React.ComponentType<{ className?: string }>> = {
   web_search: Globe,
   x_search: AtSign,
-  image_generation: ImageIcon,
+  image_generate: ImageIcon,
+};
+
+const RAN_KEY: Record<HostedActivity['mode'], 'ranNative' | 'ranProxy' | 'ranDirect'> = {
+  native: 'ranNative',
+  proxy: 'ranProxy',
+  direct: 'ranDirect',
 };
 
 const vendorLabel = (provider: string | undefined): string | null =>
@@ -41,18 +47,22 @@ const fileName = (path: string): string => path.split(/[\\/]/).pop() || path;
 const formatBytes = (bytes: number): string =>
   bytes >= 1024 * 1024 ? `${(bytes / (1024 * 1024)).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
 
-/** What a call cost, only when it is known; unknown is never shown as zero. */
+/**
+ * What a call cost, only when it is known; unknown is never shown as zero, and a
+ * lower bound (an attempt reported no price) never as a complete figure.
+ */
 const useHostedCost = (card: HostedActivity): string | null => {
   const { t } = useTranslation();
   const cost = card.cost;
   if (!cost) return null;
   const figure = cost.basis === 'included'
-    ? t('chat.agentActivity.hosted.cost.included')
+    ? t('chat.agentActivity.hosted.cost.included') as string
     : cost.usd === undefined
       ? null
-      : t(cost.basis === 'list' ? 'chat.agentActivity.hosted.cost.list' : 'chat.agentActivity.hosted.cost.reported', { usd: formatUsd(cost.usd) });
+      : t(cost.basis === 'list' ? 'chat.agentActivity.hosted.cost.list' : 'chat.agentActivity.hosted.cost.reported', { usd: formatUsd(cost.usd) }) as string;
   if (figure === null) return null;
-  return cost.calls > 1 ? t('chat.agentActivity.hosted.cost.calls', { cost: figure, count: cost.calls }) : figure;
+  const bounded = cost.at_least ? t('chat.agentActivity.hosted.cost.atLeast', { cost: figure }) as string : figure;
+  return cost.calls > 1 ? t('chat.agentActivity.hosted.cost.calls', { cost: bounded, count: cost.calls }) as string : bounded;
 };
 
 /** 「原生 · Anthropic」 or 「由 xAI 代理」 once it completed; until then, its status. */
@@ -74,6 +84,14 @@ export const HostedModeChip: React.FC<{ card: HostedActivity }> = ({ card }) => 
   }
   const vendor = vendorLabel(card.provider);
   if (!vendor) return null;
+  if (card.mode === 'direct') {
+    return (
+      <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-cyan/40 bg-cyan-soft px-2 py-px text-[11px] font-medium text-cyan-ink">
+        <Zap className="size-3" aria-hidden="true" />
+        {t('chat.agentActivity.hosted.mode.direct', { provider: vendor })}
+      </span>
+    );
+  }
   return card.mode === 'native' ? (
     <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-mint/40 bg-mint-soft px-2 py-px text-[11px] font-medium text-mint-ink">
       <Check className="size-3" aria-hidden="true" />
@@ -91,7 +109,7 @@ export const HostedModeChip: React.FC<{ card: HostedActivity }> = ({ card }) => 
 const useCountLabel = (card: HostedActivity): string | null => {
   const { t } = useTranslation();
   if (!hostedCompleted(card)) return null;
-  if (card.tool === 'image_generation') {
+  if (card.tool === 'image_generate') {
     if (card.images.length === 0) return null;
     const [first] = card.images;
     const count = t('chat.agentActivity.hosted.count.images', { count: card.images.length });
@@ -144,7 +162,7 @@ const HostedDetail: React.FC<{ card: HostedActivity }> = ({ card }) => {
   const completed = hostedCompleted(card);
   const where = completed ? [card.source_name ?? vendorLabel(card.provider), card.model].filter(Boolean).join(' · ') : '';
   const facts = [
-    where && t(card.mode === 'proxy' ? 'chat.agentActivity.hosted.ranProxy' : 'chat.agentActivity.hosted.ranNative', { where }),
+    where && t(`chat.agentActivity.hosted.${RAN_KEY[card.mode]}`, { where }),
     completed && card.duration_ms !== undefined && t('chat.agentActivity.hosted.duration', { seconds: Math.max(1, Math.round(card.duration_ms / 1000)) }),
     cost,
   ].filter(Boolean);
@@ -152,9 +170,11 @@ const HostedDetail: React.FC<{ card: HostedActivity }> = ({ card }) => {
     <div className="mx-1.5 mb-1 mt-0.5 flex flex-col overflow-hidden rounded-md border border-border bg-foreground/[0.03]">
       {facts.length > 0 && (
         <div className="flex items-center gap-1.5 border-b border-border px-2.5 py-1.5 text-[11px] text-muted">
-          {completed && (card.mode === 'proxy'
-            ? <Waypoints className="size-3 shrink-0 text-cyan-ink" aria-hidden="true" />
-            : <Check className="size-3 shrink-0 text-mint-ink" aria-hidden="true" />)}
+          {completed && (card.mode === 'native'
+            ? <Check className="size-3 shrink-0 text-mint-ink" aria-hidden="true" />
+            : card.mode === 'direct'
+              ? <Zap className="size-3 shrink-0 text-cyan-ink" aria-hidden="true" />
+              : <Waypoints className="size-3 shrink-0 text-cyan-ink" aria-hidden="true" />)}
           <span className="min-w-0">{facts.join(' · ')}</span>
         </div>
       )}

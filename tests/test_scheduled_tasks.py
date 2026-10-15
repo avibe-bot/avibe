@@ -6742,6 +6742,61 @@ def _callback_service(
     )
 
 
+def test_a_settled_runs_callback_drain_never_runs_store_work_on_the_loop(tmp_path: Path, monkeypatch) -> None:
+    """#2630: a settled run drains its callbacks from the execution task on the loop. The listing, the callback enqueue
+    (under SQLite's write lock) and the status update run on a thread, as the RUN_CALLBACKS lane's do."""
+    import threading
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    caller_session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id="target-session",
+        message="delegated work",
+        agent_name="codex",
+        callback_session_id=caller_session_id,
+    )
+    request_store.complete(request, ok=True, session_id="target-session")
+    store = SQLiteBackgroundTaskStore()
+    try:
+        store.record_run_message(
+            request.id, text="delegated result", message_id=f"suppressed:{request.id}", terminal_status="succeeded",
+        )
+    finally:
+        store.close()
+
+    async def _handle_scheduled_message(context, message, parsed_session_key=None):
+        return None
+
+    controller = _avibe_controller_double(
+        gate=SimpleNamespace(submit_scheduled=lambda *_args, **_kwargs: None, in_flight={}),
+        handle_scheduled_message=_handle_scheduled_message,
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    threads: dict[str, int] = {}
+    for name in ("list_pending_callbacks", "update_callback_status"):
+        original = getattr(request_store, name)
+
+        def recording(*args, _original=original, _name=name, **kwargs):
+            threads[_name] = threading.get_ident()
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(request_store, name, recording)
+
+    async def _drain() -> int:
+        await service._drain_callbacks()
+        return threading.get_ident()
+
+    loop_thread = asyncio.run(_drain())
+    assert set(threads) == {"list_pending_callbacks", "update_callback_status"}
+    assert loop_thread not in threads.values()
+    assert request_store.get_run(request.id)["callback_status"] == "sent"
+
+
 def test_agent_run_callback_enqueues_only_result_to_caller_session(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     caller_session_id = _make_avibe_session(monkeypatch, tmp_path)

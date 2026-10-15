@@ -43,24 +43,6 @@
     "images": [],
     "cost": { "basis": "reported", "usd": 0.11, "calls": 1 }
   },
-  "native_image": {
-    "version": 1,
-    "call_id": "ig_01",
-    "tool": "image_generation",
-    "mode": "native",
-    "status": "completed",
-    "subject": "A wide photo of an open laptop on a desk at night, empty dark space in the upper right",
-    "revised_prompt": "A wide photo of an open laptop on a desk at night, empty dark space in the upper right",
-    "action": "generate",
-    "provider": "openai",
-    "source_id": "src_relaygpt1",
-    "source_name": "relay-gpt",
-    "model": "gpt-6.1-sol",
-    "size": "1536x1024",
-    "quality": "medium",
-    "sources": [],
-    "images": [{ "path": "/media/3f2a.png", "mime": "image/png", "width": 1536, "height": 1024, "bytes": 1993000 }]
-  },
   "proxy_failed": {
     "version": 1,
     "call_id": "call_x2",
@@ -100,5 +82,32 @@
     "size": "1536x1024",
     "quality": "medium",
     "revised_prompt": "A wide photo of an open laptop on a desk at night, empty dark space in the upper right"
+  },
+  "proxy_retried": {
+    "version": 1,
+    "call_id": "call_x6",
+    "tool": "x_search",
+    "mode": "proxy",
+    "status": "completed",
+    "sources": [
+      {
+        "url": "https://x.com/OpenAI/status/1",
+        "title": "DevDay 2026 recap: everything we shipped this week",
+        "snippet": "Recordings and the launch list in one post.",
+        "page_age": "2 days ago"
+      }
+    ],
+    "images": [],
+    "subject": "from:OpenAI",
+    "provider": "xai",
+    "source_id": "src_grok0001",
+    "source_name": "Grok",
+    "model": "grok-4.6",
+    "cost": {
+      "basis": "reported",
+      "calls": 1,
+      "usd": 0.11,
+      "at_least": true
+    }
   }
 }
