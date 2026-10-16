@@ -4686,24 +4686,26 @@ async def test_model_hubs_stream_interrupted_frame_is_the_interrupted_kind(adapt
 
 
 # Model Hub's ending once its recovery window ran out (``turn_gateway.py``): an HTTP 424 whose envelope names the
-# failure the hub waited out. It already retried that failure, so the loop must not retry again, and the copy must
-# name the failure, not blame the request as the generic 4xx rule would.
+# failure the hub waited out. The loop must not replay that same request; a pre-output server/network cause may still
+# permit Vibey's safe transcript-only continuation, while the copy must name the failure rather than blame the request.
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("adapter_type", "protocol"),
     [(OpenAIResponsesAdapter, "openai_responses"), (OpenAIChatAdapter, "openai_chat"), (AnthropicAdapter, "anthropic")],
 )
 @pytest.mark.parametrize(
-    ("cause", "kind"),
+    ("cause", "kind", "continuable"),
     [
-        ("server_error", "server"),
-        ("network", "network"),
-        ("rate_limited", "rate_limit"),
-        ("quota_exhausted", "rate_limit"),
-        (None, "server"),
+        ("server_error", "server", True),
+        ("network", "network", True),
+        ("rate_limited", "rate_limit", False),
+        ("quota_exhausted", "rate_limit", False),
+        (None, "server", False),
     ],
 )
-async def test_model_hubs_recovery_exhausted_ending_names_its_cause(adapter_type, protocol, cause, kind) -> None:
+async def test_model_hubs_recovery_exhausted_ending_names_its_cause(
+    adapter_type, protocol, cause, kind, continuable
+) -> None:
     ending = {
         "type": "model_hub_recovery_exhausted",
         "code": "model_hub_recovery_exhausted",
@@ -4720,7 +4722,7 @@ async def test_model_hubs_recovery_exhausted_ending_names_its_cause(adapter_type
 
     error = events[-1]
     assert isinstance(error, ProviderError)
-    assert (error.kind, error.retryable, error.continuable) == (kind, False, False)
+    assert (error.kind, error.retryable, error.continuable) == (kind, False, continuable)
 
 
 # CLIProxyAPI nests the class under `error`; OpenAI's reference carries it at the root.
@@ -4774,20 +4776,20 @@ async def test_only_a_drop_after_thinking_alone_is_marked_after_thinking(
 
 @pytest.mark.parametrize("output", ["none", "thinking", "text"])
 @pytest.mark.parametrize(
-    "failure,continuable",
+    "failure",
     [
-        ("classified transient", True),
-        ("explicit transient", True),
-        ("eof", True),
-        ("stalled", True),
-        ("recovery exhausted", False),
-        ("pin refusal", False),
-        ("malformed", False),
-        ("unknown wire", False),
-        ("local exception", False),
+        "classified transient",
+        "explicit transient",
+        "eof",
+        "stalled",
+        "recovery exhausted",
+        "pin refusal",
+        "malformed",
+        "unknown wire",
+        "local exception",
     ],
 )
-def test_stream_error_producers_preserve_continuation_permission(output, failure, continuable):
+def test_stream_error_producers_preserve_continuation_permission(output, failure):
     """C-2: terminal sanitization must not resurrect exhausted/refused/local failures after thinking.
 
     Prior tests covered kinds and replay only, so the outer adapter could undo their decision.
@@ -4820,8 +4822,13 @@ def test_stream_error_producers_preserve_continuation_permission(output, failure
     else:
         error = assembler.exception(RuntimeError("local failure"))
     terminal = assembler.terminal(error)
-    assert terminal.continuable is continuable
-    expected_retry = (continuable and output != "text") or (failure == "unknown wire" and output == "thinking")
+    expected_continuable = failure in {"classified transient", "explicit transient", "eof", "stalled"}
+    if failure == "recovery exhausted":
+        expected_continuable = output == "none"
+    assert terminal.continuable is expected_continuable
+    expected_retry = (
+        expected_continuable and failure != "recovery exhausted" and output != "text"
+    ) or (failure == "unknown wire" and output == "thinking")
     assert terminal.retryable is expected_retry
     assert terminal.after_thinking is (expected_retry and output == "thinking")
 

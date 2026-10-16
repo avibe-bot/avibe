@@ -151,12 +151,13 @@ def classify_error(
         # Model Hub already retried the same request within its recovery window. Do not replay that request again,
         # but permit Vibey's bounded transcript-only continuation for a pre-output server/network failure: it resumes
         # from committed context without rerunning committed tools or resending the original input.
-        kind = _RECOVERY_CAUSE_KINDS.get(_recovery_cause(body) or "", "server")
+        recovery_cause = _recovery_cause(body)
+        kind = _RECOVERY_CAUSE_KINDS.get(recovery_cause or "", "server")
         return ProviderError(
             kind=kind,
             message=message,
             retryable=False,
-            continuable=partial is None and kind in _RECOVERY_CONTINUABLE_KINDS,
+            continuable=partial is None and recovery_cause in {"server_error", "network"},
             retry_after_s=retry_after,
             status=status,
             partial=partial,
@@ -239,10 +240,9 @@ _RECOVERY_CAUSE_KINDS = {
     "quota_exhausted": "rate_limit",
 }
 # Model Hub has already spent its own recovery window. A fresh transcript-only
-# continuation is still safe for a pre-output transient failure: it cannot
-# replay committed tools or resend the original input. Keep rate limits and
-# quota exhaustion explicit because their retry advice may exceed this policy.
-_RECOVERY_CONTINUABLE_KINDS = frozenset({"server", "network"})
+# continuation is safe only for an explicit pre-output server/network cause:
+# it cannot replay committed tools or resend the original input. Keep rate limits,
+# quota exhaustion, missing causes, and future causes terminal.
 
 
 def _recovery_cause(body: str) -> str | None:
