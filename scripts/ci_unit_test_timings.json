@@ -1,5 +1,5 @@
 {
-  "source": "Median per-file launcher elapsed seconds from successful GitHub Actions runs 38350418272 (f73106bd1e0e23bdbd6f85c7df5d382738b0a9e2), 38355727304 (9efb8b95c8e651bc0bb00cba9b5d581687ffdd34); single available sample for new files",
+  "source": "Median per-file launcher elapsed seconds from successful GitHub Actions runs 38350418272 (f73106bd1e0e23bdbd6f85c7df5d382738b0a9e2), 38355727304 (9efb8b95c8e651bc0bb00cba9b5d581687ffdd34); single available sample for new files; tests/scenarios/test_catalog_citations.py from run 38941449093 (ce270754a3e3bb3c7660bf50cfc435b94179ab1c)",
   "durations_seconds": {
     "tests/agent_core/agent/test_compaction.py": 15.5,
     "tests/agent_core/agent/test_context.py": 7.5,
@@ -38,6 +38,7 @@
     "tests/scenarios/permissions/test_effective_target_preflight.py": 43.5,
     "tests/scenarios/permissions/test_member_instance_operations.py": 12.5,
     "tests/scenarios/permissions/test_permissions_scenarios.py": 5.0,
+    "tests/scenarios/test_catalog_citations.py": 57.0,
     "tests/test_admin_notifications.py": 2.0,
     "tests/test_agent_activity_service.py": 8.0,
     "tests/test_agent_auth_service.py": 4.5,
