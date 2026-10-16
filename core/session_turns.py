@@ -546,6 +546,9 @@ class Turn:
     delivery_id: Optional[str] = None
     terminal_is_error: bool = False
     computer_use_admission_closed: bool = False
+    #: ``SOURCE_HUMAN`` or ``SOURCE_SCHEDULED``: whether a person launched this
+    #: Turn, so attended-only capabilities such as script confirms can refuse.
+    source: str = SOURCE_HUMAN
 
 
 @dataclass(frozen=True)
@@ -559,6 +562,8 @@ class ComputerUseAdmission:
 
 # A human reply consumed as the answer to a pending Computer Use script confirm.
 SCRIPT_CONFIRM_ANSWER_REASON = "computer_confirm_answer"
+# Delivery metadata that binds an input to one specific earlier prompt.
+_PROMPT_TARGET_METADATA_KEYS = ("quick_reply_for",)
 
 
 @dataclass(frozen=True)
@@ -2925,7 +2930,12 @@ class SessionTurnManager:
 
         if request.source != "user" or context is None or not request.delivery_id:
             return None
-        if getattr(context, "files", None):
+        # A plain yes/no names no prompt, so only a direct original text reply
+        # may answer. Quick replies, forwards, edits, and anything aimed at
+        # another prompt stay ordinary messages.
+        if request.message_kind != "original" or getattr(context, "files", None):
+            return None
+        if any(key in (request.metadata or {}) for key in _PROMPT_TARGET_METADATA_KEYS):
             return None
         interactions = getattr(self.controller, "computer_script_interactions", None)
         match_answer = getattr(interactions, "match_answer", None)
@@ -7909,6 +7919,7 @@ class SessionTurnManager:
                 started_at=_utc_now_iso(),
                 logical_turn_id=logical_turn_id,
                 delivery_id=delivery_id,
+                source=source,
             )
             # Make the DB row authoritative at ACCEPTANCE, not at dispatch start:
             # ``update_session``'s backend lock re-checks ``agent_status`` inside

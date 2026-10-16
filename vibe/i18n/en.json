@@ -930,6 +930,7 @@
         "confirmAlreadyPending": "The script already has a confirmation waiting for an answer.",
         "confirmApproverUnavailable": "The owner identity for this confirmation is unavailable.",
         "confirmPromptFailed": "The confirmation question could not be delivered, so nothing was approved.",
+        "confirmUnattended": "This script asks for an owner confirmation, which an unattended run cannot give.",
         "scriptControllerUnavailable": "The Controller is unavailable.",
         "scriptDeadlineExpired": "The script deadline expired.",
         "scriptElementNotActionable": "The matched element is not actionable.",

@@ -56,7 +56,6 @@ logger = logging.getLogger(__name__)
 _PROCESSING_RECORD_CURSOR_RE = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
 _PROCESSING_RECORD_ENTRY_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,256}\Z")
 _COMPUTER_SCRIPT_REQUEST_MAX_BYTES = 8 * 1024 * 1024
-_COMPUTER_SCRIPT_INTERACTION_MAX_BYTES = 64 * 1024
 
 
 class _RequestBodyTooLarge(RuntimeError):
@@ -200,6 +199,8 @@ def create_app(
         ComputerScriptSessionManager,
     )
     from core.computer_script_interactions import (
+        MAX_INTERACTION_REQUEST_BYTES,
+        MAX_MESSAGE_BYTES,
         ComputerScriptInteractionError,
         ComputerScriptInteractionManager,
     )
@@ -998,7 +999,7 @@ def create_app(
         try:
             payload = await _bounded_json_object(
                 request,
-                limit=_COMPUTER_SCRIPT_INTERACTION_MAX_BYTES,
+                limit=MAX_INTERACTION_REQUEST_BYTES,
             )
         except _RequestBodyTooLarge:
             return JSONResponse(
@@ -1007,7 +1008,8 @@ def create_app(
                     "ok": False,
                     "error": "computer_script_message_too_large",
                     "params": {
-                        "limit_bytes": _COMPUTER_SCRIPT_INTERACTION_MAX_BYTES,
+                        # Only a message over its own limit can exceed this cap.
+                        "limit_bytes": MAX_MESSAGE_BYTES,
                     },
                     "ambiguous": False,
                     "dispatched": False,

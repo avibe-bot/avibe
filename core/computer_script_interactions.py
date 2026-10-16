@@ -13,13 +13,18 @@ from core.computer_script_sessions import (
     ComputerScriptSessionManager,
 )
 from core.delivery_target import routed_delivery_context
+from core.services.dispatch import SOURCE_SCHEDULED
 from modules.agents.question_ui import PendingQuestion, Question
 from modules.im import MessageContext
 from vibe.i18n import t as i18n_t
 
 logger = logging.getLogger(__name__)
 
-_MAX_MESSAGE_LENGTH = 64 * 1024
+MAX_MESSAGE_BYTES = 64 * 1024
+# A request carries the message JSON-escaped (a control character becomes a
+# six-byte ``\uXXXX`` escape) plus the connection token and keys, so the transport cap
+# leaves room for the worst-case envelope around a message the limit admits.
+MAX_INTERACTION_REQUEST_BYTES = 6 * MAX_MESSAGE_BYTES + 4 * 1024
 _YES_ANSWERS = frozenset(
     {
         "y",
@@ -117,6 +122,9 @@ class ComputerScriptInteractionManager:
 
     async def confirm(self, token: str, message: str) -> dict[str, Any]:
         binding = self._admit_message(token, message)
+        # No person launched an unattended Turn, so nobody is there to answer.
+        if getattr(binding.turn, "source", None) == SOURCE_SCHEDULED:
+            raise ComputerScriptInteractionError("confirm_unattended")
         # A yes/no reply carries no prompt identity, so a Session may have only
         # one question open; otherwise one answer could approve another action.
         if any(
@@ -263,11 +271,11 @@ class ComputerScriptInteractionManager:
                 "invalid_computer_script_message",
                 status_code=400,
             )
-        if len(message.encode("utf-8")) > _MAX_MESSAGE_LENGTH:
+        if len(message.encode("utf-8")) > MAX_MESSAGE_BYTES:
             raise ComputerScriptInteractionError(
                 "computer_script_message_too_large",
                 status_code=413,
-                params={"limit_bytes": _MAX_MESSAGE_LENGTH},
+                params={"limit_bytes": MAX_MESSAGE_BYTES},
             )
         try:
             return self._script_sessions.admit(token)

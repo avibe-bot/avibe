@@ -5961,6 +5961,7 @@ async def test_im_reply_answers_only_the_approvers_pending_script_confirm(
         thread_id="T1",
         message_id="native-reply-1",
         platform="slack",
+        is_original_human_text=True,
     )
     await handler._admit_human_delivery(
         manager=manager,

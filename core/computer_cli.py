@@ -180,6 +180,7 @@ _COMPUTER_ERROR_I18N_KEYS = {
     "confirm_already_pending": "computer.cli.error.confirmAlreadyPending",
     "confirm_approver_unavailable": "computer.cli.error.confirmApproverUnavailable",
     "confirm_prompt_failed": "computer.cli.error.confirmPromptFailed",
+    "confirm_unattended": "computer.cli.error.confirmUnattended",
     "desktop_busy": "computer.cli.error.targetBusy",
     "element_not_actionable": "computer.cli.error.scriptElementNotActionable",
     "element_not_found": "computer.cli.error.scriptTargetNotFound",

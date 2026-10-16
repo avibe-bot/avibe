@@ -148,6 +148,13 @@ only after its prompt is delivered; an undelivered prompt fails the confirm with
 `computer_script_notify_failed`. Closing the script connection, like the Turn
 ending or the script deadline, invalidates its pending confirm.
 
+Only a direct original text reply answers: a quick reply, a forward, an edit,
+or anything aimed at another prompt stays an ordinary message, and a confirm
+from an unattended (scheduled) Turn fails with `confirm_unattended` before any
+prompt is sent. Because the answer carries no prompt identity, an unrelated
+standalone "yes" from the approver while a confirm is pending is still taken
+as the answer; a prompt-bound answer identity is tracked in #2733.
+
 ## Execution and runtime
 
 The command is:

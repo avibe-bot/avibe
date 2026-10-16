@@ -8,10 +8,13 @@ import pytest
 
 from core import internal_server, session_turns
 from core.computer_script_interactions import (
+    MAX_INTERACTION_REQUEST_BYTES,
+    MAX_MESSAGE_BYTES,
     ComputerScriptInteractionError,
     ComputerScriptInteractionManager,
 )
 from core.computer_script_sessions import ComputerScriptSessionManager
+from core.services.dispatch import SOURCE_SCHEDULED
 from modules.im import MessageContext
 
 
@@ -157,6 +160,21 @@ def test_confirm_is_answerable_only_after_its_prompt_is_delivered() -> None:
     assert asyncio.run(exercise())["effect"] == "confirmed"
 
 
+def test_confirm_from_an_unattended_turn_is_refused_before_any_prompt() -> None:
+    """Nobody launched a scheduled Turn, so nobody is there to answer."""
+
+    async def exercise() -> tuple[str, list]:
+        manager, controller, turn = _manager(platform="slack")
+        turn.source = SOURCE_SCHEDULED
+        try:
+            await manager.confirm("script-token", "Send it?")
+        except ComputerScriptInteractionError as exc:
+            return exc.code, controller.messages
+        raise AssertionError("unattended confirm was admitted")
+
+    assert asyncio.run(exercise()) == ("confirm_unattended", [])
+
+
 def test_a_session_has_at_most_one_pending_confirm() -> None:
     """A yes/no reply names no prompt, so a second script cannot open another."""
 
@@ -247,7 +265,7 @@ def test_script_connection_end_wakes_a_pending_confirm(ending: str, code: str) -
 
 
 def test_internal_routes_bound_interactions_and_reject_oversized_messages() -> None:
-    async def exercise() -> tuple[httpx.Response, httpx.Response, list[str]]:
+    async def exercise() -> tuple[httpx.Response, ...]:
         from tests.test_internal_server import _build_controller_double
 
         controller = _build_controller_double()
@@ -288,21 +306,32 @@ def test_internal_routes_bound_interactions_and_reject_oversized_messages() -> N
                         "message": "Progress",
                     },
                 )
+                # The largest admitted message, nearly every byte JSON-escaped to six bytes.
+                escaped_limit = await client.post(
+                    "/internal/computer-script/notify",
+                    json={
+                        "connection_token": token,
+                        "message": "x" + "\x01" * (MAX_MESSAGE_BYTES - 1),
+                    },
+                )
                 oversized = await client.post(
                     "/internal/computer-script/notify",
-                    content=b"x" * (64 * 1024 + 1),
+                    content=b"x" * (MAX_INTERACTION_REQUEST_BYTES + 1),
                     headers={"Content-Type": "application/json"},
                 )
-            return notify, oversized, messages
+            return notify, escaped_limit, oversized, messages
         finally:
             controller.computer_script_sessions.close_all()
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
-    notify, oversized, messages = asyncio.run(exercise())
+    notify, escaped_limit, oversized, messages = asyncio.run(exercise())
     assert notify.status_code == 200
     assert notify.json()["ok"] is True
     assert notify.json()["result"]["route"] == "message_dispatcher"
+    assert escaped_limit.status_code == 200
+    assert escaped_limit.json()["ok"] is True
     assert oversized.status_code == 413
     assert oversized.json()["error"] == "computer_script_message_too_large"
-    assert messages == ["Progress"]
+    assert oversized.json()["params"] == {"limit_bytes": MAX_MESSAGE_BYTES}
+    assert len(messages) == 2

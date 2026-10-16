@@ -1388,15 +1388,24 @@ def test_dispatch_async_enqueues_during_busy_turn(monkeypatch, tmp_path):
     assert transcript["messages"] == []
 
 
-@pytest.mark.parametrize("confirm_live", [True, False], ids=["pending", "invalidated"])
+@pytest.mark.parametrize(
+    ("case", "message_kind", "metadata"),
+    [
+        ("answer", "original", None),
+        ("invalidated", "original", None),
+        ("quick_reply", "quick_reply", {"quick_reply_for": "msg_older_prompt"}),
+        ("forwarded", "forwarded", None),
+    ],
+)
 def test_dispatch_async_answers_a_pending_script_confirm_before_queuing(
-    monkeypatch, tmp_path, confirm_live
+    monkeypatch, tmp_path, case, message_kind, metadata
 ):
-    """A Web reply during the script's own Turn reaches ``avibe.confirm``.
+    """A direct Web reply during the script's own Turn reaches ``avibe.confirm``.
 
     The script blocks the running Turn, so an answer that queued behind it
-    would deadlock until the script deadline. Once the confirm is gone, the same
-    reply is an ordinary send-while-busy message again.
+    would deadlock until the script deadline. A "yes" that is not a direct
+    original reply (a quick reply to another prompt, a forward), or any reply
+    after the confirm is gone, is an ordinary send-while-busy message.
     """
     from core.computer_script_interactions import ComputerScriptInteractionError
     from core.services import sessions as sessions_service
@@ -1434,6 +1443,8 @@ def test_dispatch_async_answers_a_pending_script_confirm_before_queuing(
             session_id=session["id"],
             text="yes",
             author_id="owner",
+            message_kind=message_kind,
+            metadata=metadata,
         )
     session_id = session["id"]
 
@@ -1465,7 +1476,7 @@ def test_dispatch_async_answers_a_pending_script_confirm_before_queuing(
             controller.computer_script_interactions.confirm(token, "Send it?")
         )
         await asyncio.sleep(0)
-        if not confirm_live:
+        if case == "invalidated":
             controller.computer_script_interactions.invalidate_token(token, "script_turn_ended")
         try:
             async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -1476,6 +1487,10 @@ def test_dispatch_async_answers_a_pending_script_confirm_before_queuing(
                     ),
                     timeout=5,
                 )
+            if case in {"quick_reply", "forwarded"}:
+                await asyncio.sleep(0)
+                assert not confirm.done()
+                confirm.cancel()
             outcome = await asyncio.wait_for(asyncio.gather(confirm, return_exceptions=True), 5)
         finally:
             controller.computer_script_sessions.close_all()
@@ -1491,15 +1506,18 @@ def test_dispatch_async_answers_a_pending_script_confirm_before_queuing(
         delivery = message_deliveries.get_delivery(conn, reply["id"])
         transcript = messages_service.list_session_messages(conn, session_id=session_id, types=("user",))
     assert transcript["messages"] == []
-    if confirm_live:
+    if case == "answer":
         assert outcome["effect"] == "confirmed"
         assert resp.json()["queued"] is False
         assert delivery["state"] == "retired"
         assert queued == []
         assert notices[-1] == "computer.cli.confirm.approved"
     else:
-        assert isinstance(outcome, ComputerScriptInteractionError)
-        assert outcome.code == "script_turn_ended"
+        if case == "invalidated":
+            assert isinstance(outcome, ComputerScriptInteractionError)
+            assert outcome.code == "script_turn_ended"
+        else:
+            assert isinstance(outcome, asyncio.CancelledError)
         assert resp.json()["queued"] is True
         assert queued == ["yes"]
 
