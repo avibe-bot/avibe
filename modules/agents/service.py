@@ -3,6 +3,7 @@ import asyncio
 import inspect
 import uuid
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any, Awaitable, Callable, Dict, Iterable, Optional
 
 from core.run_settlement import SETTLED_BY_BACKEND_REFRESH
@@ -335,6 +336,11 @@ class AgentService:
         service = getattr(self.controller, "scheduled_task_service", None)
         settle = getattr(service, "settle_activity_runs", None)
         if not callable(settle):
+            return False
+        held = getattr(service, "hold_activity_terminal", None)
+        if callable(held) and held(activity, partial(self.on_activity_terminal, activity)) is True:
+            # A Turn's terminal record for its Run is off the loop: settled, and
+            # acknowledged, when this replays after the record lands.
             return False
         try:
             settle(activity)

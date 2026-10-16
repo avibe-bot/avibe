@@ -1804,15 +1804,21 @@ class ConsolidatedMessageDispatcher:
                     held.append(replay)
         return held
 
-    def hold_activity_settlement(self, run_id: str, replay: Callable[[], object]) -> bool:
-        """Hold an Activity's settlement of ``run_id`` while the Run's terminal record
-        is off the loop; ``replay`` runs once it lands. ``False`` when nothing is out."""
+    def hold_activity_settlement(
+        self, run_ids: Sequence[str], replay: Callable[[], object] | None
+    ) -> bool:
+        """Hold an Activity's settlement while a terminal record for one of its Runs
+        is off the loop; ``replay``, if any, runs once that record lands. ``False``
+        when none is out."""
 
-        if run_id not in self._run_terminal_records_in_flight:
+        out = [run_id for run_id in run_ids if run_id in self._run_terminal_records_in_flight]
+        if not out:
             return False
-        held = self._held_activity_settlements.setdefault(run_id, [])
-        if all(replay is not other for other in held):
-            held.append(replay)
+        if replay is not None:
+            for run_id in out:
+                held = self._held_activity_settlements.setdefault(run_id, [])
+                if all(replay is not other for other in held):
+                    held.append(replay)
         return True
 
     async def _wait_for_close_after_runs(self, run_ids: tuple[str, ...]) -> bool:

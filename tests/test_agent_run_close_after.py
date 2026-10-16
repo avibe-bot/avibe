@@ -1133,9 +1133,10 @@ def test_a_cancellation_during_the_runs_terminal_record_is_answered_at_the_next_
 
 def test_an_activity_settling_during_the_runs_terminal_record_merges_as_on_the_loop(tmp_path, monkeypatch) -> None:
     """#2706: the blocking-Activity check is made on the loop before the Run terminal record leaves it. An owned
-    Activity that ends while the write is out must not settle the Run first, with its own weaker status: its
-    settlement waits for the record and is replayed once it lands, so the Run settles with the stronger of the two
-    terminal intents, exactly as when both ran on the loop (a failed Turn outranks a stopped Activity)."""
+    Activity that ends while the write is out must not settle the Run first, with its own weaker status, nor write at
+    all while the record holds SQLite's writer: its terminal is held, unacknowledged, and replayed once the record
+    lands, so the Run settles with the stronger of the two terminal intents, exactly as when both ran on the loop (a
+    failed Turn outranks a stopped Activity)."""
 
     from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore, TaskExecutionStore
 
@@ -1176,9 +1177,14 @@ def test_an_activity_settling_during_the_runs_terminal_record_merges_as_on_the_l
             assert await asyncio.to_thread(writing.wait, 5)
             blocked[0] = False  # the owned Activity ends while the record is out
             activity = SimpleNamespace(id="activity-1", status="stopped", run_id=queued.id, metadata={})
-            assert scheduled.settle_activity_runs(activity) == [], "the Activity settled the Run ahead of the record"
+            settlements: list[object] = []
+            real_settle = scheduled.settle_activity_runs
+            scheduled.settle_activity_runs = lambda held: settlements.append(held) or real_settle(held)
+            assert service.on_activity_terminal(activity) is False, "the held terminal was acknowledged"
+            assert settlements == [], "the Activity settled -- and wrote -- while the record held the writer"
             release.set()
             await record
+            assert settlements == [activity], "the held Activity terminal was not replayed"
 
     asyncio.run(exercise())
     assert normalize_run_status(request_store.get_run(queued.id)["status"]) == "failed"

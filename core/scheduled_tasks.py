@@ -4667,6 +4667,9 @@ class ScheduledTaskService:
         ack_terminal = getattr(registry, "ack_recovered_terminal", None)
         remaining: list[Any] = []
         for activity in self._pending_recovered_activity_terminals:
+            if self.hold_activity_terminal(activity, None):
+                remaining.append(activity)
+                continue
             if callable(has_pending_output) and any(
                 has_pending_output(run_id)
                 for run_id in self._activity_run_ids(activity)
@@ -7625,6 +7628,16 @@ class ScheduledTaskService:
                 lines.extend(self._deleted_definition_lines(run_id))
         return "\n".join(lines)
 
+    def hold_activity_terminal(self, activity: Any, replay: Callable[[], object] | None) -> bool:
+        """Whether a Turn's terminal record for one of this Activity's Runs is off the
+        loop (#2706). Its settlement then waits -- before any write, which would wait
+        on the loop for the record's writer -- and ``replay`` runs once the record
+        lands, so the two merge their terminal intents as they did on the loop."""
+
+        dispatcher = getattr(self.controller, "message_dispatcher", None)
+        hold = getattr(dispatcher, "hold_activity_settlement", None)
+        return callable(hold) and hold(self._activity_run_ids(activity), replay) is True
+
     def settle_activity_runs(self, activity: Any) -> list[str]:
         """Settle deferred Runs when a failed/stopped owned Activity is last.
 
@@ -7659,11 +7672,6 @@ class ScheduledTaskService:
         registry = getattr(getattr(self.controller, "agent_service", None), "activities", None)
         has_blocker = getattr(registry, "has_blocking_run_activity", None)
         has_pending_output = getattr(registry, "has_pending_run_output", None)
-        # A Turn's terminal record for the Run may be off the loop (#2706): this
-        # settlement then waits for it and is replayed once it lands, so the two
-        # merge their terminal intents as they did when both ran on the loop.
-        hold = getattr(getattr(self.controller, "message_dispatcher", None), "hold_activity_settlement", None)
-        replay = partial(self.settle_activity_runs, activity)
         settled: list[str] = []
         # An Activity that failed on its own is the Run's cause even when a
         # sibling still blocks settlement; a later interruption must not
@@ -7679,8 +7687,6 @@ class ScheduledTaskService:
                 terminal_status=terminal_status,
                 **({"error": own_failure} if own_failure else {}),
             )
-            if callable(hold) and hold(run_id, replay) is True:
-                continue
             if callable(has_blocker) and has_blocker(run_id):
                 continue
             if callable(has_pending_output) and has_pending_output(run_id):
