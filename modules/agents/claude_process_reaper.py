@@ -7,10 +7,12 @@ import json
 import logging
 import os
 import signal
-import subprocess
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
+
+import psutil
 
 KILL_SIGNAL = getattr(signal, "SIGKILL", signal.SIGTERM)
 NODE_EXECUTABLES = {"node", "nodejs", "node.exe"}
@@ -19,8 +21,8 @@ AVIBE_CLAUDE_SESSION_OWNER = "session"
 AVIBE_CLAUDE_AUTH_OWNER = "auth"
 CLAUDE_PROCESS_REGISTRY_NAME = "claude_processes.json"
 # This process's registry writer. Registering is called on the service's
-# event loop, so reading the process's start time (`ps`) and rewriting the file
-# run here instead, one write at a time; the registry's file lock orders them
+# event loop, so reading the process's start token and rewriting the file run
+# here instead, one write at a time; the registry's file lock orders them
 # against the other processes that register (the Web UI's auth and probes).
 _REGISTRY_WRITER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="claude-process-registry")
 
@@ -37,6 +39,11 @@ class ClaudeOwnedProcess:
     pid: int
     native_session_id: str | None = None
     owner: str = AVIBE_CLAUDE_SESSION_OWNER
+    # vibe.runtime.process_start_token at registration: the process's identity,
+    # which no clock adjustment moves. None when it could not be read then.
+    start_token: str | None = None
+    # A record a released build wrote has no token. It carries instead the start
+    # `ps -o lstart` showed, parsed as that build parsed it, and is judged so.
     started_at: float | None = None
 
 
@@ -103,49 +110,55 @@ def get_claude_client_stderr_tail(client: object | None) -> str:
     return "\n".join(str(line).strip() for line in lines if str(line).strip())
 
 
-def _process_start_time(pid: int) -> float | None:
-    try:
-        result = subprocess.run(
-            ["ps", "-o", "lstart=", "-p", str(pid)],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=1.5,
-        )
-    except Exception:
+def _released_lstart_reading(started: float) -> float:
+    """The value a released build recorded for a process that started at ``started``.
+
+    It parsed ``ps -o lstart``: local time to the second, with no zone. A naive
+    datetime reads as the first occurrence of a repeated hour, so a process that
+    started in the second occurrence of a DST fold was recorded an hour early.
+    The same reading of the process's start now reproduces that.
+    """
+
+    return datetime.fromtimestamp(int(started)).replace(fold=0).timestamp()
+
+
+def recorded_process_mismatch(record: ClaudeOwnedProcess) -> str | None:
+    """Why ``record`` does not name a live process it can be shown to be; None when it does.
+
+    One verdict for every reader -- Running's orphans, "end orphan" and the
+    reaper -- so a process is never listed by one and refused by another. A
+    record names its process by start token. One a released build wrote is
+    judged as that build judged it: its ``started_at`` within a second of the
+    start ``ps -o lstart`` would show now, read without ``ps``. The reasons:
+
+    - ``identity_unprovable``: the record has no identity, so it can never be
+      told apart from a reused pid;
+    - ``process_not_alive``: nothing runs at its pid;
+    - ``identity_unverifiable``: a process runs there, but its start cannot be
+      read now;
+    - ``pid_reused``: the process there started at another time.
+    """
+
+    from vibe import runtime
+
+    pid = record.pid
+    start_token = getattr(record, "start_token", None)
+    started_at = getattr(record, "started_at", None)
+    if start_token is None and not isinstance(started_at, (int, float)):
+        return "identity_unprovable"
+    if not runtime.pid_alive(pid):
+        return "process_not_alive"
+    if start_token is not None:
+        current = runtime.process_start_token(pid)
+        if current is None:
+            return "identity_unverifiable" if runtime.pid_alive(pid) else "process_not_alive"
+        return None if current == start_token else "pid_reused"
+    started = runtime.process_start_seconds(pid)
+    if started is None:
+        return "identity_unverifiable" if runtime.pid_alive(pid) else "process_not_alive"
+    if abs(_released_lstart_reading(started) - started_at) < 1.0:
         return None
-    text = (result.stdout or "").strip()
-    if not text:
-        return None
-    try:
-        from email.utils import parsedate_to_datetime
-
-        return parsedate_to_datetime(text).timestamp()
-    except Exception:
-        return None
-
-
-def _process_start_times(pids: set[int]) -> dict[int, float]:
-    starts: dict[int, float] = {}
-    for pid in pids:
-        started_at = _process_start_time(pid)
-        if started_at is not None:
-            starts[pid] = started_at
-    return starts
-
-
-def _process_identity_matches(
-    record: ClaudeOwnedProcess,
-    row: ClaudeProcessRow,
-    current_started_at: float | None,
-) -> bool:
-    if record.pid != row.pid:
-        return False
-    if record.started_at is None:
-        return True
-    if current_started_at is None:
-        return False
-    return abs(current_started_at - record.started_at) < 1.0
+    return "pid_reused"
 
 
 def _registry_path(runtime_dir: Path | None = None) -> Path:
@@ -174,13 +187,19 @@ def _load_owned_process_registry(runtime_dir: Path | None = None) -> list[Claude
             continue
         native_session_id = item.get("native_session_id")
         owner = item.get("owner") or AVIBE_CLAUDE_SESSION_OWNER
+        start_token = item.get("start_token")
         started_at = item.get("started_at")
         records.append(
             ClaudeOwnedProcess(
                 pid=pid,
                 native_session_id=str(native_session_id) if native_session_id else None,
                 owner=str(owner),
-                started_at=float(started_at) if isinstance(started_at, (int, float)) else None,
+                start_token=start_token if isinstance(start_token, str) and start_token else None,
+                started_at=(
+                    float(started_at)
+                    if isinstance(started_at, (int, float)) and not isinstance(started_at, bool)
+                    else None
+                ),
             )
         )
     return records
@@ -216,9 +235,10 @@ def _record_owned_process(runtime_dir: Path, owned: ClaudeOwnedProcess) -> None:
     """Rewrite the registry with ``owned``, without the records of processes that have exited."""
 
     from storage.lock import MigrationFileLock
+    from vibe import runtime
 
     path = _registry_path(runtime_dir)
-    started_at = _process_start_time(owned.pid)
+    start_token = runtime.process_start_token(owned.pid)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with MigrationFileLock(path.with_suffix(path.suffix + ".lock")):
@@ -227,13 +247,15 @@ def _record_owned_process(runtime_dir: Path, owned: ClaudeOwnedProcess) -> None:
                 for existing in _load_owned_process_registry(runtime_dir)
                 if existing.pid != owned.pid and _pid_exists(existing.pid)
             ]
-            records.append(replace(owned, started_at=started_at))
+            records.append(replace(owned, start_token=start_token, started_at=None))
             payload = {
                 "processes": [
                     {
                         "pid": record.pid,
                         "native_session_id": record.native_session_id,
                         "owner": record.owner,
+                        # A released record keeps the identity its build wrote.
+                        **({"start_token": record.start_token} if record.start_token is not None else {}),
                         "started_at": record.started_at,
                     }
                     for record in records
@@ -259,18 +281,24 @@ def _pid_exists(pid: int) -> bool:
     return True
 
 
-def _run_ps() -> str:
-    result = subprocess.run(
-        ["ps", "-axo", "pid=,ppid=,command="],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=1.5,
-    )
-    return result.stdout or ""
+def _process_table() -> str:
+    """Every process as ``pid ppid command`` lines, read through psutil rather than ``ps``.
+
+    ``ps`` cannot run in every sandbox the service runs in (#2487). A process
+    whose command line cannot be read is listed by its name, so the tree it
+    belongs to stays whole.
+    """
+
+    lines: list[str] = []
+    for process in psutil.process_iter(["pid", "ppid", "cmdline", "name"]):
+        info = process.info
+        command = " ".join(info.get("cmdline") or []) or (info.get("name") or "")
+        if command:
+            lines.append(f"{info['pid']} {info.get('ppid') or 0} {command}")
+    return "\n".join(lines)
 
 
-def _parse_ps_rows(output: str) -> list[ClaudeProcessRow]:
+def _parse_process_table(output: str) -> list[ClaudeProcessRow]:
     rows: list[ClaudeProcessRow] = []
     for line in output.splitlines():
         parts = line.strip().split(None, 2)
@@ -333,7 +361,7 @@ def find_claude_resume_processes(native_session_id: str, *, cli_path: str | None
     if os.name == "nt" or not native_session_id:
         return []
     try:
-        rows = _parse_ps_rows(_run_ps())
+        rows = _parse_process_table(_process_table())
     except Exception:
         return []
     return [
@@ -431,7 +459,7 @@ async def reap_duplicate_claude_resume_processes(
         return 0
 
     try:
-        all_rows = _parse_ps_rows(_run_ps())
+        all_rows = _parse_process_table(_process_table())
     except Exception:
         logger.debug("Failed to read process table for Claude duplicate cleanup", exc_info=True)
         return 0
@@ -507,7 +535,7 @@ async def stop_claude_process(
     if pid is None or _process_returncode(process) is not None:
         return True
     try:
-        rows = _parse_ps_rows(await asyncio.to_thread(_run_ps))
+        rows = _parse_process_table(await asyncio.to_thread(_process_table))
     except Exception:
         # No process table, as on Windows: the CLI alone.
         rows = []
@@ -556,35 +584,19 @@ async def _reap_pid_set(
 
 
 def _process_ages(pids: set[int]) -> dict[int, float]:
-    """Best-effort elapsed-seconds-since-start for the given pids via ``ps``.
+    """How long each of ``pids`` has run, read without ``ps``.
 
-    Returns a ``{pid: age_seconds}`` map. Pids whose age cannot be determined
-    are simply absent (callers treat unknown age conservatively: do not reap).
-    ``etimes`` (elapsed seconds) is available on Linux procps-ng and macOS; on
-    busybox ``ps`` (Alpine) it is unsupported, so this returns ``{}`` and the
-    caller reaps nothing — the safe conservative fallback.
+    Pids whose age cannot be read are absent: callers treat an unknown age
+    conservatively and do not reap.
     """
-    if not pids:
-        return {}
-    try:
-        result = subprocess.run(
-            ["ps", "-o", "pid=,etimes=", "-p", ",".join(str(p) for p in sorted(pids))],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=1.5,
-        )
-    except Exception:
-        return {}
+
+    from vibe import runtime
+
     ages: dict[int, float] = {}
-    for line in (result.stdout or "").splitlines():
-        parts = line.split()
-        if len(parts) < 2:
-            continue
-        try:
-            ages[int(parts[0])] = float(parts[1])
-        except ValueError:
-            continue
+    for pid in pids:
+        age = runtime.process_age_seconds(pid)
+        if age is not None:
+            ages[pid] = age
     return ages
 
 
@@ -620,7 +632,7 @@ async def reap_orphaned_claude_processes(
       candidate whose age cannot be determined is **not** reaped.
 
     Returns the number of pids that were signalled, which includes descendant
-    helper processes — not the number of orphan roots. The blocking ``ps``
+    helper processes — not the number of orphan roots. The blocking process
     reads are offloaded to a thread so this never stalls the event loop (this
     runs on every periodic cleanup sweep).
     """
@@ -629,7 +641,7 @@ async def reap_orphaned_claude_processes(
 
     loop = asyncio.get_running_loop()
     try:
-        all_rows = _parse_ps_rows(await loop.run_in_executor(None, _run_ps))
+        all_rows = _parse_process_table(await loop.run_in_executor(None, _process_table))
     except Exception:
         logger.debug("Failed to read process table for Claude orphan cleanup", exc_info=True)
         return 0
@@ -662,21 +674,18 @@ async def reap_orphaned_claude_processes(
         if owned_processes is not None
         else await loop.run_in_executor(None, _load_owned_process_registry)
     )
-    registry_pids = {
-        record.pid
-        for record in registry
-        if record.started_at is not None and record.pid in row_by_pid
-    }
-    current_start_times = await loop.run_in_executor(None, _process_start_times, registry_pids)
+
+    def live_records() -> list[ClaudeOwnedProcess]:
+        return [
+            record
+            for record in registry
+            if record.pid in row_by_pid and recorded_process_mismatch(record) is None
+        ]
 
     candidates: set[int] = set()
 
-    for record in registry:
-        row = row_by_pid.get(record.pid)
-        if row is None or not _process_identity_matches(record, row, current_start_times.get(record.pid)):
-            continue
-        if record.started_at is None:
-            continue
+    for record in await loop.run_in_executor(None, live_records):
+        row = row_by_pid[record.pid]
         in_service_tree = row.pid in service_tree
         if record.owner != AVIBE_CLAUDE_SESSION_OWNER:
             continue
@@ -698,7 +707,7 @@ async def reap_orphaned_claude_processes(
         return 0
 
     # TOCTOU grace window: never reap a process younger than the cutoff, and
-    # never reap one whose age we cannot establish. Offload the ``ps`` read.
+    # never reap one whose age we cannot establish. Offload the reads.
     ages = await loop.run_in_executor(None, _process_ages, candidates)
     aged_candidates = {pid for pid in candidates if ages.get(pid, 0.0) >= min_age_seconds}
     if not aged_candidates:

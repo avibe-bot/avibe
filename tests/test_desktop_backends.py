@@ -669,7 +669,51 @@ def test_a_tree_whose_owner_pid_now_names_another_process_is_reaped(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
-@pytest.mark.parametrize("owner", ["missing", "malformed", "uninspectable"])
+@pytest.mark.parametrize(
+    ("shape", "kept"),
+    [
+        ("token-of-a-live-ui", True),
+        ("another-token-at-a-ui-of-this-runtime", False),
+        ("released-value-of-a-live-ui", True),
+        ("released-value-of-an-exited-owner", False),
+    ],
+)
+def test_an_owner_value_is_judged_by_the_identity_its_shape_carries(
+    tmp_path, installer_tree, quiet_stop, children, shape, kept
+):
+    """#2511: an owner value this build writes names its owner by start token, so
+    another token at its pid means the pid was reused -- even by another UI of the
+    same Runtime, which the released ``pid:create_time`` value could not tell from
+    its owner. Only a released value keeps that "a UI of this Runtime" fallback,
+    because macOS can shift the create time it carries while its owner runs."""
+
+    from vibe import runtime
+
+    env, wait_for_tree = installer_tree
+    cli, statuses = quiet_stop
+    if shape == "released-value-of-an-exited-owner":
+        exited = subprocess.Popen([sys.executable, "-c", "pass"])
+        exited.wait(10)
+        owner = f"{exited.pid}:{1.0!r}"
+    else:
+        ui_pid = _start_ui_stand_in(children, tmp_path, dict(os.environ))
+        if shape == "token-of-a-live-ui":
+            owner = f"v2:{ui_pid}:{runtime.process_start_token(ui_pid)}"
+        elif shape == "another-token-at-a-ui-of-this-runtime":
+            owner = f"v2:{ui_pid}:{runtime.process_start_token(ui_pid)}-earlier"
+        else:
+            # The create time macOS can show for an owner that keeps running.
+            owner = f"{ui_pid}:{runtime.process_create_time(ui_pid) - 1.0!r}"
+    pids = _start_tree_naming(children, env, wait_for_tree, owner)
+
+    assert cli.cmd_stop() == 0
+
+    assert statuses == [("stopped",)]
+    assert _running(pids) == (pids if kept else [])
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+@pytest.mark.parametrize("owner", ["missing", "malformed", "uninspectable", "token-unreadable"])
 @pytest.mark.parametrize("scoped", [False, True], ids=["full", "scoped"])
 def test_a_tree_whose_owner_cannot_be_told_fails_every_caller_closed(
     monkeypatch, installer_tree, quiet_stop, children, capsys, owner, scoped
@@ -696,6 +740,15 @@ def test_a_tree_whose_owner_cannot_be_told_fails_every_caller_closed(
 
         for method in ("environ", "cmdline"):
             monkeypatch.setattr(psutil.Process, method, unreadable(getattr(psutil.Process, method)))
+    elif owner == "token-unreadable":
+        # It names its owner by start token, which cannot be read now.
+        live = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+        children.append(live)
+        named = f"v2:{live.pid}:{runtime.process_start_token(live.pid)}"
+        real_token = runtime.process_start_token
+        monkeypatch.setattr(
+            runtime, "process_start_token", lambda pid: None if pid == live.pid else real_token(pid)
+        )
     pids = _start_tree_naming(children, env, wait_for_tree, named)
     npm_runs: list[bool] = []
     _patch_fake_install(monkeypatch, before=lambda: npm_runs.append(True))

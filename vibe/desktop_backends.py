@@ -839,30 +839,53 @@ def _clear_abandoned_install(record: _InstallerRecord) -> bool:
     return True
 
 
+# The owner value an installer tree carries: this prefix, the owner's pid and
+# its start token. A value without it is the ``pid:create_time`` a released
+# build wrote.
+_INSTALLER_OWNER_PREFIX = "v2:"
+
+
 def _installer_owner() -> str:
     from vibe import runtime
 
-    started_at = runtime.process_create_time(os.getpid())
-    if started_at is None:
+    start_token = runtime.process_start_token(os.getpid())
+    if start_token is None:
         raise DesktopBackendError(
             "Avibe could not identify itself as the owner of a desktop backend install.",
             code="desktop_install_failed",
         )
-    return f"{os.getpid()}:{started_at!r}"
+    return f"{_INSTALLER_OWNER_PREFIX}{os.getpid()}:{start_token}"
 
 
 def _installer_owner_gone(owner: str, runtime_id: str | None) -> bool | None:
     """Whether the process named by the owner value of a ``runtime_id`` tree has exited.
 
     The owner is gone when its pid is not alive, and alive while that pid
-    keeps its create time. macOS can shift the create time psutil shows for a
-    process that keeps running, so another one alone proves nothing: the pid
-    was reused only when the process now holding it is readable and is not a
-    UI of that Runtime, as every owner is. ``None`` when the value is
-    malformed, or the create time differs and the process cannot be read.
+    keeps its start token, which no clock adjustment moves: another token
+    means the pid was reused. A released build's value carries a create time
+    instead, which macOS can shift for a process that keeps running, so
+    another one alone proves nothing there: that pid was reused only when the
+    process now holding it is readable and is not a UI of that Runtime, as
+    every owner is. ``None`` when the value is malformed, or the owner's
+    identity cannot be read now.
     """
 
     from vibe import runtime
+
+    if owner.startswith(_INSTALLER_OWNER_PREFIX):
+        pid_text, _, start_token = owner.removeprefix(_INSTALLER_OWNER_PREFIX).partition(":")
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            return None
+        if pid <= 0 or not start_token:
+            return None
+        if not runtime.pid_alive(pid):
+            return True
+        current = runtime.process_start_token(pid)
+        if current is None:
+            return None if runtime.pid_alive(pid) else True
+        return current != start_token
 
     pid_text, _, started_text = owner.partition(":")
     try:

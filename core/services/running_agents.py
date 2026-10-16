@@ -322,7 +322,7 @@ def _collect_orphans(seen_native: dict[str, Optional[int]], seen_pids: set[int])
             AVIBE_CLAUDE_SESSION_OWNER,
             _load_owned_process_registry,
             _process_ages,
-            _process_start_time,
+            recorded_process_mismatch,
         )
     except Exception:  # noqa: BLE001
         return rows
@@ -334,10 +334,9 @@ def _collect_orphans(seen_native: dict[str, Optional[int]], seen_pids: set[int])
 
     # Filter to session-owned registry rows not already backed by a live client.
     # The registry accumulates stale rows (the reaper prunes lazily), so an entry
-    # alone proves nothing — we must verify the process is genuinely alive. A
-    # missing/non-numeric ``started_at`` means we cannot prove identity, so we
-    # skip it rather than risk a false orphan from pid reuse.
-    candidates: list[tuple[Any, int, Optional[str], float]] = []
+    # alone proves nothing — we must verify the process is genuinely alive and is
+    # the one recorded, with the same verdict "end orphan" applies before it kills.
+    candidates: list[tuple[Any, int, Optional[str]]] = []
     for record in registry:
         if getattr(record, "owner", None) != AVIBE_CLAUDE_SESSION_OWNER:
             continue
@@ -354,27 +353,15 @@ def _collect_orphans(seen_native: dict[str, Optional[int]], seen_pids: set[int])
                 continue
         if not isinstance(record_pid, int) or record_pid in seen_pids:
             continue
-        recorded = getattr(record, "started_at", None)
-        if not isinstance(recorded, (int, float)):
-            continue  # identity unprovable — don't risk a false orphan
-        candidates.append((record, record_pid, native, float(recorded)))
+        candidates.append((record, record_pid, native))
 
     if not candidates:
         return rows
 
-    # ONE batched ``ps`` to drop dead/stale pids (the common case: e.g. 88 stale
-    # dead entries collapse to zero here with a single subprocess call). Only the
-    # few survivors get the precise per-pid start-time identity check below, so
-    # we never fan out N blocking ``ps`` calls on the controller loop.
-    ages = _process_ages({pid for _, pid, _, _ in candidates})
-    for record, record_pid, native, recorded in candidates:
-        if record_pid not in ages:
-            continue  # not alive — stale registry entry, not a leak
-        current_started_at = _process_start_time(record_pid)
-        if current_started_at is None:
-            continue
-        if abs(current_started_at - recorded) >= 1.0:
-            continue  # pid was reused by a different process
+    for record, record_pid, native in candidates:
+        if recorded_process_mismatch(record) is not None:
+            continue  # gone, reused, or not provably the recorded process
+        ages = _process_ages({record_pid})
         rows.append(
             _make_row(
                 backend="claude",
@@ -517,10 +504,10 @@ async def _end_orphan_pid(pid: int) -> dict[str, Any]:
             _build_children_map,
             _descendant_pids,
             _load_owned_process_registry,
-            _parse_ps_rows,
-            _process_start_time,
+            _parse_process_table,
+            _process_table,
             _reap_pid_set,
-            _run_ps,
+            recorded_process_mismatch,
         )
     except Exception:  # noqa: BLE001
         return {"ok": False, "error": "reaper_unavailable"}
@@ -532,18 +519,11 @@ async def _end_orphan_pid(pid: int) -> dict[str, Any]:
             break
     if record is None:
         return {"ok": False, "error": "not_an_owned_process", "pid": pid}
-    current = _process_start_time(pid)
-    if current is None:
-        return {"ok": False, "error": "process_not_alive", "pid": pid}
-    recorded = getattr(record, "started_at", None)
-    # FAIL CLOSED: refuse to kill unless identity is provable. A record with a
-    # missing/non-numeric ``started_at`` (e.g. the registration-time ``ps`` failed)
-    # cannot be distinguished from a reused pid, so we never SIGKILL it — matching
-    # the read path's conservatism (``_collect_orphans`` skips such records too).
-    if not isinstance(recorded, (int, float)):
-        return {"ok": False, "error": "identity_unprovable", "pid": pid}
-    if abs(current - recorded) >= 1.0:
-        return {"ok": False, "error": "pid_reused", "pid": pid}
+    # FAIL CLOSED: refuse to kill unless the record provably names this live
+    # process, by the verdict Running's orphan list applies, and say why not.
+    mismatch = recorded_process_mismatch(record)
+    if mismatch is not None:
+        return {"ok": False, "error": mismatch, "pid": pid}
     # NOTE: a microscopic TOCTOU remains between this check and the signal (the pid
     # could exit + be reused in the gap); it's inherent to pid-based signaling and
     # negligible vs. the registration→kill window the start-time match already covers.
@@ -554,12 +534,12 @@ async def _end_orphan_pid(pid: int) -> dict[str, Any]:
     # children leak with no registry root a later kill could target. Apply the
     # SAME safety subtractions as the sweep so we never signal the avibe service
     # (or its tree) or a process owned by a DIFFERENT registered session. The
-    # blocking ``ps`` read is offloaded so we don't stall the controller loop. If
-    # it fails, fall back to the verified root pid alone (better than nothing).
+    # blocking process-table read is offloaded so we don't stall the controller
+    # loop. If it fails, fall back to the verified root pid alone.
     target_pids = {pid}
     try:
         loop = asyncio.get_running_loop()
-        rows = _parse_ps_rows(await loop.run_in_executor(None, _run_ps))
+        rows = _parse_process_table(await loop.run_in_executor(None, _process_table))
         children = _build_children_map(rows)
         target_pids |= _descendant_pids(rows, pid, children)
         # Never reap the avibe service itself or anything under it.

@@ -886,6 +886,46 @@ def process_start_token(pid: int) -> str | None:
         return None
 
 
+def process_start_seconds(pid: int) -> float | None:
+    """When a process started, as the platform's own tools print it; None if it cannot be read.
+
+    This is a wall-clock time, so it is never an identity on its own: it is what
+    ``ps -o lstart`` shows, which records written before start tokens carry.
+    Linux computes it from the boot time and the start ticks, as procps does, and
+    macOS keeps the wall-clock time the process started, which psutil reads back
+    unadjusted through ``create_time(monotonic=True)``.
+    """
+
+    try:
+        process = psutil.Process(pid)
+        if sys.platform == "darwin" or sys.platform.startswith("netbsd"):
+            return float(process._proc.create_time(monotonic=True))
+        return float(process.create_time())
+    except (psutil.Error, AttributeError, TypeError, ValueError, OSError):
+        return None
+
+
+def process_age_seconds(pid: int) -> float | None:
+    """How long a process has run; None if it cannot be read.
+
+    Linux counts it from the boot, in the same ticks the start is recorded in,
+    so a step of the wall clock does not change it. Elsewhere it is the wall
+    clock's distance from the start.
+    """
+
+    if sys.platform.startswith("linux"):
+        try:
+            ticks = int(Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()[19])
+            uptime = float(Path("/proc/uptime").read_text(encoding="utf-8").split()[0])
+            return max(0.0, uptime - ticks / os.sysconf("SC_CLK_TCK"))
+        except (OSError, IndexError, ValueError):
+            return None
+    try:
+        return max(0.0, time.time() - float(psutil.Process(pid).create_time()))
+    except (psutil.Error, TypeError, ValueError, OSError):
+        return None
+
+
 def _safe_resolve_path(value: str | Path) -> Path | None:
     try:
         return Path(value).expanduser().resolve()

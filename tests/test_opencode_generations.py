@@ -13,6 +13,8 @@ import hashlib
 import json
 import os
 import stat
+import subprocess
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -326,10 +328,85 @@ def test_adoption_keeps_every_proven_serving_process_and_drops_the_rest(isolated
     assert converted.spec_digest == opencode_server.LEGACY_SPEC_DIGEST
     assert converted.active_run_sessions == {"ses_legacy"}
     assert converted.record_path.exists() and not legacy.exists()
+    # The converted record keeps the proof its released build applied (#2511).
+    rewritten = json.loads(converted.record_path.read_text(encoding="utf-8"))
+    assert "process_start_token" not in rewritten
+    assert rewritten["process_created_at"] == legacy_shape.get("process_created_at")
     # Only the proven process that stopped serving is signalled.
     assert stopped == [fake_pid(13)]
     assert serving.exists()
     assert not dead.exists() and not reused.exists() and not unhealthy.exists()
+
+
+@pytest.fixture
+def live_server_process():
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        yield process
+    finally:
+        process.kill()
+        process.wait(10)
+
+
+def test_an_adopted_generation_keeps_naming_its_process_across_a_clock_adjustment(live_server_process):
+    """#2511: a generation record names its process by start token. The create time
+    psutil shows moves when ``kern.boottime`` ticks (macOS) or the clock is stepped
+    (Linux); an adopted live server judged by it read as dead and leaked."""
+
+    from tests.test_process_start_token import _clock_adjusted
+
+    pid = live_server_process.pid
+    info = {
+        "pid": pid,
+        "port": 50200,
+        "process_start_token": opencode_server.runtime.process_start_token(pid),
+        "process_created_at": opencode_server.runtime.process_create_time(pid),
+    }
+    generation = opencode_server._generation_from_record(
+        info, generation_id="ocg_tick", spec_digest="v1", request_timeout_seconds=60
+    )
+    assert generation.process_alive()
+
+    with _clock_adjusted():
+        assert generation.process_alive()
+        assert opencode_server._names_one_of(pid, [generation.process_identity()])
+
+
+@pytest.mark.parametrize("unprovable", ["none-written", "token-unreadable-now"])
+def test_a_record_whose_process_cannot_be_proven_is_never_signalled(
+    live_server_process, tmp_path, monkeypatch, unprovable
+):
+    """A record this build wrote carries a token field. When neither a token nor a
+    create time could be read for it, or its token cannot be read now, nothing
+    proves its pid is still this server: another ``opencode serve`` on the same
+    port may hold it now. It is never signalled, and a generation it names no
+    longer counts any live pid as its own. Only a released record with no
+    identity field keeps the command-line and port proof its build applied."""
+
+    pid = live_server_process.pid
+    monkeypatch.setattr(
+        opencode_server.runtime, "get_process_command", lambda other: "/bin/opencode serve --port=50201"
+    )
+    signalled: list[int] = []
+    monkeypatch.setattr(opencode_server, "terminate_pid_tree_sync", lambda other, timeout=5.0: signalled.append(other) or True)
+    token = None
+    if unprovable == "token-unreadable-now":
+        token = opencode_server.runtime.process_start_token(pid)
+        monkeypatch.setattr(opencode_server.runtime, "process_start_token", lambda other: None)
+    info = {"pid": pid, "port": 50201, "process_start_token": token, "process_created_at": None}
+    path = tmp_path / "ocg_unproven.json"
+    path.write_text(json.dumps(info), encoding="utf-8")
+
+    assert opencode_server._record_proves_process(info) is False
+    assert opencode_server.stop_recorded_server_sync(path, info) is opencode_server.StopOutcome.STOPPED
+    assert signalled == [] and not path.exists()
+    generation = opencode_server._generation_from_record(
+        info, generation_id="ocg_unproven", spec_digest="v1", request_timeout_seconds=60
+    )
+    assert generation.process_alive() is False
+
+    released = {"pid": pid, "port": 50201, "process_created_at": None}
+    assert opencode_server._record_proves_process(released) is True
 
 
 # ------------------------------------------------------- generation lifecycle
@@ -1928,7 +2005,9 @@ def test_shutdown_stops_only_the_generations_this_controller_owns(isolated_launc
 
     own = _record(isolated_launch.records, "ocg_own", fake_pid(56), 50056)
     foreign = _record(isolated_launch.records, "ocg_foreign", fake_pid(57), 50057)
-    opencode_server._OWNED_HERE["ocg_own"] = (fake_pid(56), 100.0 + fake_pid(56))
+    opencode_server._OWNED_HERE["ocg_own"] = opencode_server._ProcessIdentity(
+        pid=fake_pid(56), port=50056, start_token=None, created_at=100.0 + fake_pid(56), released=False
+    )
     monkeypatch.setattr(opencode_server, "legacy_pid_file", lambda: isolated_launch.records / "absent.json")
     ports = {fake_pid(56): 50056, fake_pid(57): 50057}
     monkeypatch.setattr(opencode_server.runtime, "pid_alive", lambda pid: pid in ports)

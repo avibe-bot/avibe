@@ -232,6 +232,9 @@ class OpenCodeResourceExitTests(unittest.TestCase):
         pressure = AgentResourceFailure(kind="pids", message="shared cgroup limit event")
 
         with patch(
+            "modules.agents.opencode.server.runtime.pid_alive",
+            return_value=True,
+        ), patch(
             "modules.agents.opencode.server.runtime.process_create_time",
             # Alive, then the pid belongs to a later process.
             side_effect=[1000.0, 2000.0],
