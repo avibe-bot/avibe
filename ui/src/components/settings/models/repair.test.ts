@@ -113,6 +113,8 @@ describe('repairAction — the one tap a stopped source offers', () => {
     // user says they handled it.
     expect(repairAction(blocked('models.source.needs_action.balance_exhausted'))).toBe('retest');
     expect(repairAction(blocked('models.source.needs_action.account_banned'))).toBe('retest');
+    // A plan without the product is upgraded off-site, then re-checked here.
+    expect(repairAction(blocked('models.source.needs_action.plan_excludes_product', subscription))).toBe('retest');
   });
 
   it('treats an unclassified error as an upstream cause, not a credential one', () => {

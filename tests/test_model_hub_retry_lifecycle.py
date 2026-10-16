@@ -440,6 +440,50 @@ def test_a_usage_cap_cools_its_source_as_quota_until_the_upstream_reset(tmp_path
     asyncio.run(run())
 
 
+_QUOTA_COOLDOWN = ("cooldown", "models.source.cooldown.quota_exhausted")
+
+
+@pytest.mark.parametrize(("error", "settled"), [
+    # Codex's own client turns this 429 type into "upgrade to Plus" (openai/codex
+    # codex-api/src/api_bridge.rs); only a plan change ends it.
+    (
+        {"type": "usage_not_included", "message": "To use Codex with your ChatGPT plan, upgrade to Plus."},
+        ("needs_action", "models.source.needs_action.plan_excludes_product"),
+    ),
+    # OpenAI's error-code guide: a billing 429 names its cause in the code, and
+    # the type may stay the generic insufficient_quota.
+    (
+        {"type": "insufficient_quota", "code": "credit_balance_exhausted", "message": "No prepaid credits remain."},
+        ("needs_action", "models.source.needs_action.balance_exhausted"),
+    ),
+    ({"type": "insufficient_quota", "code": "organization_spend_limit_exceeded", "message": "Spend limit."}, _QUOTA_COOLDOWN),
+    ({"type": "insufficient_quota", "code": "project_spend_limit_exceeded", "message": "Spend limit."}, _QUOTA_COOLDOWN),
+    ({"type": "insufficient_quota", "code": "organization_usage_limit_exceeded", "message": "Usage limit."}, _QUOTA_COOLDOWN),
+    # A request-class type beside the code does not decide it.
+    ({"type": "invalid_request_error", "code": "project_spend_limit_exceeded", "message": "Spend limit."}, _QUOTA_COOLDOWN),
+], ids=lambda value: value.get("code", value.get("type")) if isinstance(value, dict) else None)
+def test_a_plan_or_billing_429_settles_its_source_by_the_code_that_names_it(tmp_path, error, settled):
+    """MH-RETRY-ADVICE-003: a 429 naming a plan or billing cause is not a 60 s rate limit (#2530)."""
+    async def run():
+        service, _clock, models = configured_service(tmp_path)
+        body = json.dumps({"error": error}, separators=(",", ":"))
+        calls = []
+
+        async def respond(request):
+            calls.append(await request.json())
+            return web.Response(status=429, text=body, content_type="application/json")
+
+        async with loopback_engine(tmp_path, service, respond):
+            async with gateway_client(service, "codex", models["codex"]) as (_gateway, client, url, headers):
+                async with client.post(url, headers=headers, json={"model": "shared-model"}) as response:
+                    assert response.status >= 400
+        state = service.store.load().sources[0].state
+        assert (state.status, state.detail_key) == settled
+        assert (state.retry_at is None) is (settled[0] == "needs_action")
+        assert len(calls) == 1
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("persisted", [False, True])
 @pytest.mark.parametrize("reason,delay", [
     ("server_error", 30), ("rate_limited", 60), ("quota_exhausted", 300), ("network", 1),

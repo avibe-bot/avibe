@@ -774,6 +774,14 @@ scenarios:
     kind: recovery
     layer: unit
     test: tests/test_model_hub_retry_lifecycle.py::test_a_usage_cap_cools_its_source_as_quota_until_the_upstream_reset
+  - id: MH-RETRY-ADVICE-003
+    name: >-
+      A 429 that names a plan or billing cause settles its Source by that cause, not as a 60 s rate limit: a plan
+      without the product and an exhausted credit balance need the user, and a spend or usage limit cools as quota
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_lifecycle.py::test_a_plan_or_billing_429_settles_its_source_by_the_code_that_names_it
   - id: MH-RETRY-EVIDENCE-001
     name: Unknown buffered success passes through without proving recovery
     status: covered

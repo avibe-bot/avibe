@@ -1209,6 +1209,7 @@
         "credential_revoked": "凭证已撤销",
         "balance_exhausted": "余额不足",
         "account_banned": "账户不可用",
+        "plan_excludes_product": "套餐不含此产品",
         "unclassified_error": "供应商发生未知错误",
         "no_enabled_source": "没有已启用的供应商",
         "no_eligible_source": "没有适用的供应商",

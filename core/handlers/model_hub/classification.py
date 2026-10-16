@@ -26,6 +26,7 @@ ResolutionReason = Literal[
     "credential_revoked",
     "balance_exhausted",
     "account_banned",
+    "plan_excludes_product",
     "unclassified_error",
 ]
 
@@ -50,6 +51,7 @@ SOURCE_SETTLEMENT_AUTHORITY: Mapping[str, SourceSettlementRule] = {
     "credential_revoked": SourceSettlementRule("needs_action", 30),
     "balance_exhausted": SourceSettlementRule("needs_action", 30),
     "account_banned": SourceSettlementRule("needs_action", 30),
+    "plan_excludes_product": SourceSettlementRule("needs_action", 30),
 }
 _SOURCE_STATE_PRIORITY = {
     "active": 0,
@@ -129,6 +131,21 @@ _MACHINE_ERROR_TAXONOMY: Final[Mapping[str, _MachineErrorRule]] = {
     # the reset, which the engine client carries as retry advice.
     "usage_limit_reached": _MachineErrorRule("transient", True, 80, "fallback", "quota_exhausted", None, 300, None),
     "billing_error": _MachineErrorRule("transient", True, 80, "fallback", "balance_exhausted", None, 0, None),
+    # A plan that does not include the product: Codex's 429 for a ChatGPT plan
+    # without it, which only an upgrade ends (openai/codex api_bridge.rs).
+    "usage_not_included": _MachineErrorRule("transient", True, 85, "fallback", "plan_excludes_product", None, 0, None),
+    # OpenAI's billing 429s name their cause in the code, beside a type that may
+    # be the generic insufficient_quota, so they outrank it (its error-code guide).
+    "credit_balance_exhausted": _MachineErrorRule("transient", True, 85, "fallback", "balance_exhausted", None, 0, None),
+    "organization_spend_limit_exceeded": _MachineErrorRule(
+        "transient", True, 85, "fallback", "quota_exhausted", None, 300, None
+    ),
+    "project_spend_limit_exceeded": _MachineErrorRule(
+        "transient", True, 85, "fallback", "quota_exhausted", None, 300, None
+    ),
+    "organization_usage_limit_exceeded": _MachineErrorRule(
+        "transient", True, 85, "fallback", "quota_exhausted", None, 300, None
+    ),
     "overloaded": _MachineErrorRule("transient", True, 80, "fallback", "server_error", None, 30, None),
     "overloaded_error": _MachineErrorRule("transient", True, 80, "fallback", "server_error", None, 30, None),
     "server_error": _MachineErrorRule("server", True, 70, "fallback", "server_error", None, 30, None),
