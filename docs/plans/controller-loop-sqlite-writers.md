@@ -37,6 +37,29 @@ The rows are bounded by the Turn's Run ids. The store is also constructed on eve
 
 **Recommendation.** Move it to the runtime-work door (`run_sync` through `land_step`), with the three conditions above. Construct the store once rather than per call. The same dispatcher already records Run activity through the door (`_flush_agent_run_activity` → `run_sync`).
 
+## Path A2: agent message persistence (#2725)
+
+**What it does.** `message_mirror.persist_agent_message` writes every persisted output in one deferred SQLite transaction: results, notices, interim rows, and hosted and tool-call trace rows. It runs on the loop, and so do `persist_silent_terminal` and the few direct callers outside the dispatcher (the message handler, the agent auth service, the Claude receiver). The v3.2.1 upgrade run on a slow disk stalled the loop for about 3 s on three consecutive commits. The wait is the commit itself (`fsync`), not a writer wait: the database was 840 KB.
+
+**Boundary.** None.
+
+**Orderings a move must keep.** These are the #2708 check.
+1. **Within one emit**, the emit uses the persisted row: its id feeds delivery evidence and the Run terminal record (`message_id`). Awaiting the persist in place keeps that.
+2. **Transcript order is commit order.** A row's `created_at`, the transcript's sort key, is stamped inside the transaction (`messages_service`), and so is the Session's activity rank. On the loop, persists commit in the order the loop issued them. A multi-thread pool would stamp them in whatever order its threads reach SQLite, so two emits for the same Session can swap. That can happen with a receiver's result and a concurrent Activity-output flush, or with an interim row and a notice.
+3. **The Run terminal record (A) and the persist of the same Turn commit in loop order.** On master both run on the loop, so a Run never records an output whose message row is not yet there, and no later emit's row lands before an earlier emit's record.
+
+**Recommendation: one global ordered writer for the dispatcher's durable writes.** One thread commits the work in the order the loop submitted it. Message persistence goes through it, and so does path A's Run terminal record; A moves from the runtime-work door to this writer. Each emit awaits its own step under the `_store_step` rule, so cancellation points stay where they are on master. The post-commit publishes (`message.new`, `inbox.session.updated`, the activity rank) go out from the loop after the commit lands, in the same order. The controller drains the writer at shutdown, as it drains Run activity today (`drain_agent_run_activity`).
+
+- **Why one global thread rather than per-Session ordering on a shared pool.** SQLite admits one writer at a time, so a pool cannot commit two Sessions' rows in parallel. Its threads would queue on the write lock, and one slow `fsync` delays every Session either way. A global writer costs no latency the database does not already impose, and the loop no longer pays it. The global writer also gives a single total order across both write kinds, which per-Session keys cannot: Run records and inbox rows are not cleanly keyed by Session. It also leaves room for group commit later, where several queued writes share one transaction and one `fsync`. That would directly help a slow disk; it is not part of this change.
+- **Why A joins it.** With both on one FIFO writer, a Turn's persist and its Run record cannot commit out of loop order. That holds for every pair, not only within one emit, so nothing has to reason about which pairs are safe. A's own guarantees are unchanged: the record re-reads open Activities in its transaction, and the cancellation point is the same.
+- **What it does not change.** Writes outside the dispatcher's emit path (the scheduler, Session Turns, Activities) keep their current owners.
+
+**Test design.**
+- A held writer (an `fsync` that does not return) must not hold the loop.
+- Two concurrent emits for one Session must keep their transcript order.
+- A Turn's Run record must commit after its persisted row.
+- A cancellation during a persist must be answered at the next await, with the row committed.
+
 ## Path B: a durable Turn's terminal write after delivery
 
 **What it does.** The chain is `controller.emit_agent_message` → `SessionTurnManager.on_terminal_delivery_complete` → `_finish_durable_terminal_result` → `_terminalize_durable_turn`. It runs once per durable Turn terminal. One `BEGIN IMMEDIATE` transaction:
