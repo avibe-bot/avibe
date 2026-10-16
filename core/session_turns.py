@@ -7859,7 +7859,9 @@ class SessionTurnManager:
                         # for it, so it lands where that one would have: before Hub
                         # finalization, which relies on the row being terminal (#2735).
                         durable_terminal_result = reconcile_release()
-                        reconciled = True
+                        # A write that failed again carries no ``changed``; it gets the
+                        # attempt after finalization that it would have had on its own.
+                        reconciled = "changed" in durable_terminal_result
                     completion = self._settle_model_hub_turn(context, settled_by)
                     if inspect.isawaitable(completion):
                         from core.handlers.model_hub.async_owner import await_owned_task

@@ -287,15 +287,15 @@ def test_a_durable_step_failure_keeps_the_turn_owner_live(managers, monkeypatch)
     harness.controller.agent_service.release_runtime_turn.assert_called_once()
 
 
-def _fail_first_turn_write(manager, monkeypatch) -> list[str]:
-    """Make the first evidence-carrying Turn write raise, as a busy database would."""
+def _fail_first_turn_write(manager, monkeypatch, *, failures: int = 1) -> list[str]:
+    """Make the first evidence-carrying Turn writes raise, as a busy database would."""
 
     original = manager._terminalize_durable_turn
     calls: list[str] = []
 
     def terminalize(turn_id, outcome, **kwargs):
         calls.append(str(kwargs.get("evidence_kind")))
-        if calls == ["terminal_result"]:
+        if len(calls) <= failures and calls[-1] == "terminal_result":
             raise RuntimeError("database is locked")
         return original(turn_id, outcome, **kwargs)
 
@@ -517,3 +517,27 @@ def test_the_agent_initiated_holder_publishes_turn_end_after_its_terminal_write(
 def harness_state(engine, turn_id: str) -> str:
     with engine.connect() as conn:
         return str(delivery_store.get_turn(conn, turn_id)["state"])
+
+
+def test_a_fallback_write_that_fails_again_is_retried_after_hub_finalization(managers, monkeypatch) -> None:
+    """When the runner's early fallback write meets the same busy database, it still
+    gets the attempt after Model Hub finalization that it had on master, and the
+    Turn ends with its evidence instead of staying active with its queue held."""
+
+    manager, _other, engine, _engine_b, _starts = managers
+    harness = _Harness(manager, engine, monkeypatch)
+    calls = _fail_first_turn_write(manager, monkeypatch, failures=2)
+
+    async def run() -> str:
+        turn_id, context = await _activate(manager, text="prompt")
+        runner = await harness.start(turn_id, context)
+        await asyncio.wait_for(runner, WAIT_S)
+        await asyncio.wait_for(asyncio.gather(*harness.receivers), WAIT_S)
+        return turn_id
+
+    turn_id = asyncio.run(run())
+
+    assert calls == ["terminal_result", "terminal_result", "terminal_result"]
+    turn = harness.turn(turn_id)
+    assert turn["state"] == "terminal"
+    assert turn["terminal_evidence_kind"] == "terminal_result"
