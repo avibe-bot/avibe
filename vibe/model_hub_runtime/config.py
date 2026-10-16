@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Final, Iterable
 from urllib.parse import urlsplit
 
 import yaml
 
 from config.atomic_io import write_atomic
+from core.agent_core.ai.claude_thinking import uses_adaptive_thinking
 from config.v2_config import normalize_model_hub_base_url
 from vibe.model_hub_runtime.api_key_vendors import (
     google_api_base_url,
@@ -116,6 +117,25 @@ def render_engine_config(
     return yaml.safe_dump(payload, sort_keys=False, default_flow_style=False)
 
 
+# How CLIProxyAPI's own catalog registers a Claude model that takes a token budget (registry/models/models.json).
+_CLAUDE_BUDGET_THINKING: Final = {"min": 1024, "max": 128000, "zero-allowed": True}
+
+
+def _thinking_support(source: SourceRecord, model: str, reasoning_efforts: tuple[str, ...]) -> dict[str, Any]:
+    """The thinking a model is registered with in the engine, by the kind it takes upstream.
+
+    CLIProxyAPI reads ``levels`` as adaptive thinking on its Claude path: a budget
+    request to such a model goes up as ``adaptive`` with an effort, which Claude 4.5
+    and older refuse. So a Claude model on the Anthropic protocol that takes a token
+    budget registers a budget range, as the engine's own catalog does; every other
+    model keeps its levels, strongest first (#2737).
+    """
+
+    if source.protocol == "anthropic" and "claude" in model.lower() and not uses_adaptive_thinking(model):
+        return dict(_CLAUDE_BUDGET_THINKING)
+    return {"levels": list(reversed(reasoning_efforts))}
+
+
 def _append_source(
     payload: dict[str, Any],
     source: SourceRecord,
@@ -155,8 +175,7 @@ def _append_source(
         }
         reasoning_efforts = reasoning_by_model.get(model, ())
         if reasoning_efforts:
-            # CLIProxyAPI's measured model-registration shape is strongest-first.
-            entry["thinking"] = {"levels": list(reversed(reasoning_efforts))}
+            entry["thinking"] = _thinking_support(source, model, reasoning_efforts)
         if model in text_only:
             entry["input-modalities"] = ["text"]
         if model in images and source.protocol == "openai_chat":

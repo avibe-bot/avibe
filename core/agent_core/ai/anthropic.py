@@ -17,6 +17,7 @@ from typing import Any
 
 import httpx
 
+from core.agent_core.ai.claude_thinking import uses_adaptive_thinking
 from core.agent_core.ai.hosted import anthropic_hosted_block, citation, reported_counts
 from core.agent_core.ai._common import (
     ServedHopResolver,
@@ -1008,7 +1009,7 @@ def build_messages_payload(
     if tools:
         payload["tools"] = tools
     effort = (request.reasoning_effort or "").lower()
-    adaptive = _uses_adaptive_thinking(request.endpoint.model_id)
+    adaptive = uses_adaptive_thinking(request.endpoint.model_id)
     if effort in {"none", "off", "disabled"} or (
         effort and not adaptive and _continues_unthought_tool_loop(payload_messages)
     ):
@@ -1290,27 +1291,9 @@ def sent_effort(model_id: str, effort: str) -> str | None:
     """
 
     value = effort.lower()
-    if not value or value in {"none", "off", "disabled"} or not _uses_adaptive_thinking(model_id):
+    if not value or value in {"none", "off", "disabled"} or not uses_adaptive_thinking(model_id):
         return None
     return "low" if value == "minimal" else value
-
-
-def _uses_adaptive_thinking(model_id: str) -> bool:
-    normalized = model_id.lower().replace(".", "-")
-    return any(
-        family in normalized
-        for family in (
-            "claude-opus-4-6",
-            "claude-opus-4-7",
-            "claude-opus-4-8",
-            "claude-sonnet-4-6",
-            "claude-sonnet-5",
-            "claude-opus-5",
-            "claude-fable-5",
-            "claude-mythos-5",
-            "claude-haiku-5",
-        )
-    )
 
 
 def _string(value: Any) -> str:
