@@ -102,18 +102,15 @@ OPENCODE_V4_S3_PASSTHROUGH_FIXTURES = {
             ],
             "reasoning": {"effort": "high", "summary": "auto"},
             "prompt_cache_key": "cache-fixture",
-            "parallel_tool_calls": True,
             "instructions": "",
-            "tools": [{"type": "image_generation", "output_format": "png"}],
             "include": ["reasoning.encrypted_content"],
             "store": False,
             "stream": True,
         },
         "expected_top_level_diff": {
+            # The engine adds no image tool (#2556), and drops parallel_tool_calls with no tools.
             "added": {
                 "instructions": "",
-                "parallel_tool_calls": True,
-                "tools": [{"type": "image_generation", "output_format": "png"}],
             },
             "removed": ["max_output_tokens"],
             "changed": {
@@ -129,7 +126,7 @@ OPENCODE_V4_S4_VARIANT_FIXTURES = {
         "stored_model": "gpt-5",
         "variant": {"reasoningEffort": "high"},
         "upstream_fragment": {
-            "reasoning": {"effort": "high", "summary": "auto"},
+            "reasoning": {"effort": "high"},
         },
     },
     "anthropic_same_protocol": {
@@ -144,10 +141,11 @@ OPENCODE_V4_S4_VARIANT_FIXTURES = {
     "responses_to_anthropic": {
         "protocol": "anthropic",
         "frontend_protocol": "openai_responses",
-        "stored_model": "claude-sonnet-4-5",
+        # A model that takes adaptive thinking: Claude 4.5 takes a budget instead (#2737).
+        "stored_model": "claude-sonnet-4-6",
         "variant": {"reasoningEffort": "high"},
         "upstream_fragment": {
-            "thinking": {"type": "adaptive", "display": "summarized"},
+            "thinking": {"type": "adaptive"},
             "output_config": {"effort": "high"},
         },
     },
@@ -236,7 +234,7 @@ class MockUpstreamState:
             not isinstance(required_key, str) or not required_key.strip()
         ):
             raise ConfigurationError("required_api_key must be a non-empty string or null")
-        if candidate["required_auth_scheme"] not in ("protocol", "bearer"):
+        if candidate["required_auth_scheme"] not in ("protocol", "bearer", "either"):
             raise ConfigurationError("unsupported required_auth_scheme")
         if candidate["stream"] not in STREAM_BEHAVIORS:
             raise ConfigurationError("unsupported stream behavior")
@@ -390,21 +388,20 @@ class MockLLMUpstreamHandler(BaseHTTPRequestHandler):
         """Optional value check for synthetic credentials on data endpoints."""
         required_key = config["required_api_key"]
         if required_key is not None:
-            use_api_key_header = (
-                config["protocol"] == "anthropic"
-                and config["required_auth_scheme"] == "protocol"
+            scheme = config["required_auth_scheme"]
+            # ``either``: a relay that takes the key in either header, as most
+            # Anthropic-compatible relays do.
+            by_api_key = scheme == "either" or (
+                config["protocol"] == "anthropic" and scheme == "protocol"
             )
-            supplied = (
-                self.headers.get("x-api-key")
-                if use_api_key_header
-                else self.headers.get("authorization")
-            )
-            expected = (
-                required_key
-                if use_api_key_header
-                else f"Bearer {required_key}"
-            )
-            if supplied != expected:
+            by_bearer = scheme == "either" or not by_api_key
+            if not (
+                (by_api_key and self.headers.get("x-api-key") == required_key)
+                or (
+                    by_bearer
+                    and self.headers.get("authorization") == f"Bearer {required_key}"
+                )
+            ):
                 self._write_behavior_error({**config, "auth": "401"})
                 return False
         if config["auth"] != "ok":

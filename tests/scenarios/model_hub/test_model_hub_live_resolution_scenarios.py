@@ -289,7 +289,10 @@ async def _post_turn(
     payload: dict[str, object] | None = None,
 ) -> tuple[int, bytes]:
     headers = {"Authorization": f"Bearer {launch.gateway_token}"}
-    if launch.gateway_request_metadata:
+    if launch.backend == "vibey":
+        # Vibey sends its resolution's request headers, which name its Turn.
+        headers.update(launch.gateway_request_metadata)
+    elif launch.gateway_request_metadata:
         headers["x-codex-turn-metadata"] = json.dumps(launch.gateway_request_metadata)
     request_payload = payload or {
         "model": launch.runtime_model,
@@ -971,7 +974,8 @@ def test_mh_effort_001_unknown_capability_preserves_intent_and_turn_completes(
     ("upstream_status", "upstream_code", "wire_status", "wire_code", "terminal_reason"),
     [
         (429, "rate_limited", 429, "stream_interrupted", "stream_interrupted"),
-        (503, "request_too_large", 400, "upstream_request_invalid", "invalid_parameter"),
+        # A request-family code is believed only beside a status that blames the request (#2260).
+        (413, "request_too_large", 400, "upstream_request_invalid", "invalid_parameter"),
     ],
 )
 def test_turn_gateway_nonstream_buffer_surfaces_terminal_failure(

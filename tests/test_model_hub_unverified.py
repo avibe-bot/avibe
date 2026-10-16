@@ -149,6 +149,37 @@ def test_only_current_successful_invocation_retires_verification(tmp_path, kind,
     asyncio.run(scenario())
 
 
+def test_a_verified_reauthentication_never_returns_the_source_to_its_earlier_identity(tmp_path):
+    """MH-HOSTED-003: OAuth reauthentication can keep the credential's handle. Once a call verifies the new grant, the
+    Source still reads as a new identity, so the earlier grant's evidence, retry state and opaque payloads never
+    follow it; verifying a credential changes no identity."""
+    from core.handlers.model_hub.capability_evidence import identity_digest
+
+    service, store, _adapter = _service(tmp_path)
+
+    async def verify() -> None:
+        current = store.config.sources[0]
+        outcome = RawCallOutcome(
+            kind=RawOutcomeKind.SUCCESS, http_status=200, error_code=None, redacted_message=None,
+            stream_started=False, source_id=current.id, model_id="test-model",
+        )
+        await service._verify_successful_source(current.id, current.credential_ref, current.verification_pending, outcome)
+
+    async def scenario():
+        source = (await service.create_source(_draft()))["source"]
+        pending = identity_digest(store.config.sources[0])
+        await verify()
+        earlier = identity_digest(store.config.sources[0])
+        service._mark_source_unverified(store.config.sources[0])
+        reauthenticated = identity_digest(store.config.sources[0])
+        await verify()
+        current = store.config.sources[0]
+        assert (current.verification_pending, current.credential_ref) == (None, source["credential_ref"])
+        assert identity_digest(current) == reauthenticated != earlier == pending
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("path", ["resolve", "probe", "stream"])
 def test_model_call_consumers_retire_pending_verification(tmp_path, path):
     service, store, adapter = _service(tmp_path)

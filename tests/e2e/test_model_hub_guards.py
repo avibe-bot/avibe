@@ -83,10 +83,8 @@ def test_g2_source_order_write_and_chain_reorder_are_divergent(
     mock_llm_upstream,
     model_hub_app,
 ) -> None:
-    """G2: the orphan order endpoint persists order without applying it."""
+    """G2: the default Source order persists, and never reorders a manual chain (#1897)."""
 
-    # Open decisions D-1..D-4 do not assign the B3 endpoint-divergence
-    # decision; this baseline records the current split without inventing one.
     first, second, original_hops = _two_source_chain(
         model_hub_app, mock_llm_upstream
     )
@@ -118,9 +116,10 @@ def test_g2_source_order_write_and_chain_reorder_are_divergent(
         f"/api/models/agents/claude/chain?model={MENU_MODEL}"
     )
     assert chain_after.status == 200, chain_after.json()
+    # Reorder without an order returns the current projection; a manual array keeps its order.
     assert [
         hop["source_id"] for hop in chain_after.json()["chain"]["chain"]
-    ] == reversed_order
+    ] == [hop["source_id"] for hop in original_hops]
 
 
 def test_g3_malformed_json_and_business_refusals_are_client_errors(

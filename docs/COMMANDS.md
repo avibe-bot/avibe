@@ -714,13 +714,17 @@ vibe computer set-value --arg pid=123 --arg value=enabled --arg element_token=el
 vibe computer clipboard read
 vibe computer clipboard write --arg text="copied text"
 vibe computer launch --arg bundle_id=com.example.App
-vibe computer quit --arg pid=123
+vibe computer force-quit --arg pid=123
 ```
 
 Each leaf accepts `--args-json`, repeatable `--arg`, and `--json`. `observe
 window` and `zoom` accept `--output PATH` for a caller-selected screenshot
 file. The CLI has no `--session-id` or Turn-ID option and rejects a manually
 supplied driver `session` argument.
+
+The `--json` result exposes the structured driver object at
+`result.structuredContent` and retains the legacy text content for compatibility.
+`force-quit` sends SIGKILL through the driver and can lose unsaved work.
 
 Computer Use guidance is a built-in managed Skill named `computer-use`, loaded
 on demand. It tells Agents to treat screen and clipboard data as untrusted,
@@ -965,9 +969,11 @@ record. It cannot target an existing `--session-id`.
 
 With an existing `--session-id`, the default is P1: steer the new Run into an
 active native Turn, start it when idle, or move the same Delivery to P3 after a
-definitive refusal/not-active receipt. `--queue` selects P3 without attempting a
-steer. For an existing Session, `--send-now` explicitly selects the same
-content-bearing P1 behavior; it targets the new message and never promotes older
+definitive refusal/not-active receipt. When a person's message is part of the
+active Turn, the Run queues behind it as P3 and runs as its own Turn instead.
+`--queue` selects P3 without attempting a steer. For an existing Session,
+`--send-now` steers the new message into the active Turn, including one a
+person's message is part of; it targets the new message and never promotes older
 queued work. `vibe session send-now` is the content-free P1 operation that
 promotes the exact existing FIFO head without adding a message.
 
@@ -978,6 +984,15 @@ Session. Forks keep the same backend as the source; `--agent`, `--model`, and
 `--reasoning-effort` may override the forked Session only when the backend does
 not change. Do not combine `--fork-session` with `--session-id` or
 `--create-session`.
+
+`--model` and `--reasoning-effort` set the model of any new Session the run
+creates (a blank new Session, `--create-session`, or a fork); the Session keeps
+it. They are refused with `--session-id` (`model_override_with_existing_session`).
+The pair the new Session will run on (each override over the default it would
+otherwise keep) is checked: a Vibey model or effort its Model Hub menu does not
+offer, or a menu that cannot be loaded, is refused (`session_model_unavailable`);
+for claude and codex an unknown value is a warning. `vibe agent models <agent>`
+lists valid values.
 
 ## 5.4 `vibe runs`
 

@@ -7,6 +7,7 @@ export function formatRelativeTime(
   iso: string | null | undefined,
   t: TFunction,
   now: number = Date.now(),
+  { alwaysRelative = false }: { alwaysRelative?: boolean } = {},
 ): string {
   if (!iso) return '—';
   const then = new Date(iso).getTime();
@@ -18,7 +19,7 @@ export function formatRelativeTime(
   const hours = Math.round(mins / 60);
   if (hours < 24) return t('common.relative.hoursAgo', { count: hours });
   const days = Math.round(hours / 24);
-  if (days < 7) return t('common.relative.daysAgo', { count: days });
+  if (days < 7 || alwaysRelative) return t('common.relative.daysAgo', { count: days });
   return new Date(iso).toISOString().slice(0, 10);
 }
 

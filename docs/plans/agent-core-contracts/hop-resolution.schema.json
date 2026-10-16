@@ -12,9 +12,11 @@
     "token",
     "runtime_model",
     "source_id",
+    "source_identity",
     "provider",
     "capabilities",
-    "request_headers"
+    "request_headers",
+    "hosted_tools"
   ],
   "additionalProperties": false,
   "properties": {
@@ -44,6 +46,11 @@
     "source_id": {
       "type": "string"
     },
+    "source_identity": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The primary hop Source's credential-free identity (`identity_digest`), from the snapshot its origin came from. The agent records it on each response its own Source served and replays opaque payloads only to a hop of the same identity (C-1, cross-provider.md)."
+    },
     "provider": {
       "type": "string",
       "description": "Vendor identity of the primary hop; becomes `origin.provider` unless the served-hop report differs."
@@ -53,7 +60,7 @@
       "additionalProperties": {
         "type": "string"
       },
-      "description": "Correlation metadata the gateway needs; always present, empty when there is none."
+      "description": "Correlation metadata the gateway needs, sent on every gateway request; always present, empty when there is none. A Turn's resolution carries `x-avibe-turn-id`."
     },
     "capabilities": {
       "type": "object",
@@ -64,7 +71,8 @@
         "supports_tools",
         "supports_images",
         "supports_reasoning",
-        "reasoning_efforts"
+        "reasoning_efforts",
+        "context_price_steps"
       ],
       "additionalProperties": false,
       "properties": {
@@ -113,9 +121,260 @@
           "items": {
             "type": "string"
           }
+        },
+        "context_price_steps": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "description": "The input sizes past which the target model's list price rises (any of input, cache read, or output above the base rate), ascending, from Model Hub's price table; empty when its price is flat or unknown. C-9 keeps the compaction threshold below the smallest one it can (context.md section 1)."
         }
       },
       "description": "Null means Model Hub does not know the value; it never guesses. supports_images is null when the model declares no input modalities."
+    },
+    "hosted_tools": {
+      "type": "object",
+      "description": "One entry per hosted tool the turn declares (vibey-hosted-tools.md §3.4). A search tool's entry is the primary hop's facts: `native` is `assumed` when the tool runs on the hop (`runs_on`) and no current negative `call` evidence exists, else `unsupported`; `refused` is `true` exactly when that negative `call` evidence, not `runs_on`, is why; `declaration` and `include` (the overlay's wire declaration and Responses include values) are present exactly when `native` is `assumed`; `replay` is `assumed` when `native` is, the protocol replays natively and no current negative `replay` evidence exists. `image_generate` lists the image models the user's Sources make available, default first, and is absent when the tool is off or no model is available. The turn's first resolution freezes the tool set and the image models; later hops change only `native`, `replay` and `refused`. A request carrying native content is pinned with x-avibe-pin-source: source_id.",
+      "additionalProperties": false,
+      "properties": {
+        "web_search": {
+          "type": "object",
+          "required": [
+            "native",
+            "replay"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "native": {
+              "enum": [
+                "assumed",
+                "unsupported"
+              ]
+            },
+            "declaration": {
+              "type": "object",
+              "required": [
+                "type"
+              ],
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "include": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "replay": {
+              "enum": [
+                "assumed",
+                "unsupported"
+              ]
+            },
+            "refused": {
+              "const": true,
+              "description": "Present exactly when the tool runs on the hop but current negative `call` evidence for the hop's (Source, model) makes `native` `unsupported`: this Source refused it, so a proxied call is a fallback from it."
+            }
+          },
+          "if": {
+            "properties": {
+              "native": {
+                "const": "assumed"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "declaration",
+              "include"
+            ],
+            "not": {
+              "required": [
+                "refused"
+              ]
+            }
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "declaration"
+                  ]
+                },
+                {
+                  "required": [
+                    "include"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        "x_search": {
+          "type": "object",
+          "required": [
+            "native",
+            "replay"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "native": {
+              "enum": [
+                "assumed",
+                "unsupported"
+              ]
+            },
+            "declaration": {
+              "type": "object",
+              "required": [
+                "type"
+              ],
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "include": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "replay": {
+              "enum": [
+                "assumed",
+                "unsupported"
+              ]
+            },
+            "refused": {
+              "const": true,
+              "description": "Present exactly when the tool runs on the hop but current negative `call` evidence for the hop's (Source, model) makes `native` `unsupported`: this Source refused it, so a proxied call is a fallback from it."
+            }
+          },
+          "if": {
+            "properties": {
+              "native": {
+                "const": "assumed"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "declaration",
+              "include"
+            ],
+            "not": {
+              "required": [
+                "refused"
+              ]
+            }
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "declaration"
+                  ]
+                },
+                {
+                  "required": [
+                    "include"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        "image_generate": {
+          "type": "object",
+          "required": [
+            "models",
+            "default"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "models": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "required": [
+                  "source_id",
+                  "model_id",
+                  "description",
+                  "params",
+                  "size_forms"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "source_id": {
+                    "type": "string",
+                    "pattern": "^src_[a-z0-9]{8,}$"
+                  },
+                  "model_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "description": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "params": {
+                    "type": "array",
+                    "uniqueItems": true,
+                    "items": {
+                      "enum": [
+                        "size",
+                        "images",
+                        "n"
+                      ]
+                    }
+                  },
+                  "size_forms": {
+                    "type": "array",
+                    "uniqueItems": true,
+                    "items": {
+                      "enum": [
+                        "pixels",
+                        "ratio"
+                      ]
+                    }
+                  }
+                }
+              }
+            },
+            "default": {
+              "type": "object",
+              "required": [
+                "source_id",
+                "model_id"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "source_id": {
+                  "type": "string",
+                  "pattern": "^src_[a-z0-9]{8,}$"
+                },
+                "model_id": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "examples": [
@@ -127,6 +386,7 @@
       "token": "<in-memory>",
       "runtime_model": "claude-opus-5-5",
       "source_id": "src_anthropic_main",
+      "source_identity": "sha256:9f2c4e1a7b3d5c6e8f0a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4f5a6",
       "provider": "anthropic",
       "request_headers": {},
       "capabilities": {
@@ -141,7 +401,39 @@
           "medium",
           "high",
           "xhigh"
-        ]
+        ],
+        "context_price_steps": []
+      },
+      "hosted_tools": {
+        "web_search": {
+          "native": "assumed",
+          "declaration": {
+            "type": "web_search_20250305",
+            "name": "web_search",
+            "max_uses": 5
+          },
+          "include": [],
+          "replay": "assumed"
+        },
+        "x_search": {
+          "native": "unsupported",
+          "replay": "unsupported"
+        },
+        "image_generate": {
+          "models": [
+            {
+              "source_id": "src_openai0001",
+              "model_id": "gpt-image-2",
+              "description": "OpenAI's image model; follows long prompts closely",
+              "params": ["size", "images", "n"],
+              "size_forms": ["pixels"]
+            }
+          ],
+          "default": {
+            "source_id": "src_openai0001",
+            "model_id": "gpt-image-2"
+          }
+        }
       }
     }
   ]

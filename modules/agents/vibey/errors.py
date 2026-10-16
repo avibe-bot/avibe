@@ -40,11 +40,13 @@ _KIND_KEYS: dict[str, str] = {
     # A provider failure C-2 could not classify: an unknown code, or an error frame no rule names.
     "unknown": "unclassified",
     "error": "modelError",
-    # The model kept truncating a tool call at its output limit (C-3 section 2).
+    # An explicit output-limit stop with no answer, or repeatedly truncated tools.
     "length": "outputLimit",
     # Tool calls under a stop reason that cannot carry them.
     "stop": "providerProtocol",
     "stream_cleanup": "internal",
+    # A context row this build cannot read (a shape it no longer accepts): the session cannot continue.
+    "TranscriptError": "historyUnreadable",
     # The loop refuses a route that declares no tool support before any request.
     "UnsupportedModelRoute": "toolsUnsupported",
     # A provider answer the canonical transcript cannot hold.

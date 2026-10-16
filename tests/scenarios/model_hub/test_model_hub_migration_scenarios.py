@@ -79,6 +79,7 @@ class MigrationAdapter:
             "zhipuai": "openai_chat",
         }
         self.unproven_observation_vendor: str | None = None
+        self.fail_provision_vendor: str | None = None
         self.synced: list[tuple[object, ...]] = []
         self.fail_revoke_refs: set[str] = set()
         self.fail_sync_count = 0
@@ -159,6 +160,8 @@ class MigrationAdapter:
         base_url: str | None,
         *, on_reserved=None, auth_scheme=None,
     ) -> str:
+        if vendor == self.fail_provision_vendor:
+            raise OSError("redacted custody failure")
         credential_ref = f"cred_migration_{len(self.provisioned) + 1}"
         if on_reserved:
             on_reserved(credential_ref)
@@ -207,10 +210,10 @@ class MigrationAdapter:
 
 
 def _service(
-    tmp_path: Path, *, migration_home: Path | None = None,
+    tmp_path: Path, *, migration_home: Path | None = None, adapter: MigrationAdapter | None = None,
 ) -> tuple[ModelHubService, MemoryStore, MigrationAdapter]:
     store = MemoryStore()
-    adapter = MigrationAdapter()
+    adapter = adapter or MigrationAdapter()
     state = tmp_path / "avibe-state"
 
     async def verify_fixture_idle():
@@ -694,8 +697,8 @@ def test_mh_mig_001_api_apply_takes_over_credentials_and_cleans_native_auth(
     assert len(adapter.provisioned) == 4
     assert len(adapter.oauth_provisioned) == 2
     assert adapter.revoked == []
-    assert adapter.transient_revoked == adapter.transient_refs
-    assert len(adapter.observed) == len(adapter.transient_refs)
+    # Saved keys move as configuration; none is probed on the way.
+    assert adapter.transient_refs == [] and adapter.observed == []
     assert before != _tree_digest(native_home)
     claude_settings = json.loads(
         (native_home / ".claude" / "settings.json").read_text(encoding="utf-8")
@@ -746,7 +749,8 @@ def test_mh_mig_001_api_apply_takes_over_credentials_and_cleans_native_auth(
     codex_source = next(
         source for source in store.config.sources if source.vendor == "openai" and source.kind == "api_key"
     )
-    assert codex_source.protocol == "openai_responses"
+    # The relay's saved wire_api, not a re-detected dialect.
+    assert codex_source.protocol == "openai_chat"
     assert codex_source.base_url == "https://codex-relay.example/v1"
     openrouter_source = next(source for source in store.config.sources if source.vendor == "openrouter")
     assert openrouter_source.base_url == "https://openrouter.ai/api/v1"
@@ -1008,9 +1012,8 @@ def test_mh_mig_007_shell_startup_key_is_removed_only_on_request(
     assert bool(service.migration_journal.completed()["retained_native_ids"]) is not clean_api_keys
 
 
-@pytest.mark.parametrize("discovery", (ObservationDiscovery.SUCCEEDED, ObservationDiscovery.FAILED))
-def test_mh_mig_001_long_manual_inventory_survives_takeover_even_when_discovery_fails(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, discovery: ObservationDiscovery,
+def test_mh_mig_001_long_manual_inventory_survives_takeover_without_discovery(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     """MH-MIG-001: new manual imports share admission without rewriting native files."""
     native_home = tmp_path / "native-home"
@@ -1030,15 +1033,6 @@ def test_mh_mig_001_long_manual_inventory_survives_takeover_even_when_discovery_
     before = _tree_digest(native_home)
     service, store, adapter = _service(tmp_path)
     _assert_sources_validated_before_commit(monkeypatch, service)
-
-    async def observe(*_args):
-        return SourceObservation(
-            outcome=ObservationOutcome.OBSERVED, reachable=True, authenticated=True,
-            protocol="openai_chat", discovery=discovery,
-            models=(DiscoveredModel(id=identity + "-discovered"),) if discovery is ObservationDiscovery.SUCCEEDED else (),
-        )
-
-    adapter.observe_source = observe
     [item] = service.migration_scan()["items"]
     result = asyncio.run(service.migration_apply([item["id"]], clean_api_keys=True))
     assert result["applied"] == 1
@@ -1047,9 +1041,8 @@ def test_mh_mig_001_long_manual_inventory_survives_takeover_even_when_discovery_
     assert [(model.id, model.display_name) for model in manual] == [(identity, "Long manual")]
     assert all(model.id not in invalid for model in source.models)
     assert source.state.status == "standby"
-    # Failed discovery admits the Source on protocol evidence alone; the first
-    # successful call must still prove it.
-    assert bool(source.verification_pending) is (discovery is ObservationDiscovery.FAILED)
+    # Saved, not tested: the first successful call proves it.
+    assert source.verification_pending
     assert _tree_digest(native_home) != before
     config_payload = json.loads(
         (native_home / ".config" / "opencode" / "opencode.json").read_text(
@@ -1059,7 +1052,7 @@ def test_mh_mig_001_long_manual_inventory_survives_takeover_even_when_discovery_
     provider = config_payload["provider"]["openrouter"]
     assert "apiKey" not in provider.get("options", {})
     assert provider["models"]["  " + identity + "  "] == {"name": "Long manual"}
-    assert adapter.transient_revoked == adapter.transient_refs
+    assert adapter.observed == []
     assert "sk-fabricated-never-persist-this" not in json.dumps(result)
 
 
@@ -1367,22 +1360,28 @@ def test_opencode_native_provider_without_stable_identifier_is_visible_blocker(
     assert item.selected is False
 
 
+@pytest.mark.parametrize("removed", [False, True])
+@pytest.mark.parametrize("initial_mode", ["direct", "hub"])
 def test_mh_switch_001_migration_carries_agent_models_into_the_switched_menu(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    removed: bool,
+    initial_mode: str,
 ) -> None:
-    """MH-SWITCH-001: accepting migration carries each Agent's Direct selection
-    into the menu it switches, served by the Sources that migration imported."""
+    """MH-SWITCH-001: migration carries saved Direct selections into the
+    Gateway menu whether mode was switched earlier or by this import."""
 
     native_home = tmp_path / "native-home"
     _write_opencode(native_home)
     _isolate_native_home(monkeypatch, native_home)
     service, store, _ = _service(tmp_path)
-    store.config.agents["opencode"].mode = "direct"
+    store.config.agents["opencode"].mode = initial_mode
+    if removed:
+        store.config.agents["opencode"].removed_model_ids = ["openrouter-model"]
     service.named_agents_override = lambda backend: [
         ("opencode", "openrouter/openrouter-model"),
         ("zhipu", "zhipuai/zhipuai-model"),
-        ("stranger", "openai/not-served"),
+        ("stranger", "openai/manual-openrouter-model"),
     ] if backend == "opencode" else []
 
     items = [item["id"] for item in service.migration_scan()["items"] if item["backend"] == "opencode"]
@@ -1390,18 +1389,27 @@ def test_mh_switch_001_migration_carries_agent_models_into_the_switched_menu(
 
     agent = _assert_canonical_round_trip(store.config).agents["opencode"]
     assert agent.mode == "hub"
-    assert [(model.id, model.origin, model.native_protocol) for model in agent.models] == [
-        ("openrouter-model", "provider", "openai_responses"),
-        ("zhipuai-model", "provider", "openai_responses"),
-    ]
+    expected = [("zhipuai-model", "provider", "openai_responses")]
+    if not removed:
+        expected.insert(0, ("openrouter-model", "provider", "openai_responses"))
+    assert [(model.id, model.origin, model.native_protocol) for model in agent.models] == expected
     assert {
         row["name"]: (row["effective_model_id"], row["route_reason"])
         for row in service.get_agent_sources("opencode")["named_agents"]
     } == {
-        "opencode": ("openrouter-model", None),
+        "opencode": (
+            ("openrouter/openrouter-model", "route_unconfigured") if removed
+            else ("openrouter-model", None)
+        ),
         "zhipu": ("zhipuai-model", None),
-        "stranger": ("openai/not-served", "route_unconfigured"),
+        "stranger": ("openai/manual-openrouter-model", "route_unconfigured"),
     }
+    # Carrying a saved selection creates a menu row, not a made-up discovered
+    # Source inventory. The old provider prefix stays on the named Agent.
+    assert all(
+        model.id not in {"openrouter-model", "zhipuai-model"}
+        for source in store.config.sources for model in source.models
+    )
 
 
 def test_scan_keeps_invalid_endpoint_visible_while_valid_backend_items_remain_usable(
@@ -1486,13 +1494,13 @@ def test_failed_batch_revokes_every_provisioned_credential(
     _isolate_native_home(monkeypatch, native_home)
     service, store, adapter = _service(tmp_path)
     item_ids = [item["id"] for item in service.migration_scan()["items"]]
-    adapter.unproven_observation_vendor = "zhipuai"
+    adapter.fail_provision_vendor = "zhipuai"
 
     with pytest.raises(ModelHubError) as error:
         asyncio.run(service.migration_apply(item_ids, clean_api_keys=True))
-    assert error.value.code == "migration_item_conflict"
+    # A local custody failure, never a claim about the key upstream.
+    assert error.value.code == "engine_down"
     assert adapter.revoked == ["cred_migration_1"]
-    assert adapter.transient_revoked == adapter.transient_refs
     assert store.config.sources == []
     assert all(agent.sources.order == [] for agent in store.config.agents.values())
 
@@ -1930,3 +1938,188 @@ def test_mh_mig_007_default_copy_leaves_a_key_only_codex_store_byte_identical(
     assert ids
     assert asyncio.run(service.migration_apply(ids))["applied"] == len(ids)
     assert auth_path.read_bytes() == before
+
+
+class OfflineUpstreamAdapter(MigrationAdapter):
+    """Every upstream contact fails once the native keys are being migrated.
+
+    A key that the provider would reject and an endpoint that is offline look
+    the same to migration: it must never ask. Each call is recorded before it
+    raises, so a caller that swallows the failure is still caught.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.offline = False
+        self.upstream_calls: list[str] = []
+
+    def _refuse(self, name: str) -> None:
+        if self.offline:
+            self.upstream_calls.append(name)
+            raise AssertionError(f"static-key migration must not call {name}")
+
+    async def provision_transient_credential(self, *args, **kwargs):
+        self._refuse("provision_transient_credential")
+        return await super().provision_transient_credential(*args, **kwargs)
+
+    async def observe_source(self, *args, **kwargs):
+        self._refuse("observe_source")
+        return await super().observe_source(*args, **kwargs)
+
+    async def discover_models(self, *args, **kwargs):
+        self._refuse("discover_models")
+        return await super().discover_models(*args, **kwargs)
+
+
+_REUSED_CLAUDE_KEY = "sk-ant-revoked-123456789"
+
+
+def _write_offline_static_keys(home: Path) -> None:
+    """Static keys across backends, two of them on one backend, none reachable."""
+    # Already a Hub Source, whose last call found the key revoked upstream.
+    _write(
+        home / ".claude" / "settings.json",
+        json.dumps({"env": {"ANTHROPIC_API_KEY": _REUSED_CLAUDE_KEY}, "permissions": {"allow": ["Read"]}}),
+    )
+    # The relay speaks Chat Completions; nothing may re-detect it as Responses.
+    _write(home / ".codex" / "auth.json", json.dumps({"OPENAI_API_KEY": "sk-openai-offline-123456"}))
+    _write(
+        home / ".codex" / "config.toml",
+        'cli_auth_credentials_store = "file"\nmodel_provider = "Relay"\n\n'
+        '[model_providers.Relay]\nbase_url = "https://offline-relay.example/v1"\nwire_api = "chat"\n',
+    )
+    _write(
+        home / ".config" / "opencode" / "opencode.json",
+        json.dumps({"provider": {
+            "openrouter": {"models": {"manual-openrouter-model": {"name": "Manual OpenRouter Model"}}},
+            "zhipuai": {"options": {"baseURL": "https://offline-zhipu.example/v1"}},
+        }}),
+    )
+    _write(
+        home / ".local" / "share" / "opencode" / "auth.json",
+        json.dumps({
+            "openrouter": {"type": "api", "key": "sk-or-expired-123456"},
+            "zhipuai": {"type": "api", "key": "sk-zhipu-offline-123456"},
+        }),
+    )
+    _write(
+        home / ".cache" / "opencode" / "models.json",
+        json.dumps({
+            "openrouter": {
+                "id": "openrouter", "npm": "@openrouter/ai-sdk-provider",
+                "api": "https://openrouter.ai/api/v1",
+            },
+            "zhipuai": {
+                "id": "zhipuai", "npm": "@ai-sdk/openai-compatible",
+                "api": "https://offline-zhipu.example/v1",
+            },
+        }),
+    )
+
+
+@pytest.mark.parametrize("clean_api_keys", (False, True))
+def test_mh_mig_015_static_keys_migrate_from_saved_configuration_without_upstream_contact(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, clean_api_keys: bool,
+) -> None:
+    """Scenario: MH-MIG-015."""
+    native_home = tmp_path / "native-home"
+    _isolate_native_home(monkeypatch, native_home)
+    adapter = OfflineUpstreamAdapter()
+    service, store, _ = _service(tmp_path, adapter=adapter)
+    # Seeded while the provider still answered; it has since revoked the key.
+    asyncio.run(service.create_source({
+        "kind": "api_key", "vendor": "anthropic", "key": _REUSED_CLAUDE_KEY,
+        "display_name": "Existing Claude key",
+    }))
+    [reused] = store.config.sources
+    reused.state = ModelHubSourceStateConfig(
+        status="needs_action", detail_key="models.source.needs_action.credential_revoked",
+    )
+    reused_before = reused.to_payload()
+    provisioned_before = len(adapter.provisioned)
+
+    _write_offline_static_keys(native_home)
+    before = _tree_digest(native_home)
+    # No models.dev refresh may sneak in through menu carry or Vibey's seed.
+    # The normal cache getter starts a background fetch on a miss; merely
+    # avoiding the explicit foreground loader is not sufficient.
+    catalog_requests = []
+
+    def unexpected_catalog_request(*args, **kwargs):
+        catalog_requests.append("models.dev")
+        raise AssertionError("migration must read models.dev only from cache")
+
+    monkeypatch.setattr("vibe.models_dev_catalog.load_models_dev_catalog_with_date", unexpected_catalog_request)
+    monkeypatch.setattr("vibe.models_dev_catalog.load_models_dev_catalog", unexpected_catalog_request)
+    store.config.vibey_supply_pending = True
+    store.config.agents["opencode"].mode = "direct"
+    service.named_agents_override = lambda backend: [
+        ("offline", "openrouter/manual-openrouter-model"),
+    ] if backend == "opencode" else []
+    adapter.offline = True
+    items = service.migration_scan()["items"]
+    assert {(item["backend"], item.get("vendor")) for item in items} == {
+        ("claude", "anthropic"), ("codex", "openai"),
+        ("opencode", "openrouter"), ("opencode", "zhipuai"),
+    }
+    assert all(item["proposed_action"] == "import" for item in items)
+    ids = [item["id"] for item in items]
+
+    try:
+        result = asyncio.run(service.migration_apply(ids, clean_api_keys=clean_api_keys))
+    finally:
+        # A refused call may resurface only as a generic conflict; name it.
+        assert adapter.upstream_calls == []
+        assert catalog_requests == []
+    assert set(result) == {"applied", "sources", "added_to"}
+    assert result["applied"] == len(items)
+    config = _assert_canonical_round_trip(store.config)
+    by_id = {source.id: source for source in config.sources}
+    # The matching Source keeps its identity, custody, inventory and the
+    # failure it last observed: migration neither re-verifies nor clears it.
+    assert by_id[reused.id].to_payload() == reused_before
+    # Every other key is a new Source built from its saved native settings.
+    assert len(adapter.provisioned) == provisioned_before + 3
+    new = {source.vendor: source for source in config.sources if source.id != reused.id}
+    assert set(new) == {"openai", "openrouter", "zhipuai"}
+    assert {vendor: (source.protocol, source.base_url) for vendor, source in new.items()} == {
+        "openai": ("openai_chat", "https://offline-relay.example/v1"),
+        "openrouter": ("openai_chat", "https://openrouter.ai/api/v1"),
+        "zhipuai": ("openai_chat", "https://offline-zhipu.example/v1"),
+    }
+    for source in new.values():
+        assert source.kind == "api_key" and source.supply_channel == "hub"
+        assert source.credential_ref in adapter.keys
+        # Saved, not tested: the first real call proves or fails it.
+        assert source.verification_pending and source.verification_pending.startswith("vp_")
+        assert source.state.status == "standby"
+        # Nothing was fetched, so nothing claims to be upstream inventory.
+        assert all(model.provenance == "manual" for model in source.models)
+    assert [
+        (model.id, model.display_name) for model in new["openrouter"].models
+    ] == [("manual-openrouter-model", "Manual OpenRouter Model")]
+    assert all(store.config.agents[backend].mode == "hub" for backend in ("claude", "codex", "opencode"))
+
+    receipt = service.migration_journal.completed()
+    assert receipt is not None and receipt["clean_api_keys"] is clean_api_keys
+    if clean_api_keys:
+        assert json.loads((native_home / ".claude" / "settings.json").read_text(encoding="utf-8")) == {
+            "env": {}, "permissions": {"allow": ["Read"]},
+        }
+        assert not (native_home / ".codex" / "auth.json").exists()
+        assert "sk-" not in (native_home / ".local" / "share" / "opencode" / "auth.json").read_text(encoding="utf-8")
+        assert receipt["retained_native_ids"] == {}
+    else:
+        assert _tree_digest(native_home) == before
+        assert {copy["source_id"] for copy in receipt["retained_native_ids"].values()} == set(by_id)
+    assert service.migration_scan()["items"] == []
+
+    # The same batch replays its receipt: still no upstream contact, no new
+    # custody, and the same Sources.
+    settled = store.config.to_payload()
+    replay = asyncio.run(service.migration_apply(ids, clean_api_keys=clean_api_keys))
+    assert adapter.upstream_calls == []
+    assert replay["applied"] == result["applied"]
+    assert replay["sources"] == result["sources"]
+    assert len(adapter.provisioned) == provisioned_before + 3
+    assert store.config.to_payload() == settled

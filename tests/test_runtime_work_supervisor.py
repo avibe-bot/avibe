@@ -1631,6 +1631,41 @@ async def test_hfr_160_canceled_sync_worker_remains_owner_until_thread_exits() -
 
 
 @pytest.mark.anyio
+async def test_a_store_operation_that_fails_while_its_caller_is_cancelled_answers_the_cancellation() -> None:
+    """#2657: ``run_sync`` holds a cancellation that arrives while its store operation runs until the operation exits.
+    An operation that then fails has no result to hand back, so the cancellation is answered, with the error as its
+    cause, rather than replaced by the error: a caller would settle that as an ordinary failure, not a stop."""
+
+    started = threading.Event()
+    release = threading.Event()
+    causes: list[BaseException | None] = []
+
+    def failing_store_call() -> str:
+        started.set()
+        release.wait(5)
+        raise RuntimeError("store error")
+
+    supervisor = RuntimeWorkSupervisor(reconcile_interval=3600)
+
+    async def caller() -> None:
+        try:
+            await supervisor.run_sync(failing_store_call)
+        except asyncio.CancelledError as exc:
+            causes.append(exc.__cause__)
+            raise
+
+    task = asyncio.create_task(caller())
+    assert await asyncio.to_thread(started.wait, 1)
+    task.cancel()
+    await asyncio.sleep(0.05)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert [str(cause) for cause in causes] == ["store error"]
+    await supervisor.stop()
+
+
+@pytest.mark.anyio
 async def test_hfr_164_unregister_joins_partition_not_outer_caller_task() -> None:
     """HFR-164: lane teardown joins only the exact protected operation."""
 

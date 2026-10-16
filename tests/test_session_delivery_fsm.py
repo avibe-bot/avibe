@@ -291,10 +291,11 @@ async def _activate(
     *,
     text: str = "primary",
     priority: str = "p3",
+    **fields,
 ) -> tuple[str, MessageContext]:
     context = _context()
     admitted = await manager.deliver(
-        DeliveryRequest(session_id="ses_fsm", priority=priority, content=text),
+        DeliveryRequest(session_id="ses_fsm", priority=priority, content=text, **fields),
         context=context,
     )
     assert admitted.turn_id
@@ -312,6 +313,21 @@ async def _activate(
         runtime_turn_id=f"runtime-{turn_id}",
     )
     return turn_id, context
+
+
+def _harness_fields(trigger_kind: str, **platform_specific) -> dict:
+    """A scheduled Harness input's request fields, as the internal server builds them."""
+    return {
+        "source": "harness",
+        "author": "harness",
+        "message_type": "harness",
+        "author_name": trigger_kind,
+        "metadata": {
+            SCHEDULED_PROVENANCE_KEY: {
+                "platform_specific": {"task_trigger_kind": trigger_kind, **platform_specific}
+            }
+        },
+    }
 
 
 def _rows(engine) -> list[dict]:
@@ -823,6 +839,198 @@ def test_fifo_scheduled_segment_does_not_merge_different_source_sessions(manager
     assert _row(engine, str(queued[1].delivery_id))["turn_id"] is None
 
 
+def _bind_native_start(manager: SessionTurnManager, turn_id: str) -> None:
+    """The backend's native start for a claimed Turn, as ``_activate`` binds it."""
+    context = _context()
+    context.platform_specific["turn_token"] = turn_id
+    context.platform_specific["agent_runtime_turn_token"] = f"runtime-{turn_id}"
+    manager._active_identity = lambda _backend, _session_id, logical_id: (
+        logical_id,
+        f"native-{logical_id}",
+    )
+    manager.on_native_start(
+        context,
+        backend="codex",
+        runtime_key=f"runtime-key-{turn_id}",
+        runtime_turn_id=f"runtime-{turn_id}",
+    )
+
+
+_P1_INPUTS = {
+    "watch": _harness_fields("watch", task_definition_id="watch-pr"),
+    "hook": _harness_fields("hook", task_definition_id="hook-ci"),
+    "agent_run": _harness_fields("agent_run", source_kind="agent", source_actor="lane"),
+    "agent_run_send_now": {
+        **_harness_fields("agent_run", source_kind="agent", source_actor="lane"),
+        "send_now": True,
+    },
+    "person": {},
+    # A person's Show annotation is a Harness row without scheduled provenance.
+    "show_annotation": {
+        "source": "harness",
+        "author": "harness",
+        "message_type": "annotation",
+        "author_name": "show_annotation",
+        "metadata": {"source": "show_page"},
+    },
+}
+
+
+@pytest.mark.parametrize(
+    ("turn", "incoming", "admitted"),
+    [
+        ("person", "watch", "queued"),
+        ("person", "hook", "queued"),
+        ("person", "agent_run", "queued"),
+        ("person_starting", "agent_run", "queued"),
+        ("harness_with_person_steer", "watch", "queued"),
+        ("person", "agent_run_send_now", "accepted"),
+        ("person", "person", "accepted"),
+        ("person", "show_annotation", "accepted"),
+        ("harness", "agent_run", "accepted"),
+        ("harness_starting", "agent_run", "pending_steer"),
+        ("idle", "agent_run", "claimed"),
+    ],
+)
+def test_a_harness_p1_input_steers_only_a_turn_no_persons_input_is_part_of(
+    managers, turn, incoming, admitted
+) -> None:
+    """Scenario: MESSAGE-DELIVERY-323."""
+    manager, _other, engine, _engine_b, starts = managers
+    accepted = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+    turn_id: str | None = None
+    if turn in {"person", "harness", "harness_with_person_steer"}:
+        fields = {} if turn == "person" else _harness_fields("watch", task_definition_id="watch-ci")
+        turn_id, _ = asyncio.run(_activate(manager, text="the Turn's input", **fields))
+    elif turn in {"person_starting", "harness_starting"}:
+        fields = {} if turn == "person_starting" else _harness_fields("watch", task_definition_id="watch-ci")
+        started = asyncio.run(
+            manager.deliver(
+                DeliveryRequest(session_id="ses_fsm", priority="p3", content="the Turn's input", **fields),
+                context=_context(),
+            )
+        )
+        turn_id = started.turn_id
+    if turn == "harness_with_person_steer":
+        manager._steer = accepted
+        steered = asyncio.run(
+            manager.deliver(
+                DeliveryRequest(session_id="ses_fsm", priority="p1", content="a person steers"),
+                context=_context(),
+            )
+        )
+        assert steered.state == "accepted" and _row(engine, steered.delivery_id)["turn_id"] == turn_id
+        accepted = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+    manager._steer = accepted
+
+    result = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p1", content="PR #2688 merged", **_P1_INPUTS[incoming]),
+            context=_context(),
+        )
+    )
+
+    assert result.state == admitted
+    assert accepted.await_count == (1 if admitted == "accepted" else 0)
+    row = _row(engine, result.delivery_id)
+    if admitted == "queued":
+        # It waits in the FIFO for the Turn to end, and never touched that Turn.
+        assert (row["priority"], row["turn_id"], row["current_target_turn_id"]) == ("p3", None, None)
+        last_event = json.loads(row["delivery_history_json"])["events"][-1]
+        assert {key: value for key, value in last_event.items() if key != "at"} == {
+            "kind": "queue",
+            "reason": "behind_human_turn",
+            "turn_id": turn_id,
+        }
+        with engine.connect() as conn:
+            assert delivery_store.active_turn(conn, "ses_fsm")["id"] == turn_id
+    elif admitted == "claimed":
+        assert [text for _turn_id, text in starts] == ["PR #2688 merged"]
+    else:
+        assert (row["turn_id"] or row["current_target_turn_id"]) == turn_id
+
+
+@pytest.mark.parametrize("outcome", ["completed", "failed", "canceled"])
+def test_harness_inputs_behind_a_persons_turn_each_run_as_their_own_turn_in_queue_order(
+    managers, outcome
+) -> None:
+    """Scenario: MESSAGE-DELIVERY-323.
+
+    Two callbacks and a Watch arrive while a person's Turn runs, around a
+    message the person queues. However that Turn ends, each input runs once,
+    after it, in the order it arrived, and a person's input never shares a Turn
+    with them.
+    """
+    manager, _other, engine, _engine_b, starts = managers
+    person_turn_id, _ = asyncio.run(_activate(manager, text="2547是做什么的来着？"))
+    manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+    arrivals = [
+        DeliveryRequest(session_id="ses_fsm", priority="p1", content="the PR's checks passed", **_P1_INPUTS["watch"]),
+        DeliveryRequest(
+            session_id="ses_fsm", priority="p1", content="lane A reports",
+            **_harness_fields("agent_run", source_kind="agent", source_actor="lane-a"),
+        ),
+        DeliveryRequest(session_id="ses_fsm", priority="p3", content="and one more question"),
+        DeliveryRequest(
+            session_id="ses_fsm", priority="p1", content="lane B reports",
+            **_harness_fields("agent_run", source_kind="agent", source_actor="lane-b"),
+        ),
+    ]
+    delivered = [asyncio.run(manager.deliver(request, context=_context())) for request in arrivals]
+    assert [result.state for result in delivered] == ["queued"] * 4
+    manager._steer.assert_not_awaited()
+
+    turn_ids = [person_turn_id]
+    asyncio.run(manager.terminalize_turn(person_turn_id, outcome=outcome))
+    for _ in arrivals:
+        with engine.connect() as conn:
+            successor = delivery_store.active_turn(conn, "ses_fsm")
+        assert successor is not None and successor["id"] not in turn_ids
+        turn_ids.append(str(successor["id"]))
+        _bind_native_start(manager, turn_ids[-1])
+        assert asyncio.run(manager.terminalize_turn(turn_ids[-1]))
+    with engine.connect() as conn:
+        assert delivery_store.active_turn(conn, "ses_fsm") is None
+
+    assert [text for _turn_id, text in starts] == [
+        "2547是做什么的来着？",
+        "the PR's checks passed",
+        "lane A reports",
+        "and one more question",
+        "lane B reports",
+    ]
+    assert [turn_id for turn_id, _text in starts] == turn_ids
+    rows = [_row(engine, result.delivery_id) for result in delivered]
+    assert [(row["state"], row["turn_id"], row["turn_role"]) for row in rows] == [
+        ("accepted", turn_id, "initial") for turn_id in turn_ids[1:]
+    ]
+
+
+def test_a_turns_person_check_reads_only_that_turns_rows(managers) -> None:
+    """The check runs on every P1 admission: it must not scan a Session's history."""
+    from sqlalchemy import event
+
+    manager, _other, engine, _engine_b, _starts = managers
+    turn_id, _ = asyncio.run(_activate(manager, text="active"))
+    statements: list[tuple[str, object]] = []
+
+    def capture(_conn, _cursor, statement, parameters, _context, _executemany):
+        statements.append((statement, parameters))
+
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        with engine.connect() as conn:
+            assert delivery_store.turn_has_human_input(conn, turn_id)
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+    db_path = engine.url.database
+    plans = []
+    with closing(sqlite3.connect(db_path)) as raw:
+        for statement, parameters in statements:
+            plans.extend(row[-1] for row in raw.execute("EXPLAIN QUERY PLAN " + statement, parameters))
+    assert plans and not [plan for plan in plans if plan.startswith("SCAN")]
+
+
 @pytest.mark.anyio
 async def test_scheduled_submit_passes_metadata_separately_to_native_steering(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
@@ -831,7 +1039,8 @@ async def test_scheduled_submit_passes_metadata_separately_to_native_steering(ma
     manager.controller.message_handler = SimpleNamespace(
         prepare_input_metadata=prepare,
     )
-    await _activate(manager, text="active")
+    # A Harness input steers a Turn no person's input is part of.
+    await _activate(manager, text="active", **_harness_fields("watch"))
     manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
 
     context = _context()
@@ -5884,6 +6093,126 @@ async def test_concurrent_im_attachment_retry_keeps_one_reserved_owner(
     assert not retry_path.exists()
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("sender", "answer", "expected"),
+    [
+        ("U_OWNER", "yes", "confirmed"),
+        ("U_OWNER", "no", "confirm_refused"),
+        ("U_MEMBER", "yes", "pending"),
+    ],
+    ids=["approver-yes", "approver-no", "other-member"],
+)
+async def test_im_reply_answers_only_the_approvers_pending_script_confirm(
+    managers,
+    monkeypatch,
+    sender: str,
+    answer: str,
+    expected: str,
+) -> None:
+    """In a shared IM channel only the owner who launched the script answers it.
+
+    The answer is consumed before admission, so it neither queues behind nor
+    steers into the Turn the script is blocking. Another member's reply is an
+    ordinary message and leaves the confirm waiting.
+    """
+    from core.computer_script_interactions import (
+        ComputerScriptInteractionError,
+        ComputerScriptInteractionManager,
+    )
+
+    manager, _other, engine, _engine_b, starts = managers
+    await _activate(manager, text="run the script")
+    starts_before = list(starts)
+    acks = _record_admission_acks(manager)
+    notices: list[str] = []
+
+    async def emit_agent_message(_context, _message_type, text, **_kwargs):
+        notices.append(text)
+        return f"notice-{len(notices)}"
+
+    launching_context = MessageContext(
+        user_id="U_OWNER", channel_id="C1", thread_id="T1", platform="slack"
+    )
+    binding = SimpleNamespace(
+        token="script-token",
+        session_id="ses_fsm",
+        turn=SimpleNamespace(context=launching_context),
+    )
+    interactions = ComputerScriptInteractionManager(
+        SimpleNamespace(
+            config=SimpleNamespace(language="en"),
+            emit_agent_message=emit_agent_message,
+        ),
+        SimpleNamespace(admit=lambda _token: binding),
+    )
+    manager.controller.computer_script_interactions = interactions
+    confirm = asyncio.create_task(interactions.confirm("script-token", "Send it?"))
+    await asyncio.sleep(0)
+
+    handler = MessageHandler(
+        SimpleNamespace(
+            config=SimpleNamespace(language="en"),
+            im_client=SimpleNamespace(formatter=None),
+            settings_manager=SimpleNamespace(sessions=SimpleNamespace()),
+            session_manager=SimpleNamespace(),
+            receiver_tasks={},
+            processing_indicator=manager.controller.processing_indicator,
+        )
+    )
+    handler.set_session_handler(
+        SimpleNamespace(ensure_agent_session_id=lambda *_args, **_kwargs: "ses_fsm")
+    )
+    monkeypatch.setattr("storage.db.get_cached_sqlite_engine", lambda: engine)
+    reply_context = MessageContext(
+        user_id=sender,
+        channel_id="C1",
+        thread_id="T1",
+        message_id="native-reply-1",
+        platform="slack",
+        is_original_human_text=True,
+    )
+    await handler._admit_human_delivery(
+        manager=manager,
+        context=reply_context,
+        dispatch_text=answer,
+        display_text=answer,
+        processed_files=[],
+        session_key="slack::C1",
+        agent_name="codex",
+        session_anchor="base-session",
+        working_path="/tmp",
+        vibe_agent=None,
+        delivery_intent="queue",
+        downloaded_attachment_paths=[],
+        admission_context={},
+    )
+    delivery = _row(engine, reply_context.platform_specific["delivery_id"])
+    assert starts == starts_before
+
+    if expected == "pending":
+        assert confirm.done() is False
+        assert delivery["state"] == "queued"
+        assert [ack[2] for ack in acks] == ["queued"]
+        confirm.cancel()
+        await asyncio.gather(confirm, return_exceptions=True)
+        return
+
+    outcome = (await asyncio.wait_for(asyncio.gather(confirm, return_exceptions=True), 5))[0]
+    assert notices[0] == (
+        "Send it?\n\nReply yes or no. Only the person who started this task can answer."
+    )
+    assert delivery["state"] == "retired"
+    assert acks == []
+    if expected == "confirmed":
+        assert outcome["effect"] == "confirmed"
+        assert notices[-1] == "Confirmed. Continuing."
+    else:
+        assert isinstance(outcome, ComputerScriptInteractionError)
+        assert outcome.code == "confirm_refused"
+        assert notices[-1] == "Declined. The script will not take this step."
+
+
 def test_reserved_attachment_only_submission_recovers_exact_dispatch_inputs(
     managers,
     tmp_path: Path,
@@ -8049,8 +8378,90 @@ async def test_agent_initiated_continuation_materializes_as_hidden_turn_input(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("backend", ["vibey", "claude", "codex", "opencode"])
+@pytest.mark.parametrize("boundary", ["admission", "fifo", "admission_fifo", "dispatch"])
+async def test_vibey_resume_delivery_is_retired_if_the_resolved_backend_changes(
+    managers, monkeypatch, backend, boundary,
+) -> None:
+    """A hidden control Delivery may execute only on the resolved Vibey backend.
+
+    Admission-only coverage missed later FIFO claims (including a new input
+    driving the old queue) and routing rebuilt between claim and dispatch.
+    At admission the request omits trusted fields: only the stored row owns them.
+    """
+    manager, _other, engine, _engine_b, starts = managers
+    delivery_id = delivery_store.new_delivery_id()
+    metadata = {
+        delivery_store.VIBEY_RESUME_METADATA_KEY: True,
+        delivery_store.VIBEY_SOURCE_TURN_METADATA_KEY: "source-turn",
+    }
+
+    def context(session_id):
+        value = _context(session_id)
+        with engine.connect() as conn:
+            value.platform_specific["agent_session_target"]["agent_backend"] = conn.execute(
+                select(agent_sessions.c.agent_backend).where(agent_sessions.c.id == session_id)
+            ).scalar_one()
+        return value
+
+    manager.bind_context(context)
+    with engine.begin() as conn:
+        conn.execute(update(agent_sessions).where(agent_sessions.c.id == "ses_fsm").values(agent_backend="vibey"))
+        delivery_store.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="reserved",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="harness",
+                source="harness",
+                message_type="agent_initiated",
+                text="",
+                metadata=metadata,
+            ),
+            dispatch_text="",
+        )
+
+    request = DeliveryRequest(
+        session_id="ses_fsm", priority="p3", content="", has_content=False,
+        delivery_id=delivery_id, admission_only=boundary in {"fifo", "admission_fifo"},
+        **({"author": "harness", "source": "harness", "message_type": "agent_initiated", "metadata": metadata}
+           if boundary != "admission" else {}),
+    )
+    start_persisted_turn = manager._start_persisted_turn
+    if boundary == "dispatch":
+        monkeypatch.setattr(manager, "_start_persisted_turn", AsyncMock(return_value=False))
+    if boundary != "admission":
+        queued = await manager.deliver(request, context=context("ses_fsm"))
+        assert queued.state == ("claimed" if boundary == "dispatch" else "queued")
+        assert starts == []
+    with engine.begin() as conn:
+        conn.execute(update(agent_sessions).where(agent_sessions.c.id == "ses_fsm").values(agent_backend=backend))
+    if boundary == "admission":
+        result = await manager.deliver(request, context=context("ses_fsm"))
+        if backend != "vibey":
+            assert result.reason == "backend_changed"
+    elif boundary == "fifo":
+        await manager.drain_delivery_queue("ses_fsm")
+    elif boundary == "admission_fifo":
+        await manager.deliver(DeliveryRequest(session_id="ses_fsm", priority="p3", content="新的用户任务"))
+    else:
+        monkeypatch.setattr(manager, "_start_persisted_turn", start_persisted_turn)
+        await manager._start_persisted_turn(queued.turn_id)
+
+    with engine.connect() as conn:
+        stored = delivery_store.get_delivery(conn, delivery_id)
+        assert stored["state"] == ("claimed" if backend == "vibey" else "retired")
+    expected = [""] if backend == "vibey" else ["新的用户任务"] if boundary == "admission_fifo" else []
+    assert [text for _turn, text in starts] == expected
+
+
+@pytest.mark.anyio
 async def test_failed_session_lifecycle_preserves_sampled_epoch(managers) -> None:
-    """A failed reset preserves an in-flight turn epoch."""
 
     manager, _other, _engine, _engine_b, _starts = managers
     sampled_snapshot = manager.snapshot_session_lifecycle("ses_fsm")
@@ -8272,3 +8683,80 @@ def test_legacy_effective_author_survives_queue_collect_merge_hydrate(
         public = delivery_store.public_delivery_payload(row)
         assert "_memory_user_id" not in public["metadata"]
         assert "resource_user_context" not in public["metadata"]
+
+
+def test_startup_recovery_reads_growing_tables_only_through_index_seeks(tmp_path: Path, sqlite_db_factory) -> None:
+    """#2706: durable-delivery recovery runs on the controller loop at every start, before producers are admitted.
+    ``agent_runs``, ``session_turns`` and ``message_deliveries`` grow with every Turn ever run, and ``agent_sessions``
+    with every Session kept; a read of their history held the loop at start. Every statement recovery issues must reach them by an index seek, or by walking a
+    partial index that holds only live rows -- never by scanning the table or a full index."""
+
+    from sqlalchemy import event
+
+    db_path = sqlite_db_factory(tmp_path / "recovery.sqlite")
+    engine = create_sqlite_engine(db_path)
+    _seed_session(engine)
+    manager = SessionTurnManager(_Controller(), build_context=_context)
+    manager._engine = engine
+    statements: list[tuple[str, object]] = []
+
+    def capture(_conn, _cursor, statement, parameters, _context, _executemany):
+        if statement.lstrip().upper().startswith(("SELECT", "UPDATE", "WITH")):
+            statements.append((statement, parameters))
+
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        asyncio.run(manager.recover_durable_delivery_state())
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+        engine.dispose()
+
+    growing = ("agent_runs", "session_turns", "message_deliveries", "agent_sessions")
+    live_only_indexes = {
+        "uq_session_turns_live_session",
+        "uq_session_turns_waiting_successor",
+        "ix_message_deliveries_session_order",
+    }
+    scans: list[str] = []
+    with closing(sqlite3.connect(db_path)) as raw:
+        for statement, parameters in statements:
+            for row in raw.execute("EXPLAIN QUERY PLAN " + statement, parameters):
+                detail = str(row[-1])
+                words = detail.split()
+                if detail.startswith("SCAN ") and words[1] in growing and words[-1] not in live_only_indexes:
+                    scans.append(f"{detail}  <-  {' '.join(statement.split())}")
+    assert statements, "recovery issued no statements, so this test proves nothing"
+    assert not scans, "startup recovery scans a growing table:\n" + "\n".join(scans)
+
+
+@pytest.mark.anyio
+async def test_a_turn_end_after_its_terminal_write_takes_no_writer(managers) -> None:
+    """#2706: a Turn end reaches SQLite's writer from several owners on the controller loop: the evidence-carrying
+    terminal write, then the runner's release, the post-terminal resume and the queue drain. Once the Turn is
+    terminal and nothing is queued, the later three change nothing, and they answer from a read instead of waiting for
+    the writer another process may hold."""
+
+    from sqlalchemy import event
+
+    manager, _other, engine, _engine_b, _starts = managers
+    turn_id, context = await _activate(manager, text="request")
+    manager.on_terminal_result(context, is_error=False)
+    manager.on_terminal_delivery_complete(context)
+    with engine.connect() as conn:
+        assert delivery_store.get_turn(conn, turn_id)["state"] == "terminal"
+    writers: list[str] = []
+
+    def capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+        if statement.lstrip().upper().startswith(("BEGIN IMMEDIATE", "UPDATE AGENT_SESSIONS SET ID = ID")):
+            writers.append(statement)
+
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        released = manager._terminalize_durable_turn(turn_id, "completed", evidence_kind="runner_release")
+        await manager._resume_post_terminal("ses_fsm")
+        drained = await manager.drain_delivery_queue("ses_fsm")
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+
+    assert released["changed"] is False and drained is False
+    assert writers == [], f"a Turn end took SQLite's writer {len(writers)} more time(s) to change nothing"

@@ -41,6 +41,7 @@ from .events import (
     bounded_diagnostic_detail,
     event_reason_label,
 )
+from .hosted_turn import TurnHostedTools
 from .resolver import BackendName, ModelHubTurnResolution, parse_model_hub_timestamp, source_eligible_for_backend
 from .state_file import write_state_document
 
@@ -72,13 +73,25 @@ class HopOrigin:
     provider: str
     api: str
     model: str
+    # The serving Source: two Sources can share an origin. Equality stays the
+    # origin's; opaque payloads are also bound to the Source's account (C-6 item
+    # 6), which the failover strip compares on its own.
+    source: str = field(compare=False)
+    # The launch Source's credential-free identity (``identity_digest``), taken
+    # from the snapshot the origin came from. In memory only: never in
+    # ``payload()``, the served-hop header, or persisted provenance.
+    identity: str = field(default="", compare=False, repr=False)
 
     def payload(self) -> dict[str, str]:
         return {"provider": self.provider, "api": self.api, "model": self.model}
 
     def response_headers(self) -> dict[str, str]:
         # JSON escapes keep arbitrary Unicode model ids safe in HTTP headers.
-        value = json.dumps(self.payload(), ensure_ascii=True, separators=(",", ":"))
+        value = json.dumps(
+            {**self.payload(), "source": self.source},
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
         # ensure_ascii makes character count equal to wire byte count.
         if len(value) > SERVED_HOP_HEADER_MAX_BYTES:
             raise ServedHopHeaderTooLarge("Served-hop header exceeds its transport bound")
@@ -712,6 +725,15 @@ class TurnTrace:
     # readable; explicit user cancellation suppresses live copy as before.
     outcome_frozen: Literal["backend_failure", "user_cancellation"] | None = None
     recovery_requests: dict[str, dict] = field(default_factory=dict)
+    # The request whose surfaced attempt set ``terminal_error``, and that exact
+    # value: a handed-back request withdraws only its own terminal.
+    terminal_error_by: Optional[tuple[str, dict]] = None
+    # Vibey: the hosted tools the turn's first resolution froze, with each
+    # search tool's executor order. Written once; settings apply next turn.
+    hosted_tools: Optional[TurnHostedTools] = None
+    # Vibey: per Source, the identity digest the turn's native content is bound
+    # to, claimed by its first admitted pinned request. Each entry is written once.
+    pinned_identities: dict[str, str] = field(default_factory=dict)
 
     @property
     def pending_attempt(self) -> Optional[AttemptIdentity]:
@@ -754,6 +776,10 @@ class PreparedGatewayRoute:
     source_id: str
     gateway_request_model_id: str
     primary_origin: HopOrigin | None = None
+    # Vibey only: the primary Source's identity at launch. ``HopOrigin`` compares
+    # without it, but a route under another identity is another route, so its
+    # credential carries the launch identity the gateway compares against.
+    primary_identity: str = ""
 
 
 @dataclass(frozen=True)
@@ -854,6 +880,33 @@ class GatewayTurnTerminalizer:
         reason: Literal["invalid_parameter", "protocol_error"],
     ) -> None:
         self._staged_exit = {**(self._staged_exit or {}), "fail_reason": reason}
+
+    def pinned_hop(self, source_id: str, model_id: str | None) -> tuple[str, str | None]:
+        """The exact hop an ``x-avibe-pin-source`` request was rendered for, from explicit or immutable data.
+
+        A continuation names its model (``x-avibe-pin-model``: the served-hop
+        model of the response it continues). Otherwise the pin is the launch's
+        primary hop, whose origin this route credential fixes. A pin that is
+        neither has no model and matches no hop. Nothing turn-wide is read: a
+        turn may have concurrent requests.
+        """
+
+        if model_id is None and self.primary_origin is not None and self.primary_origin.source == source_id:
+            model_id = self.primary_origin.model
+        return source_id, model_id
+
+    def hand_back(self) -> None:
+        """End this request without an exit of its own: its caller re-sends the content.
+
+        A pinned Vibey request the gateway cannot serve (``pin_unavailable``)
+        is re-rendered and sent again in the same turn. Attempts it made stay
+        recorded; the turn settles on the request that follows.
+        """
+
+        self._registry.withdraw_terminal_error(self.turn_id, request_id=self._request_id)
+        self._registry.clear_prepared_attempt(self.turn_id, request_id=self._request_id)
+        self._staged_exit = None
+        self._exit_committed = True
 
     def engine_down(self, *, local_error_detail: str | None = None) -> None:
         self._registry._terminalize_gateway_exit(
@@ -1291,6 +1344,57 @@ class TurnCorrelationRegistry:
                 )
         return token
 
+    def claim_pinned_identity(
+        self, turn_id: Optional[str], source_id: str, identity: str, continuation: bool,
+    ) -> bool:
+        """Whether a turn's native content may go to this Source under ``identity``; binds the first claim.
+
+        The turn's first claim for a Source binds its identity, and later ones
+        must match it. A continuation carries the native items of a response
+        already served, so it needs an identity already bound. A request without
+        a live turn has none to bind to.
+        """
+
+        with self._lock:
+            trace = self._traces.get(str(turn_id or "").strip())
+            if trace is None:
+                return False
+            bound = trace.pinned_identities.get(source_id)
+            if bound is None:
+                if continuation:
+                    return False
+                trace.pinned_identities[source_id] = identity
+                return True
+            return bound == identity
+
+    def turn_hosted_tools(self, turn_id: Optional[str]) -> TurnHostedTools | None:
+        """The hosted tools a turn's first resolution froze, or None before it has them."""
+
+        normalized = str(turn_id or "").strip()
+        if not normalized:
+            return None
+        with self._lock:
+            trace = self._traces.get(normalized)
+            return trace.hosted_tools if trace is not None else None
+
+    def live_hosted_turn(
+        self, *, backend: str, token: str, request_metadata: Mapping[str, str] | None,
+    ) -> tuple[str, TurnHostedTools | None] | None:
+        """The live turn a request belongs to and the hosted tools it froze; None without a live turn.
+
+        Only the turn the request names, while it holds the credential's route
+        and still admits work, is live: a request from a finished, superseded
+        or unnamed turn, or from a turn being stopped or finalized, cannot
+        start a call.
+        """
+
+        with self._lock:
+            owner = self._request_turn(backend, token, request_metadata)
+            if owner is None:
+                return None
+            trace = self._traces.get(owner[0])
+            return owner[0], trace.hosted_tools if trace is not None else None
+
     def gateway_primary_origin(self, *, backend: str, token: str) -> HopOrigin | None:
         """Read the immutable launch origin, independent of live turn ownership."""
 
@@ -1341,6 +1445,52 @@ class TurnCorrelationRegistry:
             and turn_id not in scope.routing_conflicts
             and scope.prepared_routes.get(turn_id) == route
         )
+
+    def _request_turn(
+        self,
+        backend: str,
+        token: str,
+        request_metadata: Mapping[str, str] | None,
+    ) -> tuple[str, ScopeKey] | None:
+        """The live turn one gateway request on a route credential belongs to; call under `_lock`.
+
+        Vibey names its turn on every request (``VIBEY_TURN_HEADER``), because
+        its credential answers for a route that later turns of the session
+        reuse: the named turn owns the request only while it holds that route
+        and still admits work, so a request from a finished turn is never
+        credited to its successor. Other credential-bound clients name no
+        turn, and their sole live turn is inferred.
+        """
+
+        if backend != "vibey":
+            return self._exact_turn(backend, token)
+        turn_id = self._named_route_turn(backend, token, request_metadata)
+        if turn_id is None:
+            return None
+        trace = self._traces.get(turn_id)
+        if trace is not None and (trace.ambiguous or trace.admission_closed):
+            return None
+        return turn_id, self._credential(backend, token).scope_key
+
+    def _named_route_turn(
+        self,
+        backend: str,
+        token: str,
+        request_metadata: Mapping[str, str] | None,
+    ) -> str | None:
+        """The turn a request names, if it holds the request credential's route; call under `_lock`."""
+
+        credential = self._credential(backend, token)
+        scope = self._scopes.get(credential.scope_key) if credential is not None else None
+        turn_id = request_metadata.get("avibe_turn_id") if isinstance(request_metadata, Mapping) else None
+        if (
+            scope is None
+            or credential.route is None
+            or not isinstance(turn_id, str)
+            or not self._explicit_turn_owns_route(scope, turn_id=turn_id, route=credential.route)
+        ):
+            return None
+        return turn_id
 
     def retire_scope(
         self,
@@ -1437,9 +1587,10 @@ class TurnCorrelationRegistry:
         backend: str,
         token: str,
         requested_model_id: str,
+        request_metadata: Mapping[str, str] | None = None,
     ) -> Optional[str]:
         with self._lock:
-            exact = self._exact_turn(backend, token)
+            exact = self._request_turn(backend, token, request_metadata)
             if exact is None:
                 return None
             turn_id, key = exact
@@ -1488,6 +1639,7 @@ class TurnCorrelationRegistry:
         scope: ProcessScope,
         turn_id: str,
         route: PreparedGatewayRoute,
+        hosted_tools: TurnHostedTools | None = None,
     ) -> bool:
         trace = self._traces.setdefault(
             turn_id,
@@ -1520,6 +1672,8 @@ class TurnCorrelationRegistry:
         trace.gateway_source_id = route.source_id
         trace.gateway_request_model_id = route.gateway_request_model_id
         trace.gateway_model_id = route.resolved_model_id
+        if trace.hosted_tools is None:
+            trace.hosted_tools = hosted_tools
         return True
 
     def prepare_gateway_turn(
@@ -1534,8 +1688,13 @@ class TurnCorrelationRegistry:
         via_mapping: bool,
         gateway_request_model_id: str | None = None,
         primary_origin: HopOrigin | None = None,
+        hosted_tools: TurnHostedTools | None = None,
     ) -> str:
-        """Register a route and return its legacy credential or explicit handle."""
+        """Register a route and return its legacy credential or explicit handle.
+
+        ``hosted_tools`` is what a Vibey turn's first resolution froze; the
+        turn keeps the first it is given.
+        """
 
         with self._lock:
             credential = self._credential(backend, token)
@@ -1553,6 +1712,7 @@ class TurnCorrelationRegistry:
                 source_id=source_id,
                 gateway_request_model_id=request_model_id,
                 primary_origin=primary_origin,
+                primary_identity=primary_origin.identity if primary_origin is not None else "",
             )
 
             if scope.request_scoped:
@@ -1571,6 +1731,7 @@ class TurnCorrelationRegistry:
                         scope=scope,
                         turn_id=normalized_turn_id,
                         route=prepared,
+                        hosted_tools=hosted_tools,
                     )
                 return launch_token
 
@@ -1619,6 +1780,7 @@ class TurnCorrelationRegistry:
                 scope=scope,
                 turn_id=route_turn_id,
                 route=prepared,
+                hosted_tools=hosted_tools,
             )
             return launch_token
 
@@ -1735,6 +1897,7 @@ class TurnCorrelationRegistry:
                     backend=backend,
                     token=token,
                     requested_model_id=gateway_model_id,
+                    request_metadata=request_metadata,
                 )
                 if owner != prepared_turn_id:
                     owner = None
@@ -1854,9 +2017,13 @@ class TurnCorrelationRegistry:
         # can resolve to one upstream model id, and crediting a turn for a
         # request that belongs to the other one is how a turn ends up
         # ambiguous over a model it never asked for.
-        claimed = any(
-            prepared == route and turn_id in scope.active_turns
-            for turn_id, prepared in scope.prepared_routes.items()
+        claimed = (
+            self._named_route_turn(backend, token, request_metadata) is not None
+            if backend == "vibey"
+            else any(
+                prepared == route and turn_id in scope.active_turns
+                for turn_id, prepared in scope.prepared_routes.items()
+            )
         )
         return route.requested_model_id, claimed
 
@@ -1932,7 +2099,7 @@ class TurnCorrelationRegistry:
                 )
                 return turn_id
 
-            exact = self._exact_turn(backend, token)
+            exact = self._request_turn(backend, token, request_metadata)
             if exact is None:
                 return None
             turn_id, _ = exact
@@ -1944,10 +2111,6 @@ class TurnCorrelationRegistry:
             ):
                 return None
             if backend == "vibey":
-                if credential.route != scope.prepared_routes.get(turn_id):
-                    # A superseded credential must not poison the successor
-                    # even when malformed JSON fails before body attribution.
-                    return None
                 trace.gateway_requests.add(request_id)
             trace.pending_attempts[request_id] = AttemptIdentity(
                 source_id=trace.gateway_source_id,
@@ -2410,6 +2573,21 @@ class TurnCorrelationRegistry:
                     "upstream_error_code": diagnostic_code,
                     **detail,
                 }
+                trace.terminal_error_by = (request_id, trace.terminal_error)
+
+    def withdraw_terminal_error(self, turn_id: Optional[str], *, request_id: str) -> None:
+        """Drop the terminal a handed-back request surfaced; it did not end the turn."""
+
+        if turn_id is None:
+            return
+        with self._lock:
+            trace = self._traces.get(turn_id)
+            if trace is None or trace.outcome_frozen or trace.terminal_error_by is None:
+                return
+            owner, value = trace.terminal_error_by
+            if owner == request_id and trace.terminal_error is value:
+                trace.terminal_error = None
+                trace.terminal_error_by = None
 
     def close_turn_admission(self, turn_id: str, *, settled_by: Optional[str]) -> None:
         """Latch the FSM boundary without discarding already-owned requests."""
@@ -2535,7 +2713,7 @@ class TurnCorrelationRegistry:
 
             self.store.put(
                 {
-                    "contract_version": 11,
+                    "contract_version": 15,
                     "turn_id": normalized_turn_id,
                     "ts": ts or _utc_now_iso(),
                     "agent": trace.agent,

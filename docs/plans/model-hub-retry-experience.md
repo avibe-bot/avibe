@@ -22,9 +22,11 @@ The intended experience is:
    Other requests may use backups or wait; they do not all hit the relay.
 4. If that request produces valid model output, let work continue. If it
    fails again, increase the delay. Timer expiry alone proves nothing.
-5. If automatic recovery ends, say that this request has ended and offer
-   the existing safe Retry action where supported. Later supplier recovery
-   must not silently revive a terminal Turn.
+5. If automatic recovery ends, the gateway request ends truthfully. For a pre-output `server` or `network` failure,
+   Vibey may use its existing bounded transcript-only continuation once the failed Turn closes; this does not replay the
+   original input or committed tools. Recovery exhaustion after thinking, rate-limit/quota exhaustion, or any ambiguous
+   acceptance remains terminal and uses the existing explicit Retry action where supported. Later supplier recovery must
+   not silently revive a terminal Turn.
 
 The incident's observed `server_error` classification does not itself prove
 a socket failure: a relay can return 503 because its own upstream is down.

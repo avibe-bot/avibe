@@ -16,7 +16,7 @@ import type { ModelsSurfaceKind } from './modelHubSurfaceState';
 import { ApiCallError, modelsApi } from './modelsApi';
 import { QUOTA_PENDING_REREADS, QUOTA_PENDING_REREAD_MS, SettingsModelsPage as SettingsModelsRoute } from './SettingsModelsPage';
 import { hasNativeSubscriptionCustody, SUBSCRIPTION_VENDORS } from './subscriptionOptions';
-import { CONTRACT_VERSION, type AgentBackend, type AgentChain, type AgentSupply, type BackendModel, type MigrationItem, type RuntimeDependency, type RuntimeManifest, type QuotaSummary, type Source, type UsageReport } from './types';
+import { CONTRACT_VERSION, type AgentBackend, type AgentChain, type AgentSupply, type BackendModel, type HostedToolsStatus, type MigrationItem, type RuntimeDependency, type RuntimeManifest, type QuotaSummary, type Source, type UsageReport } from './types';
 
 // The page navigates to Agents when the user clicks an Agent that needs
 // attention, so it needs a router in scope. Every render site wants the same
@@ -48,7 +48,7 @@ const manifest = {
 } satisfies RuntimeManifest;
 
 const runtime: RuntimeDependency = {
-  contract_version: 11,
+  contract_version: 15,
   manifest,
   status: { installed_version: '1', verified: true, health: 'ok' },
 };
@@ -119,7 +119,7 @@ const takeoverAgent: AgentSupply = {
 };
 
 const takeoverChain: AgentChain = { manual_override: {hops:[{source_id:'src_head',model_id:'gpt-5.6-sol'},{source_id:'src_relay',model_id:'gpt-5.6-sol'}]}, route_origin: "manual" as const,
-  contract_version: 11,
+  contract_version: 15,
   backend: 'codex',
   model_id: 'gpt-5.6-sol',
   current: { source_id: 'src_relay', model_id: 'gpt-5.6-sol' },
@@ -222,7 +222,7 @@ const routedHubAgent: AgentSupply = {
 const routedChain: AgentChain = {
   manual_override: { hops: [{ source_id: retainedSource.id, model_id: routedModelId }] },
   route_origin: 'manual' as const,
-  contract_version: 11,
+  contract_version: 15,
   backend: 'claude',
   model_id: routedModelId,
   current: { source_id: retainedSource.id, model_id: routedModelId },
@@ -247,6 +247,15 @@ const routedImpact = {
     model_id: routedModelId,
   }],
   interrupted: [{ backend: 'claude' as const, model_id: routedModelId, agents: ['Release bot'] }],
+};
+
+const unused = { latest_ok: null, verified: [], refused: [] };
+const hostedToolsStatus: HostedToolsStatus = {
+  tools: [
+    { name: 'web_search', enabled: true, status: unused, executor_order: null, effective_order: [], executor_candidates: [] },
+    { name: 'x_search', enabled: true, status: unused, executor_order: null, effective_order: [], executor_candidates: [] },
+    { name: 'image_generate', enabled: true, status: unused, default_model: null, effective_default: null, models: [], image_offered_by: [] },
+  ],
 };
 
 const deferred = <T,>() => {
@@ -274,6 +283,7 @@ const renderPage = (
   vi.spyOn(modelsApi, 'getUsageSummary').mockResolvedValue(usageSummary);
   vi.spyOn(modelsApi, 'getQuota').mockResolvedValue(quotaSummary);
   vi.spyOn(modelsApi, 'refreshQuota').mockResolvedValue(quotaSummary);
+  vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValue(hostedToolsStatus);
   return render(
     <ToastProvider>
       <I18nextProvider i18n={i18n}>
@@ -337,7 +347,7 @@ describe('SettingsModelsPage surface branches', () => {
     await userEvent.click(await screen.findByRole('button', { name: /Switch to gateway|切换到模型网关/i }));
     const dialog = await screen.findByRole('dialog');
     expect(within(dialog).getByRole('checkbox', { name: /Claude native login/ })).toBeTruthy();
-    expect(within(dialog).getByText(/After migration|迁移后/)).toBeTruthy();
+    expect(within(dialog).getByText(/migration does not test keys online|迁移时不联网校验 Key/)).toBeTruthy();
     expect(setMode).not.toHaveBeenCalled();
     if (refused) {
       await userEvent.click(within(dialog).getByRole('button', { name: /Start migration|开始迁移/i }));
@@ -467,7 +477,7 @@ describe('SettingsModelsPage surface branches', () => {
     const start = vi.spyOn(modelsApi, 'startRuntime').mockResolvedValue(runtime);
     renderPage([], [directAgent('claude')], notInstalled);
 
-    await userEvent.click(await screen.findByRole('switch', { name: /Turn model gateway on|开启模型网关/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /^Retry$|^重试$/i }));
     await waitFor(() => expect(install).toHaveBeenCalledOnce());
     await waitFor(() => expect(start).toHaveBeenCalledOnce());
     expect(screen.queryByRole('dialog')).toBeNull();
@@ -689,7 +699,7 @@ describe('SettingsModelsPage surface branches', () => {
     // Frame 09 is what the `sources` tab shows here — not what the Hub shows
     // instead of its tabs. It is still Frame 09's body: none of the gateway
     // overview leaks in beside it.
-    expect(screen.getAllByRole('tab')).toHaveLength(4);
+    expect(screen.getAllByRole('tab')).toHaveLength(5);
     expect(screen.queryByText(/^Recent switches$|^最近切换$/i)).toBeNull();
   });
 
@@ -810,8 +820,8 @@ describe('SettingsModelsPage surface branches', () => {
     expect(screen.queryByText(/^All 3 backends are direct$|^3 个后端均为直连$/i)).toBeNull();
   });
 
-  it('gates all internal configuration behind the stopped runtime switch', async () => {
-    const stopped = { ...runtime, status: { ...runtime.status, health: 'down' as const } };
+  it('recovers a previously disabled runtime without exposing an on/off switch', async () => {
+    const stopped = { ...runtime, enabled: false, status: { ...runtime.status, health: 'down' as const } };
     vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
     vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([
       directAgent('claude'),
@@ -830,16 +840,15 @@ describe('SettingsModelsPage surface branches', () => {
       </ToastProvider>,
     );
 
-    const toggle = await screen.findByRole('switch', { name: /Turn model gateway on|开启模型网关/i });
-    expect(toggle.getAttribute('aria-checked')).toBe('false');
-    expect(await screen.findByText(/^Model gateway is off$|^模型网关已关闭$/i)).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: /^Model gateway is unavailable$|^模型网关暂不可用$/i })).toBeTruthy();
+    expect(screen.queryByRole('switch')).toBeNull();
     expect(screen.queryAllByRole('tab')).toHaveLength(0);
     expect(screen.queryByText(/^All 3 backends are direct$|^3 个后端均为直连$/i)).toBeNull();
 
-    await userEvent.click(toggle);
+    await userEvent.click(screen.getByRole('button', { name: /^Retry$|^重试$/i }));
 
     await waitFor(() => expect(start).toHaveBeenCalledOnce());
-    expect(await screen.findAllByRole('tab')).toHaveLength(4);
+    expect(await screen.findAllByRole('tab')).toHaveLength(5);
   });
 
   it('keeps routing controls available while an enabled gateway process is unavailable', async () => {
@@ -861,15 +870,14 @@ describe('SettingsModelsPage surface branches', () => {
       </ToastProvider>,
     );
 
-    const toggle = await screen.findByRole('switch', { name: /Switch codex to Direct|请先将 codex 切换为直连/i });
-    expect(toggle.getAttribute('aria-checked')).toBe('true');
-    expect((toggle as HTMLButtonElement).disabled).toBe(true);
     expect(await screen.findByText('Retained source')).toBeTruthy();
+    expect(screen.queryByRole('switch')).toBeNull();
+    expect(screen.getByRole('button', { name: /^Retry$|^重试$/i })).toBeTruthy();
     expect(screen.getByRole('button', { name: /Runtime mode:|运行模式[:：]/i })).toBeTruthy();
-    expect(screen.queryAllByRole('tab')).toHaveLength(4);
+    expect(screen.queryAllByRole('tab')).toHaveLength(5);
   });
 
-  it('still allows persisted enablement to be turned off on an unsupported host', async () => {
+  it('does not offer runtime actions on an unsupported host', async () => {
     const unsupported = {
       ...runtime,
       enabled: true,
@@ -884,8 +892,6 @@ describe('SettingsModelsPage surface branches', () => {
     ]);
     vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(unsupported);
     vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
-    const stopped = { ...unsupported, enabled: false };
-    const stop = vi.spyOn(modelsApi, 'stopRuntime').mockResolvedValue(stopped);
 
     render(
       <ToastProvider>
@@ -895,51 +901,22 @@ describe('SettingsModelsPage surface branches', () => {
       </ToastProvider>,
     );
 
-    const toggle = await screen.findByRole('switch', { name: /Turn model gateway off|关闭模型网关/i });
-    expect((toggle as HTMLButtonElement).disabled).toBe(false);
-    await userEvent.click(toggle);
-    await waitFor(() => expect(stop).toHaveBeenCalledOnce());
+    expect(await screen.findAllByRole('tab')).toHaveLength(5);
+    expect(screen.queryByRole('switch')).toBeNull();
+    expect(within(document.querySelector('.model-hub-shell-head') as HTMLElement).queryByRole('button', { name: /^Retry$|^重试$/i })).toBeNull();
   });
 
-  it('stops an unused running gateway and hides its retained configuration', async () => {
-    renderPage([retainedSource]);
-    const stopped = { ...runtime, status: { ...runtime.status, health: 'not_started' as const } };
-    const stop = vi.spyOn(modelsApi, 'stopRuntime').mockResolvedValue(stopped);
+  it.each([false, true])('keeps the running gateway available without an off switch (in use: %s)', async (inUse) => {
+    renderPage([retainedSource], inUse ? [takeoverAgent] : [directAgent('codex')]);
 
-    await screen.findByText('Retained source');
-    await userEvent.click(screen.getByRole('switch', { name: /Turn model gateway off|关闭模型网关/i }));
-
-    await waitFor(() => expect(stop).toHaveBeenCalledOnce());
-    expect(await screen.findByText(/^Model gateway is off$|^模型网关已关闭$/i)).toBeTruthy();
-    expect(screen.queryByText('Retained source')).toBeNull();
-    expect(screen.queryAllByRole('tab')).toHaveLength(0);
-  });
-
-  it('does not turn the runtime off while a backend still uses the gateway', async () => {
-    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([retainedSource]);
-    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([takeoverAgent]);
-    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
-    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
-    const stop = vi.spyOn(modelsApi, 'stopRuntime').mockResolvedValue(runtime);
-
-    render(
-      <ToastProvider>
-        <I18nextProvider i18n={i18n}>
-          <SettingsModelsPage />
-        </I18nextProvider>
-      </ToastProvider>,
-    );
-
-    const toggle = await screen.findByRole('switch', { name: /Switch codex to Direct|请先将 codex 切换为直连/i });
-    expect((toggle as HTMLButtonElement).disabled).toBe(true);
-    await userEvent.click(toggle);
-    expect(stop).not.toHaveBeenCalled();
     expect(await screen.findByText('Retained source')).toBeTruthy();
+    expect(screen.queryByRole('switch')).toBeNull();
+    expect(screen.getAllByRole('tab')).toHaveLength(5);
+    expect(within(document.querySelector('.model-hub-shell-head') as HTMLElement).queryByRole('button', { name: /^Retry$|^重试$/i })).toBeNull();
   });
 
-  // The in-process catalog is configurable even when empty and without a CLI.
-  // Runtime Stop still depends on whether that catalog actually owns models.
-  it.each([false, true])('MH-VIBEY-003 derives runtime use from Avibe catalog presence: %s', async (configured) => {
+  // The in-process catalog remains configurable with or without models.
+  it.each([false, true])('MH-VIBEY-003 keeps Avibe catalog management available: %s', async (configured) => {
     const catalogModel: BackendModel = {
       id: 'menu-alias', display_name: null, origin: 'manual', models_dev_id: null,
       context_window: null, max_output_tokens: null, input_modalities: [], output_modalities: [],
@@ -949,26 +926,16 @@ describe('SettingsModelsPage surface branches', () => {
       directAgent('claude'), directAgent('codex'), directAgent('opencode'),
       { ...emptyVibeyAgent, catalog_models: configured ? [catalogModel] : [] },
     ]);
-    const stop = vi.spyOn(modelsApi, 'stopRuntime').mockResolvedValue({ ...runtime, enabled: false });
-    const toggle = await screen.findByRole('switch', {
-      name: configured ? /Vibey's models use|Vibey 的模型通过/i : /Turn model gateway off|关闭模型网关/i,
-    });
-    expect((toggle as HTMLButtonElement).disabled).toBe(configured);
     const vibeyCard = (await screen.findByText('Vibey')).closest('[data-agent-backend]') as HTMLElement;
     expect(within(vibeyCard).getAllByRole('button', { name: /^Manage models$|^管理模型$/i }).length).toBeGreaterThan(0);
     await userEvent.click(within(vibeyCard).getByRole('button', { name: /Runtime mode:|运行模式[:：]/i }));
     const modeGroup = await screen.findByRole('group', { name: /Runtime mode|运行模式/i });
     expect(within(modeGroup).queryByRole('button', { name: /Switch to direct|切到直连/i })).toBeNull();
     await userEvent.click(within(modeGroup).getByRole('button', { pressed: true }));
-    if (configured) {
-      expect(screen.queryByText(/^All 3 backends are direct$|^3 个后端均为直连$/i)).toBeNull();
-      await userEvent.click(toggle);
-      expect(stop).not.toHaveBeenCalled();
-    } else {
-      expect(screen.queryByText(/^All 3 backends are direct$|^3 个后端均为直连$/i)).toBeNull();
+    expect(screen.queryByRole('switch')).toBeNull();
+    expect(screen.queryByText(/^All 3 backends are direct$|^3 个后端均为直连$/i)).toBeNull();
+    if (!configured) {
       expect(screen.getAllByRole('button', { name: /^Switch to Gateway$|^切换到模型网关$/i })).toHaveLength(3);
-      await userEvent.click(toggle);
-      await waitFor(() => expect(stop).toHaveBeenCalledOnce());
     }
   });
 
@@ -976,7 +943,7 @@ describe('SettingsModelsPage surface branches', () => {
     renderPage([retainedSource]);
 
     expect(await screen.findByText('Retained source')).toBeTruthy();
-    expect(screen.getAllByRole('tab')).toHaveLength(4);
+    expect(screen.getAllByRole('tab')).toHaveLength(5);
     expect(screen.queryByText(/^Switch to the gateway and you gain three things$|^切换到模型网关，有三大益处$/i)).toBeNull();
   });
 
@@ -2426,7 +2393,7 @@ describe('SettingsModelsPage surface branches', () => {
     expect(recovery).not.toMatch(/void refresh\(\)/);
   });
 
-  it('keeps retained supply rows but clears derived chain claims when a later supply read fails', async () => {
+  it('A4 keeps retained supply rows but clears derived chain claims when a later supply read fails', async () => {
     const head = { ...retainedSource, id: 'src_head', display_name: 'Paused source', state: { status: 'cooldown' as const, retry_at: '2099-01-01T00:00:00Z', detail_key: null } };
     const relay = { ...retainedSource, id: 'src_relay', display_name: 'Replacement source', state: { status: 'active' as const, retry_at: null, detail_key: null } };
     vi.spyOn(modelsApi, 'listSources').mockResolvedValue([head, relay]);
@@ -2453,6 +2420,9 @@ describe('SettingsModelsPage surface branches', () => {
     await waitFor(() => expect(agentRead).toHaveBeenCalledTimes(2));
     await closeSourceDetails();
     expect(await screen.findByText(/Could not read this backend's supply|没有读到后端列表/i)).toBeTruthy();
+    const header = within(document.querySelector('.model-hub-shell-head') as HTMLElement);
+    expect(header.queryByRole('switch')).toBeNull();
+    expect(header.getByText(/^Gateway running$|^模型网关运行中$/i)).toBeTruthy();
     expect(screen.queryByTitle(takeoverMappingTitle)).toBeNull();
     expect(screen.getAllByText('—').length).toBeGreaterThan(0);
   });
@@ -2516,7 +2486,7 @@ describe('SettingsModelsPage usage region', () => {
       vi.restoreAllMocks();
       renderPage(sources);
 
-      await waitFor(() => expect(screen.getAllByRole('tab'), landing).toHaveLength(4));
+      await waitFor(() => expect(screen.getAllByRole('tab'), landing).toHaveLength(5));
       await openUsage();
       await waitFor(() => expect(vi.mocked(modelsApi.getUsageSummary), landing).toHaveBeenCalledWith('24h'));
     }
@@ -2831,5 +2801,65 @@ describe('SettingsModelsPage quota region', () => {
     trigger.remove();
     await userEvent.click(await screen.findByRole('button', { name: /^Cancel$|^取消$/ }));
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('tab', { name: /^Subscription quota$|^订阅额度$/ })));
+  });
+});
+
+// How the Tools tab is READ. What it says once read is `ToolsTab.test.tsx`'s
+// subject; here the read is the tab's own, off the landing's first paint.
+describe('SettingsModelsPage tools region', () => {
+  it('MH-HOSTED-UI-005: leaves the hosted-tools report unread until its tab opens, then re-reads on every open', async () => {
+    renderPage([retainedSource]);
+    await screen.findByText('Retained source');
+    const read = vi.mocked(modelsApi.getHostedTools);
+    expect(read).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByRole('tab', { name: /^Tools$|^工具$/ }));
+    await screen.findByRole('region', { name: /^Web search$|^网页搜索$/ });
+    expect(read).toHaveBeenCalledTimes(1);
+
+    await userEvent.click(screen.getByRole('tab', { name: /^Sources & gateway$|^供应商与路由$/ }));
+    await userEvent.click(screen.getByRole('tab', { name: /^Tools$|^工具$/ }));
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+  });
+
+  it('MH-HOSTED-UI-005: reads the hosted-tools report again after a committed Source change, since a Source change can drop its evidence', async () => {
+    renderPage([retainedSource]);
+    const updatedSource = { ...retainedSource, display_name: 'Updated source' };
+    vi.spyOn(modelsApi, 'patchSource').mockResolvedValueOnce({ source: updatedSource, removed_hops: [], interrupted: [] });
+    await userEvent.click((await screen.findByText('Retained source')).closest('button') as HTMLButtonElement);
+    await screen.findByRole('dialog', { name: 'Retained source' });
+    const read = vi.mocked(modelsApi.getHostedTools);
+    await waitFor(() => expect(read).toHaveBeenCalled());
+    const readsBefore = read.mock.calls.length;
+    vi.mocked(modelsApi.listSources).mockResolvedValue([updatedSource]);
+
+    // A change that keeps the Source's identity (here its name) still commits a new Source row.
+    await userEvent.click(screen.getByRole('button', { name: /Manage Retained source|管理 Retained source/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
+    const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
+    await userEvent.clear(name);
+    await userEvent.type(name, updatedSource.display_name);
+    await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
+    await screen.findByText(/^The source was updated$|^供应商已更新$/);
+
+    await waitFor(() => expect(read.mock.calls.length).toBeGreaterThan(readsBefore));
+  });
+
+  it('MH-HOSTED-UI-020: clears a refusal from its Source chip and shows the status the clear answered', async () => {
+    const withModel = { ...retainedSource, models: [{ id: 'claude-opus-5-5', display_name: null, origin: 'discovered' as const, reasoning_efforts: [], reasoning_efforts_source: null }] };
+    const refused: HostedToolsStatus = {
+      tools: hostedToolsStatus.tools.map((tool) => tool.name === 'web_search'
+        ? { ...tool, status: { ...unused, refused: [{ source_id: withModel.id, model_id: 'claude-opus-5-5', aspect: 'call' as const, at: '2026-10-14T09:00:00Z', reason: '400 unsupported_tool_type' }] } }
+        : tool),
+    };
+    renderPage([withModel]);
+    vi.mocked(modelsApi.getHostedTools).mockResolvedValue(refused);
+    const clear = vi.spyOn(modelsApi, 'clearHostedTool').mockResolvedValue(hostedToolsStatus);
+    await userEvent.click((await screen.findByText('Retained source')).closest('button') as HTMLButtonElement);
+    await screen.findByRole('dialog', { name: 'Retained source' });
+
+    await userEvent.click(await screen.findByRole('button', { name: /^Clear the web search refusal of claude-opus-5-5$|^清除 claude-opus-5-5 的网页搜索拒绝记录$/ }));
+    expect(clear).toHaveBeenCalledWith('web_search', { source_id: withModel.id, model_id: 'claude-opus-5-5' });
+    await waitFor(() => expect(document.querySelector('[data-capability]')).toBeNull());
   });
 });

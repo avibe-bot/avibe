@@ -13,9 +13,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, Optional, Protocol, Sequence
 
-from core.agent_core.messages import AssistantMessage, Message, ToolResultMessage, UserMessage
+from core.agent_core.messages import AssistantMessage, HostedImage, Message, ToolResultMessage, UserMessage
 
-EntryKind = Literal["input", "response", "tool_result", "compaction", "context_edit", "agent_state"]
+EntryKind = Literal["input", "response", "tool_result", "compaction", "context_edit", "agent_state", "replay_refusal"]
 
 
 @dataclass(frozen=True)
@@ -49,11 +49,21 @@ class TranscriptStore(Protocol):
         ...
 
     async def append_response(
-        self, session_id: str, message: AssistantMessage, *, final: bool, request: Optional[Mapping[str, Any]] = None
+        self,
+        session_id: str,
+        message: AssistantMessage,
+        *,
+        final: bool,
+        request: Optional[Mapping[str, Any]] = None,
+        replied: Optional[bool] = None,
+        images: Sequence[HostedImage] = (),
     ) -> ContextEntry:
         """Commit a response; ``request`` (C-9 ``ModelResponse.request``) is stored with it and read back in ``payload``.
 
-        The loop passes ``request`` only when context management is on.
+        The loop passes ``request`` only when context management is on. ``replied`` is the loop's decision whether the
+        response replies (``has_reply``), which a final's row type takes as given; without one, the response alone
+        decides. ``images`` are those the run's committed tool results generated, which a final delivers with its
+        reply: its committed display carries them, so the row is a complete result even if delivery never runs.
         """
         ...
 
@@ -62,11 +72,11 @@ class TranscriptStore(Protocol):
     ) -> ContextEntry: ...
 
     async def append_payload(
-        self, session_id: str, kind: Literal["compaction", "context_edit", "agent_state"], payload: Mapping[str, Any]
+        self, session_id: str, kind: Literal["compaction", "context_edit", "agent_state", "replay_refusal"], payload: Mapping[str, Any]
     ) -> ContextEntry: ...
 
     async def append_payloads(
-        self, session_id: str, entries: Sequence[tuple[Literal["compaction", "context_edit", "agent_state"], Mapping[str, Any]]]
+        self, session_id: str, entries: Sequence[tuple[Literal["compaction", "context_edit", "agent_state", "replay_refusal"], Mapping[str, Any]]]
     ) -> Sequence[ContextEntry]:
         """Commit several payload entries in order, in one transaction: all of them or none (C-9 section 10)."""
         ...

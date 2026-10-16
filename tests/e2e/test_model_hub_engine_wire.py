@@ -172,8 +172,8 @@ class _Harness:
 
 
 @asynccontextmanager
-async def _through_engine(tmp_path, monkeypatch, protocol: str, *handlers):
-    """A route of one Source per handler, in order, all speaking ``protocol``."""
+async def _through_engine(tmp_path, monkeypatch, protocol: str, *handlers, model_id: str = MODEL, efforts=()):
+    """A route of one Source per handler, in order, all speaking ``protocol`` and serving ``model_id``."""
     requests: list[list[dict]] = [[] for _ in handlers]
 
     def recording(index, handler):
@@ -193,7 +193,8 @@ async def _through_engine(tmp_path, monkeypatch, protocol: str, *handlers):
             for index, handler in enumerate(handlers):
                 root = await stack.enter_async_context(_server(recording(index, handler)))
                 source = _source(f"src_wire{index:04d}", f"Wire fixture {index}", vendor="custom",
-                                 protocol=protocol, model_id=MODEL)
+                                 protocol=protocol, model_id=model_id)
+                source.models[0].reasoning_efforts = list(efforts)
                 source.base_url = root + ("/v1" if protocol == "openai_responses" else "")
                 source.credential_ref = adapter.state_store.store_api_key(
                     f"sk-synthetic-wire-{index}", vendor="custom", protocol=protocol, base_url=source.base_url,
@@ -214,7 +215,8 @@ async def _through_engine(tmp_path, monkeypatch, protocol: str, *handlers):
 async def _post(url: str, hop: dict, body: dict, *, timeout: float = 150) -> dict:
     started = time.monotonic()
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as client:
-        async with client.post(url, headers={"Authorization": f'Bearer {hop["token"]}'}, json=body) as response:
+        headers = {"Authorization": f'Bearer {hop["token"]}', **hop["request_headers"]}
+        async with client.post(url, headers=headers, json=body) as response:
             transport_error = None
             try:
                 raw = await response.read()
@@ -495,7 +497,8 @@ async def test_consumer_cancel_closes_upstream_and_keeps_the_source(tmp_path, mo
     async with _through_engine(tmp_path, monkeypatch, protocol, handler) as harness:
         url, body = _frontend_request(protocol, harness.hop, stream=True)
         async with aiohttp.ClientSession() as client:
-            async with client.post(url, headers={"Authorization": f'Bearer {harness.hop["token"]}'},
+            async with client.post(url, headers={"Authorization": f'Bearer {harness.hop["token"]}',
+                                                 **harness.hop["request_headers"]},
                                    json=body) as response:
                 assert response.status == 200
                 await response.content.readuntil(b"partial")
@@ -559,3 +562,32 @@ async def test_engine_stop_ends_open_streams_without_a_forced_kill(tmp_path, mon
     _record(tmp_path, {"signals": signals, "stop_seconds": stop_seconds, "stream_end": stream_end})
     assert signals == [int(signal.SIGTERM)], signals
     assert stream_end != "still_open"
+
+
+@pytest.mark.parametrize(("model_id", "thinking"), [
+    # Claude 4.5 takes a token budget, and refuses adaptive thinking.
+    ("claude-sonnet-4-5", {"type": "enabled", "budget_tokens": 4000}),
+    # Claude 4.6 and later take adaptive thinking; the engine maps a budget to it.
+    ("claude-sonnet-4-6", {"type": "adaptive"}),
+])
+async def test_budget_thinking_reaches_a_claude_model_as_the_kind_it_takes(tmp_path, monkeypatch, model_id, thinking):
+    """#2737: the pinned engine rewrote budget thinking for a Claude 4.5 model into adaptive thinking."""
+
+    async def answer(_request, _body):
+        return web.json_response({
+            "id": "msg_wire", "type": "message", "role": "assistant", "model": model_id,
+            "content": [{"type": "text", "text": "."}], "stop_reason": "end_turn",
+            "usage": {"input_tokens": 3, "output_tokens": 1},
+        })
+
+    async with _through_engine(
+        tmp_path, monkeypatch, "anthropic", answer, model_id=model_id, efforts=("low", "medium", "high", "max"),
+    ) as harness:
+        url, body = _frontend_request("anthropic", harness.hop, stream=False, extra={
+            "max_tokens": 8000, "thinking": {"type": "enabled", "budget_tokens": 4000},
+        })
+        observed = await _post(url, harness.hop, body)
+    assert observed["status"] == 200, observed
+    (sent,) = harness.requests[0]
+    assert sent["body"]["thinking"] == thinking
+    assert ("output_config" in sent["body"]) is (thinking["type"] == "adaptive")

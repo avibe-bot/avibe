@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any, Callable, Literal, Mapping, Sequence
+from typing import Any, Callable, Literal, Mapping, Sequence, TypeVar
 
 import aiohttp
 
@@ -58,7 +58,11 @@ from vibe.model_hub_runtime.client import (
     probe_models,
     upstream_api_url,
 )
-from vibe.model_hub_runtime.api_key_vendors import pinned_api_key_protocol, validate_api_key_auth_scheme
+from vibe.model_hub_runtime.api_key_vendors import (
+    anthropic_api_key_header,
+    pinned_api_key_protocol,
+    validate_api_key_auth_scheme,
+)
 from vibe.model_hub_runtime.installer import (
     INSTALL_ALREADY_RUNNING_REASON,
     INSTALL_PLATFORM_UNSUPPORTED_REASON,
@@ -69,11 +73,14 @@ from vibe.model_hub_runtime.installer import (
 )
 from vibe.model_hub_runtime.state import EngineStateError, EngineStateStore
 from vibe.model_hub_runtime.supervisor import (
+    EngineConfigLostError,
     EngineSupervisor,
     EngineUnavailableError,
     get_engine_supervisor,
 )
 
+
+_T = TypeVar("_T")
 
 # The subscription vendors the engine can start an OAuth flow for, and the three
 # names each one answers to on the way through it:
@@ -759,18 +766,15 @@ async def _probe_protocol_response(
         raise EngineClientError("unsupported source protocol")
     try:
         url = upstream_api_url(root, taxonomy.request_path)
+        credential = anthropic_api_key_header(root, secret) if protocol == "anthropic" else {
+            "Authorization": f"Bearer {secret}",
+        }
     except (TypeError, ValueError):
         raise EngineClientError("source base URL is invalid")
     assert url is not None
-    headers = {
-        "Authorization": f"Bearer {secret}",
-        "Accept": "application/json",
-    }
+    headers = {**credential, "Accept": "application/json"}
     if protocol == "anthropic":
         headers["anthropic-version"] = "2023-06-01"
-        if auth_scheme != "bearer":
-            headers.pop("Authorization")
-            headers["x-api-key"] = secret
     client_timeout = aiohttp.ClientTimeout(total=timeout)
 
     async def observe() -> _ProtocolEvidence:
@@ -1504,7 +1508,7 @@ class CLIProxyEngineAdapter:
                 EngineHealth.NOT_INSTALLED,
             }:
                 return
-            await asyncio.to_thread(self.supervisor.ensure_running)
+            await self._engine_call(self.supervisor.ensure_running)
 
     async def _run_installation(
         self,
@@ -1727,7 +1731,7 @@ class CLIProxyEngineAdapter:
                         self._start_after_install_task = start_task
                         start_task.add_done_callback(self._start_after_install_done)
                 return status
-            await asyncio.to_thread(self.supervisor.ensure_running)
+            await self._engine_call(self.supervisor.ensure_running)
             return await self.status()
 
     async def stop_runtime(self) -> EngineStatus:
@@ -1790,7 +1794,7 @@ class CLIProxyEngineAdapter:
         return projected
 
     async def gateway_token(self) -> str:
-        connection = await asyncio.to_thread(self.supervisor.ensure_running)
+        connection = await self._engine_call(self.supervisor.ensure_running)
         return connection.gateway_token
 
     async def sync_sources(self, bindings: Sequence[SourceBinding]) -> None:
@@ -1803,7 +1807,14 @@ class CLIProxyEngineAdapter:
             # until the finite transaction has applied or restored the prior
             # projection.
             await self._requests_sent.wait()
-            await run_owned_in_thread(self._sync_sources_transaction, tuple(bindings))
+            try:
+                await run_owned_in_thread(self._sync_sources_transaction, tuple(bindings))
+            except EngineConfigLostError:
+                # The transaction kept the projection the engine was launched
+                # with, so the restart renders that and the save then applies
+                # as it would have. A second loss fails the save.
+                await self._restart_lost_engine()
+                await run_owned_in_thread(self._sync_sources_transaction, tuple(bindings))
 
     def _sync_sources_transaction(self, bindings: Sequence[SourceBinding]) -> None:
         try:
@@ -1813,6 +1824,10 @@ class CLIProxyEngineAdapter:
         self.state_store.sync_sources(bindings)
         try:
             self.supervisor.reload_config_if_running(previous)
+        except EngineConfigLostError:
+            # Nothing the engine runs is Avibe's to restore.
+            self.state_store.replace_sources(previous)
+            raise
         except Exception:
             applied = self.state_store.list_sources()
             self.state_store.replace_sources(previous)
@@ -1855,6 +1870,33 @@ class CLIProxyEngineAdapter:
                 self._transports_idle.set()
 
         return release
+
+    async def _restart_lost_engine(self) -> None:
+        """Restore an engine that lost its configuration; the caller holds the routing lock.
+
+        Holding it admits no new work. The engine restarts from the config
+        Avibe renders once the streams it still serves have ended, so none of
+        them is cut.
+        """
+        await self._transports_idle.wait()
+        await run_owned_in_thread(self.supervisor.restart_lost_engine)
+
+    async def _locked_engine_call(self, call: Callable[[], _T]) -> _T:
+        """Run a supervisor call that may start the engine, under the routing lock the caller holds."""
+        try:
+            return await asyncio.to_thread(call)
+        except EngineConfigLostError:
+            await self._restart_lost_engine()
+            return await asyncio.to_thread(call)
+
+    async def _engine_call(self, call: Callable[[], _T]) -> _T:
+        """Run a supervisor call that may start the engine, restoring one that lost its configuration."""
+        try:
+            return await asyncio.to_thread(call)
+        except EngineConfigLostError:
+            async with self._routing_lock:
+                await self._restart_lost_engine()
+            return await asyncio.to_thread(call)
 
     async def provision_credential(
         self,
@@ -2236,7 +2278,7 @@ class CLIProxyEngineAdapter:
             if metadata.get("vendor") != normalized_vendor or base_url is not None:
                 raise EngineStateError("credential does not match discovery target")
             if start_engine:
-                client = await asyncio.to_thread(self.supervisor.client)
+                client = await self._engine_call(self.supervisor.client)
             else:
                 client = await run_owned_in_thread(self.supervisor.client_if_running)
                 if client is None:
@@ -2333,7 +2375,7 @@ class CLIProxyEngineAdapter:
         elif credential_kind == "oauth":
             if normalized_base_url is not None:
                 raise EngineStateError("credential does not match observation target")
-            client = await asyncio.to_thread(self.supervisor.client)
+            client = await self._engine_call(self.supervisor.client)
             inventory = await asyncio.to_thread(_auth_inventory, client)
             auth_name = str(metadata.get("auth_name") or "")
             matches = [auth for auth in inventory.values() if auth.name == auth_name or auth.identity == auth_name]
@@ -2600,7 +2642,7 @@ class CLIProxyEngineAdapter:
                 raise EngineStateError("an OAuth flow for this provider is already active")
             self._active_oauth_providers.add(auth_provider)
         try:
-            client = await asyncio.to_thread(self.supervisor.client)
+            client = await self._engine_call(self.supervisor.client)
             before = await asyncio.to_thread(_auth_inventory, client)
             payload = await asyncio.to_thread(
                 client.management_request,
@@ -2703,7 +2745,7 @@ class CLIProxyEngineAdapter:
             if flow.state in {"success", "failed", "cancelled"}:
                 return flow.snapshot()
             try:
-                client = await asyncio.to_thread(self.supervisor.client)
+                client = await self._engine_call(self.supervisor.client)
                 payload = await asyncio.to_thread(
                     client.management_request,
                     "GET",
@@ -2772,7 +2814,7 @@ class CLIProxyEngineAdapter:
             else:
                 payload["code"] = submitted
             try:
-                client = await asyncio.to_thread(self.supervisor.client)
+                client = await self._engine_call(self.supervisor.client)
                 await asyncio.to_thread(
                     client.management_request,
                     "POST",
@@ -2792,7 +2834,7 @@ class CLIProxyEngineAdapter:
             if flow.state in {"success", "failed", "cancelled"}:
                 return
             try:
-                client = await asyncio.to_thread(self.supervisor.client)
+                client = await self._engine_call(self.supervisor.client)
                 await asyncio.to_thread(
                     client.management_request,
                     "DELETE",
@@ -2822,7 +2864,7 @@ class CLIProxyEngineAdapter:
             if source.allowed_origins and origin not in source.allowed_origins:
                 raise OriginNotAllowedError(f"origin {origin!r} is not allowed to use source {source_id!r}")
             try:
-                client = await asyncio.to_thread(self.supervisor.client)
+                client = await self._locked_engine_call(self.supervisor.client)
             except EngineUnavailableError as exc:
                 return completed_handle(
                     RawCallOutcome(

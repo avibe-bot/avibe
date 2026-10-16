@@ -67,14 +67,9 @@ export class ModelHubPage {
     return this.page.locator('.model-hub-shell-head');
   }
 
-  /** The gateway on/off switch. Its accessible name IS the product's
-   *  explanation of why it is disabled, so specs read the name, not a tooltip. */
-  get runtimeToggle(): Locator {
-    return this.header.getByRole('switch');
-  }
-
-  async runtimeToggleLabel(): Promise<string> {
-    return (await this.runtimeToggle.getAttribute('aria-label')) ?? '';
+  /** Recovery remains reachable after an old disabled intent or failed start. */
+  get runtimeRetry(): Locator {
+    return this.shell.getByRole('button', { name: hub('gateway.retry'), exact: true });
   }
 
   get runtimePill(): Locator {

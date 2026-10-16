@@ -52,6 +52,7 @@ from core.vibe_agents import VibeAgent, VibeAgentStore
 from core.blocking import run_blocking
 from vibe.i18n import get_supported_languages, t as i18n_t
 from core.loop_watchdog import EventLoopWatchdog
+from storage import loop_writers
 from vibe.runtime import current_process_owns_service_instance, mark_service_instance_started
 
 if TYPE_CHECKING:
@@ -264,6 +265,8 @@ class Controller:
         # Keep the driver proxy lazy so an enabled desktop toggle does not
         # create a driver process until an active Turn requests it.
         self.computer_use_server = None
+        self.computer_script_sessions = None
+        self.computer_script_interactions = None
         self.runtime_ownership = RuntimeOwnershipProvider(
             self.session_turns._sqlite_engine()
         )
@@ -431,9 +434,11 @@ class Controller:
         await self.model_hub_service.start_vibey_without_models()
 
     async def _model_hub_catalog_changed(self, backend: str) -> None:
-        """Follow a committed Model Hub catalog change for one backend."""
+        """Follow a committed Model Hub catalog change for one backend.
 
-        from config.v2_config import V2Config
+        Model Hub's current config is read through ``model_hub_runtime``; the app
+        config (``self.config``) carries none of it, so nothing here copies it there.
+        """
 
         if backend == "vibey":
             try:
@@ -441,11 +446,6 @@ class Controller:
             except Exception:
                 # The catalog change stands; the next start reconciles again.
                 logger.warning("Vibey Agent model reconciliation failed", exc_info=True)
-        try:
-            latest = V2Config.load()
-        except FileNotFoundError:
-            return
-        self.config.model_hub = latest.model_hub
         # Each runtime moves to the committed catalog at its next turn;
         # nothing restarts or drains. A disabled backend has nothing to adopt.
         agent = getattr(getattr(self, "agent_service", None), "agents", {}).get(backend)
@@ -1687,6 +1687,7 @@ class Controller:
         from core.services import sessions as workbench_sessions_service
         from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
         from storage.db import create_sqlite_engine
+        from storage.workbench_sessions_service import MAIN_SESSION_ID
 
         if (
             not isinstance(raw_session_id, str)
@@ -1694,7 +1695,10 @@ class Controller:
             or raw_session_id != raw_session_id.strip()
         ):
             raise ValueError("invalid Workbench session ID")
-        if raw_session_id == WORKSPACE_NOTICE_SESSION_ID:
+        if raw_session_id in {
+            WORKSPACE_NOTICE_SESSION_ID,
+            MAIN_SESSION_ID,
+        }:
             raise workbench_sessions_service.ReservedSessionError(raw_session_id)
 
         async def retire_computer_use_session() -> None:
@@ -1945,6 +1949,7 @@ class Controller:
         terminal_error: Optional[str] = None,
         delivery: Any = None,
         citations: Optional[CitationBundle] = None,
+        hosted: Optional[dict] = None,
     ):
         """Backward-compatible entrypoint; delegated to message dispatcher."""
         result = await self.message_dispatcher.emit_agent_message(
@@ -1965,7 +1970,11 @@ class Controller:
             # signature of every stand-in. The citation sidecar rides the same way.
             **({"delivery": delivery} if delivery is not None else {}),
             **({"citations": citations} if citations else {}),
+            **({"hosted": hosted} if hosted else {}),
         )
+        # The dispatcher's terminal commit already ran this write beside the Turn's
+        # signal (#2714), which makes this call a no-op. It still covers a dispatcher
+        # that did not reach that commit.
         manager = getattr(self, "session_turns", None)
         complete = getattr(manager, "on_terminal_delivery_complete", None)
         if callable(complete):
@@ -2171,6 +2180,11 @@ class Controller:
         try:
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
+            # This thread runs the loop: the one thread an activation commit may hold
+            # the runtime boundary across its I/O on.
+            self.runtime_activation.bind_loop_thread()
+            # The thread whose SQLite write transactions are counted (#2710).
+            loop_writers.bind_loop_thread()
             # Names whatever blocks this loop while it blocks; see core/loop_watchdog.py.
             self._loop_watchdog = EventLoopWatchdog(self._loop)
             self._loop_watchdog.start()
@@ -2209,6 +2223,9 @@ class Controller:
         except Exception as e:
             logger.error(f"Error in main run loop: {e}", exc_info=True)
         finally:
+            # The loop no longer serves Sessions; cleanup that reuses its thread is
+            # not a loop writer (#2710).
+            loop_writers.unbind_loop_thread()
             self.cleanup_sync()
             if not getattr(self, "_shutdown_tainted", False):
                 self._service_lock_safe_to_release = True
@@ -2565,6 +2582,18 @@ class Controller:
             self._internal_server_task = None
 
         async def _close_computer_use_server() -> None:
+            script_interactions = getattr(
+                self,
+                "computer_script_interactions",
+                None,
+            )
+            self.computer_script_interactions = None
+            if script_interactions is not None:
+                script_interactions.close_all()
+            script_sessions = getattr(self, "computer_script_sessions", None)
+            self.computer_script_sessions = None
+            if script_sessions is not None:
+                script_sessions.close_all()
             server = getattr(self, "computer_use_server", None)
             self.computer_use_server = None
             if server is not None:
@@ -2690,6 +2719,7 @@ class Controller:
         except Exception as e:
             logger.warning("OpenCode server cleanup failed: %s", e)
 
+        loop_writers.log_summary(final=True)
         logger.info("Controller cleanup (sync) complete")
 
     def _model_hub_snapshot_refresh_completed(self) -> None:
@@ -2996,6 +3026,13 @@ class Controller:
         except Exception:
             logger.warning(
                 "Model Hub built-in reconciliation failed during startup",
+                exc_info=True,
+            )
+        try:
+            asyncio.run(self.model_hub_service.reconcile_source_reasoning_tiers())
+        except Exception:
+            logger.warning(
+                "Model Hub could not derive saved Source tiers again during startup",
                 exc_info=True,
             )
         self.model_hub_turn_gateway = ModelHubTurnGateway(

@@ -12,6 +12,7 @@ class Agent:
                  context: ContextConfig | None = None) -> None: ...   # C-9; excludes hooks in v1 (§3)
 
     def run(self, input: Input, *, turn_id: str) -> AsyncIterator[AgentEvent]: ...   # one Avibe Turn
+    def resume(self, input: Input, *, turn_id: str, turn_inputs: Iterable[int] | None = None) -> AsyncIterator[AgentEvent]: ...
     def steer(self, input: Input) -> bool: ...       # False: not accepted, the adapter keeps ownership
     def follow_up(self, input: Input) -> bool: ...
     def abort(self, reason: str) -> None: ...
@@ -26,7 +27,23 @@ class Agent:
 wraps the given `JobHost` (`Agent.jobs`) to track foreground jobs for `abort`; tools are constructed with that
 wrapper.
 
-## 2. One run
+A transcript-only `resume` uses the same loop and cleanup path as `run`, but skips
+input consumption. It may be used only after the previous run has closed; the
+adapter supplies an existing input to `before_run` for hook setup but does not
+write a second `input` row. A fresh Agent passes the source Turn's committed input
+sequence numbers through `turn_inputs`; an Agent continuing its own run preserves
+its in-memory Turn-input set when the argument is omitted. Retry eligibility and
+retry budgets are adapter policy, not loop policy.
+
+A provider-caused `AgentError` preserves `retryable`, `continuable`, and `retry_after_s`; other errors default
+to false/false/None. Vibey continues only a source error explicitly marked `continuable`, with no committed final
+and no Stop. It permits at most five additional runs on the same Agent, with exponential backoff bounded by the
+loop's delay settings and Retry-After as a floor. One elapsed window (the loop policy's `max_elapsed_s`, at most
+120 seconds) starts at the first eligible failed run and includes all subsequent recovery work, waits, and runs;
+it is not restarted by `resume`. A delay that does not fit denies another continuation. Expiry prevents new
+continuations without interrupting a run already doing useful work. Stop wakes backoff immediately and settles
+the Turn as stopped without another provider request or a failure notice.
+
 
 ```text
 commit input → loop:
@@ -46,7 +63,25 @@ commit input → loop:
 ```
 
 Finality is decided before the response row is inserted, so a final (`result` or `error`) row is always the run's last
-response. A final response with `stop_reason` `refusal` or `safety` and no text is still committed as the final
+response. A final response with `stop_reason=length` is incomplete, even when it
+contains partial text: commit it as `error`, preserve usable content,
+and end with an error of kind `length`. A no-answer length stop is not an
+`empty_response`; the upstream already supplied the cause. Ordinary empty or
+reasoning-only `stop` responses still fail as `empty_response`, unless the run's
+calls generated images (a completed `image_generate` result): a final that ends
+normally then replies with them, delivered under their heading
+(`vibey-hosted-tools.md` §7.3). A refusal, safety or length stop stays a failure,
+its images still delivered. The loop decides whether a response replies once
+(`has_reply`), from the tool results as they committed (a settlement another
+writer won counts as it committed), and passes the decision to `append_response`
+as `replied`, with the images a final delivers as `images`. The row's type and
+display at commit carry both, so the committed final is the complete terminal
+reply even if delivery never runs; live settlement takes the same values. This does not
+add a model call, increase an output limit, or replay a task. Non-final responses
+with pending steer/follow-up keep continuing normally; truncated tool calls keep
+the existing bounded reissue path without executing their partial arguments.
+
+A final response with `stop_reason` `refusal` or `safety` and no text is still committed as the final
 response, typed `error` ([`transcript.md`](transcript.md) §1); its commit-time display text is the localized
 explanation. (That it is written in the same transaction so that re-delivery after a crash shows it is moot: Avibe
 delivers committed rows through the shared emit path and nothing re-delivers them, [`recovery.md`](recovery.md)

@@ -432,8 +432,12 @@ index b9637489..51b62d4c 100644
 -                break;
 +                break ServeShutdown::Requested;
              }
-@@ -1385,5 +1391,18 @@ pub async fn run_serve(
-                 eprintln!("Cua Driver embedded host closed its lifetime pipe; shutting down.");
+@@ -1385,5 +1391,21 @@ pub async fn run_serve(
+-                eprintln!("Cua Driver embedded host closed its lifetime pipe; shutting down.");
++                let _ = std::io::Write::write_all(
++                    &mut std::io::stderr(),
++                    b"Cua Driver embedded host closed its lifetime pipe; shutting down.\n",
++                );
 -                break;
 +                break ServeShutdown::ParentLiveness;
              }
@@ -472,7 +476,7 @@ index b9637489..51b62d4c 100644
 -) -> anyhow::Result<()> {
 +) -> anyhow::Result<ServeShutdown> {
      anyhow::bail!("cua-driver serve is not supported on this platform");
-@@ -2285,5 +2304,12 @@ pub fn run_serve_cmd(
+@@ -2285,5 +2304,15 @@ pub fn run_serve_cmd(
      let result = rt.block_on(run_serve(sdk, &socket_path, pid_file_path.as_deref()));
 -    rt.shutdown_timeout(std::time::Duration::from_secs(30));
 -    cua_driver_core::session_authorization::release_configured_registry_for_shutdown();
@@ -482,13 +486,16 @@ index b9637489..51b62d4c 100644
 +        // globals. The owning host is gone, so abandon the runtime and let
 +        // process exit reclaim those globals instead of clearing them first.
 +        rt.shutdown_background();
++        // AppKit's cursor overlay may own the main thread's run loop, so
++        // returning from serve is not sufficient to terminate this process.
++        std::process::exit(0);
 +    } else {
 +        rt.shutdown_timeout(std::time::Duration::from_secs(30));
 +        cua_driver_core::session_authorization::release_configured_registry_for_shutdown();
 +        cua_driver_core::session::release_process_state_for_shutdown();
 +    }
      if let Err(e) = result {
-@@ -2571,2 +2595,169 @@ mod socket_tests {
+@@ -2571,2 +2598,183 @@ mod socket_tests {
 -
 +#[cfg(all(test, unix))]
 +mod parent_liveness_tests {
@@ -505,6 +512,7 @@ index b9637489..51b62d4c 100644
 +    const SOCKET_ENV: &str = "CUA_DRIVER_PARENT_LIVENESS_TEST_SOCKET";
 +    const PID_FILE_ENV: &str = "CUA_DRIVER_PARENT_LIVENESS_TEST_PID_FILE";
 +    const STARTED_ENV: &str = "CUA_DRIVER_PARENT_LIVENESS_TEST_STARTED";
++    const CURSOR_OVERLAY_ENV: &str = "CUA_DRIVER_PARENT_LIVENESS_TEST_CURSOR_OVERLAY";
 +
 +    struct BlockingTool;
 +
@@ -558,7 +566,7 @@ index b9637489..51b62d4c 100644
 +        let driver =
 +            cua_driver_sdk::CuaDriver::create_for_host(cua_driver_sdk::DriverHostOptions {
 +                cursor: cursor_overlay::CursorConfig {
-+                    enabled: false,
++                    enabled: std::env::var(CURSOR_OVERLAY_ENV).ok().as_deref() == Some("1"),
 +                    ..cursor_overlay::CursorConfig::default()
 +                },
 +                host_owns_permission_ux: true,
@@ -574,8 +582,7 @@ index b9637489..51b62d4c 100644
 +        run_serve_cmd(driver, &socket, Some(&pid_file));
 +    }
 +
-+    #[test]
-+    fn parent_liveness_exits_without_waiting_for_blocked_calls_and_unlinks_only_its_socket() {
++    fn run_parent_liveness_test(cursor_overlay: bool) {
 +        let directory = tempfile::tempdir().expect("temporary directory");
 +        let socket = directory.path().join("driver.sock");
 +        let pid_file = directory.path().join("driver.pid");
@@ -598,6 +605,7 @@ index b9637489..51b62d4c 100644
 +            .env(SOCKET_ENV, &socket)
 +            .env(PID_FILE_ENV, &pid_file)
 +            .env(STARTED_ENV, &started)
++            .env(CURSOR_OVERLAY_ENV, u8::from(cursor_overlay).to_string())
 +            .env("HOME", &home)
 +            .env("XDG_CACHE_HOME", home.join(".cache"))
 +            .env("XDG_CONFIG_HOME", home.join(".config"))
@@ -608,7 +616,7 @@ index b9637489..51b62d4c 100644
 +            .env("CUA_DRIVER_RS_UPDATE_CHECK", "0")
 +            .stdin(Stdio::piped())
 +            .stdout(Stdio::null())
-+            .stderr(Stdio::inherit())
++            .stderr(Stdio::piped())
 +            .spawn()
 +            .expect("spawn test daemon");
 +
@@ -631,6 +639,7 @@ index b9637489..51b62d4c 100644
 +        });
 +        wait_for_path(&started, Duration::from_secs(10));
 +
++        drop(child.stderr.take());
 +        drop(child.stdin.take());
 +        let deadline = Instant::now() + Duration::from_secs(5);
 +        let status = loop {
@@ -655,6 +664,18 @@ index b9637489..51b62d4c 100644
 +            std::fs::read_to_string(unrelated_state).expect("unrelated state"),
 +            "preserve\n"
 +        );
++    }
++
++    #[test]
++    fn parent_liveness_exits_without_waiting_for_blocked_calls_and_unlinks_only_its_socket() {
++        run_parent_liveness_test(false);
++    }
++
++    #[cfg(target_os = "macos")]
++    #[test]
++    #[ignore = "requires a logged-in macOS GUI session"]
++    fn parent_liveness_with_cursor_overlay_exits_after_parent_loss() {
++        run_parent_liveness_test(true);
 +    }
 +}
 +

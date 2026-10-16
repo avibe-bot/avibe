@@ -350,6 +350,19 @@ impl TrayRuntimeState {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    fn icon(&self) -> tauri::image::Image<'static> {
+        // tray-icon preserves aspect ratio: 38x36px becomes 19x18pt on macOS.
+        // The V1 artwork is 16pt tall within that canvas; templates use its alpha.
+        match self {
+            Self::Starting | Self::Stopping => tauri::include_image!("icons/tray/starting@2x.png"),
+            Self::Serving(_) => tauri::include_image!("icons/tray/serving@2x.png"),
+            Self::Unreachable => tauri::include_image!("icons/tray/unreachable@2x.png"),
+            Self::Stopped => tauri::include_image!("icons/tray/stopped@2x.png"),
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
     fn icon(&self) -> tauri::image::Image<'static> {
         let color = match self {
             Self::Starting | Self::Stopping => [210, 135, 10, 255],
@@ -494,6 +507,7 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
     app.set_menu(application_menu)?;
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(TrayRuntimeState::Starting.icon())
+        .icon_as_template(cfg!(target_os = "macos"))
         .tooltip(&catalog.starting)
         .menu(&tray)
         .build(app)?;
@@ -633,7 +647,9 @@ fn refresh_native_controls(app: &AppHandle, requested: Option<TrayRuntimeState>)
             }
             if let Some(tray) = handle.tray_by_id(TRAY_ID) {
                 tray.set_tooltip(Some(&label))?;
-                tray.set_icon(Some(state.icon()))?;
+                // Plain set_icon resets the template flag on macOS. Update both
+                // atomically so each status keeps native contrast without flicker.
+                tray.set_icon_with_as_template(Some(state.icon()), cfg!(target_os = "macos"))?;
             }
             Ok(())
         };
@@ -2465,10 +2481,71 @@ mod tests {
             TrayRuntimeState::from_status(&BootstrapStatus::rejected(BootstrapNoticeCode::ReadyTimeout, true)),
             TrayRuntimeState::Unreachable
         );
-        assert_ne!(
-            TrayRuntimeState::Unreachable.icon().rgba(),
-            TrayRuntimeState::Stopped.icon().rgba()
+        let states = [
+            TrayRuntimeState::Serving(origin),
+            TrayRuntimeState::Starting,
+            TrayRuntimeState::Unreachable,
+            TrayRuntimeState::Stopped,
+        ];
+        for (index, state) in states.iter().enumerate() {
+            for other in &states[index + 1..] {
+                assert_ne!(state.icon().rgba(), other.icon().rgba(), "{state:?} vs {other:?}");
+            }
+        }
+        assert_eq!(
+            TrayRuntimeState::Starting.icon().rgba(),
+            TrayRuntimeState::Stopping.icon().rgba()
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn tray_templates_have_transparent_monochrome_pixels_at_both_export_sizes() {
+        // Protect the shipped image boundary, including visible size: excessive
+        // transparent padding made the original cloud much smaller than its peers.
+        let origin = LoopbackOrigin::parse("http://127.0.0.1:6123").expect("test listener");
+        let images = [
+            (18, tauri::include_image!("icons/tray/serving.png")),
+            (18, tauri::include_image!("icons/tray/starting.png")),
+            (18, tauri::include_image!("icons/tray/unreachable.png")),
+            (18, tauri::include_image!("icons/tray/stopped.png")),
+            (36, TrayRuntimeState::Serving(origin).icon()),
+            (36, TrayRuntimeState::Starting.icon()),
+            (36, TrayRuntimeState::Unreachable.icon()),
+            (36, TrayRuntimeState::Stopped.icon()),
+        ];
+        for (size, image) in images {
+            let width = if size == 36 { 38 } else { 20 };
+            let vertical_margin = size / 18;
+            assert_eq!((image.width(), image.height()), (width, size));
+            assert_eq!(image.rgba().len(), (width * size * 4) as usize);
+            let pixels = image.rgba().as_chunks::<4>().0;
+            assert!(pixels.iter().all(|pixel| pixel[..3] == [0, 0, 0]));
+            assert!(pixels.iter().any(|pixel| pixel[3] > 0), "visible silhouette");
+            assert!(pixels.iter().any(|pixel| pixel[3] == 0), "transparent background");
+            let visible = pixels
+                .iter()
+                .enumerate()
+                .filter(|(_, pixel)| pixel[3] >= 16)
+                .map(|(index, _)| (index as u32 % image.width(), index as u32 / image.width()));
+            let (left, top, right, bottom) = visible.fold(
+                (image.width(), image.height(), 0, 0),
+                |(left, top, right, bottom), (x, y)| (left.min(x), top.min(y), right.max(x), bottom.max(y)),
+            );
+            assert_eq!(
+                (left, top, right, bottom),
+                (1, vertical_margin, width - 2, size - vertical_margin - 1),
+                "the cloud must be 16pt tall, with a 1px horizontal guard"
+            );
+            assert!(
+                pixels.iter().enumerate().all(|(index, pixel)| {
+                    let x = index as u32 % width;
+                    let y = index as u32 / width;
+                    (x > 0 && x < width - 1 && y >= vertical_margin && y < size - vertical_margin) || pixel[3] == 0
+                }),
+                "the guard pixels must be fully transparent at both resolutions"
+            );
+        }
     }
 
     #[test]

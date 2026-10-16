@@ -88,16 +88,18 @@ An installed Avibe artifact publishes its complete built-in set beneath the
 authoritative runtime home returned by `config.paths.get_vibe_remote_dir()`:
 
 ```text
-<resolved-avibe-home>/builtin-skills/<runtime-snapshot>/<name>/
+<resolved-avibe-home>/builtin-skills/<name>/
 ```
 
 This honors an explicit `AVIBE_HOME` and the existing legacy-home migration
-rules. Snapshot publication must not independently select or create
-`$HOME/.avibe`, because a still-authoritative `$HOME/.vibe_remote` directory
-must remain the single state home when migration cannot complete.
+rules. Publication must not independently select or create `$HOME/.avibe`,
+because a still-authoritative `$HOME/.vibe_remote` directory must remain the
+single state home when migration cannot complete.
 
-The runtime snapshot is directly readable by the agent. It is separate from
-user-managed Skills and has the highest resolution priority.
+The live catalog is directly readable by the agent. It is separate from
+user-managed Skills and has the highest resolution priority. A later Avibe
+version replaces that catalog in place, so overlapping processes and already
+loaded companion scripts may observe the newer files.
 
 ### 4.2 Project compatibility roots
 
@@ -328,7 +330,7 @@ Therefore, without restarting Avibe or creating a new Session:
 
 `vibe skill list` and `vibe skill load` also resolve from disk on every
 invocation. Backend-bound commands use the same Session working directory,
-project boundary, compatibility homes, and built-in snapshot that produced the
+project boundary, compatibility homes, and built-in catalog that produced the
 Turn's Catalog. Binding is internal runtime state, not prompt text or a command
 argument.
 
@@ -368,18 +370,36 @@ that Avibe's normal backend calls expose only the Avibe Catalog and load route.
 ## 10. Built-in Lifecycle
 
 The bundled `skills/` tree is authoritative for each Avibe artifact. Before
-managed discovery, the artifact publishes a complete, agent-readable runtime
-snapshot. A new version therefore adds new built-ins, replaces changed ones,
-and omits retired ones as one coherent set.
+managed discovery, the artifact publishes a complete, agent-readable catalog
+under `builtin-skills/<name>/`. A new version therefore adds new built-ins,
+replaces changed ones, and omits retired ones as one coherent set.
 
-Publication is atomic and content-addressed so overlapping old and new Avibe
-processes can keep using the snapshot each one advertised. Published snapshots
-are not a user customization surface. V1 does not garbage-collect old
-snapshots, detect later manual tampering, or repair user changes there.
+Publication replaces that catalog by renaming the live directory aside and
+swapping in a staging tree. The previous catalog remains at
+`.builtin-skills.previous` until the next successful publication, so a reader
+that selected it during the swap can finish. Overlapping old and new Avibe
+processes share the live files after replacement; hashed per-version snapshots
+are not retained. The published catalog is not a user customization surface.
+V1 does not detect later manual tampering or repair user changes there.
+Leftover content-addressed snapshot directories from earlier Avibe versions are
+not discovered as Skills. A catalog that still contains only those hashed trees
+is not treated as published; the next unbound discovery republishes the named
+catalog in place. A bound path that still names a missing hashed snapshot falls
+back to the parent named catalog when that catalog is readable.
+
+Standalone `vibe skill` commands reuse a readable live catalog and do not
+republish on every list or load. Upgrade publication is the service
+`prepare_builtin_skills()` path.
 
 Wheels and source distributions include the authoritative built-in tree and
-preserve companion files and executable script modes. A publication failure
-omits built-ins without substituting a different version's content.
+preserve companion files and executable script modes. Publication rechecks the
+enumerated source before swapping so a mid-copy source change cannot land as a
+hybrid catalog. A publication failure binds an empty
+`AVIBE_BUILTIN_SKILLS_ROOT` so this process does not keep serving a previous
+catalog, and omits built-ins without substituting a different version's
+content. A nonempty but invalid explicit catalog root, such as a relative path
+from a restored poll, also binds that empty sentinel so the shell cannot inherit
+a different catalog.
 
 ## 11. Installation Defaults
 
@@ -437,7 +457,7 @@ consume it.
 
 Backend adapters own only native isolation, Session-bound command context, and
 application of a changed Avibe prompt. Built-in publication owns only the
-artifact-to-runtime snapshot lifecycle.
+artifact-to-runtime catalog lifecycle.
 
 The existing [Workbench Skills design](workbench-skills-page.md) remains the
 management surface. This protocol supersedes its backend selection and
@@ -453,7 +473,7 @@ Automated and local Incus regression must prove:
 - body-only load plus direct access to companion scripts and references;
 - live add, edit, rename, and delete behavior in one existing Session;
 - equivalent Catalogs and native isolation across Claude, Codex, and OpenCode;
-- installation and upgrade publication of complete built-in snapshots; and
+- installation and upgrade publication of the complete live built-in catalog; and
 - bounded failure of malformed, oversized, unavailable, or concurrently
   changing inputs without taking down unrelated Skills or backend Turns.
 
@@ -468,5 +488,5 @@ V1 does not include:
 - Skill editing or copy-on-write;
 - behavior for `${AVIBE_HOME:-$HOME/.avibe}/skills`;
 - historical-context invalidation;
-- built-in snapshot garbage collection or self-healing; or
+- built-in catalog self-healing; or
 - a filesystem security sandbox.

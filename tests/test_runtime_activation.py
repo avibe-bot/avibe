@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import sqlite3
 import threading
+import time
+from contextlib import closing
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
@@ -13,7 +17,8 @@ from core.runtime_activation import (
     RuntimeActivationRegistry,
     RuntimeActivationResolution,
 )
-from core.scheduled_tasks import ScheduledTaskService, TaskExecutionRequest
+from core.runtime_recovery import FallbackRequestRecoveryHandler
+from core.scheduled_tasks import ScheduledTaskService, TaskExecutionRequest, TaskExecutionStore
 from core.session_activities import SessionActivityRegistry
 from modules.agents.base import AGENT_RUNTIME_TURN_KEY, AGENT_RUNTIME_TURN_TOKEN
 from modules.agents.claude_agent import ClaudeAgent
@@ -929,14 +934,15 @@ def test_hfr_137_cleanup_first_rejects_fallback_claim() -> None:
     assert claim_calls == []
 
 
-def test_hfr_137_claim_first_requeues_when_cleanup_wins_before_pid() -> None:
-    """HFR-137: a pre-PID claim survives cleanup through exact Run requeue."""
+def test_hfr_137_claim_that_loses_to_cleanup_during_its_write_is_given_back() -> None:
+    """HFR-137, #2655: a claim writes with no boundary held, so a cleanup that starts meanwhile retires the generation
+    at once instead of waiting for the write. The claim, confirmed after it lands, finds its generation retired and is
+    given back to the queue, so nothing ever starts on the retired generation."""
 
     registry = RuntimeActivationRegistry()
     identity = registry.attach("claude", "runtime-1")
     claim_entered = threading.Event()
     allow_claim = threading.Event()
-    retirement_started = threading.Event()
     pending = TaskExecutionRequest(
         id="run-1",
         request_type="agent_run",
@@ -947,7 +953,6 @@ def test_hfr_137_claim_first_requeues_when_cleanup_wins_before_pid() -> None:
         request_type=pending.request_type,
         agent_backend=pending.agent_backend,
     )
-    mark_calls: list[str] = []
     requeued: list[str] = []
 
     def claim(_request_id: str) -> TaskExecutionRequest:
@@ -957,8 +962,6 @@ def test_hfr_137_claim_first_requeues_when_cleanup_wins_before_pid() -> None:
 
     request_store = SimpleNamespace(
         claim=claim,
-        refresh_claimed_request=lambda request: request,
-        mark_execution_started=lambda request_id: mark_calls.append(request_id) or True,
         requeue=lambda request_id: requeued.append(request_id),
     )
     service = _fallback_service(registry, request_store, identity)
@@ -968,32 +971,19 @@ def test_hfr_137_claim_first_requeues_when_cleanup_wins_before_pid() -> None:
     claim_thread = threading.Thread(
         target=lambda: claims.append(service._claim_pending_request(pending))
     )
-
-    def retire() -> None:
-        retirement_started.set()
-        retired.append(registry.retire_if_current(identity, lambda: True))
-
-    retirement_thread = threading.Thread(target=retire)
+    retirement_thread = threading.Thread(
+        target=lambda: retired.append(registry.retire_if_current(identity, lambda: True))
+    )
     claim_thread.start()
     assert claim_entered.wait(timeout=2)
     retirement_thread.start()
-    assert retirement_started.wait(timeout=2)
-    allow_claim.set()
-
-    _join(claim_thread)
+    # The cleanup does not wait for the claim's write.
     _join(retirement_thread)
-
-    assert claims == [claimed_request]
-    assert claimed_request.observed_activation_identity == identity
     assert retired == [True]
+    allow_claim.set()
+    _join(claim_thread)
 
-    request, started = asyncio.run(
-        service._mark_execution_started_for_claimed_request(claimed_request)
-    )
-
-    assert request is claimed_request
-    assert started is False
-    assert mark_calls == []
+    assert claims == [None]
     assert requeued == [pending.id]
 
 
@@ -1055,33 +1045,32 @@ def test_hfr_137_backend_drain_requeues_existing_pre_pid_claim() -> None:
     assert requeued == [request.id]
 
 
-def test_hfr_137_fallback_pid_marker_first_blocks_retirement_until_commit() -> None:
-    """HFR-137: PID admission completes before a competing cleanup can retire."""
+def test_hfr_137_pid_marker_that_loses_to_cleanup_during_its_write_is_requeued() -> None:
+    """HFR-137, #2655: the start marker writes with no boundary held, so a cleanup that starts meanwhile retires the
+    generation at once instead of waiting for the write. The start, confirmed after the marker lands, finds its
+    generation retired: the execution does not start, and the claim goes back to the queue, marker cleared."""
 
     registry = RuntimeActivationRegistry()
     identity = registry.attach("claude", "runtime-1")
     marker_entered = threading.Event()
     allow_marker = threading.Event()
-    retirement_started = threading.Event()
-    order: list[str] = []
     request = TaskExecutionRequest(
         id="run-1",
         request_type="agent_run",
         agent_backend="claude",
         observed_activation_identity=identity,
     )
+    requeued: list[str] = []
 
     def mark_execution_started(_request_id: str) -> bool:
-        order.append("marker-entered")
         marker_entered.set()
         assert allow_marker.wait(timeout=2)
-        order.append("marker-finished")
         return True
 
     request_store = SimpleNamespace(
         refresh_claimed_request=lambda current: current,
         mark_execution_started=mark_execution_started,
-        requeue=lambda _request_id: pytest.fail("admitted marker was requeued"),
+        requeue=lambda request_id: requeued.append(request_id),
     )
     service = _fallback_service(registry, request_store, identity)
     marked: list[tuple[TaskExecutionRequest, bool]] = []
@@ -1092,26 +1081,209 @@ def test_hfr_137_fallback_pid_marker_first_blocks_retirement_until_commit() -> N
             asyncio.run(service._mark_execution_started_for_claimed_request(request))
         )
     )
-
-    def retire() -> None:
-        retirement_started.set()
-
-        def final_predicate() -> bool:
-            order.append("retire-predicate")
-            return True
-
-        retired.append(registry.retire_if_current(identity, final_predicate))
-
-    retirement_thread = threading.Thread(target=retire)
+    retirement_thread = threading.Thread(
+        target=lambda: retired.append(registry.retire_if_current(identity, lambda: True))
+    )
     marker_thread.start()
     assert marker_entered.wait(timeout=2)
     retirement_thread.start()
-    assert retirement_started.wait(timeout=2)
-    allow_marker.set()
-
-    _join(marker_thread)
+    # The cleanup does not wait for the marker's write.
     _join(retirement_thread)
-
-    assert marked == [(request, True)]
     assert retired == [True]
-    assert order == ["marker-entered", "marker-finished", "retire-predicate"]
+    allow_marker.set()
+    _join(marker_thread)
+
+    assert marked == [(request, False)]
+    assert requeued == [request.id]
+
+
+def test_a_claim_waiting_for_the_sqlite_writer_never_holds_the_boundary_the_loop_needs(tmp_path) -> None:
+    """#2655: the scheduler claims off the loop, and its claim waits for SQLite's writer. The loop admits Session Turns
+    inside a transaction that already holds the writer, and only then takes the activation boundary. A claim that held
+    the boundary while it waited for the writer would make the loop wait for SQLite's busy timeout. It never holds it
+    there, so the loop takes the boundary at once, and the claim lands when the loop's transaction ends."""
+
+    db_path = tmp_path / "state.sqlite"
+    with closing(sqlite3.connect(db_path)) as setup:
+        setup.execute("CREATE TABLE claims (run_id TEXT)")
+        setup.commit()
+    registry = RuntimeActivationRegistry()
+    identity = registry.attach("claude", "runtime-1")
+    pending = TaskExecutionRequest(id="run-1", request_type="agent_run", agent_backend="claude")
+    claim_writing = threading.Event()
+
+    def claim(request_id: str) -> TaskExecutionRequest:
+        with closing(sqlite3.connect(db_path, timeout=2)) as conn:
+            claim_writing.set()
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("INSERT INTO claims VALUES (?)", (request_id,))
+            conn.commit()
+        return pending
+
+    request_store = SimpleNamespace(
+        claim=claim,
+        requeue=lambda _request_id: pytest.fail("a claim made on a live generation was given back"),
+    )
+    service = _fallback_service(registry, request_store, identity)
+    claims: list[TaskExecutionRequest | None] = []
+    errors: list[BaseException] = []
+
+    def run_claim() -> None:
+        try:
+            claims.append(service._claim_pending_request(pending))
+        except Exception as exc:
+            errors.append(exc)
+
+    with closing(sqlite3.connect(db_path, timeout=2)) as loop_transaction:
+        loop_transaction.execute("BEGIN IMMEDIATE")
+        claim_thread = threading.Thread(target=run_claim)
+        claim_thread.start()
+        assert claim_writing.wait(timeout=2)
+        time.sleep(0.1)  # the claim now waits for the writer this transaction holds
+        started = time.monotonic()
+        with registry.hold_if_current(identity) as admitted:
+            waited = time.monotonic() - started
+        loop_transaction.commit()
+    _join(claim_thread)
+
+    assert waited < 0.05, f"the loop waited {waited:.2f}s on a claim that held the boundary while waiting for SQLite"
+    assert admitted is True
+    assert errors == []
+    assert claims == [pending]
+
+
+def test_a_claim_confirmed_before_a_graceful_cleanup_keeps_its_generation() -> None:
+    """#2655: a claim confirmed while its generation was live stands. A graceful cleanup whose final snapshot sees the
+    claimed Run as an owner declines, and the Run then starts on that generation."""
+
+    registry = RuntimeActivationRegistry()
+    identity = registry.attach("claude", "runtime-1")
+    pending = TaskExecutionRequest(id="run-1", request_type="agent_run", agent_backend="claude")
+    owners: set[str] = set()
+    request_store = SimpleNamespace(
+        claim=lambda request_id: owners.add(request_id) or pending,
+        refresh_claimed_request=lambda current: current,
+        mark_execution_started=lambda _request_id: True,
+        requeue=lambda _request_id: pytest.fail("a confirmed claim was given back"),
+    )
+    service = _fallback_service(registry, request_store, identity)
+
+    claimed = service._claim_pending_request(pending)
+
+    assert claimed is pending
+    assert registry.retire_if_current(identity, lambda: not owners) is False
+    assert asyncio.run(service._mark_execution_started_for_claimed_request(claimed)) == (claimed, True)
+
+
+def _sqlite_request_store(tmp_path, monkeypatch) -> tuple[TaskExecutionStore, TaskExecutionRequest]:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    queued = request_store.enqueue_agent_run(message="run", agent_backend="claude", session_id="ses-runtime")
+    return request_store, queued
+
+
+def _failing_requeue(_request_id: str) -> None:
+    raise sqlite3.OperationalError("database is locked")
+
+
+def test_a_claim_whose_give_back_fails_starts_nothing_and_is_requeued_by_recovery(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """#2655: a claim that lost to a cleanup is given back to the queue. When that write fails too, the claim is still
+    refused, so nothing starts on the retired generation, and the failure is logged. The claim it left has no start
+    marker, so the claimed-run recovery puts the Run back in the queue, to run again."""
+
+    request_store, queued = _sqlite_request_store(tmp_path, monkeypatch)
+    registry = RuntimeActivationRegistry()
+    identity = registry.attach("claude", "runtime-1")
+
+    def claim_while_cleanup_lands(request_id: str) -> TaskExecutionRequest | None:
+        assert registry.retire_if_current(identity, lambda: True)
+        return request_store.claim(request_id)
+
+    service = _fallback_service(
+        registry,
+        SimpleNamespace(claim=claim_while_cleanup_lands, requeue=_failing_requeue),
+        identity,
+    )
+
+    with caplog.at_level(logging.ERROR, logger="core.runtime_activation"):
+        assert service._claim_pending_request(queued) is None
+    assert "lost to the retirement of claude" in caplog.text
+    left = request_store.get_run(queued.id)
+    assert left["status"] == "running" and left["pid"] is None
+
+    recovery = FallbackRequestRecoveryHandler(request_store.sqlite_backend)
+    items, _has_more = recovery.scan(limit=10, occupied=frozenset())
+    assert [recovery.process_sync(item) for item in items] == [True]
+    assert request_store.get_run(queued.id)["status"] == "queued"
+
+
+def test_a_start_whose_give_back_fails_never_runs_and_settles_as_interrupted(tmp_path, monkeypatch) -> None:
+    """#2655: a start marker that lost to a cleanup is cleared by giving the claim back. When that write fails too, the
+    execution never starts. The marker it left reads, to recovery, as an execution that may have begun, so recovery
+    settles the Run as interrupted, with its failure notice, rather than running it again: the cost of a failed write
+    racing a retirement, which only a persisted generation could undo (see the design note)."""
+
+    request_store, queued = _sqlite_request_store(tmp_path, monkeypatch)
+    registry = RuntimeActivationRegistry()
+    identity = registry.attach("claude", "runtime-1")
+    claimed = request_store.claim(queued.id)
+    assert claimed is not None
+    claimed.observed_activation_identity = identity
+
+    def mark_while_cleanup_lands(request_id: str) -> bool:
+        assert registry.retire_if_current(identity, lambda: True)
+        return request_store.mark_execution_started(request_id)
+
+    service = _fallback_service(
+        registry,
+        SimpleNamespace(
+            refresh_claimed_request=lambda current: current,
+            mark_execution_started=mark_while_cleanup_lands,
+            requeue=_failing_requeue,
+        ),
+        identity,
+    )
+
+    with pytest.raises(sqlite3.OperationalError):
+        asyncio.run(service._mark_execution_started_for_claimed_request(claimed))
+    assert request_store.get_run(queued.id)["pid"] is not None
+
+    request_store.recover_processing()
+    settled = request_store.get_run(queued.id)
+    assert settled["status"] == "failed" and settled["pid"] is None
+
+
+def test_a_boundary_held_off_the_loop_thread_is_reported_with_its_caller(caplog) -> None:
+    """#2655: off the controller loop thread, ``commit_if_current`` and ``hold_if_current`` would hold the boundary
+    across their commit's I/O while the loop takes it synchronously. Such a call is logged as an error naming its
+    caller, so a new off-loop holder cannot bring the loop stall back unnoticed."""
+
+    registry = RuntimeActivationRegistry()
+    identity = registry.attach("claude", "runtime-1")
+    registry.bind_loop_thread()  # this thread plays the controller loop
+
+    def holder_on_a_worker_commits() -> None:
+        registry.commit_if_current(identity, lambda: None)
+
+    def holder_on_a_worker_holds() -> None:
+        with registry.hold_if_current(identity):
+            pass
+
+    with caplog.at_level(logging.ERROR, logger="core.runtime_activation"):
+        registry.commit_if_current(identity, lambda: None)
+        with registry.hold_if_current(identity):
+            pass
+        assert not caplog.records, "a holder on the loop thread was reported"
+        for target in (holder_on_a_worker_commits, holder_on_a_worker_holds):
+            worker = threading.Thread(target=target)
+            worker.start()
+            _join(worker)
+
+    reports = [record.getMessage() for record in caplog.records if record.levelno == logging.ERROR]
+    assert len(reports) == 2
+    assert "commit_if_current" in reports[0] and "in holder_on_a_worker_commits" in reports[0]
+    assert "hold_if_current" in reports[1] and "in holder_on_a_worker_holds" in reports[1]
+
+

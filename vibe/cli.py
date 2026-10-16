@@ -35,10 +35,11 @@ from sqlalchemy import select
 from config import paths
 from config.atomic_io import write_atomic
 from config.v2_config import V2Config
-from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, display_name_for_backend
+from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, display_name_for_backend, is_native_cli_backend
 from core.scheduled_tasks import (
     AGENT_RUN_CLOSE_AFTER_METADATA_KEY,
     AGENT_RUN_DELIVERY_QUEUE,
+    AGENT_RUN_DELIVERY_SEND_NOW,
     AGENT_RUN_DELIVERY_STEER,
     BINDING_FOLLOWS_SESSION_METADATA_KEY,
     ScheduledTaskStore,
@@ -756,6 +757,34 @@ def cmd_computer(args) -> int:
             hint=translate("computer.cli.hint.missingCallerSession"),
             help_command="vibe computer --help",
         )
+    if args.computer_command == "run":
+        from vibe.computer_script_runner import (
+            ComputerScriptRunnerError,
+            run_computer_script,
+        )
+
+        try:
+            result = run_computer_script(
+                caller_session_id=caller_session_id,
+                script_file=args.file,
+                arg_values=args.arg,
+            )
+        except ComputerScriptRunnerError as exc:
+            params = dict(exc.params)
+            if exc.structured_error is not None:
+                params["error"] = translate_computer_error(
+                    exc.structured_error,
+                    translate=translate,
+                    fallback=str(params.get("error") or ""),
+                )
+            raise TaskCliError(
+                translate(exc.key, **params),
+                code=exc.code,
+                details=exc.details,
+                help_command="vibe computer run --help",
+            ) from exc
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        return 0
     if args.computer_command == "observe":
         command_path = ("observe", args.computer_observe_command)
     elif args.computer_command == "clipboard":
@@ -826,7 +855,14 @@ def cmd_computer(args) -> int:
             print(format_human_result(tool, result, translate=translate))
         return 1
 
-    screenshot_path = write_screenshot(tool, result, args.output)
+    try:
+        screenshot_path = write_screenshot(tool, result, args.output)
+    except ComputerCliError as exc:
+        raise TaskCliError(
+            i18n_t(exc.key, language, **exc.params),
+            code="computer_use_screenshot_missing",
+            help_command="vibe computer --help",
+        ) from exc
     if screenshot_path:
         body["screenshot_path"] = screenshot_path
     if args.json:
@@ -2009,8 +2045,9 @@ def _agent_run_examples_text() -> str:
         Session target:
           Use --session-id to continue an existing Agent Session.
           The default is P1: steer an active native Turn, start when idle, or fall back to the durable P3 queue.
+          A Turn that a person's message is part of is not steered: the Run queues behind it and runs as its own Turn.
           Add --queue to persist this Run as P3 behind the active Turn.
-          --send-now explicitly selects the same P1 content delivery for an existing Session.
+          --send-now steers the active Turn even when a person's message is part of it.
           To promote the exact existing P3 queue head without a new message, use: vibe session send-now <session-id>
           Inspect queued work with: vibe session queue list <session-id>
           Remove one exact queued row with: vibe session queue remove <session-id> <message-id>
@@ -5770,50 +5807,89 @@ def cmd_agent_models(args):
         return 1
 
 
-def _agent_value_warning_fields(agent) -> dict:
-    """Best-effort, non-fatal warnings when an Agent's model/effort is unknown.
+def _catalog_mismatches(
+    backend: str, model: Optional[str], reasoning_effort: Optional[str], *, language: str
+) -> tuple[list[str], bool]:
+    """What the backend's model catalog says against ``model`` and ``reasoning_effort``, and whether it is authoritative.
 
-    Cheap (file-based) check for claude/codex only; OpenCode availability is
-    live (needs the OpenCode server) so it is skipped here to keep create/update
-    fast — ``vibe agent models`` is the place for the full OpenCode check.
+    The catalog is ``api.agent_model_options``, the one ``vibe agent models`` and the Web picker read. Vibey's is the
+    Model Hub menu, authoritative: a model it does not list cannot run, and an effort its model does not list is never
+    sent, so one it cannot load vouches for nothing and is itself a mismatch. claude and codex catalogs are bundled and
+    may lag behind a new release, so a mismatch is advisory. OpenCode's is live (it needs the OpenCode server), so it
+    is not checked here, keeping the commands fast; ``vibe agent models`` is the place for the full OpenCode check.
     """
-    if agent.backend not in ("claude", "codex"):
-        return {}
-    if not agent.model and not agent.reasoning_effort:
-        return {}
+    if backend == "opencode" or (not model and not reasoning_effort):
+        return [], False
+    words = "harness.cli.agentRunModel"
+    authoritative = not is_native_cli_backend(backend)
     try:
-        options = api.agent_model_options(agent.backend)
+        options = api.agent_model_options(backend)
     except Exception:
-        return {}
+        options = {}
     if not options.get("ok"):
-        return {}
+        return ([i18n_t(f"{words}.catalogUnavailable", language, backend=backend)] if authoritative else []), authoritative
     by_value = {entry.get("value"): entry for entry in options.get("models") or []}
-    model_unknown = bool(agent.model) and agent.model not in by_value
-    warnings: list[str] = []
+    model_unknown = bool(model) and model not in by_value
+    mismatches: list[str] = []
     if model_unknown:
-        warnings.append(
-            f"model '{agent.model}' is not in the known {agent.backend} model list; "
-            "it may be a typo or newer than the catalog"
-        )
-    if agent.reasoning_effort:
-        if agent.model and not model_unknown:
-            allowed = set(by_value[agent.model].get("reasoning_efforts") or [])
-            scope = f"model '{agent.model}'"
+        key = "modelNotInCatalog" if authoritative else "modelMaybeNewer"
+        mismatches.append(i18n_t(f"{words}.{key}", language, model=model, backend=backend))
+    if reasoning_effort:
+        if model and not model_unknown:
+            allowed = set(by_value[model].get("reasoning_efforts") or [])
+            # An authoritative model that lists no efforts takes none.
+            constrained = bool(allowed) or authoritative
+            message = i18n_t(f"{words}.effortInvalidForModel", language, effort=reasoning_effort, model=model)
         else:
             # model unset or unknown: accept any effort valid for some model of this backend
             # (Codex efforts are backend-wide; Claude's widest set still lives in some model)
             allowed = set()
             for entry in by_value.values():
                 allowed.update(entry.get("reasoning_efforts") or [])
-            scope = f"backend '{agent.backend}'"
-        if allowed and agent.reasoning_effort not in allowed:
-            warnings.append(f"reasoning_effort '{agent.reasoning_effort}' is not valid for {scope}")
+            constrained = bool(allowed)
+            message = i18n_t(f"{words}.effortInvalidForBackend", language, effort=reasoning_effort, backend=backend)
+        if constrained and reasoning_effort not in allowed:
+            mismatches.append(message)
+    return mismatches, authoritative
+
+
+def _agent_value_warning_fields(agent) -> dict:
+    """Best-effort, non-fatal warnings when an Agent's model/effort is unknown (``_catalog_mismatches``)."""
+    if agent.backend not in ("claude", "codex"):
+        return {}
+    language = _configured_cli_language()
+    warnings, _ = _catalog_mismatches(agent.backend, agent.model, agent.reasoning_effort, language=language)
     if not warnings:
         return {}
     return {
         "warnings": warnings,
-        "hint": f"Run `vibe agent models {agent.name}` to list valid models and reasoning efforts.",
+        "hint": i18n_t("harness.cli.agentRunModel.catalogHint", language, agent=agent.name),
     }
+
+
+def _session_model_override_fields(
+    *, backend: str, agent_label: str, model: Optional[str], reasoning_effort: Optional[str], help_command: str
+) -> dict:
+    """Check the model and effort a new Session will run on against the target Agent's catalog.
+
+    ``model`` and ``reasoning_effort`` are the effective pair: the run's overrides over the defaults the Session would
+    otherwise keep. Where the catalog is authoritative (Vibey's Model Hub menu), a pair it does not offer is refused
+    and its reservation released; elsewhere a mismatch is a warning on the run, as ``vibe agent create/update`` gives.
+    """
+    language = _configured_cli_language()
+    mismatches, authoritative = _catalog_mismatches(backend, model, reasoning_effort, language=language)
+    if not mismatches:
+        return {}
+    hint = i18n_t("harness.cli.agentRunModel.catalogHint", language, agent=agent_label)
+    if authoritative:
+        raise TaskCliError(
+            mismatches[0],
+            code="session_model_unavailable",
+            hint=hint,
+            help_command=help_command,
+            details={"backend": backend, "model": model, "reasoning_effort": reasoning_effort},
+        )
+    return {"warnings": mismatches, "hint": hint}
 
 
 def cmd_agent_create(args):
@@ -6098,14 +6174,15 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
             hint="Fork creates a new Session from the source Session.",
             help_command=help_command,
         )
-    if not (fork_session or fork_self) and (
+    if session_id and (
         (getattr(args, "model", None) or "").strip()
         or (getattr(args, "reasoning_effort", None) or "").strip()
     ):
+        language = _configured_cli_language()
         raise TaskCliError(
-            "--model and --reasoning-effort are only valid with forked Sessions",
-            code="fork_override_without_fork",
-            hint="Use --agent, --model, and --reasoning-effort as overrides when forking a Session.",
+            i18n_t("harness.cli.agentRunModel.existingSession", language),
+            code="model_override_with_existing_session",
+            hint=i18n_t("harness.cli.agentRunModel.existingSessionHint", language),
             help_command=help_command,
         )
     if session_id and (same_scope or scope_id):
@@ -6728,7 +6805,10 @@ def _reserve_cli_session(
     session_anchor_target=None,
     visibility: str = "background",
     authorization_context=None,
+    model: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> str:
+    """Reserve a new Agent Session; ``model`` and ``reasoning_effort`` override the Agent's defaults for it."""
     # Route through ``core.services.sessions`` so the CLI shares the same
     # business API as the UI server and the future N3 internal endpoint;
     # see docs/plans/workbench-dispatch-architecture.md §6 (C2).
@@ -6744,8 +6824,8 @@ def _reserve_cli_session(
             session_anchor=session_anchor,
             agent_id=agent.id,
             agent_name=agent.name,
-            model=agent.model,
-            reasoning_effort=agent.reasoning_effort,
+            model=model or agent.model,
+            reasoning_effort=reasoning_effort or agent.reasoning_effort,
             workdir=workdir,
             visibility=visibility,
             metadata={"scope_placement": "explicit", **dict(metadata or {})},
@@ -6759,8 +6839,8 @@ def _reserve_cli_session(
             session_anchor=session_anchor,
             agent_id=agent.id,
             agent_name=agent.name,
-            model=agent.model,
-            reasoning_effort=agent.reasoning_effort,
+            model=model or agent.model,
+            reasoning_effort=reasoning_effort or agent.reasoning_effort,
             workdir=workdir,
             visibility=visibility,
             metadata=metadata,
@@ -6935,6 +7015,8 @@ def cmd_agent_run(args):
         delivery_intent = (
             AGENT_RUN_DELIVERY_QUEUE
             if bool(getattr(args, "queue", False))
+            else AGENT_RUN_DELIVERY_SEND_NOW
+            if bool(getattr(args, "send_now", False))
             else AGENT_RUN_DELIVERY_STEER
         )
         if bool(getattr(args, "send_now", False)) and session_policy != "existing":
@@ -7044,6 +7126,10 @@ def cmd_agent_run(args):
         # The caller's own authority, resolved once. A remote caller reserves
         # under it; a local caller stays ``None`` and keeps Owner semantics.
         caller_authorization = caller_resource_user_context(caller_context)
+        # A new Session (blank, --create-session, or a fork) may run on its own model, kept on the Session, which
+        # every later turn reads; it is checked against the Agent's catalog once the Session is reserved (below).
+        model_override = (getattr(args, "model", None) or "").strip() or None
+        effort_override = (getattr(args, "reasoning_effort", None) or "").strip() or None
         if session_policy == "create":
             session_id = _reserve_cli_session(
                 agent=agent,
@@ -7053,6 +7139,8 @@ def cmd_agent_run(args):
                 session_anchor_target=legacy_reservation_target,
                 visibility=visibility,
                 authorization_context=caller_authorization,
+                model=model_override,
+                reasoning_effort=effort_override,
             )
             reserved_session_id = session_id
         elif session_policy == "none":
@@ -7063,6 +7151,8 @@ def cmd_agent_run(args):
                 metadata=session_metadata,
                 visibility=visibility,
                 authorization_context=caller_authorization,
+                model=model_override,
+                reasoning_effort=effort_override,
             )
             reserved_session_id = session_id
         elif session_policy == "fork":
@@ -7089,6 +7179,21 @@ def cmd_agent_run(args):
                 agent_name=agent_name or None,
                 session_id=session_id,
                 session_key=session_key,
+                help_command="vibe agent run --help",
+            )
+        override_fields: dict = {}
+        if model_override or effort_override:
+            # Checked only after the reservation, which admitted the caller to the source Session or the Agent, so a
+            # refusal tells nothing about a Session or Agent the caller cannot reach; a refused pair releases the
+            # reservation (the ``except`` below). The pair is the one the Session will run on: each override over the
+            # default it would otherwise keep, the source Session's for a fork, else the Agent's.
+            override_fields = _session_model_override_fields(
+                backend=agent.backend,
+                agent_label=agent.name,
+                model=fork_result.model if fork_result else model_override or agent.model,
+                reasoning_effort=(
+                    fork_result.reasoning_effort if fork_result else effort_override or agent.reasoning_effort
+                ),
                 help_command="vibe agent run --help",
             )
         if (session_policy in {"create", "none"} or fork_result) and args.post_to:
@@ -7121,9 +7226,12 @@ def cmd_agent_run(args):
             agent_name=agent.name if agent else None,
             agent_id=agent.id if agent else None,
             agent_backend=agent.backend if agent else None,
-            model=fork_result.model if fork_result else (agent.model if agent else None),
+            # An existing Session's run never carries an override (``_validate_run_session_policy``).
+            model=fork_result.model if fork_result else model_override or (agent.model if agent else None),
             reasoning_effort=(
-                fork_result.reasoning_effort if fork_result else (agent.reasoning_effort if agent else None)
+                fork_result.reasoning_effort
+                if fork_result
+                else effort_override or (agent.reasoning_effort if agent else None)
             ),
             session_policy=session_policy,
             session_key=session_key,
@@ -7173,7 +7281,7 @@ def cmd_agent_run(args):
                 "close_after": close_after,
             },
         }
-        if bool(getattr(args, "send_now", False)) or delivery_intent != AGENT_RUN_DELIVERY_STEER:
+        if delivery_intent != AGENT_RUN_DELIVERY_STEER:
             payload["delivery_intent"] = delivery_intent
             payload["run"]["delivery_intent"] = delivery_intent
         if fork_result:
@@ -7186,7 +7294,7 @@ def cmd_agent_run(args):
                 request_store.mark_callback_pending(request.id)
                 run_payload["callback_status"] = "pending"
             payload["run"] = run_payload
-        _print_cli_payload("agent_run", **payload)
+        _print_cli_payload("agent_run", **payload, **override_fields)
         return 0
     except Exception as exc:
         if reserved_session_id:
@@ -8278,12 +8386,13 @@ def _publish_cli_vaults_updated(
     request: dict | None = None,
     grant: dict | None = None,
     secret_name: str | None = None,
+    notify_request: bool = True,
 ) -> None:
     """Best-effort bridge for CLI/agent vault writes into browser SSE."""
 
     if request is None and grant is None and not secret_name:
         return
-    if scope == "request" and isinstance(request, dict):
+    if scope == "request" and isinstance(request, dict) and notify_request:
         _publish_cli_vault_request_notification(request)
     try:
         from core.inbox_events import VAULTS_UPDATED_EVENT, vaults_updated_payload
@@ -8323,14 +8432,20 @@ def _is_env_name(name: str) -> bool:
     return all(c.isascii() and (c.isalnum() or c == "_") for c in name)
 
 
-def _parse_env_specs_parts(specs) -> tuple[dict[str, str], list[str]]:
+def _parse_env_specs_parts(
+    specs,
+    *,
+    help_command: str = "vibe vault run --help",
+) -> tuple[dict[str, str], list[str]]:
     """Map ENV var name -> vault secret name from ``--env`` specs.
 
     Accepts ``NAME`` (inject as the same name), ``LOCAL=NAME`` (rename), and
     comma-separated ``A,B`` within one flag.
     """
+    from storage import vault_service
+
     mapping: dict[str, str] = {}
-    env_by_secret: dict[str, str] = {}
+    env_by_record: dict[str, str] = {}
     normalized: list[str] = []
     for spec in specs or []:
         for part in str(spec).split(","):
@@ -8342,38 +8457,47 @@ def _parse_env_specs_parts(specs) -> tuple[dict[str, str], list[str]]:
                 local, vault_name = local.strip(), vault_name.strip()
             else:
                 local = vault_name = part
+                if "." in vault_name:
+                    base, _, field = vault_name.partition(".")
+                    local = f"{base}_{field.upper()}"
             if not local or not vault_name:
-                raise TaskCliError(f"invalid --env spec: {part!r}", code="invalid_env_spec", help_command="vibe vault run --help")
+                raise TaskCliError(f"invalid --env spec: {part!r}", code="invalid_env_spec", help_command=help_command)
+            if "." in vault_name:
+                vault_service.validate_field_name(vault_name.partition(".")[2])
             # The local (LHS) becomes an env var name / is interpolated into `export`
             # lines for eval — reject anything that isn't a plain identifier so it can't
             # break the shell or smuggle in extra commands.
             if not _is_env_name(local):
-                raise TaskCliError(f"invalid env var name: {local!r} (use [A-Za-z_][A-Za-z0-9_]*)", code="invalid_env_name", help_command="vibe vault run --help")
+                raise TaskCliError(f"invalid env var name: {local!r} (use [A-Za-z_][A-Za-z0-9_]*)", code="invalid_env_name", help_command=help_command)
             existing = mapping.get(local)
             if existing is not None and existing != vault_name:
                 raise TaskCliError(
                     f"env var {local!r} maps to both {existing!r} and {vault_name!r}",
                     code="conflicting_env_alias",
-                    help_command="vibe vault run --help",
+                    help_command=help_command,
                 )
-            existing_env = env_by_secret.get(vault_name)
+            existing_env = env_by_record.get(vault_name)
             if existing_env is not None and existing_env != local:
                 raise TaskCliError(
                     f"secret '{vault_name}' was selected as both {existing_env!r} and {local!r}",
                     code="conflicting_env_alias",
                     hint="Use one --env alias for each selected secret.",
-                    help_command="vibe vault run --help",
+                    help_command=help_command,
                 )
             if existing == vault_name:
                 continue
             mapping[local] = vault_name
-            env_by_secret[vault_name] = local
+            env_by_record[vault_name] = local
             normalized.append(vault_name if local == vault_name else f"{local}={vault_name}")
     return mapping, normalized
 
 
 def _parse_env_specs(specs) -> dict:
     return _parse_env_specs_parts(specs)[0]
+
+
+def _record_secret_name(record: str) -> str:
+    return str(record).split(".", 1)[0]
 
 
 def _arg_list(args, name: str) -> list[str]:
@@ -8391,6 +8515,7 @@ def _add_vault_run_selection(
     *,
     vault_name: str,
     env_name: str,
+    help_command: str = "vibe vault run --help",
 ) -> None:
     if not vault_name or not env_name:
         raise TaskCliError("vault run selector produced an empty secret or env name", code="invalid_selector")
@@ -8400,7 +8525,7 @@ def _add_vault_run_selection(
             raise TaskCliError(
                 f"env var {env_name!r} is selected for both {existing_secret!r} and {vault_name!r}",
                 code="conflicting_env_alias",
-                help_command="vibe vault run --help",
+                help_command=help_command,
             )
         return
     existing_env = next((selected_env for selected_env, selected_secret in selections.items() if selected_secret == vault_name), None)
@@ -8409,51 +8534,70 @@ def _add_vault_run_selection(
             f"secret '{vault_name}' was selected as both {existing_env!r} and {env_name!r}",
             code="conflicting_env_alias",
             hint="Use one --env alias for each selected secret.",
-            help_command="vibe vault run --help",
+            help_command=help_command,
         )
     selections[env_name] = vault_name
 
 
-def _resolve_vault_run_selectors(engine, args) -> tuple[dict[str, str], dict]:
-    """Expand --env/--tag/--skill to a fixed env-name -> vault-name plan."""
+def _resolve_vault_run_selectors(
+    engine,
+    args,
+    *,
+    help_command: str = "vibe vault run --help",
+) -> tuple[dict[str, str], dict]:
+    """Expand --env/--tag/--skill to a canonical env-name -> record plan."""
 
     from storage import vault_service
 
     env_specs = list(getattr(args, "env", None) or [])
-    explicit_mapping, normalized_env_specs = _parse_env_specs_parts(env_specs)
+    normalized_env_specs: list[str] = []
+    for spec in env_specs:
+        for part in str(spec).split(","):
+            # Conflicts belong to the canonical record plan: NAME and NAME.default
+            # may name the same record under the same alias.
+            _, normalized = _parse_env_specs_parts([part], help_command=help_command)
+            normalized_env_specs.extend(normalized)
     tag_specs = _arg_list(args, "tag")
     skill_specs = _arg_list(args, "skill")
     selector_requested = bool(normalized_env_specs or tag_specs or skill_specs)
     selections: dict[str, str] = {}
-    for env_name, vault_name in explicit_mapping.items():
-        _add_vault_run_selection(selections, vault_name=vault_name, env_name=env_name)
-
-    source_selector: dict = {"env": normalized_env_specs}
-    if tag_specs or skill_specs:
+    selector = {
+        "env": normalized_env_specs,
+        "tags": tag_specs,
+        "skills": skill_specs,
+    }
+    try:
         with engine.connect() as conn:
-            expanded = vault_service.expand_value_delivery_selector(conn, tags=tag_specs, skills=skill_specs)
-        source_selector["tags"] = list(expanded["source_selector"].get("tags") or [])
-        for item in expanded.get("secrets") or []:
-            _add_vault_run_selection(
-                selections,
-                vault_name=str(item.get("name") or ""),
-                env_name=str(item.get("env") or ""),
+            expanded = vault_service.expand_value_delivery_selector(
+                conn,
+                source_selector=selector,
             )
-    else:
-        source_selector["tags"] = []
+    except vault_service.InvalidRequestError as exc:
+        message = str(exc)
+        code = "conflicting_env_alias" if "conflict" in message or "maps to multiple" in message else "invalid_selector"
+        raise TaskCliError(message, code=code, help_command=help_command) from exc
+
+    for item in expanded.get("secrets") or []:
+        _add_vault_run_selection(
+            selections,
+            vault_name=str(item.get("record") or ""),
+            env_name=str(item.get("env") or ""),
+            help_command=help_command,
+        )
+    source_selector = dict(expanded.get("source_selector") or {})
 
     if not selections and selector_requested:
         raise TaskCliError(
             "vault run selector matched no value-deliverable secrets",
             code="no_matching_secrets",
             hint="Check the --env, --tag, or --skill selector, or ask the user to store/link the secret first.",
-            help_command="vibe vault run --help",
+            help_command=help_command,
         )
     if not selections:
         raise TaskCliError(
             "at least one --env NAME, --tag TAG, or --skill SKILL is required",
             code="missing_selector",
-            help_command="vibe vault run --help",
+            help_command=help_command,
         )
     return selections, source_selector
 
@@ -8523,10 +8667,14 @@ def _vault_lookup_next_steps(*, has_more: bool, has_filters: bool) -> list[str]:
 
 
 def _vault_capability_payload(secret: dict) -> dict:
+    default_field = secret.get("default_field") or "value"
     return {
         "name": secret["name"],
         "kind": secret.get("kind"),
         "protection": secret.get("protection"),
+        "default_field": default_field,
+        "fields": secret.get("fields") or [default_field],
+        **({"fields_state": "corrupt"} if secret.get("fields_state") == "corrupt" else {}),
         "tags": secret.get("tags") or [],
         "description": secret.get("description"),
         "policy": secret.get("policy") or {},
@@ -8682,30 +8830,63 @@ def cmd_vault_tags(args):
 
 def cmd_vault_rm(args):
     from storage import vault_service
-    from vibe import api
+    from storage.models import agent_sessions
 
     help_command = "vibe vault rm --help"
     try:
+        if "." in str(getattr(args, "name", "")):
+            raise TaskCliError(
+                "vibe vault rm deletes whole secrets; remove single fields in the Vaults page.",
+                code="vault_field_delete_forbidden",
+                help_command=help_command,
+            )
         engine = _open_vault_engine()
-        release_scopes: list[dict[str, str]] = []
+        requester = _vault_cli_requester(args)
         with engine.begin() as conn:
-            meta = vault_service.get_secret_meta(conn, args.name)
-            if meta.get("protection") == "protected":
-                raise TaskCliError(
-                    f"'{args.name}' is a protected secret — delete it in the browser (Vaults), where it's "
-                    f"confirmed by the signed-in user. The CLI can't delete protected secrets.",
-                    code="protected_delete_forbidden",
-                    help_command=help_command,
+            request, created = vault_service.create_delete_request(
+                conn,
+                args.name,
+                reason=getattr(args, "reason", None),
+                requester=requester,
+                user_context=caller_resource_user_context(caller_context_from_env()),
+                return_created=True,
+            )
+            stored_requester = request.get("requester") or {}
+            session_id = requester.get("session_id")
+            stored_callback_enabled = not bool(stored_requester.get("callback_disabled"))
+            callback_target_matches = bool(session_id and stored_requester.get("session_id") == session_id)
+            active_session = bool(
+                session_id
+                and conn.execute(
+                    select(agent_sessions.c.id).where(
+                        agent_sessions.c.id == session_id, agent_sessions.c.status == "active",
+                    )
+                ).first() is not None
+            )
+            callback_enabled = stored_callback_enabled and callback_target_matches and active_session
+            if created:
+                callback_enabled = (
+                    not _vault_callback_disabled(args)
+                    and stored_callback_enabled
+                    and callback_target_matches
+                    and active_session
                 )
-            grant_rows = vault_service.active_grant_rows_for_secret(conn, args.name)
-            vault_service.delete_secret(conn, args.name)
-            release_scopes = vault_service.agent_release_scopes_after_rows(conn, grant_rows)
-        api.release_vault_agent_scopes(release_scopes, reason="vault_rm")
-        _publish_cli_vaults_updated(scope="secret", secret_name=args.name)
-        _print_cli_payload("vault_secret", removed=True, name=args.name)
+        _publish_cli_vaults_updated(scope="request", request=request, notify_request=created)
+        followup = (
+            "Avibe resumes this Session after the decision; do not rerun rm."
+            if callback_enabled else
+            f"Check the decision with: vibe vault await {request['id']}; do not rerun rm."
+        )
+        _print_cli_payload(
+            "vault_delete_request", request_id=request["id"], request=request,
+            message=f"Waiting for the user to approve deleting {args.name} in Avibe. {followup}",
+        )
         return 0
     except vault_service.SecretNotFoundError:
         _print_task_error(TaskCliError(f"secret '{args.name}' not found", code="secret_not_found", help_command=help_command))
+        return 1
+    except vault_service.VaultSecretAccessError as exc:
+        _print_task_error(TaskCliError(str(exc), code="vault_access_forbidden", help_command=help_command))
         return 1
     except Exception as exc:
         _print_task_error(exc, help_command=help_command)
@@ -8887,6 +9068,9 @@ def cmd_vault_edit(args):
     except vault_service.SecretNotFoundError:
         _print_task_error(TaskCliError(f"secret '{args.name}' not found", code="secret_not_found", help_command=help_command))
         return 1
+    except vault_service.SecretConflictError as exc:
+        _print_task_error(TaskCliError(str(exc), code="secret_conflict", help_command=help_command))
+        return 1
     except vault_service.VaultServiceError as exc:
         _print_task_error(TaskCliError(str(exc), code="invalid_metadata", help_command=help_command))
         return 1
@@ -8904,16 +9088,18 @@ def cmd_vault_access(args):
     help_command = "vibe vault access --help"
     name = getattr(args, "name", "")
     try:
-        if not vault_crypto.is_valid_secret_name(name):
-            raise TaskCliError(f"invalid secret name: {name!r} (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name", help_command=help_command)
+        if not vault_crypto.is_valid_secret_name(_record_secret_name(name)):
+            raise TaskCliError(f"invalid secret reference: {name!r}", code="invalid_name", help_command=help_command)
         engine = _open_vault_engine()
         with engine.begin() as conn:
-            vault_service.get_secret_meta(conn, name)
+            record_meta = vault_service.get_secret_record_meta(conn, name)
+            secret_name = str(record_meta["name"])
+            record_name = str(record_meta["record_name"])
             request = vault_service.create_access_request(
                 conn,
-                name,
+                secret_name,
                 requester=_vault_cli_requester(args),
-                delivery=_vault_cli_delivery(args, mode="access"),
+                delivery={**_vault_cli_delivery(args, mode="access"), "record": record_name},
             )
         _publish_cli_vaults_updated(scope="request", request=request)
         _print_cli_payload(
@@ -8925,6 +9111,18 @@ def cmd_vault_access(args):
         return 0
     except vault_service.SecretNotFoundError:
         _print_task_error(TaskCliError(f"secret '{name}' not found", code="secret_not_found", help_command=help_command))
+        return 1
+    except vault_service.InvalidFieldNameError as exc:
+        _print_task_error(TaskCliError(str(exc), code="invalid_field_name", help_command=help_command))
+        return 1
+    except vault_service.FieldsCorruptError as exc:
+        _print_task_error(TaskCliError(str(exc), code="fields_corrupt", help_command=help_command))
+        return 1
+    except vault_service.FieldNotFoundError as exc:
+        _print_task_error(TaskCliError(str(exc), code="field_not_found", help_command=help_command))
+        return 1
+    except vault_service.FieldsNotSupportedError as exc:
+        _print_task_error(TaskCliError(str(exc), code="fields_not_supported", help_command=help_command))
         return 1
     except vault_service.NotGrantableError as exc:
         _print_task_error(TaskCliError(str(exc), code="not_grantable", help_command=help_command))
@@ -9000,39 +9198,41 @@ def _vault_cli_delivery_context(args, *, mode: str, **extra) -> tuple[dict, dict
     return requester, delivery, session_id
 
 
-def _preflight_vault_names(engine, names: list[str], *, mixed_message: str, mixed_code: str = "mixed_protection_tiers") -> dict[str, dict]:
-    from storage import vault_service
-
-    metas: dict[str, dict] = {}
-    with engine.connect() as conn:
-        for name in dict.fromkeys(names):
-            metas[name] = vault_service.get_secret_meta(conn, name)
-    tiers = {str(meta.get("protection") or "standard") for meta in metas.values()}
-    if len(tiers) > 1:
-        raise TaskCliError(mixed_message, code=mixed_code)
-    return metas
-
-
 def _preflight_vault_run_batch(engine, mapping: dict[str, str]) -> dict[str, dict]:
     from storage import vault_service
 
     metas: dict[str, dict] = {}
     with engine.connect() as conn:
-        for name in dict.fromkeys(mapping.values()):
+        for record in dict.fromkeys(mapping.values()):
+            name = _record_secret_name(record)
+            if name in metas:
+                continue
             metas[name] = vault_service.get_secret_meta(conn, name)
             if metas[name].get("kind") == "keypair":
                 raise vault_service.KeypairNotValueDeliverableError(
-                    f"{name} is a signing key; use vibe vault sign instead of value delivery"
+                    f"{record} is a signing key; use vibe vault sign instead of value delivery"
                 )
     return metas
 
 
 def _preflight_vault_inject_batch(engine, names: list[str]) -> dict[str, dict]:
-    return _preflight_vault_names(
-        engine,
-        names,
-        mixed_message="mixing protected and standard secrets in one vault inject is not wired yet",
-    )
+    from storage import vault_service
+
+    metas: dict[str, dict] = {}
+    with engine.connect() as conn:
+        for record in dict.fromkeys(names):
+            name = _record_secret_name(record)
+            if name in metas:
+                continue
+            metas[name] = vault_service.get_secret_meta(conn, name)
+            if metas[name].get("kind") == "keypair":
+                raise vault_service.KeypairNotValueDeliverableError(
+                    f"{record} is a signing key; use vibe vault sign instead of value delivery"
+                )
+    tiers = {str(meta.get("protection") or "standard") for meta in metas.values()}
+    if len(tiers) > 1:
+        raise TaskCliError("mixing protected and standard secrets in one vault inject is not wired yet", code="mixed_protection_tiers")
+    return metas
 
 
 class _AgentRunOutputBridge:
@@ -9400,6 +9600,17 @@ def _finish_one_shot_after_avault_error(
         _consume_after_possible_use(grants, reason=reason)
 
 
+def _capture_vault_delivery_identities(engine, names: list[str], grants):
+    from storage import vault_service
+
+    try:
+        with engine.connect() as conn:
+            return vault_service.capture_delivery_identities(conn, names)
+    except Exception:
+        _release_one_shot_reservations(engine, grants)
+        raise
+
+
 def _resolve_vault_run_delivery(
     engine,
     mapping: dict[str, str],
@@ -9416,14 +9627,14 @@ def _resolve_vault_run_delivery(
     metas = _preflight_vault_run_batch(engine, mapping)
     protected_names = [
         name
-        for name in dict.fromkeys(mapping.values())
+        for name in dict.fromkeys(_record_secret_name(record) for record in mapping.values())
         if str(metas[name].get("protection") or "standard") == "protected"
     ]
     standard_approval_error: TaskCliError | None = None
     approval_request_to_publish: dict | None = None
     if metas and not protected_names:
         with engine.begin() as conn:
-            standard_names = list(dict.fromkeys(mapping.values()))
+            standard_names = list(dict.fromkeys(_record_secret_name(record) for record in mapping.values()))
             approval_names = _always_ask_names(metas, standard_names)
             common_grant = vault_service.find_active_grant_for_secrets(
                 conn,
@@ -9434,8 +9645,13 @@ def _resolve_vault_run_delivery(
             )
             if isinstance(common_grant, dict) and common_grant.get("one_shot") is True:
                 return None, [common_grant], [
-                    {"name": vault_name, "env": env_name, "envelope": vault_service.get_envelope(conn, vault_name)}
-                    for env_name, vault_name in mapping.items()
+                    {
+                        "name": record,
+                        "env": env_name,
+                        "envelope": vault_service.get_envelope(conn, record),
+                        "tier": "standard",
+                    }
+                    for env_name, record in mapping.items()
                 ]
             if approval_names and _source_selector_tags(source_selector):
                 req = vault_service.create_access_request(
@@ -9466,7 +9682,7 @@ def _resolve_vault_run_delivery(
                 needs_selector_set = _needs_protected_selector_set(protected_names, source_selector)
                 selector_standard_names = [
                     name
-                    for name in dict.fromkeys(mapping.values())
+                    for name in dict.fromkeys(_record_secret_name(record) for record in mapping.values())
                     if name not in protected_names and str(metas[name].get("protection") or "standard") == "standard"
                 ]
                 selector_standard_approval_names = _always_ask_names(metas, selector_standard_names)
@@ -9532,15 +9748,16 @@ def _resolve_vault_run_delivery(
                         )
                 elif grant.get("one_shot") is True:
                     one_shot_grants.append(grant)
-            for env_name, vault_name in mapping.items():
+            for env_name, record in mapping.items():
+                vault_name = _record_secret_name(record)
                 if approval_error is not None:
                     break
                 if vault_name in protected_names:
                     secrets.append(
                         {
-                            "name": vault_name,
+                            "name": record,
                             "env": env_name,
-                            "envelope": vault_service.get_protected_envelope(conn, vault_name),
+                            "envelope": vault_service.get_protected_envelope(conn, record),
                             "tier": "protected",
                         }
                     )
@@ -9549,7 +9766,7 @@ def _resolve_vault_run_delivery(
                 if resolved is None:
                     resolved = vault_service.resolve_secret_access(
                         conn,
-                        vault_name,
+                        record,
                         purpose="run",
                         requester=requester,
                         delivery=delivery,
@@ -9570,9 +9787,12 @@ def _resolve_vault_run_delivery(
                     current_grant = resolved.get("grant")
                     if isinstance(current_grant, dict) and current_grant.get("one_shot") is True:
                         one_shot_grants.append(current_grant)
-                    item = {"name": vault_name, "env": env_name, "envelope": resolved["envelope"]}
-                    if protected_names:
-                        item["tier"] = "standard"
+                    item = {
+                        "name": record,
+                        "env": env_name,
+                        "envelope": vault_service.get_envelope(conn, record),
+                        "tier": "standard",
+                    }
                     secrets.append(item)
                     continue
                 if resolved["status"] == "agent_delivery_ready":
@@ -9624,41 +9844,103 @@ def _resolve_single_vault_delivery(
     raise TaskCliError(f"unsupported vault access status: {resolved['status']}", code="vault_access_error")
 
 
-def _resolve_vault_inject_delivery(engine, names: list[str], *, path: str, fmt: str, args=None):
+def _resolve_vault_inject_delivery(
+    engine,
+    mapping: dict[str, str],
+    *,
+    path: str,
+    fmt: str,
+    args=None,
+    source_selector: dict | None = None,
+):
     from storage import vault_service
 
     requester, delivery, session_id = _vault_cli_delivery_context(args, mode="inject", path=path, format=fmt)
+    names = list(mapping.values())
+    secret_names = list(dict.fromkeys(_record_secret_name(record) for record in names))
     metas = _preflight_vault_inject_batch(engine, names)
+    if source_selector:
+        delivery["source_selector"] = source_selector
     tiers = {str(meta.get("protection") or "standard") for meta in metas.values()}
     if metas and tiers == {"protected"}:
+        approval_request = None
         with engine.begin() as conn:
             common_grant = vault_service.find_active_grant_for_secrets(
                 conn,
-                names,
+                secret_names,
                 session_id=session_id,
                 purpose="inject",
                 reserve_one_shot=True,
             )
             if common_grant is not None:
                 return common_grant, [common_grant] if common_grant.get("one_shot") is True else [], [
-                    {"name": name, "key": name, "envelope": vault_service.get_protected_envelope(conn, name)}
-                    for name in names
+                    {
+                        "name": record,
+                        "key": env_name,
+                        "envelope": vault_service.get_protected_envelope(conn, record),
+                        "tier": "protected",
+                    }
+                    for env_name, record in mapping.items()
                 ]
+            if (
+                _needs_protected_selector_set(secret_names, source_selector)
+                and not _always_ask_names(metas, secret_names)
+            ):
+                request_delivery = dict(delivery)
+                request_delivery["protected_secret_names"] = secret_names
+                approval_request = vault_service.create_access_request(
+                    conn,
+                    None,
+                    source_selector=source_selector,
+                    requester=requester,
+                    delivery=request_delivery,
+                    purpose="inject",
+                )
+        if approval_request is not None:
+            _publish_cli_vaults_updated(scope="request", request=approval_request)
+            raise TaskCliError(
+                "protected secrets need approval before vault inject delivery",
+                code="approval_required",
+                details={"request_id": approval_request.get("id"), "protected_secret_names": secret_names},
+            )
     if metas and tiers == {"standard"}:
+        approval_request = None
+        approval_names = _always_ask_names(metas, secret_names)
         with engine.begin() as conn:
             standard_secrets = [
-                {"name": name, "key": name, "envelope": vault_service.get_envelope(conn, name)}
-                for name in names
+                {
+                    "name": record,
+                    "key": env_name,
+                    "envelope": vault_service.get_envelope(conn, record),
+                    "tier": "standard",
+                }
+                for env_name, record in mapping.items()
             ]
             common_grant = vault_service.find_active_grant_for_secrets(
                 conn,
-                names,
+                approval_names or secret_names,
                 session_id=session_id,
                 purpose="inject",
                 reserve_one_shot=True,
             )
             if isinstance(common_grant, dict) and common_grant.get("one_shot") is True:
                 return None, [common_grant], standard_secrets
+            if approval_names and _source_selector_tags(source_selector):
+                approval_request = vault_service.create_access_request(
+                    conn,
+                    None,
+                    source_selector=source_selector,
+                    requester=requester,
+                    delivery=delivery,
+                    purpose="inject",
+                )
+        if approval_request is not None:
+            _publish_cli_vaults_updated(scope="request", request=approval_request)
+            raise TaskCliError(
+                "standard always_ask secrets need approval before vault inject delivery",
+                code="approval_required",
+                details={"request_id": approval_request.get("id"), "secret_names": approval_names},
+            )
     secrets = []
     grant: dict | None = None
     one_shot_grants: list[dict] = []
@@ -9668,12 +9950,13 @@ def _resolve_vault_inject_delivery(engine, names: list[str], *, path: str, fmt: 
     resolved_by_name: dict[str, dict] = {}
     try:
         with engine.begin() as conn:
-            for name in names:
+            for env_name, record in mapping.items():
+                name = _record_secret_name(record)
                 resolved = resolved_by_name.get(name)
                 if resolved is None:
                     resolved = vault_service.resolve_secret_access(
                         conn,
-                        name,
+                        record,
                         purpose="inject",
                         requester=requester,
                         delivery=delivery,
@@ -9694,7 +9977,15 @@ def _resolve_vault_inject_delivery(engine, names: list[str], *, path: str, fmt: 
                     current_grant = resolved.get("grant")
                     if isinstance(current_grant, dict) and current_grant.get("one_shot") is True:
                         one_shot_grants.append(current_grant)
-                    secrets.append({"name": name, "key": name, "envelope": resolved["envelope"], "protected": False})
+                    secrets.append(
+                        {
+                            "name": record,
+                            "key": env_name,
+                            "envelope": vault_service.get_envelope(conn, record),
+                            "tier": "standard",
+                            "protected": False,
+                        }
+                    )
                     continue
                 if resolved["status"] == "agent_delivery_ready":
                     current_grant = resolved["grant"]
@@ -9709,7 +10000,15 @@ def _resolve_vault_inject_delivery(engine, names: list[str], *, path: str, fmt: 
                         break
                     if current_grant.get("one_shot") is True:
                         one_shot_grants.append(current_grant)
-                    secrets.append({"name": name, "key": name, "envelope": resolved["envelope"], "protected": True})
+                    secrets.append(
+                        {
+                            "name": record,
+                            "key": env_name,
+                            "envelope": vault_service.get_protected_envelope(conn, record),
+                            "tier": "protected",
+                            "protected": True,
+                        }
+                    )
                     continue
                 raise TaskCliError(f"unsupported vault access status: {resolved['status']}", code="vault_access_error")
     except Exception as exc:
@@ -9797,6 +10096,18 @@ def cmd_vault_run(args):
             )
         )
         return 1
+    except vault_service.FieldsCorruptError as exc:
+        _print_task_error(TaskCliError(str(exc), code="fields_corrupt", help_command=help_command))
+        return 1
+    except vault_service.FieldNotFoundError as exc:
+        _print_task_error(TaskCliError(str(exc), code="field_not_found", help_command=help_command))
+        return 1
+    except vault_service.InvalidFieldNameError as exc:
+        _print_task_error(TaskCliError(str(exc), code="invalid_field_name", help_command=help_command))
+        return 1
+    except vault_service.FieldsNotSupportedError as exc:
+        _print_task_error(TaskCliError(str(exc), code="fields_not_supported", help_command=help_command))
+        return 1
     except vault_service.UnsupportedProtectionError as exc:
         _print_task_error(TaskCliError(str(exc), code="protected_tier_unavailable", help_command=help_command))
         return 1
@@ -9814,6 +10125,7 @@ def cmd_vault_run(args):
 
     handoff_started = False
     try:
+        audit_identities = _capture_vault_delivery_identities(engine, [str(secret["name"]) for secret in secrets], one_shot_grants)
         if grant is not None:
             secret_env_names = {str(secret["env"]) for secret in secrets if secret.get("env")}
             with _AgentRunOutputBridge(
@@ -9855,7 +10167,7 @@ def cmd_vault_run(args):
             )
             requester, delivery, _session_id = _vault_cli_delivery_context(args, mode="run", command=command_argv)
             protected_names = [
-                str(secret["name"])
+                _record_secret_name(secret["name"])
                 for secret in secrets
                 if secret.get("tier") == "protected" and secret.get("name")
             ]
@@ -9889,7 +10201,7 @@ def cmd_vault_run(args):
         try:
             with engine.begin() as conn:
                 vault_service.record_deliveries(
-                    conn, sorted(set(mapping.values())), requester={"source": "cli", "pid": os.getpid()}, mode="run"
+                    conn, audit_identities, requester={"source": "cli", "pid": os.getpid()}, mode="run"
                 )
         except Exception:
             pass
@@ -10056,6 +10368,19 @@ def _wait_for_vault_delivery_approval(args, exc: TaskCliError, *, timeout: float
         raise terminal_error
 
 
+def _vault_provision_success_usage(engine, name: str) -> str:
+    from storage import vault_service
+
+    try:
+        with engine.connect() as conn:
+            metadata = vault_service.get_secret_meta(conn, name)
+    except vault_service.SecretNotFoundError:
+        return " — check `vibe vault list` for its current availability."
+    if vault_service.has_named_field_shape(metadata):
+        return vault_service.provision_field_hint(metadata)
+    return f" — use it via: vibe vault run --env {name} -- <command>"
+
+
 def cmd_vault_request(args):
     from storage import vault_crypto, vault_service
 
@@ -10085,7 +10410,7 @@ def cmd_vault_request(args):
                 secret_name=name,
                 status="fulfilled",
                 request=req,
-                message=f"'{name}' is already in the vault — use it via: vibe vault run --env {name} -- <command>",
+                message=f"'{name}' is already in the vault{_vault_provision_success_usage(engine, name)}",
             )
             return 0
         wait_seconds = getattr(args, "wait", None)
@@ -10138,7 +10463,7 @@ def cmd_vault_request(args):
                     secret_name=name,
                     status="fulfilled",
                     request=waited,
-                    message=f"'{name}' is now available — use it via: vibe vault run --env {name} -- <command>",
+                    message=f"'{name}' is now available{_vault_provision_success_usage(engine, name)}",
                 )
                 return 0
             _print_task_error(
@@ -10310,7 +10635,7 @@ def cmd_vault_await(args):
                 help_command=help_command,
                 details={"request_id": request_id},
             )
-        if request.get("status") != "approved":
+        if request.get("status") not in {"approved", "fulfilled"}:
             _print_cli_payload("vault_request_status", request_id=request_id, status=request.get("status"), request=request)
             return 0
         _print_cli_payload("vault_request_result", request_id=request_id, status=request.get("status"), request=request, result=result)
@@ -10511,8 +10836,10 @@ def _build_vault_fetch_request(
     # and after an approval wait so a mid-wait metadata edit cannot leave a stale allowlist or auth
     # injection policy in the egress frame.
     with engine.connect() as conn:
-        policy = vault_service.get_secret_policy(conn, name)
-        meta = vault_service.get_secret_meta(conn, name)
+        record_meta = vault_service.get_secret_record_meta(conn, name)
+        secret_name = str(record_meta["name"])
+        policy = vault_service.get_secret_policy(conn, secret_name)
+        meta = record_meta
         if meta.get("kind") == "keypair":
             raise vault_service.KeypairNotValueDeliverableError(
                 f"{name} is a signing key; use vault_sign instead of value delivery"
@@ -10605,6 +10932,9 @@ def cmd_vault_fetch(args):
             )
 
         engine = _open_vault_engine()
+        with engine.connect() as conn:
+            record_meta = vault_service.get_secret_record_meta(conn, name)
+        name = str(record_meta["record_name"])
         request = _build_vault_fetch_request(
             engine,
             name=name,
@@ -10652,6 +10982,7 @@ def cmd_vault_fetch(args):
                 body=body,
                 help_command=help_command,
             )
+        audit_identity = _capture_vault_delivery_identities(engine, [name], [one_shot_grant] if one_shot_grant else [])[0]
         handoff_started = True
         if grant is not None:
             result = api.avault_agent_deliver_fetch(
@@ -10671,7 +11002,7 @@ def cmd_vault_fetch(args):
             with engine.begin() as conn:
                 vault_service.record_proxy_use(
                     conn,
-                    name,
+                    audit_identity,
                     requester={"source": "cli", "pid": os.getpid()},
                     delivery={"host": host, "method": method, "status": status},
                 )
@@ -10685,6 +11016,18 @@ def cmd_vault_fetch(args):
         return 1
     except vault_service.KeypairNotValueDeliverableError as exc:
         _print_task_error(TaskCliError(str(exc), code="keypair_not_value_deliverable", help_command=help_command))
+        return 1
+    except vault_service.InvalidFieldNameError as exc:
+        _print_task_error(TaskCliError(str(exc), code="invalid_field_name", help_command=help_command))
+        return 1
+    except vault_service.FieldsCorruptError as exc:
+        _print_task_error(TaskCliError(str(exc), code="fields_corrupt", help_command=help_command))
+        return 1
+    except vault_service.FieldNotFoundError as exc:
+        _print_task_error(TaskCliError(str(exc), code="field_not_found", help_command=help_command))
+        return 1
+    except vault_service.FieldsNotSupportedError as exc:
+        _print_task_error(TaskCliError(str(exc), code="fields_not_supported", help_command=help_command))
         return 1
     except vault_service.UnsupportedProtectionError as exc:
         _print_task_error(TaskCliError(str(exc), code="protected_tier_unavailable", help_command=help_command))
@@ -10774,12 +11117,20 @@ def cmd_vault_inject(args):
     grant = None
     one_shot_grants: list[dict] = []
     keys: list[str] = []
+    secrets: list[dict] = []
     handoff_started = False
     try:
         keys = [k.strip() for k in (getattr(args, "keys", None) or "").split(",") if k.strip()]
         keys = list(dict.fromkeys(keys))  # dedupe, preserve order: A,A is one entry + one audit
-        if not keys:
-            raise TaskCliError("--keys A,B is required", code="missing_keys", help_command=help_command)
+        env_specs = list(getattr(args, "env", None) or [])
+        tag_specs = _arg_list(args, "tag")
+        skill_specs = _arg_list(args, "skill")
+        if not keys and not env_specs and not tag_specs and not skill_specs:
+            raise TaskCliError(
+                "at least one --keys, --env NAME, --tag TAG, or --skill SKILL is required",
+                code="missing_keys",
+                help_command=help_command,
+            )
         out = getattr(args, "out", None)
         if not out:
             raise TaskCliError("--out FILE is required", code="missing_out", help_command=help_command)
@@ -10796,7 +11147,22 @@ def cmd_vault_inject(args):
         engine = _open_vault_engine()
         resolved_out = _resolve_cli_output_path(str(out))
         _preflight_cli_output_path(resolved_out, help_command=help_command)
-        grant, one_shot_grants, secrets = _resolve_vault_inject_delivery(engine, keys, path=resolved_out, fmt=fmt, args=args)
+        selector_args = argparse.Namespace(**vars(args))
+        selector_args.env = [*env_specs, *keys]
+        mapping, source_selector = _resolve_vault_run_selectors(
+            engine,
+            selector_args,
+            help_command=help_command,
+        )
+        grant, one_shot_grants, secrets = _resolve_vault_inject_delivery(
+            engine,
+            mapping,
+            path=resolved_out,
+            fmt=fmt,
+            args=args,
+            source_selector=source_selector,
+        )
+        audit_identities = _capture_vault_delivery_identities(engine, [str(item["name"]) for item in secrets], one_shot_grants)
         # avault writes the 0600 file atomically; if the path is unwritable it raises and no
         # delivery is recorded.
         handoff_started = True
@@ -10814,16 +11180,39 @@ def cmd_vault_inject(args):
         # (callers would retry though the secrets are already written), so record best-effort.
         try:
             with engine.begin() as conn:
-                vault_service.record_deliveries(conn, keys, requester={"source": "cli", "pid": os.getpid()}, mode=f"inject:{fmt}")
+                vault_service.record_deliveries(
+                    conn,
+                    audit_identities,
+                    requester={"source": "cli", "pid": os.getpid()},
+                    mode=f"inject:{fmt}",
+                )
         except Exception:
             pass
-        _print_cli_payload("vault_inject", written=True, path=resolved_out, format=fmt, keys=keys)
+        _print_cli_payload(
+            "vault_inject",
+            written=True,
+            path=resolved_out,
+            format=fmt,
+            keys=[str(item["key"]) for item in secrets],
+        )
         return 0
     except vault_service.SecretNotFoundError as exc:
         _print_task_error(TaskCliError(f"secret '{exc}' not found", code="secret_not_found", help_command=help_command))
         return 1
     except vault_service.KeypairNotValueDeliverableError as exc:
         _print_task_error(TaskCliError(str(exc), code="keypair_not_value_deliverable", help_command=help_command))
+        return 1
+    except vault_service.InvalidFieldNameError as exc:
+        _print_task_error(TaskCliError(str(exc), code="invalid_field_name", help_command=help_command))
+        return 1
+    except vault_service.FieldsCorruptError as exc:
+        _print_task_error(TaskCliError(str(exc), code="fields_corrupt", help_command=help_command))
+        return 1
+    except vault_service.FieldNotFoundError as exc:
+        _print_task_error(TaskCliError(str(exc), code="field_not_found", help_command=help_command))
+        return 1
+    except vault_service.FieldsNotSupportedError as exc:
+        _print_task_error(TaskCliError(str(exc), code="fields_not_supported", help_command=help_command))
         return 1
     except vault_service.UnsupportedProtectionError as exc:
         _print_task_error(TaskCliError(str(exc), code="protected_tier_unavailable", help_command=help_command))
@@ -10844,10 +11233,14 @@ def cmd_vault_inject(args):
                 path=resolved_out,
                 format=fmt,
             )
+            delivery["source_selector"] = source_selector
+            delivery["protected_secret_names"] = list(
+                dict.fromkeys(_record_secret_name(item["name"]) for item in secrets)
+            )
             _expire_agent_grant_after_missing(
                 engine,
                 grant["id"],
-                keys,
+                [str(item["name"]) for item in secrets] or keys,
                 requester=requester,
                 delivery=delivery,
                 purpose="inject",
@@ -17098,9 +17491,32 @@ def build_parser():
     )
     computer_subparsers = computer_parser.add_subparsers(
         dest="computer_command",
-        metavar="{observe,zoom,click,type,key,hotkey,scroll,drag,set-value,clipboard,launch,quit}",
+        metavar="{run,observe,zoom,click,type,key,hotkey,scroll,drag,set-value,clipboard,launch,force-quit}",
     )
     computer_subparsers.required = True
+
+    computer_run_parser = computer_subparsers.add_parser(
+        "run",
+        help=i18n_t("computer.cli.help.run", computer_help_language),
+        description=i18n_t(
+            "computer.cli.help.runDescription",
+            computer_help_language,
+        ),
+        error_help_command="vibe computer run --help",
+        error_hint=i18n_t("computer.cli.hint.invalidArguments", computer_help_language),
+        error_i18n_key="computer.cli.error.invalidArguments",
+    )
+    computer_run_parser.add_argument(
+        "file",
+        help=i18n_t("computer.cli.help.scriptFile", computer_help_language),
+    )
+    computer_run_parser.add_argument(
+        "--arg",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help=i18n_t("computer.cli.help.scriptArg", computer_help_language),
+    )
 
     def _add_computer_options(command_parser) -> None:
         command_parser.add_argument(
@@ -17181,7 +17597,7 @@ def build_parser():
         ("drag", "drag"),
         ("set-value", "setValue"),
         ("launch", "launch"),
-        ("quit", "quit"),
+        ("force-quit", "forceQuit"),
     ):
         leaf = computer_subparsers.add_parser(
             name,
@@ -17517,7 +17933,7 @@ def build_parser():
     agent_run_delivery_group.add_argument(
         "--send-now",
         action="store_true",
-        help="Explicitly deliver this Run as P1 to an existing Session (the default behavior)",
+        help="Steer this Run into the active Turn of an existing Session, even one serving a person's message",
     )
     agent_run_delivery_group.add_argument(
         "--queue",
@@ -17544,8 +17960,13 @@ def build_parser():
         help="Make the new or forked Session user-facing from the start",
     )
     agent_run_parser.add_argument("--deliver-key", help=argparse.SUPPRESS)
-    agent_run_parser.add_argument("--model", help="Model override for the new forked Session")
-    agent_run_parser.add_argument("--reasoning-effort", help="Reasoning effort override for the new forked Session")
+    agent_run_help_language = _configured_cli_language()
+    agent_run_parser.add_argument(
+        "--model", help=i18n_t("harness.cli.agentRunModel.helpModel", agent_run_help_language)
+    )
+    agent_run_parser.add_argument(
+        "--reasoning-effort", help=i18n_t("harness.cli.agentRunModel.helpEffort", agent_run_help_language)
+    )
     agent_run_parser.add_argument(
         "--cwd",
         help=(
@@ -17836,12 +18257,17 @@ def build_parser():
 
     vault_rm_parser = vault_subparsers.add_parser(
         "rm",
-        help="Delete a secret",
-        description="Delete a secret by name.",
+        help="Request user approval to delete a secret",
+        description="Ask the user to delete a secret by name. Returns a request ID; never deletes without approval.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe vault rm --help",
     )
     vault_rm_parser.add_argument("name", help="Secret name to delete")
+    vault_rm_parser.add_argument("--reason", help="Why the secret should be deleted (shown to the user)")
+    vault_rm_parser.add_argument(
+        "--no-callback", action="store_true",
+        help="Don't auto-resume this Session after the decision; check it with 'vibe vault await'",
+    )
     _add_json_noop(vault_rm_parser)
 
     vault_edit_parser = vault_subparsers.add_parser(
@@ -17890,7 +18316,7 @@ def build_parser():
         "--env",
         action="append",
         metavar="NAME[,N2]|LOCAL=NAME",
-        help="Inject secret NAME as env var NAME (LOCAL=NAME to rename; comma-separates several). Repeatable.",
+        help="Inject secret NAME or NAME.field as env var NAME (NAME.field defaults to NAME_FIELD; LOCAL=NAME[.field] to rename; comma-separates several). Repeatable.",
     )
     vault_run_parser.add_argument("--tag", action="append", metavar="TAG", help="Inject all value-deliverable secrets with this tag. Repeatable.")
     vault_run_parser.add_argument("--skill", action="append", metavar="SKILL", help="Sugar for --tag skill:SKILL. Repeatable.")
@@ -17911,7 +18337,7 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe vault fetch --help",
     )
-    vault_fetch_parser.add_argument("--auth", required=True, metavar="NAME", help="Secret to attach as the request credential")
+    vault_fetch_parser.add_argument("--auth", required=True, metavar="NAME[.field]", help="Secret record to attach as the request credential")
     vault_fetch_parser.add_argument("--url", required=True, help="Target URL (host must be in the secret's allowed_hosts)")
     vault_fetch_parser.add_argument("--method", default="GET", help="HTTP method (default GET)")
     vault_fetch_parser.add_argument("--header", action="append", metavar="'Name: value'", help="Extra request header (repeatable)")
@@ -17932,7 +18358,7 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe vault access --help",
     )
-    vault_access_parser.add_argument("name", help="Static secret name to request")
+    vault_access_parser.add_argument("name", help="Static secret or record reference NAME[.field] to request")
     vault_access_parser.add_argument("--session-id", help="Agent Session ID. Defaults from AVIBE_SESSION_ID inside an Agent shell.")
     vault_access_parser.add_argument("--skill", help="Skill requesting the secret")
     vault_access_parser.add_argument("--command", dest="operation_command", help="Command or operation shown to the user")
@@ -17981,7 +18407,7 @@ def build_parser():
 
     vault_await_parser = vault_subparsers.add_parser(
         "await",
-        help="Read or wait for an access/sign request result",
+        help="Read or wait for a Vault request result",
         description="Return the request status/result. With --wait, poll until approved, denied, expired, or timeout.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe vault await --help",
@@ -18014,7 +18440,19 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe vault inject --help",
     )
-    vault_inject_parser.add_argument("--keys", required=True, metavar="A,B", help="Comma-separated secret names")
+    vault_inject_parser.add_argument(
+        "--keys",
+        metavar="NAME[.field],...",
+        help="Compatibility alias for comma-separated secret record references",
+    )
+    vault_inject_parser.add_argument(
+        "--env",
+        action="append",
+        metavar="NAME[,N2]|LOCAL=NAME",
+        help="Inject secret NAME or NAME.field using the same selectors as vault run",
+    )
+    vault_inject_parser.add_argument("--tag", action="append", metavar="TAG", help="Inject all value-deliverable records from secrets with this tag. Repeatable.")
+    vault_inject_parser.add_argument("--skill", action="append", metavar="SKILL", help="Sugar for --tag skill:SKILL. Repeatable.")
     vault_inject_parser.add_argument("--out", required=True, metavar="FILE", help="Output file (written 0600)")
     vault_inject_parser.add_argument("--format", default="dotenv", choices=["dotenv", "json", "yaml", "toml"], help="Output format (default dotenv)")
     _add_json_noop(vault_inject_parser)
@@ -19081,6 +19519,7 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("computer", "observe", "apps"): "member",
     ("computer", "observe", "windows"): "member",
     ("computer", "observe", "window"): "member",
+    ("computer", "run"): "member",
     ("computer", "zoom"): "member",
     ("computer", "click"): "member",
     ("computer", "type"): "member",
@@ -19092,7 +19531,7 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("computer", "clipboard", "read"): "member",
     ("computer", "clipboard", "write"): "member",
     ("computer", "launch"): "member",
-    ("computer", "quit"): "member",
+    ("computer", "force-quit"): "member",
     # Host scope, not instance scope: these act on this machine's screen and on
     # authored files, and have no role contract to repair here.
     ("screenshot",): None,

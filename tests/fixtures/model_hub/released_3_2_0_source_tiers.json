@@ -1,0 +1,842 @@
+{
+  "enabled": true,
+  "runtime_default_applied": true,
+  "sources": [
+    {
+      "id": "src_tiers3201",
+      "created_at": "2026-10-01T00:00:00Z",
+      "last_discovered_at": null,
+      "kind": "api_key",
+      "vendor": "anthropic",
+      "display_name": "anthropic relay",
+      "protocol": "anthropic",
+      "base_url": null,
+      "supply_channel": "hub",
+      "billing": "metered",
+      "state": {
+        "status": "active",
+        "retry_at": null,
+        "detail_key": null
+      },
+      "models": [
+        {
+          "id": "claude-opus-4-6",
+          "display_name": null,
+          "origin": "discovered",
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "reasoning_efforts_source": "upstream",
+          "discovered_at": null
+        },
+        {
+          "id": "claude-sonnet-4-6-20260301",
+          "display_name": null,
+          "origin": "discovered",
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "reasoning_efforts_source": "upstream",
+          "discovered_at": null
+        },
+        {
+          "id": "claude-opus-5-20260724",
+          "display_name": null,
+          "origin": "discovered",
+          "reasoning_efforts": [],
+          "reasoning_efforts_source": null,
+          "discovered_at": null
+        },
+        {
+          "id": "relay-house-model",
+          "display_name": null,
+          "origin": "discovered",
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "reasoning_efforts_source": "upstream",
+          "discovered_at": null
+        },
+        {
+          "id": "claude-haiku-4-5-20251001",
+          "display_name": null,
+          "origin": "discovered",
+          "reasoning_efforts": [
+            "low",
+            "high"
+          ],
+          "reasoning_efforts_source": "user",
+          "discovered_at": null
+        }
+      ],
+      "credential_ref": "cred_src_tiers3201",
+      "account_label": null,
+      "masked_credential": null
+    },
+    {
+      "id": "src_tiers3202",
+      "created_at": "2026-10-01T00:00:00Z",
+      "last_discovered_at": null,
+      "kind": "api_key",
+      "vendor": "openai",
+      "display_name": "openai relay",
+      "protocol": "openai_responses",
+      "base_url": null,
+      "supply_channel": "hub",
+      "billing": "metered",
+      "state": {
+        "status": "active",
+        "retry_at": null,
+        "detail_key": null
+      },
+      "models": [
+        {
+          "id": "gpt-6-astra-2026-09-01",
+          "display_name": null,
+          "origin": "discovered",
+          "reasoning_efforts": [],
+          "reasoning_efforts_source": null,
+          "discovered_at": null
+        }
+      ],
+      "credential_ref": "cred_src_tiers3202",
+      "account_label": null,
+      "masked_credential": null
+    }
+  ],
+  "agents": {
+    "opencode": {
+      "backend": "opencode",
+      "mode": "direct",
+      "menu_kind": "open",
+      "sources": {
+        "order": []
+      },
+      "routes": {},
+      "menu": {
+        "view": "featured",
+        "checked": []
+      },
+      "models": [],
+      "removed_model_ids": []
+    },
+    "claude": {
+      "backend": "claude",
+      "mode": "direct",
+      "menu_kind": "fixed",
+      "sources": {
+        "order": []
+      },
+      "routes": {},
+      "menu": null,
+      "models": [
+        {
+          "id": "claude-fable-5-1",
+          "display_name": "claude-fable-5-1 [1M]",
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        {
+          "id": "claude-fable-5",
+          "display_name": "claude-fable-5 [1M]",
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        {
+          "id": "claude-opus-5-5",
+          "display_name": "claude-opus-5-5 [1M]",
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        {
+          "id": "claude-opus-5",
+          "display_name": "claude-opus-5 [1M]",
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        {
+          "id": "claude-opus-4-8",
+          "display_name": "claude-opus-4-8 [1M]",
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        {
+          "id": "claude-opus-4-7",
+          "display_name": "claude-opus-4-7 [1M]",
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        {
+          "id": "claude-opus-4-6",
+          "display_name": "claude-opus-4-6 [1M]",
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "max"
+          ]
+        },
+        {
+          "id": "claude-sonnet-5-5",
+          "display_name": "claude-sonnet-5-5 [1M]",
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        {
+          "id": "claude-sonnet-5",
+          "display_name": "claude-sonnet-5 [1M]",
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        {
+          "id": "claude-sonnet-4-6",
+          "display_name": "claude-sonnet-4-6 [1M]",
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "max"
+          ]
+        },
+        {
+          "id": "claude-haiku-4-5",
+          "display_name": null,
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        {
+          "id": "claude-opus-4-5",
+          "display_name": null,
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        {
+          "id": "claude-sonnet-4-5",
+          "display_name": null,
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        {
+          "id": "opus",
+          "display_name": "opus [1M]",
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        {
+          "id": "sonnet",
+          "display_name": "sonnet [1M]",
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        {
+          "id": "haiku",
+          "display_name": null,
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        {
+          "id": "opus[1m]",
+          "display_name": "opus[1m] [1M]",
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        {
+          "id": "sonnet[1m]",
+          "display_name": "sonnet[1m] [1M]",
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        {
+          "id": "claude-opus-4",
+          "display_name": null,
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": []
+        },
+        {
+          "id": "claude-sonnet-4",
+          "display_name": null,
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": []
+        },
+        {
+          "id": "claude-haiku-4",
+          "display_name": null,
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": []
+        },
+        {
+          "id": "claude-sonnet-4-0",
+          "display_name": null,
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": []
+        },
+        {
+          "id": "claude-sonnet-4-20250514",
+          "display_name": null,
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": []
+        },
+        {
+          "id": "claude-sonnet-3-7",
+          "display_name": null,
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": []
+        },
+        {
+          "id": "claude-haiku-3-5",
+          "display_name": null,
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": []
+        }
+      ],
+      "removed_model_ids": []
+    },
+    "codex": {
+      "backend": "codex",
+      "mode": "direct",
+      "menu_kind": "fixed",
+      "sources": {
+        "order": []
+      },
+      "routes": {},
+      "menu": null,
+      "models": [
+        {
+          "id": "gpt-6-astra",
+          "display_name": "GPT-6-Astra",
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ]
+        },
+        {
+          "id": "gpt-6.1-sol",
+          "display_name": "GPT-6.1-Sol",
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        {
+          "id": "gpt-6-sol",
+          "display_name": "GPT-6-Sol",
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        {
+          "id": "gpt-6-luna",
+          "display_name": "GPT-6-Luna",
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        {
+          "id": "gpt-5.6-sol",
+          "display_name": "GPT-5.6-Sol",
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ]
+        },
+        {
+          "id": "gpt-5.6-terra",
+          "display_name": "GPT-5.6-Terra",
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ]
+        },
+        {
+          "id": "gpt-5.6-luna",
+          "display_name": "GPT-5.6-Luna",
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        {
+          "id": "gpt-5.5",
+          "display_name": "GPT-5.5",
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ]
+        },
+        {
+          "id": "gpt-5.4",
+          "display_name": "GPT-5.4",
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ]
+        },
+        {
+          "id": "gpt-5.4-mini",
+          "display_name": "GPT-5.4-Mini",
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ]
+        },
+        {
+          "id": "gpt-5.2",
+          "display_name": "GPT-5.2",
+          "origin": "builtin",
+          "models_dev_id": null,
+          "context_window": null,
+          "max_output_tokens": null,
+          "input_modalities": [],
+          "output_modalities": [],
+          "supports_tools": null,
+          "supports_reasoning": null,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ]
+        }
+      ],
+      "removed_model_ids": []
+    },
+    "vibey": {
+      "backend": "vibey",
+      "mode": "hub",
+      "menu_kind": "fixed",
+      "sources": {
+        "order": [
+          "src_tiers3201",
+          "src_tiers3202"
+        ]
+      },
+      "routes": {},
+      "menu": null,
+      "models": [
+        {
+          "id": "gpt-6-astra-2026-09-01",
+          "origin": "provider",
+          "display_name": null,
+          "reasoning_efforts": []
+        },
+        {
+          "id": "claude-opus-4-6",
+          "origin": "provider",
+          "display_name": null,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        {
+          "id": "claude-sonnet-4-6-20260301",
+          "origin": "provider",
+          "display_name": null,
+          "reasoning_efforts": [
+            "low",
+            "high"
+          ]
+        },
+        {
+          "id": "relay-house-model",
+          "origin": "manual",
+          "display_name": null,
+          "reasoning_efforts": []
+        }
+      ],
+      "removed_model_ids": []
+    }
+  }
+}

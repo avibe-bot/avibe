@@ -15,7 +15,7 @@ import core.agent_core.ai.anthropic as anthropic_module
 import core.agent_core.ai.sse as sse_module
 import core.agent_core.ai.openai_responses as responses_module
 from core.agent_core.ai.anthropic import AnthropicAdapter, build_messages_payload
-from core.agent_core.ai._common import OutputBudgetExceeded, StreamAssembler, read_response_body
+from core.agent_core.ai._common import OutputBudgetExceeded, ServedHop, StreamAssembler, read_response_body
 from core.agent_core.ai.openai_chat import OpenAIChatAdapter, build_chat_payload
 from core.agent_core.ai.openai_responses import OpenAIResponsesAdapter, build_responses_payload
 from core.agent_core.ai.provider import (
@@ -30,7 +30,8 @@ from core.agent_core.ai.provider import (
     ToolCallDelta,
     ToolCallStart,
 )
-from core.agent_core.ai.registry import ADAPTERS, adapter_class
+from core.agent_core.ai.registry import ADAPTERS, adapter_class, sent_effort
+from tests.agent_core.ai._wire import build_wire_request
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
     AssistantMessage,
@@ -2560,14 +2561,47 @@ def test_openai_payloads_forward_explicit_none_reasoning_effort(
         assert "include" not in payload
 
 
-def test_anthropic_adaptive_xhigh_maps_to_max_effort() -> None:
-    payload = build_messages_payload(
-        _request("anthropic", model_id="claude-opus-5", reasoning_effort="xhigh"),
-        (),
-    )
+@pytest.mark.parametrize(
+    ("model_id", "effort", "sent"),
+    [
+        # Native on Opus 4.7 and later (Anthropic's effort docs): the hop declares it, so it goes as given.
+        ("claude-opus-5", "xhigh", "xhigh"),
+        ("claude-opus-4-7", "xhigh", "xhigh"),
+        ("claude-haiku-5-5", "xhigh", "xhigh"),
+        ("claude-opus-4-6", "max", "max"),
+        # Anthropic has no minimal level.
+        ("claude-opus-5", "minimal", "low"),
+    ],
+)
+def test_anthropic_sends_the_declared_effort_as_given(model_id: str, effort: str, sent: str) -> None:
+    payload = build_messages_payload(_request("anthropic", model_id=model_id, reasoning_effort=effort), ())
 
     assert payload["thinking"] == {"type": "adaptive"}
-    assert payload["output_config"] == {"effort": "max"}
+    assert payload["output_config"] == {"effort": sent}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("protocol", "model_id"),
+    [
+        ("anthropic", "claude-opus-5-5"),
+        ("anthropic", "claude-opus-4-5"),
+        ("openai_responses", "gpt-6-sol"),
+        ("openai_chat", "deepseek-v4"),
+    ],
+)
+@pytest.mark.parametrize("effort", ["minimal", "low", "high", "xhigh", "max", "none", "off", "XHIGH"])
+async def test_sent_effort_is_the_token_each_adapter_puts_on_the_wire(protocol: str, model_id: str, effort: str) -> None:
+    """Model Hub's effort menu reads ``sent_effort``; it must name exactly the token the request carries."""
+
+    wire = await build_wire_request(_request(protocol, model_id=model_id, reasoning_effort=effort), gateway=True)
+
+    carried = {
+        "anthropic": (wire.body.get("output_config") or {}).get("effort"),
+        "openai_responses": (wire.body.get("reasoning") or {}).get("effort"),
+        "openai_chat": wire.body.get("reasoning_effort"),
+    }[protocol]
+    assert carried == sent_effort(protocol, model_id, effort)
 
 
 @pytest.mark.asyncio
@@ -2814,8 +2848,35 @@ async def test_malformed_tool_arguments_are_terminal_invalid_requests() -> None:
     assert "malformed tool arguments" in error.message
 
 
+_ORIGIN_KEYS = '"provider":"anthropic","api":"anthropic","model":"model-x"'
+
+
+@pytest.mark.parametrize("report,expected", [
+    pytest.param(
+        "{" + _ORIGIN_KEYS + ',"source":"src_fixture01"}',
+        ServedHop(Origin("anthropic", "anthropic", "model-x"), "src_fixture01"),
+        id="exact",
+    ),
+    pytest.param("{" + _ORIGIN_KEYS + "}", None, id="v11-without-source"),
+    pytest.param("{" + _ORIGIN_KEYS + ',"source":"src_fixture01","extra":"x"}', None, id="extra-key"),
+    pytest.param("{" + _ORIGIN_KEYS + ',"source":12345678}', None, id="non-string"),
+    pytest.param("{" + _ORIGIN_KEYS + ',"source":"src_short"}', None, id="bad-source-id"),
+    pytest.param(
+        "{" + _ORIGIN_KEYS + ',"source":"src_fixture01","source":"src_fixture02"}', None, id="duplicate-key",
+    ),
+])
+def test_served_hop_report_is_exactly_origin_and_source(report: str, expected: ServedHop | None) -> None:
+    """MH-VIBEY-002: only the exact v12 report verifies an origin; any other shape leaves it unverified."""
+    assert common_module.default_served_hop_resolver({"x-avibe-served-hop": report}) == expected
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("served_hop", [None, "invalid", '{"provider":"anthropic","api":"anthropic","model":"model-x"}'])
+@pytest.mark.parametrize("served_hop", [
+    None,
+    "invalid",
+    '{"provider":"anthropic","api":"anthropic","model":"model-x","source":"src_fixture01"}',
+    '{"provider":"anthropic","api":"anthropic","model":"model-x","source":"src_fixture02"}',
+])
 async def test_gateway_origin_sanitization_preserves_streamed_block_indexes(served_hop: str | None) -> None:
     body = (
         'data: {"type":"message_start","message":{"usage":{}}}\n\n'
@@ -2836,10 +2897,9 @@ async def test_gateway_origin_sanitization_preserves_streamed_block_indexes(serv
         return httpx.Response(200, headers=headers, text=body)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        events = await _events(
-            AnthropicAdapter(client, gateway=True),
-            _request("anthropic"),
-        )
+        request = _request("anthropic")
+        hop = replace(request.endpoint, source_id="src_fixture01", source_identity="sha256:fixture-account")
+        events = await _events(AnthropicAdapter(client, gateway=True), replace(request, endpoint=hop))
 
     final = events[-1]
     assert isinstance(final, Done)
@@ -2858,6 +2918,10 @@ async def test_gateway_origin_sanitization_preserves_streamed_block_indexes(serv
     if not verified:
         assert all(not isinstance(block, ThinkingBlock) or block.signature is None for block in final.message.content)
     assert all(not isinstance(block, ToolCallBlock) or block.signature is None for block in final.message.content)
+    # The message records the identity its opaque payloads go back to (cross-provider.md): the hop's, when the hop's
+    # own Source served it; none when another Source did, whose identity is unknown here.
+    own = verified and "src_fixture01" in served_hop
+    assert final.message.source_identity == ("sha256:fixture-account" if own else None)
 
 
 class _Loader(MediaLoader):
@@ -2900,8 +2964,10 @@ class _FailingLoader(MediaLoader):
 
 
 @pytest.mark.asyncio
-async def test_media_loader_failure_is_a_provider_error() -> None:
-    message = UserMessage((ImageBlock("image/png", "missing", "missing.png"),))
+@pytest.mark.parametrize("token,kind", [("missing", "unknown"), ("rate limit", "rate_limit"), ("server error", "server")])
+async def test_media_loader_failure_is_a_provider_error(token, kind) -> None:
+    # Local preparation must not acquire replay/continuation permission from upstream-looking diagnostic text.
+    message = UserMessage((ImageBlock("image/png", token, "missing.png"),))
     adapter = OpenAIChatAdapter(
         httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(500))),
         media_loader=_FailingLoader(),
@@ -2913,7 +2979,8 @@ async def test_media_loader_failure_is_a_provider_error() -> None:
     )
 
     assert isinstance(events[-1], ProviderError)
-    assert events[-1].kind == "unknown"
+    assert events[-1].kind == kind
+    assert not events[-1].retryable and not events[-1].continuable
 
 
 @pytest.mark.asyncio
@@ -3489,11 +3556,11 @@ class _StalledResolver:
         self.started = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def __call__(self, headers: Mapping[str, str]) -> Origin | None:
+    async def __call__(self, headers: Mapping[str, str]) -> ServedHop | None:
         del headers
         self.started.set()
         await self.release.wait()
-        return Origin("served", "openai_chat", "served-model")
+        return ServedHop(Origin("served", "openai_chat", "served-model"), "src_served01")
 
 
 class _CloseFailStream(httpx.AsyncByteStream):
@@ -3734,7 +3801,7 @@ async def test_http_error_classification_precedes_served_hop_resolution(
     resolver_calls = []
     closed = []
 
-    async def resolver(headers: Mapping[str, str]) -> Origin | None:
+    async def resolver(headers: Mapping[str, str]) -> ServedHop | None:
         resolver_calls.append(headers)
         raise RuntimeError("served-hop resolution failed")
 
@@ -4619,24 +4686,26 @@ async def test_model_hubs_stream_interrupted_frame_is_the_interrupted_kind(adapt
 
 
 # Model Hub's ending once its recovery window ran out (``turn_gateway.py``): an HTTP 424 whose envelope names the
-# failure the hub waited out. It already retried that failure, so the loop must not retry again, and the copy must
-# name the failure, not blame the request as the generic 4xx rule would.
+# failure the hub waited out. The loop must not replay that same request; a pre-output server/network cause may still
+# permit Vibey's safe transcript-only continuation, while the copy must name the failure rather than blame the request.
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("adapter_type", "protocol"),
     [(OpenAIResponsesAdapter, "openai_responses"), (OpenAIChatAdapter, "openai_chat"), (AnthropicAdapter, "anthropic")],
 )
 @pytest.mark.parametrize(
-    ("cause", "kind"),
+    ("cause", "kind", "continuable"),
     [
-        ("server_error", "server"),
-        ("network", "network"),
-        ("rate_limited", "rate_limit"),
-        ("quota_exhausted", "rate_limit"),
-        (None, "server"),
+        ("server_error", "server", True),
+        ("network", "network", True),
+        ("rate_limited", "rate_limit", False),
+        ("quota_exhausted", "rate_limit", False),
+        (None, "server", False),
     ],
 )
-async def test_model_hubs_recovery_exhausted_ending_names_its_cause(adapter_type, protocol, cause, kind) -> None:
+async def test_model_hubs_recovery_exhausted_ending_names_its_cause(
+    adapter_type, protocol, cause, kind, continuable
+) -> None:
     ending = {
         "type": "model_hub_recovery_exhausted",
         "code": "model_hub_recovery_exhausted",
@@ -4653,7 +4722,7 @@ async def test_model_hubs_recovery_exhausted_ending_names_its_cause(adapter_type
 
     error = events[-1]
     assert isinstance(error, ProviderError)
-    assert (error.kind, error.retryable) == (kind, False)
+    assert (error.kind, error.retryable, error.continuable) == (kind, False, continuable)
 
 
 # CLIProxyAPI nests the class under `error`; OpenAI's reference carries it at the root.
@@ -4702,6 +4771,66 @@ async def test_only_a_drop_after_thinking_alone_is_marked_after_thinking(
     assert error.after_thinking is flagged
     # Before any output a server error was always retryable; after text it never is.
     assert error.retryable is (flagged or not streamed)
+    assert error.continuable is True
+
+
+@pytest.mark.parametrize("output", ["none", "thinking", "text"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "classified transient",
+        "explicit transient",
+        "eof",
+        "stalled",
+        "recovery exhausted",
+        "pin refusal",
+        "malformed",
+        "unknown wire",
+        "local exception",
+    ],
+)
+def test_stream_error_producers_preserve_continuation_permission(output, failure):
+    """C-2: terminal sanitization must not resurrect exhausted/refused/local failures after thinking.
+
+    Prior tests covered kinds and replay only, so the outer adapter could undo their decision.
+    """
+    from core.agent_core.ai._common import PinUnavailable, pin_refusal
+    from core.agent_core.ai.errors import ProviderStalled
+
+    endpoint = _request("openai_responses").endpoint
+    assembler = StreamAssembler(origin=Origin("test", "openai_responses", "model"), protocol="openai_responses")
+    if output == "thinking":
+        assembler.thinking_delta(0, "reasoning")
+    elif output == "text":
+        assembler.text_delta(0, "partial")
+    if failure == "classified transient":
+        error = assembler.error("busy", status=503)
+    elif failure == "explicit transient":
+        error = assembler.error("busy", kind="server")
+    elif failure == "eof":
+        error = assembler.incomplete()
+    elif failure == "stalled":
+        error = assembler.exception(ProviderStalled(600))
+    elif failure == "recovery exhausted":
+        error = assembler.error(json.dumps({"error": {"code": "model_hub_recovery_exhausted", "cause": "server_error"}}))
+    elif failure == "pin refusal":
+        error = pin_refusal(assembler, endpoint, PinUnavailable())
+    elif failure == "malformed":
+        error = assembler.error("bad wire shape", kind="invalid_request")
+    elif failure == "unknown wire":
+        error = assembler.error("unclassified failure")
+    else:
+        error = assembler.exception(RuntimeError("local failure"))
+    terminal = assembler.terminal(error)
+    expected_continuable = failure in {"classified transient", "explicit transient", "eof", "stalled"}
+    if failure == "recovery exhausted":
+        expected_continuable = output == "none"
+    assert terminal.continuable is expected_continuable
+    expected_retry = (
+        expected_continuable and failure != "recovery exhausted" and output != "text"
+    ) or (failure == "unknown wire" and output == "thinking")
+    assert terminal.retryable is expected_retry
+    assert terminal.after_thinking is (expected_retry and output == "thinking")
 
 
 @pytest.mark.asyncio
@@ -4837,6 +4966,7 @@ async def test_eof_without_protocol_terminal_is_not_success(
 
     assert isinstance(events[-1], ProviderError)
     assert events[-1].retryable is False
+    assert events[-1].continuable is True
     assert events[-1].partial is not None
     assert not any(isinstance(event, Done) for event in events)
 

@@ -96,7 +96,7 @@ def test_auto_detect_asks_for_responses_before_chat():
 
 def test_unsaved_observation_schema_closes_all_terminal_shapes():
     schema = _schema("observation-result.schema.json")
-    assert schema["properties"]["contract_version"]["const"] == 11
+    assert schema["properties"]["contract_version"]["const"] == 15
     assert tuple(schema["properties"]["outcome"]["enum"]) == tuple(
         member.value for member in ObservationOutcome
     )
@@ -120,7 +120,7 @@ def test_observation_terminal_authority_and_schema_accept_the_same_products():
 
     def payload(observation: SourceObservation) -> dict:
         return {
-            "contract_version": 11,
+            "contract_version": 15,
             "outcome": observation.outcome.value,
             "reachable": observation.reachable,
             "authenticated": (
@@ -700,7 +700,7 @@ def test_guard_refusal_error_requires_its_corresponding_nonempty_plan_array():
 
     route_refusal = {
         "ok": False,
-        "contract_version": 11,
+        "contract_version": 15,
         "error": "source_in_route_chain",
         "detail": "modelHub.errors.source_in_route_chain",
         "would_remove_hops": [hop],
@@ -716,7 +716,7 @@ def test_guard_refusal_error_requires_its_corresponding_nonempty_plan_array():
     }
     candidate_refusal = {
         "ok": False,
-        "contract_version": 11,
+        "contract_version": 15,
         "error": "candidate_suppliers_changed",
         "detail": "modelHub.errors.candidate_suppliers_changed",
         "changed": {
@@ -800,7 +800,7 @@ def test_v8_mirror_registry_is_executable_and_complete():
     registry = json.loads((CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8"))
     schemas = _mirror_schemas(registry)
 
-    assert registry["contract_version"] == 11
+    assert registry["contract_version"] == 15
     ids = [entry["id"] for entry in registry["entries"]]
     assert ids
     assert len(ids) == len(set(ids))
@@ -937,8 +937,8 @@ def test_model_hub_authority_closure_anchors_the_persisted_version_floor(monkeyp
         "kind": "contract_version_schema_drift",
         "domain": "V1",
         "file": "docs/plans/model-hub-contracts/turn-provenance.schema.json",
-        "values": [6, 7, 8, 9, 10, 11],
-        "expected": [5, 6, 7, 8, 9, 10, 11],
+        "values": [6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        "expected": [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
     } in result["findings"]
 
 
@@ -1249,7 +1249,7 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
         with pytest.raises(ValidationError):
             chain_validator.validate(interrupted)
     exact_hop = {
-        "contract_version": 11,
+        "contract_version": 15,
         "backend": "claude",
         "model_id": "claude-opus-4-6",
         "manual_override": None,
@@ -1403,6 +1403,7 @@ def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tm
         "credential_ref": "cred_serializer_test",
         "client_nonce": "scn_01j5w8z7p4n6q2rt",
         "verification_pending": "vp_0123456789abcdef0123456789abcdef",
+        "credential_generation": "vp_0123456789abcdef0123456789abcdef",
     }
     hub_payload = {
         "sources": [source_example],
@@ -1410,6 +1411,8 @@ def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tm
             backend: ModelHubAgentSupplyConfig.default(backend, mode="hub").to_payload()
             for backend in AGENT_BACKENDS
         },
+        # Omitted while empty, so populate it to exercise its serializer.
+        "hosted_tools": {"web_search": {"enabled": True, "executor": None}},
     }
     config = default_config()
     config.model_hub = ModelHubConfig.from_payload(hub_payload)

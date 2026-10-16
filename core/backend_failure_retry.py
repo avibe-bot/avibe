@@ -156,6 +156,10 @@ def reserve_retry(
         and source_turn["terminal_outcome"] == "not_written"
         else []
     )
+    backend = conn.execute(
+        select(agent_sessions.c.agent_backend).where(agent_sessions.c.id == session_id)
+    ).scalar_one_or_none()
+    vibey_resume = backend == "vibey" and not original
     turn = _validate_boundary(conn, notice, exclude_ids={row["id"] for row in original})
     delivery_id = str(turn["initial_delivery_id"]) if original else deliveries.new_delivery_id()
     binding = {
@@ -177,14 +181,42 @@ def reserve_retry(
             if saved is None:
                 raise RuntimeError("retry retained input claim lost")
     else:
+        retry_snapshot = dict(snapshot)
+        dispatch_text = "continue"
+        if vibey_resume:
+            # Vibey resumes its committed transcript. Keep the Delivery as the
+            # durable ownership record, but do not create a visible user input.
+            retry_snapshot.update(
+                {
+                    "author": "harness",
+                    "source": "harness",
+                    "type": "agent_initiated",
+                    "content_text": None,
+                    "content_json": "{}",
+                }
+            )
+            metadata = json.loads(str(retry_snapshot.get("metadata_json") or "{}"))
+            if not isinstance(metadata, dict):
+                metadata = {}
+            metadata.update(
+                {
+                    deliveries.VIBEY_RESUME_METADATA_KEY: True,
+                    "retry_notice_id": notice_id,
+                    deliveries.VIBEY_SOURCE_TURN_METADATA_KEY: turn["id"],
+                }
+            )
+            retry_snapshot["metadata_json"] = json.dumps(
+                metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            )
+            dispatch_text = ""
         deliveries.insert_delivery(
             conn,
             delivery_id=delivery_id,
             session_id=session_id,
             priority="p3",
             state="reserved",
-            snapshot=snapshot,
-            dispatch_text="continue",
+            snapshot=retry_snapshot,
+            dispatch_text=dispatch_text,
             history_event=binding,
         )
     content = dict(notice["content"])

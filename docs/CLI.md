@@ -226,7 +226,7 @@ vibe computer set-value --arg pid=123 --arg value=enabled --arg element_token=el
 vibe computer clipboard read
 vibe computer clipboard write --arg text="copied text"
 vibe computer launch --arg bundle_id=com.example.App
-vibe computer quit --arg pid=123
+vibe computer force-quit --arg pid=123
 ```
 
 Every leaf also accepts `--args-json OBJECT` or `--args-json @FILE`,
@@ -235,11 +235,15 @@ repeatable `--arg NAME=VALUE`, and `--json`. `--output PATH` is supported by
 prints the resulting path. Human output for observations includes the
 accessibility state and element tokens when the driver returns them.
 
+Machine-readable output keeps the structured driver object in
+`result.structuredContent` and retains the legacy text content. `force-quit`
+uses the driver's SIGKILL operation; unsaved application state can be lost.
+
 The command reaches the running Controller over local control IPC, so the
 existing `require_bind`, observe-first, exact-window, focus-shortcut,
-single-holder lease, desktop state, and driver admission checks remain in the
+target-scoped lock, desktop state, and driver admission checks remain in the
 same enforcement path. A missing active Turn, `off`, `needs_permission`,
-`needs_runtime`, `starting`, `error`, `unavailable`, or `desktop_busy` result is
+`needs_runtime`, `starting`, `error`, `unavailable`, or `target_busy` result is
 reported to the caller; the CLI does not retry it automatically. The driver
 session and observation state are keyed by Avibe Session and are retired when
 the Session is explicitly ended or archived, rather than at every Turn
@@ -484,11 +488,14 @@ vibe agent run --close-after --no-callback --agent release-reviewer --message 'R
 With an existing `--session-id`, the default admission is P1: Avibe steers the
 new Run into an active native Turn, starts it immediately when idle, or moves the
 same Delivery to the durable P3 queue after a definitive refusal/not-active
-receipt. It does not interrupt the active Turn.
+receipt. It does not interrupt the active Turn. When a person's message is part
+of the active Turn, the Run is not steered into it: it waits in the P3 queue and
+runs as its own Turn after that Turn ends, so the person's answer stays that
+Turn's result. Watch, Hook, Webhook, and callback deliveries follow the same rule.
 
-`--send-now` is valid only with an existing `--session-id` and explicitly selects
-the normal content-bearing P1 behavior: the new message steers an active native
-Turn, starts immediately when idle, and falls back to P3 after a definitive
+`--send-now` is valid only with an existing `--session-id` and explicitly steers
+the new message into the active native Turn, including one a person's message is
+part of. It starts immediately when idle and falls back to P3 after a definitive
 refusal. It never promotes an older queued message. `vibe session send-now` is
 the content-free P1 operation: it promotes the exact existing FIFO head without
 adding a message. A stale head is refused rather than replaced by the next queued
@@ -500,6 +507,16 @@ Session keeps the source backend. `--agent`, `--model`, and
 `--reasoning-effort` can override the forked Session only when the Agent backend
 stays the same; a cross-backend fork is rejected. Do not combine
 `--fork-session` with `--session-id` or `--create-session`.
+
+`--model` and `--reasoning-effort` set the model of any new Session the run
+creates (a blank new Session, `--create-session`, or a fork), and the Session
+keeps it for its later turns. They are refused with `--session-id`; an existing
+Session's model is changed in the Web UI's Session model picker. The pair the
+new Session will run on (each override over the default it would otherwise
+keep) is checked against the Agent's catalog. A Vibey model or effort its Model
+Hub menu does not offer, or a menu that cannot be loaded, is refused; for claude
+and codex an unknown value is a warning, since their bundled catalogs can lag
+behind a new release. `vibe agent models <agent>` lists valid values.
 
 Async runs need an explicit callback policy unless the command is running inside
 an Avibe-injected Agent environment. Use `--callback-session-id` when the final

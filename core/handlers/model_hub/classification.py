@@ -219,16 +219,47 @@ def machine_error_codes(outcome: RawCallOutcome) -> tuple[str, ...]:
     )
 
 
+def names_model_refusal(outcome: RawCallOutcome) -> bool:
+    """Whether the upstream says it does not serve the requested model: a code naming it, or a 404 not_found_error."""
+
+    return machine_codes_name_model(outcome) or (
+        outcome.http_status == 404
+        and any(code in _MODEL_NOT_FOUND_ERROR_CODES for code in machine_error_codes(outcome))
+    )
+
+
+def machine_codes_name_model(outcome: RawCallOutcome) -> bool:
+    """Whether a machine code itself names the model as not served (``model_not_found``, ``unknown_model``)."""
+
+    return bool(_MODEL_SURFACE_PATTERNS.search(_error_text(outcome)))
+
+
+def _status_clears_request(http_status: int | None) -> bool:
+    """Whether the status itself says the call failed for a reason other than the request.
+
+    A timeout (408), a rate or quota limit (429) and a server or gateway failure
+    (5xx) are the server's own account of why it did not serve the call. A
+    request-family code beside one contradicts it rather than refining it:
+    relays wrap their own timeouts and stalls in ``invalid_request_error``
+    (#2260), so that code cannot show that no Source could serve the request.
+    """
+
+    return http_status in (408, 429) or (http_status is not None and 500 <= http_status <= 599)
+
+
 def _classify_unstreamed(
     outcome: RawCallOutcome,
     *,
     refresh_attempted: bool = False,
 ) -> ResolutionDecision:
-    # Signed machine-code rows precede every transport and status heuristic.
+    clears_request = _status_clears_request(outcome.http_status)
+    # Signed machine-code rows precede every transport and status heuristic,
+    # except that a status clearing the request outranks the request family.
     machine_rows = (
         (_MACHINE_ERROR_TAXONOMY[code], code)
         for code in machine_error_codes(outcome)
         if code in _MACHINE_ERROR_TAXONOMY
+        and not (clears_request and _MACHINE_ERROR_TAXONOMY[code].family == "request")
     )
     for machine_row, _machine_code in machine_rows:
         if machine_row.action is not None:
@@ -264,11 +295,7 @@ def _classify_unstreamed(
             "fallback",
             reason="balance_exhausted",
         )
-    model_not_found = _MODEL_SURFACE_PATTERNS.search(error_text) or (
-        outcome.http_status == 404
-        and any(code in _MODEL_NOT_FOUND_ERROR_CODES for code in machine_error_codes(outcome))
-    )
-    if _SURFACE_PATTERNS.search(error_text) or model_not_found:
+    if not clears_request and (_SURFACE_PATTERNS.search(error_text) or names_model_refusal(outcome)):
         return ResolutionDecision("surface", error_code="upstream_request_invalid")
 
     if _QUOTA_PATTERNS.search(error_text):
@@ -288,7 +315,7 @@ def _classify_unstreamed(
             reason="rate_limited",
             cooldown_seconds=60,
         )
-    if outcome.http_status is not None and 500 <= outcome.http_status < 600:
+    if outcome.http_status == 408 or (outcome.http_status is not None and 500 <= outcome.http_status < 600):
         return ResolutionDecision(
             "fallback",
             reason="server_error",

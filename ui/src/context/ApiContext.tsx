@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useToast } from './ToastContext';
-import type { AgentSupply } from '../components/settings/models/types';
+import type { PickerAgentCatalog } from '../components/settings/models/types';
 import type { AgentBackendId, NativeCliBackend, WebOAuthBackend } from '../lib/agentBackends';
 import { apiFetch, recoverRemoteAuthFromSessionProbe, withApiDeadline } from '../lib/apiFetch';
 import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
@@ -82,6 +82,11 @@ export type SigningAddresses = {
 
 export type VaultSecret = {
   name: string;
+  /** Absent on legacy servers; the default record is always the bare secret name. */
+  default_field?: string;
+  fields?: string[];
+  /** Present only when the stored extra-field section could not be read safely. */
+  fields_state?: 'corrupt';
   /** Flat tag list; skill association is a reserved `skill:<name>` tag (see lib/vaultTags). */
   tags: string[];
   kind: string;
@@ -134,6 +139,8 @@ export type VaultRequestSession = {
 
 export type VaultRequestSpec = {
   kind?: 'static';
+  default_field?: string;
+  fields?: string[];
   protection?: 'standard' | 'protected';
   description?: string;
   /** May already include `skill:<name>` tags; `links.skills` is a bare-name convenience mirror. */
@@ -358,6 +365,8 @@ export type VaultWebAuthnRegistrationPayload = {
 
 export type VaultCreatePayload = {
   name: string;
+  default_field?: string;
+  fields?: VaultCreateFieldPayload[];
   protection?: 'standard' | 'protected';
   blind_box?: VaultBlindBox;
   sealed?: VaultSealedEnvelope;
@@ -387,9 +396,26 @@ export type VaultCreatePayload = {
  * such as `always_ask`. Name / kind / protection / value are never editable through this path.
  */
 export type VaultMetadataUpdatePayload = {
+  default_field?: string;
   description?: string | null;
   tags?: string[];
   policy?: Record<string, unknown>;
+};
+
+export type VaultFieldValuePayload = {
+  /** Canonical record name bound into the envelope (NAME for the default field). */
+  record: string;
+  blind_box?: VaultBlindBox;
+  sealed?: VaultSealedEnvelope;
+  expected_updated_at?: string;
+};
+
+export type VaultCreateFieldPayload = {
+  name: string;
+  /** Canonical record name bound into this extra field's envelope. */
+  record: string;
+  blind_box?: VaultBlindBox;
+  sealed?: VaultSealedEnvelope;
 };
 
 export type TunnelQualitySnapshot = {
@@ -671,7 +697,7 @@ export type ApiContextType = {
   /** Picker-safe persisted catalog. Null tells pickers to use the native fallback. */
   readModelHubAgentCatalogForModelPicker: (
     backend: string,
-  ) => Promise<Pick<AgentSupply, 'backend' | 'mode' | 'catalog_models'> | null>;
+  ) => Promise<PickerAgentCatalog | null>;
   getLogs: (lines?: number, source?: string) => Promise<{ logs: LogEntry[]; total: number; source: string; sources: LogSource[] }>;
   getVersion: () => Promise<VersionInfo>;
   doUpgrade: () => Promise<UpgradeResult>;
@@ -723,8 +749,7 @@ export type ApiContextType = {
   createSession: (payload: WorkbenchSessionCreate) => Promise<WorkbenchSession>;
   forkSession: (sessionId: string) => Promise<WorkbenchSession>;
   getSession: (sessionId: string, params?: { cache?: boolean; handleError?: boolean }) => Promise<WorkbenchSession>;
-  /** Main-agent lookup seam. The endpoint is not shipped yet; the pet client
-   * currently resolves the session bound to its native window here. */
+  /** Resolve the stable main session for the current authorization context. */
   getMainSession: () => Promise<WorkbenchSessionReadResult>;
   /** The caller's desktop mini conversation with Vibey, created on first use
    * in their most recently active chat Project. */
@@ -806,7 +831,7 @@ export type ApiContextType = {
   updateVibeAgent: (name: string, payload: VibeAgentUpdatePayload) => Promise<{ ok: boolean; agent: VibeAgentFull }>;
   setDefaultVibeAgent: (name: string) => Promise<{ ok: boolean; default_agent_name: string; agent: VibeAgentBrief }>;
   removeVibeAgent: (name: string) => Promise<{ ok: boolean; code?: string; message?: string; references?: Record<string, number>; removed_agent?: string; archived_agent?: VibeAgentBrief; default_agent_name?: string | null }>;
-  listVaultSecrets: () => Promise<{ ok: boolean; secrets: VaultSecret[] }>;
+  listVaultSecrets: (opts?: { cache?: boolean }) => Promise<{ ok: boolean; secrets: VaultSecret[] }>;
   getVaultVmk: () => Promise<VaultVmkResult>;
   getVaultPubkey: () => Promise<{ ok: boolean; public_key: string; fingerprint: string }>;
   getVaultAgentPubkey: () => Promise<{ ok: boolean; public_key: string; fingerprint: string }>;
@@ -820,7 +845,7 @@ export type ApiContextType = {
   saveVaultSettings: (payload: Partial<VaultSettings>) => Promise<VaultSettingsResult>;
   createVaultRevealContext: (
     name: string,
-    payload?: { session_label?: string },
+    payload?: { session_label?: string; field?: string },
   ) => Promise<VaultRevealContextResult>;
   deriveSigningAddresses: (publicKey: string) => Promise<{ ok: boolean; addresses?: SigningAddresses; code?: string; message?: string }>;
   createVaultAuthzWebAuthnOptions: () => Promise<VaultWebAuthnRegistrationOptions>;
@@ -829,6 +854,8 @@ export type ApiContextType = {
   ) => Promise<{ ok: boolean; factor?: Record<string, unknown>; code?: string; message?: string }>;
   createVaultSecret: (payload: VaultCreatePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   updateVaultSecret: (name: string, payload: VaultMetadataUpdatePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
+  updateVaultSecretField: (name: string, field: string, payload: VaultFieldValuePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
+  deleteVaultSecretField: (name: string, field: string, payload: { expected_updated_at: string }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   deleteVaultSecret: (name: string) => Promise<{ ok: boolean; removed?: boolean; code?: string; message?: string }>;
   getVaultProvisionRequest: (
     name: string,
@@ -837,6 +864,7 @@ export type ApiContextType = {
   getVaultProvisionRequestById: (requestId: string, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; request: VaultRequest | null }>;
   getVaultRequests: (params?: { status?: string; type?: string; limit?: number; session?: string }, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; requests: VaultRequest[] }>;
   denyVaultRequest: (requestId: string) => Promise<{ ok: boolean; request?: VaultRequest; code?: string; message?: string }>;
+  approveVaultDeleteRequest: (requestId: string) => Promise<{ ok: boolean; request?: VaultRequest; removed?: boolean; name?: string; code?: string; message?: string }>;
   fulfillVaultAccessRequest: (requestId: string, payload: VaultAccessFulfillmentPayload) => Promise<{ ok: boolean; request_id?: string; grant?: VaultGrant; result?: { type: string; grant?: VaultGrant }; code?: string; message?: string }>;
   getVaultGrants: (params?: { status?: string; sessionId?: string }, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; grants: VaultGrant[] }>;
   createVaultGrant: (payload: Record<string, unknown>) => Promise<{ ok: boolean; grant: VaultGrant; code?: string; message?: string }>;
@@ -1960,7 +1988,8 @@ export type BackendConnectionState = {
   backend: AgentBackendId;
   installed: boolean;
   enabled: boolean;
-  auth: 'subscription' | 'api_key' | 'none' | 'unknown';
+  // external: launch capability only; the native backend owns authentication.
+  auth: 'subscription' | 'api_key' | 'external' | 'none' | 'unknown';
   application: 'applied' | 'draining' | 'failed' | 'stopped' | 'unknown';
   ready: boolean;
   entry_eligible: boolean;
@@ -2082,17 +2111,17 @@ export type ClaudeApiKeySource = 'v2config' | 'settings_json' | null;
 export type ClaudeAuthState = {
   ok: boolean;
   auth_mode: ClaudeAuthMode;
-  // Live source the CLI is actually inheriting at launch (api_key when
-  // V2Config injects ``ANTHROPIC_API_KEY`` and strips OAuth env vars,
-  // oauth when Claude Code reports or stores a usable first-party login).
+  // Legacy field; native authentication is not inferred by this inventory.
   active_auth_mode: ActiveAuthMode;
+  auth_managed_by?: 'claude';
+  auth_mode_uncertain?: boolean;
+  oauth_store_state?: 'present' | 'absent' | 'unknown';
+  can_remove_oauth_credentials?: boolean;
   has_api_key: boolean;
   api_key_length: number;
   api_key_masked: string | null;
   api_key_source?: ClaudeApiKeySource;
-  // Raw Claude Code account-token signal. This may remain true while Avibe
-  // is actively using API-key mode, so UI "signed in" indicators should use
-  // active_auth_mode instead.
+  // Inspectable native material only, not a signed-in or effective-auth claim.
   has_oauth_credentials: boolean;
   base_url: string | null;
   settings_path: string | null;
@@ -2137,6 +2166,8 @@ export type OAuthWebState =
 
 export type OAuthWebStartResult = {
   ok: boolean;
+  // This operation committed authorization, independently of runtime apply.
+  authorization_completed?: boolean;
   flow_id?: string;
   backend?: WebOAuthBackend;
   state?: OAuthWebState;
@@ -2151,6 +2182,7 @@ export type OAuthWebStartResult = {
 
 export type OAuthWebStatus = {
   ok: boolean;
+  authorization_completed?: boolean;
   flow_id?: string;
   backend?: WebOAuthBackend;
   state?: OAuthWebState;
@@ -2527,12 +2559,12 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // absent page there means it vanished mid-session rather than never existed.
   const readShowPageJson = (path: string) => getJson(path, { expectedCodes: ['show_page_not_found'] });
 
-  const getCachedJson = (path: string, ttlMs = 1500, opts?: { handleError?: boolean }) => {
+  const getCachedJson = (path: string, ttlMs = 1500, opts?: { cache?: boolean; handleError?: boolean }) => {
     // Best-effort callers (handleError: false) bypass the shared read cache so a
     // silently-failing request can't hand its suppressed-error promise to a
     // toast-enabled caller hitting the same path.
-    if (opts?.handleError === false) {
-      return getJson(path, opts);
+    if (opts?.cache === false || opts?.handleError === false) {
+      return getJson(path, { handleError: opts?.handleError });
     }
     const now = Date.now();
     const cached = readCacheRef.current.get(path);
@@ -3284,7 +3316,11 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // ``getJson``/``postJson``. New mutating helpers should route through
   // requestJson/postJson/patchJson/deleteJson so successful mutations always
   // invalidate reusable GET promises.
-  const deleteJson = async (path: string, payload?: any) => {
+  const deleteJson = async (
+    path: string,
+    payload?: any,
+    opts?: { handleError?: boolean; expectedCodes?: readonly string[] },
+  ) => {
     const { payloadJson } = await requestJson(path, {
       method: 'DELETE',
       ...(payload === undefined
@@ -3293,7 +3329,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
           }),
-    });
+    }, path, opts);
     return payloadJson;
   };
 
@@ -3647,7 +3683,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         .then((payload) => {
           const agent = payload?.ok === false ? null : payload?.agent;
           return agent && typeof agent === 'object'
-            ? (agent as Pick<AgentSupply, 'backend' | 'mode' | 'catalog_models'>)
+            ? (agent as PickerAgentCatalog)
             : null;
         })
         .catch(() => null),
@@ -3736,16 +3772,17 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return sessionRowFromPayload(payload);
     },
     getMainSession: async () => {
-      const binding = (window as unknown as { __AVIBE_PET_BINDING__?: unknown }).__AVIBE_PET_BINDING__;
-      if (typeof binding !== 'string' || !binding) return { status: 404, session: null };
-      const res = await apiFetch(`/api/sessions/${encodeURIComponent(binding)}`);
+      const res = await apiFetch('/api/sessions/main');
       const payload = await res.json().catch(() => null);
-      if (!(res.ok && payload && typeof payload.id === 'string')) {
+      const sessionPayload = payload && typeof payload === 'object' && 'session' in payload
+        ? (payload as { session?: unknown }).session
+        : payload;
+      if (!(res.ok && sessionPayload && typeof sessionPayload === 'object' && typeof (sessionPayload as { id?: unknown }).id === 'string')) {
         return { status: res.status, session: null };
       }
       return {
         status: res.status,
-        session: sessionRowFromPayload(payload),
+        session: sessionRowFromPayload(sessionPayload as WorkbenchSession & { capabilities?: unknown }),
         capabilities: sessionCanChatFromPayload(payload),
       };
     },
@@ -3985,7 +4022,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setDefaultVibeAgent: (name) => postJson('/api/agents/default', { name }),
     removeVibeAgent: (name) => deleteJson(`/api/agents/${encodeURIComponent(name)}`),
     getVaultVmk: () => getCachedJson('/api/vault/vmk', 1500, { handleError: false }),
-    listVaultSecrets: () => getCachedJson('/api/vault/secrets', 1500),
+    listVaultSecrets: (opts) => getCachedJson('/api/vault/secrets', 1500, opts),
     getVaultPubkey: () => getCachedJson('/api/vault/pubkey', 1500),
     getVaultAgentPubkey: () => getCachedJson('/api/vault/agent/pubkey', 1500),
     getVaultSandboxRootMetadata: () => getCachedJson('/api/vault/sandbox/root-metadata', 1500, { handleError: false }),
@@ -4001,6 +4038,21 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     registerVaultAuthzWebAuthnFactor: (payload) => postJson('/api/vault/authz/factors/webauthn', payload),
     createVaultSecret: (payload, opts) => postJson('/api/vault/secrets', payload, opts),
     updateVaultSecret: (name, payload, opts) => patchJson(`/api/vault/secrets/${encodeURIComponent(name)}`, payload, opts),
+    updateVaultSecretField: async (name, field, payload, opts) => {
+      const path = `/api/vault/secrets/${encodeURIComponent(name)}/fields/${encodeURIComponent(field)}`;
+      const { payloadJson } = await requestJson(path, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }, path, opts);
+      return payloadJson;
+    },
+    deleteVaultSecretField: (name, field, payload) =>
+      deleteJson(
+        `/api/vault/secrets/${encodeURIComponent(name)}/fields/${encodeURIComponent(field)}`,
+        payload,
+        { handleError: false },
+      ),
     deleteVaultSecret: (name) => deleteJson(`/api/vault/secrets/${encodeURIComponent(name)}`),
     getVaultProvisionRequest: (name, opts) =>
       getCachedJson(`/api/vault/provision-requests/${encodeURIComponent(name)}`, 1500, opts),
@@ -4016,6 +4068,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return getCachedJson(qs ? `/api/vault/requests?${qs}` : '/api/vault/requests', 1500, opts);
     },
     denyVaultRequest: (requestId) => postJson(`/api/vault/requests/${encodeURIComponent(requestId)}/deny`, {}),
+    approveVaultDeleteRequest: (requestId) => postJson(`/api/vault/requests/${encodeURIComponent(requestId)}/approve-delete`, {}),
     fulfillVaultAccessRequest: (requestId, payload) =>
       postJson(`/api/vault/requests/${encodeURIComponent(requestId)}/fulfill-access`, payload),
     getVaultGrants: (params, opts) => {

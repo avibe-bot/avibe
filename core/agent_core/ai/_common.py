@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import io
 import inspect
 import json
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Hashable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
 from typing import Any, TypeVar
 from urllib.parse import parse_qsl, unquote, unquote_to_bytes, urlencode, urlsplit, urlunsplit
 
@@ -21,12 +22,19 @@ from core.agent_core.ai.errors import (
     classify_error,
     parse_retry_after,
     redact_provider_error,
+    redact_provider_text,
 )
+from core.agent_core.ai.hosted import MAX_HOSTED_COUNTERS
 from core.agent_core.ai.sse import SSEEvent, SSEParseError, SSEParser
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
     AssistantContent,
     AssistantMessage,
+    Citation,
+    HostedCost,
+    HostedSource,
+    HostedSummary,
+    HostedToolBlock,
     ImageBlock,
     Origin,
     TextBlock,
@@ -36,22 +44,52 @@ from core.agent_core.messages import (
     UserContent,
 )
 from core.agent_core.ai.provider import (
+    OPAQUE_PAYLOADS,
     RETRYABLE_ERROR_KINDS,
     THINKING_DROP_RETRY_KINDS,
     BlockEnd,
     Done,
+    HostedToolRoute,
     MediaLoader,
     ModelEndpoint,
+    ModelRequest,
+    OpaquePayload,
     ProviderError,
+    Refusal,
     TextDelta,
     ThinkingDelta,
     ToolCallDelta,
     ToolCallStart,
 )
 
+
+@dataclass(frozen=True)
+class ServedHop:
+    """The C-6 served-hop report: the message origin and the serving Source."""
+
+    origin: Origin
+    source_id: str
+
+
+@dataclass(frozen=True)
+class ServedResolution:
+    """The response origin, whether its signature data is verified, and its Source.
+
+    ``source_id`` is the endpoint's own Source in direct mode (``None`` when it names none), and ``None`` for a
+    missing or invalid served-hop report. ``source_identity`` is the endpoint's identity when its own Source served
+    the response, else ``None``: the identity of another Source is unknown here.
+    """
+
+    origin: Origin
+    verified: bool
+    source_id: str | None
+    source_identity: str | None = None
+
+
 ServedHopResolver = Callable[
-    [Mapping[str, str]], Origin | None | Awaitable[Origin | None]
+    [Mapping[str, str]], ServedHop | None | Awaitable[ServedHop | None]
 ]
+_SOURCE_ID = re.compile(r"src_[a-z0-9]{8,}")
 _T = TypeVar("_T")
 WireTranslator = Callable[[AsyncIterator[SSEEvent]], AsyncIterator[Any]]
 
@@ -89,6 +127,10 @@ MAX_CUMULATIVE_OUTPUT_CHARS = 32 * 1024 * 1024
 # Conservative structural allowances, not a one-byte item counter. These cover
 # block/tool objects and their indexing sets/maps in addition to payload bytes.
 BLOCK_SLOT_OVERHEAD_BYTES = 2048
+#: What one retained citation costs beyond its text fields.
+CITATION_OVERHEAD_BYTES = 256
+#: What one kept hosted counter costs beyond its name.
+COUNTER_OVERHEAD_BYTES = 64
 TOOL_ALIAS_OVERHEAD_BYTES = 512
 # Only late response closes are detached; retain them until bounded cleanup
 # completes. The driver registers their ownership in its single finally.
@@ -167,6 +209,16 @@ class StreamAssembler:
         self._sensitive_values = tuple(value for value in sensitive_values if value)
         self.content: list[AssistantContent] = []
         self.usage: Any = None
+        #: The Source that served the response (the served-hop report): the ``native.source_id`` of its hosted calls.
+        self.source_id: str | None = None
+        self.source_identity: str | None = None
+        self._citations: dict[int, list[Citation]] = {}
+        self._hosted_inputs: dict[Hashable, io.StringIO] = {}
+        self._hosted_counts: dict[str, int] = {}
+        self._hosted_cited: tuple[HostedSource, ...] = ()
+        self._hosted_cost: HostedCost | None = None
+        #: Whether the response was paused and continues (``pause``).
+        self._continuing = False
         self._terminal_seen = False
         self._emitted_output = False
         # Text or a tool call: output past which a dropped response is never retried.
@@ -204,9 +256,27 @@ class StreamAssembler:
 
         return self._emitted_output
 
-    def set_origin(self, origin: Origin, verified_origin: bool) -> None:
+    def set_origin(
+        self,
+        origin: Origin,
+        verified_origin: bool,
+        source_id: str | None = None,
+        source_identity: str | None = None,
+    ) -> None:
+        if self._continuing:
+            # A continued response is one message (§4.3): verified only when every response in it was, from one origin
+            # and one Source identity, and its usage is the latest response's, none if that reports none.
+            verified_origin = (
+                verified_origin
+                and self.verified_origin
+                and origin == self.origin
+                and source_identity == self.source_identity
+            )
+            self.usage = None
         self.origin = origin
         self.verified_origin = verified_origin
+        self.source_id = source_id
+        self.source_identity = source_identity
 
     def begin_driver(self) -> None:
         """Defer terminal marking while the shared lifecycle driver runs."""
@@ -306,13 +376,121 @@ class StreamAssembler:
             self._materialize_thinking_details(key)
         for index, block in enumerate(self.content):
             if isinstance(block, TextBlock):
-                self.content[index] = TextBlock(text=self._text_value(index))
+                text = self._text_value(index)
+                self.content[index] = TextBlock(text=text, citations=self._text_citations(index, text))
             elif isinstance(block, ThinkingBlock):
                 self.content[index] = ThinkingBlock(
                     text=self._thinking_value(index),
                     signature=self._thinking_signature_value(index) or None,
                     redacted=block.redacted,
                 )
+
+    def _text_citations(self, index: int, text: str) -> tuple[Citation, ...] | None:
+        """A text block's citations; a range that does not lie in its final text keeps its source, not the range."""
+
+        citations = tuple(
+            item if item.end is None or item.end <= len(text) else replace(item, start=None, end=None)
+            for item in self._citations.get(index, ())
+        )
+        return citations or None
+
+    def add_text_citation(self, key: Hashable, citation: Citation) -> None:
+        """A provider citation on the text slot ``key`` (presentation only, never replayed)."""
+
+        index = self._ensure_slot("text", key, TextBlock(text=""))
+        self._account_output(CITATION_OVERHEAD_BYTES)
+        for value in (citation.url, citation.title, citation.cited_text):
+            if value:
+                self._account_output(value)
+        self._citations.setdefault(index, []).append(citation)
+
+    def has_text_citations(self, key: Hashable) -> bool:
+        index = self._slots.get(("text", key))
+        return index is not None and bool(self._citations.get(index))
+
+    def text_citations(self) -> tuple[Citation, ...]:
+        return tuple(item for index in sorted(self._citations) for item in self._citations[index])
+
+    def hosted_block(self, key: Hashable, block: HostedToolBlock) -> None:
+        """Place a hosted call in stream order at its slot ``key``, or replace the call already there: a result
+        arriving later finalizes the same block.
+
+        This is the hosted calls' one boundary. The request's own credentials are removed from every string the block
+        retains, payload included, as exact literals: a replayed payload must stay byte-exact, so no pattern touches
+        it. The record's error is also redacted as a provider error is. Everything the block retains is charged, a
+        replacement by its growth.
+        """
+
+        if self._sensitive_values:
+            block = _without_literals(block, self._sensitive_values)
+        if block.record.error is not None:
+            redacted = redact_provider_text(
+                block.record.error, literal_secrets=self._sensitive_values, endpoint_url=self._endpoint_url
+            )
+            block = replace(block, record=replace(block.record, error=redacted or block.record.error))
+        index = self._slots.get(("hosted", key))
+        if index is None:
+            self._account_output(_retained_bytes(block))
+            self._ensure_slot("hosted", key, block)
+        else:
+            previous = self.content[index]
+            growth = _retained_bytes(block) - (
+                _retained_bytes(previous) if isinstance(previous, HostedToolBlock) else 0
+            )
+            self._account_output(max(0, growth))
+            self.content[index] = block
+        self._emitted_output = True
+        self._emitted_visible = True
+
+    def hosted_input_delta(self, key: Hashable, value: str) -> None:
+        """A fragment of a hosted call's streamed input, charged like any other retained output."""
+
+        self._account_output(value)
+        buffer = self._hosted_inputs.get(key)
+        if buffer is None:
+            buffer = self._hosted_inputs[key] = _string_buffer()
+        buffer.write(value)
+
+    def hosted_input(self, key: Hashable) -> str:
+        """The hosted call's whole streamed input, once its block ends."""
+
+        buffer = self._hosted_inputs.pop(key, None)
+        return buffer.getvalue() if buffer is not None else ""
+
+    def hosted_block_at(self, key: Hashable) -> HostedToolBlock | None:
+        index = self._slots.get(("hosted", key))
+        block = self.content[index] if index is not None else None
+        return block if isinstance(block, HostedToolBlock) else None
+
+    def set_hosted_facts(
+        self,
+        *,
+        counts: Mapping[str, int] | None = None,
+        cost: HostedCost | None = None,
+        cited: tuple[HostedSource, ...] | None = None,
+    ) -> None:
+        """The response-scoped hosted facts the provider reported (§4.2 ``hosted_summary``), each charged as it is
+        kept. A summary holds a small fixed set of counters, so at most ``MAX_HOSTED_COUNTERS`` are kept."""
+
+        if counts is not None:
+            kept = dict(list(counts.items())[:MAX_HOSTED_COUNTERS])
+            for name in kept:
+                self._account_output(COUNTER_OVERHEAD_BYTES)
+                self._account_output(name)
+            self._hosted_counts = kept
+        if cost is not None:
+            self._hosted_cost = cost
+        if cited is not None:
+            for item in cited:
+                self._account_output(CITATION_OVERHEAD_BYTES)
+                self._account_output(item.url)
+                self._account_output(item.title or "")
+            self._hosted_cited = cited
+
+    def _hosted_summary(self, content: list[AssistantContent]) -> HostedSummary | None:
+        if not any(isinstance(block, HostedToolBlock) for block in content):
+            return None
+        return HostedSummary(counts=self._hosted_counts, cited_sources=self._hosted_cited, cost=self._hosted_cost)
 
     def text_delta(self, key: Hashable, value: str) -> TextDelta | None:
         if not value:
@@ -949,7 +1127,16 @@ class StreamAssembler:
             usage=self.usage,
             error_message=error_message,
             verified_origin=self.verified_origin,
+            hosted_summary=self._hosted_summary(final),
+            source_identity=self.source_identity,
         )
+
+    def pause(self) -> AssistantMessage | ProviderError:
+        """The response so far, as the assistant turn its continuation sends back (§4.3). The continuation's output
+        joins the same content, so the response stays one message."""
+
+        self._continuing = True
+        return self.finalize("tool_use")
 
     def partial(self, *, stop_reason: str = "error") -> AssistantMessage | None:
         if self.usage is None and not self._emitted_output:
@@ -964,6 +1151,8 @@ class StreamAssembler:
             usage=self.usage,
             verified_origin=self.verified_origin,
             stop_reason=stop_reason,
+            hosted_summary=self._hosted_summary(content),
+            source_identity=self.source_identity,
         )
 
     def error(
@@ -994,11 +1183,12 @@ class StreamAssembler:
                 kind=kind,
                 message=message,
                 retryable=kind in RETRYABLE_ERROR_KINDS and not self.streamed,
+                continuable=kind in RETRYABLE_ERROR_KINDS,
                 retry_after_s=parse_retry_after((headers or {}).get("retry-after")),
                 status=status,
                 partial=partial,
             )
-            return error
+            return self._after_thinking(error, allow_unknown=True)
         error = classify_error(
             body=message,
             code=code,
@@ -1008,7 +1198,7 @@ class StreamAssembler:
             partial=partial,
             protocol=self.protocol,
         )
-        return error
+        return self._after_thinking(error, allow_unknown=True)
 
     def exception(
         self,
@@ -1024,7 +1214,7 @@ class StreamAssembler:
             streamed=self.streamed,
             partial=self.partial() if self.streamed or self.usage is not None else None,
         )
-        return error
+        return self._after_thinking(error)
 
     def aborted(self, reason: str | None = None) -> ProviderError:
         return ProviderError(
@@ -1046,13 +1236,23 @@ class StreamAssembler:
         if self._terminal_seen:
             return None
         if isinstance(event, ProviderError):
-            event = _bounded_partial_error(self._sanitize_error(_partial_with_error(self._after_thinking(event))))
+            event = _bounded_partial_error(self._sanitize_error(_partial_with_error(event)))
         self._terminal_seen = True
         return event
 
-    def _after_thinking(self, error: ProviderError) -> ProviderError:
-        """A response that dropped after streaming thinking alone may be retried once (``provider.md``)."""
-        if self._emitted_output and not self._emitted_visible and error.kind in THINKING_DROP_RETRY_KINDS:
+    def _after_thinking(self, error: ProviderError, *, allow_unknown: bool = False) -> ProviderError:
+        """The producer alone grants thinking-drop replay, never terminal sanitization or error kind alone.
+
+        Unknown wire failures retain their one request retry; an unknown local exception does not. Neither
+        recovery exhaustion nor a refusal can regain permissions just because it names a transient kind.
+        """
+        if (
+            self._emitted_output
+            and not self._emitted_visible
+            and error.refusal is None
+            and error.kind in THINKING_DROP_RETRY_KINDS
+            and (error.continuable or (allow_unknown and error.kind == "unknown"))
+        ):
             return replace(error, retryable=True, after_thinking=True)
         return error
 
@@ -1110,6 +1310,36 @@ class StreamAssembler:
         if value:
             self._tool_id_owners.setdefault(value, set()).add(key)
             self._allocated_tool_ids.add(value)
+
+
+def _without_literals(value: Any, secrets: tuple[str, ...]) -> Any:
+    """``value`` with each of ``secrets`` replaced in every string it holds, dataclass fields included."""
+
+    if isinstance(value, str):
+        for secret in secrets:
+            value = value.replace(secret, "[redacted]")
+        return value
+    if isinstance(value, tuple):
+        return tuple(_without_literals(item, secrets) for item in value)
+    if isinstance(value, list):
+        return [_without_literals(item, secrets) for item in value]
+    if isinstance(value, dict):
+        scrubbed: dict[Any, Any] = {}
+        for key, item in value.items():
+            name = _without_literals(key, secrets)
+            while name in scrubbed:  # two keys that differed only by a credential keep both, in order
+                name = f"{name}#"
+            scrubbed[name] = _without_literals(item, secrets)
+        return scrubbed
+    if is_dataclass(value) and not isinstance(value, type):
+        return replace(value, **{f.name: _without_literals(getattr(value, f.name), secrets) for f in fields(value)})
+    return value
+
+
+def _retained_bytes(block: HostedToolBlock) -> int:
+    """What a hosted call keeps: its action, record and native payload, serialized once."""
+
+    return len(json.dumps(asdict(block), ensure_ascii=False, default=str).encode("utf-8"))
 
 
 def endpoint_origin(endpoint: ModelEndpoint) -> Origin:
@@ -1305,12 +1535,13 @@ async def resolve_served_origin(
     *,
     gateway: bool,
     cancel: CancelToken,
-) -> tuple[Origin, bool] | None:
-    """Return the served origin and whether its signature data is verified."""
+) -> ServedResolution | None:
+    """Return the served origin, whether its signature data is verified, and its Source."""
 
     direct = endpoint_origin(endpoint)
     if not gateway:
-        return direct, True
+        # Without a gateway the endpoint is the served hop, and its Source, when it names one, served the response.
+        return ServedResolution(direct, True, endpoint.source_id, endpoint.source_identity)
     candidate = resolver(headers) if resolver is not None else default_served_hop_resolver(headers)
     if inspect.isawaitable(candidate):
         try:
@@ -1321,10 +1552,13 @@ async def resolve_served_origin(
         served = candidate
     if cancel.cancelled:
         return None
-    return served or direct, served is not None
+    if served is None:
+        return ServedResolution(direct, False, None)
+    identity = endpoint.source_identity if served.source_id == endpoint.source_id else None
+    return ServedResolution(served.origin, True, served.source_id, identity)
 
 
-def default_served_hop_resolver(headers: Mapping[str, str]) -> Origin | None:
+def default_served_hop_resolver(headers: Mapping[str, str]) -> ServedHop | None:
     """Read the exact C-6 served-hop header."""
 
     normalized = {key.lower(): value for key, value in headers.items()}
@@ -1337,12 +1571,15 @@ def default_served_hop_resolver(headers: Mapping[str, str]) -> Origin | None:
         return None
     if not isinstance(value, Mapping):
         return None
-    if set(value) != {"provider", "api", "model"} or any(not isinstance(value[key], str) for key in value):
+    if set(value) != {"provider", "api", "model", "source"} or any(not isinstance(value[key], str) for key in value):
+        return None
+    if not _SOURCE_ID.fullmatch(value["source"]):
         return None
     try:
-        return Origin(provider=value["provider"], api=value["api"], model=value["model"])
+        origin = Origin(provider=value["provider"], api=value["api"], model=value["model"])
     except (KeyError, TypeError, ValueError):
         return None
+    return ServedHop(origin=origin, source_id=value["source"])
 
 
 def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -1385,6 +1622,164 @@ def request_credential_values(endpoint: ModelEndpoint) -> tuple[str, ...]:
     return tuple(dict.fromkeys(values))
 
 
+#: Pins a request that carries Source-specific hosted content to one Source (``vibey-hosted-tools.md`` §3.5): the
+#: gateway serves it from that Source only, and answers ``pin_unavailable`` where it would otherwise fail over.
+PIN_SOURCE_HEADER = "x-avibe-pin-source"
+#: With the pin of an in-flight continuation: the served model of the response it continues.
+PIN_MODEL_HEADER = "x-avibe-pin-model"
+
+
+class HandOff:
+    """A send that ends without a terminal, because the adapter decides what follows (§3.5, §4.3).
+    ``drive_sse_stream`` yields it in place of a terminal and commits nothing."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+
+    def __repr__(self) -> str:
+        return f"HandOff({self.reason!r})"
+
+
+class PinUnavailable(HandOff):
+    """The gateway's answer to a pinned request it cannot serve from the pinned Source (§3.5): HTTP 409
+    ``pin_unavailable``, before anything reached a model. ``tool`` and ``aspect`` name the narrow hosted rule that
+    fired, when one did (``error.reason``)."""
+
+    def __init__(self, tool: str | None = None, aspect: str | None = None) -> None:
+        super().__init__("pin_unavailable")
+        self.tool = tool
+        self.aspect = aspect
+
+
+#: A response the provider paused (Anthropic ``pause_turn``, §4.3): the adapter continues it as the same response.
+PAUSE_TURN = HandOff("pause_turn")
+#: An HTTP error the adapter answers by sending again (``drive_sse_stream``'s ``refused``).
+REFUSED = HandOff("refused")
+
+
+def _pin_unavailable(body: str) -> PinUnavailable | None:
+    """The gateway's ``pin_unavailable`` answer, matched on ``type`` and ``code`` alone, with its narrow-rule reason
+    when it carries one; None for any other body."""
+    try:
+        value = json.loads(body)
+    except (TypeError, ValueError):
+        return None
+    error = value.get("error") if isinstance(value, Mapping) else None
+    if not (
+        isinstance(error, Mapping)
+        and error.get("type") == "model_hub_pin_unavailable"
+        and error.get("code") == "pin_unavailable"
+    ):
+        return None
+    reason = error.get("reason")
+    if isinstance(reason, Mapping) and reason.get("kind") == "hosted_unsupported":
+        tool, aspect = reason.get("tool"), reason.get("aspect")
+        return PinUnavailable(tool if isinstance(tool, str) else None, aspect if isinstance(aspect, str) else None)
+    return PinUnavailable()
+
+
+#: xAI's plain-text refusal of a replayed ciphertext it cannot read (§3.2); it does not say which one.
+_DECRYPT_REFUSAL = re.compile(r"could not decrypt the provided encrypted_content", re.IGNORECASE)
+#: Anthropic's refusal of a replayed opaque payload, by kind: an encrypted search result or citation index another
+#: account minted, or a thinking signature it does not accept. Each names exactly what it refused.
+_OPAQUE_REFUSALS: tuple[tuple[re.Pattern[str], tuple[OpaquePayload, ...]], ...] = (
+    (_DECRYPT_REFUSAL, OPAQUE_PAYLOADS),
+    (re.compile(r"invalid `?encrypted_(?:content|index)`?", re.IGNORECASE), ("hosted",)),
+    (re.compile(r"invalid `?signature`? in `?thinking`? block", re.IGNORECASE), ("signature",)),
+)
+
+
+def opaque_refusal(body: str) -> tuple[OpaquePayload, ...]:
+    """The kinds of opaque payload a 400 body says the provider refused; none when it names no such refusal."""
+
+    kinds: list[OpaquePayload] = []
+    for pattern, payloads in _OPAQUE_REFUSALS:
+        if pattern.search(body):
+            kinds.extend(kind for kind in payloads if kind not in kinds)
+    return tuple(kinds)
+
+
+def pin_refusal(assembler: StreamAssembler, endpoint: ModelEndpoint, handed_back: PinUnavailable) -> ProviderError:
+    """The terminal of a pinned request the gateway handed back, which the loop answers by rendering the request again
+    (§3.5). Nothing reached a model, so nothing is lost."""
+
+    error = assembler.error("the gateway handed the pinned request back (pin_unavailable)", kind="server", status=409)
+    refusal = Refusal(
+        "pin_unavailable", endpoint.source_id, endpoint.source_identity, handed_back.tool, handed_back.aspect
+    )
+    return replace(error, retryable=False, continuable=False, after_thinking=False, refusal=refusal)
+
+
+def portable_endpoint(endpoint: ModelEndpoint) -> ModelEndpoint:
+    """``endpoint`` in portable form (§3.5): never pinned, and every hosted tool as its function, so a request carries
+    no native declaration and replays no native payload. The hop's Source and identity stay for attribution: a response
+    that Source serves is still its own, and its opaque payloads are bound to that identity."""
+
+    routes = {name: HostedToolRoute("proxy", False) for name in endpoint.hosted_tools}
+    return replace(endpoint, portable=True, hosted_tools=routes)
+
+
+@dataclass(frozen=True)
+class WireRequest:
+    """One model request exactly as its adapter sends it. A hosted-tool probe sends this request (§3.2)."""
+
+    url: str
+    headers: dict[str, str] = field(repr=False)
+    body: dict[str, Any]
+
+
+def native_hosted_tools(request: ModelRequest) -> dict[str, HostedToolRoute]:
+    """The request's tools that this hop runs natively: a declared tool whose hosted route here is ``native``."""
+
+    routes = request.endpoint.hosted_tools
+    return {
+        spec.name: routes[spec.name]
+        for spec in request.tools
+        if spec.name in routes and routes[spec.name].mode == "native"
+    }
+
+
+def native_declaration(route: HostedToolRoute) -> dict[str, Any]:
+    """A native route's wire declaration, verbatim (§4.1), as a fresh object the payload may own."""
+
+    return copy.deepcopy(dict(route.declaration or {}))
+
+
+def hosted_pin(request: ModelRequest, messages: tuple[Any, ...] = ()) -> dict[str, str]:
+    """The pin of a request that carries Source-specific hosted content (§3.5), else nothing.
+
+    ``messages`` are the request's transformed messages; a call goes back verbatim only to the hop's own Source, so
+    that is the pin. A continuation whose calls go back verbatim also names the model that served them.
+
+    A model id that is not a legal header value (printable ASCII, no surrounding space) is left out: the pinned Source
+    is the hop's, and the gateway takes that hop's own model, which served the continued response.
+    """
+
+    from core.agent_core.ai.transform import in_flight_position
+
+    def replays(message: Any) -> bool:
+        return isinstance(message, AssistantMessage) and any(isinstance(b, HostedToolBlock) for b in message.content)
+
+    if request.endpoint.portable or (
+        not native_hosted_tools(request) and not any(replays(message) for message in messages)
+    ):
+        return {}
+    if not request.endpoint.source_id:
+        raise ValueError("native hosted content needs the Source the request is pinned to")
+    pin = {PIN_SOURCE_HEADER: request.endpoint.source_id}
+    live = in_flight_position(messages)
+    continued = messages[live] if live is not None else None
+    if replays(continued) and _header_value(continued.origin.model):
+        pin[PIN_MODEL_HEADER] = continued.origin.model
+    return pin
+
+
+def _header_value(value: str) -> bool:
+    """Whether ``value`` can travel as an HTTP header value as it is: printable ASCII, with no surrounding space."""
+
+    return bool(value) and value == value.strip() and all(" " <= char <= "~" for char in value)
+
+
 async def iter_sse_events(
     response: httpx.Response,
     cancel: CancelToken,
@@ -1425,8 +1820,12 @@ async def drive_sse_stream(
     resolver: ServedHopResolver | None,
     gateway: bool,
     translate: WireTranslator,
+    refused: Callable[[ProviderError], bool] | None = None,
 ) -> AsyncIterator[Any]:
     """Own the complete request/stream/terminal/cleanup lifecycle.
+
+    ``refused`` names an HTTP error the adapter answers by sending again: the driver yields ``REFUSED`` for it in place
+    of a terminal, as for ``pin_unavailable``, so nothing the response already holds is lost.
 
     Protocol adapters provide only ``translate``. It receives the shared SSE
     iterator and yields canonical deltas or a candidate ``Done``/
@@ -1478,12 +1877,38 @@ async def drive_sse_stream(
                     else:
                         if body is None:
                             candidate = assembler.aborted(cancel.reason)
+                        elif (
+                            gateway
+                            and response.status_code == 409
+                            and PIN_SOURCE_HEADER in headers
+                            and (handed_back := _pin_unavailable(body)) is not None
+                        ):
+                            # The pinned Source cannot serve this content; nothing reached a model. The adapter
+                            # decides what follows (§3.5, §4.3), so no terminal is committed here.
+                            yield handed_back
+                            return
                         else:
                             candidate = assembler.error(
                                 body or f"provider endpoint returned HTTP {response.status_code}",
                                 status=response.status_code,
                                 headers=response.headers,
                             )
+                            if refused is not None and refused(candidate):
+                                yield REFUSED
+                                return
+                            refused_payloads = opaque_refusal(body or "") if response.status_code == 400 else ()
+                            if refused_payloads:
+                                # A replayed opaque payload this account cannot read, refused before any output: the
+                                # loop renders the request again without that identity's payloads of that kind (§3.5).
+                                refusal = Refusal(
+                                    "opaque_refused",
+                                    endpoint.source_id,
+                                    endpoint.source_identity,
+                                    payloads=refused_payloads,
+                                )
+                                candidate = replace(
+                                    candidate, retryable=False, continuable=False, after_thinking=False, refusal=refusal
+                                )
                 else:
                     resolved_origin = await resolve_served_origin(
                         endpoint,
@@ -1495,12 +1920,19 @@ async def drive_sse_stream(
                     if resolved_origin is None:
                         candidate = assembler.aborted(cancel.reason)
                     else:
-                        assembler.set_origin(*resolved_origin)
+                        assembler.set_origin(
+                            resolved_origin.origin,
+                            resolved_origin.verified,
+                            resolved_origin.source_id,
+                            resolved_origin.source_identity,
+                        )
                         async for item in translate(iter_sse_events(response, cancel)):
                             if isinstance(item, (Done, ProviderError)):
                                 candidate = item
                                 break
                             yield item
+                            if isinstance(item, HandOff):
+                                return
                         if candidate is None:
                             candidate = (
                                 assembler.aborted(cancel.reason)
@@ -1681,6 +2113,7 @@ async def prepare_messages(
     protocol: str,
     media_loader: MediaLoader | None,
     cancel: CancelToken,
+    endpoint: ModelEndpoint | None = None,
 ) -> tuple[tuple[Any, ...], dict[str, tuple[str, str]]] | ProviderError:
     """Transform history and resolve immutable media snapshots as one safe boundary."""
 
@@ -1692,6 +2125,7 @@ async def prepare_messages(
             target=target,
             supports_images=supports_images,
             protocol=protocol,
+            endpoint=endpoint,
         )
         loaded_images = await load_images(transformed.messages, media_loader, cancel)
     except _CancelledDependency:
@@ -1701,8 +2135,11 @@ async def prepare_messages(
             retryable=False,
         )
     except Exception as exc:
-        return classify_error(
-            body=f"request preparation failed: {type(exc).__name__}: {exc}",
+        # Preparation is local: diagnostic text resembling a transient upstream error grants no permission.
+        return replace(
+            classify_error(body=f"request preparation failed: {type(exc).__name__}: {exc}"),
+            retryable=False,
+            continuable=False,
         )
     return transformed.messages, loaded_images
 
@@ -1834,6 +2271,8 @@ def assistant_message(
     usage: Any = None,
     error_message: str | None = None,
     verified_origin: bool = True,
+    hosted_summary: HostedSummary | None = None,
+    source_identity: str | None = None,
 ) -> AssistantMessage:
     if not verified_origin:
         sanitized: list[AssistantContent] = []
@@ -1844,15 +2283,23 @@ def assistant_message(
                 sanitized.append(replace(block, signature=None))
             elif isinstance(block, ToolCallBlock):
                 sanitized.append(replace(block, signature=None))
+            elif isinstance(block, HostedToolBlock):
+                # A hosted call is its native payload, opaque provider content that no unverified origin replays.
+                continue
             else:
                 sanitized.append(block)
         content = sanitized
+    if not any(isinstance(block, HostedToolBlock) for block in content):
+        hosted_summary = None
     return AssistantMessage(
         content=tuple(content),
         origin=origin,
         stop_reason=stop_reason,  # type: ignore[arg-type]
         usage=usage,
         error_message=error_message,
+        hosted_summary=hosted_summary,
+        # An unverified origin names no Source its opaque payloads could go back to; it keeps none anyway.
+        source_identity=source_identity if verified_origin else None,
     )
 
 
@@ -1884,6 +2331,8 @@ def partial_message(
     usage: Any = None,
     verified_origin: bool = True,
     stop_reason: str = "aborted",
+    hosted_summary: HostedSummary | None = None,
+    source_identity: str | None = None,
 ) -> AssistantMessage:
     if stop_reason in {"aborted", "error"}:
         content = [block for block in content if not isinstance(block, ToolCallBlock)]
@@ -1893,6 +2342,8 @@ def partial_message(
         stop_reason=stop_reason,
         usage=usage,
         verified_origin=verified_origin,
+        hosted_summary=hosted_summary,
+        source_identity=source_identity,
     )
 
 

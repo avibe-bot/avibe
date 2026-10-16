@@ -39,14 +39,15 @@ from core.managed_skills import builtin_skills_source,prepare_builtin_skills
 source=builtin_skills_source()
 assert 'builtin_skills_source' in str(source)
 assert Path(sys.argv[1]) in source.parents
-snapshot=prepare_builtin_skills()
+catalog=prepare_builtin_skills()
 root=Path(os.environ['AVIBE_BUILTIN_SKILLS_ROOT'])
-assert root.name==snapshot
+assert root==catalog
+assert root.name=='builtin-skills'
 expected=json.loads(sys.argv[2])
 for path,digest in expected.items():
     assert hashlib.sha256((root/'use-avibe'/path).read_bytes()).hexdigest()==digest
-print(json.dumps({'snapshot':snapshot,'source':str(source)}))
+print(json.dumps({'catalog':str(catalog),'source':str(source)}))
 '''
     result = subprocess.run([sys.executable,"-c",script,str(installed),json.dumps(expected)], env=env,
                             cwd=tmp_path, check=True, capture_output=True, text=True)
-    assert json.loads(result.stdout)["snapshot"]
+    assert json.loads(result.stdout)["catalog"].endswith("builtin-skills")

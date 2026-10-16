@@ -7,7 +7,7 @@
   "errors": {
     "agentModelRequired": "请先在 Avibe 中为 {backend} Agent 或会话选择模型。",
     "modelHubDisabled": "本实例已停用模型网关，{backend} 没有可用的模型。",
-    "modelGatewayOff": "模型网关已关闭，{backend} 没有可用的模型。请在「模型」页开启网关并选择模型。",
+    "modelGatewayOff": "模型网关已关闭，{backend} 没有可用的模型。请前往「模型」页点击「重试」，然后选择模型。",
     "modelSourceRequired": "{backend} 还没有模型来源。请在「模型」页添加 API Key 或订阅。",
     "modelsNextStepImUrl": "管理这个 Avibe 的人可以在「模型」页处理：{url}",
     "modelsNextStepIm": "管理这个 Avibe 的人可以在 Avibe 工作台的「模型」页处理。",
@@ -91,6 +91,18 @@
   "harness": {
     "agentInitiatedContinuation": "Agent 主动发起的续接",
     "cli": {
+      "agentRunModel": {
+        "existingSession": "--model 和 --reasoning-effort 只在这次运行创建新 Session 时可用",
+        "existingSessionHint": "已有 Session 保持自己的模型；请在 Web UI 的 Session 模型选择器中修改。如果现在就要换模型运行，请新建一个 Session（--agent <名称> --model ...），或分叉当前 Session（--fork-session <id> --model ...）。",
+        "modelNotInCatalog": "模型 '{model}' 不在 {backend} 的模型目录中",
+        "modelMaybeNewer": "模型 '{model}' 不在 {backend} 的模型目录中；可能是拼写错误，也可能比目录更新",
+        "effortInvalidForModel": "推理强度 '{effort}' 不适用于模型 '{model}'",
+        "effortInvalidForBackend": "推理强度 '{effort}' 不适用于 backend '{backend}'",
+        "catalogUnavailable": "无法加载 {backend} 的模型目录，因此无法检查模型和推理强度",
+        "catalogHint": "运行 `vibe agent models {agent}` 查看可用的模型和推理强度。",
+        "helpModel": "这次运行所创建的新 Session（空白新 Session、--create-session 或分叉）使用的模型；该 Session 之后的轮次会沿用它。不能与 --session-id 一起使用。参见 `vibe agent models <agent>`。",
+        "helpEffort": "这次运行所创建的新 Session 使用的推理强度；该 Session 会沿用它。不能与 --session-id 一起使用。"
+      },
       "help": {
         "command": "检查统一的 Harness 实时状态和异常",
         "description": "检查活跃 Run、已启用 Watch、即将触发的 Task 和实时异常。",
@@ -311,6 +323,7 @@
       "type": {
         "access": "访问请求",
         "sign": "签名请求",
+        "delete": "删除请求",
         "provision": "需要你填写一个密钥"
       },
       "secretSet": "所选密钥",
@@ -861,6 +874,10 @@
         "arg": "覆盖一个 driver 参数；有效 JSON 值会按 JSON 解析。",
         "output": "调用方选择的截图路径，用于“observe window”。",
         "json": "输出结构化服务响应。",
+        "run": "运行 JavaScript Computer Use 脚本",
+        "runDescription": "使用随 Avibe 发货的 @avibe/computer 模块运行 ESM 文件，并绑定到当前这个 Avibe Agent Turn。",
+        "scriptFile": "可读的 .mjs 脚本路径。",
+        "scriptArg": "以 name=value 或 name=@file 传入脚本参数；值保持为字符串。",
         "observe": "观察应用、窗口或一个精确窗口",
         "observeApps": "列出可见应用",
         "observeWindows": "列出窗口",
@@ -874,7 +891,7 @@
         "drag": "拖动已观察的目标",
         "setValue": "设置已观察控件的值",
         "launch": "启动应用或 URL",
-        "quit": "退出应用",
+        "forceQuit": "强制终止应用；未保存的数据会丢失。",
         "clipboard": "读取或写入系统剪贴板",
         "clipboardRead": "读取系统剪贴板",
         "clipboardWrite": "写入系统剪贴板"
@@ -887,8 +904,46 @@
         "sessionArgumentForbidden": "Computer Use session 已绑定调用方 Avibe Session，不能通过 --args-json 或 --arg 提供。",
         "outputArgumentConflict": "请在 --output 和 --args-json 中的 screenshot_out_file 之间二选一，不能同时提供。",
         "unsupportedCommand": "不支持的 Computer Use 命令：{command}",
-        "screenshotMissing": "{tool} 没有返回可写入 --output 的图像。",
+        "screenshotMissing": "此结果没有可用的截图。窗口可能已隐藏或最小化，也可能是截图不可用。",
         "outputUnsupported": "--output 只支持 observe window 或 zoom。",
+        "scriptArgNameValue": "脚本 --arg 必须使用 name=value 格式。",
+        "scriptArgDuplicate": "脚本参数“{name}”被重复提供。",
+        "scriptArgFile": "无法读取脚本参数文件 {path}：{error}",
+        "scriptFile": "无法运行 Computer Use 脚本 {path}：{error}",
+        "scriptFileType": "Computer Use 脚本 {path} 必须是可读的 .mjs 文件。",
+        "scriptNodeUnavailable": "Computer Use 脚本需要 Avibe 桌面应用随附的 Node runtime。",
+        "scriptSdkUnavailable": "随 Avibe 发货的 @avibe/computer 模块不可用，请重新安装或更新 Avibe 桌面应用。",
+        "scriptOpenRejected": "Controller 拒绝了 Computer Use 脚本连接（{code}）。",
+        "scriptRuntime": "Computer Use 脚本 runtime 失败：{error}",
+        "scriptRuntimeExit": "Computer Use 脚本 runtime 以状态 {status} 退出，且未返回结果。",
+        "scriptRuntimeInvalid": "随 Avibe 发货的 Computer Use 脚本 runtime 返回了无效结果。",
+        "scriptTimedOut": "Computer Use 脚本超过了 {seconds} 秒的总超时。",
+        "scriptFailed": "Computer Use 脚本在 {step} 失败：{error}",
+        "scriptAmbiguous": "选择器匹配到多个目标。",
+        "scriptConnectionInvalid": "脚本的 Controller 连接已失效。",
+        "scriptControllerRejected": "Controller 拒绝了脚本请求。",
+        "scriptRequestTooLarge": "Computer Use 脚本请求超过了 Controller 的大小上限。",
+        "scriptMessageTooLarge": "Computer Use 脚本消息超过大小上限。",
+        "scriptNotifyFailed": "Computer Use 通知未能送达。",
+        "scriptInvalidMessage": "Computer Use 脚本消息必须是非空文本。",
+        "confirmRefused": "所有者拒绝了这次确认。",
+        "confirmAlreadyPending": "脚本已经有一个等待回答的确认请求。",
+        "confirmApproverUnavailable": "无法确定这次确认的所有者身份。",
+        "confirmPromptFailed": "确认问题未能送达，因此没有任何操作获得批准。",
+        "confirmUnattended": "此脚本需要所有者确认，无人值守的运行无法给出确认。",
+        "scriptControllerUnavailable": "Controller 当前不可用。",
+        "scriptDeadlineExpired": "脚本截止时间已到。",
+        "scriptElementNotActionable": "匹配到的元素无法执行操作。",
+        "scriptInvalidControllerResponse": "Controller 返回了无效的 Computer Use 响应。",
+        "scriptInvalidDescriptor": "Computer Use 脚本使用了无效或缺失的句柄描述符。",
+        "scriptInvalidSelector": "脚本使用了无效选择器。",
+        "scriptInvalidTimeout": "脚本使用了无效超时。",
+        "scriptOperationTimedOut": "Computer Use 操作超时。",
+        "scriptStaleAppHandle": "所选应用进程已失效。",
+        "scriptStaleWindowHandle": "所选应用窗口已失效。",
+        "scriptTargetNotFound": "未找到请求的 Computer Use 目标。",
+        "scriptTurnEnded": "启动此脚本的 Avibe Turn 已结束。",
+        "scriptWindowOrderUnavailable": "此选择器无法确定窗口顺序。",
         "missingCallerSession": "Computer Use 需要 Avibe Agent 调用方 Session。",
         "missingCallerTurn": "Computer Use 要求调用方 Avibe Session 当前有活动 Turn。",
         "serviceUnavailable": "Avibe 服务不可用：{error}",
@@ -897,10 +952,10 @@
         "requestRejected": "Computer Use 请求被拒绝。",
         "activeTurnRequired": "Computer Use 要求调用方当前有活动的 Avibe Turn。",
         "computerUseUnavailable": "Computer Use 当前不可用（状态={statusCode}：{status}；原因={reasonCode}：{reason}）。",
-        "desktopBusy": "桌面正被另一个 Avibe Session 使用。",
-        "desktopLeaseLost": "Computer Use 完成前桌面租约已丢失。",
+        "targetBusy": "请求的 Computer Use 目标正忙，请在当前操作完成后重试。",
         "focusShortcutForbidden": "不允许使用可能切换焦点的快捷键，请改用带 URL 的 launch。",
         "foregroundForbidden": "不允许使用前台输入。",
+        "foregroundConsentRequired": "前台输入需要所有者确认。",
         "genericDriverError": "Computer Use driver 返回了错误。",
         "invalidDriverArguments": "Computer Use 参数无效。",
         "observeFirst": "发送输入前，请重新观察精确窗口。",
@@ -913,6 +968,11 @@
         "upstreamToolError": "Computer Use driver 返回了错误。",
         "upstreamUnavailable": "Computer Use driver 不可用，请重新观察后再重试。",
         "windowTargetRequired": "输入必须针对已观察的精确窗口或元素。"
+      },
+      "confirm": {
+        "prompt": "{message}\n\n请回复“是”或“否”。只有发起这项任务的人可以回答。",
+        "approved": "已确认，继续执行。",
+        "declined": "已拒绝，脚本不会执行这一步。"
       },
       "status": {
         "off": "未开启",
@@ -1092,6 +1152,7 @@
       "candidate_suppliers_changed": "可用供应商已发生变化，请刷新模型选项后重新确认。",
       "models_dev_unavailable": "models.dev 当前不可用，请手动填写模型参数或稍后重试。",
       "codex_catalog_unavailable": "Codex 无法准备本地模型网关目录，请重试本回合。",
+      "hosted_content_unpinned": "此请求携带的托管工具内容未固定到其渲染所针对的来源，因此不能发送给任何来源。",
       "request_too_large": "请求超过 Avibe 本地网关的 {limit_mib} MiB 大小上限。请减少图片或对话上下文后重试。",
       "engine_down": "本地模型网关不可用。",
       "engine_down_streamed": "本地模型网关不可用。本回合输出可能不完整。",
@@ -1101,6 +1162,29 @@
       "upstream_request_invalid": "供应商拒绝了请求。",
       "upstream_unauthorized": "刷新后供应商仍拒绝授权。",
       "upstream_error": "供应商返回错误。"
+    },
+    "hostedTools": {
+      "noExecutor": {
+        "web_search": {"one": "当前没有能运行网页搜索的供应商。请在 模型 › 供应商与路由 中把 {vendors} 的 API Key 添加为供应商；存在 Vaults 里的密钥不会用于这里。", "several": "当前没有能运行网页搜索的供应商。请在 模型 › 供应商与路由 中把 {vendors} 其中一家的 API Key 添加为供应商；存在 Vaults 里的密钥不会用于这里。"},
+        "x_search": {"one": "当前没有能运行 X 搜索的供应商。请在 模型 › 供应商与路由 中把 {vendors} 的 API Key 添加为供应商；存在 Vaults 里的密钥不会用于这里。", "several": "当前没有能运行 X 搜索的供应商。请在 模型 › 供应商与路由 中把 {vendors} 其中一家的 API Key 添加为供应商；存在 Vaults 里的密钥不会用于这里。"}
+      },
+      "listSeparator": "、",
+      "providerRefused": "执行方的供应商拒绝了此次调用（{detail}）。",
+      "providerUnavailable": "执行方的供应商暂时不可用（{detail}），请稍后重试。",
+      "timedOut": "执行方调用超时。",
+      "unreachable": "无法连接执行方。",
+      "unreadable": "无法读取执行方的响应。",
+      "tooLarge": "执行方的响应超出了大小上限。",
+      "didNotRun": "执行方没有运行 {tool}。",
+      "responseEnded": "执行方的响应以 {status} 结束。",
+      "callFailed": "供应商的 {tool} 调用失败。",
+      "triedSources": "已尝试：{sources}。",
+      "imageMissing": "图像端点没有返回图像数据。",
+      "imageUnreadable": "图像端点返回的图像无法使用。",
+      "imageModelUnavailable": "本轮中 {model} 已不可用。",
+      "imageParamUnsupported": "{model} 不支持 {param}。",
+      "imageParamTakers": "支持它的模型：{models}。",
+      "imageAlternatives": "可用：{models}。"
     },
     "events": {
       "sourceFallback": "供应商",
@@ -1707,14 +1791,97 @@
       "toolsUnsupported": "所选模型不支持工具，而 {backend} 需要工具。请换一个模型。",
       "providerProtocol": "模型服务商返回的回复 {backend} 无法使用。",
       "unclassified": "请求模型时出现了 {backend} 无法归类的错误。可以重试，或换一个模型。",
-      "outputLimit": "模型在写工具调用时多次超出输出上限。请让它分成更小的步骤，或换用输出上限更大的模型。",
+      "outputLimit": "模型在生成可用的答案或工具调用前达到了输出上限。请让它分成更小的步骤，或换用输出上限更大的模型。",
       "internal": "{backend} 因内部错误而停止。可以重试；如果再次出现，服务日志里记录了原因。",
+      "historyUnreadable": "这个会话的历史记录无法加载，{backend} 无法继续它。请发送 /new 开始一个新会话。",
       "generic": "{backend} 运行失败。"
     }
   },
   "desktopMini": {
     "sessionTitle": "歪比 · 桌宠",
     "noChatProject": "先在 Avibe 里建一个项目，桌宠的对话需要放在项目里。",
-    "builtinAgentUnavailable": "内置 Agent 当前不可用，桌宠暂时没有对话对象。"
+    "builtinAgentUnavailable": "内置 Agent 当前不可用，桌宠暂时没有对话对象。",
+    "mainSessionArchived": "桌宠主会话已归档，无法重新打开。",
+    "mainSessionInvalid": "桌宠主会话状态无效，暂时无法打开。",
+    "mainSessionProtected": "桌宠主会话由 Avibe 管理，不能归档或编辑。"
+  },
+  "hostedTools": {
+    "errorCode": {
+      "provider_no_reason": "供应商未说明原因",
+      "provider_no_image": "供应商没有返回图片",
+      "image_not_streamed": "回复结束前图片未传完",
+      "image_not_saved": "图片未能保存",
+      "image_no_store": "当前环境无法保存生成的图片",
+      "executor_no_image": "代理执行者没有返回图片",
+      "gateway_unreachable": "无法连接模型网关",
+      "gateway_refused": "模型网关拒绝了这次调用",
+      "gateway_no_result": "模型网关没有返回结果",
+      "image_param_unsupported": "所选图片模型不支持其中一个参数",
+      "image_model_unavailable": "所选图片模型当前不可用",
+      "image_argument_invalid": "图片调用的参数无法发送",
+      "image_reference_unreadable": "无法读取参考图片",
+      "provider_refused": "供应商拒绝了这次调用",
+      "provider_unavailable": "供应商暂时不可用，请稍后重试",
+      "provider_timed_out": "调用超时",
+      "provider_unreachable": "无法连接供应商",
+      "provider_unreadable": "无法读取供应商的回复",
+      "provider_too_large": "供应商的回复超出了大小上限",
+      "provider_image_unusable": "供应商返回的图片无法使用",
+      "search_not_run": "模型没有搜索就直接作答了",
+      "search_failed": "供应商的搜索失败了",
+      "response_ended_early": "回复提前结束了"
+    },
+    "tool": {
+      "web_search": "网页搜索",
+      "x_search": "X 搜索",
+      "image_generate": "图片生成"
+    },
+    "quoted": "“{subject}”",
+    "mode": {
+      "native": "原生（{provider}）",
+      "proxy": "由 {provider} 代理",
+      "proxyModel": "由 {provider} 代理（{model}）",
+      "fallback": "{source} 不支持，已改用 {provider}",
+      "direct": "{provider} 直连"
+    },
+    "count": {
+      "sourceOne": "1 个来源",
+      "sources": "{count} 个来源",
+      "postOne": "1 条帖子",
+      "posts": "{count} 条帖子",
+      "imageOne": "1 张",
+      "images": "{count} 张"
+    },
+    "cost": {
+      "included": "订阅内含",
+      "list": "≈ ${usd}",
+      "reported": "${usd}",
+      "calls": "{cost}（{calls} 次调用）",
+      "atLeast": "至少 {cost}"
+    },
+    "status": {
+      "failed": "失败：{error}",
+      "incomplete": "未完成：{error}",
+      "pending": "已中断"
+    },
+    "image": {
+      "notOffered": "{model} 不是本轮可用的图片模型。",
+      "unknownArguments": "image_generate 只接受 model、prompt、size、images 和 n，却收到了 {names}。",
+      "noPrompt": "prompt 必须写明要画的内容。",
+      "sizeForm": "size 必须是{pixels}，或{ratio}。",
+      "sizeFormUnsupported": "{model} 不支持尺寸 {size}：它只接受{form}。",
+      "badImages": "images 必须是 1 到 {max} 个参考图片路径。",
+      "badCount": "n 必须是 1 到 {max} 之间的整数。",
+      "form": {
+        "pixels": "宽x高，例如 1024x1024",
+        "ratio": "宽高比，例如 16:9"
+      },
+      "reference": {
+        "unreadable": "无法读取参考图片 {path}：{reason}。",
+        "notImage": "参考图片 {path} 不是图片（jpg、png、gif、webp）。",
+        "tooLarge": "参考图片 {path} 有 {size}，超过 {limit} 的上限。",
+        "unsupported": "参考图片 {path} 是 {mime}，无法发送。"
+      }
+    }
   }
 }

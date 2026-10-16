@@ -8,17 +8,27 @@ Backend lifecycle locks remain outermost. Callers attach, replace, or retire a
 generation while holding the adapter's lifecycle lock, then use the short
 synchronous boundary here for the final predicate or authoritative commit. No
 cleanup await belongs inside this boundary.
+
+The controller loop takes the boundary synchronously, so off its thread the
+boundary is only ever held for constant-time in-memory sections: an owner commit
+made off the loop uses ``commit_then_confirm``, never a form that holds the
+boundary across the commit's I/O (see docs/plans/runtime-activation-boundary.md).
 """
 
 from __future__ import annotations
 
+import contextlib
 import itertools
+import logging
 import threading
+import traceback
 from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Callable, Generic, Iterator, TypeVar
 
+
+logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
 _RETIRED_DIAGNOSTIC_LIMIT = 64
@@ -86,6 +96,13 @@ class RuntimeActivationRegistry:
             tuple[str, str], RuntimeActivationIdentity
         ] = OrderedDict()
         self._generations = itertools.count(1)
+        self._loop_thread: int | None = None
+
+    def bind_loop_thread(self) -> None:
+        """Record the calling thread as the controller loop's, where alone a commit may
+        hold the boundary across its I/O."""
+
+        self._loop_thread = threading.get_ident()
 
     @staticmethod
     def _target_key(backend: str, resource_key: str) -> tuple[str, str]:
@@ -180,8 +197,11 @@ class RuntimeActivationRegistry:
         Generation validation and ``commit`` execute under the same target
         boundary. A cleanup-first loser receives ``admitted=False`` and must use
         its existing exact recovery path; ``commit`` is never called.
+
+        Controller loop thread only: off it, use ``commit_then_confirm``.
         """
 
+        self._report_off_loop_holder("commit_if_current")
         key = self._target_key(identity.backend, identity.resource_key)
         with identity._boundary.lock:
             if not self._is_current_locked(key, identity):
@@ -200,11 +220,62 @@ class RuntimeActivationRegistry:
         and release it only after commit. A false value means cleanup already
         retired or replaced the observed generation; callers may persist a
         queued/waiting owner, but must not promote it to starting or active.
+
+        Controller loop thread only: off it, use ``commit_then_confirm``.
         """
 
+        self._report_off_loop_holder("hold_if_current")
         key = self._target_key(identity.backend, identity.resource_key)
         with identity._boundary.lock:
             yield self._is_current_locked(key, identity)
+
+    def commit_then_confirm(
+        self,
+        identity: RuntimeActivationIdentity,
+        commit: Callable[[], _T],
+        *,
+        compensate: Callable[[_T], object] | None,
+    ) -> RuntimeActivationCommit[_T]:
+        """Run one owner commit off the controller loop, never holding the boundary
+        across it.
+
+        The loop takes the boundary synchronously -- to retire a generation, or to
+        admit a Session Turn inside a SQLite transaction that already holds the
+        writer -- so a commit that held it across its own I/O would make the loop
+        wait for that I/O, or for SQLite's ``busy_timeout`` when both wait on each
+        other. Here the boundary is held only to admit and to confirm:
+
+        1. admit: unless the generation is live, ``admitted=False`` and ``commit``
+           is never called;
+        2. ``commit``, with no boundary held;
+        3. confirm: if the generation is no longer live -- a retirement reserved or
+           finished meanwhile -- the commit lost, ``compensate(value)`` undoes it,
+           and the result is ``admitted=False``. Pass ``None`` only when the
+           caller's not-admitted path already undoes the commit.
+
+        A retirement never waits for the commit: one whose final snapshot runs
+        after the commit lands sees its owner, and one that does not has the commit
+        compensated. A compensation that fails is logged and the result is still
+        ``admitted=False``, so nothing proceeds on a retired generation; the
+        owner's recovery reclaims what the compensation left.
+        """
+
+        if not self.is_current(identity):
+            return RuntimeActivationCommit(admitted=False)
+        value = commit()
+        if self.is_current(identity):
+            return RuntimeActivationCommit(admitted=True, value=value)
+        if compensate is not None:
+            try:
+                compensate(value)
+            except Exception:
+                logger.exception(
+                    "Failed to undo a commit that lost to the retirement of %s generation %s; "
+                    "its owner's recovery reclaims it",
+                    identity.backend,
+                    identity.generation,
+                )
+        return RuntimeActivationCommit(admitted=False)
 
     def reserve_retirement(
         self,
@@ -276,6 +347,24 @@ class RuntimeActivationRegistry:
             self.finish_retirement(reservation, retire=False)
             return False
         return self.finish_retirement(reservation, retire=True)
+
+    def _report_off_loop_holder(self, form: str) -> None:
+        loop_thread = self._loop_thread
+        if loop_thread is None or threading.get_ident() == loop_thread:
+            return
+        internal = {__file__, contextlib.__file__}
+        caller = next(
+            (frame for frame in reversed(traceback.extract_stack()[:-1]) if frame.filename not in internal),
+            None,
+        )
+        logger.error(
+            "%s held the runtime activation boundary on thread %r, off the controller loop, "
+            "which takes the boundary synchronously and would wait for this commit; "
+            "use commit_then_confirm. Caller: %s",
+            form,
+            threading.current_thread().name,
+            f"{caller.filename}:{caller.lineno} in {caller.name}" if caller else "unknown",
+        )
 
     def tracked_target_count(self) -> int:
         with self._index_lock:

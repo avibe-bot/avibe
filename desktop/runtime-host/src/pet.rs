@@ -551,6 +551,17 @@ pub struct HitRect {
     pub y: f64,
     pub width: f64,
     pub height: f64,
+    /// Part of the page's hover zone (Vibey and its dock). Absent from older
+    /// pages, which then get no hover events.
+    #[serde(default)]
+    pub hover: bool,
+}
+
+/// Whether the cursor is over the page's hover zone. The shell reports this to
+/// the page because a webview in a window that is not key (the pet never takes
+/// focus on its own) receives no hover on macOS.
+pub fn hovering(rects: &[HitRect], x: f64, y: f64) -> bool {
+    rects.iter().any(|rect| rect.hover && rect.contains(x, y))
 }
 impl HitRect {
     pub fn valid(&self) -> bool {
@@ -655,6 +666,7 @@ mod tests {
             y: 20.0,
             width: 30.0,
             height: 40.0,
+            hover: false,
         };
         assert!(rect.valid());
         assert!(rect.contains(10.0, 20.0));
@@ -672,6 +684,19 @@ mod tests {
         }
         assert!(!HitRect { width: -1.0, ..rect }.valid());
         assert!(!HitRect { height: -1.0, ..rect }.valid());
+    }
+
+    #[test]
+    fn only_hover_rects_make_the_cursor_hover_and_older_pages_omit_the_flag() {
+        let rects: Vec<HitRect> = serde_json::from_str(
+            r#"[{"x":0,"y":0,"width":100,"height":50},{"x":0,"y":60,"width":100,"height":50,"hover":true}]"#,
+        )
+        .unwrap();
+        assert!(!rects[0].hover);
+        assert!(!hovering(&rects, 50.0, 25.0));
+        assert!(hovering(&rects, 50.0, 80.0));
+        assert!(!hovering(&rects, 50.0, 55.0));
+        assert!(!hovering(&[], 50.0, 80.0));
     }
 
     #[test]

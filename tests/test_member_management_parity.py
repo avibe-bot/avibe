@@ -118,7 +118,15 @@ def test_complete_registered_api_management_inventory():
         for method in (getattr(route, "methods", None) or ())
         if method not in {"HEAD", "OPTIONS"}
     }
-    assert len(endpoints) == 281
+    assert len(endpoints) == 289
+    assert ("GET", "/api/sessions/main") in endpoints
+    assert http_authorization_policy("POST", "/api/vault/requests/{request_id}/approve-delete").minimum_role == "editor"
+    # Approvers still read policy and remember duration; protection fields add a service check.
+    for method in ("GET", "PATCH"):
+        assert http_authorization_policy(method, "/api/vault/settings").minimum_role == "editor"
+    for method in ("PUT", "DELETE"):
+        assert (method, "/api/vault/secrets/{name}/fields/{field}") in endpoints
+        assert http_authorization_policy(method, "/api/vault/secrets/LOGIN/fields/username").minimum_role == "editor"
     assert http_authorization_policy("POST", "/api/desktop-mini/session").minimum_role == "editor"
     assert http_authorization_policy("GET", "/api/desktop/capabilities").minimum_role == "member"
     assert http_authorization_policy("GET", "/api/desktop/computer-use/status").minimum_role == "member"
@@ -161,6 +169,43 @@ def test_complete_registered_api_management_inventory():
     assert actual_read_roles == baseline_read_roles
 
 
+@pytest.mark.parametrize("role, status", [("editor", 403), ("member", 200), ("owner", 200)])
+def test_approve_delete_http_uses_management_authority(management_http, role, status):
+    """The real HTTP path must pass remote authority to the deletion transaction."""
+    from sqlalchemy import select
+    from storage import vault_service
+    from storage.models import vault_requests, vault_secrets
+    from storage.vault_crypto import Sealed
+
+    request_http = management_http(role)
+    routes = [
+        route for route in ui_server.app.routes
+        if getattr(route, "path", "") == "/api/vault/requests/{request_id}/approve-delete"
+        and "POST" in (getattr(route, "methods", None) or ())
+    ]
+    assert len(routes) == 1
+    # Native registration uses the handler itself, not a compat endpoint wrapper.
+    assert routes[0].endpoint is ui_server.vault_request_approve_delete_post
+    engine = api._vault_engine()
+    try:
+        with engine.begin() as conn:
+            vault_service.create_secret(conn, name="DELETE_HTTP", sealed=Sealed("ct", "nonce", "wrap"))
+            pending = vault_service.create_delete_request(conn, "DELETE_HTTP")
+        response = request_http("POST", f"/api/vault/requests/{pending['id']}/approve-delete", payload={})
+        assert response.status_code == status, response.get_json()
+        with engine.connect() as conn:
+            remaining = conn.execute(select(vault_secrets.c.name).where(vault_secrets.c.name == "DELETE_HTTP")).first()
+            decided = conn.execute(select(vault_requests.c.status).where(vault_requests.c.id == pending["id"])).scalar_one()
+        if status == 403:
+            assert response.get_json()["code"] == "resource_access_forbidden"
+            assert remaining is not None and decided == "pending"
+        else:
+            assert response.get_json()["removed"] is True
+            assert remaining is None and decided == "approved"
+    finally:
+        engine.dispose()
+
+
 @pytest.mark.parametrize("role", ["owner", "member", "editor", "viewer", None])
 def test_backend_connection_native_route_preserves_management_roles(management_http, monkeypatch, role):
     request = management_http(role or "viewer", authenticated=role is not None)
@@ -183,6 +228,62 @@ def test_backend_connection_native_route_preserves_management_roles(management_h
     assert unsupported.status_code == (400 if role in {"owner", "member"} else 401 if role is None else 403)
     assert readiness.await_count == previous_calls
     ipc.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "role, payload, status",
+    [
+        ("editor", {"strict_approvals": True}, 403),
+        ("editor", {"unlock_window_seconds": 1800}, 403),
+        ("editor", {"last_grant_ttl": 900}, 200),
+        ("editor", {"last_grant_ttl": "one-time"}, 200),
+        ("editor", {"strict_approvals": True, "unlock_window_seconds": 1800, "last_grant_ttl": 900}, 403),
+        ("member", {"strict_approvals": True}, 200),
+        ("owner", {"strict_approvals": True}, 200),
+    ],
+)
+def test_vault_settings_patch_http_splits_field_authority(management_http, role, payload, status):
+    """The route remains Editor-tier, but protected settings fields require management."""
+    from sqlalchemy import select
+    from storage import vault_service
+    from storage.models import state_meta
+
+    request = management_http(role)
+    before = request("GET", "/api/vault/settings")
+    assert before.status_code == 200, before.get_json()
+    before_settings = before.get_json()["settings"]
+    engine = api._vault_engine()
+    try:
+        with engine.connect() as conn:
+            stored_before = conn.execute(
+                select(state_meta).where(state_meta.c.key == vault_service.VAULT_SETTINGS_META_KEY)
+            ).first()
+    finally:
+        engine.dispose()
+
+    response = request("PATCH", "/api/vault/settings", payload=payload)
+    assert response.status_code == status, response.get_json()
+    body = response.get_json()
+    after = request("GET", "/api/vault/settings")
+    assert after.status_code == 200, after.get_json()
+    if status == 403:
+        assert body["ok"] is False
+        assert body["code"] == "resource_access_forbidden"
+        assert after.get_json()["settings"] == before_settings
+        engine = api._vault_engine()
+        try:
+            with engine.connect() as conn:
+                stored_after = conn.execute(
+                    select(state_meta).where(state_meta.c.key == vault_service.VAULT_SETTINGS_META_KEY)
+                ).first()
+            assert stored_after == stored_before  # Not even a normalized/default settings row was written.
+        finally:
+            engine.dispose()
+    else:
+        expected = dict(before_settings)
+        expected.update(payload)
+        assert body["ok"] is True
+        assert body["settings"] == after.get_json()["settings"] == expected
 
 
 @pytest.mark.parametrize("role", ["member", "owner"])

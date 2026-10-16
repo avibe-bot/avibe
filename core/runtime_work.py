@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import partial
-from typing import Any, Protocol, TypeVar
+from typing import Any, NoReturn, Protocol, TypeVar
 
 from core.inbox_events import (
     DEFINITIONS_UPDATED_EVENT,
@@ -25,6 +25,66 @@ from vibe import runtime
 logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
+
+
+async def land_step(step: Awaitable[_T]) -> tuple[asyncio.Future[_T], bool]:
+    """Wait for one store step to finish, whatever cancels the caller meanwhile.
+
+    A Python thread cannot be cancelled safely, and a step a cancellation split would
+    leave what it committed unowned, so the step is never cancelled: every
+    cancellation that reaches the caller meanwhile is caught instead. Returns the
+    finished step, whose ``result()`` gives its outcome, and whether a cancellation
+    was caught, for the caller to answer from that outcome.
+    """
+
+    future = asyncio.ensure_future(step)
+    cancelled = False
+    while not future.done():
+        try:
+            # ``wait`` never cancels the step, and raises only the caller's cancellation.
+            await asyncio.wait((future,))
+        except asyncio.CancelledError:
+            cancelled = True
+    return future, cancelled
+
+
+def step_failed(step: asyncio.Future[Any]) -> bool:
+    return step.cancelled() or step.exception() is not None
+
+
+def answer_caught_cancellation(step: asyncio.Future[Any]) -> NoReturn:
+    """Answer a cancellation ``land_step`` caught, now.
+
+    A failed step has no result to hand back, so this is also how a caller that keeps
+    a landed step's result answers a failed one: its error is logged and kept as the
+    cancellation's cause, never left to replace the cancellation.
+    """
+
+    error = None if step.cancelled() else step.exception()
+    if error is not None:
+        logger.warning(
+            "A store step failed while its caller was being cancelled; answering the cancellation",
+            exc_info=error,
+        )
+    raise asyncio.CancelledError from error
+
+
+def rearm_caught_cancellation() -> None:
+    """Deliver a cancellation ``land_step`` caught, but the caller did not answer, at
+    the caller's next await -- where it would have landed had the step run on the loop.
+
+    ``uncancel`` first (Python 3.11+, absent on 3.10, which counts no requests), so the
+    request is counted once, as an ``asyncio.timeout`` around the caller expects.
+    """
+
+    current = asyncio.current_task()
+    if current is None:
+        return
+    uncancel = getattr(current, "uncancel", None)
+    if uncancel is not None:
+        uncancel()
+    current.cancel()
+
 
 _DEFAULT_RECONCILE_INTERVAL_SECONDS = 30.0
 _DEFAULT_LANE_CAPACITY = 4
@@ -479,23 +539,15 @@ class RuntimeWorkSupervisor:
         loop = asyncio.get_running_loop()
         future = loop.run_in_executor(self._sync_executor, operation)
         self._sync_futures.add(future)
-        cancelled = False
         try:
-            while True:
-                try:
-                    result = await asyncio.shield(future)
-                    break
-                except asyncio.CancelledError:
-                    # Python threads are not safely cancellable. Consume every
-                    # cancellation until the exact store operation exits; the
-                    # partition task remains the owner throughout.
-                    cancelled = True
-            if cancelled:
-                raise asyncio.CancelledError
-            return result
+            # The partition task remains the owner until the exact store operation exits.
+            future, cancelled = await land_step(future)
         finally:
             if future.done():
                 self._sync_futures.discard(future)
+        if cancelled:
+            answer_caught_cancellation(future)
+        return future.result()
 
     async def stop(self) -> None:
         stop_task = self._begin_stop()

@@ -32,7 +32,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, call
 
 import httpx
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -150,6 +150,9 @@ def _build_controller_double(handler=None):
     # (a bare MagicMock would blow up ``json.dumps`` in ``_sse_event``).
     controller._t = lambda key, **kwargs: key
     controller.config = SimpleNamespace()
+    # Like ``Controller.__init__``: ``create_app`` installs the real owners.
+    controller.computer_script_sessions = None
+    controller.computer_script_interactions = None
     return controller
 
 
@@ -228,6 +231,7 @@ def _reserve_submission(
     metadata: dict | None = None,
     native_message_id: str | None = None,
     message_kind: str | None = None,
+    author_id: str | None = None,
 ):
     delivery_id = message_deliveries.new_delivery_id()
     row = message_deliveries.insert_delivery(
@@ -246,6 +250,7 @@ def _reserve_submission(
             text=text,
             content=content,
             metadata=metadata,
+            author_id=author_id,
             author_name=author_name,
             native_message_id=native_message_id,
             message_kind=message_kind,
@@ -931,6 +936,57 @@ def test_dispatch_rejects_missing_text():
     assert "text" in payload["error"]
 
 
+@pytest.mark.parametrize("text", ["", "保留这条用户输入"])
+@pytest.mark.parametrize("untrusted_field", ["type", "author", "source", "metadata"])
+def test_dispatch_resume_permission_comes_only_from_durable_provenance(
+    monkeypatch, tmp_path, text, untrusted_field,
+):
+    """Caller-forged resume fields cannot admit empty input or suppress real input.
+
+    Adapter-only tests do not exercise the internal HTTP validator, which must
+    replace every provenance field rather than merge a caller's claimed trust.
+    """
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(tmp_path, native_id="resume_authority", backend="vibey")
+    provenance = {
+        "type": "agent_initiated", "author": "harness", "source": "harness",
+        "metadata": {"vibey_resume": True},
+    }
+    provenance[untrusted_field] = {} if untrusted_field == "metadata" else "user"
+    with engine.begin() as conn:
+        reserved = _reserve_submission(
+            conn, scope_id=session["scope_id"], session_id=session["id"], text=text,
+            message_type=provenance["type"], author=provenance["author"],
+            source=provenance["source"], metadata=provenance["metadata"],
+        )
+    observed = []
+    controller = _build_controller_double()
+    app = internal_server.create_app(controller)
+
+    async def capture_run(_sid, context, dispatched, **_kwargs):
+        observed.append((dispatched, context.platform_specific["vibey_resume"]))
+        _bind_test_native_start(engine, context)
+
+    controller.session_turns._run = capture_run
+
+    async def dispatch():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+            return await client.post("/internal/dispatch_async", json={
+                "session_id": session["id"], "user_message_id": reserved["id"],
+                "text": "", "type": "agent_initiated", "author": "harness", "source": "harness",
+                "vibey_resume": True, "metadata": {"vibey_resume": True},
+            })
+
+    response = asyncio.run(dispatch())
+    if text:
+        assert response.status_code == 202
+        assert observed == [(text, False)]
+    else:
+        assert response.status_code == 400
+        assert response.json()["error"] == "text or files is required"
+        assert observed == []
+
+
 def test_dispatch_rejects_missing_session_id():
     resp = asyncio.run(_dispatch_round_trip({"text": "hi"}))
     assert resp.status_code == 400
@@ -1330,6 +1386,140 @@ def test_dispatch_async_enqueues_during_busy_turn(monkeypatch, tmp_path):
         assert [q["text"] for q in message_deliveries.list_queued(conn, session_id)] == ["while busy"]
         transcript = messages_service.list_session_messages(conn, session_id=session_id, types=("user",))
     assert transcript["messages"] == []
+
+
+@pytest.mark.parametrize(
+    ("case", "message_kind", "metadata"),
+    [
+        ("answer", "original", None),
+        ("invalidated", "original", None),
+        ("quick_reply", "quick_reply", {"quick_reply_for": "msg_older_prompt"}),
+        ("forwarded", "forwarded", None),
+    ],
+)
+def test_dispatch_async_answers_a_pending_script_confirm_before_queuing(
+    monkeypatch, tmp_path, case, message_kind, metadata
+):
+    """A direct Web reply during the script's own Turn reaches ``avibe.confirm``.
+
+    The script blocks the running Turn, so an answer that queued behind it
+    would deadlock until the script deadline. A "yes" that is not a direct
+    original reply (a quick reply to another prompt, a forward), or any reply
+    after the confirm is gone, is an ordinary send-while-busy message.
+    """
+    from core.computer_script_interactions import ComputerScriptInteractionError
+    from core.services import sessions as sessions_service
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn, platform="avibe", scope_type="project", native_id="proj_confirm", now="2026-05-31T00:00:00Z"
+        )
+        _seed_project_workdir(conn, scope_id, tmp_path)
+        session = sessions_service.create_session(
+            conn, scope_id=scope_id, agent_backend="claude", agent_name="worker"
+        )
+        owner = _reserve_submission(
+            conn, scope_id=scope_id, session_id=session["id"], text="run the script"
+        )
+        owner_turn_id = message_deliveries.new_turn_id()
+        message_deliveries.insert_turn(
+            conn,
+            turn_id=owner_turn_id,
+            session_id=session["id"],
+            initial_delivery_id=owner["id"],
+            state="active",
+            backend="claude",
+        )
+        reply = _reserve_submission(
+            conn,
+            scope_id=scope_id,
+            session_id=session["id"],
+            text="yes",
+            author_id="owner",
+            message_kind=message_kind,
+            metadata=metadata,
+        )
+    session_id = session["id"]
+
+    controller = _build_controller_double()
+    notices: list[str] = []
+
+    async def emit_agent_message(_context, _message_type, text, **_kwargs):
+        notices.append(text)
+        return f"notice-{len(notices)}"
+
+    controller.emit_agent_message = emit_agent_message
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        task = asyncio.create_task(asyncio.sleep(60))
+        controller.session_turns.in_flight[session_id] = session_turns.Turn(
+            task=task,
+            context=MessageContext(
+                user_id="owner",
+                channel_id=session_id,
+                platform="avibe",
+                platform_specific={"agent_session_id": session_id},
+            ),
+            logical_turn_id=owner_turn_id,
+        )
+        token = controller.computer_script_sessions.open(session_id, 30)["connection_token"]
+        confirm = asyncio.create_task(
+            controller.computer_script_interactions.confirm(token, "Send it?")
+        )
+        await asyncio.sleep(0)
+        if case == "invalidated":
+            controller.computer_script_interactions.invalidate_token(token, "script_turn_ended")
+        try:
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                resp = await asyncio.wait_for(
+                    client.post(
+                        "/internal/dispatch_async",
+                        json={"session_id": session_id, "text": "yes", "user_message_id": reply["id"]},
+                    ),
+                    timeout=5,
+                )
+            if case in {"quick_reply", "forwarded"}:
+                await asyncio.sleep(0)
+                assert not confirm.done()
+                confirm.cancel()
+            outcome = await asyncio.wait_for(asyncio.gather(confirm, return_exceptions=True), 5)
+        finally:
+            controller.computer_script_sessions.close_all()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        return resp, outcome[0]
+
+    resp, outcome = asyncio.run(_go())
+    assert resp.status_code == 202
+    controller.message_handler.handle_user_message.assert_not_awaited()
+    with engine.connect() as conn:
+        queued = [q["text"] for q in message_deliveries.list_queued(conn, session_id)]
+        delivery = message_deliveries.get_delivery(conn, reply["id"])
+        transcript = messages_service.list_session_messages(conn, session_id=session_id, types=("user",))
+    assert transcript["messages"] == []
+    if case == "answer":
+        assert outcome["effect"] == "confirmed"
+        assert resp.json()["queued"] is False
+        assert delivery["state"] == "retired"
+        assert queued == []
+        assert notices[-1] == "computer.cli.confirm.approved"
+    else:
+        if case == "invalidated":
+            assert isinstance(outcome, ComputerScriptInteractionError)
+            assert outcome.code == "script_turn_ended"
+        else:
+            assert isinstance(outcome, asyncio.CancelledError)
+        assert resp.json()["queued"] is True
+        assert queued == ["yes"]
 
 
 def test_dispatch_async_replay_of_queued_delivery_is_idempotent(monkeypatch, tmp_path):
@@ -2785,6 +2975,66 @@ def test_turn_state_reflects_in_flight():
     assert busy["backend"] == "opencode"
 
 
+def test_turn_state_repairs_a_stale_running_projection_without_waiting_for_the_writer(tmp_path, monkeypatch):
+    """#2706: ``/internal/turn-state`` clears a stale ``running`` projection only after rechecking, under SQLite's
+    writer, that no turn owns the session. The endpoint runs on the controller loop, and another process may hold that
+    writer for the whole busy timeout, so the repair never waits for it: while the writer is held the read answers at
+    once and leaves the projection for the next read, which repairs it."""
+    import sqlite3
+    import threading
+    import time
+
+    from storage.models import agent_sessions
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(tmp_path, native_id="proj_turn_state_repair")
+    session_id = session["id"]
+    with engine.begin() as conn:
+        conn.execute(
+            update(agent_sessions).where(agent_sessions.c.id == session_id).values(agent_status="running")
+        )
+    app = internal_server.create_app(_build_controller_double())
+    transport = httpx.ASGITransport(app=app)
+    held, release = threading.Event(), threading.Event()
+
+    def another_process_holds_the_writer() -> None:
+        holder = sqlite3.connect(engine.url.database, timeout=10)
+        try:
+            holder.execute("BEGIN IMMEDIATE")
+            held.set()
+            release.wait(2.0)
+            holder.rollback()
+        finally:
+            holder.close()
+
+    def stored_status() -> str:
+        with engine.connect() as conn:
+            return conn.execute(
+                select(agent_sessions.c.agent_status).where(agent_sessions.c.id == session_id)
+            ).scalar_one()
+
+    async def _go():
+        holder = threading.Thread(target=another_process_holds_the_writer)
+        holder.start()
+        assert await asyncio.to_thread(held.wait, 5)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            started = time.monotonic()
+            contended = (await client.get(f"/internal/turn-state/{session_id}")).json()
+            answered_in = time.monotonic() - started
+            status_while_held = stored_status()
+            release.set()
+            await asyncio.to_thread(holder.join, 5)
+            repaired = (await client.get(f"/internal/turn-state/{session_id}")).json()
+        return answered_in, contended, status_while_held, repaired
+
+    answered_in, contended, status_while_held, repaired = asyncio.run(_go())
+    assert answered_in < 0.5, f"the turn-state read waited {answered_in:.2f}s for SQLite's writer on the loop"
+    assert contended["in_flight"] is False and contended["recovered_agent_status"] is False
+    assert status_while_held == "running"
+    assert repaired["recovered_agent_status"] is True
+    assert stored_status() == "idle"
+
+
 def test_turn_state_projects_a_restored_durable_owner_without_in_flight(
     tmp_path,
     monkeypatch,
@@ -4011,6 +4261,150 @@ def test_agent_run_send_now_steers_its_content_without_promoting_fifo(monkeypatc
     }
 
 
+def test_an_agent_run_report_queues_behind_a_persons_turn_and_runs_as_the_next_turn(monkeypatch, tmp_path):
+    """Scenario: MESSAGE-DELIVERY-323.
+
+    The default (not send-now) Agent Run a lane reports with, through the real
+    producer: it never steers the person's Turn, and starts its own Turn after it.
+    """
+    from core.scheduled_tasks import TaskExecutionStore
+    from core.services import sessions as sessions_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_agent_report",
+            now="2026-07-30T00:00:00Z",
+        )
+        _seed_project_workdir(conn, scope_id, tmp_path)
+        session_id = sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend="claude",
+            agent_name="worker",
+        )["id"]
+        question = _reserve_submission(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            text="2547是做什么的来着？",
+        )
+
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="PR #2688 merged externally.",
+        agent_name="worker",
+        source_kind="agent",
+        source_actor="ses_lane",
+    )
+    assert request_store.claim(request.id) is not None
+    answering, answered, report_started = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    seen: list[tuple[str, str]] = []
+
+    async def _dispatch(
+        ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None, **_kwargs
+    ):
+        seen.append((text, source))
+        _bind_test_native_start(engine, ctx)
+        if text == "2547是做什么的来着？":
+            answering.set()
+            await answered.wait()
+        else:
+            report_started.set()
+        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
+
+    monkeypatch.setattr(session_turns, "dispatch_turn_with_outcome", _dispatch)
+
+    controller = _build_controller_double()
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+    controller.session_turns._steer = AsyncMock(
+        return_value=steer_result(SteerOutcome.ACCEPTED)
+    )
+
+    async def _go():
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/internal/dispatch_async",
+                json={
+                    "session_id": session_id,
+                    "text": "2547是做什么的来着？",
+                    "user_message_id": question["id"],
+                },
+            )
+            assert response.status_code == 202
+            await asyncio.wait_for(answering.wait(), timeout=3)
+            context = MessageContext(
+                user_id="workbench",
+                channel_id=session_id,
+                platform="avibe",
+                message_id=f"agent_run:{request.id}",
+                platform_specific={
+                    "task_execution_id": request.id,
+                    "task_trigger_kind": "agent_run",
+                    "source_kind": "agent",
+                    "source_actor": "ses_lane",
+                    "suppress_delivery": True,
+                },
+            )
+            result = await controller.session_turn_gate.submit_scheduled(
+                session_id,
+                context,
+                request.message or "",
+            )
+            with engine.connect() as conn:
+                assert [row["text"] for row in message_deliveries.list_queued(conn, session_id)] == [
+                    "PR #2688 merged externally."
+                ]
+            answered.set()
+            await asyncio.wait_for(report_started.wait(), timeout=3)
+            return result
+
+    result = asyncio.run(_go())
+
+    assert result == session_turns.TurnSubmissionResult(
+        route="enqueued",
+        queue_persisted=True,
+        target_was_busy=True,
+        delivery_status="queued",
+        delivery_owner_transferred=True,
+    )
+    controller.session_turns._steer.assert_not_awaited()
+    controller.command_handler.handle_stop.assert_not_awaited()
+    assert seen == [
+        ("2547是做什么的来着？", SOURCE_HUMAN),
+        ("PR #2688 merged externally.", SOURCE_SCHEDULED),
+    ]
+    with engine.connect() as conn:
+        report = message_deliveries.get_delivery_by_native_identity(
+            conn,
+            platform="avibe",
+            native_message_id=f"agent_run:{request.id}",
+            scope_id=scope_id,
+            session_id=session_id,
+        )
+        first = message_deliveries.get_delivery(conn, question["id"])
+    assert report is not None and first is not None
+    assert (report["turn_role"], report["turn_position"]) == ("initial", 0)
+    assert report["turn_id"] != first["turn_id"]
+    stored = request_store.get_run(request.id)
+    assert stored is not None
+    assert stored["metadata"]["delivery_outcome"] == {
+        "intent": "steer",
+        "status": "queued",
+        "target_was_busy": True,
+    }
+
+
 def test_agent_run_send_now_steers_a_turn_started_during_admission(monkeypatch, tmp_path):
     """A stale idle snapshot cannot downgrade explicit P1 into P3 queueing."""
     from core.scheduled_tasks import TaskExecutionStore
@@ -4620,7 +5014,7 @@ def test_agent_run_send_now_restart_preserves_refused_queue_behind_durable_owner
         ]
     stored = request_store.get_run(request.id)
     assert stored is not None
-    assert stored["metadata"]["delivery_intent"] == "steer"
+    assert stored["metadata"]["delivery_intent"] == "send_now"
     assert stored["metadata"]["delivery_outcome"]["status"] == "queued"
 
 
@@ -5565,7 +5959,10 @@ def test_scheduled_send_now_recovers_transferred_reservation(monkeypatch, tmp_pa
     resumed_owner = asyncio.run(_go())
     assert isinstance(resumed_owner, session_turns.TurnSubmissionResult)
     assert resumed_owner.route == "ran"
-    assert resumed_owner.delivery_status == "claimed"
+    # The duplicate answers with the Delivery's state when its admission reads it. Admission
+    # now yields the loop while it waits for SQLite (#2630), so the recovered turn may have
+    # moved its Delivery from claimed to accepted by then; either way the turn owns it.
+    assert resumed_owner.delivery_status in {"claimed", "accepted"}
     assert resumed_owner.delivery_owner_transferred is True
     assert dispatched == ["original send-now prompt"]
 
@@ -8534,3 +8931,156 @@ def test_show_access_apply_serializes_controller_writes(monkeypatch):
 
     assert [response.status_code for response in responses] == [200, 200]
     assert calls == ["ses-first", "ses-second"]
+
+
+def test_a_scheduled_turns_admission_never_holds_the_loop(monkeypatch, tmp_path):
+    """#2630: admitting a scheduled turn writes its Delivery and Run rows in one transaction that waits for SQLite's
+    write lock and commits. The loop runs every session's turns, so it stays free while another writer holds the
+    lock."""
+    import sqlite3
+    import threading
+
+    from core import session_turns
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(tmp_path, native_id="proj_admission_off_loop")
+    session_id = session["id"]
+
+    async def _fake_dispatch_turn(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None, **_kwargs):
+        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
+
+    monkeypatch.setattr(session_turns, "dispatch_turn_with_outcome", _fake_dispatch_turn)
+    controller = _build_controller_double()
+    internal_server.create_app(controller)
+    ctx = MessageContext(
+        user_id="workbench",
+        channel_id=session_id,
+        platform="avibe",
+        message_id="scheduled:admission-off-loop:1",
+        platform_specific={"agent_session_id": session_id, "agent_session_target": {"agent_backend": "claude"}},
+    )
+
+    held, release = threading.Event(), threading.Event()
+    released_in_time: list[bool] = []
+
+    def _hold_write_lock() -> None:
+        # Another writer, as a second process or a long transaction would be.
+        holder = sqlite3.connect(engine.url.database, timeout=10)
+        try:
+            holder.execute("BEGIN IMMEDIATE")
+            held.set()
+            released_in_time.append(release.wait(2))
+            holder.rollback()
+        finally:
+            holder.close()
+
+    async def _go():
+        holder = threading.Thread(target=_hold_write_lock)
+        holder.start()
+        assert await asyncio.to_thread(held.wait, 5)
+        submitting = asyncio.create_task(controller.session_turn_gate.submit_scheduled(session_id, ctx, "digest please"))
+        await asyncio.sleep(0.1)
+        # The loop lets the other writer go while admission waits for it.
+        release.set()
+        await submitting
+        await asyncio.to_thread(holder.join, 5)
+
+    asyncio.run(_go())
+    assert released_in_time == [True]
+
+
+@pytest.mark.parametrize("admission_fails", [False, True])
+def test_a_cancellation_during_admission_keeps_the_runs_delivery_ownership(monkeypatch, tmp_path, admission_fails):
+    """#2630: admission runs on a thread now, so a cancellation can arrive while it waits for SQLite's write lock.
+    Once its transaction moves the Run's ownership to the Delivery, the submission must hand the turn to recovery,
+    as a cancellation during delivery does, instead of letting the Run be terminalized and the turn dropped.
+
+    #2657: an admission that fails moved nothing, so the submission answers the cancellation, not the error: the
+    error would have the executor settle an ordinary failure instead of the stop or shutdown that cancelled it."""
+    import sqlite3
+    import threading
+
+    from core import session_turns
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage import background
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(tmp_path, native_id="proj_admission_cancel")
+    session_id = session["id"]
+    request_store = TaskExecutionStore()
+    run = request_store.enqueue_definition_run(
+        definition_id="scheduled-admission-cancel",
+        run_type="scheduled",
+        source_kind="scheduler",
+        session_key="",
+        session_id=session_id,
+        post_to=None,
+        deliver_key=None,
+        prompt="digest please",
+        agent_name="worker",
+        session_policy="existing",
+    )
+    assert request_store.claim(run.id) is not None
+
+    async def _fake_dispatch_turn(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None, **_kwargs):
+        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
+
+    monkeypatch.setattr(session_turns, "dispatch_turn_with_outcome", _fake_dispatch_turn)
+    controller = _build_controller_double()
+    internal_server.create_app(controller)
+    ctx = MessageContext(
+        user_id="workbench",
+        channel_id=session_id,
+        platform="avibe",
+        message_id=f"scheduled:scheduled-admission-cancel:{run.id}",
+        platform_specific={
+            "agent_session_id": session_id,
+            "agent_session_target": {"agent_backend": "claude"},
+            "task_execution_id": run.id,
+            "task_trigger_kind": "scheduled",
+            "task_definition_id": "scheduled-admission-cancel",
+        },
+    )
+    held, release = threading.Event(), threading.Event()
+    if admission_fails:
+
+        def _refuse_binding(*_args, **_kwargs):
+            raise sqlite3.OperationalError("disk I/O error")
+
+        monkeypatch.setattr(background, "attach_agent_run_delivery_in_connection", _refuse_binding)
+
+    def _hold_write_lock() -> None:
+        holder = sqlite3.connect(engine.url.database, timeout=10)
+        try:
+            holder.execute("BEGIN IMMEDIATE")
+            held.set()
+            release.wait(5)
+            holder.rollback()
+        finally:
+            holder.close()
+
+    async def _go():
+        holder = threading.Thread(target=_hold_write_lock)
+        holder.start()
+        assert await asyncio.to_thread(held.wait, 5)
+        submitting = asyncio.create_task(
+            controller.session_turn_gate.submit_scheduled(session_id, ctx, "digest please", delivery_intent="queue")
+        )
+        await asyncio.sleep(0.1)
+        submitting.cancel()
+        release.set()
+        try:
+            return await submitting
+        except asyncio.CancelledError:
+            return "cancelled"
+        finally:
+            await asyncio.to_thread(holder.join, 5)
+
+    result = asyncio.run(_go())
+    stored = request_store.get_run(run.id)
+    if admission_fails:
+        assert result == "cancelled", f"the admission's error replaced the cancellation: {result!r}"
+        assert not stored["delivery_id"]
+        return
+    assert result.delivery_owner_transferred is True
+    assert stored["delivery_id"] and stored["status"] in {"running", "queued"}

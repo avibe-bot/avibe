@@ -134,6 +134,30 @@ def test_notifies_im_session_with_platform_link_format(tmp_path: Path) -> None:
     assert "<https://desk.avibe.bot/u/team/vaults?request_id=vrq_123|Review on the web>" in emitted["text"]
 
 
+def test_delete_request_notification_uses_delete_type(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.sqlite"
+    _seed_session(db_path)
+    controller = FakeController()
+
+    result = asyncio.run(
+        notify_vault_request_created(
+            controller,
+            {
+                "id": "vrq_delete",
+                "request_type": "delete",
+                "secret_name": "OLD_TOKEN",
+                "status": "pending",
+                "requester": {"session_id": "ses_im"},
+                "card": {"request_type": "delete", "secret_name": "OLD_TOKEN"},
+            },
+            db_path=db_path,
+        )
+    )
+
+    assert result["sent"] is True
+    assert "Delete request" in controller.emitted[0]["text"]
+
+
 def test_notifies_wechat_with_plain_url_format(tmp_path: Path) -> None:
     db_path = tmp_path / "state.sqlite"
     _seed_session(db_path, platform="wechat", native_id="wx-chat")

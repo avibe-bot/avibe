@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 
@@ -175,9 +174,6 @@ def test_f2_apply_takes_over_selected_key_and_preserves_blocked_native_material(
     """F2: grouped custody cleans the selected key without touching blockers."""
 
     seeded_api_key = SYNTHETIC_MIGRATION_API_KEY
-    seeded_api_key_digest = hashlib.sha256(
-        seeded_api_key.encode("utf-8")
-    ).hexdigest()
     _configure_protocol(
         mock_llm_upstream,
         "anthropic",
@@ -205,11 +201,16 @@ def test_f2_apply_takes_over_selected_key_and_preserves_blocked_native_material(
         mock_llm_upstream.reset_requests()
 
         applied = app.client.post(
-            "/api/models/migration/apply", {"item_ids": item_ids}
+            "/api/models/migration/apply", {"item_ids": item_ids, "clean_api_keys": True}
         )
         body = applied.json()
         assert applied.status == 200, body
         assert body["applied"] == 1
+        # Check migration before the Sources page read below schedules its
+        # own independent background inventory refresh.
+        assert mock_llm_upstream.requests() == []
+        assert body["sources"][0]["verification_pending"]
+        assert body["sources"][0]["last_discovered_at"] is None
         assert [
             (source["vendor"], source["kind"], source["supply_channel"])
             for source in body["sources"]
@@ -234,47 +235,79 @@ def test_f2_apply_takes_over_selected_key_and_preserves_blocked_native_material(
         assert "sk-ant-e2e-claude-independent-123456" not in serialized
         assert "codex-oauth-e2e-123456" not in serialized
 
-        captured_digests = set()
-        for request in mock_llm_upstream.requests():
-            headers = request["headers"]
-            credential = headers.get("x-api-key")
-            if credential is None:
-                authorization = headers.get("authorization", "")
-                prefix = "Bearer "
-                credential = (
-                    authorization[len(prefix) :]
-                    if authorization.startswith(prefix)
-                    else authorization
-                )
-            if credential:
-                captured_digests.add(
-                    hashlib.sha256(credential.encode("utf-8")).hexdigest()
-                )
-        assert seeded_api_key_digest in captured_digests
-        catalogue_headers = [
-            request["headers"]
-            for request in mock_llm_upstream.requests()
-            if request["path"] == "/v1/models"
-        ]
-        assert any(
-            headers.get("authorization") == f"Bearer {seeded_api_key}"
-            and "x-api-key" not in headers
-            for headers in catalogue_headers
-        )
-        assert any(
-            not headers.get("x-api-key") and not headers.get("authorization")
-            for headers in catalogue_headers
-        )
+
+
+@pytest.mark.parametrize("clean_api_keys", [False, True])
+def test_mh_mig_015_keys_migrate_over_http_without_any_upstream_request(
+    model_hub_app_factory, mock_llm_upstream, clean_api_keys,
+) -> None:
+    """MH-MIG-015: HTTP/IPC imports even rejected keys, without probing them.
+
+    Service doubles alone cannot show that the real custody/runtime adapters do
+    not authenticate or fetch inventories. This local upstream rejects every
+    credential; its request log must remain empty through migration and replay.
+    """
+    mock_llm_upstream.configure(auth="401", protocol="openai_chat")
+    credentials = {
+        "deepseek": "fixture-stale-native-key",
+        "custom-relay": "fixture-unchecked-native-key",
+    }
+    paths: list[Path] = []
+
+    def seed(app) -> None:
+        path = app.home / ".config/opencode/opencode.json"
+        paths.append(path)
+        _write(path, json.dumps({"provider": {
+            vendor: {
+                "npm": "@ai-sdk/openai-compatible",
+                "options": {"apiKey": key, "baseURL": mock_llm_upstream.url},
+                "models": {"configured-model": {"name": "Configured model"}},
+            }
+            for vendor, key in credentials.items()
+        }}))
+
+    with model_hub_app_factory(before_start=seed) as app:
+        before = paths[0].read_bytes()
+        scan = app.client.post("/api/models/migration/scan", {})
+        assert scan.status == 200, scan.json()
+        items = scan.json()["scan"]["items"]
+        assert {item["vendor"] for item in items} == set(credentials)
+        request = {"item_ids": [item["id"] for item in items], "clean_api_keys": clean_api_keys}
+        response = app.client.post("/api/models/migration/apply", request)
+        body = response.json()
+        assert response.status == 200, body
+        assert body["applied"] == 2
+        assert {source["vendor"] for source in body["sources"]} == set(credentials)
+        assert mock_llm_upstream.requests() == []
+        for source in body["sources"]:
+            assert source["protocol"] == "openai_chat"
+            assert source["verification_pending"]
+            assert source["last_discovered_at"] is None
+            assert [(model["id"], model["origin"]) for model in source["models"]] == [
+                ("configured-model", "manual"),
+            ]
+        assert all(key not in json.dumps(body) for key in credentials.values())
+        if clean_api_keys:
+            assert all(key not in paths[0].read_text() for key in credentials.values())
+        else:
+            assert paths[0].read_bytes() == before
+        replay = app.client.post("/api/models/migration/apply", request)
+        assert replay.status == 200, replay.json()
+        assert replay.json()["applied"] == 2
+        assert {source["id"] for source in replay.json()["sources"]} == {
+            source["id"] for source in body["sources"]
+        }
+        assert mock_llm_upstream.requests() == []
 
 
 @pytest.mark.parametrize(
     "required_api_key", [None, "sk-ant-e2e-different-key"],
     ids=["public-catalogue", "rejected-key"],
 )
-def test_f2_unproven_key_keeps_all_native_material(
+def test_f2_unproven_key_is_copied_without_upstream_validation(
     model_hub_app_factory, mock_llm_upstream, required_api_key: str | None,
 ) -> None:
-    """F2: a public catalogue or credential rejection cannot authorize cleanup."""
+    """F2: upstream authentication is not admission to a configuration transfer."""
     _configure_protocol(
         mock_llm_upstream, "anthropic",
         models=[{"id": "claude-sonnet-4-6"}],
@@ -296,9 +329,12 @@ def test_f2_unproven_key_keeps_all_native_material(
         response = app.client.post(
             "/api/models/migration/apply", {"item_ids": [item["id"] for item in selected]},
         )
-        assert response.status == 409, response.json()
-        assert response.json()["error"] == "migration_item_conflict"
+        body = response.json()
+        assert response.status == 200, body
+        assert body["applied"] == 1
+        assert body["sources"][0]["verification_pending"]
+        assert mock_llm_upstream.requests() == []
         assert all(path.read_bytes() == before[path] for path in seeded_paths)
         listed = app.client.get("/api/models/sources")
         assert listed.status == 200, listed.json()
-        assert listed.json()["sources"] == []
+        assert len(listed.json()["sources"]) == 1

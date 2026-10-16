@@ -19,8 +19,6 @@ export type PetSurfaceEpoch = {
   binding: string | null;
   authorizationGeneration: number;
   isCurrent: () => boolean;
-  /** A pick intentionally changes binding; its queued IPC still needs this gate. */
-  isAuthorizationCurrent: () => boolean;
 };
 
 export const PET_TAIL_LIMIT = 30;
@@ -78,10 +76,9 @@ const mergeRow = (tail: Tail, row: WorkbenchMessage): Tail => {
  * contract in docs/plans/2026-10-01-desktop-pet.md: an initial read, live
  * triggers, and gap fallbacks, with every read fenced by binding and order.
  *
- * `onInvalid(S)` fires when `S` turns out to be read-only or missing, so the
- * caller can clear the binding (compare-and-clear) and show the switcher.
+ * Main is resolved through the owner-only endpoint; native bindings are ignored.
  */
-export function usePetSession(sessionId: string | null, onInvalid: (sessionId: string) => void): PetSessionData {
+export function usePetSession(sessionId: string | null): PetSessionData {
   const api = useApi();
   const [authorizationGeneration, setAuthorizationGeneration] = useState(0);
   const authorizationNow = useRef(0);
@@ -96,7 +93,6 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
     const isAuthorizationCurrent = () => mounted.current && authorizationNow.current === identity.authorizationGeneration;
     return {
       ...identity,
-      isAuthorizationCurrent,
       isCurrent: () => isAuthorizationCurrent() && currentIdentity.current === identity
         && (petShell.currentBinding() ?? null) === identity.binding,
     };
@@ -106,8 +102,6 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
   const [canChat, setCanChat] = useState<boolean | null>(null);
   const [tail, setTail] = useState<Tail>(EMPTY_TAIL);
   const [turn, setTurn] = useState<SessionRuntimeState | null>(null);
-  // The session a fresh read found missing or read-only.
-  const [invalid, setInvalid] = useState<string | null>(null);
   // A local send stays Running for the registration grace.
   const [inGrace, setInGrace] = useState(false);
   const [sendCount, setSendCount] = useState(0);
@@ -116,31 +110,25 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
   const [displayed, setDisplayed] = useState(sessionId);
   if (displayed !== sessionId) {
     setDisplayed(sessionId);
-    setSession(null);
-    setCanChat(null);
     setTail(EMPTY_TAIL);
     setTurn(null);
     setInGrace(false);
-    setInvalid(null);
   }
 
   const sources = useMemo(() => ({
-    session: new FencedSource<string, WorkbenchSessionReadResult>({
+    session: new FencedSource<number, WorkbenchSessionReadResult>({
       read: () => api.getMainSession(),
-      apply: (key, { status, session: row, capabilities }) => {
-        // A binding is valid only while S is writable: missing, archived and
-        // Runtime-owned sessions all clear it.
-        // 403: this principal lost access to the session (or its project).
-        if (status === 404 || status === 403 || (row && isSessionReadOnly(row))) {
-          setInvalid(key);
-          setCanChat(false);
-          return;
-        }
-        // Unknown or missing: deny. The composer waits on an explicit true.
-        setCanChat(capabilities?.can_chat === true);
-        if (row) setSession(row);
+      apply: (_key, { status, session: row, capabilities }) => {
+        const valid = status === 200 && row && !isSessionReadOnly(row) && capabilities?.can_chat === true;
+        setSession(valid ? row : null);
+        setCanChat(Boolean(valid));
+        petShell.setMain(valid ? row.id : null);
       },
-      fail: () => setCanChat(false),
+      fail: () => {
+        setSession(null);
+        setCanChat(false);
+        petShell.setMain(null);
+      },
     }),
     tail: new FencedSource<string, { messages: WorkbenchMessage[]; next_before_id?: string | null }>({
       read: (key) => api.listSessionMessages(key, { tail: true, cache: false, limit: PET_TAIL_LIMIT }),
@@ -168,27 +156,27 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
     sources.turn.refresh();
   }, [sources]);
 
-  // Initial read on every binding change.
+  // One fenced main lookup per mount, then event-driven recovery. No polling.
   useEffect(() => {
-    sources.session.setKey(sessionId);
-    sources.tail.setKey(sessionId);
-    sources.turn.setKey(sessionId);
-    if (sessionId) refreshAll();
-    return () => {
-      sources.session.setKey(null);
-      sources.tail.setKey(null);
-      sources.turn.setKey(null);
-    };
-  }, [sessionId, sources, refreshAll]);
+    sources.session.setKey(authorizationNow.current);
+    sources.session.refresh();
+    return () => sources.session.setKey(null);
+  }, [sources]);
 
-  // Report an invalid binding once, and only while it is still the binding.
+  // No transcript or runtime reads before the main endpoint grants access.
+  const resolved = session?.id === sessionId && canChat === true;
   useEffect(() => {
-    if (epoch.isCurrent() && invalid && invalid === sessionId) onInvalid(invalid);
-  }, [invalid, sessionId, onInvalid, epoch]);
+    const key = resolved ? sessionId : null;
+    sources.tail.setKey(key);
+    sources.turn.setKey(key);
+    if (key) { sources.tail.refresh(); sources.turn.refresh(); }
+    return () => { sources.tail.setKey(null); sources.turn.setKey(null); };
+  }, [sessionId, resolved, authorizationGeneration, sources]);
 
   // Live triggers and the reconnect gap fallback.
   useEffect(() => {
-    const mine = (id: string | null | undefined) => Boolean(sessionId && id === sessionId);
+    const generation = authorizationNow.current;
+    const mine = (id: string | null | undefined) => Boolean(generation === authorizationNow.current && resolved && sessionId && id === sessionId);
     return api.connectWorkbenchEvents({
       onConnected: refreshAll,
       onMessageNew: (row) => {
@@ -234,8 +222,8 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
         sources.turn.refresh();
       },
       // Access changed: drop everything read under the old authorization at
-      // once, then re-read (a refresh also drops any read in flight); a lost
-      // session reads 403 and clears the binding.
+      // once, then resolve main again. Its owner-only grant must land before any
+      // transcript/runtime reads under the new authorization.
       onAuthorizationChanged: () => {
         // Invalidate callbacks synchronously, before React commits the reset.
         authorizationNow.current += 1;
@@ -245,8 +233,10 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
         setTail(EMPTY_TAIL);
         setTurn(null);
         setInGrace(false);
-        setInvalid(null);
-        refreshAll();
+        sources.tail.setKey(null);
+        sources.turn.setKey(null);
+        sources.session.setKey(authorizationNow.current);
+        sources.session.refresh();
       },
       onQueueUpdated: ({ session_id }) => {
         if (mine(session_id)) sources.turn.refresh();
@@ -256,11 +246,10 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
       onRunsUpdated: () => sources.turn.refresh(),
       onDefinitionsUpdated: () => sources.turn.refresh(),
     });
-  }, [api, sessionId, sources, refreshAll, sessionRef, tailLoadedRef]);
+  }, [api, sessionId, resolved, authorizationGeneration, sources, refreshAll, sessionRef, tailLoadedRef]);
 
   // The window coming back is a gap too.
   useEffect(() => {
-    if (!sessionId) return undefined;
     return onPageReactivated(refreshAll);
   }, [sessionId, refreshAll]);
 

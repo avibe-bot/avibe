@@ -165,7 +165,9 @@ class InMemoryTranscriptStore:
                 return entry
         return (await self._append(session_id, [("input", message, {}, message_id)]))[0]
 
-    async def append_response(self, session_id, message: AssistantMessage, *, final: bool, request=None) -> ContextEntry:
+    async def append_response(
+        self, session_id, message: AssistantMessage, *, final: bool, request=None, replied=None, images=()
+    ) -> ContextEntry:
         payload = {"request": dict(request)} if request is not None else {}
         row = (await self._append(session_id, [("response", message, payload, None)]))[0]
         self.final[row.row_id] = final
@@ -198,7 +200,7 @@ class InMemoryTranscriptStore:
 
 def _payload(kind, payload: Mapping) -> dict:
     """A payload row's content, as the contract admits it: a payload kind, at the current version."""
-    if kind not in ("compaction", "context_edit", "agent_state"):
+    if kind not in ("compaction", "context_edit", "agent_state", "replay_refusal"):
         raise ValueError(f"not a payload entry kind: {kind!r}")
     if payload.get("version") != 1:
         raise ValueError(f"a {kind} payload needs version 1")

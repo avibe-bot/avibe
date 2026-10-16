@@ -9,11 +9,11 @@ import {
   subscribeEditorFontSize,
 } from '../../lib/editorFontSize';
 
-import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
-import jsonWorker from 'monaco-editor/esm/vs/language/json/json.worker?worker';
-import tsWorker from 'monaco-editor/esm/vs/language/typescript/ts.worker?worker';
-import cssWorker from 'monaco-editor/esm/vs/language/css/css.worker?worker';
-import htmlWorker from 'monaco-editor/esm/vs/language/html/html.worker?worker';
+import editorWorker from 'monaco-editor/editor/editor.worker?worker';
+import jsonWorker from 'monaco-editor/language/json/json.worker?worker';
+import tsWorker from 'monaco-editor/language/typescript/ts.worker?worker';
+import cssWorker from 'monaco-editor/language/css/css.worker?worker';
+import htmlWorker from 'monaco-editor/language/html/html.worker?worker';
 
 // The VS Code kernel. ALL monaco imports live in THIS module so that
 // `React.lazy(() => import('./MonacoEditor'))` keeps monaco-editor + its language

@@ -23,8 +23,10 @@ the live IM reply path.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 from sqlalchemy.exc import IntegrityError
@@ -220,6 +222,53 @@ def _publish_activity_event(event_row: Optional[dict]) -> None:
         logger.debug("message_mirror: activity tool_call publish failed", exc_info=True)
 
 
+def _hosted_card(conn, context: MessageContext, hosted: dict, *, scope_id, session_id) -> dict:
+    """A hosted-tool card as the row stores it: on the Workbench, each image gains its media URL.
+
+    The card is a trace row, which never passes the transcript's media rewrite,
+    so its images are registered here, in the row's own transaction. The media
+    store reuses one token per (session, file), so the answer that links the
+    same file resolves to the same URL and the Web can join the two.
+    """
+    images = hosted.get("images") if isinstance(hosted.get("images"), list) else []
+    if context.platform != "avibe" or not session_id or not images:
+        return hosted
+    from core.workbench_media import register_agent_reply_media
+    from storage import media_service
+
+    registered = []
+    for image in images:
+        path = image.get("path") if isinstance(image, dict) else None
+        if not isinstance(path, str) or not os.path.isabs(path):
+            registered.append(image)
+            continue
+        try:
+            # Canonical, as the transcript's rewrite registers it, so both share one token.
+            canonical = str(Path(path).resolve())
+            token = register_agent_reply_media(
+                conn,
+                scope_id=scope_id,
+                session_id=session_id,
+                kind="image",
+                local_path=canonical,
+                file_name=os.path.basename(canonical),
+            )
+            row = media_service.get_by_token(conn, token) or {}
+        except Exception:
+            logger.exception("persist_agent_message: hosted image registration failed")
+            registered.append(image)
+            continue
+        url = f"/api/media/{token}"
+        width, height = row.get("width_px"), row.get("height_px")
+        if width and height:
+            url = f"{url}?w={width}&h={height}"
+        extra = {"media_url": url}
+        if row.get("size_bytes") is not None:
+            extra["bytes"] = row["size_bytes"]
+        registered.append({**image, **extra})
+    return {**hosted, "images": registered}
+
+
 def _session_row(conn, session_id: str) -> Optional[dict]:
     """Resolve scope/provenance from an agent session."""
     from sqlalchemy import select
@@ -299,6 +348,7 @@ def persist_agent_message(
     native_message_id: Optional[str] = None,
     error_sink: Optional[list] = None,
     existing_row_id: Optional[str] = None,
+    hosted: Optional[dict] = None,
 ) -> Optional[dict]:
     """Persist one agent output into the workbench ``messages`` store.
 
@@ -380,8 +430,24 @@ def persist_agent_message(
                     # A trace row carries text and no sidecar, so its copy is
                     # written here rather than finalized with spans.
                     text=materialize_citations(text, citations) or text,
-                    content={"kind": canonical_type or "tool_call"},
-                    metadata={"canonical_type": canonical_type or "tool_call"},
+                    content={
+                        "kind": canonical_type or "tool_call",
+                        **(
+                            {"hosted": _hosted_card(conn, context, hosted, scope_id=scope_id, session_id=row_session_id)}
+                            if hosted
+                            else {}
+                        ),
+                    },
+                    metadata={
+                        "canonical_type": canonical_type or "tool_call",
+                        # A native hosted call happened before the text of the response that
+                        # carried it, though it is emitted after that row commits.
+                        **(
+                            {"precedes_message_id": hosted["response_id"]}
+                            if hosted and isinstance(hosted.get("response_id"), str)
+                            else {}
+                        ),
+                    },
                     agent_name=agent_name,
                     backend=backend,
                     turn_id=turn_id,

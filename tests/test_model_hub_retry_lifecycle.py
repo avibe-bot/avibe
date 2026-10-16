@@ -18,7 +18,7 @@ import pytest
 from config.v2_config import ModelHubConfig, ModelHubRouteConfig, ModelHubRouteHopConfig, ModelHubSourceStateConfig
 from core.handlers.model_hub.adapter import RawOutcomeKind
 from core.handlers.model_hub.retry import RECOVERY_EXHAUSTED_CODE, RECOVERY_EXHAUSTED_MESSAGE
-from core.handlers.model_hub.service import ModelHubError
+from core.handlers.model_hub.service import ModelHubError, ModelHubService
 from core.handlers.model_hub.stream_wire import ProtocolSSEState
 from core.handlers.model_hub import turn_gateway
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
@@ -305,7 +305,7 @@ def test_recovered_disk_observation_is_exact_and_never_masks_new_authority(tmp_p
         elif change == "credential":
             current.credential_ref = "cred_replaced"
         elif change == "verification":
-            current.verification_pending = "vp_" + "1" * 32
+            ModelHubService._mark_source_unverified(current)
         elif change == "endpoint":
             current.base_url = "https://replacement.invalid"
         elif change == "deleted":

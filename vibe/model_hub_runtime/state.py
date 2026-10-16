@@ -42,6 +42,10 @@ class EngineStateError(RuntimeError):
     pass
 
 
+class EngineStateContentError(EngineStateError):
+    """A state file that was read but does not hold a JSON object: its contents, not its access, are bad."""
+
+
 @dataclass(frozen=True)
 class RuntimeSecrets:
     management_key: str
@@ -1058,6 +1062,15 @@ class EngineStateStore:
         self, credential_ref: str, *, source_id: str, vendor: str, auth_provider: str,
     ) -> str | None:
         """Project optional identity without changing custody or repairing files."""
+        payload = self._bound_oauth_payload(
+            credential_ref, source_id=source_id, vendor=vendor, auth_provider=auth_provider,
+        )
+        return _oauth_account_label(payload) if payload is not None else None
+
+    def _bound_oauth_payload(
+        self, credential_ref: str, *, source_id: str, vendor: str, auth_provider: str,
+    ) -> dict[str, Any] | None:
+        """Read a Source's active grant as the engine holds it, or None; never repairs."""
         try:
             with self._lock:
                 _validated_source_id(source_id)
@@ -1081,10 +1094,10 @@ class EngineStateStore:
                 if not isinstance(payload, dict):
                     return None
                 self._assert_oauth_payload_identity(metadata, auth_name, payload, auth_provider=auth_provider)
-                return _oauth_account_label(payload)
+                return payload
         except (EngineStateError, OSError, ValueError, TypeError):
-            # Display metadata is optional. A missing/unsafe grant stays under
-            # its existing auth recovery policy; listing must not repair it.
+            # Grant metadata is optional. A missing/unsafe grant stays under
+            # its existing auth recovery policy; reading must not repair it.
             return None
 
     def oauth_credential_ref(self, auth_name: str) -> str | None:
@@ -1251,10 +1264,12 @@ class EngineStateStore:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return None
-        except (OSError, ValueError) as exc:
+        except ValueError as exc:
+            raise EngineStateContentError(f"invalid engine state file: {path.name}") from exc
+        except OSError as exc:
             raise EngineStateError(f"invalid engine state file: {path.name}") from exc
         if not isinstance(payload, dict):
-            raise EngineStateError(f"invalid engine state file: {path.name}")
+            raise EngineStateContentError(f"invalid engine state file: {path.name}")
         return payload
 
     @classmethod

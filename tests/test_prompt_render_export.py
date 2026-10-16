@@ -43,6 +43,16 @@ _HISTORY_AS_MEMORY_GUIDANCE = (
     "and channel, and it is the clearest, most direct, and rawest source of memory. "
     "Do not rely on vague impressions or ask the user to repeat themselves."
 )
+_PREVIOUS_FORK_OVERRIDE_GUIDANCE = (
+    "- With `--fork-self` or `--fork-session`, pass `--agent`, `--model`, or `--reasoning-effort` only as "
+    "forked-Session overrides, and only when the requested Agent backend matches the source Session backend."
+)
+_NEW_SESSION_MODEL_GUIDANCE = (
+    "- `--model` and `--reasoning-effort` set the model of the new Session a run creates (a blank new Session, "
+    "`--create-session`, or a fork), and that Session keeps it; they are not valid with `--session-id`. With "
+    "`--fork-self` or `--fork-session`, `--agent`, `--model`, and `--reasoning-effort` override the forked Session "
+    "only when the requested Agent backend matches the source Session backend."
+)
 _PREVIOUS_FOLLOW_THROUGH_PRINCIPLE = (
     "- **Follow through.** Maintain ongoing responsibility for entrusted work rather than forgetting it "
     "when a turn ends. When repeatedly blocked, revisit assumptions and root causes; when necessary, "
@@ -522,6 +532,7 @@ def test_approved_guidance_changes_preserve_all_other_injection_bytes(monkeypatc
         "skills-prompt",
         "skills-manual-prompt",
         "codex-skill-reuse",
+        "quick-replies-prompt",
     }
     for backend, history, skill_mode in itertools.product(
         ("claude", "codex", "opencode"), ("off", "managed", "self-managed"), ("empty", "manual", "pages"),
@@ -532,14 +543,17 @@ def test_approved_guidance_changes_preserve_all_other_injection_bytes(monkeypatc
         assert text.count(_EVIDENCE_LED_PRINCIPLE) == 1
         assert text.count(_HISTORY_AS_MEMORY_GUIDANCE) == 1
         assert text.count(_FOLLOW_THROUGH_PRINCIPLE) == 1
+        assert text.count(_NEW_SESSION_MODEL_GUIDANCE) == 1
+        text = text.replace(_NEW_SESSION_MODEL_GUIDANCE, _PREVIOUS_FORK_OVERRIDE_GUIDANCE)
         text = text.replace(_HISTORY_AS_MEMORY_GUIDANCE, _PREVIOUS_HISTORY_GUIDANCE)
         text = text.replace(_FOLLOW_THROUGH_PRINCIPLE, _PREVIOUS_FOLLOW_THROUGH_PRINCIPLE)
         outputs.append(text.replace(_EVIDENCE_LED_PRINCIPLE, _PREVIOUS_VERIFICATION_PRINCIPLE))
     digest = hashlib.sha256(json.dumps(outputs, ensure_ascii=False).encode()).hexdigest()
-    # Captured before editing from 1e9ba96bc61b0e86027d4871553e68e8ed85c1ac,
-    # omitting only the approved Computer Use and Skill-loading guidance blocks
-    # (including the Codex-only reuse sentence) and restoring the previous
-    # verification principle and conversation-history guidance and Follow-through
-    # principle.
+    # Captured before editing from b4eb5cca140955d7e6f7f4206c793892cf19ef59,
+    # omitting only the approved quick-reply, Computer Use and Skill-loading
+    # guidance blocks (including the Codex-only reuse sentence) and restoring the
+    # previous verification principle and conversation-history guidance and
+    # Follow-through principle, and the Harness rule that a run's --model applies
+    # only to forks (now: to any new Session a run creates).
     # Every other byte/order stays pinned, including all Claude/OpenCode output.
-    assert digest == "262c7cbabbbb0bfefa4a69511d805d28f76a3559bd511184006242f831b4836e"
+    assert digest == "9475df69a6c14f6ddda396dc33d665f4ebda657517cd3ea3134d23d7f5c5c712"

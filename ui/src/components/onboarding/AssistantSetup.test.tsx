@@ -50,7 +50,7 @@ const hubAgent = (enabled = true) => ({
   system_prompt: null, created_at: '', metadata: { builtin_default: true },
 });
 const hubChain = (modelId: string) => ({
-  contract_version: 11, backend: 'claude', model_id: 'opus-5',
+  contract_version: 15, backend: 'claude', model_id: 'opus-5',
   manual_override: { hops: [{ source_id: 'src_a', model_id: modelId }] },
   route_origin: 'manual', current: { source_id: 'src_a', model_id: modelId },
   chain: [{ source_id: 'src_a', model_id: modelId, channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }],
@@ -87,6 +87,20 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('assistant installation presentation', () => {
+  it('renders Direct Claude capability as external authentication, not an API key', async () => {
+    const saved = data();
+    for (const agent of Object.values(saved.agents)) agent.status = 'ok';
+    mock.api.getConfig.mockResolvedValue(saved);
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: true, enabled: true, supply_mode: 'direct',
+      auth: backend === 'claude' ? 'external' : 'api_key', application: 'applied', ready: true, entry_eligible: true,
+    }));
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} />));
+    await row('Claude Code').findByRole('button', { name: en.onboarding.setup.externalConnected });
+    expect(row('Claude Code').queryByRole('button', { name: en.onboarding.setup.api_keyConnected })).toBeNull();
+    expect(row('Claude Code').queryByRole('button', { name: en.onboarding.setup.subscriptionConnected })).toBeNull();
+    expect(row('Claude Code').getByText(en.onboarding.setup.externalConnectedHint)).toBeTruthy();
+  });
   it('enables a Hub assistant after a successful install', async () => {
     const saved = data();
     saved.agents.codex.enabled = false;
@@ -340,7 +354,7 @@ describe('assistant installation presentation', () => {
     mock.api.getVibeAgent.mockResolvedValue({ ok: true, agent });
     mock.models.listSources.mockResolvedValue([]);
     const chain = {
-      contract_version: 11, backend: 'claude', model_id: 'opus-5',
+      contract_version: 15, backend: 'claude', model_id: 'opus-5',
       manual_override: { hops: [{ source_id: 'src_a', model_id: 'opus-5' }, { source_id: 'src_b', model_id: 'opus-5' }] },
       route_origin: 'manual', current: { source_id: 'src_a', model_id: 'opus-5' },
       chain: [

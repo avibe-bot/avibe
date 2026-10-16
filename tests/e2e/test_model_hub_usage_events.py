@@ -20,6 +20,14 @@ from tests.e2e.test_model_hub_sources import (
 
 pytestmark = pytest.mark.e2e_model_hub
 
+# The counters these scenarios seed and read back; a report's cost and cache-write
+# totals (#2189) are additive and owned by the pricing tests.
+_SCENARIO_COUNTERS = ("requests", "token_reports", "input_tokens", "cached_input_tokens", "output_tokens")
+
+
+def _counts(totals: dict) -> dict:
+    return {key: totals[key] for key in _SCENARIO_COUNTERS}
+
 
 @pytest.fixture
 def usage_analytics_app(model_hub_app_factory):
@@ -87,7 +95,7 @@ def test_e2_usage_windows_are_bounded(
         body = response.json()
         assert response.status == 200, body
         assert body["usage"]["window_days"] == expected
-        assert body["usage"]["totals"] == {
+        assert _counts(body["usage"]["totals"]) == {
             "requests": 0,
             "token_reports": 0,
             "input_tokens": 0,
@@ -167,7 +175,7 @@ def test_e2_usage_reports_reconcile_across_http_ipc_and_restart(
         expected = expected_hourly if window == "24h" else expected_daily
         assert report["window_key"] == window
         assert report["granularity"] == ("hour" if window == "24h" else "day")
-        assert report["totals"] == expected
+        assert _counts(report["totals"]) == expected
         buckets = report["buckets"]
         assert len(buckets) == count
         assert len({bucket["key"] for bucket in buckets}) == count
@@ -217,16 +225,16 @@ def test_e2_usage_reports_reconcile_across_http_ipc_and_restart(
         assert response.status == 400, response.json()
     repeated = model_hub_app.client.get("/api/models/usage?window=24h&window=24h")
     assert repeated.status == 200, repeated.json()
-    assert repeated.json()["usage"]["totals"] == expected_hourly
+    assert _counts(repeated.json()["usage"]["totals"]) == expected_hourly
     legacy = model_hub_app.client.get("/api/models/usage?days=7").json()["usage"]
-    assert legacy["totals"] == expected_daily
+    assert _counts(legacy["totals"]) == expected_daily
     assert "buckets" not in legacy
 
     model_hub_app.restart_controller()
     for window, expected in (("24h", expected_hourly), ("7d", expected_daily)):
         response = model_hub_app.client.get(f"/api/models/usage?window={window}")
         assert response.status == 200, response.json()
-        assert response.json()["usage"]["totals"] == expected
+        assert _counts(response.json()["usage"]["totals"]) == expected
 
 
 def test_e2_daily_only_history_is_not_invented_as_hourly_usage(
@@ -260,11 +268,11 @@ def test_e2_daily_only_history_is_not_invented_as_hourly_usage(
     with model_hub_app_factory(before_start=seed_legacy) as app:
         daily = app.client.get("/api/models/usage?window=7d")
         assert daily.status == 200, daily.json()
-        assert daily.json()["usage"]["totals"] == counts
+        assert _counts(daily.json()["usage"]["totals"]) == counts
         hourly = app.client.get("/api/models/usage?window=24h")
         assert hourly.status == 200, hourly.json()
         report = hourly.json()["usage"]
-        assert report["totals"] == dict.fromkeys(counts, 0)
+        assert _counts(report["totals"]) == dict.fromkeys(counts, 0)
         assert any(not bucket["history_complete"] for bucket in report["buckets"])
         assert not any(bucket["rows"] for bucket in report["buckets"])
 

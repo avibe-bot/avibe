@@ -14,7 +14,7 @@ const POLL_DEADLINE_MS = 16 * 60 * 1000;
 export function useBackendOAuth({ backend, opencodeProviderId, onSuccess, onFailure, onCancel, onActiveChange, onPendingChange }: {
   backend: OAuthBackend;
   opencodeProviderId?: string;
-  onSuccess?: () => void | Promise<void>;
+  onSuccess?: (applicationError?: string) => void | Promise<void>;
   /** Observe persisted credentials when a terminal server failure follows commit. */
   onFailure?: (error: string) => void | Promise<void>;
   /** Invalidate an in-flight confirmation before explicit cancellation. */
@@ -33,6 +33,7 @@ export function useBackendOAuth({ backend, opencodeProviderId, onSuccess, onFail
   const [submitting, setSubmitting] = useState(false);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [authorizationCompleted, setAuthorizationCompleted] = useState(false);
   const [hubOwnedAuth, setHubOwnedAuth] = useState(false);
   const owner = useRef({ generation: 0, mounted: true, flowId: '', busy: false, submitting: false, deadline: 0 });
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -82,7 +83,7 @@ export function useBackendOAuth({ backend, opencodeProviderId, onSuccess, onFail
     owner.current.flowId = '';
     owner.current.busy = false;
     owner.current.submitting = false;
-    setState('idle'); setUrl(null); setDeviceCode(null); setCode(''); setError(null); setHubOwnedAuth(false);
+    setState('idle'); setUrl(null); setDeviceCode(null); setCode(''); setError(null); setHubOwnedAuth(false); setAuthorizationCompleted(false);
     setStarting(false); setSubmitting(false);
     callbacks.current.onActiveChange?.(false);
   };
@@ -95,6 +96,7 @@ export function useBackendOAuth({ backend, opencodeProviderId, onSuccess, onFail
     setStarting(false);
     setSubmitting(false);
     setHubOwnedAuth(true);
+    setAuthorizationCompleted(false);
     setError(null);
     setState('failed');
     settled(generation);
@@ -102,23 +104,26 @@ export function useBackendOAuth({ backend, opencodeProviderId, onSuccess, onFail
   };
   const accept = async (data: OAuthWebStartResult, generation: number) => {
     if (!current(generation)) return;
-    if (!data.ok) {
-      if (isNativeAuthHubOwned(data)) {
-        settleHubOwnedAuth(generation);
-        return;
-      }
-      throw new Error(data.detail || data.error || 'flow_not_found');
+    if (isNativeAuthHubOwned(data)) {
+      settleHubOwnedAuth(generation);
+      return;
     }
+    const receipt = backend === 'claude' && data.authorization_completed === true;
+    if (receipt) setAuthorizationCompleted(true);
+    if (!data.ok && !receipt) throw new Error(data.detail || data.error || 'flow_not_found');
     if (data.callback_kind) setCallbackKind(data.callback_kind);
     if (data.url) setUrl(data.url);
     if (data.device_code) setDeviceCode(data.device_code);
-    if (data.state === 'success') {
+    if (data.state === 'success' || (receipt && (data.state === 'failed' || data.state === 'cancelled'))) {
+      if (backend === 'claude' && data.authorization_completed === false) throw new Error(t('onboarding.connection.unconfirmed'));
       stopPolling();
-      // The success consumer must re-read effective auth/application before the
-      // presentation can claim success. It may reject while application fails.
+      // A terminal authorization receipt is not a runtime-application verdict.
+      // Claude consumers may retain the receipt while application is retried;
+      // neither metadata readback nor unmount may cancel this completed login.
+      if (backend === 'claude') { setAuthorizationCompleted(true); owner.current.flowId = ''; }
       setState('verifying');
-      await callbacks.current.onSuccess?.();
-      if (!current(generation)) return;
+      await callbacks.current.onSuccess?.(data.state === 'success' ? undefined : data.detail || data.error || t('onboarding.connection.applyFailed'));
+      if (!current(generation)) { settled(generation); return; }
       owner.current.flowId = '';
       owner.current.busy = false;
       settled(generation);
@@ -166,7 +171,7 @@ export function useBackendOAuth({ backend, opencodeProviderId, onSuccess, onFail
     callbacks.current.onPendingChange?.(true);
     owner.current.busy = true;
     owner.current.deadline = Date.now() + POLL_DEADLINE_MS;
-    setStarting(true); setState('starting'); setError(null); setHubOwnedAuth(false); setCode(''); setUrl(null); setDeviceCode(null); setCallbackKind(null);
+    setStarting(true); setState('starting'); setError(null); setHubOwnedAuth(false); setAuthorizationCompleted(false); setCode(''); setUrl(null); setDeviceCode(null); setCallbackKind(null);
     callbacks.current.onActiveChange?.(true);
     try {
       const result = backend === 'opencode'
@@ -227,6 +232,6 @@ export function useBackendOAuth({ backend, opencodeProviderId, onSuccess, onFail
     }
   };
   const isActive = state === 'starting' || state === 'awaiting_code' || state === 'verifying';
-  return { state, url, deviceCode, callbackKind, code, setCode, submitting, starting, error, setError, hubOwnedAuth,
+  return { state, authorizationCompleted, url, deviceCode, callbackKind, code, setCode, submitting, starting, error, setError, hubOwnedAuth,
     isActive, startFlow, cancelFlow, submitCallback, resetToIdle };
 }

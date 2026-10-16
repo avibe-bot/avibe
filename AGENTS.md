@@ -191,6 +191,11 @@ Source-of-truth rule:
 
 ### Planning and Documentation
 
+For recurring upstream dependency work, use the canonical playbook at
+`docs/maintenance/upstream-dependency-maintenance.md`; keep detection,
+candidate preparation, focused validation, and owner-held release boundaries
+there rather than expanding this index.
+
 - for complex or ambiguous tasks, record the plan in `docs/plans/` (background,
   goal, solution, todo items) and update it when scope changes materially
 - ask before choosing a direction only when an ambiguity would change the

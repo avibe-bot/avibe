@@ -238,7 +238,18 @@ scenarios:
     status: covered
     kind: authorization
     layer: scenario
-    test: tests/scenarios/permissions/test_editor_reservation_and_fork.py
+    # Every case named for this row.
+    test:
+      - tests/scenarios/permissions/test_editor_reservation_and_fork.py::test_permissions_023_editor_reserves_only_a_project_and_agent_it_may_use
+      - tests/scenarios/permissions/test_editor_reservation_and_fork.py::test_permissions_023_reservation_requires_agent_selection_authority
+      - tests/scenarios/permissions/test_editor_reservation_and_fork.py::test_permissions_023_unauthorized_callers_never_reserve
+      - tests/scenarios/permissions/test_editor_reservation_and_fork.py::test_permissions_023_standalone_reservation_keeps_runtime_management_boundary
+      - tests/scenarios/permissions/test_editor_reservation_and_fork.py::test_permissions_023_local_callers_keep_owner_reservation_semantics
+      - tests/scenarios/permissions/test_editor_reservation_and_fork.py::test_permissions_023_fork_of_a_permitted_source_and_agent_succeeds
+      - tests/scenarios/permissions/test_editor_reservation_and_fork.py::test_permissions_023_fork_inherited_agent_needs_selection_authority
+      - tests/scenarios/permissions/test_editor_reservation_and_fork.py::test_permissions_023_fork_override_agent_needs_selection_authority
+      - tests/scenarios/permissions/test_editor_reservation_and_fork.py::test_permissions_023_fork_checks_source_and_destination_independently
+      - tests/scenarios/permissions/test_editor_reservation_and_fork.py::test_permissions_023_fork_preserves_existing_source_answers
     given: An Editor holds Project and Agent selection authority for only part of the instance
     when: The caller reserves a Session and forks an existing one with inherited or overridden Agents
     then: Source and destination are checked independently, unauthorized callers never reserve, and local callers keep Owner semantics
@@ -248,7 +259,16 @@ scenarios:
     status: covered
     kind: authorization
     layer: scenario
-    test: tests/scenarios/permissions/test_deferred_authority_provenance.py
+    # Every case named for this row.
+    test:
+      - tests/scenarios/permissions/test_deferred_authority_provenance.py::test_permissions_024_a_vault_request_records_the_authority_that_made_it
+      - tests/scenarios/permissions/test_deferred_authority_provenance.py::test_permissions_024_a_caller_cannot_forge_the_recorded_authority
+      - tests/scenarios/permissions/test_deferred_authority_provenance.py::test_permissions_024_outward_request_views_hide_the_recorded_authority
+      - tests/scenarios/permissions/test_deferred_authority_provenance.py::test_permissions_024_auto_resume_runs_under_the_requesting_caller
+      - tests/scenarios/permissions/test_deferred_authority_provenance.py::test_permissions_024_a_local_requests_auto_resume_stays_local
+      - tests/scenarios/permissions/test_deferred_authority_provenance.py::test_permissions_024_a_request_cannot_name_a_session_its_caller_cannot_resume
+      - tests/scenarios/permissions/test_deferred_authority_provenance.py::test_permissions_024_a_reachable_target_still_records_the_request
+      - tests/scenarios/permissions/test_deferred_authority_provenance.py::test_permissions_024_a_request_that_names_no_session_is_unchanged
     given: A remote caller opens a Vault access request that is decided long after the call returns
     when: The request is read back, audited, and auto-resumed by the scheduled callback
     then: The row keeps the trusted snapshot for the resumed turn, every outward view and the audit trail hide it, and a local caller's row is byte-for-byte unchanged
@@ -268,7 +288,27 @@ scenarios:
     status: covered
     kind: authorization
     layer: scenario
-    test: tests/scenarios/permissions/test_cli_invocation_authority.py
+    # Every case named for this row.
+    test:
+      - tests/scenarios/permissions/test_cli_invocation_authority.py::test_permissions_026_every_cli_command_declares_a_role_floor
+      - tests/scenarios/permissions/test_cli_invocation_authority.py::test_permissions_026_authority_comes_from_the_caller_env
+      - tests/scenarios/permissions/test_cli_invocation_authority.py::test_permissions_026_a_declared_remote_caller_without_provenance_fails_closed
+      - tests/scenarios/permissions/test_cli_invocation_authority.py::test_permissions_026_a_personal_pairing_admits_a_snapshot_without_organization_claims
+      - tests/scenarios/permissions/test_cli_invocation_authority.py::test_permissions_026_unbound_background_editor_cannot_become_local_owner
+      - tests/scenarios/permissions/test_cli_invocation_authority.py::test_permissions_026_a_snapshot_from_another_pairing_is_anonymous_remote
+      - tests/scenarios/permissions/test_cli_invocation_authority.py::test_permissions_026_a_stale_snapshot_is_refused_and_writes_nothing
+      - tests/scenarios/permissions/test_cli_invocation_authority.py::test_permissions_026_a_stale_snapshot_cannot_reach_a_command_that_forwards_it
+      - tests/scenarios/permissions/test_cli_invocation_authority.py::test_permissions_026_each_namespace_admits_at_its_own_floor
+      - tests/scenarios/permissions/test_cli_invocation_authority.py::test_permissions_026_a_refused_command_leaves_the_record_it_would_have_written
+      - tests/scenarios/permissions/test_cli_invocation_authority.py::test_permissions_026_an_existing_resource_guard_now_sees_the_invocation_caller
+      - tests/scenarios/permissions/test_cli_invocation_authority.py::test_permissions_026_an_explicit_context_still_outranks_the_invocation
+      - tests/scenarios/permissions/test_cli_invocation_authority.py::test_permissions_026_authority_lasts_exactly_one_invocation
+      - tests/scenarios/permissions/test_cli_invocation_authority.py::test_permissions_026_a_below_floor_command_is_refused_while_a_remote_owner_is_not
+      - tests/scenarios/permissions/test_cli_invocation_authority.py::test_permissions_026_internal_activation_entry_points_stay_owner_work
+      - tests/scenarios/permissions/test_cli_invocation_authority.py::test_permissions_026_guided_remote_setup_refuses_before_a_pairing_key_is_solicited
+      - tests/scenarios/permissions/test_cli_invocation_authority.py::test_permissions_026_an_admitted_restart_hands_the_supervisor_no_caller
+      - tests/scenarios/permissions/test_cli_invocation_authority.py::test_permissions_026_a_deferred_activation_runs_as_the_installation
+      - tests/scenarios/permissions/test_cli_invocation_authority.py::test_permissions_026_a_runtime_owned_process_starts_without_the_caller
     given: The host injects a remote caller's signed snapshot into the Agent subprocess environment
     when: The real CLI entry point dispatches commands across every parser leaf and caller role
     then: Every command declares a role floor, below-floor commands are refused before any effect, unusable provenance fails closed as anonymous remote, and the authority lasts exactly one invocation
@@ -278,12 +318,23 @@ scenarios:
     status: covered
     kind: authorization
     layer: scenario
-    test: tests/scenarios/permissions/test_deferred_authority_provenance.py
+    # Every case named for this row, and the share route's visitor case.
+    test:
+      - tests/scenarios/permissions/test_deferred_authority_provenance.py::test_permissions_027_a_dispatching_show_event_records_its_author
+      - tests/scenarios/permissions/test_deferred_authority_provenance.py::test_permissions_027_a_non_dispatching_event_hides_the_author_from_the_transcript
+      - tests/scenarios/permissions/test_deferred_authority_provenance.py::test_permissions_027_the_cli_reserves_a_dispatching_event_under_its_own_caller
+      - tests/scenarios/permissions/test_deferred_authority_provenance.py::test_permissions_027_the_cli_reserves_nothing_for_an_event_that_starts_no_turn
+      - tests/scenarios/permissions/test_deferred_authority_provenance.py::test_permissions_027_an_admitted_reservation_is_still_admitted_at_execution
+      - tests/scenarios/permissions/test_deferred_authority_provenance.py::test_permissions_027_revoking_access_after_the_reservation_stops_the_turn
+      - tests/scenarios/permissions/test_deferred_authority_provenance.py::test_permissions_027_an_unreachable_session_is_refused_before_the_reservation
+      - tests/scenarios/permissions/test_deferred_authority_provenance.py::test_permissions_027_local_and_management_callers_keep_the_same_targets
+      - tests/scenarios/permissions/test_deferred_authority_provenance.py::test_permissions_027_the_cli_fails_the_command_when_its_reservation_is_refused
+      - tests/scenarios/permissions/test_deferred_authority_provenance.py::test_permissions_027_an_offline_cli_dispatch_still_runs_as_its_caller
+      - tests/test_ui_show_pages.py::test_public_show_page_dispatch_records_the_visitor_that_admitted_it
     given: A Show annotation or intent starts an Agent turn through a delivery reservation rather than the message that woke the daemon
     when: Remote and local authors append dispatching and non-dispatching events, including the CLI reservation replayed by the live UI post and a share visitor posting to /p
     then: The reserved delivery carries the author's snapshot for the resumed turn, the event echo and transcript stream hide it, the CLI caller's authority survives the replay, and the share route resolves its visitor once so admission, display author and recorded authority cannot describe different people
     related_tests:
-      - tests/test_ui_show_pages.py::test_public_show_page_dispatch_records_the_visitor_that_admitted_it
       - tests/test_ui_show_pages.py::test_public_show_page_dispatch_fails_closed_without_a_resolved_visitor
 
   - id: PERMISSIONS-028
@@ -291,7 +342,33 @@ scenarios:
     status: covered
     kind: authorization
     layer: scenario
-    test: tests/scenarios/permissions/test_effective_target_preflight.py
+    # Every case named for this row.
+    test:
+      - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_the_open_project_binds_the_signed_editor
+      - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_every_producer_refuses_an_unreachable_target
+      - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_a_legacy_key_names_the_same_session
+      - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_the_callers_own_session_is_an_effective_target
+      - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_a_callback_is_admitted_before_the_run_is_reserved
+      - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_a_forbidden_project_target_is_refused
+      - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_an_unusable_agent_refuses_the_turn
+      - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_a_permitted_editor_still_queues_the_turn
+      - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_runtime_management_and_local_callers_are_unchanged
+      - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_an_update_reauthorizes_its_effective_target
+      - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_an_inherited_update_target_is_checked_too
+      - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_a_permitted_destination_still_takes_the_work
+      - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_per_run_work_with_no_scope_is_a_stream_of_standalone_sessions
+      - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_a_replacement_target_is_the_one_that_is_admitted
+      - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_a_replacement_cannot_land_where_the_caller_cannot_chat
+      - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_per_run_work_admits_the_agent_every_fire_will_use
+      - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_an_admitted_per_run_target_keeps_the_agent_it_resolved
+      - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_a_bound_session_still_keeps_the_agents_authority
+      - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_a_reserved_replacement_still_follows_the_session_it_makes
+      - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_clearing_the_agent_on_per_run_work_resolves_one
+      - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_the_callers_that_could_still_retarget_per_run_work
+      - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_a_fresh_legacy_target_is_a_placement_not_a_blank
+      - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_fresh_legacy_work_still_opens_for_the_callers_that_could
+      - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_an_update_onto_a_fresh_legacy_target_is_admitted_too
+      - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_saved_control_keeps_the_definitions_own_authority
     given: A signed caller names a Session it may not drive, by Session id, by legacy scope key whose thread exists or has never been opened, or by defaulting to its own, or repoints a stored definition at a destination it may or may not use
     when: A Run, a callback route, and a Task or Watch definition are produced or retargeted through the real CLI
     then: Each producer refuses before writing, leaving Run definition Session and Scope counts and the stored row unchanged, a target whose Session does not exist yet is admitted as the placement it is rather than skipped for having no row, an edit that replaces its Session is judged on the destination it chooses rather than the one it abandons, work that becomes per-run admits the Agent each future fire will select with its follow-the-Session marker read from the edit's final policy, and permitted Editors Member Owner and local callers keep the reach they had while saved automation control keeps the definition's own authority

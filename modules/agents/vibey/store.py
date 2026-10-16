@@ -13,7 +13,8 @@ Two adapter rules live at this boundary, where the loop consumes an input:
   after the backend accepts the steer. The loop can reach that input first, so
   consumption waits, bounded, for the row to exist.
 
-Each committed response is handed to ``on_response`` once, for the run that
+Each committed response is handed to ``on_response`` once, with the loop's
+decision whether it replies and the images a final delivers, for the run that
 owns it; nothing here keeps responses after that.
 """
 
@@ -30,7 +31,7 @@ from sqlalchemy.engine import Engine
 
 from core.agent_core.harness.projection import context_view
 from core.agent_core.harness.store import ContextEntry
-from core.agent_core.messages import AssistantMessage, ToolResultMessage, UserMessage
+from core.agent_core.messages import AssistantMessage, HostedImage, ToolResultMessage, UserMessage
 from modules.agents.vibey.prompt import (
     EnvironmentValue,
     displayed_environment,
@@ -43,7 +44,7 @@ from storage.agent_transcript import SQLiteTranscriptStore, fork_link
 from storage.models import agent_sessions, messages
 
 EnvironmentSource = Callable[[str], Mapping[str, EnvironmentValue]]
-ResponseObserver = Callable[[str, str, AssistantMessage], None]
+ResponseObserver = Callable[[str, str, AssistantMessage, Optional[bool], tuple[HostedImage, ...]], None]
 
 #: How long consumption waits for an accepted steer's row before failing the run.
 INPUT_ROW_TIMEOUT_S = 10.0
@@ -74,28 +75,37 @@ class AdapterTranscriptStore:
         # Per Session, the Agent of the Turn writing it (its request snapshot), so a
         # mid-Turn change of the Session's selected Agent never re-attributes its rows.
         self._agents: dict[str, str] = {}
+        self._turns: dict[str, str] = {}
 
-    def bind_agent(self, session_id: str, agent_name: Optional[str]) -> None:
+    def bind_agent(self, session_id: str, agent_name: Optional[str], *, turn_id: Optional[str] = None) -> None:
         """Attribute the Session's next writes to the running Turn's Agent."""
         if agent_name:
             self._agents[session_id] = agent_name
         else:
             self._agents.pop(session_id, None)
+        if turn_id:
+            self._turns[session_id] = turn_id
+        else:
+            self._turns.pop(session_id, None)
 
     @contextmanager
-    def writing_as(self, session_id: str, agent_name: Optional[str]) -> Iterator[None]:
-        """Attribute the Session's writes inside the block to ``agent_name``; restore after."""
+    def writing_as(
+        self, session_id: str, agent_name: Optional[str], *, turn_id: Optional[str] = None
+    ) -> Iterator[None]:
+        """Use the owning response's identity for recovery writes; restore the active Turn after."""
         previous = self._agents.get(session_id)
-        self.bind_agent(session_id, agent_name or previous)
+        previous_turn = self._turns.get(session_id)
+        self.bind_agent(session_id, agent_name or previous, turn_id=turn_id)
         try:
             yield
         finally:
-            self.bind_agent(session_id, previous)
+            self.bind_agent(session_id, previous, turn_id=previous_turn)
 
     def forget(self, session_id: str) -> None:
         """Drop per-Session state; the next consumption reads the environment from the rows again."""
         self._env_state.pop(session_id, None)
         self._agents.pop(session_id, None)
+        self._turns.pop(session_id, None)
         self._store.forget(session_id)
 
     # --- TranscriptStore -----------------------------------------------------
@@ -122,32 +132,51 @@ class AdapterTranscriptStore:
         return entry
 
     async def append_response(
-        self, session_id: str, message: AssistantMessage, *, final: bool, request: Optional[Mapping[str, Any]] = None
+        self,
+        session_id: str,
+        message: AssistantMessage,
+        *,
+        final: bool,
+        request: Optional[Mapping[str, Any]] = None,
+        replied: Optional[bool] = None,
+        images: Sequence[HostedImage] = (),
     ) -> ContextEntry:
         entry = await self._store.append_response(
-            session_id, message, final=final, request=request, agent_name=self._agents.get(session_id)
+            session_id,
+            message,
+            final=final,
+            request=request,
+            replied=replied,
+            images=images,
+            agent_name=self._agents.get(session_id),
+            turn_id=self._turns.get(session_id),
         )
-        self._on_response(session_id, entry.row_id, message)
+        self._on_response(session_id, entry.row_id, message, replied, tuple(images))
         return entry
 
     async def append_tool_result(
         self, session_id: str, message: ToolResultMessage, *, details: Mapping[str, Any]
     ) -> ContextEntry:
         return await self._store.append_tool_result(
-            session_id, message, details=details, agent_name=self._agents.get(session_id)
+            session_id, message, details=details, agent_name=self._agents.get(session_id),
+            turn_id=self._turns.get(session_id),
         )
 
     async def append_payload(
-        self, session_id: str, kind: Literal["compaction", "context_edit", "agent_state"], payload: Mapping[str, Any]
+        self, session_id: str, kind: Literal["compaction", "context_edit", "agent_state", "replay_refusal"], payload: Mapping[str, Any]
     ) -> ContextEntry:
-        return await self._store.append_payload(session_id, kind, payload, agent_name=self._agents.get(session_id))
+        return await self._store.append_payload(
+            session_id, kind, payload, agent_name=self._agents.get(session_id), turn_id=self._turns.get(session_id)
+        )
 
     async def append_payloads(
         self,
         session_id: str,
-        entries: Sequence[tuple[Literal["compaction", "context_edit", "agent_state"], Mapping[str, Any]]],
+        entries: Sequence[tuple[Literal["compaction", "context_edit", "agent_state", "replay_refusal"], Mapping[str, Any]]],
     ) -> Sequence[ContextEntry]:
-        committed = await self._store.append_payloads(session_id, entries, agent_name=self._agents.get(session_id))
+        committed = await self._store.append_payloads(
+            session_id, entries, agent_name=self._agents.get(session_id), turn_id=self._turns.get(session_id)
+        )
         if any(kind == "compaction" for kind, _ in entries):
             self._env_state.pop(session_id, None)  # the summarized inputs' environment is no longer seen
         return committed
@@ -155,7 +184,9 @@ class AdapterTranscriptStore:
     async def append_audit(
         self, session_id: str, kind: Literal["attempt", "fork_turn"], payload: Mapping[str, Any]
     ) -> str:
-        return await self._store.append_audit(session_id, kind, payload, agent_name=self._agents.get(session_id))
+        return await self._store.append_audit(
+            session_id, kind, payload, agent_name=self._agents.get(session_id), turn_id=self._turns.get(session_id)
+        )
 
     # --- implementation ------------------------------------------------------
 

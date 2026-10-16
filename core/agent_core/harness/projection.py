@@ -16,6 +16,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Literal, Mapping, Optional, Sequence
 
+from core.agent_core.ai.provider import OPAQUE_PAYLOADS
 from core.agent_core.harness.store import ContextEntry
 from core.agent_core.messages import (
     AssistantMessage,
@@ -44,6 +45,8 @@ class Projection:
     messages: tuple[Message, ...]
     context_seq: int
     state: Mapping[str, Any] = field(default_factory=dict)
+    #: The opaque payloads, by (Source identity, kind), a provider refused in this Session (``replay_refusal`` rows).
+    opaque_refused: frozenset[tuple[Optional[str], str]] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -81,6 +84,8 @@ class ContextView:
     state: Mapping[str, Any]
     #: How many of ``units``, first, are inputs the latest checkpoint keeps (``kept_inputs``, C-9 context.md §5).
     pinned: int = 0
+    #: The opaque payloads, by (Source identity, kind), a provider refused in this Session (``replay_refusal`` rows).
+    opaque_refused: frozenset[tuple[Optional[str], str]] = frozenset()
 
     @property
     def messages(self) -> tuple[Message, ...]:
@@ -238,6 +243,13 @@ _PAYLOAD_SHAPES: dict[str, Check] = {
         }
     ),
     "agent_state": _object({"version": _one_of(1), "state": lambda value: isinstance(value, dict)}),
+    "replay_refusal": _object(
+        {
+            "version": _one_of(1),
+            "source_identity": _nullable(_string),
+            "payloads": lambda value: isinstance(value, list) and bool(value) and set(value) <= set(OPAQUE_PAYLOADS),
+        }
+    ),
 }
 
 
@@ -291,9 +303,14 @@ def context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] =
     compaction: Optional[ContextEntry] = None
     edits: dict[str, str] = {}
     reasons: dict[str, str] = {}
+    refused: set[tuple[Optional[str], str]] = set()
     for row in rows:
         if row.kind == "agent_state":
             state = row.payload["state"]
+        elif row.kind == "replay_refusal":
+            # A refusal stands for the whole Session, whatever a later checkpoint cut: what the account could not read
+            # still cannot be read.
+            refused.update((row.payload["source_identity"], payload) for payload in row.payload["payloads"])
         elif row.kind == "compaction":
             compaction = row
         elif row.kind == "context_edit":
@@ -342,6 +359,7 @@ def context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] =
         context_seq=rows[-1].context_seq if rows else 0,
         state=deepcopy(state),
         pinned=len(kept),
+        opaque_refused=frozenset(refused),
     )
 
 
@@ -360,7 +378,7 @@ def project(
     """
     view = context_view(entries, fork_point=fork_point)
     messages = (*deepcopy(tuple(rehydrated)), *view.messages)
-    return Projection(system, messages, view.context_seq, view.state)
+    return Projection(system, messages, view.context_seq, view.state, view.opaque_refused)
 
 
 def validate_message_append(

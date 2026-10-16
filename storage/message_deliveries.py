@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any, Iterable, Literal
 
-from sqlalchemy import Select, and_, func, or_, select, update
+from sqlalchemy import Select, and_, func, literal_column, or_, select, text, union, union_all, update
 from sqlalchemy.engine import Connection
 
 from core.delivery_target import normalize_message_kind
@@ -39,6 +39,20 @@ FAILURE_RETRY_HISTORY_KIND = "backend_failure_retry"
 WEB_PUSH_USER_KEY_METADATA = "_web_push_user_key"
 WEB_PUSH_USER_KEYS_METADATA = "_web_push_user_keys"
 WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA = "_web_push_authorization_contexts"
+VIBEY_RESUME_METADATA_KEY = "vibey_resume"
+VIBEY_SOURCE_TURN_METADATA_KEY = "vibey_source_turn_id"
+
+
+def is_vibey_resume_payload(payload: Mapping[str, Any]) -> bool:
+    """Return whether a Delivery carries the server-owned Vibey resume marker."""
+    metadata = payload.get("metadata")
+    return bool(
+        payload.get("type") == "agent_initiated"
+        and payload.get("author") == "harness"
+        and payload.get("source") == "harness"
+        and isinstance(metadata, Mapping)
+        and metadata.get(VIBEY_RESUME_METADATA_KEY) is True
+    )
 
 
 def legacy_admitted_user_id(metadata: object) -> str | None:
@@ -1866,16 +1880,37 @@ def terminalize_turn(
     return {"changed": settled is not None, "turn": settled or turn}
 
 
+# The predicates of the partial indexes that migration 0044 built over live rows
+# only, verbatim. Session Turns and Deliveries accumulate with every Turn ever run,
+# and SQLite uses a partial index only when the query states its predicate -- never
+# through bound parameters -- so the reads that must stay bounded by live work spell
+# them out (#2706).
+_LIVE_TURN_INDEX_PREDICATE = "state in ('starting','active')"
+_WAITING_TURN_INDEX_PREDICATE = "state = 'waiting'"
+_LIVE_DELIVERY_INDEX_PREDICATE = (
+    "state in ('reserved','queued','claimed','pending_steer','steering','reconciling_steer')"
+)
+
+
 def recovery_turns(conn: Connection, session_id: str | None = None) -> list[dict[str, Any]]:
-    query = select(session_turns).where(session_turns.c.state.in_(("waiting",) + TURN_OWNER_STATES))
-    if session_id:
-        query = query.where(session_turns.c.session_id == session_id)
-    return [dict(row) for row in conn.execute(query.order_by(session_turns.c.created_at, session_turns.c.id)).mappings()]
+    # One arm per partial index: an OR of the two predicates would scan the table.
+    arms = []
+    for predicate in (_WAITING_TURN_INDEX_PREDICATE, _LIVE_TURN_INDEX_PREDICATE):
+        arm = select(session_turns).where(text(predicate))
+        if session_id:
+            arm = arm.where(session_turns.c.session_id == session_id)
+        arms.append(arm)
+    turns = union_all(*arms).subquery()
+    return [
+        dict(row)
+        for row in conn.execute(select(turns).order_by(turns.c.created_at, turns.c.id)).mappings()
+    ]
 
 
 def unresolved_deliveries(conn: Connection, session_id: str | None = None) -> list[dict[str, Any]]:
     query = select(message_deliveries).where(
-        message_deliveries.c.state.in_(FENCE_STATES + ("claimed",))
+        message_deliveries.c.state.in_(FENCE_STATES + ("claimed",)),
+        text(_LIVE_DELIVERY_INDEX_PREDICATE),
     )
     if session_id:
         query = query.where(message_deliveries.c.session_id == session_id)
@@ -1888,7 +1923,10 @@ def recoverable_reservations(
 ) -> list[dict[str, Any]]:
     """Pre-write producer reservations safe to re-enter through admission."""
 
-    query = select(message_deliveries).where(message_deliveries.c.state == "reserved")
+    query = select(message_deliveries).where(
+        message_deliveries.c.state == "reserved",
+        text(_LIVE_DELIVERY_INDEX_PREDICATE),
+    )
     if session_id:
         query = query.where(message_deliveries.c.session_id == session_id)
     return [
@@ -1903,13 +1941,18 @@ def session_ids_with_live_turns(conn: Connection) -> set[str]:
     return {
         str(value)
         for value in conn.execute(
-            select(session_turns.c.session_id).where(session_turns.c.state.in_(TURN_OWNER_STATES)).distinct()
+            select(session_turns.c.session_id).where(text(_LIVE_TURN_INDEX_PREDICATE)).distinct()
         ).scalars()
     }
 
 
-def session_ids_with_turn_history(conn: Connection) -> set[str]:
-    return {str(value) for value in conn.execute(select(session_turns.c.session_id).distinct()).scalars()}
+def session_has_turn_history(conn: Connection, session_id: str) -> bool:
+    return (
+        conn.execute(
+            select(session_turns.c.id).where(session_turns.c.session_id == session_id).limit(1)
+        ).first()
+        is not None
+    )
 
 
 def active_runtime_session_ids_for_backend(conn: Connection, backend: str) -> set[str]:
@@ -2188,12 +2231,38 @@ def retire_queued_with_run(
     return retire_queued(conn, session_id, delivery_id)
 
 
-def terminal_turn_agent_run_owners(
+def recoverable_terminal_turn_agent_run_owners(
     conn: Connection,
     session_id: str | None = None,
 ) -> list[tuple[dict[str, Any], list[str]]]:
-    """Return terminal Turns and their accepted Agent Run participants."""
+    """Terminal Turns that may still owe their accepted Agent Runs a settlement.
 
+    Recovery acts on a terminal Turn only when one of its accepted Runs is still
+    queued or running, or carries a pending owed failure notice (the legacy per-Run
+    notice it re-attributes). Every other terminal Turn is history: reading them all,
+    as this used to, grew with every Turn ever run and held the controller loop at
+    start (#2706). So the read starts from those Runs, through indexed seeks
+    (``ix_agent_runs_status_created``, ``ix_agent_runs_owed_notice``), and joins
+    outward to the terminal Turns that accepted them. Each Turn still comes back with
+    ALL its accepted participants.
+    """
+
+    from storage.background import NOTICE_PENDING, OWED_NOTICE_STATE_SQL, RUN_STATUS_ALIASES
+
+    live_statuses = sorted(
+        {"queued", "running"}
+        | {raw for raw, public in RUN_STATUS_ALIASES.items() if public in {"queued", "running"}}
+    )
+    candidate_deliveries = union(
+        select(agent_runs.c.delivery_id).where(agent_runs.c.status.in_(live_statuses)),
+        # Verbatim, so the planner matches ``ix_agent_runs_owed_notice``'s expression.
+        select(agent_runs.c.delivery_id).where(literal_column(OWED_NOTICE_STATE_SQL) == NOTICE_PENDING),
+    )
+    recoverable_turns = (
+        select(message_deliveries.c.turn_id)
+        .where(message_deliveries.c.id.in_(candidate_deliveries))
+        .where(message_deliveries.c.state == "accepted")
+    )
     query = (
         select(
             session_turns.c.id.label("turn_id"),
@@ -2211,6 +2280,7 @@ def terminal_turn_agent_run_owners(
         .join(agent_runs, agent_runs.c.delivery_id == message_deliveries.c.id)
         .where(session_turns.c.state == "terminal")
         .where(message_deliveries.c.state == "accepted")
+        .where(session_turns.c.id.in_(recoverable_turns))
     )
     if session_id:
         query = query.where(session_turns.c.session_id == session_id)
@@ -2490,6 +2560,15 @@ def pending_steer_for_turn(conn: Connection, turn_id: str) -> dict[str, Any] | N
         .where(message_deliveries.c.state == "pending_steer")
         .order_by(message_deliveries.c.submitted_at, message_deliveries.c.id)
         .limit(1),
+    )
+
+
+def turn_has_human_input(conn: Connection, turn_id: str) -> bool:
+    """Whether a person's input is part of this Turn: one it started with, one
+    steered into it, or one still being steered into it."""
+    return any(
+        execution_delivery_payload(conn, row).get("source") == "user"
+        for row in deliveries_for_turn(conn, turn_id)
     )
 
 

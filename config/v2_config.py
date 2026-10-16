@@ -9,10 +9,11 @@ import shutil
 import tempfile
 import threading
 from contextlib import contextmanager
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from datetime import datetime
 from pathlib import Path
 from typing import (
+    Any,
     Callable,
     ClassVar,
     Iterator,
@@ -2340,6 +2341,16 @@ class ModelHubSourceConfig:
     account_label: Optional[str] = None
     masked_credential: Optional[str] = None
     verification_pending: Optional[str] = None
+    # The verification marker minted at the latest credential or endpoint change, kept when verification clears the
+    # marker: the Source's identity follows it, so an identity never returns to one an earlier credential had, even
+    # when OAuth reauthentication keeps the credential's handle. Absent until the first such change.
+    credential_generation: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.credential_generation is None and self.verification_pending:
+            # A release before the generation left a pending Source with only its marker, which named the change that
+            # minted it: that marker is the change's generation, so the identity stays what it was.
+            self.credential_generation = self.verification_pending
 
     @classmethod
     def from_payload(cls, payload: dict, *, repairing: bool = False) -> "ModelHubSourceConfig":
@@ -2364,6 +2375,7 @@ class ModelHubSourceConfig:
             "account_label",
             "masked_credential",
             "verification_pending",
+            "credential_generation",
         }
         if set(payload) - allowed_fields:
             raise ValueError("Config 'model_hub.sources' contains unknown fields")
@@ -2419,6 +2431,12 @@ class ModelHubSourceConfig:
             or re.fullmatch(r"vp_[0-9a-f]{32}", verification_pending) is None
         ):
             raise ValueError("Config 'model_hub.sources.verification_pending' must be a verification marker")
+        credential_generation = payload.get("credential_generation")
+        if credential_generation is not None and (
+            not isinstance(credential_generation, str)
+            or re.fullmatch(r"vp_[0-9a-f]{32}", credential_generation) is None
+        ):
+            raise ValueError("Config 'model_hub.sources.credential_generation' must be a verification marker")
         created_at = payload.get("created_at")
         client_nonce = (
             validate_model_hub_source_client_nonce(payload.get("client_nonce"))
@@ -2473,6 +2491,7 @@ class ModelHubSourceConfig:
             account_label=account_label,
             masked_credential=masked_credential,
             verification_pending=verification_pending,
+            credential_generation=credential_generation,
         )
 
     def to_payload(self) -> dict:
@@ -2497,6 +2516,8 @@ class ModelHubSourceConfig:
             payload["client_nonce"] = self.client_nonce
         if self.verification_pending:
             payload["verification_pending"] = self.verification_pending
+        if self.credential_generation:
+            payload["credential_generation"] = self.credential_generation
         if self.usage is not None:
             payload["usage"] = self.usage.to_payload()
         return payload
@@ -2635,6 +2656,7 @@ class ModelHubBackendModelConfig:
             # server-owned policy into persisted state.
             "locked",
             "routeable",
+            "effort_menu",
         }
         if set(payload) - allowed:
             raise ValueError("Config 'model_hub.agents.models' contains unknown fields")
@@ -3011,6 +3033,166 @@ class ModelHubAgentSupplyConfig:
         return payload
 
 
+# Model Hub's hosted-tool catalog (vibey-hosted-tools.md §2): two search tools a hop may run natively or
+# through the executor, and the direct image tool.
+MODEL_HUB_SEARCH_TOOLS: tuple[str, ...] = ("web_search", "x_search")
+MODEL_HUB_HOSTED_TOOLS: tuple[str, ...] = (*MODEL_HUB_SEARCH_TOOLS, "image_generate")
+
+
+def _drop_vibey_client_presets(agent: "ModelHubAgentSupplyConfig") -> None:
+    """Keep client presets (Codex ``ultra``) out of Vibey's model rows.
+
+    A preset is a name another client maps before sending, never a wire tier,
+    and Vibey is not that client. 3.2.0 saved Vibey rows carrying one (#2539),
+    so every read drops them here, the single owner of those rows: the catalog
+    payload, the picker, the launch and the API then agree, and the next save
+    writes the clean list. No I/O: the preset index is read once per process.
+    """
+
+    from vibe.backend_model_catalog import without_client_presets
+
+    agent.models = [
+        replace(model, reasoning_efforts=without_client_presets((model.id,), model.reasoning_efforts))
+        if model.reasoning_efforts
+        else model
+        for model in agent.models
+    ]
+
+
+def is_model_hub_source_id(value: object) -> bool:
+    """A Source id as Model Hub mints it, whether or not that Source exists now."""
+
+    return isinstance(value, str) and re.fullmatch(r"src_[a-z0-9]{8,}", value) is not None
+
+
+def is_model_hub_model_id(value: object) -> bool:
+    """A model id already in its canonical spelling, by the one admission rule (``canonical_model_id``)."""
+
+    from core.handlers.model_hub.identifiers import canonical_model_id
+
+    return isinstance(value, str) and canonical_model_id(value) == value
+
+
+def model_hub_executor_order(value: object, *, tool: str) -> tuple[str, ...]:
+    """A saved executor order: one or more distinct Source ids (automatic is its absence, never an empty list).
+
+    The one grammar the config loader and the API share.
+    """
+
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(is_model_hub_source_id(item) for item in value)
+        or len(set(value)) != len(value)
+    ):
+        raise ValueError(f"Config 'model_hub.hosted_tools.{tool}.executor_order' must be distinct Source ids")
+    return tuple(value)
+
+
+@dataclass(frozen=True)
+class ModelHubImageModelChoice:
+    """The image model a user chose as ``image_generate``'s default."""
+
+    source_id: str
+    model_id: str
+
+    @classmethod
+    def from_payload(cls, payload: object, *, tool: str) -> "ModelHubImageModelChoice":
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"source_id", "model_id"}
+            or not is_model_hub_source_id(payload["source_id"])
+            or not is_model_hub_model_id(payload["model_id"])
+        ):
+            raise ValueError(f"Config 'model_hub.hosted_tools.{tool}.default_model' must name a source_id and model_id")
+        return cls(source_id=payload["source_id"], model_id=payload["model_id"])
+
+    def to_payload(self) -> dict:
+        return {"source_id": self.source_id, "model_id": self.model_id}
+
+
+@dataclass(frozen=True)
+class ModelHubHostedToolConfig:
+    """One hosted tool's user settings (``vibey-hosted-tools.md`` §3.3).
+
+    ``enabled`` defaults to on. ``executor_order`` (search tools) is the Source order the user wants executors
+    tried in, None for automatic; ``default_image`` (``image_generate``, persisted as ``default_model``) is the
+    chosen default image model, None for the catalog default. Both are saved values, never resolved ones.
+    """
+
+    enabled: bool = True
+    executor_order: Optional[tuple[str, ...]] = None
+    default_image: Optional[ModelHubImageModelChoice] = None
+
+    @classmethod
+    def from_payload(cls, payload: object, *, tool: str) -> "ModelHubHostedToolConfig":
+        """Read one entry; fields it does not know are ignored with a warning, the ones it knows are kept."""
+
+        if not isinstance(payload, dict):
+            raise ValueError(f"Config 'model_hub.hosted_tools.{tool}' must be an object")
+        known = {"enabled"} | ({"executor_order"} if tool in MODEL_HUB_SEARCH_TOOLS else {"default_model"})
+        unknown = set(payload) - known
+        if unknown:
+            logger.warning("Config 'model_hub.hosted_tools.%s' ignores unknown fields %s", tool, sorted(unknown))
+        enabled = payload.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise ValueError(f"Config 'model_hub.hosted_tools.{tool}.enabled' must be a boolean")
+        # Only the fields this tool knows are read; another tool's field was ignored above. A field is decided by its
+        # presence: the writer omits an unset one, so a present null is damage and goes through the grammar.
+        has_order = "executor_order" in known and "executor_order" in payload
+        has_default = "default_model" in known and "default_model" in payload
+        return cls(
+            enabled=enabled,
+            executor_order=model_hub_executor_order(payload["executor_order"], tool=tool) if has_order else None,
+            default_image=(
+                ModelHubImageModelChoice.from_payload(payload["default_model"], tool=tool) if has_default else None
+            ),
+        )
+
+    def to_payload(self) -> dict:
+        out: dict[str, Any] = {"enabled": self.enabled}
+        if self.executor_order is not None:
+            out["executor_order"] = list(self.executor_order)
+        if self.default_image is not None:
+            out["default_model"] = self.default_image.to_payload()
+        return out
+
+
+def _hosted_tools_from_payload(section: Mapping[str, Any]) -> dict[str, ModelHubHostedToolConfig]:
+    """Read ``model_hub.hosted_tools`` as an optional feature that degrades on its own.
+
+    Absent means every tool takes its defaults (on). An unknown tool key, or an unknown field inside an entry, is
+    ignored with a warning, and the fields the loader knows are kept, so a user's opt-out survives. A broken section
+    or entry turns its tools off, with a warning: hosted tools reach third parties and cost money, so damage never
+    turns one on. Sources and Agents still load.
+    """
+
+    if "hosted_tools" not in section:
+        return {}
+    payload = section["hosted_tools"]
+    # Present but not an object, ``null`` included, is damage, never absence.
+    if not isinstance(payload, dict):
+        logger.warning("Config 'model_hub.hosted_tools' is not an object; hosted tools are off")
+        return {tool: ModelHubHostedToolConfig(enabled=False) for tool in MODEL_HUB_HOSTED_TOOLS}
+    tools: dict[str, ModelHubHostedToolConfig] = {}
+    for tool, raw in payload.items():
+        if tool not in MODEL_HUB_HOSTED_TOOLS:
+            logger.warning("Config 'model_hub.hosted_tools' ignores an unknown tool %r", tool)
+            continue
+        try:
+            tools[tool] = ModelHubHostedToolConfig.from_payload(raw, tool=tool)
+        except ValueError as exc:
+            logger.warning("%s; hosted tool %r is off", exc, tool)
+            tools[tool] = ModelHubHostedToolConfig(enabled=False)
+    return tools
+
+
+def hosted_tool_setting(config: "ModelHubConfig", tool: str) -> ModelHubHostedToolConfig:
+    """One tool's settings, its defaults when the config says nothing."""
+
+    return config.hosted_tools.get(tool) or ModelHubHostedToolConfig()
+
+
 @dataclass
 class ModelHubConfig:
     # New installations enable the runtime. Disk loading promotes pre-marker
@@ -3028,6 +3210,8 @@ class ModelHubConfig:
     # retain a pending false marker until lock-owning startup commits promotion;
     # an unrelated save must not acknowledge an upgrade it did not perform.
     runtime_default_applied: bool = True
+    # Absent on every released config: absence means every hosted tool takes its defaults (on).
+    hosted_tools: dict[str, ModelHubHostedToolConfig] = field(default_factory=dict)
     # Not persisted, like ``V2Config.load_warnings``. True while the Vibey
     # entry was never supplied: a fresh install, or a file written before
     # Vibey existed. The empty entry standing in waits for its starting
@@ -3081,7 +3265,7 @@ class ModelHubConfig:
     def from_payload(cls, payload: dict, *, repairing: bool = False) -> "ModelHubConfig":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub' must be an object")
-        if set(payload) - {"enabled", "sources", "agents", "runtime_default_applied"}:
+        if set(payload) - {"enabled", "sources", "agents", "runtime_default_applied", "hosted_tools"}:
             raise ValueError("Config 'model_hub' contains unknown fields")
         enabled = payload.get("enabled", True)
         if not isinstance(enabled, bool):
@@ -3148,7 +3332,9 @@ class ModelHubConfig:
             sources=sources,
             agents=agents,
             runtime_default_applied=runtime_default_applied,
+            hosted_tools=_hosted_tools_from_payload(payload),
         )
+        _drop_vibey_client_presets(config.agents["vibey"])
         agents = config.agents
         for backend in MODEL_HUB_BACKENDS:
             configured_sources = agents[backend].sources
@@ -3186,7 +3372,7 @@ class ModelHubConfig:
         unseeded = self.vibey_supply_pending and self.agents["vibey"] == ModelHubAgentSupplyConfig.default(
             "vibey", mode="hub"
         )
-        return {
+        payload = {
             "enabled": self.enabled,
             "runtime_default_applied": self.runtime_default_applied,
             "sources": [source.to_payload() for source in self.sources],
@@ -3196,6 +3382,13 @@ class ModelHubConfig:
                 if not (backend == "vibey" and unseeded)
             },
         }
+        if self.hosted_tools:
+            payload["hosted_tools"] = {
+                tool: self.hosted_tools[tool].to_payload()
+                for tool in MODEL_HUB_HOSTED_TOOLS
+                if tool in self.hosted_tools
+            }
+        return payload
 
 
 @dataclass

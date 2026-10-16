@@ -196,9 +196,9 @@ describe('derivePetPose', () => {
     }
   });
 
-  it('shows another conversation\'s work over idle and sleep', () => {
-    expect(derivePetPose('idle', { othersWorking: true, asleep: true })).toBe('running');
-    expect(derivePetPose('idle', { othersWorking: true, asleep: false })).toBe('running');
+  it('shows the team pose for another conversation\'s work before sleep', () => {
+    expect(derivePetPose('idle', { othersWorking: true, asleep: true })).toBe('team');
+    expect(derivePetPose('idle', { othersWorking: true, asleep: false })).toBe('team');
     expect(derivePetPose('idle', { othersWorking: false, asleep: true })).toBe('sleeping');
     expect(derivePetPose('idle', { othersWorking: false, asleep: false })).toBe('idle');
   });

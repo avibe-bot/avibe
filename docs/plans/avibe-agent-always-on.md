@@ -48,8 +48,9 @@ backend list, it is always enabled, and it cannot be turned off.
   the Model Hub leaves a backend no model to run on now. The shared model gate and the adapter's preflight render its
   copy (`hub_supply_refusal`), `get_backend_connection` reports such a backend unready, and `GET /api/config` carries
   it as `agent_supply_blocks`, which the Backends pages show. The backend stays listed and enabled in every case.
-  - Gateway off (Models → Start/Stop): its row says "Gateway off", its page links to Models, and a Turn refuses with
-    `errors.modelGatewayOff`.
+  - A legacy disabled gateway or runtime recovery state: its row says "Gateway unavailable", its page links to
+    Models for recovery, and a Turn refuses with `errors.modelGatewayOff`. Model Hub is enabled by default and the
+    experimental Models Start/Stop switch is retired; the backend lifecycle API and safety gates remain intact.
   - Model Hub disabled on the instance (`VIBE_MODEL_HUB_ENABLED=0`): a backend without its own CLI gets every model
     through the Hub, so its row says "Model Hub disabled", its page says so without a Models link, and a Turn refuses
     with `errors.modelHubDisabled`.

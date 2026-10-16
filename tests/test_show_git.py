@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -624,6 +625,8 @@ def test_duplicate_turn_events_do_not_create_duplicate_checkpoint_commits(resolv
 
     bus.publish("turn.start", {"session_id": session_id})
     bus.publish("turn.start", {"session_id": session_id})
+    # The Turn's dispatch waits for its PRE_TURN snapshot before the agent edits.
+    asyncio.run(service.wait_for_turn_start(session_id))
     (workspace / "page.txt").write_text("after\n", encoding="utf-8")
     bus.publish("turn.end", {"session_id": session_id})
     bus.publish("turn.end", {"session_id": session_id})
@@ -635,6 +638,55 @@ def test_duplicate_turn_events_do_not_create_duplicate_checkpoint_commits(resolv
         "edit page",
         "adopt existing workspace",
     ]
+
+
+def test_turn_checkpoints_run_off_the_publishing_thread_in_event_order(resolved_git, monkeypatch):
+    """#2734: a checkpoint's ``git`` work used to run inside ``bus.publish`` on the
+    controller loop, so a slow or hung ``git`` stalled every Session. The publish
+    now returns at once; the Turn's dispatch waits for its PRE_TURN snapshot without
+    holding the loop, and POST_TURN still follows PRE_TURN."""
+
+    session_id = "ses_bus_off_loop"
+    _workspace(session_id)
+    release = threading.Event()
+    calls = []
+
+    class HeldRepository:
+        def checkpoint(self, checkpoint, **kwargs):
+            if checkpoint == PRE_TURN:
+                release.wait(10)
+            calls.append(checkpoint)
+            return True
+
+    monkeypatch.setattr(
+        show_git,
+        "load_turn_checkpoint_context",
+        lambda _session_id, **_kwargs: TurnCheckpointContext(message="edit"),
+    )
+    service = ShowGitCheckpointService(resolved_git)
+    monkeypatch.setattr(service, "_repository", lambda _session_id: HeldRepository())
+    bus = InboxEventBus()
+    service.start(bus)
+
+    async def run() -> None:
+        started = time.monotonic()
+        bus.publish("turn.start", {"session_id": session_id})
+        bus.publish("turn.end", {"session_id": session_id})
+        assert time.monotonic() - started < 1.0, "the publisher waited for git"
+        waiting = asyncio.create_task(service.wait_for_turn_start(session_id))
+        # The loop keeps turning while git is held.
+        await asyncio.sleep(0.05)
+        assert not waiting.done(), "the dispatch did not wait for the PRE_TURN snapshot"
+        release.set()
+        await asyncio.wait_for(waiting, 10)
+
+    try:
+        asyncio.run(run())
+    finally:
+        release.set()
+        service.stop()
+
+    assert calls == [PRE_TURN, POST_TURN]
 
 
 def test_shared_turn_hooks_reuse_path_owned_bus_lifecycle(resolved_git, monkeypatch):

@@ -26,8 +26,8 @@ beforeAll(async () => {
       resolveId: id => id === entry ? entry : undefined,
       load: id => id === entry ? `
         export { default as purify } from 'dompurify';
-        export { safeSetInnerHtml } from 'monaco-editor/esm/vs/base/browser/domSanitize.js';
-        export { renderMarkdown } from 'monaco-editor/esm/vs/base/browser/markdownRenderer.js';
+        export { safeSetInnerHtml } from 'monaco-editor/base/browser/domSanitize.js';
+        export { renderMarkdown } from 'monaco-editor/base/browser/markdownRenderer.js';
       ` : undefined,
     }],
     build: {

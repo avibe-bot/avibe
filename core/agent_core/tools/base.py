@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Literal, Mapping, Optional, Protocol
 
 from core.agent_core.cancel import CancelToken
-from core.agent_core.messages import UserContent
+from core.agent_core.messages import HostedResult, UserContent
 
 MAX_LINES = 2000
 MAX_BYTES = 50 * 1024
@@ -63,6 +63,8 @@ class ToolResult:
     is_error: bool = False
     details: Mapping[str, Any] = field(default_factory=dict)
     terminate: bool = False
+    #: A proxied hosted tool's canonical record and execution, kept on its ``ToolResultMessage``.
+    hosted: Optional[HostedResult] = None
 
 
 class Tool(Protocol):

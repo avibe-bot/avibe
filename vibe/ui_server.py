@@ -3663,6 +3663,11 @@ async def show_runtime_hmr_websocket(websocket: WebSocket, session_id: str):
 async def public_show_runtime_hmr_websocket(websocket: WebSocket, share_id: str):
     from core.show_pages import ShowPageStore
 
+    # Public visibility lets anyone view the page; it does not let a cross-site
+    # page attach to its live socket.
+    if not _show_runtime_hmr_origin_allowed(websocket):
+        await websocket.close(code=1008)
+        return
     store = ShowPageStore()
     try:
         page = store.get_by_share_id(share_id)
@@ -4007,10 +4012,15 @@ def _show_runtime_websocket_resource_context(
 
 
 def _show_runtime_hmr_origin_allowed(websocket: Any) -> bool:
-    config = _load_remote_access_config()
-    if not _websocket_trusted_public_origin_local_request(websocket, config):
-        return True
-    return _websocket_origin_matches_effective_request(websocket)
+    """Gate every Show HMR socket on the page's own exact origin.
+
+    Browsers do not apply same-origin policy to WebSocket handshakes, so a
+    cross-site page could otherwise open the socket (local requests carry no
+    cookie gate, and a public share has no gate at all). Show pages are served
+    same-origin (their iframes keep ``allow-same-origin``), so the real client
+    always presents a matching Origin. This is the terminal socket's contract.
+    """
+    return _terminal_origin_allowed(websocket)
 
 
 def _authorization_websocket_close_code(state: str) -> int:
@@ -4222,22 +4232,6 @@ def _terminal_origin_allowed(websocket: Any) -> bool:
         if config is None:
             return False
         return _remote_access_public_origin_matches(origin, config)
-    origin_port = _origin_port(parsed_origin.netloc, parsed_origin.scheme)
-    websocket_scheme = _websocket_effective_scheme(websocket)
-    request_port = _origin_port(_websocket_effective_request_host(websocket), websocket_scheme)
-    return origin_port == request_port and _terminal_origin_scheme_matches_socket(
-        parsed_origin.scheme,
-        websocket_scheme,
-    )
-
-
-def _websocket_origin_matches_effective_request(websocket: Any) -> bool:
-    origin = _request_origin(websocket.headers.get("origin"))
-    if not origin:
-        return False
-    parsed_origin = urlparse(origin)
-    if _normalized_host(parsed_origin.netloc) != _websocket_normalized_host(websocket):
-        return False
     origin_port = _origin_port(parsed_origin.netloc, parsed_origin.scheme)
     websocket_scheme = _websocket_effective_scheme(websocket)
     request_port = _origin_port(_websocket_effective_request_host(websocket), websocket_scheme)
@@ -5153,6 +5147,63 @@ async def model_hub_quota_refresh(starlette_request: FastAPIRequest):
     return await _dispatch_native_ui_request(starlette_request, handler)
 
 
+@app.get("/api/models/hosted-tools", include_in_schema=False)
+async def model_hub_hosted_tools_get(starlette_request: FastAPIRequest):
+    async def handler():
+        from core.handlers.model_hub import ModelHubError
+
+        try:
+            return _model_hub_success(**await _model_hub_service().hosted_tools_status())
+        except ModelHubError as exc:
+            return _model_hub_error(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.put("/api/models/hosted-tools/{tool}", include_in_schema=False)
+async def model_hub_hosted_tool_put(tool: str, starlette_request: FastAPIRequest):
+    async def handler():
+        from core.handlers.model_hub import ModelHubError
+
+        try:
+            status = await _model_hub_service().set_hosted_tool(tool, _model_hub_json_object("invalid_parameter"))
+            return _model_hub_success(**status)
+        except ModelHubError as exc:
+            return _model_hub_error(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.post("/api/models/hosted-tools/{tool}/clear", include_in_schema=False)
+async def model_hub_hosted_tool_clear(tool: str, starlette_request: FastAPIRequest):
+    async def handler():
+        from core.handlers.model_hub import ModelHubError
+
+        try:
+            status = await _model_hub_service().clear_hosted_refusals(tool, _model_hub_json_object("invalid_parameter"))
+            return _model_hub_success(**status)
+        except ModelHubError as exc:
+            return _model_hub_error(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.post("/api/models/sources/{source_id}/evidence/clear", include_in_schema=False)
+async def model_hub_source_evidence_clear(source_id: str, starlette_request: FastAPIRequest):
+    async def handler():
+        from core.handlers.model_hub import ModelHubError
+
+        try:
+            result = await _model_hub_service().clear_source_evidence(
+                source_id, _model_hub_json_object("invalid_parameter"),
+            )
+            return _model_hub_success(**result)
+        except ModelHubError as exc:
+            return _model_hub_error(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
 @app.route("/api/models/agents/<backend>/chains", methods=["GET"])
 def model_hub_agent_chains_get(backend):
     from core.handlers.model_hub import ModelHubError
@@ -5785,7 +5836,10 @@ def vault_settings_patch():
     from vibe import api
 
     try:
-        return jsonify(api.save_vault_settings(request.json or {}))
+        return jsonify(api.save_vault_settings(
+            request.json or {},
+            user_context=getattr(g, "authorization_context", None),
+        ))
     except ValueError as exc:
         return _vault_error_response(exc)
 
@@ -5832,7 +5886,13 @@ def vault_secrets_post():
     from vibe import api
 
     try:
-        return jsonify(api.create_vault_secret(request.json or {}, origin=_vault_sandbox_webauthn_origin()))
+        return jsonify(
+            api.create_vault_secret(
+                request.json or {},
+                origin=_vault_sandbox_webauthn_origin(),
+                user_context=getattr(g, "authorization_context", None),
+            )
+        )
     except ValueError as exc:
         return _vault_error_response(exc)
 
@@ -5842,9 +5902,66 @@ def vault_secret_patch(name):
     from vibe import api
 
     try:
-        return jsonify(api.update_vault_secret(name, request.json or {}))
+        return jsonify(
+            api.update_vault_secret(
+                name,
+                request.json or {},
+                user_context=getattr(g, "authorization_context", None),
+            )
+        )
     except ValueError as exc:
         return _vault_error_response(exc)
+
+
+@app.put("/api/vault/secrets/{name}/fields/{field}", include_in_schema=False)
+async def vault_secret_field_put(
+    name: str,
+    field: str,
+    starlette_request: FastAPIRequest,
+):
+    async def handler():
+        from vibe import api
+
+        try:
+            payload = request.json if isinstance(request.json, dict) else {}
+            return jsonify(
+                await asyncio.to_thread(
+                    api.update_vault_secret_field,
+                    name,
+                    field,
+                    payload,
+                    user_context=getattr(g, "authorization_context", None),
+                )
+            )
+        except ValueError as exc:
+            return _vault_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.delete("/api/vault/secrets/{name}/fields/{field}", include_in_schema=False)
+async def vault_secret_field_delete(
+    name: str,
+    field: str,
+    starlette_request: FastAPIRequest,
+):
+    async def handler():
+        from vibe import api
+
+        try:
+            return jsonify(
+                await asyncio.to_thread(
+                    api.delete_vault_secret_field,
+                    name,
+                    field,
+                    request.json,
+                    user_context=getattr(g, "authorization_context", None),
+                )
+            )
+        except ValueError as exc:
+            return _vault_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
 
 
 @app.route("/api/vault/secrets/<name>", methods=["DELETE"])
@@ -5862,7 +5979,13 @@ def vault_secret_reveal_context_post(name):
     from vibe import api
 
     try:
-        return jsonify(api.create_vault_reveal_context(name, request.json or {}))
+        return jsonify(
+            api.create_vault_reveal_context(
+                name,
+                request.json or {},
+                user_context=getattr(g, "authorization_context", None),
+            )
+        )
     except ValueError as exc:
         return _vault_error_response(exc)
 
@@ -5879,7 +6002,15 @@ def vault_requests_get():
         limit = int(request.args.get("limit") or 100)
     except ValueError:
         limit = 100
-    return jsonify(api.get_vault_requests(status=status, request_type=req_type, limit=limit, session=session))
+    return jsonify(
+        api.get_vault_requests(
+            status=status,
+            request_type=req_type,
+            limit=limit,
+            session=session,
+            user_context=getattr(g, "authorization_context", None),
+        )
+    )
 
 
 @app.route("/api/vault/requests/<request_id>", methods=["GET"])
@@ -5888,7 +6019,13 @@ def vault_request_get(request_id):
     from storage import vault_service
 
     try:
-        return jsonify(api.get_vault_request(request_id, audience=vault_service.REQUEST_AUDIENCE_UI))
+        return jsonify(
+            api.get_vault_request(
+                request_id,
+                audience=vault_service.REQUEST_AUDIENCE_UI,
+                user_context=getattr(g, "authorization_context", None),
+            )
+        )
     except ValueError as exc:
         return _vault_error_response(exc)
 
@@ -5918,7 +6055,12 @@ def vault_access_request_post():
     from vibe import api
 
     try:
-        return jsonify(api.request_vault_access(request.json or {}))
+        return jsonify(
+            api.request_vault_access(
+                request.json or {},
+                user_context=getattr(g, "authorization_context", None),
+            )
+        )
     except ValueError as exc:
         return _vault_error_response(exc)
 
@@ -5928,7 +6070,12 @@ def vault_sign_request_post():
     from vibe import api
 
     try:
-        return jsonify(api.request_vault_sign(request.json or {}))
+        return jsonify(
+            api.request_vault_sign(
+                request.json or {},
+                user_context=getattr(g, "authorization_context", None),
+            )
+        )
     except ValueError as exc:
         return _vault_error_response(exc)
 
@@ -5941,6 +6088,25 @@ def vault_request_deny_post(request_id):
         return jsonify(api.deny_vault_request(request_id, request.json or {}))
     except ValueError as exc:
         return _vault_error_response(exc)
+
+
+@app.post("/api/vault/requests/{request_id}/approve-delete", include_in_schema=False)
+async def vault_request_approve_delete_post(request_id: str, starlette_request: FastAPIRequest):
+    async def handler():
+        from vibe import api
+
+        try:
+            return jsonify(
+                await asyncio.to_thread(
+                    api.approve_vault_delete_request,
+                    request_id,
+                    user_context=getattr(g, "authorization_context", None),
+                )
+            )
+        except ValueError as exc:
+            return _vault_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
 
 
 @app.route("/api/vault/requests/<request_id>/fulfill-access", methods=["POST"])
@@ -9460,6 +9626,66 @@ def desktop_mini_session_ensure():
     return jsonify({**session, "capabilities": {"can_chat": can_chat}})
 
 
+@app.route("/api/sessions/main", methods=["GET"])
+def sessions_main():
+    """Return the caller's stable built-in main session, creating it on first use."""
+
+    from core.services import sessions as workbench_sessions_service
+    from core.vibe_agents import VibeAgentAccessError, VibeAgentStore
+    from vibe.authorization import InstanceAuthorizationError
+    from storage.workbench_sessions_service import (
+        MainSessionArchivedError,
+        MainSessionInvariantError,
+        ensure_main_session,
+    )
+
+    store = VibeAgentStore()
+    try:
+        vibey = store.get_builtin_default_agent_for_backend("vibey")
+    finally:
+        store.close()
+    lang = _request_ui_language()
+    if vibey is None:
+        return _coded_error_response("builtin_agent_unavailable", t("desktopMini.builtinAgentUnavailable", lang), 409)
+
+    authorization_context = getattr(g, "authorization_context", None)
+    engine = _projects_engine()
+    try:
+        with engine.begin() as conn:
+            session = ensure_main_session(
+                conn,
+                agent_name=vibey.name,
+                title=t("desktopMini.sessionTitle", lang),
+                authorization_context=authorization_context,
+            )
+    except InstanceAuthorizationError:
+        return jsonify(
+            {"ok": False, "error": "instance_access_forbidden", "required_role": "owner"}
+        ), 403
+    except (VibeAgentAccessError, workbench_sessions_service.ProjectAccessDeniedError):
+        return _coded_error_response("project_access_denied", t("error.projectAccessDenied", lang), 403)
+    except MainSessionArchivedError:
+        return _coded_error_response(
+            MainSessionArchivedError.code,
+            t("desktopMini.mainSessionArchived", lang),
+            409,
+        )
+    except MainSessionInvariantError:
+        return _coded_error_response(
+            MainSessionInvariantError.code,
+            t("desktopMini.mainSessionInvalid", lang),
+            409,
+        )
+    return jsonify(
+        {
+            "session": session,
+            "capabilities": {
+                "can_chat": bool(getattr(authorization_context, "can_chat", False)),
+            },
+        }
+    )
+
+
 def _session_fork_error_response(err: Exception):
     """Map a ``SessionForkError`` to its machine code, in the STRUCTURED body.
 
@@ -9873,6 +10099,7 @@ def _session_archived_response():
 #: The archive/edit refusal's copy: the row exists to receive notices and cannot be
 #: torn down or re-labelled. Used by the DELETE and PATCH guards.
 RESERVED_SESSION_PROTECTED_I18N_KEY = "harness.notice.workspaceSessionProtected"
+MAIN_SESSION_PROTECTED_I18N_KEY = "desktopMini.mainSessionProtected"
 #: The send refusal's copy. A SEPARATE key on purpose: "cannot be archived or modified"
 #: is not an answer to "why did my message not send", and the composer's own inert-state
 #: notice has to say the same thing this body says.
@@ -9980,6 +10207,7 @@ def _publish_session_update_activity(
 @app.route("/api/sessions/<session_id>", methods=["PATCH"])
 async def sessions_update(session_id: str):
     from core.services import sessions as workbench_sessions_service
+    from storage.workbench_sessions_service import MAIN_SESSION_ID, MAIN_SESSION_UPDATABLE_FIELDS
     from vibe import internal_client
     from vibe.sse_broker import broker
 
@@ -10002,6 +10230,13 @@ async def sessions_update(session_id: str):
     }
     if not updatable:
         return jsonify({"error": "no updatable fields supplied"}), 400
+    if str(session_id) == MAIN_SESSION_ID and not set(updatable).issubset(
+        MAIN_SESSION_UPDATABLE_FIELDS
+    ):
+        return _reserved_session_response(
+            MAIN_SESSION_PROTECTED_I18N_KEY,
+            code="reserved_session",
+        )
 
     engine = _projects_engine()
     # Archive is TERMINAL, so it outranks every transient conflict below — most
@@ -10109,7 +10344,9 @@ async def sessions_update(session_id: str):
         # un-project the system surface until the next heal. Mirror the DELETE
         # route's 403 + localized copy so the two guards read as one contract.
         return _reserved_session_response(
-            RESERVED_SESSION_PROTECTED_I18N_KEY,
+            MAIN_SESSION_PROTECTED_I18N_KEY
+            if str(session_id) == MAIN_SESSION_ID
+            else RESERVED_SESSION_PROTECTED_I18N_KEY,
             code=getattr(err, "code", "reserved_session"),
         )
     except ValueError as err:
@@ -10298,6 +10535,7 @@ async def sessions_archive(session_id: str):
     from core.show_pages import ShowPageError, require_show_page_management
     from sqlalchemy import select
     from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
+    from storage.workbench_sessions_service import MAIN_SESSION_ID
     from storage.models import show_pages
     from vibe.sse_broker import broker
 
@@ -10305,6 +10543,11 @@ async def sessions_archive(session_id: str):
     if str(session_id) == WORKSPACE_NOTICE_SESSION_ID:
         return _reserved_session_response(
             RESERVED_SESSION_PROTECTED_I18N_KEY,
+            code="reserved_session",
+        )
+    if str(session_id) == MAIN_SESSION_ID:
+        return _reserved_session_response(
+            MAIN_SESSION_PROTECTED_I18N_KEY,
             code="reserved_session",
         )
     try:
@@ -10343,7 +10586,9 @@ async def sessions_archive(session_id: str):
             code = getattr(err, "code", "forbidden")
             if code == "reserved_session":
                 return _reserved_session_response(
-                    RESERVED_SESSION_PROTECTED_I18N_KEY,
+                    MAIN_SESSION_PROTECTED_I18N_KEY
+                    if str(session_id) == MAIN_SESSION_ID
+                    else RESERVED_SESSION_PROTECTED_I18N_KEY,
                     code=code,
                 )
             return _coded_error_response(code, str(err), 403)
@@ -10372,7 +10617,9 @@ async def sessions_archive(session_id: str):
             return jsonify({"error": f"Session not found: {session_id}"}), 404
         if status_code == 403 and body.get("error") == "reserved_session":
             return _reserved_session_response(
-                RESERVED_SESSION_PROTECTED_I18N_KEY,
+                MAIN_SESSION_PROTECTED_I18N_KEY
+                if str(session_id) == MAIN_SESSION_ID
+                else RESERVED_SESSION_PROTECTED_I18N_KEY,
                 code="reserved_session",
             )
         candidate = body.get("session")
@@ -11909,10 +12156,16 @@ async def sessions_messages_create(session_id: str):
             attachment_specs = resolve_attachment_specs(
                 conn, session_id=session_id, attachments=content.get("attachments") or []
             )
+    from storage import message_deliveries
+
+    internal_resume = bool(
+        retry_for and message_deliveries.is_vibey_resume_payload(message)
+    )
     if (
         not dispatch_text.strip()
         and not attachment_specs
         and not (retry_for and message.get("state") == "accepted")
+        and not internal_resume
     ):
         from storage import message_deliveries
 
@@ -15134,7 +15387,14 @@ async def show_runtime_vendor_asset(vendor_path: str):
     `/show/<id>/` surface and the anonymous public `/p/<share>/` surface. We forward
     this prefix verbatim (never under a per-session base) and, because the content
     hash is in the path, mark successful responses immutable for a year.
+
+    This route is reachable without authentication, so its path must never leave the
+    vendor prefix. Dot segments survive `quote()` and the HTTP client normalizes them
+    before sending, which would rebase the request onto the runtime's unauthenticated
+    session routes. Vendor files never use dot-prefixed segments, so reject them all.
     """
+    if _is_show_page_dot_path(vendor_path):
+        return FastAPIResponse(status_code=404)
     runtime_path = f"{_SHOW_RUNTIME_VENDOR_PREFIX}/{quote(vendor_path, safe='/@:-._~')}"
     if request._request.url.query:
         runtime_path = f"{runtime_path}?{request._request.url.query}"

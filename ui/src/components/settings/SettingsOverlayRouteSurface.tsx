@@ -41,14 +41,21 @@ const isForegroundFocusOwner = (element: Element | null): element is HTMLElement
   return false;
 };
 
-const isAgentationActive = (): boolean => (
-  // Agentation does not expose its active state through a callback. Its toolbar
-  // keeps the collapsed trigger at tabIndex=0 and switches its root container
-  // to tabIndex=-1 while feedback mode (and its annotation popup) is active.
-  document.querySelector(
-    '[data-agentation-root] [data-agentation-toolbar] > div[tabindex="-1"]',
-  ) !== null
-);
+const isAgentationActive = (): boolean => {
+  // Agentation 3.1 renders its toolbar inside an open shadow root. Walk every
+  // open root so Settings still yields the first Escape to an active annotation.
+  const pending: ParentNode[] = [document];
+  while (pending.length > 0) {
+    const root = pending.pop()!;
+    if (root.querySelector(
+      '[data-agentation-root] [data-agentation-toolbar] > div[tabindex="-1"]',
+    )) return true;
+    root.querySelectorAll<HTMLElement>('*').forEach((element) => {
+      if (element.shadowRoot) pending.push(element.shadowRoot);
+    });
+  }
+  return false;
+};
 
 const getOutsideFocusTarget = (target: EventTarget | null): HTMLElement | null => {
   if (!(target instanceof Element)) return null;

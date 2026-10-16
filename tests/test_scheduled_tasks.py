@@ -171,6 +171,16 @@ async def _fire_and_finish_scheduled_task(
         await asyncio.gather(*executions)
 
 
+async def _drain_requests_settled(service: ScheduledTaskService) -> None:
+    """Drain claimable requests and wait for the executions they spawn: an execution's
+    store steps run on the runtime-work executor, so it settles after the drain returns."""
+
+    await service._drain_requests()
+    executions = tuple(service._inflight_executions.values())
+    if executions:
+        await asyncio.gather(*executions, return_exceptions=True)
+
+
 def test_parse_session_key_accepts_channel_and_thread() -> None:
     parsed = parse_session_key("slack::channel::C123::thread::171717.123")
 
@@ -493,10 +503,10 @@ def test_hfr_172_task_definition_wake_follows_commit_and_not_rollback(
     release = threading.Event()
     failure: list[BaseException] = []
 
-    def blocking_save() -> None:
+    def blocking_save(*args) -> None:
         entered.set()
         assert release.wait(timeout=1)
-        original_save()
+        original_save(*args)
 
     def add_task() -> None:
         try:
@@ -526,7 +536,7 @@ def test_hfr_172_task_definition_wake_follows_commit_and_not_rollback(
 
     events.clear()
     task = store.list_tasks()[0]
-    monkeypatch.setattr(store, "_save", lambda: (_ for _ in ()).throw(OSError("disk full")))
+    monkeypatch.setattr(store, "_save", lambda *_args: (_ for _ in ()).throw(OSError("disk full")))
     with pytest.raises(OSError, match="disk full"):
         store.set_enabled(task.id, False)
     assert events == []
@@ -1889,10 +1899,10 @@ def test_hfr_282_task_reload_waits_for_result_stamp_mirror_commit(
     original_save = store._save
     original_load = store._load_unlocked
 
-    def blocked_save() -> None:
+    def blocked_save(*args) -> None:
         write_entered.set()
         assert release_write.wait(timeout=1)
-        original_save()
+        original_save(*args)
 
     def observed_load() -> None:
         load_entered.set()
@@ -3347,6 +3357,8 @@ def test_service_teardown_terminalizes_transferred_turn_without_starting_queued_
         assert live_turn["state"] == "active"
         assert session_id in manager.in_flight
         assert not manager.in_flight[session_id].task.done()
+        # Attended-only capabilities (script confirms) read this provenance.
+        assert manager.in_flight[session_id].source == SOURCE_SCHEDULED
         await service.stop()
         assert service._service_teardown_task is not None
 
@@ -3786,7 +3798,7 @@ def test_restart_recovers_delivery_owned_run_without_unrelated_run_arbitration(
     monkeypatch,
     tmp_path,
 ) -> None:
-    """Only the Delivery FIFO can block recovery; an unlinked Run cannot."""
+    """HFR-004: only the Delivery FIFO can block recovery; an unlinked Run cannot."""
 
     from core.session_turns import (
         SCHEDULED_PROVENANCE_KEY,
@@ -4072,6 +4084,9 @@ def test_service_lease_loss_cancels_inflight_execution(tmp_path: Path, monkeypat
         assert service._owns_service_instance() is False
         with pytest.raises(asyncio.CancelledError):
             await execution
+        # The cancelled claim is settled by an owned task off the loop, which ``stop``
+        # waits for; this test stops nothing, so it waits itself.
+        await asyncio.gather(*tuple(service._cancel_settlements))
 
     asyncio.run(_exercise())
 
@@ -4159,6 +4174,103 @@ def test_execute_claimed_request_skips_retired_runtime_generation(
     asyncio.run(service._execute_claimed_request(claimed))
 
     service._execute_agent_run.assert_not_awaited()
+    row = request_store.get_run(claimed.id)
+    assert row["status"] == "queued"
+    assert row.get("pid") is None
+
+
+def test_claim_and_start_read_the_runtime_generation_on_the_loop(tmp_path: Path) -> None:
+    """#2664: an adapter's runtime state (its sessions and generation maps) is owned
+    and mutated by the controller loop. The claim and the execution start resolve
+    the Run's runtime generation from it, so they must read it there, not on the
+    runtime-work door, where a concurrent mutation raised "dictionary changed size
+    during iteration" and logged a traceback."""
+
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    reads: list[int] = []
+
+    def identity_for_request(_backend, _request):
+        reads.append(threading.get_ident())
+        return None
+
+    controller = SimpleNamespace(
+        agent_service=SimpleNamespace(
+            is_backend_ready=Mock(return_value=True),
+            runtime_activation_identity_for_request=identity_for_request,
+            activation_registry=None,
+        )
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    pending = request_store.enqueue_agent_run(
+        message="run",
+        agent_backend="codex",
+        session_id="ses-runtime",
+    )
+    service._transport_ready_for_request = lambda _pending: True  # type: ignore[method-assign]
+    service._spawn_execution = Mock()  # type: ignore[method-assign]
+    service._execute_agent_run = AsyncMock(  # type: ignore[assignment]
+        return_value=scheduled_tasks.AgentRunExecutionResult(error=None, complete_on_return=False)
+    )
+
+    async def run() -> int:
+        assert await service._process_pending_request(pending) is True
+        (claimed, _lock_key), _ = service._spawn_execution.call_args
+        await service._execute_claimed_request(claimed)
+        return threading.get_ident()
+
+    loop_thread = asyncio.run(run())
+
+    assert reads == [loop_thread, loop_thread]
+    service._execute_agent_run.assert_awaited_once()
+
+
+def test_start_requeues_when_the_refreshed_agent_names_another_backend(tmp_path: Path) -> None:
+    """The loop resolves the start's runtime generation from the claimed request
+    before the store step refreshes its Agent reference (#2664). If a rename since
+    the claim makes the refreshed Agent resolve to a backend the loop did not
+    resolve for, the step must not start without the generation fence: it requeues,
+    and the next pass resolves again with the refreshed row."""
+
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    registry = RuntimeActivationRegistry()
+    identity = registry.attach("claude", "/repo")
+    agents = {"pm-renamed": SimpleNamespace(backend="claude")}
+    controller = SimpleNamespace(
+        vibe_agent_store=SimpleNamespace(get=agents.get, get_by_id=lambda _agent_id: None),
+        agent_service=SimpleNamespace(
+            agents={},
+            is_backend_ready=Mock(return_value=True),
+            runtime_activation_identity_for_request=Mock(return_value=identity),
+            activation_registry=registry,
+        ),
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    queued = request_store.enqueue_hook_send(
+        session_key="slack::channel::C123",
+        prompt="continue",
+        agent_name="pm",
+    )
+    claimed = request_store.claim(queued.id)
+    assert claimed is not None
+
+    def refresh_after_rename(item):
+        item.agent_name = "pm-renamed"
+        return item
+
+    request_store.refresh_claimed_request = refresh_after_rename  # type: ignore[method-assign]
+    service._execute_request = AsyncMock()  # type: ignore[method-assign]
+
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    service._execute_request.assert_not_awaited()
     row = request_store.get_run(claimed.id)
     assert row["status"] == "queued"
     assert row.get("pid") is None
@@ -4273,7 +4385,7 @@ def test_request_capacity_is_reserved_before_claim(tmp_path: Path) -> None:
     spawned: list[str] = []
 
     async def _run_sync(operation, /, *args, **kwargs):  # noqa: ANN001, ANN202
-        if operation == service._claim_pending_request:
+        if operation == service._commit_claim:
             claims.append(args[0].id)
             claim_started.set()
             await release_claim.wait()
@@ -4319,7 +4431,7 @@ def test_claimed_request_is_requeued_when_its_lane_generation_stops(
     spawned: list[str] = []
 
     async def _run_sync(operation, /, *args, **kwargs):  # noqa: ANN001, ANN202
-        if operation == service._claim_pending_request:
+        if operation == service._commit_claim:
             claim_started.set()
             await release_claim.wait()
         return operation(*args, **kwargs)
@@ -4368,7 +4480,7 @@ def test_drain_requests_executes_hook_send(tmp_path: Path) -> None:
         request_store=request_store,
     )
 
-    asyncio.run(service._drain_requests())
+    asyncio.run(_drain_requests_settled(service))
 
     assert len(calls) == 1
     context, message, parsed = calls[0]
@@ -5567,7 +5679,7 @@ def test_legacy_queue_hold_metadata_has_no_sweep_authority(
 def test_legacy_hold_metadata_does_not_change_turn_or_run_ownership(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Only explicit Turn attribution owns running work; legacy flags own nothing."""
+    """HFR-026: only explicit Turn attribution owns running work; legacy flags own nothing."""
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     request_store = TaskExecutionStore()
@@ -5600,6 +5712,10 @@ def test_legacy_hold_metadata_does_not_change_turn_or_run_ownership(
 
     service._sweep_stale_runs()
 
+    # The attributed run outlives its orphan grace because a Turn owns it, and the
+    # legacy hold flag gives the other two rows no owner at all.
+    assert request_store.get_run(primary)["status"] == "running"
+    assert session_turns.owned_agent_run_ids() == {primary}
     assert request_store.get_run(held)["status"] == "queued"
     assert request_store.get_run(unowned)["status"] == "queued"
 
@@ -6031,7 +6147,7 @@ def test_sweep_spares_a_hold_parked_behind_a_live_session_turn(
 def test_canceling_a_delivery_owned_run_retires_its_exact_queue_row(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Run cancellation and exact Delivery retirement share one transaction."""
+    """HFR-028: Run cancellation and exact Delivery retirement share one transaction."""
 
     from storage.background import attach_agent_run_delivery_in_connection
     from storage.models import agent_sessions
@@ -6736,6 +6852,61 @@ def _callback_service(
         store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
         request_store=request_store,
     )
+
+
+def test_a_settled_runs_callback_drain_never_runs_store_work_on_the_loop(tmp_path: Path, monkeypatch) -> None:
+    """#2630: a settled run drains its callbacks from the execution task on the loop. The listing, the callback enqueue
+    (under SQLite's write lock) and the status update run on a thread, as the RUN_CALLBACKS lane's do."""
+    import threading
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    caller_session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id="target-session",
+        message="delegated work",
+        agent_name="codex",
+        callback_session_id=caller_session_id,
+    )
+    request_store.complete(request, ok=True, session_id="target-session")
+    store = SQLiteBackgroundTaskStore()
+    try:
+        store.record_run_message(
+            request.id, text="delegated result", message_id=f"suppressed:{request.id}", terminal_status="succeeded",
+        )
+    finally:
+        store.close()
+
+    async def _handle_scheduled_message(context, message, parsed_session_key=None):
+        return None
+
+    controller = _avibe_controller_double(
+        gate=SimpleNamespace(submit_scheduled=lambda *_args, **_kwargs: None, in_flight={}),
+        handle_scheduled_message=_handle_scheduled_message,
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    threads: dict[str, int] = {}
+    for name in ("list_pending_callbacks", "update_callback_status"):
+        original = getattr(request_store, name)
+
+        def recording(*args, _original=original, _name=name, **kwargs):
+            threads[_name] = threading.get_ident()
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(request_store, name, recording)
+
+    async def _drain() -> int:
+        await service._drain_callbacks()
+        return threading.get_ident()
+
+    loop_thread = asyncio.run(_drain())
+    assert set(threads) == {"list_pending_callbacks", "update_callback_status"}
+    assert loop_thread not in threads.values()
+    assert request_store.get_run(request.id)["callback_status"] == "sent"
 
 
 def test_agent_run_callback_enqueues_only_result_to_caller_session(tmp_path: Path, monkeypatch) -> None:
@@ -9325,9 +9496,9 @@ def test_busy_avibe_agent_run_send_now_keeps_transferred_owner_running(monkeypat
     assert run.get("started_at") is not None
     assert run.get("completed_at") is None
     assert "workbench_queue_holds_run" not in (run.get("metadata") or {})
-    assert run["metadata"]["delivery_intent"] == "steer"
+    assert run["metadata"]["delivery_intent"] == "send_now"
     assert submitted == [
-        (session_id, "run behind active workbench turn", request.id, "steer")
+        (session_id, "run behind active workbench turn", request.id, "send_now")
     ]
     assert handler_calls == []
 
@@ -9466,7 +9637,7 @@ def test_send_now_runtime_uses_shared_delivery_for_im_session(monkeypatch, tmp_p
     assert stored["error"] is None
     assert direct_calls == []
     submit_scheduled.assert_awaited_once()
-    assert submit_scheduled.await_args.kwargs == {}
+    assert submit_scheduled.await_args.kwargs == {"delivery_intent": "send_now"}
 
 
 def test_busy_avibe_agent_run_requeue_preserves_session_fork_metadata(monkeypatch, tmp_path) -> None:
@@ -9687,7 +9858,7 @@ def test_drain_requests_reserves_watch_create_per_run_before_session_validation(
 
     service._execute_request = _execute_request  # type: ignore[method-assign]
 
-    asyncio.run(service._drain_requests())
+    asyncio.run(_drain_requests_settled(service))
 
     assert calls == [
         {
@@ -9807,7 +9978,7 @@ def test_drain_requests_records_scheduled_create_per_run_reserved_session(tmp_pa
 
     service._execute_request = _execute_request  # type: ignore[method-assign]
 
-    asyncio.run(service._drain_requests())
+    asyncio.run(_drain_requests_settled(service))
 
     assert calls == [
         {
@@ -9991,7 +10162,7 @@ def test_drain_requests_agent_run_passes_agent_name(tmp_path: Path) -> None:
         request_store=request_store,
     )
 
-    asyncio.run(service._drain_requests())
+    asyncio.run(_drain_requests_settled(service))
 
     assert len(calls) == 1
     context, message, parsed = calls[0]
@@ -10035,7 +10206,7 @@ def test_run_task_request_does_not_disable_one_shot(tmp_path: Path) -> None:
     )
     service = ScheduledTaskService(controller=controller, store=store, request_store=request_store)
 
-    asyncio.run(service._drain_requests())
+    asyncio.run(_drain_requests_settled(service))
 
     reloaded = ScheduledTaskStore(path)
     updated = reloaded.get_task(task.id)
@@ -13006,7 +13177,9 @@ def test_dead_accepted_owner_converges_run_session_and_persisted_fifo(
         request_store=request_store,
     )
 
-    async def _wait_for(predicate, *, timeout=1.0) -> None:
+    # Each step of the execution settles through the runtime-work executor, so allow
+    # for thread hops under a loaded suite.
+    async def _wait_for(predicate, *, timeout=5.0) -> None:
         async def _poll() -> None:
             while not predicate():
                 await asyncio.sleep(0.005)
@@ -16164,7 +16337,9 @@ def test_a_locked_database_that_refuses_release_and_record_still_recovers_the_or
     # the release is entered and lifted only after the record write has failed against
     # it. Nothing about the release or the record is stubbed; both hit SQLite and get
     # SQLite's answer.
-    holder = sqlite3_module.connect(str(db_path))
+    # The fire's store steps run on the runtime-work executor, so the fault is taken and
+    # lifted from that thread.
+    holder = sqlite3_module.connect(str(db_path), check_same_thread=False)
     fault = {"armed": True, "held": False, "release_calls": 0, "record_failures": 0}
     original_release = SQLiteSessionsService.release_reserved_agent_session
     original_record = ScheduledTaskStore.record_orphaned_reservations
@@ -20127,3 +20302,543 @@ def test_complete_with_an_escalation_marker_stamps_no_owed_notice(
     assert notice is not None and notice.get("state"), (
         "the suppression leaked to ordinary failures; every failed run would go silent"
     )
+
+
+def _hold_state_write_lock(held: threading.Event, release: threading.Event, released_in_time: list[bool]) -> None:
+    """Another writer holding SQLite's write lock, as a second process or a long
+    transaction would, until the loop lets it go (or two seconds pass)."""
+
+    holder = sqlite3.connect(str(paths.get_sqlite_state_path()), timeout=10)
+    try:
+        holder.execute("BEGIN IMMEDIATE")
+        held.set()
+        released_in_time.append(release.wait(2))
+        holder.rollback()
+    finally:
+        holder.close()
+
+
+def _sqlite_claimed_agent_run(tmp_path: Path, monkeypatch) -> tuple[ScheduledTaskService, TaskExecutionStore, Any]:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    controller = SimpleNamespace(
+        agent_service=SimpleNamespace(
+            is_backend_ready=lambda _backend: True,
+            runtime_activation_identity_for_request=Mock(return_value=None),
+            activation_registry=None,
+        )
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    queued = request_store.enqueue_agent_run(message="run", agent_backend="codex", session_id="ses-runtime")
+    claimed = request_store.claim(queued.id)
+    assert claimed is not None
+    return service, request_store, claimed
+
+
+def test_a_claimed_executions_store_steps_never_hold_the_loop(tmp_path: Path, monkeypatch) -> None:
+    """#2649: a claimed execution's start and terminal writes wait for SQLite's write lock and commit. The loop runs
+    every session's turns, so it stays free while another writer holds the lock, and the execution still settles."""
+
+    service, request_store, claimed = _sqlite_claimed_agent_run(tmp_path, monkeypatch)
+    service._execute_agent_run = AsyncMock(  # type: ignore[assignment]
+        return_value=scheduled_tasks.AgentRunExecutionResult(error=None, complete_on_return=True)
+    )
+    held, release = threading.Event(), threading.Event()
+    released_in_time: list[bool] = []
+
+    async def _go() -> None:
+        holder = threading.Thread(target=_hold_state_write_lock, args=(held, release, released_in_time))
+        holder.start()
+        assert await asyncio.to_thread(held.wait, 5)
+        execution = asyncio.create_task(service._execute_claimed_request(claimed))
+        await asyncio.sleep(0.1)
+        # The loop lets the other writer go while the execution waits for it.
+        release.set()
+        await execution
+        await asyncio.to_thread(holder.join, 5)
+
+    asyncio.run(_go())
+    assert released_in_time == [True]
+    assert request_store.get_run(claimed.id)["status"] == "succeeded"
+
+
+def test_a_claim_cancelled_before_it_runs_is_settled_off_the_loop(tmp_path: Path, monkeypatch) -> None:
+    """#2649: the execution's done-callback is synchronous and runs on the loop. A claim cancelled before its
+    coroutine ran is settled by an owned task on the runtime-work executor instead, so the loop stays free while
+    another writer holds the lock, and the claim still goes back to the queue."""
+
+    service, request_store, claimed = _sqlite_claimed_agent_run(tmp_path, monkeypatch)
+    held, release = threading.Event(), threading.Event()
+    released_in_time: list[bool] = []
+
+    async def _go() -> None:
+        holder = threading.Thread(target=_hold_state_write_lock, args=(held, release, released_in_time))
+        holder.start()
+        assert await asyncio.to_thread(held.wait, 5)
+        service._spawn_execution(claimed, None)
+        service._inflight_executions[claimed.id].cancel()
+        await asyncio.sleep(0.1)
+        # Until its settlement lands the claim stays live, so recovery cannot reclaim the
+        # still-running row and have the settlement terminalize the new claim.
+        assert claimed.id in service._live_claimed_run_ids
+        release.set()
+        for _ in range(100):
+            if request_store.get_run(claimed.id)["status"] == "queued" and not service._cancel_settlements:
+                break
+            await asyncio.sleep(0.05)
+        await asyncio.to_thread(holder.join, 5)
+
+    asyncio.run(_go())
+    assert released_in_time == [True]
+    assert request_store.get_run(claimed.id)["status"] == "queued"
+    assert claimed.id not in service._live_claimed_run_ids
+
+
+def test_a_mirror_read_never_waits_for_a_writer_and_never_sees_its_unwritten_edit(tmp_path: Path, monkeypatch) -> None:
+    """#2649: writers hold the mirror lock across their store write, now on worker threads. The controller loop reads
+    the mirror (``get_task``, ``list_tasks``, ``reconcile_jobs``), so a read takes no lock: it answers at once, from
+    the published mirror, which a writer replaces only after its write lands."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = store.add_task(
+        session_key="slack::channel::C123",
+        prompt="run once",
+        schedule_type="at",
+        run_at="2030-01-01T00:00:00+00:00",
+        timezone_name="UTC",
+    )
+    write_entered, release_write = threading.Event(), threading.Event()
+    original_save = store._save
+
+    def slow_save(*args) -> None:
+        write_entered.set()
+        assert release_write.wait(timeout=5)
+        original_save(*args)
+
+    monkeypatch.setattr(store, "_save", slow_save)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        stamping = executor.submit(store.set_enabled, task.id, False)
+        assert write_entered.wait(timeout=1)
+        try:
+            read = executor.submit(lambda: (store.get_task(task.id), store.list_tasks()))
+            current, listed = read.result(timeout=0.5)
+            assert current.enabled is True and [item.enabled for item in listed] == [True]
+        finally:
+            release_write.set()
+        stamping.result(timeout=5)
+    assert store.get_task(task.id).enabled is False
+
+
+def test_a_reset_rebind_persists_its_whole_recovery_whatever_the_mirror_publishes_meanwhile(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """#2649: binding recovery now runs on a worker while the mirror stays published to the loop. A reset rebind's
+    recorded choice (follow the rebound session, drop the stale Agent pin) is written with the binding by the store,
+    so a reload that republishes the mirror between the recovery and its write cannot drop it, and the definition the
+    loop reads is never edited before the database accepts it."""
+    from core.vibe_agents import VibeAgentStore
+    from storage.models import agent_sessions
+    from storage.sessions_service import SQLiteSessionsService
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+    agent_store = VibeAgentStore(db_path)
+    try:
+        agent_store.create(name="nightly", backend="claude", model="legacy-model")
+    finally:
+        agent_store.close()
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        pinned = sessions.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="claude",
+            session_anchor="slack_C123:definition_republish",
+            native_session_id="native-republish",
+        )
+    finally:
+        sessions.close()
+    engine = create_sqlite_engine(db_path)
+    with engine.begin() as conn:
+        conn.execute(
+            agent_sessions.update().where(agent_sessions.c.id == pinned).values(agent_name="nightly", model="legacy-model")
+        )
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        name="digest",
+        session_key="",
+        session_id=pinned,
+        session_policy="create_once",
+        agent_name="nightly",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        assert sessions.delete_agent_sessions(scope_key="slack::channel::C123", session_anchor_prefix="slack_C123")
+    finally:
+        sessions.close()
+    agent_store = VibeAgentStore(db_path)
+    try:
+        assert agent_store.remove("nightly")
+    finally:
+        agent_store.close()
+
+    store = ScheduledTaskStore()
+    store.set_enabled(task.id, True)
+    service = _dispatching_binding_service(tmp_path, store, db_path=db_path)
+    published = store.get_task(task.id)
+    rebind = store.rebind_session
+
+    def rebind_after_a_republish(*args, **kwargs):
+        # Another executor's reload lands between the recovery and its write.
+        store.load()
+        return rebind(*args, **kwargs)
+
+    monkeypatch.setattr(store, "rebind_session", rebind_after_a_republish)
+    asyncio.run(service._execute_task(published, execution_id="exec-1", disable_one_shot=False))
+
+    rebound = ScheduledTaskStore().get_task(task.id)
+    assert rebound.session_id and rebound.session_id != pinned
+    assert rebound.agent_name is None
+    assert rebound.metadata.get(BINDING_FOLLOWS_SESSION_METADATA_KEY) is True
+    # The object the loop read before the fire was never edited in place.
+    assert published.agent_name == "nightly" and published.session_id == pinned
+
+
+
+@pytest.mark.parametrize("cancelled_during", ["_reserve_runtime_session", "_require_execution_agent_access"])
+def test_a_cancellation_during_a_per_run_fires_store_steps_is_answered_at_its_dispatch(
+    tmp_path: Path, monkeypatch, cancelled_during: str
+) -> None:
+    """#2649: a per-run fire's store steps run on the runtime-work door, but its cancellation points stay where the loop
+    had them. A cancellation that arrives while the reservation or a pre-dispatch step runs is answered at the dispatch,
+    which already holds the reserved session -- so a reservation is never stranded between steps, where nothing owns it
+    and the orphan sweep cannot find it (a per-run reservation carries no definition stamp)."""
+
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = store.add_task(
+        session_key="slack::channel::C123",
+        session_policy="create_per_run",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+    )
+    dispatched: list[str] = []
+    answered: list[str] = []
+
+    async def submit_scheduled(session_id, _context, _prompt, **_kwargs):
+        dispatched.append(session_id)
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            answered.append(session_id)
+            raise
+
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(
+            platform_settings_managers={"slack": object()},
+            im_clients={},
+            session_turn_gate=SimpleNamespace(submit_scheduled=submit_scheduled),
+        ),
+        store=store,
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+    )
+    entered, release = threading.Event(), threading.Event()
+    released: list[str] = []
+
+    def step(name: str, result):
+        def run(*_args, **_kwargs):
+            if name == cancelled_during:
+                entered.set()
+                assert release.wait(5)
+            return result
+
+        return run
+
+    async def build_context(*_args, **_kwargs):
+        return SimpleNamespace()
+
+    monkeypatch.setattr(service, "_reserve_runtime_session", step("_reserve_runtime_session", "ses-reserved-1"))
+    monkeypatch.setattr(
+        scheduled_tasks,
+        "resolve_session_id_target",
+        step("resolve_session_id_target", SimpleNamespace(session_key=parse_session_key("slack::channel::C123"))),
+    )
+    monkeypatch.setattr(service, "_require_execution_agent_access", step("_require_execution_agent_access", None))
+    monkeypatch.setattr(service, "_build_context", build_context)
+    monkeypatch.setattr(
+        service, "_release_reserved_session", lambda session_id, *, reason: released.append(session_id) or True
+    )
+
+    async def _go() -> None:
+        fire = asyncio.create_task(service._execute_task(task, execution_id="exec-1", disable_one_shot=False))
+        assert await asyncio.to_thread(entered.wait, 5)
+        fire.cancel()
+        await asyncio.sleep(0.05)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await fire
+
+    asyncio.run(_go())
+    assert dispatched == ["ses-reserved-1"], "the cancellation was answered before the dispatch adopted the reservation"
+    assert answered == ["ses-reserved-1"]
+    assert released == []
+
+
+def test_a_cancellation_during_a_binding_recovery_still_reports_the_change_it_committed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """#2649: the pinned-binding recovery runs on the runtime-work door. A cancellation that arrives while it runs waits
+    for it, and the change it committed still gets its result stamp, its recovery marker and its notice: the cancellation
+    is answered at the next real await, as on the loop, not between the recovery and its bookkeeping."""
+
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = store.add_task(
+        session_key="",
+        session_id="sesdoesnotexist",
+        session_policy="existing",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+    )
+    service = _binding_service(tmp_path, store, [])
+    notices = _spy_binding_notices(service)
+    entered, release = threading.Event(), threading.Event()
+    recover = service._recover_pinned_session_binding
+
+    def slow_recovery(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return recover(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_recover_pinned_session_binding", slow_recovery)
+
+    async def _go() -> None:
+        fire = asyncio.create_task(service._execute_task(task, execution_id="exec-1", disable_one_shot=False))
+        assert await asyncio.to_thread(entered.wait, 5)
+        fire.cancel()
+        await asyncio.sleep(0.05)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await fire
+
+    asyncio.run(_go())
+    assert [notice.action for notice in notices] == ["failing"], "the committed binding change was never reported"
+    current = store.get_task(task.id)
+    assert current is not None and "sesdoesnotexist" in (current.last_error or "")
+    assert current.metadata.get(BINDING_RECOVERY_METADATA_KEY, {}).get("action") == "failing", (
+        "the change's recovery marker was never recorded"
+    )
+
+
+def test_an_older_mirror_capture_never_undoes_a_newer_one(tmp_path: Path) -> None:
+    """#2649: ``reconcile_jobs`` captures the mirror on a thread, so captures may complete out of order. Each is ordered
+    by the mirror generation it actually read -- not by when it was submitted -- so a capture submitted first but taken
+    after a disable applies the disable, even when a later-submitted capture of the older mirror landed before it."""
+
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = store.add_task(
+        session_key="slack::channel::C123",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+    )
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={"slack": object()}, im_clients={}),
+        store=store,
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+    )
+    service.scheduler = _StubScheduler()
+    capture = store.list_tasks_with_generation
+    first_waits, first_entered = threading.Event(), threading.Event()
+    calls: list[int] = []
+
+    def ordered_capture():
+        calls.append(len(calls))
+        if len(calls) == 1:
+            first_entered.set()
+            assert first_waits.wait(5)
+        return capture()
+
+    store.list_tasks_with_generation = ordered_capture  # type: ignore[method-assign]
+
+    async def _go() -> None:
+        first = asyncio.create_task(service._reconcile_jobs_off_loop())
+        assert await asyncio.to_thread(first_entered.wait, 5)
+        await service._reconcile_jobs_off_loop()  # submitted second, captures the enabled mirror, lands first
+        assert service.scheduler.get_job(task.id) is not None
+        store.set_enabled(task.id, False)
+        first_waits.set()
+        await first  # submitted first, captures the disabled mirror, lands last
+
+    asyncio.run(_go())
+    assert service.scheduler.get_job(task.id) is None, "an older mirror capture undid the disable a newer one applied"
+
+
+class _TaskWithoutCancelCount:
+    """A running task as Python 3.10 presents it: ``cancel``, but no ``uncancel`` to count requests with."""
+
+    def __init__(self, task: "asyncio.Task[Any]") -> None:
+        self._task = task
+
+    def cancel(self, *args) -> bool:
+        return self._task.cancel(*args)
+
+
+@pytest.mark.parametrize(
+    ("door", "step_raises", "python310", "expected"),
+    [
+        ("_store_step", False, False, ["step result", "cancelled at the next await"]),
+        ("_store_step", False, True, ["step result", "cancelled at the next await"]),
+        ("_store_step", True, False, ["cancelled at the door, caused by: step error"]),
+        ("_run_runtime_sync", False, False, ["cancelled at the door, caused by: None"]),
+        ("_run_runtime_sync", True, False, ["cancelled at the door, caused by: step error"]),
+    ],
+)
+def test_a_cancellation_caught_by_a_store_step_is_answered_from_its_outcome(
+    tmp_path: Path, monkeypatch, door: str, step_raises: bool, python310: bool, expected: list[str]
+) -> None:
+    """#2649, #2660: a store step on the runtime-work door holds a cancellation that arrives while it runs until it
+    lands, then answers it from the step's outcome. ``_store_step`` hands a landed step's result back and the
+    cancellation to the caller's next await (also on Python 3.10, whose tasks keep no cancellation count);
+    ``_run_runtime_sync`` answers it at once. A failed step has no result to hand back, so either door answers its
+    cancellation at once, with the error as its cause: an error that replaced the cancellation would let the caller
+    settle an ordinary failure, or end the task failed where no await follows."""
+
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}, im_clients={}),
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+    )
+    entered, release = threading.Event(), threading.Event()
+    outcomes: list[str] = []
+
+    def step() -> str:
+        entered.set()
+        assert release.wait(5)
+        if step_raises:
+            raise RuntimeError("step error")
+        return "step result"
+
+    if python310:
+        current_task = asyncio.current_task
+        monkeypatch.setattr(
+            scheduled_tasks.asyncio, "current_task", lambda *args: _TaskWithoutCancelCount(current_task(*args))
+        )
+
+    async def caller() -> None:
+        try:
+            outcomes.append(await getattr(service, door)(step))
+        except asyncio.CancelledError as exc:
+            outcomes.append(f"cancelled at the door, caused by: {exc.__cause__}")
+            raise
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            outcomes.append("cancelled at the next await")
+            raise
+
+    async def _go() -> None:
+        run = asyncio.create_task(caller())
+        assert await asyncio.to_thread(entered.wait, 5)
+        run.cancel()
+        await asyncio.sleep(0.05)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await run
+
+    asyncio.run(_go())
+    assert outcomes == expected
+
+
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="Task.uncancel and asyncio.timeout are Python 3.11+")
+def test_a_timeout_that_expires_during_a_store_step_still_reads_as_a_timeout(tmp_path: Path) -> None:
+    """#2649: a cancellation a store step holds and re-arms is counted once, so an ``asyncio.timeout`` around the caller
+    still turns its own expiry into ``TimeoutError`` instead of letting a bare cancellation escape the caller."""
+
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}, im_clients={}),
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+    )
+
+    async def _go() -> None:
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0.05):
+                await service._store_step(time.sleep, 0.2)
+                await asyncio.sleep(5)
+
+    asyncio.run(_go())
+
+
+def test_a_claim_whose_terminal_settlement_fails_while_cancelled_is_settled_as_cancelled(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """#2660: a claimed execution's terminal settlement is its last step, with no await after it. When a cancellation
+    arrives while it runs and the settlement then fails, the execution must still end cancelled, so the cancelled-claim
+    settlement takes over, instead of ending failed with the run left ``running`` and its claim no longer live."""
+
+    service, request_store, claimed = _sqlite_claimed_agent_run(tmp_path, monkeypatch)
+    service._execute_agent_run = AsyncMock(  # type: ignore[assignment]
+        return_value=scheduled_tasks.AgentRunExecutionResult(error=None, complete_on_return=True)
+    )
+    entered, release = threading.Event(), threading.Event()
+
+    def failing_settlement(*_args, **_kwargs):
+        entered.set()
+        assert release.wait(5)
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(service, "_settle_claimed_request", failing_settlement)
+
+    async def _go() -> None:
+        service._spawn_execution(claimed, None)
+        execution = service._inflight_executions[claimed.id]
+        assert await asyncio.to_thread(entered.wait, 5)
+        execution.cancel()
+        await asyncio.sleep(0.05)
+        release.set()
+        await asyncio.gather(execution, return_exceptions=True)
+        assert execution.cancelled(), "the settlement's error replaced the cancellation"
+        for _ in range(100):
+            if not service._cancel_settlements:
+                break
+            await asyncio.sleep(0.05)
+
+    asyncio.run(_go())
+    settled = request_store.get_run(claimed.id)
+    assert settled["status"] != "running", "the run was left running, with no live claim to settle it"
+    assert claimed.id not in service._live_claimed_run_ids
+
+
+def test_stop_waits_for_the_settlement_of_a_claim_cancelled_just_before_it(tmp_path: Path, monkeypatch) -> None:
+    """#2660: ``stop`` joins every execution, then the settlements their done-callbacks start. An execution already
+    cancelled and done when ``stop`` awaits it does not suspend, so its done-callback may not have run yet: ``stop``
+    must still wait for the settlement that callback starts, not return with the claim's requeue pending."""
+
+    service, request_store, claimed = _sqlite_claimed_agent_run(tmp_path, monkeypatch)
+
+    async def _go() -> str:
+        service._spawn_execution(claimed, None)
+        execution = service._inflight_executions[claimed.id]
+        execution.cancel()
+        await asyncio.sleep(0)
+        assert execution.cancelled() and claimed.id in service._inflight_executions, "its done-callback already ran"
+        await service.stop()
+        return request_store.get_run(claimed.id)["status"]
+
+    assert asyncio.run(_go()) == "queued", "stop returned before the cancelled claim was given back to the queue"

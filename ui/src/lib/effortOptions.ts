@@ -123,3 +123,18 @@ export function isEffortSupported(
 ): boolean {
   return !effort || resolveEffortOptions(backend, model, reasoningOptions).includes(effort);
 }
+
+/**
+ * The saved effort when routing now refuses it on every hop (`effort_menu.omitted`),
+ * else null. The menu leaves such an effort out, but a route that already holds
+ * it still sends it, so it stays visible as itself, marked, rather than the menu
+ * silently reading as some other effort than the one that dispatches.
+ */
+export function refusedSavedEffort(
+  saved: string | null | undefined,
+  model: string | null | undefined,
+  effortMenus: Record<string, { omitted: readonly string[] }> | undefined,
+): string | null {
+  if (!saved || !model || !effortMenus || !Object.prototype.hasOwnProperty.call(effortMenus, model)) return null;
+  return effortMenus[model].omitted.includes(saved) ? saved : null;
+}

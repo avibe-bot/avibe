@@ -19,6 +19,15 @@ class ModelEndpoint:            # built by the adapter layer from C-6 HopResolut
     request_headers: Mapping[str, str]
     provider: str               # vendor identity of the hop (HopResolution.provider); with protocol and model it
                                 # forms the target origin for the cross-provider rules
+    source_id: str | None       # HopResolution.source_id: the pin of a request with native hosted content
+    source_identity: str | None # HopResolution.source_identity: the account its opaque payloads are bound to
+    portable: bool              # never pinned, and no native hosted content (vibey-hosted-tools.md §3.5)
+    opaque_refused: frozenset[tuple[str | None, str]]   # (Source identity, payload kind) pairs whose provider
+                                # refused that kind in this Session; its messages go without them (cross-provider.md)
+    hosted_tools: Mapping[str, HostedToolRoute]   # HopResolution.hosted_tools, in Model Hub's order: per enabled
+                                # search tool its mode and replay, and for native its declaration and Responses
+                                # include values (vibey-hosted-tools.md §3.4)
+    image_models: ImageModels | None   # the models image_generate may call; None when the tool is off
 
 
 @dataclass(frozen=True)
@@ -36,6 +45,10 @@ class MediaLoader(Protocol):   # supplied by the adapter; reads media_objects
     async def load(self, media_token: str) -> tuple[bytes, str]: ...   # bytes, mime type
 
 
+class MediaSink(Protocol):     # supplied by the adapter; keeps a generated image as a local file
+    async def save_image(self, encoded: str) -> HostedImage: ...       # base64 in; path, sniffed mime, size out
+
+
 @dataclass(frozen=True)
 class ModelRequest:
     endpoint: ModelEndpoint
@@ -48,6 +61,40 @@ class ModelRequest:
                                          # (conversion-tables.md); "none" for the compaction summarizer
     supports_images: bool                # resolved by the loop; unknown capability counts as False
 ```
+
+`tools` is the one owner of what a request declares. A hosted tool is its canonical `ToolSpec`
+(`core/agent_core/tools/hosted.py`, `hosted_tool_spec`). On a hop whose route for it is native, the adapter sends the
+route's `declaration` verbatim in the spec's place, merges a Responses route's `include` values into `include`, and
+pins the request with `x-avibe-pin-source: <source_id>`; on any other hop the spec is an ordinary function. Vibey
+lists its hosted tools first, so Anthropic's tools breakpoint, which goes on the last function tool, never moves.
+
+History follows the same Source rule. A response's hosted calls go back verbatim only to the hop the request goes to,
+when that hop's Source served them on the same origin (`conversion-tables.md`, Hosted tools): within their turn as a
+continuation, later with the hop's current `replay`, and pinned to that Source either way.
+
+**Refusals before any output** (`vibey-hosted-tools.md` §3.5). The gateway answers a pinned request it cannot serve
+from that Source with `409 pin_unavailable`, matched on its `type` and `code`, and names the narrow hosted rule that
+fired in `error.reason` when one did. A provider refuses an opaque payload replayed under an account that cannot read
+it (a key change, or a relay serving a later turn from another pooled account, which no Source identity can see) with
+a 400 naming it: xAI's plain-text `Could not decrypt the provided encrypted_content`, which does not say which kind;
+Anthropic's `Invalid \`encrypted_content\`` (or `encrypted_index`) for a search result (kind `hosted`) and
+`Invalid \`signature\` in \`thinking\` block` (kind `signature`), on any request. The adapter ends either send with a
+`ProviderError` that has no output, is not `retryable`, and carries a `refusal`: `pin_unavailable` with the hop's
+Source and the rule's tool and aspect, or `opaque_refused` with the hop's Source identity and the kinds refused (both
+for xAI's). The loop answers it by rendering the request again, never by the generic retry:
+
+- by a fresh hop, rendered normally, at most once per (Source, tool, aspect) a narrow rule names and at most twice
+  per run, whatever the reason;
+- in portable form on the hop it has, past either bound, or at once when a hand-back's fresh hop is the refused one
+  again (the same Source, identity, model and hosted-tool facts). A portable request is never pinned, so the gateway
+  never hands it back;
+- after `opaque_refused`, with each refused (identity, kind) in `opaque_refused`, so none of that identity's payloads
+  of that kind is sent again: its earlier search calls take their portable form (the query and sources, readable;
+  no encrypted data), and its thinking goes without signatures. The loop keeps each new pair as a `replay_refusal`
+  row before resending, so the Session's later turns, and its forks, start without them (`transcript.md`). Each
+  pair is answered once; refused again, the error ends the run.
+
+A `pause_turn` continuation's `pin_unavailable` comes after output, so it is no refusal (`conversion-tables.md`).
 
 The loop's `ModelRouter` returns the `ModelEndpoint` together with its `ModelCapabilities`. Every capability has a
 defined effect, including when it is unknown:
@@ -65,13 +112,30 @@ token names an immutable snapshot (`message.schema.json`), so the bytes never ch
 `stream` yields `ProviderEvent`s (`provider-event.schema.json`) and always ends with exactly one `done` or one
 `error`. `done.message` is the complete canonical `AssistantMessage`; its `origin` comes from the served-hop report
 (C-6), which the gateway sends as the `x-avibe-served-hop` response header: compact JSON with exactly `provider`,
-`api`, `model`, before the first model byte. On the direct channel (no gateway) the endpoint is the served hop. When a gateway response carries no
+`api`, `model`, `source` (Model Hub contract v12), before the first model byte. The `origin` is `provider`, `api`,
+`model`; `source` is the serving Source id, which is not part of a message's origin. A report of any other shape
+counts as no report. On the direct channel (no gateway) the endpoint is the served hop, and its `source_id`, when it
+names one, is the serving Source. When a gateway response carries no
 served-hop report, the origin is unverified: the adapter commits the message with every opaque provider payload
 removed (the `signature` of every block of any kind, and redacted thinking), keeping the endpoint as `origin`, so no
 opaque payload of an unknown vendor can ever be replayed. A block without a signature is always sent without one
 (`cross-provider.md`).
 
 Error classification is part of the contract because the loop branches on it:
+
+`retryable` permits replay of the same request. `continuable` (default false) separately permits a new run
+from the committed transcript after the failed run closes. Classified transient errors grant continuation even
+when streamed output forbids replay. A `model_hub_recovery_exhausted` ending remains non-retryable: for an
+explicit pre-output `server` or `network` cause, it may grant Vibey one of its existing bounded transcript-only
+continuation runs, which cannot replay the original input or committed tools. Rate-limit/quota exhaustion, missing or
+future causes, explicit pin/opaque refusals, permanent/protocol errors, unclassified failures, and local preparation
+errors grant no continuation. Neither the terminal sanitizer nor a downstream consumer may infer permission from
+`kind` alone. A recovery-exhausted error after thinking remains non-continuable, because the partial response is not
+safe to replay or continue implicitly.
+
+The loop carries both permissions and `retry_after_s` into the terminal `AgentError` unchanged. These fields do
+not grant permission to replay committed tools or manufacture user input; Vibey uses `Agent.resume` under its
+own bounded continuation policy (`loop-control.md`).
 
 | `kind` | Meaning | Loop action |
 | --- | --- | --- |
@@ -88,7 +152,8 @@ most once per request, inside the same count and time budget; a second drop ends
 some prompts drop at the same point every time. The dropped attempt's thinking is never context: it stays in the
 attempt ledger and its audit (C-9 `context.md` §10, invariant 4), and the retry resends the original request.
 A refusal or safety stop is a response, not an error, and `auth`, `invalid_request`, `overflow`, and `rate_limit`
-after thinking stay terminal.
+after thinking stay terminal. The unknown-wire exception grants one request replay only, not transcript
+continuation; an unknown local exception does not acquire the thinking-drop exception.
 
 A `ProviderError` whose `partial` is committed (a response that failed after output) carries the error's text as that
 partial's `error_message`, redacted like the error itself and bounded to 1,000 characters, so the transcript row says

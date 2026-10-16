@@ -14,7 +14,7 @@ import mimetypes
 import secrets
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -24,6 +24,10 @@ import core.media_types  # noqa: F401 — registers audio/video types before gue
 from storage.models import media_object_references, media_objects
 
 logger = logging.getLogger(__name__)
+
+#: The ``source`` of a file in the agent's context: an input snapshot, or a generated image a committed transcript row
+#: names. The agent media sweep keeps exactly the files some row registers.
+AGENT_CONTEXT_SOURCE = "agent_context"
 
 
 def _utc_now_iso() -> str:
@@ -180,6 +184,16 @@ def register(
         created_at=created_at,
     )
     return token
+
+
+def is_registered_path(conn: Connection, local_paths: Iterable[str]) -> bool:
+    """Whether any row, live or revoked, registers one of ``local_paths``: one lookup on the ``local_path`` prefix of
+    ``ix_media_objects_dedup``."""
+
+    paths = list(local_paths)
+    return bool(paths) and conn.execute(
+        select(media_objects.c.token).where(media_objects.c.local_path.in_(paths)).limit(1)
+    ).first() is not None
 
 
 def get_by_token(conn: Connection, token: str) -> Optional[dict[str, Any]]:

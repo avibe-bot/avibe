@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Check, Copy, ExternalLink, Globe, KeyRound, Link2, Loader2, LockKeyhole, PenTool, Puzzle, ShieldCheck, Tag, Wallet } from 'lucide-react';
+import { AlertTriangle, Check, Copy, ExternalLink, Globe, KeyRound, Link2, Loader2, LockKeyhole, PenTool, Puzzle, ShieldCheck, Tag, Trash2, Wallet } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import {
@@ -16,6 +16,7 @@ import { partitionTags } from '@/lib/vaultTags';
 import { useProtectedVault, useVaultSandboxWarm, type ProtectedUnlockMaterial } from '@/lib/useProtectedVault';
 import { openVaultsInBrowser, vaultPasskeyNeedsBrowser } from '@/lib/vaultBrowserHandoff';
 import { vaultApprovalNeedsPasskey } from '@/lib/vaultRequestPlacement';
+import { vaultHasNamedFieldShape, vaultFieldNames } from '@/lib/vaultFields';
 import { usePreparedRequest } from '@/lib/usePreparedRequest';
 import { openVaultAuthorizationWindow } from '@/lib/vaultSandboxClient';
 import { SigningAddressList } from './signing-address-list';
@@ -23,6 +24,7 @@ import { type BlindBox, type SignatureResult, type SignatureScheme } from '@/lib
 import { cn, copyTextToClipboard } from '@/lib/utils';
 import { Badge } from './badge';
 import { Button } from './button';
+import { ConfirmDialog } from './confirm-dialog';
 import { SegmentedRadio } from './segmented';
 import { Switch } from './switch';
 import { vaultRequestSessionDisplay } from './vault-request-session';
@@ -54,6 +56,7 @@ type GrantOption = {
   one_shot?: boolean;
   member_count?: number;
   member_snapshot?: string[];
+  member_fields?: Array<{ name: string; default_field: string; fields: string[] }>;
   source_selector?: VaultSourceSelector;
   /** Hydrated for UI audience: the protected members of this set to DEK-release. */
   unlock_material?: ProtectedUnlockMaterial[];
@@ -61,13 +64,19 @@ type GrantOption = {
 
 type ApprovalCard = {
   card_type?: string;
-  request_type?: 'access' | 'sign';
+  request_type?: 'access' | 'sign' | 'delete';
   secret_name?: string;
   secret_names?: string[];
   protected_secret_names?: string[];
-  kind?: string | null;
+  kind?: string;
   protection?: string | null;
+  description?: string | null;
+  tags?: string[];
+  reason?: string | null;
   command?: string | null;
+  default_field?: string;
+  fields?: string[];
+  fields_state?: 'corrupt';
   egress?: string | null;
   session_id?: string | null;
   purpose?: string | null;
@@ -82,7 +91,7 @@ type ApprovalCard = {
   secret_unlock_material?: ProtectedUnlockMaterial | null;
 };
 
-export type ApprovalOutcome = { kind: 'approved' | 'denied'; requestType: 'access' | 'sign' };
+export type ApprovalOutcome = { kind: 'approved' | 'denied'; requestType: 'access' | 'sign' | 'delete' };
 
 /** The receive address(es) a signature scheme produces, for the sign card's "Signing as" row. */
 function addressesForScheme(scheme: string | undefined, addresses: SigningAddresses | null): SigningAddresses {
@@ -146,6 +155,7 @@ export const VaultApprovalCard: React.FC<{
     operation_context?: VaultSignedOperationContext;
   };
   const isSign = (card?.request_type ?? request.request_type) === 'sign';
+  const isDelete = (card?.request_type ?? request.request_type) === 'delete';
   const isKeypair = card?.kind === 'keypair';
 
   // A grant covers a fixed protected set — there is no scope picker.
@@ -161,8 +171,12 @@ export const VaultApprovalCard: React.FC<{
     return option?.member_snapshot?.length ? option.member_snapshot : (card?.secret_names ?? (card?.secret_name ? [card.secret_name] : []));
   }, [card, isSign, option]);
   // Protected secret names to be granted (design: "show the protected secret names covered").
+  const namedDeleteFields = useMemo(() => {
+    if (!isDelete || !card) return [];
+    return vaultHasNamedFieldShape(card) ? vaultFieldNames(card) : [];
+  }, [card, isDelete]);
   const protectedNames = useMemo(() => {
-    const materialNames = materials.map((m) => m.name);
+    const materialNames = [...new Set(materials.map((m) => m.name.split('.')[0]))];
     return materialNames.length ? materialNames : (card?.protected_secret_names ?? []);
   }, [card, materials]);
   const isProtected = isSign ? card?.protection === 'protected' : protectedNames.length > 0 || card?.protection === 'protected';
@@ -193,11 +207,12 @@ export const VaultApprovalCard: React.FC<{
   const [error, setError] = useState<string | null>(null);
   const [signAddresses, setSignAddresses] = useState<SigningAddresses | null>(null);
   const [copiedDigest, setCopiedDigest] = useState(false);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
 
   useEffect(() => {
     // Skip the remembered-choice seed for sign requests and one-shot grants (one-shot is forced to
     // one-time, so seeding a remembered 5/15 min would be misleading and pointless).
-    if (isSign || isOneShot) return;
+    if (isSign || isOneShot || isDelete) return;
     let alive = true;
     api
       .getVaultSettings()
@@ -208,7 +223,7 @@ export const VaultApprovalCard: React.FC<{
     return () => {
       alive = false;
     };
-  }, [api, isSign, isOneShot]);
+  }, [api, isDelete, isOneShot, isSign]);
 
   // Sign approvals: fetch the key's derived addresses (best-effort) so the human sees which
   // on-chain identity is about to sign — not just an opaque digest. Addresses are public.
@@ -238,6 +253,7 @@ export const VaultApprovalCard: React.FC<{
   // (no binding contexts, no sandbox ceremony) starts here.
   const approveInBrowser = needsProtectedApproval && vaultPasskeyNeedsBrowser();
   const canApprove = capabilities.can_use_vault_secrets;
+  const canManageDelete = capabilities.can_manage_instance;
   // Set once this card has approved or denied its request, which is then no longer pending.
   const [resolved, setResolved] = useState(false);
   const sendBindings = useCallback(
@@ -245,7 +261,7 @@ export const VaultApprovalCard: React.FC<{
     [api],
   );
   const bindings = usePreparedRequest(
-    canApprove && !isSign && !approveInBrowser && materials.length > 0 && option?.grant_id && !busy && !resolved
+    canApprove && !isSign && !isDelete && !approveInBrowser && materials.length > 0 && option?.grant_id && !busy && !resolved
       ? { requestId: request.id, duration: grantDurationApiValue(effectiveGrantDuration) }
       : null,
     sendBindings,
@@ -254,7 +270,7 @@ export const VaultApprovalCard: React.FC<{
   );
   const sandboxReady = useVaultSandboxWarm(needsProtectedApproval && !approveInBrowser);
   // Until both are ready the approve button waits, so its click never waits on either.
-  const preparing = !busy && (!sandboxReady || bindings.pending);
+  const preparing = !isDelete && !busy && (!sandboxReady || bindings.pending);
 
   useEffect(() => {
     if (needsProtectedApproval) void vault.refresh();
@@ -385,11 +401,29 @@ export const VaultApprovalCard: React.FC<{
       onResolved({ kind: 'approved', requestType: 'sign' });
     });
 
+  const approveDelete = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api.approveVaultDeleteRequest(request.id);
+      if (!result.ok) throw new Error(result.message || result.code || t('vaults.approval.errors.failed'));
+      setResolved(true);
+      setDeleteConfirmOpen(false);
+      onResolved({ kind: 'approved', requestType: 'delete' });
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }, [api, onResolved, request.id, t]);
+
+  const deleteNeedsHold = isKeypair || isProtected;
+
   const deny = () =>
     finish(async () => {
       await api.denyVaultRequest(request.id);
       setResolved(true);
-      onResolved({ kind: 'denied', requestType: isSign ? 'sign' : 'access' });
+      onResolved({ kind: 'denied', requestType: isSign ? 'sign' : isDelete ? 'delete' : 'access' });
     });
 
   // The request is provided pre-loaded (hydrated by the inbox list), so there's no async
@@ -410,7 +444,7 @@ export const VaultApprovalCard: React.FC<{
     );
   }
 
-  const approveDisabled = busy || preparing || !canApprove || (!isSign && !option);
+  const approveDisabled = busy || preparing || !canApprove || (isDelete && !canManageDelete) || (!isSign && !isDelete && !option);
 
   return (
     <div className="flex min-w-0 flex-col gap-4">
@@ -422,14 +456,14 @@ export const VaultApprovalCard: React.FC<{
             isSign ? 'bg-violet/15 text-violet-ink' : 'bg-gold/15 text-gold-ink',
           )}
         >
-          {isSign ? <PenTool className="size-5" /> : <LockKeyhole className="size-5" />}
+          {isDelete ? <Trash2 className="size-5" /> : isSign ? <PenTool className="size-5" /> : <LockKeyhole className="size-5" />}
         </div>
         <div className="flex flex-col gap-0.5">
           <span className="text-[15px] font-semibold">
-            {isSign ? t('vaults.approval.signTitle') : t('vaults.approval.accessTitle')}
+            {isDelete ? t('vaults.approval.deleteTitle') : isSign ? t('vaults.approval.signTitle') : t('vaults.approval.accessTitle')}
           </span>
           <span className="text-xs text-muted-foreground">
-            {isSign ? t('vaults.approval.signSubtitle') : t('vaults.approval.accessSubtitle')}
+            {isDelete ? t('vaults.approval.deleteSubtitle') : isSign ? t('vaults.approval.signSubtitle') : t('vaults.approval.accessSubtitle')}
           </span>
         </div>
       </div>
@@ -460,6 +494,41 @@ export const VaultApprovalCard: React.FC<{
             </Badge>
           ) : null}
         </DetailRow>
+        {isDelete && namedDeleteFields.length ? (
+          <span className="rounded-lg bg-destructive/5 px-3 py-2 text-xs text-muted">
+            {t('vaults.approval.deleteFields', { fields: namedDeleteFields.join(', ') })}
+          </span>
+        ) : null}
+        {isDelete && card.description ? (
+          <DetailRow label={t('vaults.approval.description')}><span className="text-[13px] text-foreground">{card.description}</span></DetailRow>
+        ) : null}
+        {isDelete && (card.reason || (request.delivery as { reason?: string } | null)?.reason) ? (
+          <DetailRow label={t('vaults.approval.reason')}><span className="text-[13px] text-foreground">{card.reason || (request.delivery as { reason?: string }).reason}</span></DetailRow>
+        ) : null}
+        {isDelete && card.tags?.length ? (
+          <DetailRow label={t('vaults.approval.tags')}>{card.tags.map((tag) => <Badge key={tag} variant="outline">{tag}</Badge>)}</DetailRow>
+        ) : null}
+        {!isSign && !isDelete && memberNames.map((name) => {
+          const metadata = option?.member_fields?.find((member) => member.name === name);
+          const labels = metadata?.fields ?? materials
+            .filter((material) => material.name === name || material.name.startsWith(`${name}.`))
+            .map((material) => material.field ?? material.name.split('.')[1] ?? 'value');
+          const shape = metadata ?? {
+            kind: isKeypair ? 'keypair' : 'static',
+            default_field: labels[0] ?? 'value',
+            fields: labels,
+          };
+          if (isKeypair || !vaultHasNamedFieldShape(shape)) return null;
+          return (
+            <DetailRow key={name} label={name}>
+              {labels.map((field) => (
+                <Badge key={field} variant="outline" className="font-mono">
+                  {field}{field === metadata?.default_field ? ` · ${t('vaults.fields.default')}` : ''}
+                </Badge>
+              ))}
+            </DetailRow>
+          );
+        })}
         {isSign && hasSchemeAddress ? (
           <DetailRow label={t('vaults.approval.signingAs')}>
             <SigningAddressList addresses={schemeAddresses} />
@@ -470,7 +539,7 @@ export const VaultApprovalCard: React.FC<{
             <VaultRequestSessionLink session={requestSession} className="text-foreground" textClassName="text-[13px]" />
           </DetailRow>
         ) : null}
-        {!isSign && card.command ? (
+        {!isSign && !isDelete && card.command ? (
           <DetailRow label={t('vaults.approval.command')}>
             {/* Full command in a wrapping code box — break-all so a long unbroken token
                 (URL, flag) can't push the dialog wide. */}
@@ -479,7 +548,7 @@ export const VaultApprovalCard: React.FC<{
             </code>
           </DetailRow>
         ) : null}
-        {!isSign && card.egress ? (
+        {!isSign && !isDelete && card.egress ? (
           <DetailRow label={t('vaults.approval.egress')}>
             <span className="flex items-center gap-1.5 text-[13px] text-foreground">
               <Globe className="size-3.5 shrink-0 text-muted" />
@@ -524,7 +593,7 @@ export const VaultApprovalCard: React.FC<{
       {/* Access grant summary (access only): how the set was selected and the fixed protected
           secret names to be granted. There is no scope picker — the grant is a fixed protected
           set determined by the request's selector. */}
-      {!isSign ? (
+      {!isSign && !isDelete ? (
         <div className="flex flex-col gap-3.5">
           {sourceChips.length > 0 ? (
             <DetailRow label={t('vaults.approval.source')}>
@@ -566,7 +635,7 @@ export const VaultApprovalCard: React.FC<{
           set (protocol v2 §7.1). "授权时长 / Agent access duration" language (§8): this is what the
           agent receives, distinct from the browser unlock window; never a countdown pill. It is chosen
           where the approval happens, so a browser handoff leaves it to the browser. */}
-      {!isSign && !approveInBrowser ? (
+      {!isSign && !isDelete && !approveInBrowser ? (
         <div className="flex flex-col gap-1.5">
           <span className="text-[13px] font-medium text-foreground">{t('vaults.approval.grantDuration')}</span>
           <SegmentedRadio<GrantDurationChoice>
@@ -598,7 +667,7 @@ export const VaultApprovalCard: React.FC<{
 
       {/* Footer */}
       <div className="flex items-center gap-3">
-        {!isSign && !needsProtectedApproval ? (
+        {!isSign && !isDelete && !needsProtectedApproval ? (
           <label className="flex items-center gap-2 text-xs font-medium text-muted">
             <Switch
               checked={thisSessionOnly}
@@ -622,7 +691,20 @@ export const VaultApprovalCard: React.FC<{
           <Button type="button" variant="outline" onClick={deny} disabled={busy || !canApprove}>
             {t('vaults.approval.deny')}
           </Button>
-          {approveInBrowser ? (
+          {isDelete && !canManageDelete ? (
+            <span className="text-xs text-muted">{t('vaults.approval.deleteManagementHint')}</span>
+          ) : null}
+          {isDelete ? (
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={() => (deleteNeedsHold ? setDeleteConfirmOpen(true) : void approveDelete())}
+              disabled={busy || !canApprove || !canManageDelete}
+            >
+              {busy ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+              {t('vaults.delete')}
+            </Button>
+          ) : approveInBrowser ? (
             <Button
               type="button"
               onClick={() => {
@@ -648,6 +730,33 @@ export const VaultApprovalCard: React.FC<{
           )}
         </div>
       </div>
+      <ConfirmDialog
+        open={deleteConfirmOpen}
+        onOpenChange={setDeleteConfirmOpen}
+        destructive
+        title={t('vaults.deleteDialog.title', { name: card.secret_name ?? '' })}
+        description={t('vaults.deleteDialog.description')}
+        confirmLabel={t('vaults.delete')}
+        holdSeconds={deleteNeedsHold ? 5 : 0}
+        onConfirm={approveDelete}
+      >
+        {error ? (
+          <div className="mb-3 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive-ink">
+            {error}
+          </div>
+        ) : null}
+        {isKeypair ? (
+          <div className="flex flex-col gap-2 rounded-[10px] border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-[12.5px] leading-snug text-foreground">
+            <span className="flex items-start gap-2"><AlertTriangle className="mt-0.5 size-4 shrink-0 text-destructive-ink" /><span>{t('vaults.deleteDialog.keypairIrreversible')}</span></span>
+            <span className="flex items-start gap-2"><Wallet className="mt-0.5 size-4 shrink-0 text-destructive-ink" /><span>{t('vaults.deleteDialog.keypairFunds')}</span></span>
+          </div>
+        ) : null}
+        {isProtected ? (
+          <div className="flex flex-col gap-2 rounded-[10px] border border-gold/30 bg-gold/5 px-3 py-2.5 text-[12.5px] leading-snug text-foreground">
+            <span className="flex items-start gap-2"><ShieldCheck className="mt-0.5 size-4 shrink-0 text-gold-ink" /><span>{t('vaults.deleteDialog.protectedUnlockNote')}</span></span>
+          </div>
+        ) : null}
+      </ConfirmDialog>
     </div>
   );
 };

@@ -247,6 +247,7 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
             terminal_error="stream disconnected",
             output_semantics=output,
             provenance=dict(output.metadata),
+            blocked_run_ids=frozenset(),
         )
 
         store.record_turn_run_outputs.assert_called_once_with(
@@ -535,7 +536,7 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         dispatcher = ConsolidatedMessageDispatcher(controller)
         dispatcher._collapse_status_bubble = mock.AsyncMock()
         dispatcher._clear_consolidated_state = mock.AsyncMock()
-        dispatcher._record_agent_run_terminal_result = mock.Mock()
+        dispatcher._record_agent_run_terminal_result = mock.AsyncMock()
         context = MessageContext(
             user_id="U1",
             channel_id="C1",
@@ -623,7 +624,7 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         dispatcher = ConsolidatedMessageDispatcher(controller)
         dispatcher._collapse_status_bubble = mock.AsyncMock()
         dispatcher._clear_consolidated_state = mock.AsyncMock()
-        dispatcher._record_agent_run_terminal_result = mock.Mock()
+        dispatcher._record_agent_run_terminal_result = mock.AsyncMock()
         platform_specific = {
             "agent_runtime_turn_key": "runtime-1",
             "agent_runtime_turn_token": "runtime-turn-1",
@@ -1120,7 +1121,7 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
 
         controller = _StubController(platform="avibe")
         dispatcher = ConsolidatedMessageDispatcher(controller)
-        dispatcher._record_agent_run_terminal_result = mock.Mock()
+        dispatcher._record_agent_run_terminal_result = mock.AsyncMock()
         context = MessageContext(
             user_id="U1",
             channel_id="ses-1",
@@ -1153,7 +1154,7 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_workbench_persistence_failure_does_not_settle_the_run(self):
         controller = _StubController(platform="avibe")
         dispatcher = ConsolidatedMessageDispatcher(controller)
-        dispatcher._record_agent_run_terminal_result = mock.Mock()
+        dispatcher._record_agent_run_terminal_result = mock.AsyncMock()
         context = MessageContext(
             user_id="U1",
             channel_id="ses-1",
@@ -1186,7 +1187,7 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_workbench_duplicate_persistence_receipt_can_settle_the_run(self):
         controller = _StubController(platform="avibe")
         dispatcher = ConsolidatedMessageDispatcher(controller)
-        dispatcher._record_agent_run_terminal_result = mock.Mock()
+        dispatcher._record_agent_run_terminal_result = mock.AsyncMock()
         context = MessageContext(
             user_id="U1",
             channel_id="ses-1",
@@ -1245,7 +1246,7 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_suppressed_history_id_is_not_recorded_as_run_delivery(self):
         controller = _StubController(platform="slack")
         dispatcher = ConsolidatedMessageDispatcher(controller)
-        dispatcher._record_suppressed_agent_run_terminal_result = mock.Mock()
+        dispatcher._record_suppressed_agent_run_terminal_result = mock.AsyncMock()
         context = MessageContext(
             user_id="U1",
             channel_id="C1",
@@ -1395,6 +1396,63 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(result)
         persist.assert_not_called()
+
+    async def _emit_split_result(self, *, fail_chunk: int | None, upload_id: str | None):
+        """Emit a Discord result long enough to split, optionally failing one chunk."""
+
+        class _FlakyChunkClient(_StubIMClient):
+            def __init__(self):
+                super().__init__(upload_id=upload_id)
+                self.chunk_attempts = 0
+
+            async def send_message(self, context, text, parse_mode=None, reply_to=None):
+                if text.startswith("x"):
+                    attempt = self.chunk_attempts
+                    self.chunk_attempts += 1
+                    if attempt == fail_chunk:
+                        raise RuntimeError("chunk send failed")
+                return await super().send_message(context, text, parse_mode, reply_to)
+
+        controller = _StubController(platform="discord", im_client=_FlakyChunkClient())
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(user_id="U1", channel_id="C1", platform="discord")
+        text = "x" * 5000
+        with mock.patch("core.message_dispatcher.persist_agent_message") as persist:
+            message_id = await dispatcher.emit_agent_message(context, "result", text)
+        return controller.im_client, dispatcher, text, message_id, persist
+
+    async def test_split_result_later_chunk_failure_delivers_complete_document(self):
+        client, dispatcher, text, message_id, persist = await self._emit_split_result(fail_chunk=1, upload_id="file-1")
+
+        # The split stops at the failed chunk and the complete result is uploaded once.
+        self.assertEqual(client.chunk_attempts, 2)
+        self.assertEqual([upload[2] for upload in client.uploaded_markdowns], [text])
+        self.assertEqual(message_id, "file-1")
+        sent_texts = [sent[1] for sent in client.sent_messages]
+        self.assertIn(dispatcher._t("info.resultDeliveredAsAttachment"), sent_texts)
+        persist.assert_called_once()
+
+    async def test_split_result_later_chunk_and_upload_failure_reports_failure_without_resending(self):
+        client, dispatcher, _text, message_id, persist = await self._emit_split_result(fail_chunk=1, upload_id=None)
+
+        # No second split: chunk 0 is never resent, and the turn reports failure.
+        self.assertEqual(client.chunk_attempts, 2)
+        self.assertEqual(len(client.uploaded_markdowns), 1)
+        self.assertIsNone(message_id)
+        sent_texts = [sent[1] for sent in client.sent_messages]
+        self.assertEqual(len([sent for sent in sent_texts if sent.startswith("x")]), 1)
+        self.assertIn(dispatcher._t("error.resultDeliveryFailed"), sent_texts)
+        persist.assert_not_called()
+
+    async def test_split_result_all_chunks_delivered_uploads_nothing(self):
+        client, dispatcher, text, message_id, persist = await self._emit_split_result(fail_chunk=None, upload_id="file-1")
+
+        self.assertGreaterEqual(client.chunk_attempts, 3)
+        chunks = [sent[1] for sent in client.sent_messages if sent[1].startswith("x")]
+        self.assertEqual("".join(chunks), text)
+        self.assertEqual(message_id, "msg-1")
+        self.assertEqual(client.uploaded_markdowns, [])
+        persist.assert_called_once()
 
     async def test_removed_platform_result_drop_is_not_persisted(self):
         controller = _StubController(platform="discord", im_client=_DropClient())

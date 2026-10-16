@@ -17,6 +17,7 @@ import pytest
 
 from core import internal_server, session_turns
 from core.computer_cli import (
+    _COMPUTER_ERROR_I18N_KEYS,
     COMPUTER_CLI_TOOLS,
     build_driver_arguments,
     format_human_result,
@@ -33,6 +34,7 @@ from vibe.i18n import t as i18n_t
 def _structured(payload: dict) -> dict:
     return {
         "isError": False,
+        "structuredContent": payload,
         "content": [
             {
                 "type": "text",
@@ -56,6 +58,7 @@ def _bind_socket(path: Path) -> socket.socket:
 
 def test_parser_covers_the_allowlisted_driver_operations_without_session_id() -> None:
     commands = [
+        (["computer", "run", "./script.mjs"], ("run",)),
         (["computer", "observe", "apps"], ("observe", "apps")),
         (["computer", "observe", "windows"], ("observe", "windows")),
         (["computer", "observe", "window"], ("observe", "window")),
@@ -70,7 +73,7 @@ def test_parser_covers_the_allowlisted_driver_operations_without_session_id() ->
         (["computer", "clipboard", "read"], ("clipboard", "read")),
         (["computer", "clipboard", "write"], ("clipboard", "write")),
         (["computer", "launch"], ("launch",)),
-        (["computer", "quit"], ("quit",)),
+        (["computer", "force-quit"], ("force-quit",)),
     ]
 
     parser = cli.build_parser()
@@ -83,10 +86,13 @@ def test_parser_covers_the_allowlisted_driver_operations_without_session_id() ->
         else:
             command_path = (args.computer_command,)
         assert command_path == path
-        assert tool_for_command(path)
+        if path != ("run",):
+            assert tool_for_command(path)
 
     with pytest.raises(SystemExit):
         parser.parse_args(["computer", "click", "--session-id", "manual"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["computer", "quit"])
 
 
 def test_packaged_skill_examples_parse_and_match_the_pinned_driver_schema() -> None:
@@ -96,6 +102,8 @@ def test_packaged_skill_examples_parse_and_match_the_pinned_driver_schema() -> N
         for line in skill.splitlines()
         if line.strip().startswith("vibe computer ")
     ]
+    commands.extend(re.findall(r"`(vibe computer [^`]+)`", skill))
+    commands = list(dict.fromkeys(commands))
     snapshot = json.loads(
         Path("desktop/cua-driver/tools-v0.31.0.json").read_text(encoding="utf-8")
     )
@@ -111,6 +119,9 @@ def test_packaged_skill_examples_parse_and_match_the_pinned_driver_schema() -> N
         argv = shlex.split(command)
         assert argv[:2] == ["vibe", "computer"]
         args = parser.parse_args(argv[1:])
+        if args.computer_command == "run":
+            assert args.file.endswith(".mjs")
+            continue
         if args.computer_command == "observe":
             path = ("observe", args.computer_observe_command)
         elif args.computer_command == "clipboard":
@@ -128,7 +139,6 @@ def test_packaged_skill_examples_parse_and_match_the_pinned_driver_schema() -> N
         covered_tools.add(tool)
 
     assert covered_tools == set(COMPUTER_CLI_TOOLS.values())
-    assert len(commands) == len(COMPUTER_CLI_TOOLS)
     assert re.findall(
         r"vibe computer clipboard read[^\n]*",
         skill,
@@ -249,7 +259,192 @@ def test_cmd_computer_binds_the_caller_session_and_prints_structured_result(
     }
     payload = json.loads(capsys.readouterr().out)
     assert payload["session_id"] == "ses-cli"
+    assert payload["result"]["structuredContent"]["apps"][0]["name"] == "Fixture"
     assert payload["result"]["content"][0]["type"] == "text"
+
+
+def test_cmd_computer_run_passes_string_arguments_and_prints_json(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    monkeypatch.setenv("AVIBE_SESSION_ID", "ses-cli")
+    captured: dict = {}
+
+    def fake_run_computer_script(**kwargs):
+        captured.update(kwargs)
+        return {"mailbox": "Inbox", "count": "01"}
+
+    monkeypatch.setattr(
+        "vibe.computer_script_runner.run_computer_script",
+        fake_run_computer_script,
+    )
+    args = cli.build_parser().parse_args(
+        [
+            "computer",
+            "run",
+            "./inspect.mjs",
+            "--arg",
+            "mailbox=Inbox",
+            "--arg",
+            "count=01",
+        ]
+    )
+    assert cli.cmd_computer(args) == 0
+    assert captured == {
+        "caller_session_id": "ses-cli",
+        "script_file": "./inspect.mjs",
+        "arg_values": ["mailbox=Inbox", "count=01"],
+    }
+    assert json.loads(capsys.readouterr().out) == {
+        "count": "01",
+        "mailbox": "Inbox",
+    }
+
+
+def test_cmd_computer_run_localizes_missing_private_node(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibe.computer_script_runner import ComputerScriptRunnerError
+
+    monkeypatch.setenv("AVIBE_SESSION_ID", "ses-cli")
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
+
+    def unavailable(**_kwargs):
+        raise ComputerScriptRunnerError(
+            "computer.cli.error.scriptNodeUnavailable",
+            code="computer_script_unavailable",
+        )
+
+    monkeypatch.setattr(
+        "vibe.computer_script_runner.run_computer_script",
+        unavailable,
+    )
+    args = cli.build_parser().parse_args(["computer", "run", "./inspect.mjs"])
+    with pytest.raises(
+        cli.TaskCliError,
+        match="Avibe 桌面应用随附的 Node runtime",
+    ) as exc_info:
+        cli.cmd_computer(args)
+    assert exc_info.value.code == "computer_script_unavailable"
+
+
+def test_cmd_computer_run_localizes_sdk_error_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibe.computer_script_runner import ComputerScriptRunnerError
+
+    monkeypatch.setenv("AVIBE_SESSION_ID", "ses-cli")
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
+
+    def invalid_selector(**_kwargs):
+        raise ComputerScriptRunnerError(
+            "computer.cli.error.scriptFailed",
+            code="invalid_selector",
+            params={
+                "step": "computer.app",
+                "error": "Application selector contains unknown field 'text'.",
+            },
+            structured_error={
+                "code": "invalid_selector",
+                "params": {"field": "text"},
+            },
+        )
+
+    monkeypatch.setattr(
+        "vibe.computer_script_runner.run_computer_script",
+        invalid_selector,
+    )
+    args = cli.build_parser().parse_args(["computer", "run", "./inspect.mjs"])
+
+    with pytest.raises(cli.TaskCliError) as exc_info:
+        cli.cmd_computer(args)
+
+    assert str(exc_info.value) == (
+        "Computer Use 脚本在 computer.app 失败：脚本使用了无效选择器。"
+    )
+    assert "Application selector" not in str(exc_info.value)
+
+
+def test_computer_cli_error_translations_exist_in_all_supported_languages() -> None:
+    keys = {
+        *_COMPUTER_ERROR_I18N_KEYS.values(),
+        "computer.cli.error.screenshotMissing",
+        "computer.cli.error.scriptArgNameValue",
+        "computer.cli.error.scriptArgDuplicate",
+        "computer.cli.error.scriptArgFile",
+        "computer.cli.error.scriptFile",
+        "computer.cli.error.scriptFileType",
+        "computer.cli.error.scriptNodeUnavailable",
+        "computer.cli.error.scriptSdkUnavailable",
+        "computer.cli.error.scriptOpenRejected",
+        "computer.cli.error.scriptRuntime",
+        "computer.cli.error.scriptRuntimeExit",
+        "computer.cli.error.scriptRuntimeInvalid",
+        "computer.cli.error.scriptTimedOut",
+        "computer.cli.error.scriptFailed",
+    }
+    for catalog_path in sorted(Path("vibe/i18n").glob("*.json")):
+        catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+        for key in keys:
+            value: object = catalog
+            for part in key.split("."):
+                assert isinstance(value, dict) and part in value, (
+                    f"{catalog_path.stem} is missing {key}"
+                )
+                value = value[part]
+            assert isinstance(value, str) and value.strip(), (
+                f"{catalog_path.stem} has an empty translation for {key}"
+            )
+
+
+@pytest.mark.parametrize(
+    ("language", "expected"),
+    [
+        (
+            "en",
+            "No screenshot is available for this result. The window may be hidden or "
+            "minimized, or capture may be unavailable.",
+        ),
+        (
+            "zh",
+            "此结果没有可用的截图。窗口可能已隐藏或最小化，也可能是截图不可用。",
+        ),
+    ],
+)
+def test_cmd_computer_localizes_missing_screenshot_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    language: str,
+    expected: str,
+) -> None:
+    monkeypatch.setenv("AVIBE_SESSION_ID", "ses-cli")
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
+
+    with patch(
+        "vibe.internal_client.computer_use_sync",
+        return_value={
+            "status_code": 200,
+            "body": {
+                "ok": True,
+                "tool": "get_window_state",
+                "result": _structured({"pid": 7, "window_id": 9}),
+            },
+        },
+    ):
+        args = cli.build_parser().parse_args(
+            [
+                "computer",
+                "observe",
+                "window",
+                "--output",
+                str(tmp_path / "window.png"),
+            ]
+        )
+        with pytest.raises(cli.TaskCliError) as exc_info:
+            cli.cmd_computer(args)
+
+    assert str(exc_info.value) == expected
+    assert "computer.cli.error.screenshotMissing" not in str(exc_info.value)
 
 
 @pytest.mark.parametrize(
@@ -312,6 +507,10 @@ def test_cmd_computer_reports_driver_error_before_writing_screenshot(
                 "tool": expected_tool,
                 "result": {
                     "isError": True,
+                    "structuredContent": {
+                        "code": "target_busy",
+                        "params": {},
+                    },
                     "content": [
                         {
                             "type": "text",
@@ -319,7 +518,7 @@ def test_cmd_computer_reports_driver_error_before_writing_screenshot(
                                 "Structured content:\n"
                                 + json.dumps(
                                     {
-                                        "code": "desktop_busy",
+                                        "code": "target_busy",
                                         "params": {},
                                     }
                                 )
@@ -337,7 +536,7 @@ def test_cmd_computer_reports_driver_error_before_writing_screenshot(
         assert cli.cmd_computer(args) == 1
 
     output = capsys.readouterr().out
-    assert "桌面正被另一个 Avibe Session 使用" in output
+    assert "请求的 Computer Use 目标正忙" in output
     assert "desktop is held" not in output
     assert not output_path.exists()
 
@@ -398,6 +597,13 @@ def test_json_unavailable_error_keeps_code_and_params(
         "tool": "list_apps",
         "result": {
             "isError": True,
+            "structuredContent": {
+                "code": "computer_use_unavailable",
+                "params": {
+                    "status": "needs_permission",
+                    "reason": "screen_recording",
+                },
+            },
             "content": [
                 {
                     "type": "text",
@@ -424,7 +630,11 @@ def test_json_unavailable_error_keeps_code_and_params(
         )
         assert cli.cmd_computer(args) == 1
 
-    assert json.loads(capsys.readouterr().out) == body
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["result"]["structuredContent"]["params"]["reason"] == (
+        "screen_recording"
+    )
+    assert payload == body
 
 
 def test_cmd_computer_localizes_controller_error_in_zh(

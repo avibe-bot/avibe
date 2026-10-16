@@ -1,7 +1,49 @@
 # Model Hub contracts
 
-Status: **contract_version 11**, 2026-10-02: the Vibey Hub-only consumer, primary-hop
-resolution and response origin linked to the served attempt, plus the Google protocol
+Status: **contract_version 15**, 2026-10-15: hosted tools design v2 (`../vibey-hosted-tools.md`), passive and
+default-on, with no probes. This bump publishes the Model Hub side; the hop-resolution and executor changes join it
+before it ships.
+- Capability evidence is passive (`capability-evidence.schema.json`, version 2): `basis` is `observed` only; a record is
+  keyed by status, so a `verified` success (with its `mode`) and an `unsupported` refusal coexist; refusals have no
+  time limit and read as unknown once the Source identity or the `wire` stamp (engine release, Avibe release, the
+  model's rendered fields) differs; `shape` and `engine` are gone.
+- Refused efforts lose `changes_at` and their `probe` basis (`agent-chain.schema.json`, `source.schema.json`).
+- The Tools read is rewritten (`hosted-tools-status.schema.json`): per tool `enabled`, passive `status` (`latest_ok`,
+  `refused[]`, `verified[]`), the search executor order (saved and effective, with candidates), and the image models
+  with their default.
+- The probe endpoint and `hosted-tool-probe-result.schema.json` are removed. `POST /api/models/hosted-tools/<tool>/clear`
+  and `POST /api/models/sources/<source_id>/evidence/clear` clear refusals; the PUT is per field.
+- The provider overlay gains a vendor's `executor_models[]` and `image_models[]`, and loses the native `image_generation`
+  declaration.
+- `HopResolution.capabilities` gains `context_price_steps` (`hop-resolution.schema.json`): where the target model's
+  list price rises with its context, from the price table, which Vibey's compaction threshold stays below.
+
+It builds on v14 (2026-10-14): opaque history is bound to the account that issued it, the Source
+identity, not only to the origin (#2620): a provider refuses another account's encrypted reasoning.
+- `HopResolution.source_identity` (`hop-resolution.schema.json`) names the primary hop Source's credential-free
+  identity, which Vibey records on each response its own Source served and matches before replaying opaque payloads.
+- The gateway strips an unpinned request's opaque history for another origin, Source, or Source identity, read on the
+  final admission snapshot. A request pinned to the primary hop whose identity changed since the launch answers
+  `pin_unavailable` (`vibey-consumer.md`). The identity stays in memory: never in the served-hop header or provenance.
+- `source.schema.json` gains the optional `credential_generation`; Source identity follows it instead of
+  `verification_pending`, so verification changes no identity and an identity never reverts after a credential
+  change.
+
+It builds on v13 (2026-10-14), which published the hosted-tools Phase 1 additions
+(`../vibey-hosted-tools.md`) as one version event:
+- the capability evidence the engine's 400s teach (`UpstreamRejection` in `adapter-interface.py`) and refused efforts,
+  on agent-chain hops and Source models, with when they change (`changes_at`);
+- the Tools tab's read (`hosted-tools-status.schema.json`): executor binding, candidate billing, price and probe
+  estimate, and evidence expiry;
+- the user-started hosted-tool probe (`POST /api/models/hosted-tools/<tool>/probe`,
+  `hosted-tool-probe-result.schema.json`): call and replay, and a call probe for image generation;
+- the picker read's `effort_menu` (`backend-model.schema.json`);
+- `clean_api_keys` on migration apply, which migrates saved API keys without upstream validation;
+- that the engine no longer adds its own `image_generation` tool (`opencode-overlay.md`).
+
+It builds on v12 (2026-10-13): the served-hop response header also names the serving Source
+id (`served-hop.schema.json`), because two Sources can share an origin. v12 builds on v11
+(2026-10-02): the Vibey Hub-only consumer, primary-hop resolution and response origin linked to the served attempt, plus the Google protocol
 vocabulary and Gemini gateway frontend, with API/config-only Source admission. See
 [`vibey-consumer.md`](vibey-consumer.md) and [`google-protocol.md`](google-protocol.md).
 The approved routing contract is
@@ -182,7 +224,7 @@ comparison. A gate may not report success by comparing stale input with itself.
 
 ## Version closure
 
-`contract_version` 11 must coexist in all registered version locations on the same tested head:
+`contract_version` 15 must coexist in all registered version locations on the same tested head:
 
 - `mirror-registry.json`
 - `agent-chain.schema.json`
@@ -240,6 +282,7 @@ revision; the discovering lane does not reinterpret or edit the contract in plac
 | `turn-provenance.schema.json` | Exactly attributed turn attempts and terminal outcome; no policy or mapping discriminator. The one versioned object persisted to disk, so it accepts every released version. |
 | `usage-summary.schema.json` | Metered token usage over a trailing local-day window, aggregated from proxied turns, with its list-API-price valuation. A report only: no consumer may feed it back into resolution, admission, or cooldown. |
 | `quota-summary.schema.json` | Rate-limit windows of hub-held subscriptions, parsed from each vendor's own usage report, and the API-price value of each subscription's metered usage against its monthly fee. A report only; carries no grant or raw body. |
+| `hosted-tools-status.schema.json` | The Tools read: each hosted tool's switch, its passive status (latest success, refusals, per-pair successes), the search executor order (saved, effective, candidates with their unit rates) and the image models with their default. A report only; hop resolution reads config and evidence itself. |
 | `resolution-event.schema.json` | Pull-feed Source/resolution records and their closed reason/detail vocabulary. |
 | `oauth-flow.schema.json` | Subscription creation and re-auth presentation without secret material. |
 | `migration-scan.schema.json` | Server-owned custody-takeover scan of existing native CLI/provider configuration; not an internal contract migration. |
@@ -253,6 +296,9 @@ revision; the discovering lane does not reinterpret or edit the contract in plac
 | `vibey-consumer.md` | C-6 launch projection, capability authority, served-hop response headers, and delivery boundaries. |
 | `google-protocol.md` | Google API/config admission, native gateway paths, discovery, stream facts, and pinned-engine translation boundary. |
 | `vibey-boundary-matrix.json` | Executable Vibey backend/channel audit: all declared schema shapes, runtime admission owners, and Hub-only refusal cases. |
-| `hop-resolution.schema.json` | Ephemeral in-process Vibey consumer result, including gateway-only credentials and nullable capabilities. |
-| `hop-origin.schema.json` | Non-secret response origin shared by the HTTP response header and provenance attempt. |
+| `hop-resolution.schema.json` | Ephemeral in-process Vibey consumer result, including gateway-only credentials, nullable capabilities, and each enabled hosted tool's mode, declaration, bound executor, and replay authorization. |
+| `hop-origin.schema.json` | Non-secret upstream origin persisted on the provenance attempt, beside its `source_id`. |
+| `served-hop.schema.json` | Exact `x-avibe-served-hop` response header value: the admitted origin plus the serving Source id. |
+| `capability-evidence.schema.json` | One persisted (Source, model, feature, status) evidence record, observed from real traffic only: a refusal (routing state, no time limit) or a success (display history, with its mode), with the wire stamp and the Source identity it follows. |
+| `provider-overlay.schema.json` | The `providers` section of `vibe/data/backend_models.json`: per-vendor model families with wire efforts and hosted-tool declarations, includes, and list prices. |
 | `README.md` | This ownership, version-closure, and contract-index document. |

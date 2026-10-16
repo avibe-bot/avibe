@@ -7,23 +7,36 @@ httpx directly so Model Hub remains the only gateway boundary.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import re
 from collections.abc import AsyncIterator, Mapping
+from dataclasses import replace
 from typing import Any
 
 import httpx
 
+from core.agent_core.ai.claude_thinking import uses_adaptive_thinking
+from core.agent_core.ai.hosted import anthropic_hosted_block, citation, reported_counts
 from core.agent_core.ai._common import (
     ServedHopResolver,
+    WireRequest,
     auth_headers,
     content_parts,
     drive_sse_stream,
     dispatch_wire_event,
     endpoint_origin,
+    hosted_pin,
+    PAUSE_TURN,
+    PIN_SOURCE_HEADER,
+    PinUnavailable,
+    REFUSED,
+    pin_refusal,
     join_endpoint_url,
     json_object,
+    native_declaration,
+    native_hosted_tools,
     prepare_messages,
     request_credential_values,
     StreamAssembler,
@@ -43,24 +56,31 @@ from core.agent_core.ai.provider import (
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
     AssistantMessage,
+    HostedToolBlock,
     ImageBlock,
     TextBlock,
     ThinkingBlock,
     ToolCallBlock,
     ToolResultMessage,
+    Usage,
     UserMessage,
 )
 
 logger = logging.getLogger(__name__)
 
 ANTHROPIC_VERSION = "2023-06-01"
+#: How many times one response may be continued after the provider paused it (``vibey-hosted-tools.md`` §4.3).
+MAX_PAUSE_CONTINUATIONS = 5
+PAUSE_LIMIT_MESSAGE = f"the provider paused the turn more than {MAX_PAUSE_CONTINUATIONS} times"
+#: A paused response continues only on the Source that served it, pinned there (§4.3 as implemented).
+PAUSE_UNSERVED_MESSAGE = "the Source that served the paused turn cannot continue it"
 _MAX_CACHE_BREAKPOINTS = 4
 # A Claude route caches its static prefix, the tools and then the system prompt, for an hour (``_prefix_ttl``); the
 # conversation's breakpoints keep the default five minutes. Anthropic evaluates breakpoints as tools, system, messages
 # and requires every longer lifetime to come before every shorter one, which this placement satisfies.
 _PREFIX_TTL = "1h"
 # Routes whose endpoint rejected the field. They keep the default lifetime for the rest of the process.
-_TTL_REJECTED_ROUTES: set[tuple[str, str, str]] = set()
+_TTL_REJECTED_ROUTES: set[tuple[str, str | None, str, str]] = set()
 _TTL_REJECTION = re.compile(r"cache_control|\bttl\b", re.IGNORECASE)
 _LEGACY_THINKING_BUDGETS = {
     "minimal": 1024,
@@ -227,6 +247,7 @@ class AnthropicAdapter(ProviderAdapter):
             protocol=self.protocol,
             media_loader=self._media_loader,
             cancel=cancel,
+            endpoint=request.endpoint,
         )
         if isinstance(prepared, ProviderError):
             terminal = assembler.terminal(prepared)
@@ -242,13 +263,26 @@ class AnthropicAdapter(ProviderAdapter):
         stop_reason: str | None = None
         message_started = False
         message_stopped = False
-        prefix_ttl = _prefix_ttl(request)
+        # The hosted tools this request declared natively; ``server_tool_use`` blocks of other tools stay unparsed.
+        hosted = frozenset(native_hosted_tools(request))
+        # Each hosted call's ``server_tool_use`` by stream index; its input JSON streams into the assembler.
+        uses: dict[int, dict[str, Any]] = {}
+        # A paused response continues as the same one (§4.3): a continuation's blocks follow the paused ones, its hosted
+        # counters add to theirs, and its usage, the final request's, stands for the whole response.
+        paused = False
+        offset = next_index = 0
+        response_usage: Usage | None = None
+        carried_counts: dict[str, int] = {}
+        response_counts: dict[str, int] = {}
+
+        def block_index(chunk: Mapping[str, Any]) -> int | None:
+            index = _stream_index(chunk)
+            return None if index is None else index + offset
+
         try:
-            headers = auth_headers(request.endpoint, provider="anthropic", gateway=self._gateway)
-            headers.update({"anthropic-version": ANTHROPIC_VERSION, "content-type": "application/json"})
-            url = join_endpoint_url(request.endpoint.base_url, "/messages")
             async def translate(events: AsyncIterator[Any]) -> AsyncIterator[Any]:
-                nonlocal message_started, message_stopped, stop_reason
+                nonlocal message_started, message_stopped, stop_reason, paused, next_index, response_usage
+                nonlocal response_counts
                 async for event in events:
                     if cancel.cancelled:
                         terminal = assembler.terminal(assembler.aborted(cancel.reason))
@@ -350,11 +384,16 @@ class AnthropicAdapter(ProviderAdapter):
                             if terminal is not None:
                                 yield terminal
                             return
-                        assembler.set_usage(
-                            _anthropic_usage(message.get("usage"))
-                        )
+                        # Each response's own usage: the last request's input already holds every paused part, so
+                        # it is the context the merged response stands for (plan §4.3 as implemented).
+                        response_usage = _anthropic_usage(message.get("usage"))
+                        assembler.set_usage(response_usage)
+                        start_usage = message.get("usage")
+                        if isinstance(start_usage, Mapping) and "server_tool_use" in start_usage:
+                            response_counts = reported_counts(start_usage.get("server_tool_use"))
+                            assembler.set_hosted_facts(counts=_summed(carried_counts, response_counts))
                     elif event_type == "content_block_start":
-                        index = _stream_index(chunk)
+                        index = block_index(chunk)
                         if index is None:
                             terminal = assembler.terminal(
                                 assembler.error("content_block_start index must be an integer", kind="invalid_request")
@@ -362,6 +401,7 @@ class AnthropicAdapter(ProviderAdapter):
                             if terminal is not None:
                                 yield terminal
                             return
+                        next_index = max(next_index, index + 1)
                         block = chunk.get("content_block")
                         if not isinstance(block, Mapping):
                             terminal = assembler.terminal(
@@ -394,9 +434,33 @@ class AnthropicAdapter(ProviderAdapter):
                                     yield terminal
                                 return
                             continue
+                        if kind == "server_tool_use":
+                            hosted_call = block.get("name") in hosted and isinstance(block.get("id"), str) and block["id"]
+                            if hosted_call and assembler.source_id is not None:
+                                # The call keeps its place in the stream; its input streams in and its result follows.
+                                assembler.set_block_kind(index, "hosted_use")
+                                uses[index] = dict(block)
+                                assembler.hosted_block(
+                                    ("hosted", block.get("id")),
+                                    anthropic_hosted_block(block, None, source_id=assembler.source_id),
+                                )
+                            continue
+                        if kind == "web_search_tool_result":
+                            use = next((item for item in uses.values() if item.get("id") == block.get("tool_use_id")), None)
+                            if use is not None and assembler.source_id is not None:
+                                assembler.set_block_kind(index, "hosted_result")
+                                assembler.hosted_block(
+                                    ("hosted", use.get("id")),
+                                    anthropic_hosted_block(use, block, source_id=assembler.source_id),
+                                )
+                            continue
                         if kind == "text":
                             assembler.set_block_kind(index, "text")
                             assembler.ensure_text_slot(index)
+                            for raw in block.get("citations") or ():
+                                cited = citation(raw) if isinstance(raw, Mapping) else None
+                                if cited is not None:
+                                    assembler.add_text_citation(index, cited)
                             initial = block.get("text")
                             if initial is not None and not isinstance(initial, str):
                                 terminal = assembler.terminal(
@@ -507,7 +571,7 @@ class AnthropicAdapter(ProviderAdapter):
                             if isinstance(initial_input, Mapping):
                                 assembler.set_tool_arguments_object(index, initial_input)
                     elif event_type == "content_block_delta":
-                        index = _stream_index(chunk)
+                        index = block_index(chunk)
                         if index is None:
                             terminal = assembler.terminal(
                                 assembler.error("content_block_delta index must be an integer", kind="invalid_request")
@@ -595,6 +659,14 @@ class AnthropicAdapter(ProviderAdapter):
                             value = _string(raw_signature)
                             if value:
                                 assembler.append_thinking_signature(index, value)
+                        elif delta_type == "citations_delta":
+                            raw_citation = delta.get("citation")
+                            cited = citation(raw_citation) if isinstance(raw_citation, Mapping) else None
+                            if block_kind == "text" and cited is not None:
+                                assembler.add_text_citation(index, cited)
+                        elif delta_type == "input_json_delta" and block_kind == "hosted_use":
+                            if isinstance(delta.get("partial_json"), str):
+                                assembler.hosted_input_delta(index, delta["partial_json"])
                         elif delta_type == "input_json_delta":
                             if block_kind != "tool":
                                 continue
@@ -616,7 +688,7 @@ class AnthropicAdapter(ProviderAdapter):
                         # Pi ignores delta variants it does not know yet.
                         # Known event shape has already been validated above.
                     elif event_type == "content_block_stop":
-                        index = _stream_index(chunk)
+                        index = block_index(chunk)
                         if index is None:
                             terminal = assembler.terminal(
                                 assembler.error("content_block_stop index must be an integer", kind="invalid_request")
@@ -624,6 +696,17 @@ class AnthropicAdapter(ProviderAdapter):
                             if terminal is not None:
                                 yield terminal
                             return
+                        streamed_input = assembler.hosted_input(index) if assembler.block_kind(index) == "hosted_use" else ""
+                        if streamed_input:
+                            use = uses[index]
+                            parsed = json_object(streamed_input)
+                            use["input"] = parsed if parsed is not None else use.get("input") or {}
+                            current = assembler.hosted_block_at(("hosted", use.get("id")))
+                            if current is not None and current.record.status == "pending":
+                                assembler.hosted_block(
+                                    ("hosted", use.get("id")),
+                                    anthropic_hosted_block(use, None, source_id=current.native.source_id),
+                                )
                         end = assembler.block_end(index)
                         if end is not None:
                             yield end
@@ -678,8 +761,13 @@ class AnthropicAdapter(ProviderAdapter):
                                     if terminal is not None:
                                         yield terminal
                                     return
+                                paused = delta.get("stop_reason") == "pause_turn"
                                 stop_reason = _normalize_stop_reason(delta.get("stop_reason"))
-                        assembler.set_usage(_anthropic_usage(usage, current=assembler.usage))
+                        response_usage = _anthropic_usage(usage, current=response_usage)
+                        assembler.set_usage(response_usage)
+                        if isinstance(usage, Mapping) and "server_tool_use" in usage:
+                            response_counts = reported_counts(usage.get("server_tool_use"))
+                            assembler.set_hosted_facts(counts=_summed(carried_counts, response_counts))
                     elif event_type == "error":
                         shape_error = _error_event_shape_error(chunk)
                         if shape_error is not None:
@@ -709,6 +797,9 @@ class AnthropicAdapter(ProviderAdapter):
                             if terminal is not None:
                                 yield terminal
                             return
+                        if paused:
+                            yield PAUSE_TURN
+                            return
                         final = assembler.finalize(
                             stop_reason or ("tool_use" if assembler.has_tools() else "stop")
                         )
@@ -729,6 +820,9 @@ class AnthropicAdapter(ProviderAdapter):
                         yield terminal
                     return
                 if stop_reason is not None:
+                    if paused:
+                        yield PAUSE_TURN
+                        return
                     final = assembler.finalize(stop_reason)
                     terminal = assembler.terminal(
                         final if isinstance(final, ProviderError) else Done(final)
@@ -739,43 +833,132 @@ class AnthropicAdapter(ProviderAdapter):
                 terminal = assembler.terminal(assembler.incomplete())
                 if terminal is not None:
                     yield terminal
+            sending = request
+            continuations = 0
             while True:
-                payload = build_messages_payload(
-                    request, transformed_messages, loaded_images=loaded_images, prefix_ttl=prefix_ttl
-                )
+                # The lifetime ``wire_request`` gives the prefix: the default once this route has rejected the field.
+                prefix_ttl = _prefix_ttl(sending)
+                wire = wire_request(sending, transformed_messages, gateway=self._gateway, loaded_images=loaded_images)
                 driver = drive_sse_stream(
                     self._client,
                     method="POST",
-                    url=url,
-                    json_body=payload,
-                    headers=headers,
+                    url=wire.url,
+                    json_body=wire.body,
+                    headers=wire.headers,
                     cancel=cancel,
                     assembler=assembler,
-                    endpoint=request.endpoint,
+                    endpoint=sending.endpoint,
                     resolver=self._served_hop_resolver,
                     gateway=self._gateway,
                     translate=translate,
+                    # The endpoint refused the lifetime before answering: sent again below, with nothing lost.
+                    refused=_rejects_ttl if prefix_ttl is not None else None,
                 )
-                rejected = False
+                rejected = continued = paused = message_started = message_stopped = False
+                unavailable: PinUnavailable | None = None
+                stop_reason = None
                 try:
                     async for event in driver:
-                        if prefix_ttl is not None and _rejects_ttl(event):
+                        if isinstance(event, PinUnavailable):
+                            unavailable = event
+                            break
+                        if event is PAUSE_TURN:
+                            continued = True
+                            break
+                        if event is REFUSED:
                             rejected = True
                             break
                         yield event
                 finally:
                     await driver.aclose()
-                if not rejected:
+                if unavailable is not None and continuations == 0:
+                    # The pinned Source cannot serve this content; nothing reached a model. The loop renders the
+                    # request again for a fresh hop (§3.5).
+                    terminal = assembler.terminal(pin_refusal(assembler, request.endpoint, unavailable))
+                    if terminal is not None:
+                        yield terminal
                     return
-                # The endpoint refused the request before answering, so the consumer saw nothing: send it once more
-                # with the default lifetime, which this route keeps from now on.
-                _remember_ttl_rejection(request.endpoint)
-                prefix_ttl = None
-                assembler = new_assembler()
+                elif unavailable is not None or (
+                    continued
+                    and self._gateway
+                    and (PIN_SOURCE_HEADER not in wire.headers or not assembler.verified_origin)
+                ):
+                    # A paused response continues only on the Source that served it, pinned, so it stays one origin's
+                    # message: a continuation that Source cannot serve, a send no pin held there, or a response whose
+                    # Source is unknown (no served-hop report, so its hosted calls could not be kept and sent back) ends
+                    # the response with what it has (§4.3 as implemented).
+                    terminal = assembler.terminal(assembler.error(PAUSE_UNSERVED_MESSAGE, kind="interrupted"))
+                    if terminal is not None:
+                        yield terminal
+                    return
+                elif continued:
+                    # The provider paused the turn: send its content back as it is, with no new user message, pinned to
+                    # the Source and model that served it, and keep streaming the same response, at most
+                    # MAX_PAUSE_CONTINUATIONS times (§4.3).
+                    if continuations == MAX_PAUSE_CONTINUATIONS:
+                        terminal = assembler.terminal(assembler.error(PAUSE_LIMIT_MESSAGE, kind="interrupted"))
+                        if terminal is not None:
+                            yield terminal
+                        return
+                    so_far = assembler.pause()
+                    if isinstance(so_far, ProviderError):
+                        terminal = assembler.terminal(so_far)
+                        if terminal is not None:
+                            yield terminal
+                        return
+                    continuations += 1
+                    response_usage = None
+                    carried_counts, response_counts = _summed(carried_counts, response_counts), {}
+                    offset = next_index
+                    sending = replace(sending, messages=(*request.messages, so_far))
+                elif rejected:
+                    # The endpoint refused the lifetime before answering, so nothing reached the consumer: the same
+                    # send once more with the default lifetime, which this route keeps from now on.
+                    _remember_ttl_rejection(sending.endpoint)
+                    continue
+                else:
+                    return
+                hosted = frozenset(native_hosted_tools(sending))
+                prepared = await prepare_messages(
+                    sending.messages,
+                    target=origin,
+                    supports_images=sending.supports_images,
+                    protocol=self.protocol,
+                    media_loader=self._media_loader,
+                    cancel=cancel,
+                    endpoint=sending.endpoint,
+                )
+                if isinstance(prepared, ProviderError):
+                    # A paused response keeps what it streamed, as a failed continuation request does.
+                    terminal = assembler.terminal(replace(prepared, partial=prepared.partial or assembler.partial()))
+                    if terminal is not None:
+                        yield terminal
+                    return
+                transformed_messages, loaded_images = prepared
         except Exception as exc:
             terminal = assembler.terminal(assembler.exception(exc))
             if terminal is not None:
                 yield terminal
+
+
+def _continues_unthought_tool_loop(messages: list[dict[str, Any]]) -> bool:
+    """Whether a request continues a tool loop (tool results follow its last assistant message) whose assistant message
+    does not start with a thinking block, which Anthropic refuses under manual thinking. Anthropic combines consecutive
+    user messages into one turn, so a user message after the results (a new prompt, a checkpoint's) still follows the
+    tool loop the rule names."""
+
+    last = next((index for index in range(len(messages) - 1, -1, -1) if messages[index]["role"] == "assistant"), None)
+    if last is None:
+        return False
+    continues = any(
+        isinstance(block, Mapping) and block.get("type") == "tool_result"
+        for message in messages[last + 1 :]
+        if isinstance(message["content"], list)
+        for block in message["content"]
+    )
+    content = messages[last]["content"]
+    first = content[0] if isinstance(content, list) and content else None
+    return continues and not (isinstance(first, Mapping) and first.get("type") in ("thinking", "redacted_thinking"))
 
 
 def build_messages_payload(
@@ -811,27 +994,35 @@ def build_messages_payload(
         "system": system,
         "messages": payload_messages,
     }
-    if request.tools:
-        payload["tools"] = [
-            {
-                "name": tool.name,
-                "description": tool.description,
-                "input_schema": dict(tool.input_schema),
-                **(
-                    {"cache_control": _cache_control(prefix_ttl)}
-                    if request.cache == "default" and index == len(request.tools) - 1
-                    else {}
-                ),
-            }
-            for index, tool in enumerate(request.tools)
-        ]
+    # A hosted tool this hop runs natively is sent as the provider's declaration in its spec's place (§4.1). The tools
+    # breakpoint goes on the last function tool, never on a server tool.
+    native = native_hosted_tools(request)
+    tools: list[dict[str, Any]] = [
+        native_declaration(native[tool.name])
+        if tool.name in native
+        else {"name": tool.name, "description": tool.description, "input_schema": dict(tool.input_schema)}
+        for tool in request.tools
+    ]
+    functions = [index for index, tool in enumerate(request.tools) if tool.name not in native]
+    if request.cache == "default" and functions:
+        tools[functions[-1]]["cache_control"] = _cache_control(prefix_ttl)
+    if tools:
+        payload["tools"] = tools
     effort = (request.reasoning_effort or "").lower()
-    if effort in {"none", "off", "disabled"}:
+    adaptive = uses_adaptive_thinking(request.endpoint.model_id)
+    if effort in {"none", "off", "disabled"} or (
+        effort and not adaptive and _continues_unthought_tool_loop(payload_messages)
+    ):
+        # Under manual thinking, Anthropic requires the assistant message a tool loop continues to start with its
+        # thinking block. One whose thinking cannot go back (another origin's, or a Session whose signatures the
+        # provider refused) continues with thinking off, as Anthropic's refusal itself advises; the models that take
+        # manual thinking all accept that. Adaptive thinking has no such rule, and several adaptive models refuse
+        # ``disabled``, so it stays on.
         payload["thinking"] = {"type": "disabled"}
     elif effort:
-        if _uses_adaptive_thinking(request.endpoint.model_id):
+        if adaptive:
             payload["thinking"] = {"type": "adaptive"}
-            payload["output_config"] = {"effort": _anthropic_effort(effort)}
+            payload["output_config"] = {"effort": sent_effort(request.endpoint.model_id, effort)}
         else:
             # Pi's Anthropic adapter uses legacy budget thinking for Claude
             # 4.5 and older families. The API requires room for the thinking
@@ -844,6 +1035,22 @@ def build_messages_payload(
                 "budget_tokens": budget,
             }
     return payload
+
+
+def wire_request(
+    request: ModelRequest,
+    messages: tuple[Any, ...],
+    *,
+    gateway: bool,
+    loaded_images: Mapping[str, tuple[str, str]] | None = None,
+) -> WireRequest:
+    """The Messages request for already prepared ``messages``, as the adapter sends it."""
+
+    payload = build_messages_payload(request, messages, loaded_images=loaded_images, prefix_ttl=_prefix_ttl(request))
+    headers = auth_headers(request.endpoint, provider="anthropic", gateway=gateway)
+    headers.update({"anthropic-version": ANTHROPIC_VERSION, "content-type": "application/json"})
+    headers.update(hosted_pin(request, messages))
+    return WireRequest(join_endpoint_url(request.endpoint.base_url, "/messages"), headers, payload)
 
 
 def _message_to_anthropic(
@@ -869,6 +1076,9 @@ def _message_to_anthropic(
                     content.append({"type": "text", "text": block.text})
             elif isinstance(block, ToolCallBlock):
                 content.append({"type": "tool_use", "id": block.id, "name": block.name, "input": dict(block.arguments)})
+            elif isinstance(block, HostedToolBlock):
+                # Its server_tool_use and web_search_tool_result, verbatim (transform allowed it for this Source).
+                content.extend(copy.deepcopy(list(block.native.payload)))
         return {"role": "assistant", "content": content}
     if isinstance(message, ToolResultMessage):
         result = _anthropic_user_content(message.content, supports_images, loaded_images)
@@ -953,8 +1163,10 @@ def _prefix_ttl(request: ModelRequest) -> str | None:
     return _PREFIX_TTL
 
 
-def _ttl_route(endpoint: ModelEndpoint) -> tuple[str, str, str]:
-    return (endpoint.base_url, endpoint.provider, endpoint.model_id)
+def _ttl_route(endpoint: ModelEndpoint) -> tuple[str, str | None, str, str]:
+    """The route a TTL rejection is remembered for. Every Vibey hop shares the one gateway URL, so the Source behind
+    it is part of the route: one relay's rejection never changes what another Source is sent."""
+    return (endpoint.base_url, endpoint.source_id, endpoint.provider, endpoint.model_id)
 
 
 def _rejects_ttl(event: Any) -> bool:
@@ -1047,11 +1259,17 @@ def _usage(input_tokens: int = 0, output_tokens: int = 0, cache_read: int = 0, c
     )
 
 
+def _summed(counts: Mapping[str, int], more: Mapping[str, int]) -> dict[str, int]:
+    summed = dict(counts)
+    for name, value in more.items():
+        summed[name] = summed.get(name, 0) + value
+    return summed
+
+
 def _normalize_stop_reason(value: Any) -> str:
     normalized = {
         "end_turn": "stop",
         "stop_sequence": "stop",
-        "pause_turn": "stop",
         "max_tokens": "length",
         # Generation reached the context window (Claude 4.5 and newer accept input plus max_tokens over the window);
         # Anthropic says to treat the response as truncated, as at max_tokens.
@@ -1063,25 +1281,19 @@ def _normalize_stop_reason(value: Any) -> str:
     return normalized or "error"
 
 
-def _anthropic_effort(effort: str) -> str:
-    return {"minimal": "low", "xhigh": "max"}.get(effort, effort)
+def sent_effort(model_id: str, effort: str) -> str | None:
+    """The token an Anthropic request carries at ``output_config.effort`` for ``effort`` on ``model_id``; None when it
+    carries none, for an off effort or a model that thinks on a legacy token budget.
 
+    The effort goes as given: the hop declares only the levels its model takes (Model Hub bounds them by the model's
+    catalog row), so ``xhigh`` reaches Opus 4.7 and later natively and never Opus 4.6, which has no such level.
+    ``minimal`` has no Anthropic level and goes as ``low``.
+    """
 
-def _uses_adaptive_thinking(model_id: str) -> bool:
-    normalized = model_id.lower().replace(".", "-")
-    return any(
-        family in normalized
-        for family in (
-            "claude-opus-4-6",
-            "claude-opus-4-7",
-            "claude-opus-4-8",
-            "claude-sonnet-4-6",
-            "claude-sonnet-5",
-            "claude-opus-5",
-            "claude-fable-5",
-            "claude-mythos-5",
-        )
-    )
+    value = effort.lower()
+    if not value or value in {"none", "off", "disabled"} or not uses_adaptive_thinking(model_id):
+        return None
+    return "low" if value == "minimal" else value
 
 
 def _string(value: Any) -> str:

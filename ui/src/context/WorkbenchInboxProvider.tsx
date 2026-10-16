@@ -1002,6 +1002,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     () => ({
       inboxSessions,
       unreadBySession,
+      unreadLoaded,
       totalUnread,
       unreadSessions,
       nextCursor,
@@ -1016,6 +1017,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       activateFeed,
       inboxSessions,
       unreadBySession,
+      unreadLoaded,
       totalUnread,
       unreadSessions,
       nextCursor,

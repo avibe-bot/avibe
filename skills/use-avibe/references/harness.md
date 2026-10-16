@@ -50,7 +50,7 @@ Targeting and callbacks:
 - `vibe task add` stores a message template — or, with `--shell` / a trailing `-- <argv>`, a command — and creates Runs when the time trigger fires. A command task runs with no Agent turn: silent on success, a failure notice on failure, `--on-failure agent` to escalate failures to an Agent.
 - `vibe watch add` uses `--message` as the instruction template for the Agent Run created after the waiter reaches a reportable state.
 - `--fork-self` forks this Session's native backend context. `--fork-session <id>` forks another explicit Session. Forks keep the source Session backend, scope, and cwd by default.
-- Fork overrides are intentionally narrow: `--agent`, `--model`, and `--reasoning-effort` can override the forked Session only if the backend stays the same. Do not combine fork flags with existing-session or session-creation flags.
+- `--model` and `--reasoning-effort` set the model of any new Session a run creates (blank, `--create-session`, or a fork); the Session keeps it, and they are refused with `--session-id`. Fork overrides stay narrow: `--agent`, `--model`, and `--reasoning-effort` can override the forked Session only if the backend stays the same. Do not combine fork flags with existing-session or session-creation flags.
 
 Operational guidance:
 

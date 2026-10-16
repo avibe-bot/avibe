@@ -48,9 +48,25 @@ from core.agent_core.ai.provider import (
 from core.agent_core.agent.models import ModelSelection
 from core.agent_core.harness.context import ContextConfig, budget
 from core.agent_core.harness.projection import project
-from core.agent_core.messages import AssistantMessage, ThinkingBlock, ToolCallBlock, ToolResultMessage, Usage, UserMessage, text
+from core.agent_core.messages import (
+    AssistantMessage,
+    HostedAction,
+    HostedImage,
+    HostedNative,
+    HostedRecord,
+    HostedSource,
+    HostedSummary,
+    HostedToolBlock,
+    ThinkingBlock,
+    ToolCallBlock,
+    ToolResultMessage,
+    Usage,
+    UserMessage,
+    text,
+)
 from core.agent_core.tools.base import CallInstance, ToolResult
 from tests.agent_core.fakes import (
+    ORIGIN,
     FakeJobHost,
     FakeModelRouter,
     FakeTool,
@@ -79,9 +95,95 @@ def make_agent(provider, *, store=None, session_id="session", tools=(), hooks=()
 async def collect(agent, row_id="input", value="hello", turn_id="turn"):
     return [event async for event in agent.run(input_row(row_id, value), turn_id=turn_id)]
 
-
 def user_texts(request):
     return [message.content[0].text for message in request.messages if isinstance(message, UserMessage)]
+
+
+async def test_resume_reuses_the_committed_transcript_without_consuming_an_input():
+    provider = ScriptedProvider(
+        [
+            [ProviderError("server", "temporary upstream failure", False)],
+            [Done(assistant("recovered"))],
+        ]
+    )
+    agent = make_agent(provider)
+    original = input_row("input", "hello")
+
+    first = [event async for event in agent.run(original, turn_id="turn")]
+    second = [event async for event in agent.resume(original, turn_id="turn")]
+
+    assert first[-1].reason == "error"
+    assert second[-1].reason == "completed"
+    assert [row.row_id for row in await agent.store.load("session") if row.kind == "input"] == ["input"]
+    assert [row.message.content[0].text for row in await agent.store.load("session") if row.kind == "response"] == [
+        "recovered"
+    ]
+    assert len(provider.requests) == 2
+    assert second[0].seq == first[-1].seq + 1
+
+
+async def test_resume_uses_only_explicit_source_turn_inputs_for_a_fresh_agent():
+    store = InMemoryTranscriptStore()
+    first = await store.consume_input("session", "first", user("first"))
+    await store.consume_input("session", "other", user("other"))
+    provider = ScriptedProvider([[Done(assistant("recovered"))]])
+    agent = make_agent(provider, store=store)
+
+    events = [
+        event
+        async for event in agent.resume(
+            input_row("retry", "ignored"),
+            turn_id="retry-turn",
+            turn_inputs={first.context_seq},
+        )
+    ]
+
+    assert events[-1].reason == "completed"
+    assert agent._turn_inputs == {first.context_seq}
+
+
+async def test_resume_merges_newly_admitted_inputs_into_same_turn_pins():
+    provider = ScriptedProvider([
+        [ProviderError("invalid_request", "failed", False)],
+        [Done(assistant("recovered"))],
+    ])
+    agent = make_agent(provider)
+    await collect(agent)
+    [initial] = [row for row in await agent.store.load("session") if row.kind == "input"]
+    returned = await agent.store.consume_input("session", "returned-steer", user("不要删文件"))
+
+    events = [event async for event in agent.resume(
+        input_row("retry", "ignored"), turn_id="turn", turn_inputs={returned.context_seq}
+    )]
+
+    assert events[-1].reason == "completed"
+    assert agent._turn_inputs == {initial.context_seq, returned.context_seq}
+    assert user_texts(provider.requests[-1]) == ["hello", "不要删文件"]
+
+
+async def test_resume_preserves_images_committed_by_an_earlier_tool_call():
+    from core.agent_core.messages import HostedResult, ProxyExecution
+
+    hosted = HostedResult(
+        HostedRecord(status="completed", images=(HostedImage(path="/media/winner.png", mime="image/png"),)),
+        ProxyExecution(ORIGIN, "src_executor01", "metered", mode="direct"),
+    )
+    tool = FakeTool("image_generate", result=ToolResult((text("saved"),), hosted=hosted))
+    provider = ScriptedProvider(
+        [
+            [Done(assistant("", calls=[ToolCallBlock("call_img", "image_generate", {})]))],
+            [ProviderError("server", "temporary upstream failure", False)],
+            [Done(assistant("recovered"))],
+        ]
+    )
+    agent = make_agent(provider, tools=[tool])
+
+    first_events = await collect(agent, value="make an image")
+    second_events = [event async for event in agent.resume(input_row("retry", "ignored"), turn_id="turn")]
+
+    assert first_events[-1].reason == "error"
+    assert second_events[-1].reason == "completed"
+    assert agent._generated_images == [HostedImage(path="/media/winner.png", mime="image/png")]
 
 
 async def test_C1_tool_set_is_captured_per_request_and_unavailable_calls_are_errors():
@@ -431,11 +533,11 @@ async def test_C4_pending_steer_prevents_finality_and_late_steer_is_refused_duri
             super().__init__()
             self.final_entered, self.final_release = asyncio.Event(), asyncio.Event()
 
-        async def append_response(self, session_id, message, *, final):
+        async def append_response(self, session_id, message, *, final, replied=None, images=()):
             if final:
                 self.final_entered.set()
                 await self.final_release.wait()
-            return await super().append_response(session_id, message, final=final)
+            return await super().append_response(session_id, message, final=final, replied=replied, images=images)
 
     entered, release = asyncio.Event(), asyncio.Event()
 
@@ -623,6 +725,27 @@ async def test_retry_obeys_provider_flag_and_allows_usage_only_partial(streamed,
         assert events[-1].reason == "completed"
 
 
+@pytest.mark.parametrize("failure", ["before output", "after output", "recovery exhausted"])
+async def test_provider_permissions_and_delay_reach_the_terminal_cause(failure):
+    """C-3: consumers need the producer's decision, which the old kind/message-only event dropped."""
+    from core.agent_core.ai.errors import classify_error
+
+    error = classify_error(
+        status=424 if failure == "recovery exhausted" else 429,
+        body='{"error":{"code":"model_hub_recovery_exhausted","cause":"rate_limited"}}'
+        if failure == "recovery exhausted" else "busy",
+        headers={"retry-after": "17"},
+        streamed=failure == "after output",
+    )
+    agent = make_agent(ScriptedProvider([[error]]), retry=RetryPolicy(max_retries=0))
+    events = await collect(agent)
+    [announced] = [event for event in events if isinstance(event, AgentError)]
+    assert events[-1].cause == announced
+    assert (announced.kind, announced.origin, announced.retryable, announced.continuable, announced.retry_after_s) == (
+        "rate_limit", "source", failure == "before output", failure != "recovery exhausted", 17.0
+    )
+
+
 # OpenAI Responses streams, as the real adapter reads them: reasoning, then how the response ended.
 _REASONING = (
     'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1"}}\n\n'
@@ -770,7 +893,7 @@ async def test_retry_keeps_a_usage_only_partial_out_of_the_context():
 
 
 class _FailingResponses(InMemoryTranscriptStore):
-    async def append_response(self, session_id, message, *, final, request=None):
+    async def append_response(self, session_id, message, *, final, request=None, replied=None, images=()):
         raise RuntimeError("disk full")
 
 
@@ -1191,18 +1314,32 @@ async def test_reasoning_effort_must_be_declared_by_the_route():
 
 
 @pytest.mark.parametrize("stop_reason", ["stop", "length", "refusal", "safety"])
-@pytest.mark.parametrize("shape", ["empty", "whitespace", "thinking", "visible"])
+@pytest.mark.parametrize("shape", ["empty", "whitespace", "thinking", "visible", "search"])
 @pytest.mark.parametrize("continuation", ["final", "steer", "follow_up"])
 async def test_tool_free_final_reply_is_committed_and_empty_success_is_an_error(stop_reason, shape, continuation):
     # The old refusal/safety-only table missed empty successful finals.
     # Pending-input responses are non-final and must still be allowed to continue.
+    # A native search with no answer is no reply.
+    native = HostedNative(source_id="src_testsrc1", payload=({"type": "provider_item"},))
     content = {
         "empty": (),
         "whitespace": (text(" \n"),),
         "thinking": (ThinkingBlock("private reasoning"),),
         "visible": (ThinkingBlock("private reasoning"), text("visible reply")),
+        "search": (
+            HostedToolBlock(
+                id="ws_1",
+                tool="web_search",
+                action=HostedAction(type="search", queries=("avibe",)),
+                record=HostedRecord(status="completed", sources=(HostedSource(url="https://avibe.bot"),)),
+                native=native,
+            ),
+        ),
     }[shape]
-    message = replace(assistant(stop_reason=stop_reason), content=content)
+    hosted = shape == "search"
+    message = replace(
+        assistant(stop_reason=stop_reason), content=content, hosted_summary=HostedSummary() if hosted else None
+    )
 
     async def first(request, cancel):
         if continuation != "final":
@@ -1225,12 +1362,12 @@ async def test_tool_free_final_reply_is_committed_and_empty_success_is_an_error(
         ["input"] if continuation == "final" else ["input", "pending"]
     )
     errors = [event for event in events if isinstance(event, AgentError)]
-    if shape == "visible" or continuation != "final":
+    if continuation != "final" or (shape == "visible" and stop_reason != "length"):
         assert errors == []
         assert events[-1].reason == "completed"
     else:
         assert len(errors) == 1
-        assert errors[0].kind == (stop_reason if stop_reason in {"refusal", "safety"} else "empty_response")
+        assert errors[0].kind == (stop_reason if stop_reason in {"length", "refusal", "safety"} else "empty_response")
         assert errors[0].message
         assert committed[0].seq < errors[0].seq < events[-1].seq
         assert events[-1].reason == "error"
@@ -1350,7 +1487,7 @@ async def test_failed_queued_input_commit_keeps_pending_input_and_announces_prio
 
 async def test_partial_response_commit_failure_still_emits_a_terminal_error():
     class Store(InMemoryTranscriptStore):
-        async def append_response(self, session_id, message, *, final):
+        async def append_response(self, session_id, message, *, final, replied=None, images=()):
             raise OSError("response persistence unavailable")
 
     provider = ScriptedProvider(
@@ -1892,3 +2029,38 @@ async def test_a_terminating_call_ends_the_run_after_its_whole_group_commits():
 
     assert await committed_results(agent) == [("a", "a", False), ("b", "b", False)]
     assert events[-1].reason == "completed" and len(agent.models.provider.requests) == 1
+
+
+def _image_result(call_id: str, *, completed: bool) -> ToolResultMessage:
+    from core.agent_core.messages import HostedResult, ProxyExecution
+
+    if completed:
+        record = HostedRecord(status="completed", images=(HostedImage(path="/media/winner.png", mime="image/png"),))
+        execution = ProxyExecution(ORIGIN, "src_executor01", "metered", mode="direct")
+        return ToolResultMessage(call_id, "image_generate", (text("saved"),), hosted=HostedResult(record, execution))
+    record = HostedRecord(status="failed", error="refused", images=())
+    return ToolResultMessage(call_id, "image_generate", (text("failed"),), True, hosted=HostedResult(record))
+
+
+@pytest.mark.parametrize(("ours", "theirs"), [(False, True), (True, False)], ids=["they-saved-it", "they-failed-it"])
+async def test_a_reply_counts_the_images_of_the_tool_result_that_committed_not_the_writer_that_lost(ours, theirs):
+    """MH-HOSTED-UI-012: a call instance is settled once, whoever writes (a recovery pass may settle it first), and the
+    store returns the row that committed. Whether a final that says nothing after it replies with an image follows
+    that row, never the result this execution produced and lost."""
+
+    store = InMemoryTranscriptStore()
+
+    async def execute(arguments, ctx):
+        # Another writer settles the call while it runs: its result is the one that commits.
+        await store.append_tool_result(ctx.session_id, _image_result(ctx.tool_call_id, completed=theirs), details={})
+        mine = _image_result(ctx.tool_call_id, completed=ours)
+        return ToolResult(mine.content, mine.is_error, hosted=mine.hosted)
+
+    tool = FakeTool("image_generate", execute=execute)
+    provider = ScriptedProvider(
+        [[Done(assistant("", calls=[ToolCallBlock("call_img", "image_generate", {})]))], [Done(assistant(""))]]
+    )
+    events = await collect(make_agent(provider, store=store, tools=[tool]))
+
+    ended = events[-1]
+    assert isinstance(ended, RunEnded) and ended.reason == ("completed" if theirs else "error")

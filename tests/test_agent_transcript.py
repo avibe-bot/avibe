@@ -443,7 +443,7 @@ async def test_the_display_copy_commits_with_its_row_and_never_reaches_the_conte
         _session(conn, "ses_main", home)
         consumed = _row(conn, "ses_main", home, "go")
 
-    def render(message, *, final):
+    def render(message, *, final, replied, images):
         body = "\n".join(block.text for block in message.content if isinstance(block, TextBlock) and block.text)
         return f"{body} (shown)" if final else body.upper()
 
@@ -469,6 +469,47 @@ async def test_the_display_copy_commits_with_its_row_and_never_reaches_the_conte
     ]
 
 
+@pytest.mark.parametrize(
+    ("replied", "display", "row_type"),
+    [
+        # Its display carries the turn's images: a terminal result as committed.
+        (True, "Generated image:\n\n![a.png](file:///a.png)", "result"),
+        # A reply the model kept silent shows nothing.
+        (True, "", "assistant"),
+        (False, "", "error"),
+        (None, "", "error"),
+    ],
+    ids=["replies-with-its-turns-images", "replies-silently", "does-not-reply", "no-decision"],
+)
+async def test_a_final_commits_as_the_loops_reply_decision_says(engine, replied, display, row_type) -> None:
+    """MH-HOSTED-UI-012: whether a final replies is the loop's decision (``has_reply``), and the row commits with the type
+    it gives, so a final that replies with its turn's images is no failed final even if the process stops before its
+    delivery rewrites the row. The renderer gets the same decision and the images the final delivers. Without a
+    decision, the response alone decides."""
+    with engine.begin() as conn:
+        home = _scope(conn, "C-home")
+        _session(conn, "ses_main", home)
+        consumed = _row(conn, "ses_main", home, "draw a lighthouse")
+    from core.agent_core.messages import HostedImage
+
+    image = HostedImage(path="/a.png", mime="image/png")
+    given: list[tuple] = []
+
+    def render(message, *, final, replied, images):
+        given.append((replied, images))
+        return display
+
+    store = SQLiteTranscriptStore(engine, render=render)
+    await store.consume_input("ses_main", consumed, _user("draw a lighthouse"))
+    final = await store.append_response(
+        "ses_main", AssistantMessage((), ORIGIN, "stop"), final=True, replied=replied, images=(image,)
+    )
+
+    with engine.connect() as conn:
+        committed = conn.execute(select(messages.c.type).where(messages.c.id == final.row_id)).scalar_one()
+    assert committed == row_type and given == [(bool(replied), (image,))]
+
+
 async def test_a_call_instance_is_settled_once_whoever_writes(engine) -> None:
     with engine.begin() as conn:
         home = _scope(conn, "C-home")
@@ -489,3 +530,70 @@ async def test_a_call_instance_is_settled_once_whoever_writes(engine) -> None:
     await store.append_response("ses_main", _assistant("again", call_id="call_1"), final=False)
     later = await store.append_tool_result("ses_main", _tool_result("call_1", "second call"), details={})
     assert later.row_id != first.row_id
+
+
+async def test_the_media_sweep_keeps_every_file_a_row_registers_and_takes_only_stale_orphans(engine, tmp_path) -> None:
+    """MH-HOSTED-VIBEY-007, #2588 (``vibey-hosted-tools.md`` §7.3): a generated image is saved before the row that
+    names it commits, so an interruption in between leaves a file no row names. A committed ``image_generate`` result
+    registers each image its record names, as an input snapshot is registered; the sweep removes only a file nothing
+    registers that is older than any Turn holds an uncommitted save, and never a link or a name of someone else's."""
+    import base64
+    import os
+    import time
+    from pathlib import Path
+
+    from core.agent_core.messages import HostedRecord, HostedResult, ProxyExecution
+    from modules.agents.vibey.media import SWEEP_GRACE_S, MediaSnapshots
+
+    with engine.begin() as conn:
+        home = _scope(conn, "C-home")
+        _session(conn, "ses_main", home)
+        first = _accepted_turn(conn, "ses_main", home, "paint two lighthouses", "turn_main")
+    store = SQLiteTranscriptStore(engine)
+    root = tmp_path / "media"
+    media = MediaSnapshots(engine, root)
+
+    def jpeg(n: int) -> str:
+        return base64.b64encode(b"\xff\xd8\xff\xe0" + bytes([n]) * 512).decode()
+
+    await store.consume_input("ses_main", first, _user("paint two lighthouses"))
+    await media.snapshot(b"\x89PNG\r\n\x1a\n" + bytes(64), "image/png", session_id="ses_main")
+    first, second = await media.save_image(jpeg(1)), await media.save_image(jpeg(2))
+    execution = ProxyExecution(
+        executor_origin=ORIGIN, executor_source_id="src_executor01", executor_billing="metered", mode="direct"
+    )
+    await store.append_tool_result(
+        "ses_main",
+        ToolResultMessage(
+            tool_call_id="call_2",
+            tool_name="image_generate",
+            content=(text("[image saved]"),),
+            hosted=HostedResult(record=HostedRecord(status="completed", images=(first, second)), execution=execution),
+        ),
+        details={},
+    )
+    fresh, stale, reused = [await media.save_image(jpeg(n)) for n in (3, 4, 5)]
+    temporary = root / f".{'a' * 64}.0123abcd.tmp"
+    temporary.write_bytes(b"half written")
+    foreign = root / "notes.txt"
+    foreign.write_text("not the sweep's")
+    secret = tmp_path / "secret.key"
+    secret.write_bytes(b"key")
+    link = root / f"{'b' * 64}.png"
+    link.symlink_to(secret)
+    old = time.time() - SWEEP_GRACE_S - 60
+    for entry in root.iterdir():
+        if entry.name != Path(fresh.path).name:
+            os.utime(entry, (old, old), follow_symlinks=False)
+    # A save that reuses an old file makes it new again, so the sweep never takes it before its row commits.
+    assert await media.save_image(jpeg(5)) == reused
+
+    gone = Path(stale.path).stat().st_size + temporary.stat().st_size
+
+    assert media.sweep() == (2, gone)
+    kept = {entry.name for entry in root.iterdir()}
+    assert Path(stale.path).name not in kept and temporary.name not in kept
+    assert {Path(image.path).name for image in (first, second, fresh, reused)} <= kept
+    assert {foreign.name, link.name} <= kept and secret.read_bytes() == b"key"
+    assert len([name for name in kept if name.endswith(".png")]) == 2  # the input snapshot and the link
+

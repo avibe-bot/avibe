@@ -389,9 +389,14 @@ vibe agent run --no-callback --create-session --scope-id slack::channel::C999 --
 vibe agent run --close-after --no-callback --agent release-reviewer --message 'Run a disposable batch review.'
 ```
 
-`--send-now` 只能和现有 `--session-id` 一起使用，它显式选择普通的带内容 P1
-语义：新消息会 steering 进活动 native Turn，Session 空闲时立即启动；只有明确
-拒绝后才回退到 P3。它不会提升更早的排队消息。`vibe session send-now` 是无内容
+对于现有 `--session-id`，默认投递是 P1：新 Run 会 steering 进活动 native Turn，
+Session 空闲时立即启动。如果活动 Turn 中包含用户本人发送的消息，Run 不会 steering
+进去，而是进入 P3 队列，在该 Turn 结束后作为独立 Turn 执行，这样用户得到的答复仍是
+该 Turn 的结果。Watch、Hook、Webhook 和回调投递遵循同一规则。
+
+`--send-now` 只能和现有 `--session-id` 一起使用，它显式把新消息 steering 进活动
+native Turn，包括包含用户消息的 Turn；Session 空闲时立即启动；只有明确拒绝后才
+回退到 P3。它不会提升更早的排队消息。`vibe session send-now` 是无内容
 P1 操作，只提升现有的精确 FIFO 队头，不新增消息。过期队头会被拒绝，而不会改为
 提升下一条；两个命令都不会调用 Stop。
 
@@ -400,6 +405,14 @@ P1 操作，只提升现有的精确 FIFO 队头，不新增消息。过期队�
 只有 backend 不变时，才可以通过 `--agent`、`--model`、`--reasoning-effort`
 覆盖 fork 后 Session 的 Agent、模型或推理强度；跨 backend fork 会被拒绝。
 不要把 `--fork-session` 和 `--session-id` 或 `--create-session` 混用。
+
+`--model` 和 `--reasoning-effort` 可以为这次运行创建的任何新 Session（空白新
+Session、`--create-session` 或 fork）设置模型，该 Session 之后的轮次会沿用它。
+它们不能与 `--session-id` 一起使用；已有 Session 的模型在 Web UI 的 Session 模型
+选择器中修改。新 Session 实际运行的组合（覆盖值加上它原本沿用的默认值）会按 Agent
+的模型目录检查：Vibey 的 Model Hub 菜单不提供的模型或推理强度，或菜单无法加载时，
+会被拒绝；claude 和 codex 的未知值只给出警告，因为它们内置的目录可能落后于新版本。
+`vibe agent models <agent>` 会列出可用的值。
 
 异步 run 需要明确 callback 策略，除非命令运行在 Avibe 已注入 caller context
 的 Agent 环境内。当最终结果文本需要回到调用方 Session 时，使用

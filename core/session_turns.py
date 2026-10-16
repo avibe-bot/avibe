@@ -28,11 +28,13 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, ContextManager, Iter
 
 from sqlalchemy import and_, exists, literal, or_, select, update
 from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.exc import OperationalError
 
 from core.delivery_target import normalize_message_kind
 from core.agent_input import AgentInputMetadata
 from core.backend_failure import backend_failure_notification_output, harness_run_identity
 from core.message_context import (
+    TERMINAL_COMMIT_KEY,
     resolve_turn_sink_key,
 )
 from core.native_dispatch_phase import (
@@ -63,7 +65,7 @@ from core.services.agent_steering import (
     result as steer_result,
     steer_active_turn,
 )
-from storage import messages_service
+from storage import loop_writers, messages_service
 from storage import message_deliveries as delivery_store
 from storage.agent_transcript import recovered_watch_ids
 from storage.agent_session_rows import reserve_write_lock
@@ -477,6 +479,28 @@ def _segment_dispatch_text(segment: list[dict[str, Any]]) -> str:
     return ("\n\n---\n\n" if scheduled else "\n").join(texts)
 
 
+def _yields_to_human_turn(
+    conn: Connection,
+    request: "DeliveryRequest",
+    delivery: dict[str, Any],
+    turn_id: str,
+) -> bool:
+    """Whether this P1 input queues behind the active Turn instead of steering it.
+
+    A Watch, Hook, Webhook, or Agent Run delivers a scheduled Harness input: an
+    automatic signal, not a person speaking. Steered into a Turn that serves a
+    person, it would continue that Turn past the person's answer, which would
+    then no longer be the Turn's result. So it waits for that Turn to end and
+    runs as its own Turn. A person's input (IM, a Show annotation) and an
+    explicit send-now keep steering.
+    """
+    if request.send_now:
+        return False
+    if delivery_store.scheduled_delivery_provenance(delivery_store.delivery_payload(delivery)) is None:
+        return False
+    return delivery_store.turn_has_human_input(conn, turn_id)
+
+
 def emit_matches_active_turn(sink: dict, context: "MessageContext") -> bool:
     """The ONE active-turn token rule (FSM Phase 2 — collapses the three previously
     duplicated guards: ``_stream_chunk`` completion, ``_is_active_turn``, and
@@ -545,6 +569,9 @@ class Turn:
     delivery_id: Optional[str] = None
     terminal_is_error: bool = False
     computer_use_admission_closed: bool = False
+    #: ``SOURCE_HUMAN`` or ``SOURCE_SCHEDULED``: whether a person launched this
+    #: Turn, so attended-only capabilities such as script confirms can refuse.
+    source: str = SOURCE_HUMAN
 
 
 @dataclass(frozen=True)
@@ -552,6 +579,14 @@ class ComputerUseAdmission:
     """One Computer Use request admitted for one live Avibe Session."""
 
     session_id: str
+    turn: Turn = field(repr=False, compare=False)
+    logical_turn_id: str | None = None
+
+
+# A human reply consumed as the answer to a pending Computer Use script confirm.
+SCRIPT_CONFIRM_ANSWER_REASON = "computer_confirm_answer"
+# Delivery metadata that binds an input to one specific earlier prompt.
+_PROMPT_TARGET_METADATA_KEYS = ("quick_reply_for",)
 
 
 @dataclass(frozen=True)
@@ -589,6 +624,10 @@ class DeliveryRequest:
     # P3 admission without the usual idle-session auto-start. This keeps the
     # admission and promotion decision on one post-admission queue snapshot.
     admission_only: bool = False
+    # A producer's explicit send-now (``vibe agent run --send-now``). Without it,
+    # a scheduled Harness P1 input never steers a Turn a person's input is part
+    # of; it queues behind that Turn (``_yields_to_human_turn``).
+    send_now: bool = False
 
 
 @dataclass(frozen=True)
@@ -628,6 +667,24 @@ class _RuntimeStartOwner:
     admitted: bool
     identity: RuntimeActivationIdentity | None = None
 
+
+
+def _try_reserve_write_lock(conn: Connection) -> bool:
+    """``reserve_write_lock`` without waiting: ``False`` when another connection holds
+    SQLite's writer, instead of blocking the caller for the busy timeout."""
+
+    loop_writers.mark_never_waits(conn)
+    previous = conn.exec_driver_sql("PRAGMA busy_timeout").scalar()
+    conn.exec_driver_sql("PRAGMA busy_timeout = 0")
+    try:
+        reserve_write_lock(conn)
+    except OperationalError as exc:
+        if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+            raise
+        return False
+    finally:
+        conn.exec_driver_sql(f"PRAGMA busy_timeout = {int(previous)}")
+    return True
 
 class SessionTurnManager:
     """Owns the live per-session turn state + lifecycle for avibe sessions.
@@ -1999,6 +2056,21 @@ class SessionTurnManager:
                     raise RuntimeError("runtime-rejected Delivery queue fallback lost")
             return None
 
+        # Admission can claim an older queued segment, and FIFO may resolve its
+        # runtime only after inspecting input. Gate the actual claimed backend
+        # here as well, using each durable row rather than the waking request.
+        incompatible_resumes = [
+            delivery for delivery in deliveries
+            if backend != "vibey"
+            and delivery_store.is_vibey_resume_payload(delivery_store.delivery_payload(delivery))
+        ]
+        if incompatible_resumes:
+            for delivery in incompatible_resumes:
+                cls._retire_delivery_not_written(
+                    conn, session_id, str(delivery["id"]), reason="backend_changed"
+                )
+            return None
+
         denied_remote = [
             (delivery, reason)
             for delivery in deliveries
@@ -2432,6 +2504,14 @@ class SessionTurnManager:
             {
                 "delivery_id": str(delivery["id"]),
                 "delivery_source": payload.get("source"),
+                "vibey_resume": delivery_store.is_vibey_resume_payload(payload),
+                "vibey_source_turn_id": (
+                    (payload.get("metadata") or {}).get(
+                        delivery_store.VIBEY_SOURCE_TURN_METADATA_KEY
+                    )
+                    if delivery_store.is_vibey_resume_payload(payload)
+                    else None
+                ),
                 "scope_id": payload.get("scope_id"),
                 "display_text": payload.get("text") or "",
                 "message_content": dict(payload.get("content") or {}),
@@ -2482,12 +2562,14 @@ class SessionTurnManager:
                 return raw_session_id
         return session_id
 
-    @staticmethod
     def _has_resolvable_delivery_input(
+        self,
         conn: Connection,
         delivery: dict[str, Any],
     ) -> bool:
         payload = delivery_store.delivery_payload(delivery)
+        if delivery_store.is_vibey_resume_payload(payload):
+            return True
         from core.workbench_media import resolve_attachment_specs
 
         specs = resolve_attachment_specs(
@@ -2834,7 +2916,22 @@ class SessionTurnManager:
         if not content_present and request.content == "":
             request = replace(request, content=None)
         if request.priority == "p3" and not content_present:
-            raise ValueError("P3 requires content")
+            delivery = None
+            if request.delivery_id:
+                with self._sqlite_engine().connect() as conn:
+                    delivery = delivery_store.get_delivery(conn, request.delivery_id)
+            # submit() is a wake-up, not the producer of hidden retry provenance.
+            # Neither its default user fields nor caller-supplied markers decide
+            # whether an empty Delivery is an authorized continuation.
+            if not (
+                delivery is not None
+                and delivery["session_id"] == request.session_id
+                and delivery_store.is_vibey_resume_payload(delivery_store.delivery_payload(delivery))
+            ):
+                raise ValueError("P3 requires content")
+        confirm_answer = self._consume_script_confirm_answer(request, context)
+        if confirm_answer is not None:
+            return confirm_answer
         backend, resolved_context = self._delivery_backend(
             request.session_id,
             context,
@@ -2844,6 +2941,60 @@ class SessionTurnManager:
         if request.priority == "p1":
             return await self._admit_p1(request, backend, resolved_context)
         return await self._admit_p0(request, backend, resolved_context)
+
+    def _consume_script_confirm_answer(
+        self,
+        request: DeliveryRequest,
+        context: Optional["MessageContext"],
+    ) -> DeliveryResult | None:
+        """Hand the approver's answer to a pending script confirm, before admission.
+
+        Web dispatch and IM ingress both reach here with a reserved human
+        Delivery. The script asking is blocking this Session's running Turn, so
+        a queued or steered answer could never reach it. A matched answer
+        retires its reservation instead of being admitted: it starts no Turn
+        and joins no queue. Every other input continues unchanged.
+        """
+
+        if request.source != "user" or context is None or not request.delivery_id:
+            return None
+        # A plain yes/no names no prompt, so only a direct original text reply
+        # may answer. Quick replies, forwards, edits, and anything aimed at
+        # another prompt stay ordinary messages.
+        if request.message_kind != "original" or getattr(context, "files", None):
+            return None
+        if any(key in (request.metadata or {}) for key in _PROMPT_TARGET_METADATA_KEYS):
+            return None
+        interactions = getattr(self.controller, "computer_script_interactions", None)
+        match_answer = getattr(interactions, "match_answer", None)
+        if not callable(match_answer):
+            return None
+        text = request.display_text if request.display_text is not None else request.content
+        matched = match_answer(
+            session_id=request.session_id,
+            approver_id=str(getattr(context, "user_id", None) or ""),
+            message=str(text or ""),
+        )
+        if matched is None:
+            return None
+        with self._sqlite_engine().begin() as conn:
+            reserve_write_lock(conn)
+            retired = delivery_store.retire_reserved(
+                conn,
+                request.session_id,
+                request.delivery_id,
+                reason=SCRIPT_CONFIRM_ANSWER_REASON,
+            )
+        if not retired:
+            return None
+        confirm_id, approved = matched
+        interactions.resolve_answer(confirm_id, approved)
+        return DeliveryResult(
+            delivery_id=request.delivery_id,
+            message_id=None,
+            state="retired",
+            reason=SCRIPT_CONFIRM_ANSWER_REASON,
+        )
 
     async def _admit_p3(
         self,
@@ -2883,6 +3034,24 @@ class SessionTurnManager:
                 priority="p3",
                 state="queued",
             )
+            if (
+                delivery_store.is_vibey_resume_payload(delivery_store.delivery_payload(delivery))
+                and backend != "vibey"
+                and delivery["state"] in {"queued", "reserved"}
+            ):
+                self._retire_delivery_not_written(
+                    conn,
+                    request.session_id,
+                    str(delivery["id"]),
+                    reason="backend_changed",
+                )
+                delivery = delivery_store.get_delivery(conn, str(delivery["id"])) or delivery
+                return DeliveryResult(
+                    str(delivery["id"]),
+                    str(delivery.get("message_id") or "") or None,
+                    "retired",
+                    reason="backend_changed",
+                )
             if delivery["state"] not in {"queued", "reserved"}:
                 return DeliveryResult(
                     str(delivery["id"]),
@@ -3042,7 +3211,23 @@ class SessionTurnManager:
                 and identity is not None
                 and identity[0] == observed_id
             )
-            if same_active:
+            if current is not None and _yields_to_human_turn(conn, request, delivery, str(current["id"])):
+                queued = delivery_store.cas_delivery(
+                    conn,
+                    str(delivery["id"]),
+                    expected_version=int(delivery["version"]),
+                    expected_states=("reserved",),
+                    values={"priority": "p3", "state": "queued"},
+                    history_event={
+                        "kind": "queue",
+                        "reason": "behind_human_turn",
+                        "turn_id": str(current["id"]),
+                    },
+                )
+                if queued is None:
+                    raise RuntimeError("P1 queue claim behind a human Turn lost after writer reservation")
+                delivery = queued
+            elif same_active:
                 attempt_id = delivery_store.new_attempt_id()
                 native_id = str(identity[1])
                 turn_id = observed_id
@@ -3898,6 +4083,7 @@ class SessionTurnManager:
         ):
             return {"state": "reconciling", "reason": "prewrite_owner_changed"}
 
+        self._close_turn_computer_use_admission(projected)
         projected.cancel_settled_by = SETTLED_BY_STOPPED
         mark_prewrite_user_stop(projected.context)
         projected.task.cancel()
@@ -3957,6 +4143,8 @@ class SessionTurnManager:
             or turn.task.done()
         ):
             runtime_turn = None
+        if runtime_turn is not None:
+            self._close_turn_computer_use_admission(runtime_turn)
         stop_context = runtime_turn.context if runtime_turn is not None else None
         unavailable_reason = "runtime_owner_unavailable"
         if stop_context is None and logical_turn_id:
@@ -4311,6 +4499,13 @@ class SessionTurnManager:
                 for row in deliveries
                 if not self._has_resolvable_delivery_input(conn, row)
             }
+            # The final routing context is rebuilt after claim. Both that route
+            # and the bound Turn must still support the hidden control input.
+            if str(turn["backend"]) != "vibey" or self._context_backend(resolved) != "vibey":
+                invalid_delivery_ids.update(
+                    str(row["id"]) for row in deliveries
+                    if delivery_store.is_vibey_resume_payload(delivery_store.delivery_payload(row))
+                )
             remote_authorization_denials = {
                 str(row["id"]): reason
                 for row in deliveries
@@ -4514,9 +4709,18 @@ class SessionTurnManager:
         return (
             ComputerUseAdmission(
                 session_id=normalized_session_id,
+                turn=turn,
+                logical_turn_id=turn.logical_turn_id,
             ),
             "",
         )
+
+    def _close_turn_computer_use_admission(self, turn: Turn) -> None:
+        turn.computer_use_admission_closed = True
+        script_sessions = getattr(self.controller, "computer_script_sessions", None)
+        invalidate_turn = getattr(script_sessions, "invalidate_turn", None)
+        if callable(invalidate_turn):
+            invalidate_turn(turn)
 
     def _delivery_runtime_owner_factory(
         self,
@@ -4585,6 +4789,15 @@ class SessionTurnManager:
         expected_head_version: int | None = None,
     ) -> bool:
         turn_id: str | None = None
+        with self._sqlite_engine().connect() as conn:
+            # Most drains find nothing to claim -- every Turn end asks. Those answer
+            # from a read, as the claim below would, without taking the writer (#2706).
+            claimable = (
+                delivery_store.active_turn(conn, session_id) is None
+                and delivery_store.claimable_fifo_head(conn, session_id) is not None
+            )
+        if not claimable:
+            return False
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             turn_id = self._claim_fifo_batch_in_transaction(
@@ -4658,6 +4871,16 @@ class SessionTurnManager:
         linked_activation_deferred = False
         with self._sqlite_engine().connect() as conn:
             observed_turn = delivery_store.get_turn(conn, turn_id)
+        if observed_turn is None or observed_turn["state"] == "terminal":
+            # Terminal is final, and a missing Turn stays missing: the answer the
+            # recheck under the writer would give, without the boundary or the writer.
+            # A Turn end reaches here again after its terminal write (#2706).
+            return {
+                "changed": False,
+                "successor_turn_id": None,
+                "delivery_id": None,
+                "defer_queue_resume": False,
+            }
         owner_session_id = str((observed_turn or {}).get("session_id") or "")
         owner_backend = str((observed_turn or {}).get("backend") or "")
         with self._runtime_start_owner(owner_session_id, owner_backend) as start_owner, self._sqlite_engine().begin() as conn:
@@ -5219,10 +5442,41 @@ class SessionTurnManager:
         terminal_is_error: bool,
         cancel_defers_queue_resume: bool = False,
         failure_evidence: dict[str, Any] | None = None,
+        terminal_commit: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Contain post-native ownership writes so runner cleanup always finishes."""
+        """Contain post-native ownership writes so runner cleanup always finishes.
+
+        ``terminal_commit`` is the evidence a terminal emit handed to its Turn write
+        (#2714). When that write already landed, the Turn is terminal and this is a
+        no-op; when it failed, the runner commits the same thing it would have.
+        """
 
         try:
+            if terminal_commit is not None:
+                committed_settlement = (
+                    str(terminal_commit.get("settled_by") or "") or settled_by
+                )
+                # The evidence is the emit's, but whether the queue moves on stays
+                # the runner's decision: a cancelled runner keeps the cancellation's
+                # resume rule below, so a shutdown never starts a successor.
+                resume = not cancelled or (
+                    (settled_by or SETTLED_BY_NO_TERMINAL_RESULT) == SETTLED_BY_STOPPED
+                    and not cancel_defers_queue_resume
+                )
+                result = self._terminalize_durable_turn(
+                    turn_id,
+                    self._durable_terminal_outcome(
+                        is_error=terminal_is_error,
+                        settled_by=committed_settlement,
+                    ),
+                    settled_by=committed_settlement or SETTLED_BY_TERMINAL_RESULT,
+                    evidence_kind="terminal_result",
+                    evidence=terminal_commit["evidence"],
+                    resume_successors=resume,
+                )
+                if not resume:
+                    result["defer_queue_resume"] = True
+                return result
             if cancelled:
                 interruption = settled_by or SETTLED_BY_NO_TERMINAL_RESULT
                 resume_after_cancel = bool(
@@ -6696,8 +6950,8 @@ class SessionTurnManager:
         for turn in turns:
             turn_id = str(turn["id"])
             target_session = str(turn["session_id"])
-            with self._sqlite_engine().begin() as conn:
-                reserve_write_lock(conn)
+            # A read: ``_terminalize_durable_turn`` rechecks it under the writer.
+            with self._sqlite_engine().connect() as conn:
                 latest = delivery_store.get_turn(conn, turn_id)
                 terminal_stop_receipt = bool(
                     latest is not None
@@ -7028,7 +7282,7 @@ class SessionTurnManager:
                 if result.state != "reserved":
                     recovered.append(target_session)
         with self._sqlite_engine().connect() as conn:
-            terminal_run_owners = delivery_store.terminal_turn_agent_run_owners(
+            terminal_run_owners = delivery_store.recoverable_terminal_turn_agent_run_owners(
                 conn,
                 session_id,
             )
@@ -7093,8 +7347,7 @@ class SessionTurnManager:
                     recoverable_owners.append((terminal_turn, run_ids))
         for terminal_turn, run_ids in recoverable_owners:
             self._settle_agent_run_ids_from_terminal_turn(run_ids, terminal_turn)
-        with self._sqlite_engine().begin() as conn:
-            reserve_write_lock(conn)
+        with self._sqlite_engine().connect() as conn:
             queued_without_owner = set(
                 delivery_store.queued_session_ids_without_live_turns(conn, session_id)
             )
@@ -7109,17 +7362,25 @@ class SessionTurnManager:
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             live = delivery_store.session_ids_with_live_turns(conn)
-            owned = delivery_store.session_ids_with_turn_history(conn)
-            idle = owned - live
-            if idle:
-                cleared = conn.execute(
-                    update(agent_sessions)
-                    .where(agent_sessions.c.id.in_(idle))
-                    .where(agent_sessions.c.status == "active")
-                    .where(agent_sessions.c.agent_status == "running")
-                    .values(agent_status="idle")
+            # Only the sessions projected ``running`` that have Turn history and no
+            # live Turn, each checked by an indexed lookup -- not every session that
+            # ever ran a Turn, a set that grows with history (#2706).
+            # Seeks ``ix_agent_sessions_agent_status`` (agent_status, status).
+            stale_running = (
+                update(agent_sessions)
+                .where(agent_sessions.c.agent_status == "running")
+                .where(agent_sessions.c.status == "active")
+                .where(
+                    exists(
+                        select(session_turn_rows.c.id).where(
+                            session_turn_rows.c.session_id == agent_sessions.c.id
+                        )
+                    )
                 )
-                _ = cleared.rowcount
+            )
+            if live:
+                stale_running = stale_running.where(agent_sessions.c.id.notin_(live))
+            conn.execute(stale_running.values(agent_status="idle"))
             if live:
                 running = conn.execute(
                     update(agent_sessions)
@@ -7347,8 +7608,8 @@ class SessionTurnManager:
         return successor_id
 
     async def _resume_post_terminal(self, session_id: str) -> None:
-        with self._sqlite_engine().begin() as conn:
-            reserve_write_lock(conn)
+        # A read: both continuations recheck under their own writer.
+        with self._sqlite_engine().connect() as conn:
             owner = delivery_store.active_turn(conn, session_id)
         if owner is not None:
             await self._resume_durable_session(session_id)
@@ -7640,6 +7901,33 @@ class SessionTurnManager:
                         settled_by = (
                             getattr(turn, "cancel_settled_by", None) if turn is not None else None
                         ) or SETTLED_BY_NO_TERMINAL_RESULT
+                    terminal_commit = (context.platform_specific or {}).pop(
+                        TERMINAL_COMMIT_KEY, None
+                    )
+                    reconciled = False
+
+                    def reconcile_release() -> dict[str, Any]:
+                        return self._reconcile_durable_runner_release(
+                            logical_turn_id,
+                            cancelled=cancelled,
+                            failed=failed,
+                            prewrite_refused=prewrite_refused,
+                            definitive_prewrite_exit=definitive_prewrite_exit,
+                            settled_by=settled_by,
+                            terminal_is_error=terminal_is_error,
+                            cancel_defers_queue_resume=cancel_defers_queue_resume,
+                            failure_evidence=prewrite_failure_evidence(context),
+                            terminal_commit=terminal_commit,
+                        )
+
+                    if terminal_commit is not None and logical_turn_id and durable_turn_registered:
+                        # The emit's own Turn write failed (#2714); this write stands in
+                        # for it, so it lands where that one would have: before Hub
+                        # finalization, which relies on the row being terminal (#2735).
+                        durable_terminal_result = reconcile_release()
+                        # A write that failed again carries no ``changed``; it gets the
+                        # attempt after finalization that it would have had on its own.
+                        reconciled = "changed" in durable_terminal_result
                     completion = self._settle_model_hub_turn(context, settled_by)
                     if inspect.isawaitable(completion):
                         from core.handlers.model_hub.async_owner import await_owned_task
@@ -7651,23 +7939,17 @@ class SessionTurnManager:
                     # Durable output may already have marked the old row terminal.
                     # _start_persisted_turn still fences its successor on this live
                     # runner, so release the projection only after Hub finalization.
-                    if turn is not None and self.in_flight.get(session_id) is turn:
+                    released_projection = turn is not None and self.in_flight.get(session_id) is turn
+                    if released_projection:
                         self.in_flight.pop(session_id, None)
+                    if not reconciled and logical_turn_id and durable_turn_registered:
+                        durable_terminal_result = reconcile_release()
+                    if released_projection:
+                        # After the terminal write, so its session.status precedes
+                        # turn.end as it does when the emit's own write lands (#2735).
                         bus.publish(
                             "turn.end",
                             _turn_event_payload(session_id, logical_turn_id),
-                        )
-                    if logical_turn_id and durable_turn_registered:
-                        durable_terminal_result = self._reconcile_durable_runner_release(
-                            logical_turn_id,
-                            cancelled=cancelled,
-                            failed=failed,
-                            prewrite_refused=prewrite_refused,
-                            definitive_prewrite_exit=definitive_prewrite_exit,
-                            settled_by=settled_by,
-                            terminal_is_error=terminal_is_error,
-                            cancel_defers_queue_resume=cancel_defers_queue_resume,
-                            failure_evidence=prewrite_failure_evidence(context),
                         )
                     # Only definitive pre-write failure may synthesize an empty
                     # terminal result. Once native work may have produced output, a
@@ -7733,6 +8015,7 @@ class SessionTurnManager:
                 started_at=_utc_now_iso(),
                 logical_turn_id=logical_turn_id,
                 delivery_id=delivery_id,
+                source=source,
             )
             # Make the DB row authoritative at ACCEPTANCE, not at dispatch start:
             # ``update_session``'s backend lock re-checks ``agent_status`` inside
@@ -7855,15 +8138,31 @@ class SessionTurnManager:
         return recovered
 
     def _repair_ownerless_running_projection(self, session_id: str) -> bool:
-        """Clear a legacy running projection only after an exact owner recheck."""
+        """Clear a legacy running projection only after an exact owner recheck.
+
+        Runs on the controller loop, so no loop-side section that writes the running
+        projection before it creates the owner (an agent-initiated Turn's ``on_running``,
+        then ``register_agent_initiated_turn``) can interleave with the recheck. It
+        therefore never WAITS for SQLite's writer, which another process may hold for
+        the whole busy timeout (#2706): a busy writer skips the repair, and the next
+        turn-state read retries it.
+        """
 
         engine = self._sqlite_engine()
         if not callable(getattr(engine, "connect", None)):
             return False
         if not self._durable_schema_available():
             return False
+        # Most sessions are not projected running: answer them without the writer.
+        with engine.connect() as conn:
+            status = conn.execute(
+                select(agent_sessions.c.agent_status).where(agent_sessions.c.id == session_id)
+            ).scalar_one_or_none()
+        if status != "running":
+            return False
         with engine.begin() as conn:
-            reserve_write_lock(conn)
+            if not _try_reserve_write_lock(conn):
+                return False
             if delivery_store.active_turn(conn, session_id) is not None:
                 return False
             repaired = conn.execute(
@@ -8620,6 +8919,7 @@ class SessionTurnManager:
             return {"ok": False, "code": "not_in_flight", "session_id": session_id}
         if turn.task.done():
             return {"ok": True, "session_id": session_id, "status": "already_finished"}
+        self._close_turn_computer_use_admission(turn)
         turn.cancel_settled_by = SETTLED_BY_STOPPED
         if turn.context.platform_specific is None:
             turn.context.platform_specific = {}
@@ -9142,11 +9442,6 @@ class SessionTurnManager:
                 )
                 if turn is not None:
                     self.in_flight.pop(session_id, None)
-                if turn is not None:
-                    bus.publish(
-                        "turn.end",
-                        _turn_event_payload(session_id, turn_token),
-                    )
                 if durable_turn_registered:
                     try:
                         durable_terminal_result = self._terminalize_durable_turn(
@@ -9183,6 +9478,13 @@ class SessionTurnManager:
                             turn_token,
                         )
                         durable_terminal_result = {"defer_queue_resume": True}
+                if turn is not None:
+                    # After the terminal write, so its session.status precedes
+                    # turn.end (#2735).
+                    bus.publish(
+                        "turn.end",
+                        _turn_event_payload(session_id, turn_token),
+                    )
                 should_flush = not (
                     queue_resume_deferred
                     or bool(durable_terminal_result.get("defer_queue_resume"))
@@ -9468,7 +9770,7 @@ class SessionTurnManager:
             return
         try:
             with self._sqlite_engine().connect() as conn:
-                has_history = session_id in delivery_store.session_ids_with_turn_history(conn)
+                has_history = delivery_store.session_has_turn_history(conn, session_id)
         except Exception:
             logger.debug(
                 "could not inspect durable Turn history for restored poll %s",

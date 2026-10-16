@@ -1688,6 +1688,35 @@ def _read_claude(home: Path | None, *, allow_secret: bool) -> NativeOAuthSnapsho
     )
 
 
+def clear_claude_native_oauth_files(home: Path | None = None) -> list[str]:
+    """Clear selected file-backed Claude grants, preserving unrelated entries.
+
+    The caller owns the native credential lease. Use the inventory's locator
+    and the existing compare/write/readback machinery; no Keychain value is
+    read and no cleanup journal is persisted.
+    """
+    operations = []
+    changed = []
+    for path in native_credentials_paths("claude", home):
+        status, payload, raw = _read_json_file(path)
+        if status == "missing":
+            continue
+        if status != "ok" or payload is None or raw is None:
+            raise NativeOAuthPermissionError("native credential file could not be safely cleaned")
+        after = _remove_claude_oauth(payload)
+        if _claude_oauth_payload(after) is not None:
+            after = _remove_claude_oauth(after)
+        if after == payload and payload:
+            continue
+        operations.append(_file_operation(path, _json_file_state_from_raw(raw), _state_for_json_payload(after, raw)))
+        changed.append(str(path))
+    if operations:
+        edit = _edit("claude", "explicit-native-cleanup", operations)
+        apply_keychain_edit(edit)
+        check_keychain_edit(edit, applied=True)
+    return changed
+
+
 def read_native_oauth(
     backend: str,
     *,

@@ -17,7 +17,7 @@ import time
 from collections import deque
 from contextlib import asynccontextmanager, suppress
 from copy import deepcopy
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, AsyncIterator, Awaitable, Callable, Iterable, Literal, Mapping, Optional, Sequence, TypeVar
 
 from core.agent_core.agent.events import (
@@ -67,12 +67,13 @@ from core.agent_core.agent.lifecycle import RunAborted as _Aborted, RunScope
 from core.agent_core.agent.models import ModelRouter, ModelSelection, RetryPolicy
 from core.agent_core.agent.outcome import OutcomeOwner
 from core.agent_core.agent.state import HookStateError, state_representation
-from core.agent_core.ai._common import endpoint_origin
+from core.agent_core.ai._common import endpoint_origin, native_hosted_tools, portable_endpoint
 from core.agent_core.ai.provider import (
     Done,
     ModelEndpoint,
     ModelRequest,
     ProviderError,
+    Refusal,
     TextDelta,
     ThinkingDelta,
 )
@@ -127,13 +128,14 @@ from core.agent_core.harness.projection import (
 from core.agent_core.harness.store import ContextEntry, EntryKind, TranscriptStore
 from core.agent_core.messages import (
     AssistantMessage,
+    HostedImage,
     Message,
     Origin,
-    TextBlock,
     ToolCallBlock,
     ToolResultMessage,
     Usage,
     UserMessage,
+    has_reply,
     message_to_dict,
     text,
     usage_to_dict,
@@ -185,6 +187,66 @@ def _cache_of(origin: Origin) -> tuple[str, str]:
 
 async def _silent(*_: Any, **__: Any) -> None:
     """A side turn's emit: it shows nothing (C-10 section 7)."""
+
+
+#: The fresh hops a run resolves to answer refusals before any output (``vibey-hosted-tools.md`` §3.5).
+MAX_REFUSAL_RESOLVES = 2
+
+
+@dataclass
+class _Refusals:
+    """A run's refusals before any output, and how the requests after them render (``vibey-hosted-tools.md`` §3.5).
+
+    A refusal is answered by a fresh hop, rendered normally: at most once per (Source, tool, aspect) a narrow hosted
+    rule names, and at most ``MAX_REFUSAL_RESOLVES`` times in the run. Past a bound, or when a gateway hand-back's
+    fresh hop is the refused one again, the request goes portable instead.
+
+    A Source identity whose provider refused an opaque payload of a kind sends none of that kind again in this Session:
+    ``opaque`` starts with the Session's earlier refusals (``replay_refusal`` rows), and each new one is answered once,
+    then kept (``unsaved`` until the loop persists it). A refusal of a kind already demoted stands as the error.
+    """
+
+    resolves: int = 0
+    rules: set[tuple[Optional[str], str, Optional[str]]] = field(default_factory=set)
+    opaque: set[tuple[Optional[str], str]] = field(default_factory=set)
+    unsaved: dict[Optional[str], list[str]] = field(default_factory=dict)
+
+    def answer(self, refusal: Refusal) -> Optional[Literal["resolve", "portable"]]:
+        """How the next attempt answers ``refusal``, counted; None when the refusal stands as the error."""
+        if refusal.kind == "opaque_refused":
+            fresh = [kind for kind in refusal.payloads if (refusal.source_identity, kind) not in self.opaque]
+            if not fresh:
+                return None
+            self.opaque.update((refusal.source_identity, kind) for kind in fresh)
+            self.unsaved.setdefault(refusal.source_identity, []).extend(fresh)
+        rule = (refusal.source_id, refusal.tool, refusal.aspect) if refusal.tool is not None else None
+        if self.resolves >= MAX_REFUSAL_RESOLVES or rule in self.rules:
+            return "portable"
+        self.resolves += 1
+        if rule is not None:
+            self.rules.add(rule)
+        return "resolve"
+
+    def render(self, selection: ModelSelection, *, portable: bool) -> ModelSelection:
+        """``selection`` as the next request goes out: without the refused identities' opaque payloads, and portable
+        when the refusal it answers asked for that."""
+        endpoint = selection.endpoint
+        if self.opaque:
+            endpoint = replace(endpoint, opaque_refused=frozenset(self.opaque))
+        if portable:
+            endpoint = portable_endpoint(endpoint)
+        return selection if endpoint is selection.endpoint else replace(selection, endpoint=endpoint)
+
+
+def _same_hop(fresh: ModelEndpoint, refused: ModelEndpoint) -> bool:
+    """A fresh hop that would send the refused request again: the same Source, account and model, with the same
+    hosted-tool facts (§3.5)."""
+    return (fresh.source_id, fresh.source_identity, fresh.model_id, fresh.hosted_tools) == (
+        refused.source_id,
+        refused.source_identity,
+        refused.model_id,
+        refused.hosted_tools,
+    )
 
 
 @dataclass
@@ -290,6 +352,10 @@ class Agent:
         self._turn_inputs: set[int] = set()
         # The run's attempt ledger (C-9): every model attempt, in order.
         self._attempts: list[_Attempt] = []
+        self._refusals = _Refusals()
+        # The images the run's committed tool results generated, which its final delivers: a reply even without text
+        # (``has_reply``). Read from the committed rows, so a result another writer settled counts as it committed.
+        self._generated_images: list[HostedImage] = []
         # When each upstream prompt cache was last used in this Agent: the end of its latest model call, by the provider
         # and model that served it (``_cache_of``, C-9 section 3).
         self._last_model_at: dict[tuple[str, str], float] = {}
@@ -346,23 +412,57 @@ class Agent:
 
     def run(self, input: AgentInput, *, turn_id: str) -> AsyncIterator[AgentEvent]:
         input = deepcopy(input)
-        return self._pump(turn_id, lambda emit: self._drive(emit, input))
+        return self._pump(turn_id, lambda emit: self._drive(emit, input, consume=True))
+
+    def resume(
+        self,
+        input: AgentInput,
+        *,
+        turn_id: str,
+        turn_inputs: Iterable[int] | None = None,
+    ) -> AsyncIterator[AgentEvent]:
+        """Continue from the committed transcript without consuming another input row.
+
+        The input is still passed to ``before_run`` so existing hook setup remains
+        unchanged; it is a control value, not a second transcript message. A fresh
+        Agent can provide the source Turn's input sequence numbers so compaction
+        pins only that Turn's inputs. Within the same Turn, newly admitted inputs
+        extend the existing pins rather than replacing them.
+        """
+        input = deepcopy(input)
+        resume_turn_inputs = None if turn_inputs is None else set(turn_inputs)
+        return self._pump(
+            turn_id,
+            lambda emit: self._drive(emit, input, consume=False),
+            preserve_turn_inputs=True,
+            resume_turn_inputs=resume_turn_inputs,
+        )
 
     async def _pump(
-        self, turn_id: str, drive: Callable[[Callable[..., Awaitable[None]]], Awaitable[None]]
+        self,
+        turn_id: str,
+        drive: Callable[[Callable[..., Awaitable[None]]], Awaitable[None]],
+        *,
+        preserve_turn_inputs: bool = False,
+        resume_turn_inputs: set[int] | None = None,
     ) -> AsyncIterator[AgentEvent]:
+        previous_turn_inputs = set(self._turn_inputs)
+        previous_seq = self._seq
         async with self._lock:
             if self._running:
                 raise RuntimeError("this Agent already has an active run")
             if self._steers or self._follow_ups:
                 raise RuntimeError("return unconsumed inputs with take_pending_inputs() before starting another run")
+            continuing_turn = preserve_turn_inputs and self._ctx.turn_id == turn_id
             self._running = True
             self._open = True
             self._consumer_closed = False
             self._ctx = RunContext(self.session_id, turn_id, CancelToken())
             self._scope = RunScope(self._ctx.cancel)
             self._outcome = OutcomeOwner()
-            self._seq = 0
+            self._seq = previous_seq if continuing_turn else 0
+            if preserve_turn_inputs:
+                self._turn_inputs = (previous_turn_inputs if continuing_turn else set()) | set(resume_turn_inputs or ())
 
         # Bounded delivery applies backpressure to provider streaming. No emit
         # awaits this queue while holding the input-admission lock.
@@ -419,6 +519,17 @@ class Agent:
                     self._running = self._open = False
                     self._run_tools = None
 
+    async def _save_refusals(self) -> None:
+        """Keep the run's new opaque refusals in the Session, so its later turns never send what was refused."""
+        unsaved, self._refusals.unsaved = self._refusals.unsaved, {}
+        for identity, payloads in unsaved.items():
+            entry = {"version": 1, "source_identity": identity, "payloads": payloads}
+            row = await self._scope.call(
+                lambda entry=entry: self.store.append_payload(self.session_id, "replay_refusal", entry),
+                interruptible=False,
+            )
+            self._rows.append(row)
+
     async def _save_state(self, *, cleanup: bool = False) -> None:
         """Hook state at a commit point; a C-9 transition writes it with its own rows (``_commit_context``)."""
         representation = state_representation(self._ctx.state)
@@ -470,14 +581,21 @@ class Agent:
         except ProjectionError as error:
             raise ProviderProtocolViolation(f"Provider protocol violation: {error}") from error
 
-    async def _response(self, message: AssistantMessage, *, final: bool) -> ContextEntry:
+    async def _response(self, message: AssistantMessage, *, final: bool, replied: Optional[bool] = None) -> ContextEntry:
         self._validate_response(message)
         await self._save_state()
         # The attempt this response answered: the ledger's latest conversation attempt (the C-9 anchor).
         attempt = next((item for item in reversed(self._attempts) if item.purpose == "conversation"), None)
         facts = {"request": request_facts(attempt.request)} if self.context is not None and attempt else {}
         row = await self._scope.call(
-            lambda: self.store.append_response(self.session_id, deepcopy(message), final=final, **facts),
+            lambda: self.store.append_response(
+                self.session_id,
+                deepcopy(message),
+                final=final,
+                replied=replied,
+                images=tuple(self._generated_images) if final else (),
+                **facts,
+            ),
             interruptible=False,
         )
         if attempt is not None:
@@ -485,8 +603,14 @@ class Agent:
         self._rows.append(row)
         return row
 
-    async def _drive(self, emit: Callable[..., Awaitable[None]], input: AgentInput) -> None:
-        """One run of ``input``."""
+    async def _drive(
+        self,
+        emit: Callable[..., Awaitable[None]],
+        input: AgentInput,
+        *,
+        consume: bool,
+    ) -> None:
+        """One run of ``input`` or one transcript-only continuation."""
         loaded = False
         try:
             try:
@@ -501,8 +625,13 @@ class Agent:
                 self._committed_state_json = state_representation(self._ctx.state)
                 self._committed_state = deepcopy(self._ctx.state)
                 self._unproductive = 0
-                self._turn_inputs = set()
+                if consume:
+                    self._turn_inputs = set()
                 self._attempts = []
+                # The Session's earlier opaque refusals hold from this run's first request.
+                self._refusals = _Refusals(opaque=set(projection.opaque_refused))
+                if consume:
+                    self._generated_images = []
                 loaded = True
                 system = self.system
                 self._run_tools = dict(self._tools)
@@ -516,7 +645,8 @@ class Agent:
                             if len(names) != len(set(names)):
                                 raise ValueError("tool names must be unique")
                             self._run_tools = dict(zip(names, setup.tools))
-                await self._consume(input)
+                if consume:
+                    await self._consume(input)
                 self._outcome.primary(await self._loop(system, emit, selected))
             except _Ended:
                 self._outcome.primary("ended_by_hook")
@@ -556,14 +686,20 @@ class Agent:
         await emit(RunEnded, reason=self._outcome.reason, cause=self._outcome.cause)
 
     async def _error(
-        self, emit: Callable[..., Awaitable[Any]], kind: str, message: str, origin: ErrorOrigin, *, cause: bool
+        self, emit: Callable[..., Awaitable[Any]], kind: str, message: str, origin: ErrorOrigin, *, cause: bool,
+        provider_error: Optional[ProviderError] = None,
     ) -> None:
         """The one place the loop announces an error: ``origin`` as its caller states it, where the error is raised.
 
         ``cause``: the error decided the run's outcome (``OutcomeOwner.primary``), so ``RunEnded`` names it; a
         diagnostic never does.
         """
-        event = await emit(AgentError, kind=kind, message=message, origin=origin)
+        event = await emit(
+            AgentError, kind=kind, message=message, origin=origin,
+            retryable=provider_error.retryable if provider_error is not None else False,
+            continuable=provider_error.continuable if provider_error is not None else False,
+            retry_after_s=provider_error.retry_after_s if provider_error is not None else None,
+        )
         if cause:
             self._outcome.cause = event
 
@@ -712,6 +848,10 @@ class Agent:
             # A response that dropped after thinking alone is retried once per request (C-2 ``provider.md``): some
             # prompts drop at the same point every time.
             thinking_retried = False
+            # A refusal before any output is answered by rendering the request again (§3.5, ``_Refusals``): the hop a
+            # gateway hand-back refused, and whether the next request goes portable.
+            refused: Optional[ModelEndpoint] = None
+            portable = False
             while True:
                 self._scope.check()
                 if retry_error is not None and time.monotonic() - started >= self.retry.max_elapsed_s:
@@ -719,6 +859,7 @@ class Agent:
                     return
                 if selected is None:
                     selected = await self._scope.call(self.models.resolve)
+                    portable = portable or (refused is not None and _same_hop(selected.endpoint, refused))
                 # Resolution is the last async stage before request admission.
                 # Expiry wins before route validation, projection, rehydration or
                 # hooks can replace the original error or persist new side effects.
@@ -726,8 +867,8 @@ class Agent:
                     yield retry_error, {}
                     return
                 route = selected
-                request, tools = await compose(selected)
-                selected = None
+                request, tools = await compose(self._refusals.render(selected, portable=portable))
+                selected, refused, portable = None, None, False
                 if retry_error is not None and time.monotonic() - started >= self.retry.max_elapsed_s:
                     yield retry_error, tools
                     return
@@ -773,16 +914,24 @@ class Agent:
                         and not streamed
                         and (terminal.partial is None or not terminal.partial.content)
                     )
+                    rerender = (
+                        self._refusals.answer(terminal.refusal)
+                        if isinstance(terminal, ProviderError)
+                        and terminal.refusal is not None
+                        and not streamed
+                        and (terminal.partial is None or not terminal.partial.content)
+                        else None
+                    )
                     delay = (
                         self.retry.delay(terminal, retries=retries, streamed=streamed, elapsed_s=time.monotonic() - started)
-                        if isinstance(terminal, ProviderError) and not relieve
+                        if isinstance(terminal, ProviderError) and not relieve and rerender is None
                         else None
                     )
                     if delay is not None and terminal.after_thinking:
                         if thinking_retried:
                             delay = None
                         thinking_retried = True
-                    if delay is None and not relieve:
+                    if delay is None and not relieve and rerender is None:
                         # Admitted here; the caller commits it inside the scope,
                         # BEFORE aclose. Never retry an accepted terminal.
                         admitted = terminal.message if isinstance(terminal, Done) else terminal.partial
@@ -799,6 +948,15 @@ class Agent:
                 # ladder step (section 8).
                 await self._settle_attempts(first)
                 terminal = replace(terminal, partial=None)
+                if rerender is not None:
+                    await self._save_refusals()
+                if rerender == "portable":
+                    selected, portable = route, True
+                    continue
+                if rerender == "resolve":
+                    if terminal.refusal.kind == "pin_unavailable":
+                        refused = route.endpoint
+                    continue
                 if relieve:
                     ladder.overflows += 1
                     ladder.refused = True
@@ -854,10 +1012,10 @@ class Agent:
             await self._audit("attempt", payload)
 
     async def _commit_model_message(
-        self, message: AssistantMessage, emit: Callable[..., Awaitable[None]]
+        self, message: AssistantMessage, emit: Callable[..., Awaitable[None]], *, replied: bool
     ) -> tuple[ContextEntry, bool]:
         """Commit the response: its row, and whether it is final. Finality and queued-input admission share one lock
-        with the commit."""
+        with the commit. ``replied`` is the run's decision whether it replies, which the store takes as given."""
         pending: list[tuple[AgentInput, bool]] = []
         consumed: list[tuple[AgentInput, bool]] = []
         failed = message.stop_reason in {"error", "aborted"}
@@ -871,7 +1029,7 @@ class Agent:
                 final = not message.tool_calls and not pending and not failed
                 if final or failed:
                     self._open = False
-                row = await self._response(message, final=final)
+                row = await self._response(message, final=final, replied=replied)
                 for item, is_steer in pending:
                     await self._consume(item)
                     (self._steers if is_steer else self._follow_ups).popleft()
@@ -905,7 +1063,9 @@ class Agent:
                     # ``aborted`` is the loop's own cancellation and ``overflow`` says our request was too large;
                     # every other provider error is the source's.
                     origin = "local" if terminal.kind in {"aborted", "overflow"} else "source"
-                    await self._error(emit, terminal.kind, terminal.message, origin, cause=decided)
+                    await self._error(
+                        emit, terminal.kind, terminal.message, origin, cause=decided, provider_error=terminal
+                    )
                     if terminal.partial is not None:
                         row = await self._response(terminal.partial, final=False)
                         await emit(MessageCommitted, message_id=row.row_id, context_seq=row.context_seq, final=False)
@@ -924,16 +1084,20 @@ class Agent:
                         "local" if aborted else "source",
                         cause=decided,
                     )
-                response, final = await self._commit_model_message(message, emit)
-                empty_reply = final and not any(
-                    isinstance(block, TextBlock) and block.text and block.text.strip() for block in message.content
-                )
-                if empty_reply:
+                # Decided once: the empty-reply test, the row's type and settlement all take it (``has_reply``).
+                replied = has_reply(message, generated_images=bool(self._generated_images))
+                response, final = await self._commit_model_message(message, emit, replied=replied)
+                empty_reply = final and not replied
+                truncated_reply = final and message.stop_reason == "length"
+                if empty_reply or truncated_reply:
                     decided = self._outcome.primary("error")
                     await self._error(
                         emit,
-                        message.stop_reason if message.stop_reason in {"refusal", "safety"} else "empty_response",
-                        message.error_message or f"Model stopped with {message.stop_reason} without a reply.",
+                        message.stop_reason if message.stop_reason in {"length", "refusal", "safety"} else "empty_response",
+                        message.error_message or (
+                            "The model reached its output limit before completing the reply."
+                            if truncated_reply else f"Model stopped with {message.stop_reason} without a reply."
+                        ),
                         "source",
                         cause=decided,
                     )
@@ -984,7 +1148,7 @@ class Agent:
                 return "aborted" if message.stop_reason == "aborted" else "error"
             if not message.tool_calls:
                 await self._save_state()
-                if empty_reply:
+                if empty_reply or truncated_reply:
                     return "error"
                 if end:
                     return "ended_by_hook"
@@ -1120,7 +1284,7 @@ class Agent:
     async def _commit_result(
         self, call: ToolCallBlock, result: ToolResult, emit: Callable[..., Awaitable[None]]
     ) -> None:
-        message = ToolResultMessage(call.id, call.name, result.content, result.is_error)
+        message = ToolResultMessage(call.id, call.name, result.content, result.is_error, hosted=result.hosted)
         validate_message_append(self._rows, session_id=self.session_id, kind="tool_result", message=message)
         await self._save_state()
         row = await self._scope.call(
@@ -1128,6 +1292,10 @@ class Agent:
             interruptible=False,
         )
         self._rows.append(row)
+        # The committed result, which a settlement race may have taken from another writer, not this execution's.
+        committed = row.message.hosted if isinstance(row.message, ToolResultMessage) else None
+        if committed is not None and committed.record.status == "completed":
+            self._generated_images.extend(committed.record.images or ())
         await emit(
             ToolFinished,
             tool_call_id=call.id,
@@ -1503,7 +1671,7 @@ class Agent:
         last_tokens = unit_tokens(last) if last is not None else 0
         parts = [
             ContextPart("system", text_tokens(request.system)),
-            ContextPart("tools", request_tokens("", request.tools, ())),
+            ContextPart("tools", request_tokens("", request.tools, (), native_hosted_tools(request))),
             ContextPart("history", max(0, messages_tokens(request.messages) - last_tokens)),
         ]
         if last is not None:
@@ -1810,7 +1978,9 @@ class Agent:
             # A side turn's call has no committed response, so no instance: it starts no job (F4).
             result = await self._execute(tool, call, None, _silent)
         # Every other result that enters the turn is bounded to the room the window leaves (C-9 section 6).
-        return ToolResultMessage(call.id, call.name, fit_result(result.content, limit), result.is_error)
+        return ToolResultMessage(
+            call.id, call.name, fit_result(result.content, limit), result.is_error, hosted=result.hosted
+        )
 
     async def _drop(
         self,
@@ -1878,7 +2048,9 @@ class Agent:
         candidate = ContextEntry(self.session_id, seq, "compaction", "uncommitted-compaction", payload=payload)
         after = context_view([*self._rows, candidate])
         # What the next request would carry; it is budgeted for real when it is built.
-        payload["tokens_after_estimate"] = request_tokens(request.system, request.tools, self._carried(after))
+        payload["tokens_after_estimate"] = request_tokens(
+            request.system, request.tools, self._carried(after), native_hosted_tools(request)
+        )
         return payload, after
 
     async def _hosted(self, view: ContextView, cut: int) -> tuple[tuple[str, ...], Optional[str]]:

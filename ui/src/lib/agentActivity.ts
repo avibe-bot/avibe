@@ -1,5 +1,6 @@
 import type { WorkbenchMessage } from '../context/ApiContext';
 import type { CitationSource } from './citations';
+import { hostedActivityFrom, type HostedActivity } from './hostedActivity';
 import { specFor } from './messageTypes';
 import { timestampOrderTimeMs } from './transcriptOrder';
 
@@ -16,6 +17,8 @@ export type ActivityRow = {
   // Source sidecar for an agent narration row whose text carries citation links
   // (see lib/citations). Absent on every other row, live or durable.
   citations?: CitationSource[];
+  // A hosted tool call's card (lib/hostedActivity); its ``text`` is then the IM line.
+  hosted?: HostedActivity;
 };
 
 // Storage owns persisted order, including clocks recovered from migration metadata.
@@ -94,6 +97,7 @@ export type TurnActivityGroupWire = {
     created_at: string;
     order_micros?: number;
     citations?: CitationSource[];
+    hosted?: unknown;
   }>;
 };
 
@@ -109,6 +113,7 @@ export const groupFromWire = (wire: TurnActivityGroupWire): ActivityGroup => ({
   rows: wire.rows?.map((r) => ({
     id: r.id, kind: r.kind, text: r.text, created_at: r.created_at, order_micros: r.order_micros,
     citations: r.citations,
+    hosted: hostedActivityFrom(r.hosted),
   })),
 });
 
@@ -120,6 +125,7 @@ export const activityRowFromMessage = (msg: WorkbenchMessage): ActivityRow => ({
   text: msg.text ?? '',
   created_at: msg.created_at,
   citations: (msg.content as { citations?: CitationSource[] } | null | undefined)?.citations,
+  hosted: hostedActivityFrom((msg.content as { hosted?: unknown } | null | undefined)?.hosted),
 });
 
 // ===== Live running-card buffer: a pure state machine (state, not timing) =====

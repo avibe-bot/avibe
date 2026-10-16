@@ -176,12 +176,12 @@ def test_use_avibe_harness_owns_the_extracted_harness_protocol() -> None:
 def test_background_watch_skill_defaults_to_current_session() -> None:
     body = _read("skills/background-watch-hook/SKILL.md")
 
-    assert '  --message "<what the next Agent Run should do>"' in body
+    assert '--message "PR #151 has an event.' in body
     assert "Inside an Avibe-injected Agent shell, omitting the target continues this conversation." in body
     assert "Use `--session-id <id>` only when" in body
-    assert "Use `--create-session --same-scope` when follow-ups should run in one visible sibling Session" in body
-    assert "use `--create-session-per-run --same-scope`" in body
-    assert "use `--create-session-per-run --scope-id <scopes.id>`" in body
+    assert "Use `--create-session --same-scope` for one visible sibling Session" in body
+    assert "`--create-session-per-run --same-scope` for a separate visible Session per event" in body
+    assert "Use `--scope-id <scopes.id>` instead of `--same-scope`" in body
     assert "Avibe uses the command's current working directory" in body
     assert "each follow-up should run in a visible sibling Session" not in body
     assert '  --session-id "sesk8m4q2p7x"' not in body
@@ -189,7 +189,14 @@ def test_background_watch_skill_defaults_to_current_session() -> None:
 
 
 def test_background_watch_skill_uses_bundled_waiters_and_persists_managed_pr_state() -> None:
-    body = _read("skills/background-watch-hook/SKILL.md")
+    entry = _read("skills/background-watch-hook/SKILL.md")
+    reference = _read("skills/background-watch-hook/references/waiters.md")
+    body = entry + "\n" + reference
+    skill = parse_skill_file(ROOT / "skills/background-watch-hook/SKILL.md", priority=(1, 0, 1))
+    assert skill is not None
+    rendered = render_skill_content(skill)
+    assert reference not in rendered
+    assert "Read it only for" in entry and "not for routine PR monitoring" in entry
 
     assert (
         'BACKGROUND_WATCH_HOOK_DIR="<directory containing the loaded SKILL.md>"'
@@ -215,7 +222,7 @@ def test_background_watch_skill_uses_bundled_waiters_and_persists_managed_pr_sta
     assert "Omit `--sha`" in body
     assert "Use `--forever` and one" in body
     assert "never reseed or replace its state between rounds" in body
-    preferred_section = body.split("### Preferred PR + CI watch", 1)[1]
+    preferred_section = entry.split("Preferred PR + CI watch", 1)[1]
     preferred_forever_command = preferred_section.split('vibe watch add \\\n', 1)[
         1
     ].split("```", 1)[0]
@@ -233,28 +240,45 @@ def test_background_watch_skill_uses_bundled_waiters_and_persists_managed_pr_sta
     assert '--workflow lint' in body
 
 
-def test_pr_delivery_loop_keeps_one_optional_reference_out_of_routine_loading() -> None:
+def test_pr_delivery_loop_keeps_optional_references_out_of_routine_loading() -> None:
     directory = ROOT / ".agents/skills/pr-delivery-loop"
     body = (directory / "SKILL.md").read_text()
     flat = " ".join(body.split())
     references = re.findall(r"\]\((references/[^)]+\.md)\)", body)
 
-    assert references == ["references/rationale.md"]
+    assert references == ["references/rationale.md", "references/local-regression.md"]
     assert {path.relative_to(directory).as_posix() for path in directory.rglob("*.md")} == {
         "SKILL.md", *references,
     }
     assert "are optional reading" in flat and "do not load them routinely" in flat
     assert "They introduce no additional delivery gates." in flat
     assert "sync the **whole maintained package**, including references, byte-for-byte" in flat
+    assert "Keep exact head-bound evidence in the internal gate record" in flat
+    assert "residual issues (or none known)" in flat
+    assert "gate-state dumps belong in the evidence" in flat
+    assert "offer Merge with the PR link" in flat
+    assert "persist the target PR and exact offered head" in flat
+    assert "visible report may omit the SHA" in flat
 
     skill = parse_skill_file(directory / "SKILL.md", priority=(1, 0, 1))
     assert skill is not None
     rendered = render_skill_content(skill)
     assert "## 4. Complete delivery" in rendered
     assert "### Authorized local regression updates" in rendered
-    reference = (directory / references[0]).read_text()
-    assert reference.startswith("# Delivery Rationale and Examples")
-    assert reference not in rendered
+    for reference_path in references:
+        reference = (directory / reference_path).read_text()
+        assert reference not in rendered
+
+
+def test_quick_replies_are_action_driven_not_mandatory() -> None:
+    body = _read("core/prompts/quick-replies.md")
+    flat = " ".join(body.split())
+    assert "Offer buttons for useful next actions or decisions" in body
+    assert "When buttons are supported and enabled, put this exact multiline footer" in body
+    assert "---\n[button text] | [another action]" in body
+    assert "When none is useful, omit the footer" in body
+    assert "Do not invent filler choices" in body
+    assert "treat displaying an action as authorization" in flat
 
 
 def test_agent_prompt_audit_examples_parse_against_the_real_cli() -> None:

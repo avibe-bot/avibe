@@ -50,6 +50,11 @@ it, exactly as for the other backends' rows (``persist_agent_message`` with
 changes after commit. A final whose ``final_outcome`` failed commits as
 ``error``.
 
+Generated images. A committed row that names a generated image (a hosted
+record's ``images``) registers each file in ``media_objects`` in its own
+transaction, as an input snapshot is registered: the media sweep keeps exactly
+the files some row registers (``vibey-hosted-tools.md`` §7.3).
+
 Cancellation. A worker thread cannot be interrupted, so a cancelled write keeps
 the Session's lock until its transaction settles and only then raises: when a
 write call returns or raises, the rows already show whether it committed.
@@ -71,17 +76,21 @@ from core.agent_core.harness.projection import open_tool_calls
 from core.agent_core.harness.store import ContextEntry, EntryKind
 from core.agent_core.messages import (
     AssistantMessage,
+    HostedImage,
+    HostedToolBlock,
     TextBlock,
     ToolResultMessage,
+    has_reply,
     UserMessage,
     message_from_dict,
     message_to_dict,
     require_json_value,
 )
-from storage import agent_events_service, messages_service
+from storage import agent_events_service, media_service, messages_service
 from storage.agent_session_rows import reserve_write_lock
 from storage.message_deliveries import TURN_OWNER_STATES
 from storage.models import agent_events, agent_sessions, message_deliveries, messages, scopes, session_turns
+from storage.vibey_recovery import VIBEY_RECOVERY_INPUT_PREDICATE
 
 INPUT_TYPES = ("user", "harness", "agent_initiated", "annotation")
 # A final response is ``result``, or ``error`` when ``final_outcome`` says it failed:
@@ -99,45 +108,74 @@ _AUDIT_EVENT_TYPE: dict[str, str] = {"attempt": "model_attempt", "fork_turn": "f
 CONTEXT_WRITER = "vibey"
 PAYLOAD_VERSION = 1
 
-PayloadKind = Literal["compaction", "context_edit", "agent_state"]
+PayloadKind = Literal["compaction", "context_edit", "agent_state", "replay_refusal"]
 _EVENT_TYPE_BY_KIND: dict[str, str] = {
     "tool_result": "tool_result",
     "compaction": "context_compaction",
     "context_edit": "context_edit",
     "agent_state": "agent_state",
+    "replay_refusal": "replay_refusal",
 }
 _KIND_BY_EVENT_TYPE = {event_type: kind for kind, event_type in _EVENT_TYPE_BY_KIND.items()}
 
-# ``render(message, final=...)``: a response row's commit-time display text.
+# ``render(message, final=..., replied=..., images=...)``: a response row's commit-time display text; ``replied`` is
+# the decision ``final_outcome`` takes, and ``images`` those a final delivers with its reply.
 DisplayRenderer = Callable[..., str]
 _T = TypeVar("_T")
 FinalOutcome = Literal["completed", "failed"]
 
 
-def final_outcome(message: AssistantMessage) -> FinalOutcome:
-    """The Turn outcome a committed final response determines by itself.
+def final_outcome(message: AssistantMessage, *, replied: Optional[bool] = None) -> FinalOutcome:
+    """The Turn outcome of a committed final response.
 
     The one rule, shared by the row's type at commit and live settlement: a final
-    reply without text of its own (an unexplained refusal or safety stop, or an
-    empty answer) failed; any other final completed. It is the loop's own
-    empty-reply test (loop-control.md section 2). Failures only a live run can
-    observe after the commit are applied by the live caller.
+    that does not reply, or explicitly stopped at its output limit, failed. Whether
+    it replies is the loop's decision (``has_reply``), taken as given; without one
+    (``replied`` None), the response alone decides. Partial text must not turn a
+    provider's incomplete final into a successful result. Pending-input responses
+    are not finals. Failures only a live run can observe after the commit are
+    applied by the live caller.
     """
-    has_text = any(isinstance(block, TextBlock) and block.text and block.text.strip() for block in message.content)
-    return "completed" if has_text else "failed"
+    if replied is None:
+        replied = has_reply(message)
+    return "completed" if replied and message.stop_reason != "length" else "failed"
 
 
-def _response_type(message: AssistantMessage, *, final: bool, display_text: str) -> str:
+def _response_type(message: AssistantMessage, *, final: bool, display_text: str, replied: bool) -> str:
     if not final:
         return "assistant"
-    if final_outcome(message) == "failed":
+    if final_outcome(message, replied=replied) == "failed":
         return "error"
     return "result" if display_text.strip() else "assistant"
 
 
-def render_text(message: AssistantMessage, *, final: bool = False) -> str:
-    """Default display copy of a response: its text blocks, verbatim, in order."""
-    return "\n\n".join(block.text for block in message.content if isinstance(block, TextBlock) and block.text)
+#: What a response's display puts between two text blocks another block (a tool or hosted call, thinking) separates.
+PARAGRAPH_BREAK = "\n\n"
+
+
+def text_parts(message: AssistantMessage) -> list[tuple[str, TextBlock]]:
+    """A response's text blocks as its display joins them: each non-empty block with what goes before it.
+
+    Adjacent blocks are one span of prose and join as written: a provider may split
+    its answer into many, as Anthropic does at every cited span. A paragraph break
+    goes only where another block came between two of them.
+    """
+    parts: list[tuple[str, TextBlock]] = []
+    separated = False
+    for block in message.content:
+        if not isinstance(block, TextBlock):
+            separated = True
+        elif block.text:
+            parts.append((PARAGRAPH_BREAK if parts and separated else "", block))
+            separated = False
+    return parts
+
+
+def render_text(
+    message: AssistantMessage, *, final: bool = False, replied: bool = True, images: Sequence[HostedImage] = ()
+) -> str:
+    """Default display copy of a response: its text blocks, verbatim, in order, joined as ``text_parts`` says."""
+    return "".join(separator + block.text for separator, block in text_parts(message))
 
 
 class TranscriptError(RuntimeError):
@@ -223,7 +261,10 @@ class SQLiteTranscriptStore:
         *,
         final: bool,
         request: Optional[Mapping[str, Any]] = None,
+        replied: Optional[bool] = None,
+        images: Sequence[HostedImage] = (),
         agent_name: Optional[str] = None,
+        turn_id: Optional[str] = None,
     ) -> ContextEntry:
         if not isinstance(message, AssistantMessage):
             raise TypeError("append_response takes an AssistantMessage")
@@ -231,10 +272,12 @@ class SQLiteTranscriptStore:
         if request is not None:
             response["request"] = dict(request)  # C-9 ``ModelResponse.request``: the anchor's request facts
         model = _canonical(response, "response")
-        display_text = self._render(message, final=final)
+        if replied is None:
+            replied = has_reply(message)
+        display_text = self._render(message, final=final, replied=replied, images=tuple(images))
 
         def work(conn: Connection) -> ContextEntry:
-            origin = _turn_origin(conn, session_id, agent_name)
+            origin = _turn_origin(conn, session_id, agent_name, turn_id)
             seq = _next_context_seq(conn, session_id)
             row = messages_service.append(
                 conn,
@@ -244,11 +287,13 @@ class SQLiteTranscriptStore:
                 author="agent",
                 source="agent",
                 author_name=origin.agent_name,
-                message_type=_response_type(message, final=final, display_text=display_text),
+                message_type=_response_type(message, final=final, display_text=display_text, replied=replied),
                 text=display_text,
                 content={"model": model},
+                metadata={"turn_id": origin.turn_id} if origin.turn_id else None,
             )
             conn.execute(messages.update().where(messages.c.id == row["id"]).values(context_seq=seq))
+            _register_images(conn, origin.scope_id, session_id, message)
             return ContextEntry(
                 session_id, seq, "response", row["id"], message=message, payload=model, created_at=_epoch(row["created_at"])
             )
@@ -262,6 +307,7 @@ class SQLiteTranscriptStore:
         *,
         details: Mapping[str, Any],
         agent_name: Optional[str] = None,
+        turn_id: Optional[str] = None,
     ) -> ContextEntry:
         if not isinstance(message, ToolResultMessage):
             raise TypeError("append_tool_result takes a ToolResultMessage")
@@ -277,14 +323,17 @@ class SQLiteTranscriptStore:
             settled = _settled_result(conn, session_id, message.tool_call_id)
             if settled is not None:
                 return settled
-            return self._append_event(conn, session_id, "tool_result", payload, message, agent_name)
+            return self._append_event(conn, session_id, "tool_result", payload, message, agent_name, turn_id)
 
         return await self._write(session_id, work)
 
     async def append_payload(
-        self, session_id: str, kind: PayloadKind, payload: Mapping[str, Any], *, agent_name: Optional[str] = None
+        self, session_id: str, kind: PayloadKind, payload: Mapping[str, Any], *, agent_name: Optional[str] = None,
+        turn_id: Optional[str] = None,
     ) -> ContextEntry:
-        return (await self.append_payloads(session_id, [(kind, payload)], agent_name=agent_name))[0]
+        return (await self.append_payloads(
+            session_id, [(kind, payload)], agent_name=agent_name, turn_id=turn_id
+        ))[0]
 
     async def append_payloads(
         self,
@@ -292,17 +341,19 @@ class SQLiteTranscriptStore:
         entries: Sequence[tuple[PayloadKind, Mapping[str, Any]]],
         *,
         agent_name: Optional[str] = None,
+        turn_id: Optional[str] = None,
     ) -> list[ContextEntry]:
         """Several payload rows in order, in one transaction: all of them or none (C-9 section 10)."""
         rows = [(kind, _payload(kind, payload)) for kind, payload in entries]
 
         def work(conn: Connection) -> list[ContextEntry]:
-            return [self._append_event(conn, session_id, kind, data, None, agent_name) for kind, data in rows]
+            return [self._append_event(conn, session_id, kind, data, None, agent_name, turn_id) for kind, data in rows]
 
         return await self._write(session_id, work)
 
     async def append_audit(
-        self, session_id: str, kind: AuditKind, payload: Mapping[str, Any], *, agent_name: Optional[str] = None
+        self, session_id: str, kind: AuditKind, payload: Mapping[str, Any], *, agent_name: Optional[str] = None,
+        turn_id: Optional[str] = None,
     ) -> str:
         """A non-context audit row (C-9 ``ModelAttempt`` or C-10 ``ForkTurn``); its id. Never loaded as context."""
         if kind not in _AUDIT_EVENT_TYPE:
@@ -310,7 +361,7 @@ class SQLiteTranscriptStore:
         data = _canonical(dict(payload), f"{kind} audit")
 
         def work(conn: Connection) -> str:
-            origin = _turn_origin(conn, session_id, agent_name)
+            origin = _turn_origin(conn, session_id, agent_name, turn_id)
             row = agent_events_service.append(
                 conn,
                 scope_id=origin.scope_id,
@@ -353,8 +404,9 @@ class SQLiteTranscriptStore:
         payload: dict[str, Any],
         message: Optional[ToolResultMessage],
         agent_name: Optional[str] = None,
+        turn_id: Optional[str] = None,
     ) -> ContextEntry:
-        origin = _turn_origin(conn, session_id, agent_name)
+        origin = _turn_origin(conn, session_id, agent_name, turn_id)
         seq = _next_context_seq(conn, session_id)
         row = agent_events_service.append(
             conn,
@@ -370,6 +422,8 @@ class SQLiteTranscriptStore:
             source="agent",
             context_seq=seq,
         )
+        if message is not None:
+            _register_images(conn, origin.scope_id, session_id, message)
         return ContextEntry(
             session_id, seq, kind, row["id"], message=message, payload=payload, created_at=_epoch(row["created_at"])
         )
@@ -397,6 +451,27 @@ async def _settle(task: asyncio.Future[Any]) -> None:
 # --- allocation and attribution ----------------------------------------------
 
 
+def _register_images(
+    conn: Connection, scope_id: Optional[str], session_id: str, message: AssistantMessage | ToolResultMessage
+) -> None:
+    """Register each generated image ``message`` names, in its row's transaction (module docstring)."""
+
+    if isinstance(message, AssistantMessage):
+        records = [block.record for block in message.content if isinstance(block, HostedToolBlock)]
+    else:
+        records = [message.hosted.record] if message.hosted is not None else []
+    for image in (image for record in records for image in record.images or ()):
+        media_service.register(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            kind="image",
+            source=media_service.AGENT_CONTEXT_SOURCE,
+            local_path=image.path,
+            content_type=image.mime,
+        )
+
+
 def _own_bound(conn: Connection, session_id: str) -> Optional[int]:
     values = [
         conn.execute(
@@ -417,18 +492,33 @@ def _next_context_seq(conn: Connection, session_id: str) -> int:
     return top + 1
 
 
-def _turn_origin(conn: Connection, session_id: str, agent_name: Optional[str] = None) -> _TurnOrigin:
+def _turn_origin(
+    conn: Connection, session_id: str, agent_name: Optional[str] = None, turn_id: Optional[str] = None
+) -> _TurnOrigin:
     """Where an inserted row belongs, and the Agent that wrote it.
 
     ``agent_name`` is the running Turn's Agent (its request snapshot): the Session's
     selected Agent may change mid-Turn, so the Session row is only the fallback for a
-    write outside a Turn (startup recovery).
+    write outside a Turn (startup recovery). ``turn_id`` is explicit for live writes:
+    a transcript-only retry owns a new Turn without consuming another input.
     """
     session = conn.execute(
         select(agent_sessions.c.agent_name).where(agent_sessions.c.id == session_id)
     ).first()
     if session is None:
         raise TranscriptError(f"Session {session_id} does not exist")
+    if turn_id is not None:
+        initial = conn.execute(
+            select(messages.c.platform, messages.c.scope_id)
+            .select_from(
+                session_turns.join(message_deliveries, message_deliveries.c.id == session_turns.c.initial_delivery_id)
+                .join(messages, messages.c.id == message_deliveries.c.message_id)
+            )
+            .where(session_turns.c.id == turn_id, session_turns.c.session_id == session_id)
+        ).first()
+        if initial is None:
+            raise TranscriptError(f"Turn {turn_id} has no accepted input in Session {session_id}")
+        return _TurnOrigin(initial.platform, initial.scope_id, turn_id, agent_name or session.agent_name, CONTEXT_WRITER)
     latest = conn.execute(
         select(messages.c.id, messages.c.platform, messages.c.scope_id)
         .where(
@@ -516,14 +606,13 @@ def _unended_input_seq(conn: Connection, session_id: str, entries: Sequence[Cont
     ).all()
     awaiting_input = set(
         conn.execute(
-            select(message_deliveries.c.turn_id)
-            .select_from(message_deliveries.join(messages, messages.c.id == message_deliveries.c.message_id))
-            .where(
-                messages.c.session_id == session_id,
-                messages.c.context_seq.is_(None),
-                messages.c.type.in_(INPUT_TYPES),
-                message_deliveries.c.state == "accepted",
-            )
+            text(
+                "select message_deliveries.turn_id from messages "
+                "cross join message_deliveries on message_deliveries.message_id = messages.id "
+                f"where {VIBEY_RECOVERY_INPUT_PREDICATE} "
+                "and messages.session_id = :session_id and message_deliveries.state = 'accepted'"
+            ),
+            {"session_id": session_id},
         ).scalars()
     )
     inputs = sorted(seq for _, _, seq in turns if seq is not None)
@@ -801,7 +890,7 @@ def _canonical(value: dict[str, Any], what: str) -> dict[str, Any]:
 
 
 def _payload(kind: str, payload: Mapping[str, Any]) -> dict[str, Any]:
-    if kind not in ("compaction", "context_edit", "agent_state"):
+    if kind not in ("compaction", "context_edit", "agent_state", "replay_refusal"):
         raise ValueError(f"not a payload entry kind: {kind!r}")
     data = _canonical(dict(payload), f"{kind} payload")
     if not _is_current_version(data):

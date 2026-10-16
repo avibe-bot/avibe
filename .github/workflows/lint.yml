@@ -25,6 +25,7 @@ jobs:
       contents: read
     outputs:
       docs_only: ${{ steps.scope.outputs.docs_only }}
+      windows_control_ipc: ${{ steps.scope.outputs.windows_control_ipc }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
         with:
@@ -99,7 +100,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: "22.14.0"
           cache: "npm"
@@ -124,7 +125,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: "22.14.0"
           cache: "npm"
@@ -161,7 +162,7 @@ jobs:
           # it again from the same Runtime source as their platform archives.
           ref: 5a9a6a52f2ae03611d617a659bfd0c1c32389478
           path: .show-runtime-test
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: "22.14.0"
           cache: npm
@@ -198,7 +199,7 @@ jobs:
           # checkout falls back to 0.1.dev1 instead of the 3.0 release line.
           fetch-depth: 0
 
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: "22.14.0"
           cache: "npm"
@@ -388,7 +389,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
 
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: "20"
 
@@ -411,17 +412,17 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         with:
           name: ui-dist-linux
           path: ui/dist
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         with:
           name: vibe-wheel-linux
           path: dist
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         if: matrix.suite == 'installer'
         with:
           name: vibe-package-contracts-linux
@@ -515,7 +516,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         with:
           name: vibe-wheel-linux
           path: dist
@@ -729,7 +730,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         with:
           name: vibe-wheel-linux
           path: dist
@@ -764,12 +765,12 @@ jobs:
 
   windows-control-ipc:
     runs-on: windows-latest
-    needs: build-linux-artifacts
-    if: github.event_name != 'pull_request'
+    needs: [changes, build-linux-artifacts]
+    if: needs.changes.outputs.docs_only == 'false' && (github.event_name != 'pull_request' || needs.changes.outputs.windows_control_ipc == 'true')
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
 
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0  # v5
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: vibe-wheel-linux
           path: dist
@@ -824,8 +825,10 @@ jobs:
       # A Windows directory listing reports st_dev and st_ino as zero, so a
       # Skill whose identity is taken from it fails every later identity check
       # and the catalog comes back empty -- how gh-v3.1.2rc5's bundled
-      # `vibe skill load -- use-avibe` failed. Only a real Windows filesystem
-      # shows it, and like the steps above it needs no packaged Runtime.
+      # `vibe skill load -- use-avibe` failed. In-place publication compares
+      # those identities across two enumerations; the same zero listing made
+      # an unchanged source look changed. Only a real Windows filesystem shows
+      # it, and like the steps above it needs no packaged Runtime.
       - name: Verify Skill discovery keeps real directory identities
         run: python -m pytest tests/test_managed_skills.py -q -k zero_directory_entry_identities
 

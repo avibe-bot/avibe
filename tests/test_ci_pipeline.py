@@ -378,8 +378,18 @@ def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
 
 def test_windows_platform_checks_leave_only_latest_installer_smoke_on_prs() -> None:
     jobs = _jobs()
-    for name in ("windows-model-hub", "windows-control-ipc"):
-        assert jobs[name]["if"] == "github.event_name != 'pull_request'"
+    assert jobs["windows-model-hub"]["if"] == "github.event_name != 'pull_request'"
+    assert jobs["windows-control-ipc"]["needs"] == ["changes", "build-linux-artifacts"]
+    assert jobs["windows-control-ipc"]["if"] == (
+        "needs.changes.outputs.docs_only == 'false' && "
+        "(github.event_name != 'pull_request' || needs.changes.outputs.windows_control_ipc == 'true')"
+    )
+    skill_step = next(
+        step for step in jobs["windows-control-ipc"]["steps"]
+        if step.get("name") == "Verify Skill discovery keeps real directory identities"
+    )
+    assert "tests/test_managed_skills.py" in skill_step["run"]
+    assert "zero_directory_entry_identities" in skill_step["run"]
     assert jobs["windows-agent"]["if"] == (
         "needs.changes.outputs.docs_only == 'false' && github.event_name != 'pull_request'"
     )
@@ -563,6 +573,7 @@ def test_docs_scope_gates_all_work_without_filtering_away_required_checks() -> N
         assert not job.get("continue-on-error")
     scope = jobs["changes"]
     assert scope["outputs"]["docs_only"] == "${{ steps.scope.outputs.docs_only }}"
+    assert scope["outputs"]["windows_control_ipc"] == "${{ steps.scope.outputs.windows_control_ipc }}"
     assert not scope.get("if") and not scope.get("continue-on-error")
     command, = [s for s in scope["steps"] if s.get("id") == "scope"]
     assert command["run"] == "python3 scripts/ci_docs_only.py"

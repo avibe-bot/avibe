@@ -56,7 +56,7 @@ from vibe.model_hub_runtime import supervisor as supervisor_module
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
 from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_catalog, official_models_dev_provider
 from vibe.model_hub_runtime.client import EngineClient, EngineClientError, EngineConnection
-from vibe.model_hub_runtime.config import write_engine_config
+from vibe.model_hub_runtime.config import expected_model_names, write_engine_config
 from vibe.model_hub_runtime.environment import engine_subprocess_environment
 from vibe.model_hub_runtime.installer import (
     EngineRuntimeManager,
@@ -69,7 +69,9 @@ from vibe.model_hub_runtime.state import (
     SourceRecord,
 )
 from vibe.model_hub_runtime.supervisor import (
+    MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS,
     MODEL_HUB_STARTUP_TIMEOUT_SECONDS,
+    EngineConfigLostError,
     EngineSupervisor,
     EngineUnavailableError,
 )
@@ -1349,7 +1351,7 @@ def test_manifest_resolution_drives_admission_persistence_and_schema(
         installer=manager,
         state_store=EngineStateStore(tmp_path / "state"),
     )
-    projected = {"contract_version": 11, **supervisor.status()}
+    projected = {"contract_version": 15, **supervisor.status()}
     schema = json.loads(
         Path("docs/plans/model-hub-contracts/runtime-dependency.schema.json").read_text(
             encoding="utf-8"
@@ -1611,6 +1613,41 @@ def test_engine_version_check_uses_minimal_environment(
     assert captured_env == engine_subprocess_environment()
 
 
+def test_a_claude_model_is_registered_with_the_thinking_it_takes_upstream(tmp_path: Path) -> None:
+    """A budget-only Claude model registers a budget range: CPA reads ``levels`` as adaptive thinking on its Claude
+    path and rewrites budget thinking to ``adaptive``, which Claude 4.5 and older refuse (#2737)."""
+
+    store = EngineStateStore(tmp_path / "state")
+    instance_dir, runtime_secrets = store.prepare_instance("install-1")
+    ref = store.store_api_key(
+        "relay-secret", vendor="custom", protocol="anthropic", base_url="https://relay.example.test",
+    )
+    efforts = ("low", "medium", "high", "max")
+    models = ("claude-sonnet-4-5-20250929", "claude-sonnet-4-6", "claude-opus-4.5", "claude-latest", "kimi-k2")
+    store.sync_sources([_binding(
+        ref, source_id="src_relayclaude", vendor="custom", protocol="anthropic",
+        base_url="https://relay.example.test", model_ids=models,
+        model_reasoning_efforts=tuple((model, efforts) for model in models),
+    )])
+    config_path = instance_dir / "config.yaml"
+    write_engine_config(
+        config_path, host="127.0.0.1", port=18231, auth_dir=store.auth_dir, runtime_secrets=runtime_secrets,
+        sources=store.list_sources(), state_store=store,
+    )
+    (entry,) = yaml.safe_load(config_path.read_text())["claude-api-key"]
+    thinking = {model["name"]: model["thinking"] for model in entry["models"]}
+    budget = {"min": 1024, "max": 128000, "zero-allowed": True}
+    assert thinking == {
+        "claude-sonnet-4-5-20250929": budget,
+        "claude-sonnet-4-6": {"levels": ["max", "high", "medium", "low"]},
+        "claude-opus-4.5": budget,
+        # An alias or a later family names no budget-only version, so it keeps its levels.
+        "claude-latest": {"levels": ["max", "high", "medium", "low"]},
+        # Not a Claude model: the Anthropic protocol alone says nothing about its thinking.
+        "kimi-k2": {"levels": ["max", "high", "medium", "low"]},
+    }
+
+
 def test_config_generation_is_private_and_never_logs_secrets(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
@@ -1702,7 +1739,9 @@ def test_config_generation_is_private_and_never_logs_secrets(
             "alias": "model-a",
             "display-name": "model-a #0",
             "thinking": {"levels": ["high", "low"]},
-        }
+        },
+        # An OpenAI key's engine entry registers the vendor's image models too (vibey-hosted-tools.md §7.4).
+        {"name": "gpt-image-2", "alias": "gpt-image-2", "display-name": "gpt-image-2 #0"},
     ]
     assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
     assert stat.S_IMODE(store.auth_dir.stat().st_mode) == 0o700
@@ -1790,9 +1829,50 @@ def test_engine_config_declares_text_only_input_only_on_openai_compatibility_mod
     ]
     for key in ("codex-api-key", "claude-api-key"):
         [entry] = payload[key]
-        assert entry["models"] == [
-            {"name": "text-model", "alias": "text-model", "display-name": "text-model #0"}
-        ]
+        assert entry["models"][0] == {"name": "text-model", "alias": "text-model", "display-name": "text-model #0"}
+        assert all("input-modalities" not in model for model in entry["models"])
+
+
+def test_an_api_key_engine_entry_registers_its_vendors_image_models(tmp_path: Path) -> None:
+    """MH-HOSTED-GATEWAY-007: image_generate routes only models the engine registered; an OpenAI-compatible entry
+    serves the images endpoints only for a model it flags, and reload verification expects them all."""
+
+    store = EngineStateStore(tmp_path / "state")
+    instance_dir, runtime_secrets = store.prepare_instance("install-1")
+    refs = {
+        "openai": store.store_api_key("openai-secret", vendor="openai", protocol="openai_responses"),
+        "gemini": store.store_api_key("gemini-secret", vendor="gemini", protocol="openai_chat"),
+        "custom": store.store_api_key("custom-secret", base_url="https://api.example.test/v1"),
+    }
+    store.sync_sources([
+        _binding(refs["openai"], source_id="src_openai0001", vendor="openai", protocol="openai_responses",
+                 base_url=None, model_ids=("gpt-6-astra",)),
+        _binding(refs["gemini"], source_id="src_gemini0001", vendor="gemini", protocol="openai_chat",
+                 base_url=None, model_ids=("gemini-3-flash", "gemini-2.5-flash-image")),
+        _binding(refs["custom"], source_id="src_custom0001", model_ids=("model-a",)),
+    ])
+    config_path = instance_dir / "config.yaml"
+    write_engine_config(
+        config_path, host="127.0.0.1", port=18231, auth_dir=store.auth_dir, runtime_secrets=runtime_secrets,
+        sources=store.list_sources(), state_store=store,
+    )
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+    def models(entry):
+        return {model["name"]: model.get("image") for model in entry["models"]}
+
+    [openai] = payload["codex-api-key"]
+    assert models(openai) == {"gpt-6-astra": None, "gpt-image-2": None}
+    custom, gemini = sorted(payload["openai-compatibility"], key=lambda entry: entry["base-url"])
+    # Listed as a chat model or not, an image model is flagged, and registered once.
+    assert models(gemini) == {
+        "gemini-3-flash": None, "gemini-2.5-flash-image": True, "gemini-3-pro-image-preview": True,
+    }
+    assert models(custom) == {"model-a": None}
+    sources = {source.source_id: source for source in store.list_sources()}
+    expected = expected_model_names(store.list_sources(), store, "0")
+    assert f'{sources["src_openai0001"].prefix}/gpt-image-2' in expected
+    assert f'{sources["src_gemini0001"].prefix}/gemini-3-pro-image-preview' in expected
 
 
 def _rendered_text_only(tmp_path: Path, model_ids: tuple[str, ...], text_only: tuple[str, ...]) -> set[str]:
@@ -1932,6 +2012,8 @@ def test_mixed_anthropic_credentials_disable_cloak_only_for_api_key_entry(
 
     payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert payload["disable-claude-cloak-mode"] is True
+    # The engine forwards declared image tools unchanged and never adds one.
+    assert payload["disable-image-generation"] == "passthrough"
     assert payload["claude-api-key"] == [
         {
             "api-key": "api-key-fixture",
@@ -2872,9 +2954,11 @@ def _write_mock_engine(
     exit_before_ready: int | None = None,
     reload_delay: float = 0.0,
     drop_reload_ack: bool = False,
+    lose_config_on_reload: bool = False,
 ) -> None:
     script = f"""#!{sys.executable}
 import json
+import os
 import sys
 import threading
 import time
@@ -2956,8 +3040,13 @@ class Handler(BaseHTTPRequestHandler):
             handle.write(body)
 
         def apply():
-            global config
+            global config, gateway, management
             config = yaml.safe_load(body)
+            if {lose_config_on_reload!r} and not os.path.exists('config-lost'):
+                # The 3.2.1rc8 race (#2686): the watcher applied a half-written
+                # file, so the engine runs its defaults, not the config written.
+                open('config-lost', 'w').close()
+                gateway = management = 'engine-default'
             with open('config-reloads', 'a', encoding='utf-8') as handle:
                 handle.write('reload\\n')
 
@@ -3096,6 +3185,7 @@ def _fixture_supervisor(
     exit_before_ready: int | None = None,
     reload_delay: float = 0.0,
     drop_reload_ack: bool = False,
+    lose_config_on_reload: bool = False,
 ) -> tuple[EngineSupervisor, EngineStateStore]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     binary = tmp_path / "mock-engine"
@@ -3108,6 +3198,7 @@ def _fixture_supervisor(
         exit_before_ready=exit_before_ready,
         reload_delay=reload_delay,
         drop_reload_ack=drop_reload_ack,
+        lose_config_on_reload=lose_config_on_reload,
     )
     installer = _FixtureInstaller(binary, tmp_path / "versions" / "install-1")
     store = EngineStateStore(tmp_path / "state")
@@ -3146,6 +3237,46 @@ def test_source_sync_hot_reloads_a_running_engine_without_restart(tmp_path: Path
         supervisor.stop()
 
 
+def test_an_engine_that_lost_its_configuration_is_reported_once_and_restarted_by_its_drainer(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Scenario: MH-RUNTIME-014 -- an engine refusing its launch credentials is not running Avibe's config (#2687).
+
+    The reload that lost it fails at once instead of waiting out its deadline,
+    no caller restarts it under the streams it still serves, and the restart
+    its drainer asks for renders the config again.
+    """
+    supervisor, store = _fixture_supervisor(tmp_path, lose_config_on_reload=True)
+    credential_ref = store.store_api_key("upstream-secret", base_url="https://api.example.test/v1")
+    store.sync_sources([_binding(credential_ref)])
+    connection = supervisor.ensure_running()
+    lost = supervisor._process
+    try:
+        store.sync_sources([_binding(credential_ref, route_model_ids=("model-b",))])
+        started = time.monotonic()
+        with caplog.at_level(logging.WARNING, logger=supervisor_module.__name__):
+            with pytest.raises(EngineConfigLostError):
+                supervisor.reload_config_if_running()
+            assert time.monotonic() - started < MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS
+            with pytest.raises(EngineConfigLostError):
+                supervisor.ensure_running()
+        assert supervisor._process is lost and lost.poll() is None
+        [report] = [record.getMessage() for record in caplog.records if "lost its configuration" in record.getMessage()]
+        assert f"port={connection.base_url.rsplit(':', 1)[1]}" in report and "http_status=401" in report
+
+        supervisor.restart_lost_engine()
+        assert supervisor._process is not lost and lost.poll() is not None
+        prefix = store.get_source("src_fixture123").prefix
+        restored = EngineClient(supervisor.ensure_running())
+        assert restored.list_model_ids() == {f"{prefix}/model-a", f"{prefix}/model-b"}
+        # A second drainer of the same loss finds the engine answering.
+        restarted = supervisor._process
+        supervisor.restart_lost_engine()
+        assert supervisor._process is restarted
+    finally:
+        supervisor.stop()
+
+
 def test_source_sync_waits_for_an_id_preserving_reload_to_apply(tmp_path: Path) -> None:
     supervisor, store = _fixture_supervisor(tmp_path, reload_delay=0.3)
     credential_ref = store.store_api_key("upstream-secret", base_url="https://api.example.test/v1")
@@ -3177,6 +3308,66 @@ def test_source_sync_waits_for_a_reload_that_removes_every_model(tmp_path: Path)
         # model leaving the listing.
         asyncio.run(adapter.sync_sources([_binding(credential_ref, model_ids=())]))
         assert EngineClient(connection).list_model_ids() == frozenset()
+    finally:
+        supervisor.stop()
+
+
+@pytest.mark.parametrize(
+    ("damage", "error"),
+    [("missing", None), ("corrupt", "JSONDecodeError"), ("non_object", "NonObjectDocument")],
+)
+def test_a_key_replacement_reloads_without_reading_the_old_credential(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, damage: str, error: str | None,
+) -> None:
+    """Replacing the key is how a damaged credential is recovered, so the reload never depends on reading it."""
+
+    supervisor, store = _fixture_supervisor(tmp_path)
+    old_ref = store.store_api_key("old-secret", base_url="https://api.example.test/v1")
+    store.sync_sources([_binding(old_ref)])
+    connection = supervisor.ensure_running()
+    adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)
+    document = store.root / "credentials" / f"{old_ref}.json"
+    try:
+        if damage == "missing":
+            document.unlink()
+        else:
+            document.write_bytes(b"{fixture-corrupt" if damage == "corrupt" else b"[]")
+        new_ref = store.store_api_key("new-secret", base_url="https://api.example.test/v1")
+        with caplog.at_level(logging.WARNING, logger="vibe.model_hub_runtime.supervisor"):
+            asyncio.run(adapter.sync_sources([_binding(new_ref)]))
+        prefix = store.get_source("src_fixture123").prefix
+        assert EngineClient(connection).list_model_ids() == {f"{prefix}/model-a"}
+        warnings = [record.getMessage() for record in caplog.records if "previous credential" in record.getMessage()]
+        assert warnings == ([] if error is None else [
+            f"Model Hub reload cannot read the previous credential of source=src_fixture123 error={error}; "
+            "its removal is awaited by the names its projection routes"
+        ])
+        # Every other reader still refuses the damaged document.
+        if damage != "missing":
+            with pytest.raises(EngineStateError):
+                store.credential_metadata(old_ref)
+    finally:
+        supervisor.stop()
+
+
+def test_removing_a_source_with_an_unreadable_credential_is_confirmed_only_once_its_names_leave(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lost acknowledgment proves nothing: the removed Source's names, read from its projection, must leave."""
+
+    monkeypatch.setattr(supervisor_module, "MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS", 0.5)
+    supervisor, store = _fixture_supervisor(tmp_path, drop_reload_ack=True, reload_delay=30)
+    credential_ref = store.store_api_key("upstream-secret", base_url="https://api.example.test/v1")
+    store.sync_sources([_binding(credential_ref)])
+    connection = supervisor.ensure_running()
+    prefix = store.get_source("src_fixture123").prefix
+    adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)
+    try:
+        (store.root / "credentials" / f"{credential_ref}.json").write_bytes(b"{fixture-corrupt")
+        # The write is neither acknowledged nor applied: the engine still serves the removed Source.
+        with pytest.raises((EngineStateError, EngineUnavailableError)):
+            asyncio.run(adapter.sync_sources([]))
+        assert EngineClient(connection).list_model_ids() == {f"{prefix}/model-a"}
     finally:
         supervisor.stop()
 
@@ -7497,8 +7688,8 @@ def test_slow_source_prelude_is_bounded_without_blocking_other_routes(
                 return None
 
         class Session:
-            async def post(self, *_args, json=None, **_kwargs):
-                source_id = "src_slow0001" if str(json["model"]).startswith("slow/") else "src_fast0001"
+            async def post(self, *_args, data=None, **_kwargs):
+                source_id = "src_slow0001" if str(json.loads(data)["model"]).startswith("slow/") else "src_fast0001"
                 return Response(source_id)
 
             async def close(self) -> None:
@@ -8114,9 +8305,9 @@ def test_engine_client_preserves_large_valid_responses(
             b'{"output":[{"content":"' + large_value + b'"}]}'
             if not case["stream"]
             else (
-                b"event: response.image_generation_call.partial_image\n"
-                b'data: {"type":"response.image_generation_call.partial_image",'
-                b'"partial_image_b64":"'
+                b"event: response.output_text.delta\n"
+                b'data: {"type":"response.output_text.delta",'
+                b'"delta":"'
                 + large_value
                 + b'"}\n\nevent: response.completed\ndata: {"type":"response.completed"}\n\n'
             )

@@ -228,23 +228,47 @@ const PortaledModalProbe = () => {
 
 const AgentationEscapeProbe = () => {
   const [active, setActive] = useState(true);
-  return createPortal(
-    <div data-agentation-root="" data-settings-interaction-owner="true">
-      <div data-agentation-toolbar>
-        <div tabIndex={active ? -1 : 0}>
-          <button
-            type="button"
-            onKeyDown={(event) => {
-              if (event.key === 'Escape') setActive(false);
-            }}
-          >
-            feedback-toolbar
-          </button>
-        </div>
-      </div>
-    </div>,
-    document.body,
-  );
+  const hostRef = useRef<HTMLElement | null>(null);
+  const activeRef = useRef(active);
+
+  useEffect(() => {
+    activeRef.current = active;
+    const controls = hostRef.current?.shadowRoot?.querySelector('[data-agentation-toolbar] > div');
+    controls?.setAttribute('tabindex', active ? '-1' : '0');
+  }, [active]);
+
+  useEffect(() => {
+    const host = document.createElement('agentation-toolbar');
+    hostRef.current = host;
+    host.dataset.settingsInteractionOwner = 'true';
+    const shadow = host.attachShadow({ mode: 'open' });
+    const root = document.createElement('div');
+    root.dataset.agentationRoot = '';
+    const toolbar = document.createElement('div');
+    toolbar.dataset.agentationToolbar = '';
+    const controls = document.createElement('div');
+    controls.setAttribute('tabindex', activeRef.current ? '-1' : '0');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = 'feedback-toolbar';
+    button.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && activeRef.current) setActive(false);
+    });
+    controls.append(button);
+    toolbar.append(controls);
+    root.append(toolbar);
+    shadow.append(root);
+    document.body.append(host);
+    return () => host.remove();
+  }, []);
+
+  return null;
+};
+
+const agentationToolbarButton = () => {
+  const button = document.querySelector('agentation-toolbar')?.shadowRoot?.querySelector('button');
+  if (!(button instanceof HTMLButtonElement)) throw new Error('Agentation toolbar button missing');
+  return button;
 };
 
 const SettingsFrame = () => {
@@ -856,7 +880,7 @@ describe('SettingsOverlayRouteSurface', () => {
     );
 
     await user.click(screen.getByRole('link', { name: 'shell-settings' }));
-    await user.click(screen.getByRole('button', { name: 'feedback-toolbar' }));
+    await user.click(agentationToolbarButton());
     await user.keyboard('{Escape}');
 
     expect(document.querySelector('[data-settings-overlay="true"]')).toBeTruthy();
@@ -877,7 +901,7 @@ describe('SettingsOverlayRouteSurface', () => {
     );
 
     await user.click(screen.getByRole('link', { name: 'shell-settings' }));
-    await user.click(screen.getByRole('button', { name: 'feedback-toolbar' }));
+    await user.click(agentationToolbarButton());
     expect(document.querySelector('[data-settings-overlay="true"]')).toBeTruthy();
   });
 
@@ -892,7 +916,7 @@ describe('SettingsOverlayRouteSurface', () => {
     );
 
     await user.click(screen.getByRole('link', { name: 'shell-settings' }));
-    await user.click(screen.getByRole('button', { name: 'feedback-toolbar' }));
+    await user.click(agentationToolbarButton());
     await user.keyboard('{Escape}');
     expect(document.querySelector('[data-settings-overlay="true"]')).toBeTruthy();
     await user.keyboard('{Escape}');

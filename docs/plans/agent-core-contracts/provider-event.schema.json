@@ -42,6 +42,7 @@
         "type": { "const": "error" },
         "kind": { "enum": ["overflow", "rate_limit", "overloaded", "network", "stalled", "server", "interrupted", "auth", "invalid_request", "aborted", "unknown"] },
         "retryable": { "type": "boolean" },
+        "continuable": { "type": "boolean", "default": false, "description": "Explicit permission to continue from committed context, separate from same-request replay. Classified transient failures allow it; a pre-output recovery exhaustion with an explicit server_error or network cause may allow the bounded transcript-only continuation; missing/future causes, refusals, permanent and local failures do not." },
         "retry_after_s": { "type": "number", "minimum": 0 },
         "after_thinking": { "type": "boolean", "description": "The response streamed thinking and nothing else before this transient or unknown error; the loop retries it at most once per request (provider.md)." },
         "status": { "type": "integer", "description": "HTTP status, when there was one." },

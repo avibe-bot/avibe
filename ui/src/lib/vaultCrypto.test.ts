@@ -32,6 +32,7 @@ import {
   packProtectedRecord,
   unpackProtectedRecord,
   signDigest,
+  signProtectedDigest,
   SIGN_SCHEME_ECDSA_SECP256K1_DER,
   SIGN_SCHEME_ECDSA_SECP256K1_RECOVERABLE,
   SIGN_SCHEME_SCHNORR_SECP256K1_BIP340,
@@ -214,6 +215,35 @@ describe('vaultCrypto signing vectors', () => {
 });
 
 describe('vaultCrypto blind boxes', () => {
+  // Shared positive vectors permit field names for seal/deliver; pin the boundary so widening
+  // that grammar cannot silently allow fields on signing keys or nested/invalid field names.
+  it.each(['LOGIN.Password', 'LOGIN.1password', 'LOGIN.user.name', `LOGIN.${'x'.repeat(65)}`, '.password'])(
+    'rejects malformed field record %s', (name) => {
+      expect(() => standardCreateBlindBoxContext(name)).toThrow('record name');
+    },
+  );
+
+  it('rejects field records for signing even though they are valid seal records', async () => {
+    const vector = p2.blind_box_aad_examples.cases.find((example) => example.purpose === 'agent-sign')!;
+    await expect(protectedDekReleaseBlindBoxContext('KEY.password', {
+      kind: 'agent-sign', grantId: vector.grant_id, signatureScheme: vector.sign_scheme as SignatureScheme,
+      digest: vector.digest_hex, ttlSecs: vector.ttl_secs!, approval: approvalFromVector(vector),
+      operationHash: vector.operation_hash_hex,
+    })).rejects.toThrow('secret name');
+    expect(() => blindBoxAad({
+      purpose: 'agent-sign', name: 'KEY.password', grantId: vector.grant_id,
+      signScheme: vector.sign_scheme as SignatureScheme, digest: bytesFromHex(vector.digest_hex),
+      ttlSecs: vector.ttl_secs!, approvalNonce: bytesFromHex(vector.approval_nonce_hex),
+      approvalExpiresAtUnix: vector.approval_expires_at_unix!, operationHash: bytesFromHex(vector.operation_hash_hex),
+    })).toThrow('secret name');
+    const vmk = newVmk();
+    const key = importSigningKey('01'.padStart(64, '0'));
+    const sealed = await sealProtected(key.privateKey, vmk, { name: 'KEY.password' });
+    await expect(signProtectedDigest(
+      sealed, vmk, { name: 'KEY.password' }, vector.digest_hex, vector.sign_scheme as SignatureScheme,
+    )).rejects.toThrow('secret name');
+  });
+
   it('matches all shared avault blind-box AAD examples byte-for-byte', async () => {
     expect(p2.blind_box.aad_domain_utf8).toBe(BLIND_BOX_AAD_DOMAIN);
     expect(p2.blind_box_aad_examples.wrap_scheme).toBe(WRAP_SCHEME);

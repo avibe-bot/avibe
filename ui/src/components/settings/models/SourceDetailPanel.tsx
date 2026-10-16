@@ -4,6 +4,7 @@ import { FlaskConical, Info, Loader2, LogIn, MoreHorizontal, Plus, RefreshCw, Se
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
+import { useToast } from '@/context/ToastContext';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Input } from '@/components/ui/input';
 import { ResponsiveMenu } from '@/components/ui/responsive-menu';
@@ -16,6 +17,8 @@ import { classifyModelHubFailure } from './asyncLifetime';
 import { Field } from './dialogFields';
 import { GuardDialog } from './GuardDialog';
 import { GuardImpact } from './GuardImpact';
+import { HostedCapabilityChips } from './HostedCapabilityChips';
+import { modelCapabilities } from './hostedTools';
 import { confirmGuardPlan, sendAgreed, unansweredRefusal } from './guardedWrite';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { SourcePrivateValue, SourcePrivacyToggle } from './SourcePrivacy';
@@ -51,6 +54,7 @@ import {
   type TrackSourceMutation,
 } from './mutationSettlement';
 import { reconcileUnknownWrite } from './reconcileUnknownWrite';
+import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
 import { REPAIR_DESTINATION, REPAIR_LABEL_KEY, reauthBodyKey, reauthCost, repairAction } from './repair';
 import { activeSourceAdoption, sourceStatePresentation } from './sourceStatePresentation';
 import { useDeadlineClock } from './useDeadlineClock';
@@ -58,6 +62,8 @@ import { SourceTestDialog } from './SourceTestDialog';
 import { ACCENT_ICON, ACCENT_TILE, sourceVisual } from './vendorMeta';
 import type {
   AgentBackend,
+  HostedToolName,
+  HostedToolsStatus,
   RouteHopRef,
   Source,
   SourcePatch,
@@ -140,6 +146,8 @@ const GUARD_COPY_KIND: Record<GuardedAction['kind'], 'refetch' | 'removeModel'> 
 const committedPlan = (hops: RouteHopRef[], gaps: SupplyGap[]): ManageGuardPlan | null =>
   hops.length > 0 || gaps.length > 0 ? { hops, gaps } : null;
 
+const NO_TOOLS: ReadonlySet<HostedToolName> = new Set();
+
 type SourceReconciliation =
   | { kind: 'source'; source: Source }
   | { kind: 'gone'; sources: Source[]; snapshot: number };
@@ -166,8 +174,15 @@ export const SourceDetailPanel: React.FC<{
   headingRef?: React.Ref<HTMLHeadingElement>;
   /** Authoritative backends still using the gateway, when the Agent read is ready. */
   activeBackends?: ReadonlySet<AgentBackend>;
-}> = ({ source, trackMutation, onReauth, onMutationCommitted, headingRef, activeBackends }) => {
+  /** The hosted-tools read, for each model's capability chips (`vibey-hosted-tools.md` §8.2), and its retry. */
+  hostedTools?: RegionRead<HostedToolsStatus>;
+  onRetryHostedTools?: () => void;
+  /** Tools with a write out, and the clear a refusal chip runs for one of this Source's models. */
+  hostedPending?: ReadonlySet<HostedToolName>;
+  onClearHostedRefusal?: (tool: HostedToolName, modelId: string) => void;
+}> = ({ source, trackMutation, onReauth, onMutationCommitted, headingRef, activeBackends, hostedTools, onRetryHostedTools, hostedPending, onClearHostedRefusal }) => {
   const { t, i18n } = useTranslation();
+  const { showToast } = useToast();
   const detailsHidden = useSourceDetailsHidden();
   const now = useDeadlineClock(source.state.status === 'cooldown' ? source.state.retry_at : null);
   const { Icon, accent } = sourceVisual(source);
@@ -190,6 +205,24 @@ export const SourceDetailPanel: React.FC<{
     ? models.filter((model) => model.id.toLocaleLowerCase(i18n.language).includes(normalizedQuery))
     : models;
   const visibleModelIds = new Set(filteredModels.map((model) => model.id));
+  const capabilityStatus = hostedTools
+    ? foldRegionRead<HostedToolsStatus, HostedToolsStatus | null>(hostedTools, {
+        loading: () => null,
+        ready: (data) => data,
+        unread: () => null,
+        degraded: (staleData) => staleData,
+      })
+    : null;
+  const capabilities = new Map(models.map((model) => [
+    model.id,
+    capabilityStatus ? modelCapabilities(capabilityStatus, source.id, model.id) : [],
+  ]));
+  // The column appears only when a model has evidence: an unused model draws nothing.
+  const showCapabilities = [...capabilities.values()].some((list) => list.length > 0)
+    || models.some((model) => (model.refused_efforts?.length ?? 0) > 0);
+  // A failed read is not "nothing checked": say so where chips would be. Only a
+  // hub Source can carry hosted-tool evidence.
+  const capabilitiesFailed = source.supply_channel === 'hub' && hostedTools !== undefined && regionFailed(hostedTools);
   const editDraft = 'draft' in manageStage ? manageStage.draft : null;
   const editAssessment = editDraft
     ? assessSourceEdit(source, editDraft)
@@ -244,6 +277,32 @@ export const SourceDetailPanel: React.FC<{
               settlement.release();
             }
           }
+        }
+      }
+    }).finally(() => setPendingAction(null));
+  };
+  /** Clear one refused effort: the next request at it tries this Source again. The answer is the Source. */
+  const clearEffort = (modelId: string, effort: string) => {
+    if (busy) return Promise.resolve();
+    setPendingAction('other');
+    return trackMutation(async (latest, settlement) => {
+      try {
+        await settlement.source(await modelsApi.clearRefusedEffort(latest.id, modelId, effort));
+      } catch (error) {
+        if (apiFailure(error)?.code === 'source_not_found') {
+          await settlement.gone(latest.id);
+          return;
+        }
+        showToast(t('settings.models.capability.clearFailed') as string, 'error');
+        // A refused clear changed nothing and a lost answer may have committed:
+        // either way the chips show what the server holds now.
+        try {
+          const inventory = await settlement.readInventory();
+          const current = inventory.sources.find((item) => item.id === latest.id);
+          if (current) await settlement.source(current);
+          else await settlement.gone(latest.id, inventory);
+        } catch {
+          settlement.release();
         }
       }
     }).finally(() => setPendingAction(null));
@@ -723,15 +782,28 @@ export const SourceDetailPanel: React.FC<{
           <SourceManageMenu source={source} busy={busy || manageStage.kind !== 'idle'} onEdit={beginEdit} onDelete={beginDelete} />
         </div>
       </section>
-      <section className="model-hub-source-table flex min-h-0 flex-1 flex-col overflow-hidden bg-surface">
+      {capabilitiesFailed && <p role="status" className="model-hub-source-capabilities-failure flex shrink-0 items-center justify-between gap-3 border-b border-border px-5 py-2 text-destructive-ink">
+        <span>{t('settings.models.capability.readFailed')}</span>
+        {onRetryHostedTools && <button type="button" onClick={onRetryHostedTools} className="model-hub-action-mint shrink-0 font-semibold">{t('settings.models.upstream.retry')}</button>}
+      </p>}
+      <section className={cn('model-hub-source-table flex min-h-0 flex-1 flex-col overflow-hidden bg-surface', showCapabilities && 'model-hub-source-table--capabilities')}>
         <div className="model-hub-source-table-head hidden border-b border-border font-semibold md:grid">
-          <span className="truncate">{t('settings.models.sourceDetail.col.id')}</span><span />
+          <span className="truncate">{t('settings.models.sourceDetail.col.id')}</span>{showCapabilities && <span className="truncate">{t('settings.models.capability.col')}</span>}<span />
         </div>
         <div className="model-hub-source-table-scroll min-h-0 flex-1 overflow-y-auto">
         {filteredModels.length === 0 && !manualDraft && <p className="px-5 py-12 text-center text-[12px] text-muted">{t(normalizedQuery ? 'settings.models.sourceDetail.searchEmpty' : source.last_discovered_at ? 'settings.models.sourceDetail.empty' : 'settings.models.sourceDetail.emptyNeverFetched')}</p>}
         {models.map((model) => (
           <div key={model.id} hidden={!visibleModelIds.has(model.id)} className="model-hub-source-table-row grid gap-3 border-b border-border last:border-b-0 md:items-center md:gap-y-0">
             <span className="flex min-w-0 items-center gap-2"><span className="model-hub-source-model truncate font-mono text-foreground" title={model.id}>{model.id}</span>{model.origin !== 'discovered' && <span className="model-hub-source-pill model-hub-source-entry-pill model-hub-source-entry-pill--manual w-fit rounded-full border font-semibold">{t('settings.models.sourceDetail.entry.manual')}</span>}{result?.added.includes(model.id) && <span className="model-hub-accent-pill--mint model-hub-source-pill rounded-full border px-2 py-0.5 font-semibold">{t('settings.models.sourceDetail.refetch.added')}</span>}</span>
+            {showCapabilities && <span className="model-hub-source-capabilities min-w-0"><HostedCapabilityChips
+              modelId={model.id}
+              capabilities={capabilities.get(model.id) ?? []}
+              refusedEfforts={model.refused_efforts}
+              pendingTools={hostedPending ?? NO_TOOLS}
+              sourceBusy={busy}
+              onClearTool={onClearHostedRefusal && ((tool) => onClearHostedRefusal(tool, model.id))}
+              onClearEffort={(effort) => void clearEffort(model.id, effort)}
+            /></span>}
             <div className="model-hub-source-row-actions flex items-center justify-end gap-1">
               {removeFailure?.modelId === model.id && <span className="model-hub-source-tier text-right text-destructive-ink">{t('settings.models.sourceDetail.fail.removeModel')} <button type="button" disabled={busy} onClick={() => {
                 if (!removeFailure.retryRead) void remove(model);

@@ -1,0 +1,353 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "model-hub/provider-overlay.schema.json",
+  "title": "ProviderOverlay",
+  "description": "The providers section of vibe/data/backend_models.json (model-hub-capability-model.md §4): what each provider offers per model family and protocol, the vendor's executor model and its image models. Priors only, read from the bundled file and never the remote catalog. Keys are canonical Source vendor ids. An invalid vendor entry is disabled with a warning.",
+  "definitions": {
+    "Token": {
+      "type": "string",
+      "pattern": "^\\S(?:.*\\S)?$",
+      "description": "Nonblank, without surrounding whitespace."
+    },
+    "PriceComponent": {
+      "type": "object",
+      "required": [
+        "unit",
+        "usd_per_1k"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "unit": {
+          "enum": [
+            "call",
+            "search",
+            "post",
+            "profile"
+          ]
+        },
+        "usd_per_1k": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "Price": {
+      "type": "object",
+      "description": "The provider's list price per 1,000 units, with the date and page it was read from.",
+      "required": [
+        "unit",
+        "usd_per_1k",
+        "as_of",
+        "url"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "unit": {
+          "$ref": "#/definitions/PriceComponent/properties/unit"
+        },
+        "usd_per_1k": {
+          "$ref": "#/definitions/PriceComponent/properties/usd_per_1k"
+        },
+        "as_of": {
+          "type": "string",
+          "format": "date",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        },
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://[^\\s/?#]+(?:[/?#]\\S*)?$"
+        },
+        "extra": {
+          "type": "array",
+          "description": "Further units the same call is billed by, e.g. xAI x_search profiles beside posts.",
+          "items": {
+            "$ref": "#/definitions/PriceComponent"
+          }
+        }
+      }
+    },
+    "ImagePrice": {
+      "type": "object",
+      "description": "An image model's list price per 1,000 images, with the date and page it was read from.",
+      "required": [
+        "unit",
+        "usd_per_1k",
+        "as_of",
+        "url"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "unit": {
+          "const": "image"
+        },
+        "usd_per_1k": {
+          "$ref": "#/definitions/PriceComponent/properties/usd_per_1k"
+        },
+        "as_of": {
+          "$ref": "#/definitions/Price/properties/as_of"
+        },
+        "url": {
+          "$ref": "#/definitions/Price/properties/url"
+        }
+      }
+    },
+    "HostedTool": {
+      "type": "object",
+      "required": [
+        "declaration"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "declaration": {
+          "type": "object",
+          "description": "Sent verbatim as the native tool declaration.",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "$ref": "#/definitions/Token"
+            }
+          }
+        },
+        "price": {
+          "$ref": "#/definitions/Price",
+          "description": "Absent when no list price is known, which is never a price of zero."
+        },
+        "include": {
+          "type": "array",
+          "description": "Responses include values the tool needs, e.g. web_search_call.action.sources.",
+          "items": {
+            "$ref": "#/definitions/Token"
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "ModelFamily": {
+      "type": "object",
+      "required": [
+        "match"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "match": {
+          "type": "object",
+          "description": "Compared with the normalized model id: prefix by startswith, id by equality.",
+          "minProperties": 1,
+          "maxProperties": 1,
+          "additionalProperties": false,
+          "properties": {
+            "prefix": {
+              "$ref": "#/definitions/Token"
+            },
+            "id": {
+              "$ref": "#/definitions/Token"
+            }
+          }
+        },
+        "wire_efforts": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "description": "Effort values the provider accepts on the wire. Null or absent defers to models.dev.",
+          "items": {
+            "$ref": "#/definitions/Token"
+          },
+          "uniqueItems": true
+        },
+        "hosted_tools": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "source.schema.json#/properties/protocol"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "propertyNames": {
+              "enum": [
+                "web_search",
+                "x_search"
+              ]
+            },
+            "additionalProperties": {
+              "$ref": "#/definitions/HostedTool"
+            }
+          }
+        }
+      }
+    },
+    "Vendor": {
+      "type": "object",
+      "required": [
+        "models"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "models": {
+          "type": "array",
+          "description": "Ordered; the first family that matches a model wins.",
+          "items": {
+            "$ref": "#/definitions/ModelFamily"
+          }
+        },
+        "executor_models": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/definitions/Token"
+          },
+          "description": "The vendor's lightweight models that run proxied search calls on this vendor's Sources, preferred first (vibey-hosted-tools.md §6). A Source runs the first one it lists, exactly or as a dated snapshot (`<id>-YYYYMMDD`), and is no executor if it lists none. The executor call uses the declaration of the family row that model matches. A vendor without them is never an executor."
+        },
+        "image_models": {
+          "type": "array",
+          "description": "The image models this vendor offers to image_generate, in catalog order. Only models whose route the shipped engine was verified for are listed.",
+          "items": {
+            "$ref": "#/definitions/ImageModel"
+          }
+        }
+      }
+    },
+    "ImageModel": {
+      "type": "object",
+      "required": [
+        "id",
+        "description",
+        "params",
+        "size_forms"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/Token"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^\\S(?:.*\\S)?$",
+          "description": "One short line; it goes into every request's tool block."
+        },
+        "params": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "images",
+              "n",
+              "size"
+            ]
+          },
+          "description": "Which common image_generate parameters the model takes."
+        },
+        "size_forms": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "pixels",
+              "ratio"
+            ]
+          },
+          "description": "Which forms of size the model accepts; non-empty exactly when params lists size."
+        },
+        "kinds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "api_key",
+              "subscription"
+            ]
+          },
+          "description": "The credential kinds the model's route was verified on through the shipped engine; absent means every kind. Every image model runs through the engine's /v1/images/generations and /v1/images/edits."
+        },
+        "request": {
+          "type": "object",
+          "propertyNames": {
+            "not": {
+              "enum": [
+                "model",
+                "prompt",
+                "size",
+                "aspect_ratio",
+                "n",
+                "images",
+                "stream"
+              ]
+            }
+          },
+          "additionalProperties": {
+            "type": [
+              "string",
+              "integer",
+              "number",
+              "boolean"
+            ]
+          },
+          "description": "Fixed fields every call to the model sends, such as an output format or base64 results; never a field a call names itself."
+        },
+        "prices": {
+          "type": "array",
+          "description": "Per-image list prices, each for the output size and quality it applies to (absent keys match any).",
+          "items": {
+            "type": "object",
+            "required": [
+              "price"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "price": {
+                "$ref": "#/definitions/ImagePrice"
+              },
+              "size": {
+                "$ref": "#/definitions/Token"
+              },
+              "quality": {
+                "$ref": "#/definitions/Token"
+              }
+            }
+          }
+        },
+        "tokens_per_image": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The documented output tokens of one image; the pricing module values it at the model's output rate as an estimate where no per-image price exists."
+        }
+      },
+      "if": {
+        "properties": {
+          "params": {
+            "contains": {
+              "const": "size"
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "size_forms": {
+            "minItems": 1
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "size_forms": {
+            "maxItems": 0
+          }
+        }
+      }
+    }
+  },
+  "type": "object",
+  "propertyNames": {
+    "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$"
+  },
+  "additionalProperties": {
+    "$ref": "#/definitions/Vendor"
+  }
+}

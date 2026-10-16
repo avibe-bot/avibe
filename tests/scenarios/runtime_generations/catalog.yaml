@@ -39,7 +39,7 @@ scenarios:
     backend: shared
     test: tests/test_runtime_generations.py::test_runtime_gen_003_at_the_cap_the_oldest_retiring_generation_gives_way
     related_tests:
-      - tests/test_opencode_generations.py::test_a_cap_forced_stop_settles_the_activities_of_the_sessions_it_interrupts
+      - tests/test_opencode_generations.py::test_a_cap_forced_stop_settles_the_turns_and_activities_of_its_process
       - tests/test_opencode_generations.py::test_the_cap_stops_the_oldest_adopted_generation_whatever_its_record_order
   - id: RUNTIME-GEN-004
     name: A routine restart request renews in place and never drains, holds a turn, or interrupts

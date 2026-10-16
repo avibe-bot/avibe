@@ -1,0 +1,94 @@
+name: Model Hub release E2E
+
+# The hermetic Model Hub E2E (`-m e2e_model_hub`) runs the real gateway, the
+# pinned engine and real agent CLIs against a loopback mock upstream. It is too
+# slow for pull requests, so it runs nightly and on demand; a release needs a
+# green run at its SHA (docs/release.md).
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: model-hub-e2e-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  model-hub-e2e:
+    name: model-hub-e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+
+      - name: Prepare hermetic UI asset placeholder
+        run: |
+          mkdir -p ui/dist
+          printf '%s\n' '<!doctype html><html><body></body></html>' > ui/dist/index.html
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned uv
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.12.10
+
+      - name: Install package and test dependencies
+        run: uv pip install --system -e . --group dev
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: "22.14.0"
+
+      # The agent CLIs users install: the latest release of each, as Avibe installs them.
+      - name: Install agent CLIs
+        run: |
+          npm install -g @openai/codex opencode-ai
+          codex --version
+          opencode --version
+
+      # The packaged engine manifest, with this runner's asset downloaded and
+      # verified, so every scenario installs the pinned engine offline.
+      - name: Prepare the pinned engine offline
+        run: |
+          python - <<'EOF'
+          import hashlib, json, os, pathlib, urllib.request
+
+          manifest = json.loads(pathlib.Path("vibe/model_hub_runtime/cliproxyapi_manifest.json").read_text())
+          root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "model-hub-engine"
+          root.mkdir(parents=True, exist_ok=True)
+          (asset,) = [item for item in manifest["assets"] if item["platform"] == "linux-amd64"]
+          archive = root / asset["url"].rsplit("/", 1)[1]
+          with urllib.request.urlopen(asset["url"], timeout=300) as response:
+              archive.write_bytes(response.read())
+          digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+          if digest != asset["sha256"] or archive.stat().st_size != asset["size_bytes"]:
+              raise SystemExit(f"engine archive does not match the manifest: {digest}")
+          asset["url"] = archive.as_uri()
+          (root / "offline-manifest.json").write_text(json.dumps(manifest))
+          print(f"{manifest['asset_release_tag']} {asset['platform']} verified")
+          EOF
+          echo "VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH=$RUNNER_TEMP/model-hub-engine/offline-manifest.json" >> "$GITHUB_ENV"
+
+      - name: Run the Model Hub E2E
+        run: |
+          python -m pytest -m e2e_model_hub tests/e2e -p no:cacheprovider -ra \
+            --basetemp="$RUNNER_TEMP/e2e" 2>&1 | tee model-hub-e2e.log
+          exit "${PIPESTATUS[0]}"
+
+      - name: Upload the run log
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        with:
+          name: model-hub-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          path: model-hub-e2e.log
+          if-no-files-found: ignore
+          retention-days: 14

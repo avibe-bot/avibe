@@ -59,6 +59,10 @@ type TriggerFields = Pick<
 > & { metadata?: Record<string, unknown> };
 
 const VAULT_CALLBACK_STATUS_KEYS: Record<string, TranslationKey> = {
+  'delete:approved': 'chat.source.vaultDeleteApproved',
+  'delete:fulfilled': 'chat.source.vaultDeleteApproved',
+  'delete:denied': 'chat.source.vaultDeleteDenied',
+  'delete:expired': 'chat.source.vaultDeleteExpired',
   'provision:fulfilled': 'chat.source.vaultProvided',
   'access:approved': 'chat.source.vaultAccessApproved',
   'sign:approved': 'chat.source.vaultSigned',

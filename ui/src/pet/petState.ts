@@ -129,7 +129,7 @@ export const derivePetPose = (
   { othersWorking, asleep }: { othersWorking: boolean; asleep: boolean },
 ): PetPose => {
   if (state !== 'idle') return state;
-  if (othersWorking) return 'running';
+  if (othersWorking) return 'team';
   return asleep ? 'sleeping' : 'idle';
 };
 

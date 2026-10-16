@@ -11,7 +11,7 @@ from aiohttp import web
 from core.handlers.model_hub.adapter import RawOutcomeKind, SourceBinding
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
 from vibe.model_hub_runtime.client import EngineClient, EngineConnection
-from vibe.model_hub_runtime.supervisor import EngineUnavailableError
+from vibe.model_hub_runtime.supervisor import EngineConfigLostError, EngineUnavailableError
 from vibe.model_hub_runtime.state import EngineStateStore
 
 
@@ -27,9 +27,18 @@ class LeaseSupervisor:
         self.allow_reload.set()
         self.reload_count = 0
         self.fail_reload = False
+        # Where the engine is next found to have lost its configuration, once.
+        self.lose_config_at = None
+        self.restarts = 0
 
     def client(self):
+        if self.lose_config_at == "admission":
+            self.lose_config_at = None
+            raise EngineConfigLostError()
         return EngineClient(self.connection)
+
+    def restart_lost_engine(self):
+        self.restarts += 1
 
     def client_if_running(self):
         return self.client()
@@ -44,6 +53,9 @@ class LeaseSupervisor:
         if self.fail_reload:
             self.fail_reload = False
             raise EngineUnavailableError("models.engine.health_failed")
+        if self.lose_config_at == "reload":
+            self.lose_config_at = None
+            raise EngineConfigLostError()
 
 
 @asynccontextmanager
@@ -199,6 +211,42 @@ def test_cancelled_reload_holds_admission_until_commit_or_rollback(tmp_path, fai
                 assert supervisor.reload_count == 2
             else:
                 assert adapter.state_store.list_sources()[0].route_model_ids == ("changed",)
+            assert adapter._active_transports == 0
+            assert not adapter._routing_lock.locked()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("lost_at", ["reload", "admission"])
+def test_an_engine_that_lost_its_configuration_restarts_only_once_its_streams_end(tmp_path, lost_at):
+    """Scenario: MH-RUNTIME-014 -- no new work is admitted, the open stream ends whole, then the waiting work runs (#2687)."""
+
+    async def run():
+        async with _transport(tmp_path) as (adapter, supervisor, binding, _received, finish, requests):
+            handle = await adapter.invoke(binding.source_id, "unknown", {}, True, "opencode")
+            assert await anext(handle.stream) == FIRST
+            supervisor.lose_config_at = lost_at
+            save = None
+            if lost_at == "reload":
+                save = asyncio.create_task(adapter.sync_sources([replace(binding, route_model_ids=("unknown", "new"))]))
+                assert await asyncio.to_thread(supervisor.reload_started.wait, 2)
+            later = asyncio.create_task(adapter.invoke(binding.source_id, "unknown", {}, False, "opencode"))
+            await asyncio.sleep(0.1)
+            assert supervisor.restarts == 0
+            assert len(requests) == 1 and not later.done()
+            finish.set()
+            assert b"".join([part async for part in handle.stream]) == LAST
+            assert (await handle.outcome()).kind is RawOutcomeKind.SUCCESS
+            later_handle = await asyncio.wait_for(later, 2)
+            assert supervisor.restarts == 1
+            assert (await later_handle.outcome()).kind is RawOutcomeKind.SUCCESS
+            await handle.close_stream()
+            await later_handle.close_stream()
+            if save is not None:
+                await asyncio.wait_for(save, 2)
+                # The save applies again on the restarted engine.
+                assert supervisor.reload_count == 2
+                assert set(adapter.state_store.list_sources()[0].route_model_ids) == {"unknown", "new"}
             assert adapter._active_transports == 0
             assert not adapter._routing_lock.locked()
 

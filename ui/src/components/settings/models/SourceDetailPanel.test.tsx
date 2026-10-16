@@ -11,6 +11,7 @@ import { ToastProvider } from '@/context/ToastProvider';
 import i18n from '@/i18n';
 import { classifyModelHubFailure, createPendingWrites } from './asyncLifetime';
 import { MANAGE_DESTINATION, type ManageKind } from './manage';
+import { readyRegion, unreadRegion } from './regionRead';
 import { ApiCallError, modelsApi } from './modelsApi';
 import type {
   PresentSourceMutationCommit,
@@ -29,7 +30,7 @@ import {
   NEEDS_ACTION_DETAIL_KEYS,
   SOURCE_STATUSES,
 } from './types';
-import type { Source, SourceDetailKey, SourceKind, SourceProtocol, SupplyChannel } from './types';
+import type { HostedRefusal, HostedSuccess, HostedToolsStatus, Source, SourceDetailKey, SourceKind, SourceProtocol, SupplyChannel } from './types';
 
 const source: Source = {
   id: 'src_detail',
@@ -1378,4 +1379,130 @@ describe('SourceDetailPanel', () => {
     expect(screen.queryByText(/as soon as you start|旧的登录立即失效/i)).toBeNull();
   });
 
+});
+
+// What a Source's model rows say about hosted tools (§8.2, frame yjGXx). The
+// projection's states are `hostedTools.test.ts`'s subject; what is proved here is
+// what a Source row adds: one chip per feature, unused draws nothing, refused
+// efforts get their own chip, the detail carries the record's facts, and every
+// refusal chip carries the clear for its own (Source, model).
+describe('SourceDetailPanel hosted-tool capability chips', () => {
+  const twoModels: Source = {
+    ...source,
+    models: [
+      { id: 'model-a', display_name: null, origin: 'discovered', reasoning_efforts: [], reasoning_efforts_source: null },
+      { id: 'model-b', display_name: null, origin: 'discovered', reasoning_efforts: [], reasoning_efforts_source: null },
+    ],
+  };
+  const at = '2026-10-13T10:20:00Z';
+  const ok = (model_id: string, when = at): HostedSuccess => ({ source_id: source.id, model_id, mode: 'native', at: when });
+  const refused = (model_id: string, aspect: HostedRefusal['aspect'] = 'call'): HostedRefusal => ({
+    source_id: source.id, model_id, aspect, at, reason: '400 unsupported_tool_type',
+  });
+  const run = (verified: HostedSuccess[], refusals: HostedRefusal[]) => ({ latest_ok: null, verified, refused: refusals });
+  const status = (): HostedToolsStatus => ({
+    tools: [
+      // model-b runs web search but refused a replay of its results; model-a refused nothing.
+      { name: 'web_search', enabled: true, status: run([ok('model-a'), ok('model-b')], [refused('model-b', 'replay')]), executor_order: null, effective_order: [], executor_candidates: [] },
+      // A later refusal on a pair that once ran the tool: the refusal is what routes.
+      { name: 'x_search', enabled: true, status: run([ok('model-a', '2026-10-10T08:00:00Z')], [refused('model-a')]), executor_order: null, effective_order: [], executor_candidates: [] },
+      { name: 'image_generate', enabled: true, status: run([], []), default_model: null, effective_default: null, models: [], image_offered_by: [] },
+    ],
+  });
+  const efforts = (model: Source['models'][number]) => model.id === 'model-b'
+    ? { ...model, refused_efforts: [{ effort: 'xhigh', basis: 'observed' as const, observed_at: at, detail: '400 unsupported_reasoning_effort' }] }
+    : model;
+  const renderChips = (
+    hostedTools: HostedToolsStatus,
+    { models = twoModels.models, onClear, track = immediateTrack }: {
+      models?: Source['models'];
+      onClear?: React.ComponentProps<typeof SourceDetailPanel>['onClearHostedRefusal'];
+      track?: TrackSourceMutation;
+    } = {},
+  ) => render(
+    <I18nextProvider i18n={i18n}>
+      <CommittedPanel source={{ ...twoModels, models }} hostedTools={readyRegion(hostedTools)} onClearHostedRefusal={onClear} trackMutation={track} onReauth={noReauth} />
+    </I18nextProvider>,
+  );
+  const row = (modelId: string) => screen.getByTitle(modelId).closest('.model-hub-source-table-row') as HTMLElement;
+  const chips = (modelId: string) => [...row(modelId).querySelectorAll('[data-capability]')].map((chip) => chip.getAttribute('data-capability'));
+
+  it('MH-HOSTED-UI-006: draws one chip per feature with a record, a refusal over a success, and nothing for an unused model', () => {
+    renderChips(status(), { models: twoModels.models.map(efforts) });
+    // A call refusal wins over the call's success.
+    expect(chips('model-a')).toEqual(['web_search:ok', 'x_search:refused']);
+    // A replay refusal is its own feature: it sits beside the success, as the model still runs the tool.
+    expect(chips('model-b')).toEqual(['web_search:ok', 'web_search:replay', 'effort:xhigh']);
+    cleanup();
+
+    renderChips({ tools: [] });
+    expect(chips('model-a')).toEqual([]);
+  });
+
+  it('MH-HOSTED-UI-017: names the record time, the reason, how long it stays, and the last success', async () => {
+    renderChips(status());
+    const chip = within(row('model-a')).getByRole('button', { name: /^X search · not supported|^X 搜索 · 不支持/ });
+    // The accessible name carries the same facts as the hover detail, each with
+    // its term, composed by the locale.
+    expect(chip.getAttribute('aria-label')).toMatch(/(Reason: |原因：)400 unsupported_tool_type/);
+    expect(chip.getAttribute('aria-haspopup')).toBe('dialog');
+    expect(chip.getAttribute('aria-expanded')).toBe('false');
+    await userEvent.hover(chip);
+    const detail = await screen.findByRole('dialog');
+    expect(chip.getAttribute('aria-expanded')).toBe('true');
+    expect(chip.getAttribute('aria-controls')).toBe(detail.id);
+    within(detail).getByText(/ · (a real request|一次真实请求)$/);
+    within(detail).getByText('400 unsupported_tool_type');
+    within(detail).getByText(/until you clear it|直到你清除/);
+    within(detail).getByText('10-10');
+  });
+
+  it('MH-HOSTED-UI-017: opens any chip\'s detail from the keyboard, a success\'s included', async () => {
+    renderChips(status(), { onClear: vi.fn() });
+    const chip = within(row('model-a')).getByRole('button', { name: /^Web search · OK · 10-13|^网页搜索 · 正常 · 10-13/ });
+    chip.focus();
+    await userEvent.keyboard('{Escape}');
+    await userEvent.keyboard('{Enter}');
+    const detail = await screen.findByRole('dialog');
+    within(detail).getByText(/Display only|只用于显示/);
+    // A success has nothing to clear.
+    expect(within(row('model-a')).getAllByRole('button', { name: /^Clear|^清除/ })).toHaveLength(1);
+  });
+
+  it('MH-HOSTED-UI-020: clears a tool refusal for its own model only', async () => {
+    const onClear = vi.fn();
+    renderChips(status(), { onClear });
+    await userEvent.click(within(row('model-b')).getByRole('button', { name: /^Clear the web search refusal of model-b$|^清除 model-b 的网页搜索拒绝记录$/ }));
+    expect(onClear).toHaveBeenCalledWith('web_search', 'model-b');
+  });
+
+  it('MH-HOSTED-UI-020: clears a refused effort and shows the Source the clear answered', async () => {
+    const answered: Source = { ...twoModels, models: twoModels.models };
+    const clear = vi.spyOn(modelsApi, 'clearRefusedEffort').mockResolvedValue(answered);
+    const landed = settlement();
+    renderChips({ tools: [] }, { models: twoModels.models.map(efforts), track: async (work) => work(source, landed) });
+
+    await userEvent.click(within(row('model-b')).getByRole('button', { name: /^Clear the Extra High refusal of model-b$|^清除 model-b 的 .+ 拒绝记录$/ }));
+    expect(clear).toHaveBeenCalledWith(source.id, 'model-b', 'xhigh');
+    await waitFor(() => expect(landed.source).toHaveBeenCalledWith(answered));
+  });
+
+  it('MH-HOSTED-UI-006: says when the capability read failed instead of drawing a Source with no evidence', async () => {
+    const retry = vi.fn();
+    render(
+      <I18nextProvider i18n={i18n}>
+        <CommittedPanel source={twoModels} hostedTools={unreadRegion()} onRetryHostedTools={retry} trackMutation={immediateTrack} onReauth={noReauth} />
+      </I18nextProvider>,
+    );
+    const line = screen.getByRole('status');
+    within(line).getByText(/Couldn't read this Source's tool capabilities|未能读取此供应商的工具能力/);
+    await userEvent.click(within(line).getByRole('button', { name: /^Retry$|^重试$/ }));
+    expect(retry).toHaveBeenCalledTimes(1);
+  });
+
+  it('MH-HOSTED-UI-006: adds no capability column when no model has evidence', () => {
+    renderChips({ tools: status().tools.map((tool) => ({ ...tool, status: run([], []) })) });
+    expect(document.querySelector('.model-hub-source-table--capabilities')).toBeNull();
+    expect(document.querySelector('[data-capability]')).toBeNull();
+  });
 });

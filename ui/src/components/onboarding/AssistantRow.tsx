@@ -36,7 +36,7 @@ export interface AssistantRowProps {
   routeError?: string;
   configuringDisabled?: boolean;
   /** Presentation only. The connection owner must supply confirmed state. */
-  connection?: 'subscription' | 'api_key' | 'hub';
+  connection?: 'subscription' | 'api_key' | 'external' | 'hub';
   /** Model Hub is where this setup's models come from, whatever this card's own
       state is — including one whose CLI is not on disk yet. It decides what the
       card offers: an install that also enables, a switch to flip, or its own

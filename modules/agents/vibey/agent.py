@@ -23,6 +23,7 @@ One Turn is one ``Agent.run`` (plan section 4). The adapter
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import secrets
@@ -35,7 +36,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, Callable, Mapping, Optional, Sequence
 
-from sqlalchemy import and_, select
+import httpx
+from sqlalchemy import and_, select, text as sql_text
 from sqlalchemy.engine import Engine
 
 from config import paths
@@ -46,6 +48,7 @@ from core.agent_core.agent.events import (
     CompactionFinished,
     MessageCommitted,
     RunEnded,
+    ToolFinished,
     ToolStarted,
 )
 from core.agent_core.agent.hooks import AgentInput
@@ -58,10 +61,16 @@ from core.agent_core.harness.store import ContextEntry
 from core.agent_core.tools.base import CallInstance
 from core.agent_core.tools.jobs import call_instance
 from core.agent_core.messages import (
+    HOSTED_RESULT_TOOLS,
+    HostedImage,
     IMAGE_MIME_TYPES,
     AssistantMessage,
+    TextBlock,
     ToolCallBlock,
+    ToolResultMessage,
     UserMessage,
+    has_reply,
+    message_from_dict,
     text as text_block,
 )
 from core.agent_input import AgentInputMetadata
@@ -74,6 +83,8 @@ from core.services.agent_steering import (
     result as steer_result,
 )
 from core.backend_failure import emit_backend_failure
+from core.citations import CitationBundle, register_text_citations
+from core.hosted_activity import HostedActivity, hosted_line, native_activities, proxy_activity
 from core.message_output import MessageOutput, stop_output_for, terminal_output_for
 from core.native_dispatch_phase import mark_backend_dispatch_attempted
 from core.processing_indicator import STOPPED_REACTION_EMOJI
@@ -90,7 +101,7 @@ from modules.agents.vibey.media import MediaSnapshots
 from modules.agents.vibey.models import HubModelRouter, ProviderFactory, registry_providers, selection_from_hop
 from modules.agents.vibey.prompt import EnvironmentValue, current_environment, system_prompt
 from modules.agents.vibey.store import AdapterTranscriptStore
-from modules.agents.vibey.tools import ToolSuite, local_tool_suite
+from modules.agents.vibey.tools import ToolSuite, hosted_tools, local_tool_suite
 from modules.agents.base import AGENT_RUNTIME_TURN_KEY, AgentRequest, BaseAgent
 from modules.agents.catalog import display_name_for_backend
 from modules.im.base import FileAttachment
@@ -102,16 +113,20 @@ from storage.agent_transcript import (
     call_instance_result,
     final_outcome,
     render_text,
+    text_parts,
 )
 from storage.db import get_cached_sqlite_engine
 from storage.models import agent_events, agent_sessions, message_deliveries, messages, session_turns
+from storage.vibey_recovery import VIBEY_RECOVERY_INPUT_PREDICATE
+from vibe.i18n import t as i18n_t
 
 logger = logging.getLogger(__name__)
 
 BACKEND = "vibey"
 # Final responses whose empty text is explained by the stop itself (loop-control.md section 2).
-_EXPLAINED_STOPS = ("refusal", "safety")
+_EXPLAINED_STOPS = ("length", "refusal", "safety")
 _COMPLETED = ("completed", "ended_by_hook")
+_MAX_AUTO_CONTINUATIONS = 5
 _JOB_PRUNE_INTERVAL_S = 3600.0
 
 
@@ -181,9 +196,23 @@ class _Run:
     tool_calls: dict[str, ToolCallBlock] = field(default_factory=dict)
     # This run's committed responses by row id, for delivering them; released with the run.
     responses: dict[str, AssistantMessage] = field(default_factory=dict)
+    # The loop's decision for each response whether it replies (``has_reply``), committed with its row.
+    replied: dict[str, bool] = field(default_factory=dict)
+    # The images each final delivers with its reply, as committed with its row.
+    reply_images: dict[str, tuple[HostedImage, ...]] = field(default_factory=dict)
     # Steer attempts ``Agent.steer`` accepted into this run: reconcile's in-process evidence.
     accepted_steers: set[str] = field(default_factory=set)
+    # Automatic transcript-only continuations already spent by this Turn. The
+    # initial model call is not counted; the limit is five additional attempts.
+    continuations: int = 0
+    # One elapsed window from the first continuable failure, shared by every outer continuation.
+    continuation_started_at: Optional[float] = None
     stop_requested: bool = False
+    stop_event: asyncio.Event = field(default_factory=asyncio.Event)
+    # When each tool call started (monotonic), for a proxied hosted call's duration.
+    tool_started: dict[str, float] = field(default_factory=dict)
+    # Images the run's hosted calls generated, as (path, label), attached to its final reply.
+    hosted_images: list[tuple[str, str]] = field(default_factory=list)
 
     @property
     def native_turn_id(self) -> str:
@@ -215,6 +244,7 @@ class VibeyAgent(BaseAgent):
         providers: Optional[ProviderFactory] = None,
         tool_suite: Optional[ToolSuite] = None,
         state_dir: Optional[Path] = None,
+        gateway_client: Optional[httpx.AsyncClient] = None,
     ) -> None:
         super().__init__(controller)
         self._engine = engine or get_cached_sqlite_engine()
@@ -228,6 +258,8 @@ class VibeyAgent(BaseAgent):
             on_response=self._on_response,
         )
         self._providers = providers or registry_providers(media_loader=self.media)
+        # The client of the Turn's other gateway calls (the hosted-tool executor); None opens one per call.
+        self._gateway_client = gateway_client
         # C-9: the Session parts a checkpoint carries (context.md section 9).
         self.context_host = VibeyContextHost(self._engine, environment=self._environment)
         self._tool_suite = tool_suite
@@ -244,6 +276,7 @@ class VibeyAgent(BaseAgent):
         # J5 while the service runs: when the jobs directory was last pruned, and the pass in flight.
         self._pruned_at: Optional[float] = None
         self._prune_task: Optional[asyncio.Task] = None
+        self._media_sweep: Optional[asyncio.Task] = None
 
     # --- BaseAgent -----------------------------------------------------------
 
@@ -293,7 +326,7 @@ class VibeyAgent(BaseAgent):
         context = request.context
         # Rows this Turn writes are the Turn's Agent's, from its request snapshot, even if the
         # Session's selected Agent changes while it runs.
-        self.store.bind_agent(session_id, request.vibe_agent_name)
+        self.store.bind_agent(session_id, request.vibe_agent_name, turn_id=turn.turn_id)
         await self._resume(runtime)
         if turn.stop_requested:
             return await self._settle_stopped(turn)
@@ -327,19 +360,125 @@ class VibeyAgent(BaseAgent):
             await indicator.delete_ack_message(request)
         accept_catalog(self.controller, context, skill_catalog, backend=BACKEND)
         agent_input: Optional[AgentInput] = AgentInput(input_id, message)
+        platform_specific = context.platform_specific or {}
+        transcript_resume = platform_specific.get("vibey_resume") is True
+        resume_turn_inputs = (
+            await asyncio.to_thread(
+                self._resume_turn_inputs, session_id, platform_specific.get("vibey_source_turn_id")
+            )
+            if transcript_resume
+            else None
+        )
         while agent_input is not None:
             if turn.stop_requested:
                 # A Stop acknowledged before this run could abort: no run starts. An input
                 # left unconsumed is admitted at the Session's next resume (T3).
                 turn.reason = "aborted"
                 break
-            async for event in turn.agent.run(agent_input, turn_id=turn.turn_id):
+            stream = (
+                turn.agent.resume(
+                    agent_input,
+                    turn_id=turn.turn_id,
+                    turn_inputs=resume_turn_inputs,
+                )
+                if transcript_resume
+                else turn.agent.run(agent_input, turn_id=turn.turn_id)
+            )
+            transcript_resume = False
+            resume_turn_inputs = None
+            async for event in stream:
                 await self._on_event(turn, event)
+            if self._can_auto_continue(turn) and turn.continuations < _MAX_AUTO_CONTINUATIONS:
+                if turn.continuation_started_at is None:
+                    turn.continuation_started_at = time.monotonic()
+                # Finish T2 before asking the same Agent to build its next request.
+                # Accepted P1 inputs are admitted into the transcript, but never
+                # become an implicit user-visible continuation message.
+                await self._settle_left_open(runtime)
+                resume_turn_inputs = await self._admit_returned_inputs(turn)
+                if await self._wait_auto_continue(turn):
+                    turn.continuations += 1
+                    turn.reason = None
+                    turn.cause = None
+                    turn.final_row = None
+                    transcript_resume = True
+                    continue
             agent_input = await self._continuing_input(turn)
         if turn.reason not in _COMPLETED:
             await self._settle_left_open(runtime)
         await self._settle(turn)
         self._maybe_backfill_session_title(request, session_id)
+
+    def _resume_turn_inputs(self, session_id: str, source_turn_id: Any) -> tuple[int, ...]:
+        """Committed inputs of the failed task, including steers across its retry ancestry."""
+        if not isinstance(source_turn_id, str) or not source_turn_id:
+            return ()
+        pins: set[int] = set()
+        visited: set[str] = set()
+        with self._engine.connect() as conn:
+            while source_turn_id and source_turn_id not in visited:
+                visited.add(source_turn_id)
+                turn = delivery_store.get_turn(conn, source_turn_id)
+                if turn is None or turn["session_id"] != session_id or turn["backend"] != BACKEND:
+                    break
+                pins.update(conn.execute(
+                    select(messages.c.context_seq)
+                    .select_from(message_deliveries.join(messages, message_deliveries.c.message_id == messages.c.id))
+                    .where(
+                        message_deliveries.c.turn_id == source_turn_id,
+                        messages.c.session_id == session_id,
+                        messages.c.context_seq.is_not(None),
+                        messages.c.type.in_(INPUT_TYPES),
+                    )
+                ).scalars())
+                initial = delivery_store.get_delivery(conn, turn["initial_delivery_id"])
+                payload = delivery_store.execution_delivery_payload(conn, initial) if initial else {}
+                if not delivery_store.is_vibey_resume_payload(payload):
+                    break
+                source_turn_id = payload["metadata"].get(delivery_store.VIBEY_SOURCE_TURN_METADATA_KEY)
+                if not isinstance(source_turn_id, str):
+                    break
+        return tuple(sorted(pins))
+
+    @staticmethod
+    def _can_auto_continue(run: _Run) -> bool:
+        """Whether the failed request can safely be retried from committed context."""
+
+        cause = run.cause
+        return bool(
+            not run.stop_requested
+            and run.reason == "error"
+            and not run.final_row
+            and cause is not None
+            and cause.origin == "source"
+            and cause.continuable
+        )
+
+    async def _wait_auto_continue(self, run: _Run) -> bool:
+        """Honor the provider's delay floor and one elapsed budget, with Stop owning the wait.
+
+        The initial run is not in this window. Subsequent runs and recovery work spend it, not just backoff.
+        Expiry prevents another continuation, but never interrupts a run already doing useful work.
+        """
+        if run.stop_requested:
+            run.reason = "aborted"
+            return False
+        if not self._can_auto_continue(run):
+            return False
+        policy = run.agent.retry
+        elapsed = time.monotonic() - run.continuation_started_at
+        backoff = min(policy.max_delay_s, policy.initial_delay_s * 2**run.continuations)
+        delay = max(backoff, run.cause.retry_after_s or 0.0)
+        if elapsed + delay >= policy.max_elapsed_s:
+            return False
+        try:
+            await asyncio.wait_for(run.stop_event.wait(), timeout=delay)
+        except asyncio.TimeoutError:
+            pass
+        if run.stop_requested:
+            run.reason = "aborted"
+            return False
+        return time.monotonic() - run.continuation_started_at < policy.max_elapsed_s
 
     async def _settle_stopped(self, turn: _Run) -> None:
         """A Stop before the loop started: the Turn settles as stopped, nothing dispatched."""
@@ -352,6 +491,7 @@ class VibeyAgent(BaseAgent):
             request.stop_failure_reason = "not_active"
             return False
         run.stop_requested = True
+        run.stop_event.set()
         if run.agent is not None:
             run.agent.abort("stopped by user")
         return True
@@ -378,6 +518,7 @@ class VibeyAgent(BaseAgent):
             run = runtime.run
             if run is not None and run.request.session_key == session_key:
                 run.stop_requested = True
+                run.stop_event.set()
                 if run.agent is not None:
                     run.agent.abort("session cleared")
                 cleared += 1
@@ -400,8 +541,11 @@ class VibeyAgent(BaseAgent):
         Sessions with accepted inputs no run consumed. Each runs the same resume a Turn
         runs (T2 and T3, no model call). A Session a run holds is skipped: its own resume
         settles it. J5 pruning follows a pass that settled everything. Never reports
-        success over a failure; ``VibeyRecovery`` owns the retries.
+        success over a failure; ``VibeyRecovery`` owns the retries. The first pass of the
+        process also starts the media sweep.
         """
+        if self._media_sweep is None:
+            self._media_sweep = asyncio.create_task(self._sweep_media(), name="vibey-agent-media-sweep")
         candidates = await asyncio.to_thread(self._recovery_candidates)
         unsettled: list[str] = []
         for session_id in candidates:
@@ -445,6 +589,16 @@ class VibeyAgent(BaseAgent):
                     logger.info("Vibey pruned %d settled job(s)", len(removed))
         except Exception:
             logger.exception("Vibey job pruning failed")
+
+    async def _sweep_media(self) -> None:
+        """Remove the media files no row registers, once per process, off the loop (``MediaSnapshots.sweep``)."""
+        try:
+            removed, freed = await asyncio.to_thread(self.media.sweep)
+        except Exception:
+            logger.exception("Vibey media sweep failed")
+            return
+        if removed:
+            logger.info("Vibey removed %d unregistered media file(s), %d bytes", removed, freed)
 
     def _job_call_settled(self, meta: Any) -> bool:
         """Whether the job's call instance has a durable ``tool_result`` row (the adapter's half of J5).
@@ -597,7 +751,12 @@ class VibeyAgent(BaseAgent):
             context=ContextConfig(host=self.context_host, scratch_dir=str(self._state_dir / "scratch" / session_id)),
         )
         # Job-backed tools receive the loop's tracking wrapper, so Stop kills foreground commands.
-        tools = mark_skill_loads(tuple(suite.create_tools(agent.jobs, self.media.image_sink(session_id))))
+        tools = mark_skill_loads(
+            (
+                *hosted_tools(turn.router, self._gateway_client, self.media, language=self._language),
+                *suite.create_tools(agent.jobs, self.media.image_sink(session_id)),
+            )
+        )
         agent.set_tools(tools)
         finds_rg = shutil.which("rg", path=environment.get("PATH", "")) is not None
         agent.system = system_prompt(
@@ -611,13 +770,18 @@ class VibeyAgent(BaseAgent):
 
     async def _on_event(self, run: _Run, event: AgentEvent) -> None:
         if isinstance(event, MessageCommitted):
+            # A response's native hosted calls show before the text that reads their results.
+            await self._emit_native_hosted(run, event.message_id)
             if event.final:
                 # Delivered at the end of the run, which decides how the Turn settles.
                 run.final_row = event.message_id
             else:
                 await self._emit_narration(run, event.message_id)
         elif isinstance(event, ToolStarted):
+            run.tool_started[event.tool_call_id] = time.monotonic()
             await self._emit_tool_started(run, event)
+        elif isinstance(event, ToolFinished):
+            await self._emit_proxy_hosted(run, event)
         elif isinstance(event, AgentError):
             run.errors.append(event)
         elif isinstance(event, RunEnded):
@@ -652,10 +816,15 @@ class VibeyAgent(BaseAgent):
             if run.stop_requested and reason == "aborted":
                 reason = "completed"
             run_failed_after_commit = reason not in _COMPLETED
-            failed = final_outcome(final) == "failed" or run_failed_after_commit
+            # Whether the final replies is the run's decision, committed with its row (``final_outcome``).
+            # Whether the final replies, and the images it delivers, are the run's, committed with its row.
+            replied = run.replied.get(run.final_row)
+            failed = final_outcome(final, replied=replied) == "failed" or run_failed_after_commit
             if failed:
                 self._log_failure(run, reason, kind, origin, diagnostic)
-            body = self._display_source(final, final=True)
+            body, citations = self._display_with_citations(
+                final, final=True, replied=bool(replied), images=run.reply_images.get(run.final_row, ())
+            )
             if failed and not body.strip():
                 # A silent final whose run failed after the commit: like a final without text
                 # of its own (``_display_source``), its row carries the explanation.
@@ -673,6 +842,7 @@ class VibeyAgent(BaseAgent):
                     started_at=request.started_at,
                     request=request,
                     output=replace(terminal_output_for(request), persisted_row_id=run.final_row),
+                    citations=citations,
                 )
             else:
                 # A reply the model chose to keep silent.
@@ -680,6 +850,9 @@ class VibeyAgent(BaseAgent):
                     context, "result", "", level="silent", output=terminal_output_for(request)
                 )
             return
+        # Generated images are paid for and already announced: they reach the user
+        # whether or not a final reply follows.
+        await self._emit_orphan_images(run)
         if run.stop_requested and reason == "aborted":
             # The stop receipt IM shows, as for the other backends.
             await self._remove_ack_reaction(request, terminal_emoji=STOPPED_REACTION_EMOJI)
@@ -732,23 +905,26 @@ class VibeyAgent(BaseAgent):
         run.reason = None
         return pending[-1]
 
-    async def _admit_returned_inputs(self, run: _Run) -> None:
+    async def _admit_returned_inputs(self, run: _Run) -> tuple[int, ...]:
         """Inputs a stopped or failed run accepted but did not consume enter the context (T3).
 
         They belong to the Turn that accepted them and share its outcome, as a message
         merged into another backend's stopped or failed turn does; the next Turn
         answers them with the full context.
         """
+        consumed: list[int] = []
         if run.agent is None:
-            return
+            return ()
         try:
             for item in await run.agent.take_pending_inputs():
-                await self.store.consume_input(run.session_id, item.message_id, item.message)
+                entry = await self.store.consume_input(run.session_id, item.message_id, item.message)
+                consumed.append(entry.context_seq)
         except Exception:
             # The rows stay accepted and unconsumed: the recovery owner admits them (T3)
             # without waiting for the Session's next message.
             logger.exception("Vibey could not admit returned inputs for Session %s", run.session_id)
             self._schedule_recovery()
+        return tuple(consumed)
 
     # --- resume (recovery.md T2, T3) -------------------------------------------
 
@@ -818,8 +994,8 @@ class VibeyAgent(BaseAgent):
         # A tool result is the Agent's that made the call: its owning response's author, not
         # the Turn writing it now (or none, at startup) or the Session's current selection.
         # Only the last response can hold open calls, so they share one owner.
-        owner_agent = await asyncio.to_thread(self._author_of, open_calls[0][0].row_id)
-        with self.store.writing_as(session_id, owner_agent):
+        owner_agent, owner_turn = await asyncio.to_thread(self._response_owner, open_calls[0][0].row_id)
+        with self.store.writing_as(session_id, owner_agent, turn_id=owner_turn):
             await settle_open_calls(
                 session_id=session_id,
                 store=self.store,
@@ -828,9 +1004,14 @@ class VibeyAgent(BaseAgent):
                 render_result=suite.render_recovered,
             )
 
-    def _author_of(self, row_id: str) -> Optional[str]:
+    def _response_owner(self, row_id: str) -> tuple[Optional[str], Optional[str]]:
         with self._engine.connect() as conn:
-            return conn.execute(select(messages.c.author_name).where(messages.c.id == row_id)).scalar()
+            row = conn.execute(
+                select(messages.c.author_name, messages.c.metadata_json).where(messages.c.id == row_id)
+            ).first()
+        if row is None:
+            return None, None
+        return row.author_name, _json_object(row.metadata_json).get("turn_id")
 
     def _job_route(self, meta: Mapping[str, Any]) -> dict[str, Any]:
         """A job Watch's Agent and authorization, from the job's owning Turn (fail closed).
@@ -855,13 +1036,15 @@ class VibeyAgent(BaseAgent):
         session_id = call.session_id
         with self._engine.connect() as conn:
             owner = conn.execute(
-                select(messages.c.author_name).where(
+                select(messages.c.author_name, messages.c.metadata_json).where(
                     messages.c.id == call.response_id,
                     messages.c.session_id == session_id,
                     messages.c.context_seq == call.response_seq,
                 )
             ).first()
-            origin = self._turn_initial_input(conn, session_id, call.response_seq) if owner else None
+            origin = self._turn_initial_input(
+                conn, session_id, call.response_seq, turn_id=_json_object(owner.metadata_json).get("turn_id")
+            ) if owner else None
         if owner is None or origin is None:
             return {"unverifiable_remote": True}
         route: dict[str, Any] = {"agent_name": owner.author_name} if owner.author_name else {}
@@ -888,8 +1071,20 @@ class VibeyAgent(BaseAgent):
         return {**route, "user_context": context}
 
     @staticmethod
-    def _turn_initial_input(conn: Any, session_id: str, before_seq: int) -> Optional[dict]:
-        """The initial input row of the Turn whose input precedes ``before_seq``."""
+    def _turn_initial_input(
+        conn: Any, session_id: str, before_seq: int, *, turn_id: Optional[str] = None
+    ) -> Optional[dict]:
+        """The response's durable Turn input; legacy responses use context order."""
+        if turn_id is not None:
+            row = conn.execute(
+                select(messages.c.platform, messages.c.author_id, messages.c.metadata_json)
+                .select_from(
+                    session_turns.join(message_deliveries, message_deliveries.c.id == session_turns.c.initial_delivery_id)
+                    .join(messages, messages.c.id == message_deliveries.c.message_id)
+                )
+                .where(session_turns.c.id == turn_id, session_turns.c.session_id == session_id)
+            ).mappings().first()
+            return dict(row) if row is not None else None
         latest = conn.execute(
             select(messages.c.id)
             .where(
@@ -933,30 +1128,23 @@ class VibeyAgent(BaseAgent):
         from core.workbench_media import file_attachments_from_specs, resolve_attachment_specs
 
         with self._engine.connect() as conn:
+            # CROSS JOIN fixes SQLite's loop order: start with indexed live
+            # inputs, then seek their Deliveries/Turns. A materialized CTE alone
+            # still lets the planner scan all historical accepted Deliveries.
             rows = conn.execute(
-                select(
-                    messages.c.id,
-                    messages.c.content_text,
-                    messages.c.content_json,
-                    message_deliveries.c.id.label("delivery_id"),
-                    message_deliveries.c.turn_role,
-                    session_turns.c.dispatch_text.label("turn_dispatch_text"),
-                )
-                .select_from(
-                    messages.join(message_deliveries, message_deliveries.c.message_id == messages.c.id).join(
-                        session_turns, session_turns.c.id == message_deliveries.c.turn_id
-                    )
-                )
-                .where(
-                    and_(
-                        messages.c.session_id == session_id,
-                        messages.c.context_seq.is_(None),
-                        messages.c.type.in_(INPUT_TYPES),
-                        message_deliveries.c.state == "accepted",
-                        session_turns.c.backend == BACKEND,
-                    )
-                )
-                .order_by(message_deliveries.c.materialized_at, message_deliveries.c.turn_position, messages.c.id)
+                sql_text(
+                    "select messages.id, messages.content_text, messages.content_json, "
+                    "message_deliveries.id as delivery_id, message_deliveries.turn_role, "
+                    "session_turns.dispatch_text as turn_dispatch_text "
+                    "from messages cross join message_deliveries "
+                    "on message_deliveries.message_id = messages.id "
+                    "cross join session_turns on session_turns.id = message_deliveries.turn_id "
+                    f"where {VIBEY_RECOVERY_INPUT_PREDICATE} "
+                    "and messages.session_id = :session_id "
+                    "and message_deliveries.state = 'accepted' and session_turns.backend = :backend "
+                    "order by message_deliveries.materialized_at, message_deliveries.turn_position, messages.id"
+                ),
+                {"session_id": session_id, "backend": BACKEND},
             ).mappings().all()
             inputs = []
             seen: set[str] = set()
@@ -969,6 +1157,8 @@ class VibeyAgent(BaseAgent):
                     conn, session_id=session_id, attachments=list(content.get("attachments") or [])
                 )
                 delivery = delivery_store.get_delivery(conn, row["delivery_id"])
+                if delivery is None:
+                    continue
                 # A Turn's initial input is sent as the Turn's dispatch text, which the Turn owner
                 # derived from its Delivery batch (attachment notes, merged scheduled inputs) and
                 # keeps after acceptance; the row's display text omits that.
@@ -1023,19 +1213,25 @@ class VibeyAgent(BaseAgent):
         content = ([text_block(rendered)] if rendered or not images else []) + images
         return UserMessage(content=tuple(content))
 
-    def _display_source(self, message: AssistantMessage, *, final: bool) -> str:
+    def _display_source(
+        self, message: AssistantMessage, *, final: bool, replied: bool = False, images: Sequence[HostedImage] = ()
+    ) -> str:
         """The text a surface renders a response from: its text blocks without silent blocks.
 
         Also the row's commit-time display (the store's renderer). A final without
         text of its own (``final_outcome`` failed) is explained by localized copy:
         the refusal or safety explanation, else the empty-reply one, so the row
-        never shows nothing for a failed Turn (loop-control.md section 2).
+        never shows nothing for a failed Turn (loop-control.md section 2). A final
+        carries the images its Turn generated (``images``), so its committed row is
+        the complete reply even if delivery never runs.
         """
         value = render_text(message)
-        if final and not value.strip():
+        # A final that replies without text replies with its Turn's images, so there is nothing to explain.
+        if final and not value.strip() and not replied:
             kind = message.stop_reason if message.stop_reason in _EXPLAINED_STOPS else "empty_response"
-            return error_text(kind, self._language())
-        return strip_silent_blocks(value)
+            return self._with_images(error_text(kind, self._language()), images)
+        body = strip_silent_blocks(value)
+        return self._with_images(body, images) if final else body
 
     async def _avibe_sections(self, request: AgentRequest, cwd: str) -> tuple[str, Optional[dict]]:
         """Avibe's injected prompt sections and the skill catalog they offered.
@@ -1155,7 +1351,7 @@ class VibeyAgent(BaseAgent):
     async def _emit_narration(self, run: _Run, row_id: str) -> None:
         """A non-final response through the same process path as the other backends' narration."""
         message = run.responses.get(row_id)
-        body = self._display_source(message, final=False) if message is not None else ""
+        body, citations = self._display_with_citations(message, final=False) if message is not None else ("", None)
         if not body.strip():
             return
         try:
@@ -1164,31 +1360,188 @@ class VibeyAgent(BaseAgent):
                 "assistant",
                 body,
                 output=MessageOutput(completes_turn=False, completes_run=False, persisted_row_id=row_id),
+                citations=citations,
             )
         except Exception:
             logger.exception("Vibey could not show narration %s", row_id)
 
-    async def _emit_tool_started(self, run: _Run, event: ToolStarted) -> None:
+    def _display_with_citations(
+        self, message: AssistantMessage, *, final: bool, replied: bool = False, images: Sequence[HostedImage] = ()
+    ) -> tuple[str, Optional[CitationBundle]]:
+        """The display text and, when the provider cited sources, the bundle that links them.
+
+        The same text ``_display_source`` gives, with each cited span carrying a
+        token that delivery writes out as a Markdown link (IM) and a badge (Web),
+        through ``core.citations`` like every other backend's citations.
+        """
+        blocks = [(separator, block.text, block.citations or ()) for separator, block in text_parts(message)]
+        if not any(citations for _, _, citations in blocks):
+            return self._display_source(message, final=final, replied=replied, images=images), None
+        body, bundle = register_text_citations(
+            blocks,
+            unresolved_label=i18n_t("message.citationUnresolved", self._language()),
+            transform=strip_silent_blocks,
+        )
+        if final and not body.strip():
+            return self._display_source(message, final=True, replied=replied, images=images), None
+        return (self._with_images(body, images) if final else body), bundle
+
+    def _with_images(self, body: str, images: Sequence[HostedImage]) -> str:
+        """A final reply with its Turn's generated images attached, as file links.
+
+        A file link is how every surface delivers a local file: IM uploads it as an
+        attachment, and the Web shows it inline from the same media token its card
+        registered. An image the reply already links is not attached twice.
+        """
+        links = self._image_links([(image.path, Path(image.path).name) for image in images], body)
+        if not links:
+            return body
+        # A reply that is only images still says what it carries, as the Codex backend's does.
+        lead = body.rstrip() or i18n_t("info.generatedImagesFallback", self._language())
+        return f"{lead}\n\n{links}"
+
+    @staticmethod
+    def _image_links(images: Sequence[tuple[str, str]], body: str) -> str:
+        """File links for the ``(path, label)`` images that ``body`` does not already link.
+
+        Only a link counts: the model is given each image's path as text, and a
+        reply that mentions it in prose has still not delivered the file. A path
+        that is not absolute names no file a surface could send, so it is skipped.
+        """
+        links = []
+        for path, label in images:
+            if not os.path.isabs(path):
+                logger.warning("Vibey skipped a hosted image with a relative path: %s", path)
+                continue
+            uri = Path(path).as_uri()
+            if f"]({uri})" in body:
+                continue
+            safe = label.replace("[", "(").replace("]", ")")
+            links.append(f"![{safe}]({uri})")
+        return "\n\n".join(links)
+
+    async def _emit_orphan_images(self, run: _Run) -> None:
+        """A run's generated images when it ends with no final reply to carry them."""
+        links = self._image_links(run.hosted_images, "")
+        if not links:
+            return
+        try:
+            await self.controller.emit_agent_message(
+                run.request.context,
+                "output",
+                f"{i18n_t('info.generatedImagesFallback', self._language())}\n\n{links}",
+                output=MessageOutput(completes_turn=False, completes_run=False, records_run_output=False),
+            )
+        except Exception:
+            logger.exception("Vibey could not deliver %d generated image(s)", len(run.hosted_images))
+
+    async def _source_names(self) -> Mapping[str, str]:
+        """Each Model Hub Source's display name by id, as Model Hub holds them now.
+
+        Read through the Model Hub runtime, the one owner of its current config, off
+        the event loop: ``self.config`` is the controller's app config, which carries
+        no Model Hub state, and a Source renamed or added since start must show as it
+        is now.
+        """
+        runtime = getattr(self.controller, "model_hub_runtime", None)
+        if runtime is None:
+            return {}
+        try:
+            hub = await asyncio.to_thread(runtime.snapshot)
+        except Exception:
+            # A name is display only: the card and the line still show the Source by id.
+            logger.warning("Vibey could not read Model Hub's Sources for display names", exc_info=True)
+            return {}
+        return {source.id: source.display_name for source in hub.sources if source.display_name}
+
+    async def _emit_hosted(self, run: _Run, activity: HostedActivity) -> None:
+        """One hosted call: its line for IM and its card for the Web (``core.hosted_activity``)."""
+        # Only a completed call delivers what it produced, as only its image counts as a reply (``has_reply``).
+        if activity.completed:
+            run.hosted_images.extend((image.path, Path(image.path).name) for image in activity.images)
+        formatter = self._get_formatter(run.request.context)
+        line = hosted_line(activity, self._language(), escape=formatter.escape_special_chars)
+        try:
+            await self.controller.emit_agent_message(
+                run.request.context, "toolcall", line, status_label=line, hosted=activity.to_payload()
+            )
+        except Exception:
+            logger.exception("Vibey could not show hosted call %s", activity.call_id)
+
+    async def _emit_native_hosted(self, run: _Run, row_id: str) -> None:
+        message = run.responses.get(row_id)
+        if message is None:
+            return
+        names = await self._source_names()
+        for activity in native_activities(message, source_names=names.get, response_id=row_id):
+            await self._emit_hosted(run, activity)
+
+    async def _emit_proxy_hosted(self, run: _Run, event: ToolFinished) -> None:
+        """A proxied hosted call, once its result is committed: the record its executor returned."""
         call = run.tool_calls.get(event.tool_call_id)
-        arguments = dict(call.arguments) if call is not None else {}
+        started = run.tool_started.pop(event.tool_call_id, None)
+        if call is None or call.name not in HOSTED_RESULT_TOOLS:
+            return
+        try:
+            result = await asyncio.to_thread(self._committed_tool_result, event.event_id)
+        except Exception:
+            logger.exception("Vibey could not read hosted result %s", event.event_id)
+            result = None
+        if result is None or result.hosted is None:
+            # A hosted-named call that ended without a record (a plain error result):
+            # it still shows, as the tool line its start would have drawn.
+            await self._emit_tool_line(run, call.name, dict(call.arguments))
+            return
+        duration = int((time.monotonic() - started) * 1000) if started is not None else None
+        names = await self._source_names()
+        await self._emit_hosted(run, proxy_activity(call, result.hosted, source_names=names.get, duration_ms=duration))
+
+    def _committed_tool_result(self, event_id: str) -> Optional[ToolResultMessage]:
+        """The tool result a ``ToolFinished`` names: one row, by primary key."""
+        with self._engine.connect() as conn:
+            raw = conn.execute(select(agent_events.c.content_json).where(agent_events.c.id == event_id)).scalar()
+        if not raw:
+            return None
+        message = message_from_dict((json.loads(raw) or {}).get("message") or {})
+        return message if isinstance(message, ToolResultMessage) else None
+
+    async def _emit_tool_started(self, run: _Run, event: ToolStarted) -> None:
+        if event.name in HOSTED_RESULT_TOOLS:
+            # A proxied hosted call shows once, as its card, when its result lands.
+            return
+        call = run.tool_calls.get(event.tool_call_id)
+        await self._emit_tool_line(run, event.name, dict(call.arguments) if call is not None else {})
+
+    async def _emit_tool_line(self, run: _Run, name: str, arguments: dict) -> None:
         formatter = self._get_formatter(run.request.context)
         relative = _relative_to(run.cwd)
         try:
             await self.controller.emit_agent_message(
                 run.request.context,
                 "toolcall",
-                formatter.format_toolcall(event.name, arguments, get_relative_path=relative),
-                status_label=formatter.format_toolcall_label(event.name, arguments, get_relative_path=relative),
+                formatter.format_toolcall(name, arguments, get_relative_path=relative),
+                status_label=formatter.format_toolcall_label(name, arguments, get_relative_path=relative),
             )
         except Exception:
-            logger.exception("Vibey could not show tool %s", event.name)
+            logger.exception("Vibey could not show tool %s", name)
 
-    def _on_response(self, session_id: str, row_id: str, message: AssistantMessage) -> None:
+    def _on_response(
+        self,
+        session_id: str,
+        row_id: str,
+        message: AssistantMessage,
+        replied: Optional[bool],
+        images: tuple[HostedImage, ...] = (),
+    ) -> None:
         """A response committed for the Session's run: keep what its delivery and tool events need."""
         run = self._run_for(session_id, None)
         if run is None:
             return
         run.responses[row_id] = message
+        if replied is not None:
+            run.replied[row_id] = replied
+        if images:
+            run.reply_images[row_id] = images
         run.tool_calls.update({call.id: call for call in message.tool_calls})
         self._note_tokens(run, message)
 
@@ -1388,24 +1741,18 @@ class VibeyAgent(BaseAgent):
     def _sessions_with_unconsumed_inputs(self) -> list[str]:
         """Sessions with inputs accepted into a ``vibey`` Turn that no run consumed (T3)."""
         with self._engine.connect() as conn:
-            return sorted(
-                conn.execute(
-                    select(messages.c.session_id)
-                    .select_from(
-                        messages.join(message_deliveries, message_deliveries.c.message_id == messages.c.id).join(
-                            session_turns, session_turns.c.id == message_deliveries.c.turn_id
-                        )
-                    )
-                    .where(
-                        messages.c.session_id.is_not(None),
-                        messages.c.context_seq.is_(None),
-                        messages.c.type.in_(INPUT_TYPES),
-                        message_deliveries.c.state == "accepted",
-                        session_turns.c.backend == BACKEND,
-                    )
-                    .distinct()
-                ).scalars()
-            )
+            rows = conn.execute(
+                sql_text(
+                    "select messages.session_id from messages "
+                    "cross join message_deliveries on message_deliveries.message_id = messages.id "
+                    "cross join session_turns on session_turns.id = message_deliveries.turn_id "
+                    f"where {VIBEY_RECOVERY_INPUT_PREDICATE} "
+                    "and messages.session_id is not null "
+                    "and message_deliveries.state = 'accepted' and session_turns.backend = :backend"
+                ),
+                {"backend": BACKEND},
+            ).scalars()
+            return sorted({str(session_id) for session_id in rows if session_id is not None})
 
     def _session_workdir(self, session_id: str) -> str:
         with self._engine.connect() as conn:

@@ -701,6 +701,8 @@
       "oauthStarting": "Starting OAuth flow…",
       "oauthVerifying": "Verifying credentials…",
       "oauthSuccess": "Signed in successfully.",
+      "claudeAuthorizationCompleted": "Authorization completed and saved. Runtime application is a separate step.",
+      "claudeNativeCredentialsCleared": "Saved native account credentials cleared. Environment and project authentication settings are unchanged.",
       "oauthFailed": "OAuth flow failed: {{detail}}",
       "oauthPollTimedOut": "Login did not complete within the allowed time. Please retry.",
       "oauthUrlCopied": "URL copied to clipboard.",
@@ -911,40 +913,32 @@
       "shell": {
         "title": "Models",
         "running": "Gateway running",
-        "stopped": "Gateway off",
-        "unavailable": "Gateway enabled, currently unavailable",
+        "stopped": "Gateway unavailable",
+        "unavailable": "Gateway currently unavailable",
         "degraded": "Gateway running degraded",
         "unread": "Gateway status unavailable",
-        "notStarted": "Gateway off",
+        "notStarted": "Gateway not ready",
         "notInstalled": "Gateway component not installed",
         "allDirect_one": "The only backend is direct",
         "allDirect_other": "All {{count}} backends are direct",
         "starting": "Starting…",
-        "stopping": "Stopping…",
         "unsupported": "No gateway component for this platform yet",
-        "toggle": {
-          "turnOn": "Turn model gateway on",
-          "turnOff": "Turn model gateway off",
-          "stopBlocked": "Switch {{names}} to Direct before turning the model gateway off",
-          "stopVibeyBlocked": "{{name}}'s models use the model gateway; remove them before turning it off.",
-          "stopUnavailable": "Agent routing status is unavailable; the model gateway cannot be turned off yet"
-        },
         "closed": {
           "off": {
-            "title": "Model gateway is off",
-            "body": "Turn it on to view and edit sources, routes, and gateway models."
+            "title": "Model gateway is not ready",
+            "body": "Retry to restore access to sources, routes, and gateway models."
           },
           "down": {
-            "title": "Model gateway is off",
-            "body": "The previous start did not become ready. Turn it on to try again."
+            "title": "Model gateway is unavailable",
+            "body": "The previous start did not become ready. Retry to start the gateway again."
           },
           "enabledDown": {
-            "title": "Model gateway is enabled but unavailable",
-            "body": "The enabled setting is saved. Turn it off and back on to retry now."
+            "title": "Model gateway is unavailable",
+            "body": "Your configuration is saved. Retry to restore the gateway."
           },
           "notInstalled": {
             "title": "Model gateway is not installed",
-            "body": "Turn it on to install the managed gateway component."
+            "body": "Retry to install and start the managed gateway component."
           },
           "unsupported": {
             "title": "Model gateway is unavailable",
@@ -958,10 +952,6 @@
             "title": "Starting model gateway",
             "body": "Sources and routing will appear when the gateway is ready."
           },
-          "stopping": {
-            "title": "Turning model gateway off",
-            "body": "Gateway configuration is hidden while the runtime stops."
-          },
           "unread": {
             "title": "Model gateway status unavailable",
             "body": "Configuration stays hidden until the runtime state can be confirmed."
@@ -973,6 +963,7 @@
         },
         "tab": {
           "hub": "Sources & gateway",
+          "tools": "Tools",
           "quota": "Subscription quota",
           "usage": "Usage",
           "logs": "Logs"
@@ -1757,8 +1748,7 @@
       },
       "errors": {
         "engineDown": "Model engine is not ready yet; try again shortly",
-        "startFailed": "Model engine could not be started",
-        "stopFailed": "Model gateway could not be turned off"
+        "startFailed": "Model engine could not be started"
       },
       "runtime": {
         "notStarted": "Not started · starts automatically on first use",
@@ -1969,7 +1959,7 @@
           "native": {
             "label": "Use natively",
             "desc": {
-              "claude": "Claude Code uses this subscription directly; the credential stays on this machine."
+              "claude": "Claude Code manages this native sign-in on this machine; credentials stay in its own store."
             }
           },
           "hub": {
@@ -2039,6 +2029,7 @@
           "timeout": "Authorization timed out, please reconnect",
           "generic": "Connection failed, please retry",
           "finalize": "Authorized, but couldn't create the source — please retry",
+          "nativeApply": "Authorization and source configuration were saved, but this attempt could not apply the backend configuration. Check and retry application in backend settings.",
           "finalizeReauth": "Signed in, but this source still isn't working — please retry",
           "details": {
             "show": "Show details",
@@ -2084,7 +2075,7 @@
       "migration": {
         "open": "Migrate configuration",
         "title": "Migrate to the Model Hub",
-        "subtitle": "Import authentication saved in configuration files, shell startup files, or supported credential stores. After migration, assistants authenticate through Model Hub: subscription sign-ins move into Model Hub, and API keys are copied while the originals stay in place.",
+        "subtitle": "Import authentication saved in configuration files, shell startup files, or supported credential stores. Subscription sign-ins move into Model Hub. API keys are copied as saved, with the originals kept by default; migration does not test keys online or fetch model lists. Later model requests establish whether a key works.",
         "cleanApiKeys": "Also remove the API keys from the native CLI configuration",
         "cleanApiKeysHint": "Includes shell startup files and each CLI’s config files. Left unchecked, those keys stay as they are; assistants launched through Model Hub don’t use them.",
         "empty": "No configuration found to migrate.",
@@ -2112,7 +2103,7 @@
           "runtimeStopping": "The task these assistants were running in Avibe is still stopping. Try again in a moment.",
           "permissionNeeded": "Allow credential access, then retry.",
           "recoveryPending": "Migration is unfinished. Retry to continue.",
-          "itemConflict": "Migration could not verify the saved configuration or its credentials. Check the files and authentication before retrying, or add the source manually in Model Hub.",
+          "itemConflict": "The selected configuration could not be migrated safely. Reopen the migration dialog to scan the latest configuration. If it still fails, check the file format and access permissions.",
           "configurationBlocked": "Adjust the native configuration, then scan again.",
           "credentialsInvalid": "Authentication has expired. Sign in again in Model Hub.",
           "reauthorizationRequired": "This backend was already migrated, and the changed native login cannot be verified as a new authorization. The original files are unchanged. Sign in again for the existing source in Model Hub instead of importing this login."
@@ -2344,6 +2335,164 @@
         "refreshed": "Updated",
         "unresolved": "Still not working",
         "failed": "Couldn't do that, please retry"
+      },
+      "tools": {
+        "title": "Tools",
+        "subtitle": "Tools Vibey can use in a conversation. Searches send the query to the vendor that runs them; if one fails, the query may be retried with another of your Sources. Image prompts go to the image model's vendor. On metered Sources each call is billed.",
+        "group": {
+          "search": "Search",
+          "generate": "Generate"
+        },
+        "tool": {
+          "web_search": {
+            "name": "Web search",
+            "inline": "web search",
+            "description": "Searches the web and cites its sources in the answer."
+          },
+          "x_search": {
+            "name": "X search",
+            "inline": "X search",
+            "description": "Searches posts on X, with operators such as from: and within_time:."
+          },
+          "image_generate": {
+            "name": "Image generation",
+            "inline": "image generation",
+            "description": "Vibey calls an image model to generate or edit images, saved as files."
+          }
+        },
+        "state": {
+          "on": "On",
+          "off": "Off"
+        },
+        "toggle": {
+          "turnOn": "Turn on {{name}}",
+          "turnOff": "Turn off {{name}}"
+        },
+        "status": {
+          "ok": "Last run by {{source}} · OK · {{date}}",
+          "refused": "Not supported on {{source}} · {{models}}",
+          "refusedMany": "Not supported on {{sources}}",
+          "switched": "{{line}}; now using {{source}}",
+          "replay": "{{source}} can't replay earlier results",
+          "replayMany": "{{sources}} can't replay earlier results"
+        },
+        "clear": {
+          "label": "Clear",
+          "source": "Clear {{source}}'s refusal of {{toolInline}}",
+          "model": "Clear the {{toolInline}} refusal of {{model}} on {{source}}",
+          "all": "Clear all",
+          "allLabel": "Clear every refusal of {{toolInline}}"
+        },
+        "advanced": {
+          "label": "Advanced",
+          "summaryBoth": "{{order}} · {{sources}}"
+        },
+        "order": {
+          "title": "Execution order",
+          "caption": "When the current model can't search natively, Vibey asks these Sources to search for it, in this order.",
+          "captionCustom": "When the current model can't search natively, Vibey asks these Sources to search for it, in this order. Customized.",
+          "summaryAuto": "Execution order: automatic",
+          "summaryCustom": "Execution order: customized",
+          "reset": "Reset to automatic",
+          "empty": "None of your Sources can search for models that can't run {{toolInline}} natively.",
+          "moveUp": "Move {{source}} up",
+          "moveDown": "Move {{source}} down",
+          "moved_one": "Moved {{source}} to position {{position}} of {{count}}.",
+          "moved_other": "Moved {{source}} to position {{position}} of {{count}}."
+        },
+        "sources": {
+          "title": "Status by Source",
+          "caption": "From real requests. A refusal stays until you clear it, or until the Source's settings, the engine or Avibe change. After a clear, the next request tries that Source again."
+        },
+        "pair": {
+          "ok": "OK · {{date}}",
+          "refused": "Not supported · {{date}}",
+          "replay": "No replay · {{date}}"
+        },
+        "image": {
+          "title": "Available image models",
+          "noUnitPrice": "No unit price",
+          "perImage": "${{usd}} / image",
+          "perImageEstimated": "≈ ${{usd}} / image",
+          "pair": "{{model}} · {{source}}",
+          "defaultBadge": "Default",
+          "defaultLabel": "Default model",
+          "defaultPick": "Default image model",
+          "automatic": "Automatic",
+          "automaticNamed": "Automatic ({{pair}})",
+          "automaticRule": "Automatic (first available in catalog order)",
+          "unavailable": "{{pair}} (unavailable)",
+          "defaultNote": "Used when Vibey doesn't name a model. Vibey can also pick another model from the list when it needs to.",
+          "unavailableNote": "The saved default isn't available now, so {{pair}} is used.",
+          "unavailableNoteNone": "The saved default isn't available now.",
+          "emptyOne": "Image generation needs an API key from {{vendor}}.",
+          "emptyMany": "Image generation needs an API key from one of {{vendors}}.",
+          "emptyRefused": "No image model is available now. Clear a refusal above to try it again.",
+          "emptyNoVendor": "No image model is available.",
+          "description": {
+            "gpt-image-2": "Photorealistic images and legible text in them; edits from reference images.",
+            "gemini-2_5-flash-image": "Fast generation and edits, keeping characters and style consistent.",
+            "gemini-3-pro-image-preview": "High-fidelity images with accurate text rendering."
+          },
+          "vendor": {
+            "openai": "OpenAI",
+            "gemini": "Google",
+            "xai": "xAI"
+          }
+        },
+        "cost": {
+          "included": "Included in subscription",
+          "includedNote": "No extra charge",
+          "perUnit": "${{usd}} / {{unit}}",
+          "unit": {
+            "call": "call",
+            "search": "search",
+            "post": "post",
+            "profile": "profile"
+          },
+          "listNote": "At API price",
+          "listNoteExtras": "At API price · {{extras}}",
+          "extra": "+ {{price}}",
+          "extraSeparator": " · ",
+          "unknown": "No list price"
+        },
+        "footnote": "Costs are estimated at the vendor's API price, and a relay may bill differently. Subscriptions add no charge. A Claude subscription can't run these tools.",
+        "saveFailed": "Couldn't save the {{toolInline}} setting. Please retry.",
+        "clearFailed": "Couldn't clear the {{toolInline}} refusal. Please retry."
+      },
+      "capability": {
+        "readFailed": "Couldn't read this Source's tool capabilities.",
+        "col": "Capabilities",
+        "chip": {
+          "ok": "{{tool}} · OK · {{date}}",
+          "refused": "{{tool}} · not supported",
+          "replay": "{{tool}} · no replay"
+        },
+        "explain": {
+          "native": "A real request ran {{toolInline}} natively on this model. Display only; it doesn't change routing.",
+          "executor": "This model ran {{toolInline}} for other models as the executor. Display only; it doesn't change routing.",
+          "direct": "This model generated images on its image endpoint. Display only; it doesn't change routing.",
+          "refused": "This Source refused {{toolInline}} in a real request on this model. Until you clear it, Vibey does it another way.",
+          "replay": "This model runs {{toolInline}} on this Source but refused earlier results sent back to it, so they go back as plain text."
+        },
+        "recorded": "Recorded",
+        "recordedValue": "{{time}} · a real request",
+        "reason": "Reason",
+        "kept": "Kept",
+        "keptValue": "until you clear it, or the Source's settings, the engine or Avibe change",
+        "lastOk": "Last OK",
+        "clear": "Clear",
+        "clearTool": "Clear the {{tool}} refusal of {{model}}",
+        "clearEffort": "Clear the {{effort}} refusal of {{model}}",
+        "clearHint": "Supported now? Select Clear on the chip, and the next request tries this Source again.",
+        "clearFailed": "Couldn't clear the refusal. Please retry.",
+        "accessibleName": "{{label}}. {{explanation}}",
+        "accessibleNameFacts": "{{label}}. {{explanation}} {{facts}}",
+        "accessibleFact": "{{term}}: {{value}}.",
+        "effort": {
+          "unsupported": "{{effort}} · not supported",
+          "explain": "This Source refused this reasoning effort, so requests at it skip this Source."
+        }
       }
     }
   },
@@ -2520,6 +2669,15 @@
     "retry": "Retry"
   },
   "errors": {
+    "invalid_field_name": "Use 1–64 lowercase letters, digits or underscores for field names, starting with a letter.",
+    "field_exists": "A field with this name already exists. Choose a different name.",
+    "field_not_found": "This field no longer exists. Refresh the secret and choose one of its current fields.",
+    "too_many_fields": "A secret can have at most 32 fields, including the default field.",
+    "fields_corrupt": "This secret's stored field data is damaged. The default value remains available; field changes are disabled to preserve existing data.",
+    "fields_not_supported": "Signing keys do not support named fields or default-field renaming.",
+    "record_mismatch": "This field changed while you were saving. Refresh the secret and try again.",
+    "secret_conflict": "This secret changed elsewhere. Review the refreshed fields and try again; your change was not saved.",
+    "secret_not_found": "This secret no longer exists. Refresh the vault and choose another secret.",
     "retry_not_available": "This notice cannot be retried. Send a message to continue.",
     "retry_stale": "Newer work has already started. Send a message if you want to continue.",
     "retry_busy": "The previous turn is still settling. Try again after it stops.",
@@ -3006,7 +3164,6 @@
     "sessionReference": "Reference this session",
     "sessionFork": "Fork session",
     "sessionForkUnavailable": "This session has no native agent session to fork yet.",
-    "sessionShowInPet": "Show in pet",
     "sessionHideToBackground": "Hide to background",
     "sessionHiddenToast": "Hidden to background · Find it in Agents → Runs",
     "sessionArchive": "Archive session",
@@ -4662,6 +4819,9 @@
       "vaultDenied": "Denied",
       "vaultFailed": "Failed",
       "vaultExpired": "Expired",
+      "vaultDeleteApproved": "Deletion approved — secret deleted",
+      "vaultDeleteDenied": "Deletion denied",
+      "vaultDeleteExpired": "Deletion request expired",
       "agentFallback": "agent"
     },
     "citation": {
@@ -4679,6 +4839,9 @@
       "agent": "Agent",
       "model": "Model",
       "effort": "Effort",
+      "effortNotOn": "Not on {{sources}}",
+      "effortNotOnSome": "Not on some Sources",
+      "effortRefused": "No Source accepts it now · clear it under Models → Sources",
       "newAgent": "New agent",
       "addModel": "Add model",
       "noModels": "No models found",
@@ -4766,6 +4929,76 @@
       }
     },
     "agentActivity": {
+      "hosted": {
+        "errorCode": {
+          "provider_no_reason": "The provider gave no reason.",
+          "provider_no_image": "The provider returned no image.",
+          "image_not_streamed": "The image did not arrive before the response ended.",
+          "image_not_saved": "The image could not be saved.",
+          "image_no_store": "Nothing here can keep a generated image.",
+          "executor_no_image": "The proxy executor returned no image.",
+          "gateway_unreachable": "Couldn't reach the model gateway.",
+          "gateway_refused": "The model gateway refused the call.",
+          "gateway_no_result": "The model gateway returned no result.",
+          "image_param_unsupported": "The chosen image model doesn't take one of the arguments.",
+          "image_model_unavailable": "The chosen image model isn't available.",
+          "image_argument_invalid": "The image call had an argument it can't send.",
+          "image_reference_unreadable": "A reference image couldn't be read.",
+          "provider_refused": "The provider refused the call.",
+          "provider_unavailable": "The provider is unavailable right now. Try again later.",
+          "provider_timed_out": "The call timed out.",
+          "provider_unreachable": "Couldn't reach the provider.",
+          "provider_unreadable": "The provider's response couldn't be read.",
+          "provider_too_large": "The provider's response was larger than allowed.",
+          "provider_image_unusable": "The provider returned an image that couldn't be used.",
+          "search_not_run": "The model answered without searching.",
+          "search_failed": "The provider's search failed.",
+          "response_ended_early": "The response ended early."
+        },
+        "mode": {
+          "native": "Native · {{provider}}",
+          "proxy": "Via {{provider}} proxy",
+          "direct": "Direct · {{provider}}",
+          "directModel": "{{model}} · {{source}}",
+          "proxyModel": "Via {{provider}} proxy · {{model}}"
+        },
+        "status": {
+          "failed": "Failed",
+          "incomplete": "Incomplete",
+          "pending": "Cut off"
+        },
+        "cost": {
+          "included": "Included in subscription",
+          "list": "≈ ${{usd}}",
+          "reported": "${{usd}}",
+          "atLeast": "at least {{cost}}",
+          "calls_one": "{{cost}} for {{count}} call",
+          "calls_other": "{{cost}} for {{count}} calls"
+        },
+        "count": {
+          "sources_one": "{{count}} source",
+          "sources_other": "{{count}} sources",
+          "posts_one": "{{count}} post",
+          "posts_other": "{{count}} posts",
+          "images_one": "{{count}} image",
+          "images_other": "{{count}} images"
+        },
+        "ranNative": "Ran natively on {{where}}",
+        "ranProxy": "Run by proxy executor {{where}}",
+        "ranDirect": "Ran directly on {{where}}",
+        "fallback": {
+          "ranOn": "{{from}} doesn't support {{toolInline}}, so {{provider}} ({{source}}) ran it",
+          "ran": "{{from}} doesn't support {{toolInline}}, so {{provider}} ran it",
+          "kept": "Used from now on; clear it in Models › Tools",
+          "keptManager": "Used from now on; an instance manager can clear it in Models › Tools"
+        },
+        "duration": "took {{seconds}} s",
+        "alsoSearched": "Also searched: {{queries}}",
+        "image": {
+          "prompt": "Prompt",
+          "download": "Download {{name}}"
+        }
+      },
       "running": "Running",
       "step": "{{count}} step",
       "steps": "{{count}} steps",
@@ -4890,9 +5123,41 @@
     "chat": {
       "floatApprovals": "Waiting for your approval · {{count}}"
     },
+    "search": {
+      "label": "Search secrets",
+      "placeholder": "Search names, descriptions, tags, hosts…",
+      "clear": "Clear search",
+      "count_one": "{{count}} secret",
+      "count_other": "{{count}} secrets",
+      "filtered": "{{visible}} / {{total}} secrets"
+    },
     "filter": {
-      "clear": "Clear filters",
-      "empty": "No secrets match the selected tags."
+      "clear": "Clear",
+      "clearAll": "Clear all",
+      "empty": "No matching secrets",
+      "reset": "Clear search and filters",
+      "tags": "Tags",
+      "skills": "Skills",
+      "tagsByUsage": "Tags · by usage",
+      "selectedTags": "Tags ({{count}})",
+      "entry": "{{name}} · {{count}}",
+      "searchTags": "Search tags",
+      "searchTagsPlaceholder": "Search {{count}} tags",
+      "noTags": "No matching tags",
+      "intersection": "Select multiple; all must match",
+      "remove": "Remove filter: {{name}}",
+      "moreTags": "Show {{count}} more tags",
+      "quick": "Quick filters",
+      "all": "All",
+      "protected": "Protected",
+      "signing": "Signing keys",
+      "unused": "Never used"
+    },
+    "sort": {
+      "label": "Sort",
+      "name": "Name",
+      "recent": "Recently used",
+      "added": "Recently added"
     },
     "grants": {
       "title": "Active access",
@@ -4940,17 +5205,65 @@
       "copy": "Copy value",
       "showInBrowser": "Show in browser",
       "errors": {
+        "staleField": "This link points to a field that no longer exists. Open the secret and choose a current field.",
         "contextFailed": "Couldn't prepare the reveal. Please try again.",
         "unavailable": "Reveal isn't available for this secret yet."
       }
     },
     "saved": "Updated {{name}}",
-    "editSecret": "Edit info",
+    "editSecret": "Edit secret",
     "rowActions": "More actions",
     "edit": {
-      "title": "Edit info",
-      "subtitle": "Info edits keep grants; fetch policy changes require new approval",
+      "title": "Edit secret",
+      "subtitle": "Value or fetch policy changes require new approval",
       "lockedHint": "Name, kind and protection can't be changed"
+    },
+    "fields": {
+      "title": "Fields",
+      "name": "Field {{index}} name",
+      "namePlaceholder": "field_name",
+      "value": "Value for {{field}}",
+      "default": "Default",
+      "defaultName": "Default field name",
+      "newName": "New field name",
+      "newValue": "New field value",
+      "add": "Add field",
+      "useTemplate": "Use template",
+      "templateLogin": "Login",
+      "templateLogin2fa": "Login + 2FA",
+      "multiHint": "One secret can hold several fields, like an account's username, password, and 2FA code.",
+      "setDefault": "Set default",
+      "setDefaultNamed": "Set {{field}} as default",
+      "rowActions": "Actions for {{field}}",
+      "showNamed": "Show {{field}}",
+      "hideNamed": "Hide {{field}}",
+      "remove": "Remove {{field}}",
+      "removeField": "Remove field",
+      "removeConfirm": "Remove <field/> and its value?",
+      "removeConfirmSaved": "Remove <field/> and its value? Existing grants will expire.",
+      "confirmRemove": "Remove",
+      "defaultNotRemovable": "The default field can't be removed. Set another field as default first.",
+      "extraNotRenamable": "Extra fields can't be renamed",
+      "discardNew": "Discard new field",
+      "save": "Save",
+      "saveNamed": "Save {{field}}",
+      "saveNew": "Save new field",
+      "saved": "Field saved",
+      "draftsDropped": "Drafts for fields removed elsewhere were dropped: {{fields}}.",
+      "recordConflict": "This field changed while you were saving. The value was not written; reload the secret and try again.",
+      "secretConflict": "This secret changed while you were saving. Its fields are now refreshed; review them and save again. Your value was not written.",
+      "replacePlaceholder": "Saved · type to replace",
+      "revealField": "Field to reveal",
+      "nameRequired": "Enter a field name",
+      "nameInvalid": "Use lowercase letters, digits, and underscores, starting with a letter",
+      "nameTaken": "There's already a {{field}} field",
+      "valueRequired": "Enter a value for this field",
+      "nameRule": "Field names: lowercase letters, digits, and underscores, starting with a letter.",
+      "references": "Agent references",
+      "referenceName": "NAME",
+      "referenceDefault": "<name/> alone resolves to the default field, <field/>.",
+      "singleFile": "File upload supports one value. Switch to Text before adding fields.",
+      "editHelp": "Save each row after editing · blank values stay unchanged"
     },
     "protectedUnlock": {
       "checking": "Checking your protected vault…",
@@ -5078,6 +5391,7 @@
       "waitingForValue": "Waiting for value",
       "access": "Use secret",
       "sign": "Sign",
+      "delete": "Delete request",
       "provision": "Provide secret",
       "approved": "Access approved",
       "signed": "Signed",
@@ -5088,7 +5402,14 @@
       "accessSubtitle": "You decide whether the agent may use it. Its value is never shown to the AI or the chat.",
       "signTitle": "Agent wants to sign",
       "signSubtitle": "Each signature needs your approval — it can't be pre-approved.",
+      "deleteTitle": "Agent wants to delete a secret",
+      "deleteSubtitle": "Review the details before permanently deleting this secret.",
+      "deleteManagementHint": "Deleting needs instance management access. You can still deny this request.",
+      "deleteFields": "Deleting removes all fields: {{fields}}",
       "secret": "Secret",
+      "description": "Description",
+      "reason": "Reason",
+      "tags": "Tags",
       "key": "Key",
       "session": "Session",
       "command": "Command",
@@ -5315,19 +5636,16 @@
       },
       "claude": {
         "role": "Developer",
-        "step": "Build",
         "working": "Writing code",
         "complete": "Implementation ready"
       },
       "codex": {
         "role": "Reviewer",
-        "step": "Review",
         "working": "Reviewing the change",
         "complete": "Review passed"
       },
       "opencode": {
         "role": "Tester",
-        "step": "Test",
         "working": "Running tests",
         "complete": "All tests passed"
       }
@@ -5354,6 +5672,8 @@
       "api_key": "API Key",
       "subscriptionConnected": "Subscription connected",
       "api_keyConnected": "API Key connected",
+      "externalConnected": "Ready to start",
+      "externalConnectedHint": "Claude Code manages authentication when you run it. This is not a sign-in check.",
       "claudeGuide": "Sign in with Claude or enter an API key",
       "codexGuide": "Sign in with ChatGPT or use an OpenAI API key",
       "opencodeGuide": "Choose either way to connect",
@@ -5418,6 +5738,13 @@
       "showKey": "Show credential",
       "hideKey": "Hide credential",
       "connected": "Connected",
+      "nativeReady": "Ready to start · authentication is managed by Claude Code",
+      "claudeManagedAuth": "These are saved native settings, not a prediction of which credentials a session will use. Claude Code manages authentication when it runs.",
+      "nativeStore": {
+        "present": "Native OAuth material detected. This does not verify the account or token.",
+        "absent": "No native OAuth material observed. Claude Code may use other authentication sources.",
+        "unknown": "The native credential store could not be inspected. This does not mean you are signed out."
+      },
       "savedSubscription": "Subscription credentials detected",
       "savedDisabled": "Credentials saved. This assistant is currently disabled.",
       "readFailed": "Unable to read connection state. Try again.",
@@ -5575,6 +5902,7 @@
       "sleeping": "Vibey is asleep",
       "listening": "Listening",
       "running": "Working…",
+      "team": "The team is working",
       "ready": "Reply ready",
       "needs_input": "Needs your input",
       "blocked": "Something went wrong"
@@ -5582,27 +5910,22 @@
     "unreadBadge_one": "{{count}} unread reply",
     "unreadBadge_other": "{{count}} unread replies",
     "setupPending": "Finish setting up in Avibe to talk to your agent here.",
-    "showInPetOff": "The session is set for the pet. Turn on Show Pet in the Avibe tray menu to see it.",
-    "showInPetFailed": "The pet could not show this session.",
     "openAvibe": "Open Avibe",
     "toggle": "Show or hide the pet panel",
     "panel": "Pet panel",
     "untitled": "Untitled session",
-    "chooseSession": "Choose a session",
-    "switchSession": "Switch session",
     "openInAvibe": "Open in Avibe",
-    "inputPlaceholder": "Message the main agent…",
+    "inputPlaceholder": "Message Vibey…",
     "send": "Send",
     "queued": "Queued — it will run after the current turn.",
     "moreInAvibe": "More replies in Avibe",
     "empty": "No messages yet. Say something to get started.",
     "vaultRequest": "Approval needed — open in Avibe",
-    "noSessions": "No active sessions yet. Start one in Avibe.",
-    "mainAgent": "Main agent",
-    "mainAgentTitle": "Main agent",
+    "mainAgent": "Vibey",
+    "mainAgentTitle": "Vibey",
     "thinking": "Thinking",
     "waiting": "Waiting",
-    "repliedPrefix": "Replied:",
+    "repliedPrefix": "Replied: {{text}}",
     "untitledTask": "Untitled task",
     "dismiss": "Dismiss task",
     "voiceContinue": "Continue voice input",
@@ -5610,14 +5933,20 @@
       "cloudRequired": "Voice input needs Avibe Cloud. You can type a message instead.",
       "listening": "Listening…",
       "open": "Voice input",
-      "stop": "Stop voice input"
+      "stop": "Stop voice input",
+      "startFailed": "Couldn't use the microphone. Check microphone access in system settings, or type instead.",
+      "empty": "No speech was heard. Try again, or type instead.",
+      "failed": "Couldn't turn that into text. Try again, or type instead."
     },
     "keyboard": {
       "open": "Type a message",
       "close": "Close input"
     },
     "stack": {
-      "expand": "Expand session cards"
+      "count_one": "{{displayCount}} item",
+      "count_other": "{{displayCount}} items",
+      "expand_one": "Expand {{displayCount}} session card",
+      "expand_other": "Expand {{displayCount}} session cards"
     },
     "activityKind": {
       "watch": "Monitor",
@@ -5635,7 +5964,7 @@
       "unknown": "In progress"
     },
     "stop": {
-      "stop": "Stop",
+      "stop": "Stop: {{title}}",
       "pause": "Pause",
       "confirmStop": "Stop?",
       "confirmPause": "Pause?",
@@ -5647,8 +5976,24 @@
     },
     "failedPrefix": "Didn't run:",
     "fixInAvibe": "Fix it in Avibe",
-    "talkToVibey": "Talk to Vibey",
-    "noChatProject": "Create a project in Avibe first, so Vibey has a place for this conversation.",
-    "vibeyUnavailable": "Couldn't open the conversation with Vibey. Try again in a moment."
+    "vibeyUnavailable": "Couldn't open the conversation with Vibey. Try again in a moment.",
+    "unknownProject": "Conversation",
+    "unknownAgent": "Agent",
+    "needsAuthorization": "Needs your approval",
+    "replied": "Replied",
+    "referenceSession": "Reference session: {{title}}",
+    "authorize": "Review",
+    "recentTurns": "Recent turns",
+    "collapseHistory": "Hide history",
+    "platform": {
+      "slack": "Slack",
+      "discord": "Discord",
+      "telegram": "Telegram",
+      "feishu": "Feishu",
+      "lark": "Lark",
+      "wechat": "WeChat",
+      "unknown": "IM"
+    },
+    "removeReference": "Remove reference to {{title}}"
   }
 }

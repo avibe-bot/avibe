@@ -28,10 +28,12 @@ from core.handlers.model_hub.adapter import (
     InvokeCancelledError,
     RawCallOutcome,
     RawOutcomeKind,
+    UpstreamRejection,
 )
 from core.handlers.model_hub.async_owner import run_owned_in_thread
 from core.handlers.model_hub.classification import UPSTREAM_MACHINE_ERROR_CODES
 from core.handlers.model_hub.events import bounded_diagnostic_detail
+from core.handlers.model_hub.hosted_images import IMAGE_RESPONSE_MAX_BYTES
 from core.handlers.model_hub.json_wire import (
     JSONEvent,
     JSONPath,
@@ -48,6 +50,7 @@ from core.handlers.model_hub.stream_wire import (
     observe_buffered_protocol_response,
 )
 from vibe.model_hub_runtime.api_key_vendors import (
+    anthropic_api_key_header,
     google_api_base_url,
     official_api_key_base_urls,
     validate_api_key_auth_scheme,
@@ -69,6 +72,12 @@ _ENGINE_TRANSPORT_FAILURE = re.compile(
 # This threshold only selects memory or a temporary file; it never rejects or
 # truncates upstream response bytes.
 _PRELUDE_MEMORY_BYTES = 256 * 1024
+# A buffered answer is spooled whole before it is read. An image answer, served or refused, is bounded while it
+# downloads, so a relay that never stops cannot fill the disk before the image call rejects it
+# (vibey-hosted-tools.md §7.4).
+_BUFFERED_RESPONSE_MAX_BYTES: Mapping[str, int] = {"openai_images": IMAGE_RESPONSE_MAX_BYTES}
+# The machine code of an answer cut at that bound; L1's own, never an upstream's.
+RESPONSE_TOO_LARGE = "response_too_large"
 _ERROR_OBSERVATION_BYTES = 256 * 1024
 # Projecting a response body that has already arrived is local work. It has
 # its own budget so the client's connection budget never limits it.
@@ -465,6 +474,11 @@ class EngineClient:
                 endpoint += "?alt=sse"
             body.pop("model", None)
             body.pop("stream", None)
+        elif request_protocol == "openai_images":
+            # Reference images make an edit (vibey-hosted-tools.md §7.4). An images call is
+            # always buffered, and names no stream: not every images endpoint reads one.
+            endpoint = "/v1/images/edits" if "images" in body else "/v1/images/generations"
+            body["model"] = routed_model
         else:
             endpoint = _endpoint_for_protocol(request_protocol)
             body["model"] = routed_model
@@ -499,6 +513,9 @@ class EngineClient:
         # bound, and one that runs out closes the engine connection, which
         # cancels the upstream request. A buffered response sends nothing until
         # it is complete, so it has none.
+        bound = _BUFFERED_RESPONSE_MAX_BYTES.get(request_protocol)
+        # A body can carry megabytes of images: encoded off the controller loop.
+        encoded = await run_owned_in_thread(lambda: json.dumps(body).encode("utf-8"))
         trace_configs: list[aiohttp.TraceConfig] = []
         if on_request_sent is not None:
             # CPA resolves the route as soon as it reads the body, while a
@@ -549,10 +566,21 @@ class EngineClient:
                 )
             return completed_handle(outcome)
 
+        def cut(status: int) -> EngineInvokeHandle:
+            # A local cut, like a transport failure: nothing past the bound was read or observed.
+            return ended(_outcome(
+                kind=RawOutcomeKind.NETWORK_ERROR,
+                source=source,
+                model_id=model_id,
+                http_status=status,
+                error_code=RESPONSE_TOO_LARGE,
+                message="upstream response exceeded its bound",
+            ))
+
         try:
             response = await session.post(
                 self._url(endpoint),
-                json=body,
+                data=encoded,
                 headers=headers,
                 allow_redirects=False,
             )
@@ -564,7 +592,7 @@ class EngineClient:
                 error_body = _StreamPrelude()
                 try:
                     await asyncio.wait_for(
-                        _read_response_into(response.content, error_body),
+                        _read_response_into(response.content, error_body, max_bytes=bound),
                         timeout=self.timeout,
                     )
                     observed_payload = await _observe_buffered_protocol_response_async(
@@ -578,6 +606,10 @@ class EngineClient:
                 except (asyncio.TimeoutError, aiohttp.ClientError):
                     payload = b""
                     observed_payload = ProtocolObservation()
+                except _ResponseTooLarge:
+                    response.close()
+                    await session.close()
+                    return cut(response.status)
                 finally:
                     error_body.close()
                 if retry_after is None:
@@ -636,7 +668,15 @@ class EngineClient:
                 buffered_body = _StreamPrelude()
                 prelude = buffered_body
                 await buffered_body.write_async(first)
-                await _read_response_into(response.content, buffered_body)
+                try:
+                    await _read_response_into(
+                        response.content, buffered_body, max_bytes=None if bound is None else bound - len(first),
+                    )
+                except _ResponseTooLarge:
+                    buffered_body.close()
+                    response.close()
+                    await session.close()
+                    return cut(response.status)
                 observation = await _observe_buffered_protocol_response_async(
                     observe_buffered_protocol_response,
                     request_protocol,
@@ -913,19 +953,17 @@ async def probe_models(
         return await _probe_google_models(root, secret=secret, timeout=timeout)
     try:
         url = upstream_api_url(root, "/v1/models")
+        credential = {} if secret is None else (
+            anthropic_api_key_header(root, secret) if protocol == "anthropic" else {"Authorization": f"Bearer {secret}"}
+        )
     except (TypeError, ValueError):
         raise EngineClientError("source base URL is invalid")
     assert url is not None
-    headers = {"Accept": "application/json"}
+    headers = {"Accept": "application/json", **credential}
     if protocol == "anthropic":
         # The version header is part of the interface, not the credential, so it
         # stays on the uncredentialed request: it must differ in exactly one way.
         headers["anthropic-version"] = "2023-06-01"
-    if secret is not None:
-        if protocol == "anthropic" and auth_scheme != "bearer":
-            headers["x-api-key"] = secret
-        else:
-            headers["Authorization"] = f"Bearer {secret}"
     deadline = time.monotonic() + timeout
     client_timeout = aiohttp.ClientTimeout(total=timeout)
     try:
@@ -1350,10 +1388,18 @@ def _is_local_model_registration_failure(
         return False
     error = decoded.get("error")
     error_type, _, _ = _raw_error_fields(payload)
+    message = error.get("message") if isinstance(error, dict) else None
     return (
-        isinstance(error, dict)
-        and error_type == "invalid_request_error"
-        and error.get("message") == f"unknown provider for model {routed_model}"
+        error_type == "invalid_request_error"
+        and isinstance(message, str)
+        and (
+            message == f"unknown provider for model {routed_model}"
+            # Its images handler refuses, before any upstream, a model it does not route
+            # there (sdk/api/handlers/openai/openai_images_handlers.go at d318bcc3).
+            or message.startswith(
+                f"Model {routed_model} is not supported on /v1/images/generations or /v1/images/edits."
+            )
+        )
     )
 
 
@@ -1504,11 +1550,22 @@ def _project_raw_error_fields(
     return types[0] if types else None, codes[0] if codes else None, candidates
 
 
+class _ResponseTooLarge(Exception):
+    """A response grew past the bound its request protocol sets."""
+
+
 async def _read_response_into(
     content: aiohttp.StreamReader,
     target: _StreamPrelude,
+    *,
+    max_bytes: int | None = None,
 ) -> None:
+    received = 0
     while chunk := await content.read(_STREAM_CHUNK_BYTES):
+        received += len(chunk)
+        if max_bytes is not None and received > max_bytes:
+            # Stop reading: what is past the bound is never written anywhere.
+            raise _ResponseTooLarge
         await target.write_async(chunk)
 
 
@@ -1718,6 +1775,7 @@ def _reduce_protocol_observation(
             stream_started=stream_started,
             usage=observation.usage,
             recovery_verified=observation.recovery_verified,
+            hosted_tools=observation.hosted_tools,
         )
     if observation.outcome == "failed_terminal":
         projected_types = tuple(
@@ -1778,6 +1836,15 @@ def _reduce_protocol_observation(
             usage=observation.usage,
             recovery_verified=observation.recovery_verified,
             upstream_detail=upstream_detail,
+            rejection=_upstream_rejection(
+                http_status,
+                stream_started,
+                error_code,
+                error_type,
+                observation.error_payload or b"",
+                observation.error_envelope_paths or (("error",),),
+                observation.error_message,
+            ),
         )
     return _outcome(
         kind=RawOutcomeKind.PROTOCOL_ERROR,
@@ -1880,6 +1947,8 @@ def _outcome(
     recovery_verified: bool = False,
     upstream_detail: str | None = None,
     os_errno: int | None = None,
+    rejection: UpstreamRejection | None = None,
+    hosted_tools: frozenset[str] = frozenset(),
 ) -> RawCallOutcome:
     return RawCallOutcome(
         kind=kind,
@@ -1895,6 +1964,8 @@ def _outcome(
         recovery_verified=recovery_verified,
         upstream_detail=upstream_detail,
         os_errno=os_errno,
+        rejection=rejection,
+        hosted_tools=hosted_tools,
     )
 
 
@@ -1942,6 +2013,68 @@ def _upstream_error_detail(
         if text:
             return text
     return None
+
+
+_REJECTION_TOKEN = re.compile(r"[A-Za-z0-9_.\[\]-]{1,64}")
+_REJECTION_MESSAGE_SCAN_CHARS = 2000
+_INVALID_VALUE_MESSAGE = re.compile(r"Invalid value: '([A-Za-z0-9_.-]{1,64})'")
+_UNSUPPORTED_TOOL_TYPE_MESSAGE = re.compile(r"Unsupported tool type: ([A-Za-z0-9_.-]{1,64})")
+_INVALID_ENCRYPTED_CONTENT_MESSAGE = re.compile(r"Invalid encrypted_content in ([a-z_]{1,64}) block")
+
+
+def _upstream_rejection(
+    http_status: int | None,
+    stream_started: bool,
+    error_code: str | None,
+    error_type: str | None,
+    payload: bytes,
+    envelope_paths: tuple[ErrorEnvelopePath, ...],
+    message: str | None,
+) -> UpstreamRejection | None:
+    """Project a 400 before output into the closed tokens the evidence rules read.
+
+    The machine code and type come from the one extractor (``_raw_error_fields``
+    and its projection); this adds only the first envelope's ``param`` and the
+    single token each recognized message names. The prose itself never leaves.
+    """
+
+    if http_status != 400 or stream_started:
+        return None
+    names = ("param", "message")
+    paths = tuple((*path, name) for path in envelope_paths for name in names)
+    values: dict[JSONPath, str] = {}
+
+    def visit(path: JSONPath, event: JSONEvent, value: object | None, _scope: JSONScope) -> None:
+        if event == "replace":
+            values.pop(path, None)
+        elif event == "scalar" and isinstance(value, str):
+            values[path] = value
+
+    if payload:
+        project_json_reader(io.BytesIO(payload), paths, visit)
+    envelope = next(
+        (path for path in envelope_paths if any((*path, name) in values for name in names)),
+        None,
+    )
+    fields = {name: values.get((*envelope, name)) for name in names} if envelope is not None else {}
+    text = (fields.get("message") or message or "")[:_REJECTION_MESSAGE_SCAN_CHARS]
+
+    def token(value: object) -> str | None:
+        return value if isinstance(value, str) and _REJECTION_TOKEN.fullmatch(value) else None
+
+    def named(pattern: re.Pattern[str]) -> str | None:
+        found = pattern.search(text)
+        return found.group(1) if found else None
+
+    return UpstreamRejection(
+        status=400,
+        code=token(error_code),
+        error_type=token(error_type),
+        param=token(fields.get("param")),
+        invalid_value=named(_INVALID_VALUE_MESSAGE),
+        unsupported_tool_type=named(_UNSUPPORTED_TOOL_TYPE_MESSAGE),
+        invalid_encrypted_content_block=named(_INVALID_ENCRYPTED_CONTENT_MESSAGE),
+    )
 
 
 def _upstream_reset_advice(

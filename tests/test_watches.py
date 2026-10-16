@@ -5515,3 +5515,57 @@ def test_a_watch_committed_before_a_failed_reload_is_not_lost_with_the_probe() -
     finally:
         witness.close()
         witness_engine.dispose()
+
+
+def test_a_watch_read_never_waits_for_a_writer_holding_sqlite_and_never_sees_its_unwritten_edit(monkeypatch) -> None:
+    """#2705: watch writers run on worker threads and hold the mirror lock across their SQLite write, which waits
+    while another process holds SQLite's writer. The controller loop reads the mirror on every watch tick
+    (``get_watch``, ``list_watches``), so a read takes no lock: it answers at once, from the published mirror, which
+    a writer replaces only after its write lands."""
+
+    import sqlite3
+
+    store = ManagedWatchStore()
+    assert store._sqlite is not None, "this test is about a writer waiting on SQLite"
+    watch = store.add_watch(**_WATCH_FIXTURE_PAYLOAD)
+    writer_writing = threading.Event()
+    original_upsert = store._sqlite.upsert_watch
+
+    def upsert(*args, **kwargs):
+        writer_writing.set()
+        return original_upsert(*args, **kwargs)
+
+    monkeypatch.setattr(store._sqlite, "upsert_watch", upsert)
+    other_writer_holds, release_other_writer = threading.Event(), threading.Event()
+
+    def another_process_holds_the_writer() -> None:
+        holder = sqlite3.connect(str(store._sqlite.db_path), timeout=10)
+        try:
+            holder.execute("BEGIN IMMEDIATE")
+            other_writer_holds.set()
+            release_other_writer.wait(1.0)
+            holder.rollback()
+        finally:
+            holder.close()
+
+    holder = threading.Thread(target=another_process_holds_the_writer)
+    holder.start()
+    assert other_writer_holds.wait(5)
+    worker = threading.Thread(target=store.set_enabled, args=(watch.id, False))
+    worker.start()
+    try:
+        assert writer_writing.wait(5)
+        time.sleep(0.1)  # the worker's write now waits for SQLite's writer, holding the mirror lock
+        started = time.monotonic()
+        current = store.get_watch(watch.id)
+        # Read now: a landed write later updates this same entry, by design.
+        read_enabled = (current.enabled if current is not None else None, [item.enabled for item in store.list_watches()])
+        waited = time.monotonic() - started
+    finally:
+        release_other_writer.set()
+        holder.join(5)
+        worker.join(5)
+
+    assert waited < 0.05, f"a watch read waited {waited:.2f}s for a writer holding SQLite"
+    assert read_enabled == (True, [True]), "a reader saw the writer's unwritten edit"
+    assert store.get_watch(watch.id).enabled is False, "the landed write was never published"

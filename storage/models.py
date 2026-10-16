@@ -20,6 +20,7 @@ from sqlalchemy import (
 )
 
 from storage.delivery_states import DELIVERY_STATES
+from storage.vibey_recovery import VIBEY_RECOVERY_INPUT_PREDICATE
 from vibe.message_types import build_partial_index_predicate
 
 metadata = MetaData()
@@ -227,6 +228,8 @@ agent_sessions = Table(
     Index("ix_agent_sessions_scope_anchor_workdir", "scope_id", "session_anchor", "workdir"),
     Index("ix_agent_sessions_backend_variant", "agent_backend", "agent_variant"),
     Index("ix_agent_sessions_status_activity", "status", "last_active_at"),
+    # The Sessions projected running, for the startup projection repair (migration 0068).
+    Index("ix_agent_sessions_agent_status", "agent_status", "status"),
     Index("ix_agent_sessions_visibility", "visibility"),
     Index("ix_agent_sessions_scope_status_activity", "scope_id", "status", "last_active_at", "created_at", "id"),
     Index(
@@ -374,6 +377,15 @@ agent_runs = Table(
             "run_type = 'agent_run' and source_kind = 'callback' "
             "and callback_terminal_turn_id is not null and session_id is not null"
         ),
+    ),
+    # A callback child by the parent Run and actor it answers (migration 0066).
+    Index(
+        "ix_agent_runs_callback_parent",
+        "parent_run_id",
+        "source_actor",
+        "created_at",
+        "id",
+        sqlite_where=text("run_type = 'agent_run' and source_kind = 'callback'"),
     ),
     # Leading-timestamp index for the run-graph window scan: updated_at bumps on
     # every state change, so it is the single column that scan filters on.
@@ -694,6 +706,16 @@ messages = Table(
         "context_seq",
         unique=True,
         sqlite_where=text("context_seq is not null"),
+    ),
+    # T3 recovery only needs inputs that can still be consumed.  The hidden
+    # Vibey retry ownership row stays durable with a null context_seq but is
+    # deliberately outside this growing population.
+    Index(
+        "ix_messages_vibey_recovery_input",
+        "context_seq",
+        "session_id",
+        "id",
+        sqlite_where=text(VIBEY_RECOVERY_INPUT_PREDICATE),
     ),
     Index("ix_messages_session_created", "session_id", "created_at"),
     Index("ix_messages_session_created_id", "session_id", "created_at", "id"),
@@ -1060,6 +1082,11 @@ message_deliveries = Table(
         ),
     ),
     Index("ix_message_deliveries_session_state", "session_id", "state", "submitted_at", "id"),
+    Index(
+        "ix_message_deliveries_message",
+        "message_id",
+        sqlite_where=text("message_id is not null"),
+    ),
     Index("ix_message_deliveries_turn", "turn_id", "turn_position"),
     Index(
         "uq_message_deliveries_turn_position",
@@ -1260,6 +1287,9 @@ vault_secrets = Table(
     Column("ciphertext", Text, nullable=True),
     Column("nonce", Text, nullable=True),
     Column("wrap_meta", Text, nullable=True),
+    # JSON array of extra named field envelopes. The default field remains in the
+    # legacy ciphertext/nonce/wrap_meta columns for released-version compatibility.
+    Column("fields", Text, nullable=True),
     Column("public_meta", Text, nullable=True),  # JSON: desc / pubkey / address / op:// uri
     Column("policy", Text, nullable=True),  # JSON: allowed modes, allowed hosts, always_ask
     Column("last_used_at", String, nullable=True),

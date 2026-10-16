@@ -367,10 +367,16 @@ class ManagedWatchStore:
         self.path = path or paths.get_watches_path()
         self._sqlite = SQLiteBackgroundTaskStore() if path is None else None
         self._signature: Optional[tuple[int, int, int]] = None
+        #: The published mirror. It is replaced, never changed in place: a writer edits
+        #: a private copy of an entry and publishes it only once its write has landed,
+        #: and a reload builds a new dict. A reader therefore takes no lock -- one dict
+        #: reference is one consistent mirror -- so the controller loop never waits
+        #: behind a writer holding ``_mirror_lock`` across SQLite I/O on a worker
+        #: thread (#2705), and never sees an edit the database has not accepted.
         self._watches: dict[str, ManagedWatch] = {}
-        #: For this store, a durable write and the mirror publication reflecting it
-        #: are one atomic section for every observer of this mirror. No observer may
-        #: see an entry older than a row this store already committed. This must be
+        #: Serializes the writers of this mirror: a durable write and the publication
+        #: reflecting it are one section, so a same-store reload cannot replace a newer
+        #: committed entry with an older one. Readers do not take it. This must be
         #: reentrant: ``_write_watch`` reloads through both its refused-write and
         #: failed-write paths, so replacing the RLock with Lock would self-deadlock.
         self._mirror_lock = threading.RLock()
@@ -462,14 +468,15 @@ class ManagedWatchStore:
             self.load()
             return True
 
-    def _save(self, *, replacement: Optional[ManagedWatch] = None) -> None:
+    def _save(self, watches: Optional[dict[str, ManagedWatch]] = None) -> None:
+        """Write ``watches`` -- by default the published mirror -- to the file backend."""
+
         with self._mirror_lock:
             if self._sqlite is not None:
                 return
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            watches = dict(self._watches)
-            if replacement is not None:
-                watches[replacement.id] = replacement
+            if watches is None:
+                watches = self._watches
             payload = {
                 "watches": [
                     watch.to_dict()
@@ -483,8 +490,7 @@ class ManagedWatchStore:
             self._signature = _path_signature(self.path)
 
     def list_watches(self) -> list[ManagedWatch]:
-        with self._mirror_lock:
-            return sorted(self._watches.values(), key=lambda item: (item.created_at, item.id))
+        return sorted(self._watches.values(), key=lambda item: (item.created_at, item.id))
 
     def list_watches_for_recovery(self) -> list[ManagedWatch]:
         """Return a strict, current snapshot suitable for process recovery."""
@@ -522,8 +528,14 @@ class ManagedWatchStore:
         return sorted(watches, key=lambda item: (item.created_at, item.id))
 
     def get_watch(self, watch_id: str) -> Optional[ManagedWatch]:
-        with self._mirror_lock:
-            return self._watches.get(watch_id)
+        return self._watches.get(watch_id)
+
+    def _publish(self, watch: ManagedWatch) -> None:
+        self._watches = {**self._watches, watch.id: watch}
+
+    def _unpublish(self, watch_id: str) -> None:
+        if watch_id in self._watches:
+            self._watches = {key: value for key, value in self._watches.items() if key != watch_id}
 
     @staticmethod
     def _read_state(watch: ManagedWatch) -> DefinitionWriteExpectation:
@@ -568,12 +580,12 @@ class ManagedWatchStore:
         failure leaves neither behind. Only the SQLite backend can do that, and passing
         one to the file backend is a caller bug -- see ``sqlite_backend``.
 
-        EVERY way this write can fail to land reloads the mirror (HFR-271). Callers may
-        pass either the cached object or a detached candidate; a landed detached write
-        replaces the cached object's complete namespace in one assignment. Existing
-        references stay current, while readers capture the immutable
-        ``last_cycle_outcome`` from one published namespace. If the write does not
-        stick, its mutation must not either. Reloading on the
+        EVERY way this write can fail to land reloads the mirror (HFR-271). Callers pass
+        a detached candidate, never the published entry, so a reader cannot see the
+        edit before it lands (#2705); a landed write replaces the published entry's
+        complete namespace in one assignment. Existing references stay current, while
+        readers capture the immutable ``last_cycle_outcome`` from one published
+        namespace. If the write does not stick, its mutation must not either. Reloading on the
         ``False`` return alone was half the job -- a raised exception rolls the
         transaction back just as completely, and left the process serving edits the
         database never accepted. ``reconcile_watches`` chooses which watches keep
@@ -585,7 +597,7 @@ class ManagedWatchStore:
         def _publish_snapshot() -> None:
             cached = self._watches.get(watch.id)
             if cached is None:
-                self._watches[watch.id] = watch
+                self._publish(watch)
             elif cached is not watch:
                 # Preserve mutation-result identity; outcome readers capture this
                 # namespace once rather than reading across its publication point.
@@ -598,7 +610,7 @@ class ManagedWatchStore:
                         raise ValueError(
                             "a file-backed watch store cannot commit a queued run with the watch row"
                         )
-                    self._save(replacement=watch)
+                    self._save({**self._watches, watch.id: watch})
                     landed = True
                 elif queued_run is None:
                     landed = self._sqlite.upsert_watch(
@@ -646,7 +658,7 @@ class ManagedWatchStore:
                     "stale mirror entry for %s",
                     watch_id,
                 )
-                self._watches.pop(watch_id, None)
+                self._unpublish(watch_id)
                 self._signature = None
                 self._reload_required = True
 
@@ -668,7 +680,6 @@ class ManagedWatchStore:
 
         with self._mirror_lock:
             watch.updated_at = _utc_now_iso()
-            self._watches[watch.id] = watch
             try:
                 if self._sqlite is not None:
                     # No ``expect``: the create/adopt entry point (``add_watch``), whose
@@ -680,15 +691,18 @@ class ManagedWatchStore:
                     )
                     if expected_reference_agent_id is not None:
                         self.load()
-                        result = self._watches[watch.id]
-                    else:
-                        result = watch
                 else:
-                    self._save()
-                    result = watch
+                    self._save({**self._watches, watch.id: watch})
             except Exception:
                 self._reload_after_lost_write(watch.id)
                 raise
+            # Published only once the row has landed (#2705); a reference-checked
+            # SQLite write was reloaded above.
+            if self._sqlite is not None and expected_reference_agent_id is not None:
+                result = self._watches[watch.id]
+            else:
+                self._publish(watch)
+                result = watch
         _publish_watch_definitions_updated()
         return result
 
@@ -873,12 +887,12 @@ class ManagedWatchStore:
                 owner = self.find_job_watch(target["job_id"])
                 if owner is not None:
                     return owner
-                self._watches[watch.id] = watch
                 try:
-                    self._save()
+                    self._save({**self._watches, watch.id: watch})
                 except Exception:
                     self._reload_after_lost_write(watch.id)
                     raise
+                self._publish(watch)
             watch_id = watch.id
         _publish_watch_definitions_updated()
         return watch_id
@@ -888,11 +902,10 @@ class ManagedWatchStore:
 
         if self._sqlite is not None:
             return self._sqlite.find_job_watch(job_id)
-        with self._mirror_lock:
-            for watch in self._watches.values():
-                target = watch.job_target
-                if target is not None and target["job_id"] == job_id:
-                    return watch.id
+        for watch in self._watches.values():
+            target = watch.job_target
+            if target is not None and target["job_id"] == job_id:
+                return watch.id
         return None
 
     def list_job_watch_targets(self) -> list[dict[str, Any]]:
@@ -903,12 +916,11 @@ class ManagedWatchStore:
 
         if self._sqlite is not None:
             return self._sqlite.list_job_watch_targets()
-        with self._mirror_lock:
-            return [
-                {"id": watch.id, "enabled": watch.enabled, "deleted": False, "session_archived": False, "target": target}
-                for watch in self._watches.values()
-                if (target := watch.job_target) is not None and not target.get("released_at")
-            ]
+        return [
+            {"id": watch.id, "enabled": watch.enabled, "deleted": False, "session_archived": False, "target": target}
+            for watch in self._watches.values()
+            if (target := watch.job_target) is not None and not target.get("released_at")
+        ]
 
     def job_watch_settled(self, job_id: str) -> bool:
         """The Watch half of J5 for ``LocalJobHost.prune``: no Watch still manages ``job_id``."""
@@ -927,12 +939,14 @@ class ManagedWatchStore:
             target = cached.job_target if cached is not None else None
             if cached is None or target is None:
                 return
-            cached.metadata = {
+            released = {
                 **cached.metadata,
                 WATCH_TARGET_METADATA_KEY: {**target, "released_at": released_at},
             }
             if self._sqlite is None:
-                self._save()
+                self._save({**self._watches, watch_id: replace(cached, metadata=released)})
+            # One assignment, after the write landed.
+            cached.metadata = released
 
     def remove_watch(self, watch_id: str) -> bool:
         """Delete a watch; the mirror rolls back with the delete (HFR-275).
@@ -946,21 +960,22 @@ class ManagedWatchStore:
         with self._mirror_lock:
             if watch_id not in self._watches:
                 return False
-            del self._watches[watch_id]
             try:
                 if self._sqlite is not None:
                     self._sqlite.remove_task(watch_id)
                 else:
-                    self._save()
+                    self._save({key: value for key, value in self._watches.items() if key != watch_id})
             except Exception:
                 self._reload_after_lost_write(watch_id)
                 raise
+            self._unpublish(watch_id)
         _publish_watch_definitions_updated()
         return True
 
     def set_enabled(self, watch_id: str, enabled: bool) -> ManagedWatch:
         with self._mirror_lock:
-            watch = self._watches[watch_id]
+            # A private copy: the published entry changes only once the write lands.
+            watch = replace(self._watches[watch_id])
             expect = self._read_state(watch)
             if enabled and not watch.enabled:
                 # First, because it may refuse (a job Watch): nothing is mutated yet.
@@ -982,7 +997,7 @@ class ManagedWatchStore:
                 # Session binding, so a pause/resume that lost to a teardown must fail
                 # loudly rather than quietly undo it.
                 raise DefinitionWriteConflict(watch_id, definition_type="watch")
-            return watch
+            return self._watches[watch_id]
 
     def update_watch(
         self,
@@ -1019,7 +1034,8 @@ class ManagedWatchStore:
         ensure_harness_definition_write(user_context)
         ensure_agent_name_access(agent_name, user_context=user_context)
         with self._mirror_lock:
-            watch = self._watches[watch_id]
+            # A private copy: the published entry changes only once the write lands.
+            watch = replace(self._watches[watch_id])
             # Captured before the first mutation: the state ``vibe watch update`` read and
             # resolved its payload from.
             expect = self._read_state(watch)
@@ -1098,8 +1114,7 @@ class ManagedWatchStore:
                 raise DefinitionWriteConflict(watch_id, definition_type="watch")
             if expected_reference_agent_id is not None:
                 self.load()
-                return self._watches[watch_id]
-            return watch
+            return self._watches[watch_id]
 
     @staticmethod
     def _clear_cycle_state(watch: ManagedWatch, columns: tuple[str, ...]) -> None:
@@ -1111,10 +1126,12 @@ class ManagedWatchStore:
     def mark_cycle_start(self, watch_id: str) -> bool:
         with self._mirror_lock:
             self.maybe_reload()
-            watch = self._watches.get(watch_id)
-            if watch is None:
+            published = self._watches.get(watch_id)
+            if published is None:
                 return False
-            expect = self._read_state(watch)
+            expect = self._read_state(published)
+            # A private copy: the published entry changes only once the write lands.
+            watch = replace(published)
             watch.last_started_at = _utc_now_iso()
             # The outcome pair describes the last completed cycle. Keep it stable while
             # the next cycle is in flight; ``mark_cycle_result`` owns both fields.

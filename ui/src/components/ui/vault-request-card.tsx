@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import { ArrowRight, ExternalLink, KeyRound, LockKeyhole, PenTool, Wallet } from 'lucide-react';
+import { ArrowRight, ExternalLink, KeyRound, LockKeyhole, PenTool, Trash2, Wallet } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import type { VaultRequest } from '@/context/ApiContext';
@@ -12,11 +12,11 @@ import { Button } from './button';
 import { VaultApprovalDialog } from './vault-approval-dialog';
 import { VaultSecretDialog } from './vault-secret-dialog';
 
-type RequestType = 'access' | 'sign' | 'provision';
+type RequestType = 'access' | 'sign' | 'provision' | 'delete';
 
 function requestType(request: VaultRequest): RequestType {
   const t = (request.card as { request_type?: string } | null)?.request_type ?? request.request_type;
-  return t === 'sign' || t === 'provision' ? t : 'access';
+  return t === 'sign' || t === 'provision' || t === 'delete' ? t : 'access';
 }
 
 type OpenProvisionDialog = (request: VaultRequest) => void;
@@ -131,6 +131,8 @@ export const VaultRequestCard: React.FC<{ request: VaultRequest; onResolved: () 
       ? { icon: <KeyRound className="size-4" />, tint: 'bg-accent/15 text-accent-ink', title: t('vaults.request.title'), action: t('vaults.request.provide') }
       : type === 'sign'
         ? { icon: <PenTool className="size-4" />, tint: 'bg-violet/15 text-violet-ink', title: t('vaults.approval.signTitle'), action: t('vaults.requests.review') }
+        : type === 'delete'
+          ? { icon: <Trash2 className="size-4" />, tint: 'bg-destructive/15 text-destructive-ink', title: t('vaults.approval.deleteTitle'), action: t('vaults.requests.review') }
         : { icon: <LockKeyhole className="size-4" />, tint: 'bg-gold/15 text-gold-ink', title: t('vaults.approval.accessTitle'), action: t('vaults.requests.review') };
 
   if (type === 'provision' && provisionDialog?.isDismissed(request.id)) return null;
