@@ -22,7 +22,7 @@ import pytest
 from config.v2_config import ModelHubModelConfig, ModelHubHostedToolConfig
 from core.agent_core.messages import HostedCost, message_from_dict
 from core.handlers.model_hub import service as service_module
-from core.handlers.model_hub.adapter import InvokeCancelledError, RawOutcomeKind, UpstreamRejection
+from core.handlers.model_hub.adapter import DiscoveredModel, InvokeCancelledError, RawOutcomeKind, UpstreamRejection
 from core.handlers.model_hub.capability_evidence import EvidenceFeature
 from core.handlers.model_hub.hosted_executor import ResponsesReadout, anthropic_result, excerpt, responses_result
 from core.handlers.model_hub import hosted_tools as hosted_tools_module
@@ -502,6 +502,55 @@ async def test_a_model_the_source_does_not_serve_moves_on_and_refuses_no_tool(tm
     assert not service.hosted_evidence().unsupported(source, model_id, EvidenceFeature.hosted("web_search", "call"))
     chain = service.freeze_turn_hosted_tools(service.store.config).executors["web_search"]
     assert [slot.source_id for slot in chain] == [source_id, XAI]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("listed_again", [False, True], ids=["unlisted", "still_listed"])
+async def test_a_refused_listed_executor_model_is_listed_again_and_leaves_once_unlisted(tmp_path, listed_again):
+    """MH-HOSTED-GATEWAY-008: a model-not-found for an executor model its Source lists lists that Source again (#2682).
+
+    Only a model both the call and the fresh listing disown leaves, the rest of
+    the listing is merged as the background schedule merges it, and the Source
+    is listed again at most once per debounce.
+    """
+
+    source_id, model_id, protocol, body = MODEL_NOT_SERVED["openai"]
+    not_served = replace(await _engine_outcome(protocol, 404, body), source_id=source_id)
+    served = LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=XAI), _responses(WEB_CALL, WEB_ANSWER))
+    sources = _sources()
+    # Its turns route to another model, so the executor row moves no route.
+    next(item for item in sources if item.id == source_id).models.insert(
+        0, ModelHubModelConfig(id="gpt-6-chat", provenance="discovered"),
+    )
+    service = _vibey_service(tmp_path, sources, handles=[InvokeHandle(not_served), served])
+    _chain(service, "web_search", (source_id, model_id), (XAI, "grok-4.6"))
+    listed = [DiscoveredModel(id="gpt-6-chat"), *([DiscoveredModel(id=model_id)] if listed_again else [])]
+    listings = []
+
+    async def discover_models(vendor, *_args, **_kwargs):
+        listings.append(vendor)
+        return listed
+
+    service.adapter.discover_models = discover_models
+    service.adapter.stop = lambda: asyncio.sleep(0)
+    service.start_background_discovery()
+    try:
+        status, answer = await _call(service, "web_search", {"arguments": {"query": "q"}})
+        assert (status, answer["execution"]["executor_source_id"]) == (200, XAI)
+        async with asyncio.timeout(2):
+            while not listings:
+                await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)
+        # Inside the debounce the same refusal lists nothing.
+        service.request_stale_listing_refresh(source_id, model_id)
+        await asyncio.sleep(0.05)
+        assert listings == ["openai"]
+    finally:
+        await service.stop()
+    openai = next(item for item in service.store.config.sources if item.id == source_id)
+    assert [model.id for model in openai.models] == (["gpt-6-chat", model_id] if listed_again else ["gpt-6-chat"])
+    chain = service.freeze_turn_hosted_tools(service.store.config).executors["web_search"]
+    assert [slot.source_id for slot in chain] == ([source_id, XAI] if listed_again else [XAI])
 
 
 @pytest.mark.asyncio

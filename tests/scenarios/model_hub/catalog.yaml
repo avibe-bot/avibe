@@ -2568,6 +2568,15 @@ scenarios:
     test: tests/test_model_hub_hosted_evidence.py::test_a_served_response_proves_only_its_own_completed_search_item
     related_tests:
       - tests/test_model_hub_hosted_evidence.py::test_a_native_success_is_recorded_at_settlement_for_a_tool_the_request_declared
+  - id: MH-HOSTED-GATEWAY-008
+    name: >-
+      A model-not-found for an executor model its Source lists asks for that Source to be listed again in the
+      background, at most once per Source per debounce; the row leaves only when the fresh listing no longer names it
+      either and its removal moves no route, so the next chain skips the stale model instead of paying its 404 first
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_model_hub_hosted_executor.py::test_a_refused_listed_executor_model_is_listed_again_and_leaves_once_unlisted
   - id: MH-HOSTED-GATEWAY-007
     name: image_generate runs directly on the images endpoint of a model its turn's frozen enum names, admitted on the final snapshot with no fallback; an argument the model does not take or a model no longer admitted fails before anything runs; only usable base64 images complete; only an upstream refusal of the model or its endpoint is learned; each offered path is verified through the pinned engine
     status: covered

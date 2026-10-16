@@ -383,6 +383,8 @@ _BACKGROUND_DISCOVERY_RETRY_BASE = timedelta(minutes=15)
 _BACKGROUND_DISCOVERY_RETRY_CAP = timedelta(hours=6)
 # A viewer of Source inventory asks for listings at most this old.
 _VIEWED_DISCOVERY_AGE = timedelta(minutes=30)
+# A Source that refused a model it lists is listed again at most this often.
+_STALE_LISTING_DEBOUNCE = timedelta(minutes=15)
 # A credential waiting on the user cannot list models until the user acts.
 _UNDISCOVERABLE_SOURCE_DETAILS = frozenset({
     "models.source.needs_action.oauth_expired",
@@ -1503,6 +1505,8 @@ class ModelHubService:
         self._background_discovery_caught_up = False
         self._background_discovery_inflight: set[str] = set()
         self._viewed_discovery_task: asyncio.Task[None] | None = None
+        self._stale_listing_asked: dict[str, datetime] = {}
+        self._stale_listing_tasks: set[asyncio.Task[None]] = set()
         self._builtin_snapshot_generations: dict[BackendName, str] = {}
         self._builtin_snapshot_cache: dict[BackendName, list[dict[str, Any]]] = {}
         self._pending_builtin_catalog_refresh: set[BackendName] = set()
@@ -2222,13 +2226,14 @@ class ModelHubService:
             await await_owned_task(resume)
         discovery, self._background_discovery_task = self._background_discovery_task, None
         viewed, self._viewed_discovery_task = self._viewed_discovery_task, None
+        stale, self._stale_listing_tasks = self._stale_listing_tasks, set()
         if self._background_discovery_stop is not None:
             self._background_discovery_stop.set()
         # Background listings never start the engine, and an upstream listing
         # is cancelled outright. An engine listing's worker is owned and
         # bounded, so these return only once nothing still uses the engine
         # that `adapter.stop()` retires.
-        retiring = [task for task in (discovery, viewed) if task is not None and not task.done()]
+        retiring = [task for task in (discovery, viewed, *stale) if task is not None and not task.done()]
         for task in retiring:
             task.cancel()
         await asyncio.gather(*retiring, return_exceptions=True)
@@ -4862,6 +4867,30 @@ class ModelHubService:
             name="model-hub-viewed-discovery",
         )
 
+    def request_stale_listing_refresh(self, source_id: str, model_id: str) -> None:
+        """A Source refused a model it lists: list it again, so a row it no longer lists leaves (#2682).
+
+        Fire-and-forget, at most once per Source per ``_STALE_LISTING_DEBOUNCE``,
+        and only while the background schedule runs, so it shares that
+        schedule's shutdown and never starts work for a stopped runtime.
+        """
+
+        schedule = self._background_discovery_task
+        stopping = self._background_discovery_stop
+        if schedule is None or schedule.done() or stopping is None or stopping.is_set():
+            return
+        now = self.now()
+        asked = self._stale_listing_asked.get(source_id)
+        if asked is not None and now - asked < _STALE_LISTING_DEBOUNCE:
+            return
+        self._stale_listing_asked[source_id] = now
+        task = asyncio.get_running_loop().create_task(
+            self._refresh_source_in_background(source_id, unless_listed=model_id),
+            name="model-hub-stale-listing-refresh",
+        )
+        self._stale_listing_tasks.add(task)
+        task.add_done_callback(self._stale_listing_tasks.discard)
+
     async def _refresh_due_sources(self, *, max_age: timedelta | None = None) -> None:
         """Refresh, one at a time, each Hub Source whose background listing is due.
 
@@ -4946,11 +4975,15 @@ class ModelHubService:
             period = min(period, max_age)
         return listed_at + period
 
-    async def _refresh_source_in_background(self, source_id: str) -> None:
+    async def _refresh_source_in_background(self, source_id: str, *, unless_listed: str | None = None) -> None:
         """Add newly listed models without touching health or removing anything.
 
         A listing is not inference evidence, and removals move supply, so Source
         state, removals, and their guards stay with a manual `refresh_source`.
+        One row is the exception: ``unless_listed``, a discovered model the
+        Source refused as one it does not serve, leaves if this listing no
+        longer names it either. Two answers then agree, and only when its
+        removal moves no route.
         """
 
         if source_id in self._background_discovery_inflight:
@@ -4958,11 +4991,11 @@ class ModelHubService:
             return
         self._background_discovery_inflight.add(source_id)
         try:
-            await self._refresh_listed_source_in_background(source_id)
+            await self._refresh_listed_source_in_background(source_id, unless_listed=unless_listed)
         finally:
             self._background_discovery_inflight.discard(source_id)
 
-    async def _refresh_listed_source_in_background(self, source_id: str) -> None:
+    async def _refresh_listed_source_in_background(self, source_id: str, *, unless_listed: str | None = None) -> None:
         config = self.store.load()
         if not config.enabled:
             # Re-read per Source: a runtime stopped mid-pass is not listed again.
@@ -4994,6 +5027,13 @@ class ModelHubService:
                 updated = self._clone_config(previous)
                 source = self._source(updated, source_id)
                 overrides = self._merge_discovered_models(source, discovered)
+                if unless_listed is not None and unless_listed not in {
+                    canonical_model_id(model.id) for model in discovered
+                }:
+                    source.models = [
+                        model for model in source.models
+                        if not (model.id == unless_listed and model.provenance == "discovered")
+                    ]
                 if self._inventory_fingerprint(source) != self._inventory_fingerprint(current):
                     if self._inventory_removed_hops(previous, updated) or self._introduced_interruptions(
                         previous, updated,
@@ -6951,6 +6991,11 @@ class ModelHubService:
         if learned is not None and learned.feature.kind == "hosted_tool":
             return True
         if not outcome.stream_started and names_model_refusal(outcome):
+            if any(model.id == model_id and model.provenance == "discovered" for model in source.models):
+                # An executor runs only on a model its Source lists, so the
+                # listing may be stale: list it again, debounced (#2682). A
+                # manual row is the user's, and only they remove it.
+                self.request_stale_listing_refresh(source.id, model_id)
             return True
         decision = classify_outcome(replace(outcome, stream_started=False))
         return decision.action in {"fallback", "refresh"}

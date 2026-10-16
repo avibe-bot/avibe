@@ -503,7 +503,10 @@ These rules are C-1 rows in `cross-provider.md` and per-protocol rows in `conver
      routing's classifier reads it; L1 hands no prose to it) skips that Source for this call without settling its
      health, as `_InvocationUnsupported` does. It is not a refusal of the tool and writes no evidence: only the
      narrow rule, an error naming the feature, does. With the executor model taken from the Source's listing, it
-     means a stale listing, which the Source's next inventory refresh corrects. A failure mid-stream moves on too: nothing
+     means a stale listing, so a discovered row asks for that Source to be listed again in the background, at most
+     once per 15 minutes per Source (#2682). The row leaves only if that listing no longer names it either and its
+     removal moves no route, and the rest of the listing merges as the background schedule's does. A manual row
+     is the user's, and stays. A failure mid-stream moves on too: nothing
      reaches Vibey until the gateway returns the record, so "before output" here means before the result is
      returned, and the partial call is still metered on its Source. A completed response that never ran the tool
      (the model chose not to; Anthropic is asked in the message alone) ends the chain with a `failed` record: it is
