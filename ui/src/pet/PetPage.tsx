@@ -9,6 +9,7 @@ import { useWorkbenchInbox } from '@/context/WorkbenchInboxContext';
 import { Button } from '@/components/ui/button';
 import { Markdown } from '@/components/ui/markdown';
 import { QuickReplies } from '@/components/workbench/QuickReplies';
+import { isComposingKey } from '@/lib/imeComposition';
 import { usePageActive } from '@/lib/pageActivity';
 import { usePendingVaultRequests } from '@/lib/usePendingVaultRequests';
 import { useVaultRequestRefresh } from '@/lib/useVaultRequestRefresh';
@@ -578,7 +579,8 @@ const PetSurface: React.FC = () => {
   }, [voice.listening, draft, setPanel]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
+      // Escape also dismisses an IME candidate list; that one is not ours.
+      if (event.key !== 'Escape' || isComposingKey(event)) return;
       if (voice.listening) voice.cancel();
       else if (composing) closeComposer();
       else if (detailOpen) { setDetailOpen(false); void setPanel(false); }
@@ -735,7 +737,7 @@ const PetSurface: React.FC = () => {
               value={inputDraft}
               onChange={(event) => setDraft([...draftMarkers, event.target.value].join(' '))}
               onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                if (event.key === 'Enter' && !event.shiftKey && !isComposingKey(event)) {
                   event.preventDefault();
                   void submit();
                 }

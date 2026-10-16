@@ -2397,3 +2397,42 @@ describe('Personal Agent breaker: readiness and turn generations', () => {
     expect(api.getTurnState).not.toHaveBeenCalledWith('im', expect.anything());
   });
 });
+
+describe('PetPage IME composition', () => {
+  // WebKit (the macOS pet webview) fires compositionend before the Enter that
+  // commits the candidate, so that keydown reads isComposing false with the
+  // legacy keyCode 229.
+  it('keeps the draft through IME Enters and sends once on a plain Enter', async () => {
+    mainSession('S');
+    render(<PetPage />);
+    summon('listen');
+    const input = await screen.findByLabelText('pet.inputPlaceholder') as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: 'hello' } });
+    fireEvent.keyDown(input, { key: 'Enter', keyCode: 229, isComposing: false });
+    fireEvent.keyDown(input, { key: 'Enter', keyCode: 13, isComposing: true });
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 15)));
+    expect(api.sendSessionMessage).not.toHaveBeenCalled();
+    expect(input.value).toBe('hello');
+    fireEvent.keyDown(input, { key: 'Enter', keyCode: 13 });
+    await waitFor(() => expect(api.sendSessionMessage).toHaveBeenCalledTimes(1));
+    expect(api.sendSessionMessage).toHaveBeenCalledWith('S', { text: 'hello' });
+  });
+
+  it('leaves the composer and its draft open when Escape dismisses an IME candidate', async () => {
+    mainSession('S');
+    render(<PetPage />);
+    summon('listen');
+    const input = await screen.findByLabelText('pet.inputPlaceholder') as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: 'hello' } });
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 229 }));
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', isComposing: true }));
+    });
+    expect(screen.getByLabelText('pet.inputPlaceholder')).toBe(input);
+    expect(input.value).toBe('hello');
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    });
+    await waitFor(() => expect(screen.queryByLabelText('pet.inputPlaceholder')).toBeNull());
+  });
+});
