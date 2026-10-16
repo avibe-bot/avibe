@@ -38,7 +38,12 @@ whole run protocol, including the session-scoped fixtures it sets up.
 Outside the hook: child processes (each loads its own interpreter), a native
 resolver or transport that bypasses CPython's socket module, such as uvloop's
 or c-ares's, and ``socket.getnameinfo``, whose audit event omits the flags
-that say whether it queries DNS.
+that say whether it queries DNS. On Linux CI the operating system covers them:
+the unit shards run in a network namespace that has only loopback
+(``scripts/ci_loopback_only.sh``), where anything past it fails at once with
+"network unreachable". That refusal is the child's own error and names no
+test; the hook stays the named signal for the pytest process itself. macOS and
+Windows jobs have the hook alone.
 """
 
 from __future__ import annotations
