@@ -1,4 +1,4 @@
-# Terminal emit: the Turn's terminal commit before the IM surfaces (#2714)
+# Terminal emit: one synchronous Turn commit after the IM surfaces (#2714)
 
 Status: design note, proposed. No code yet.
 
@@ -21,6 +21,8 @@ Each terminal branch of `MessageDispatcher.emit_agent_message` runs its durable 
 | suppressed outward delivery | the same |
 | delivered result | `_stream_chunk` (its completion is the signal), the Activity settlement check; `finally`: `_finish_processing_indicator_turn`, `_release_runtime_turn` |
 
+The delivered branch retires its status bubble and drops its status state as part of delivery, before its durable steps. `_retire_status_bubble` deletes the bubble where the platform can, and collapses it otherwise.
+
 B runs only after the dispatcher returns. Two things can put the runner first:
 
 1. **Any suspension between the signal and B. This happens on the normal path, not only on cancellation.** The signal resolves the runner's `done.wait()`, and the runner runs at the receiver's next suspension. A probe with the real runner (`SessionTurnManager._run`) confirms it:
@@ -34,55 +36,56 @@ Both paths leave a Turn whose snapshot disagrees with its Run. The first also pu
 
 ## Decision
 
-**Once a terminal emit's durable steps have succeeded, its terminal commit runs as one synchronous block, before any IM surface work.** The block, in order:
-1. the signal: `_signal_turn_complete`, or `_stream_chunk`'s completion for a delivered result;
-2. the Activity settlement check, unchanged: if it raises, the rest of the block is skipped, as B is skipped today;
+**Every IM surface stays where it is. The signal moves out of the IM work. Once the durable steps have succeeded, the emit ends with one synchronous terminal block, after its last IM surface, and the block runs in a `finally`.** The block, in order:
+1. the signal: `_signal_turn_complete`, or, for a delivered result, the completion half of `_stream_chunk`, with its token check and settlement rule. Its chunk forward stays where it is;
+2. the Activity settlement check, as today. A failure no longer skips the rest of the block: its error is held and raised once the block has run;
 3. `_release_runtime_turn`;
 4. `on_terminal_delivery_complete`, called by the dispatcher here.
 
-The controller keeps its call after the dispatcher returns. That call is a no-op once the pending flag is popped (`_SHOW_CHECKPOINT_TERMINAL_PENDING_KEY`), and it still covers dispatchers that do not reach this block.
+A local flag records that the durable steps succeeded. The dispatcher's existing `finally` runs the processing-indicator cleanup, as today. Then, in an inner `finally`, it runs the block if the flag is set, or else only the release, as today. So the block runs after a normal ending, and also after a cancellation or failure in any IM surface, before the cancellation propagates. The release keeps its place after every IM surface and before B.
 
-Then the IM surfaces run in the `finally`, each best-effort as today: the status bubble collapse, the consolidated-state clear and the processing indicator. They use the status key captured before the release (`status_key_for_context`), as `finish_prewrite_stop_surfaces` already does. If the emit raised before the block, the `finally` also performs the release it performs today.
+The controller keeps its call after the dispatcher returns. That call is a no-op once the pending flag is popped (`_SHOW_CHECKPOINT_TERMINAL_PENDING_KEY`), and it still covers dispatchers that do not reach this block.
 
 Nothing in the block awaits, so neither the runner nor a cancellation can get between the signal and B.
 
-Not chosen: making `runner_release` carry the latched evidence. The latch is set before delivery, so it does not prove the result was delivered. The runner would need a second "delivered" marker, which would make it a second owner of a decision the emit already makes.
+Not chosen:
+- **Running the block before the IM surfaces** (this note's first version). After the release, a successor can start while the previous Turn's surfaces are still running. Status state is keyed by the thread's latest trigger message, and a successor without its own trigger, such as a quick-reply Turn (`message_id=None`), shares that key. The previous Turn's collapse and clear would then act on the successor's bubble and state. Avoiding that needs status state detached from its key at the release, which is a new mechanism. Leaving the surfaces before the release needs none.
+- **Running the Activity settlement check before the signal**, and not signalling when it fails. Some failures are swallowed by their caller. For example, the Claude receiver logs a delivered Activity batch that is not durable and keeps it fail-closed; nothing else would then signal the Turn, and its runner would wait forever.
+- **Making `runner_release` carry the latched evidence.** The latch is set before delivery, so it does not prove the result was delivered. The runner would need a second "delivered" marker, which would make it a second owner of a decision the emit already makes.
 
-## What the IM side relies on in the current order
+## What changes, and what does not
 
-After the block, a successor Turn may start while the previous Turn's surfaces are still running. Each dependency was checked:
-- **Status key.** `_get_consolidated_message_key` reads the thread's current trigger message id, and the next Turn overwrites it (`update_thread_message_id`). A key computed after the release could collapse or clear the successor's bubble. So the key is captured before the release.
-- **The finalized marker and the gate.** `_drop_status_keys` keeps the finalized marker because the gate used to be released after the teardown. After the release, a late same-token process emit fails `_is_current_runtime_turn` and is dropped ("Dropping stale ... emit"). The status heartbeat stops itself on the same check. Releasing first is at least as safe.
-- **The next Turn's bubble and indicator.** Both are keyed per Turn: the bubble by its own trigger message, the indicator handle by turn token. Neither reads the previous Turn's state. What the user can see change is ordering on screen: a successor's first output can appear before the previous bubble collapses to ✅.
-- **WeChat typing** is the one shared resource. It needs an explicit clear per DM (`typing_indicator_requires_clear`). The previous Turn's clear can cancel a successor's typing that has already started. The successor's keepalive re-sends it within `TYPING_KEEPALIVE_INTERVAL_SECONDS` (5 s). On every other platform, typing expires on its own and the clear is a no-op.
+- **For IM surfaces and successors: nothing.** The status bubble collapse or retire, the state clear and the processing indicator all run before the runtime release, as on master. A successor still cannot start before them, and nothing new shares state with it.
+- **The signal comes later on IM.** It moves from before the indicator cleanup to after it. The runner, `turn.end` and the queued successor wake after that cleanup's IM calls instead of before them. A successor already waited for them, because the release follows the cleanup on master. Web Turns have no indicator, and their signal does not move in time.
+- **A held Activity settlement failure** now leaves the Turn `terminal_result` with this emit's evidence. On master the runner won the race there and left `runner_release` without it. The emit still raises the same error to its caller, so the Activity's own retry is unchanged: the requeue, the completed-Activity flush and the Registry-owned settlement. A backend's follow-up close for that Turn, such as Claude's silent turn-only emit after an undelivered Activity output, finds the Turn terminal and is a no-op. That is what it already is on master, where the runner wins.
 - **Successor resume, the Model Hub fence and event order.** B runs while `in_flight` still holds the Turn, so it does not spawn the resume. The runner does, after B: exactly once, Path B's ordering 2. The Model Hub fence (ordering 3) and `session.status` before `turn.end` (ordering 4) now hold on IM as well. Web Turns already had them.
 
-## When an IM step fails or is cancelled after the block
+## When an IM step fails or is cancelled
 
-The durable state is complete by then.
 - **A failed IM step** is logged by the step itself, as today: a failed edit, delete or reaction call.
-- **A cancellation** lands at the first suspension in the surfaces, and the remaining surfaces are skipped, as they are today. What it can leave behind, and the existing fallbacks:
+- **A cancellation** interrupts the surface it lands in. The block still runs from the `finally`, and the cancellation then propagates. The remaining surfaces are skipped, as today, and leave the same things behind:
   - the bubble keeps its last running text, though its heartbeat stops because the gate is released;
   - the 👀 reaction stays;
   - the typing keepalive stops at its next tick (`_typing_turn_is_current`).
 
-  Running the surfaces through a cancellation would mean holding a Stop behind IM network calls, which A rejected. These leftovers are cosmetic and the same as today.
+  The indicator cleanup in the `finally` still runs while the cancellation propagates, as it does on master. The block adds no IM call, and nothing holds a caught cancellation across the network, the rule A follows.
+- **A failure in a durable step** (delivery, persist, the Run record) happens before the flag is set. The `finally` then runs only the release, B does not run, and the Turn owner stays live, as today.
 
 ## What stays uncancellable
 
 Only the block, which has no await. Its four steps are synchronous. B's transaction is the existing loop-side write; moving it off the loop is Path B step 2.
 
-A cancellation caught during the Run terminal record (A, #2715, the `_store_step` rule) is re-armed for the next suspension, and that is now after the block. Between the record and the block, a delivered result runs `_stream_chunk`'s forward. Every production sink is `_noop_chunk`, which never suspends. A sink that suspends would reopen the window, and a test pins this.
+A cancellation caught during the Run terminal record (A, #2715, the `_store_step` rule) is re-armed for the next suspension. That is the first IM surface, or the indicator cleanup, and the `finally` runs the block after it.
 
 ## Test design
 
 - **Regression, failing on master.** Run the real runner with the real dispatcher terminal emit for an IM context whose processing indicator suspends in `finish`. Assert that the Turn's terminal snapshot is `terminal_result` and carries the evidence. One case per branch: silent, duplicate, suppressed, delivered.
-- **Cancellation.** Cancel the receiver at each suspension in the surfaces, and assert:
+- **Cancellation.** Cancel the receiver at each suspension after the durable steps: the collapse, the clear, the chunk forward and the indicator cleanup. Assert that:
   - the snapshot carries the evidence;
   - the cancellation propagates;
   - the runtime is released.
-- **Key capture.** A successor that updates the thread's trigger id before the surfaces run keeps its own bubble and state.
-- **Sinks.** The production sinks used for durable Turns do not suspend in `_stream_chunk`'s forward.
+- **Activity settlement failure.** A held settlement failure still raises to the caller, and the Turn ends `terminal_result` with the evidence.
+- **Durable-step failure.** The Turn owner stays live, and B does not run.
 - **Existing tests that pin the current order, kept green:**
   - `tests/test_controller_dispatch_loop.py`: the checkpoint ends after delivery, and a delivery failure keeps the Turn owner live;
   - `tests/test_message_dispatcher_result_fallback.py`;
@@ -94,4 +97,4 @@ A cancellation caught during the Run terminal record (A, #2715, the `_store_step
 ## Plan
 
 - [ ] Accept this note.
-- [ ] One change across the four terminal branches: the synchronous terminal commit after the durable steps, with the surfaces moved to the `finally` behind a captured status key; the regression and cancellation tests above.
+- [ ] One change across the four terminal branches: move the signal into a synchronous terminal block that runs after the last IM surface, in the dispatcher's `finally`, once the durable steps have succeeded. Hold the Activity settlement error until the block has run. Add the tests above.
