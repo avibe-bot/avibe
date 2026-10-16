@@ -1270,3 +1270,66 @@ def test_an_activity_that_settles_while_the_runs_terminal_record_waits_stays_fir
     asyncio.run(exercise())
     settled = request_store.get_run(queued.id)
     assert normalize_run_status(settled["status"]) == "canceled", "the later record replaced the Activity's settlement"
+
+
+def test_the_runs_terminal_record_reads_only_its_sessions_activities(tmp_path, monkeypatch) -> None:
+    """#2706: the record re-reads open Activities under SQLite's writer, so that read must stay bounded by the Turn's
+    work: it seeks the Turn's Session through ``ix_runtime_records_scope_anchor`` instead of walking every Activity row,
+    and a malformed Activity row is skipped rather than failing every Run's terminal record."""
+
+    import sqlite3
+
+    from sqlalchemy import event
+
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.db import create_sqlite_engine
+    from storage.session_activities import SQLiteSessionActivityStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    queued = request_store.enqueue_agent_run(message="run", agent_backend="claude", session_id="session-1")
+    assert request_store.claim(queued.id) is not None
+    store = request_store.sqlite_backend
+    engine = create_sqlite_engine(store.db_path)
+    with engine.begin() as conn:
+        conn.exec_driver_sql(
+            "insert into runtime_records (id, record_type, record_key, scope_id, session_anchor, workdir, payload_json,"
+            " expires_at, created_at, updated_at) values ('runtime::session_activity::bad', 'session_activity', 'bad',"
+            " null, 'session-1', null, '[]', null, '2026-10-16T00:00:00Z', '2026-10-16T00:00:00Z')"
+        )
+    SQLiteSessionActivityStore(engine).upsert_activity(
+        {
+            "id": "activity-elsewhere",
+            "backend": "claude",
+            "runtime_key": "runtime-2",
+            "session_id": "session-2",
+            "run_id": queued.id,
+            "detached_from_run": False,
+            "metadata": {},
+        },
+        phase="active",
+    )
+    statements: list[tuple[str, object]] = []
+
+    def capture(_conn, _cursor, statement, parameters, _context, _executemany):
+        if "runtime_records" in statement:
+            statements.append((statement, parameters))
+
+    event.listen(store.engine, "before_cursor_execute", capture)
+    try:
+        deferred = store.record_turn_terminal_outputs(
+            [queued.id],
+            activity_session_ids=["session-1"],
+            output_id="terminal",
+            text="done",
+            terminal_status="succeeded",
+        )
+    finally:
+        event.remove(store.engine, "before_cursor_execute", capture)
+
+    assert deferred == [], "an Activity in another Session blocked this Turn's Run"
+    assert normalize_run_status(request_store.get_run(queued.id)["status"]) == "succeeded"
+    (statement, parameters), = statements
+    with sqlite3.connect(store.db_path) as raw:
+        plan = " ".join(row[-1] for row in raw.execute("EXPLAIN QUERY PLAN " + statement, parameters))
+    assert "ix_runtime_records_scope_anchor" in plan and "SCAN runtime_records" not in plan, plan

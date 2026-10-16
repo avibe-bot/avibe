@@ -3344,23 +3344,38 @@ def enqueue_run_in_connection(conn: Any, values: dict[str, Any]) -> None:
 
 
 
-def _runs_blocked_by_live_activities(conn: Any, run_ids: Sequence[str]) -> set[str]:
+def _runs_blocked_by_live_activities(
+    conn: Any, run_ids: Sequence[str], session_ids: Iterable[str]
+) -> set[str]:
     """The Runs among ``run_ids`` that a durable, still-active, attached Activity owns.
 
     The durable twin of ``SessionActivityRegistry.has_blocking_run_activity``: the
     registry persists an Activity before it changes its own state, so its ``active``
-    rows are exactly the Activities it holds open. Read under the caller's writer.
+    rows are exactly the Activities it holds open. Only the Turn's Sessions are read,
+    by ``ix_runtime_records_scope_anchor`` (an Activity row has no scope). Read under
+    the caller's writer.
     """
 
     from storage.session_activities import ACTIVITY_RECORD_TYPE
 
+    sessions = sorted({session_id for session_id in session_ids if session_id})
+    if not sessions:
+        return set()
     wanted = set(run_ids)
     blocked: set[str] = set()
-    for payload_json in conn.execute(
-        select(runtime_records.c.payload_json).where(runtime_records.c.record_type == ACTIVITY_RECORD_TYPE)
-    ).scalars():
+    # ``record_type`` is checked here, not in SQL: as a term it would let the planner
+    # prefer ``ix_runtime_records_type_scope_expiry``, which matches every Activity row.
+    for record_type, payload_json in conn.execute(
+        select(runtime_records.c.record_type, runtime_records.c.payload_json)
+        .where(runtime_records.c.scope_id.is_(None))
+        .where(runtime_records.c.session_anchor.in_(sessions))
+    ):
+        if record_type != ACTIVITY_RECORD_TYPE:
+            continue
         payload = _json_loads(payload_json, {})
-        activity = payload.get("activity") if isinstance(payload, dict) else None
+        if not isinstance(payload, dict):
+            continue
+        activity = payload.get("activity")
         if payload.get("phase") != "active" or not isinstance(activity, dict) or activity.get("detached_from_run"):
             continue
         owners = {str(activity.get("run_id") or "").strip()}
@@ -6316,16 +6331,24 @@ class SQLiteBackgroundTaskStore:
     def record_turn_terminal_outputs(
         self,
         run_ids: Sequence[str],
+        *,
+        activity_session_ids: Sequence[str] = (),
         **kwargs: Any,
     ) -> list[str]:
         """``record_turn_run_outputs`` for a Turn's terminal result recorded off the
         controller loop: the Runs an open Activity blocks are re-read from the durable
         Activity rows inside the write's transaction, so an Activity that started or
         ended while the write waited for SQLite's writer is seen as committed (#2706).
-        Returns the Runs whose terminal intent was deferred."""
+        Returns the Runs whose terminal intent was deferred. ``activity_session_ids``
+        names the Turn's Session, read with the Runs' own."""
 
         deferred: set[str] = set()
-        self.record_turn_run_outputs(run_ids, _durable_activity_blockers=deferred, **kwargs)
+        self.record_turn_run_outputs(
+            run_ids,
+            _durable_activity_blockers=deferred,
+            _activity_session_ids=activity_session_ids,
+            **kwargs,
+        )
         return sorted(deferred)
 
     def record_turn_run_outputs(
@@ -6342,6 +6365,7 @@ class SQLiteBackgroundTaskStore:
         deferred_run_ids: Sequence[str] = (),
         updated_at: Optional[str] = None,
         _durable_activity_blockers: Optional[set[str]] = None,
+        _activity_session_ids: Sequence[str] = (),
     ) -> dict[str, dict[str, Any]]:
         """Record one Turn output across all participant Runs atomically.
 
@@ -6372,7 +6396,12 @@ class SQLiteBackgroundTaskStore:
         with run_update_event_transaction(self.engine) as conn:
             reserve_write_lock(conn)
             if _durable_activity_blockers is not None and terminal_status:
-                deferred_ids |= _runs_blocked_by_live_activities(conn, normalized_run_ids)
+                run_sessions = conn.execute(
+                    select(agent_runs.c.session_id).where(agent_runs.c.id.in_(normalized_run_ids))
+                ).scalars()
+                deferred_ids |= _runs_blocked_by_live_activities(
+                    conn, normalized_run_ids, {*_activity_session_ids, *run_sessions}
+                )
                 _durable_activity_blockers.update(deferred_ids)
             terminal_provenance = dict(provenance or {})
             notification = terminal_provenance.get("turn_failure_notification")

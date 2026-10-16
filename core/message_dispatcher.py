@@ -1304,6 +1304,7 @@ class ConsolidatedMessageDispatcher:
         output_semantics: MessageOutput,
         provenance: dict[str, Any],
         blocked_run_ids: frozenset[str],
+        session_id: str | None = None,
     ) -> list[str]:
         """Record a Turn's output on its Runs; may run off the loop.
 
@@ -1345,6 +1346,7 @@ class ConsolidatedMessageDispatcher:
             if callable(getattr(type(store), "record_turn_terminal_outputs", None)):
                 return store.record_turn_terminal_outputs(
                     normalized_run_ids,
+                    activity_session_ids=[session_id] if session_id else [],
                     output_id=output_id,
                     text=text,
                     message_id=message_id,
@@ -1752,6 +1754,8 @@ class ConsolidatedMessageDispatcher:
                     output_semantics=semantics,
                     provenance=provenance,
                     blocked_run_ids=blocked_run_ids,
+                    session_id=str((getattr(context, "platform_specific", None) or {}).get("agent_session_id") or "")
+                    or None,
                 )
             finally:
                 store.close()
