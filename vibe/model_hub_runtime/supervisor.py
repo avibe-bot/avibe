@@ -142,6 +142,11 @@ class EngineSupervisor:
             self._stop_locked()
             return self._start_locked()
 
+    def recheck_engine(self) -> None:
+        """Make the next call check the running engine instead of trusting its last passed check."""
+        with self._lock:
+            self._verified_at = None
+
     def restart_lost_engine(self) -> None:
         """Restart an engine that lost its configuration, from the config Avibe renders.
 

@@ -1194,6 +1194,15 @@ scenarios:
     test:
       - tests/test_model_hub_transport_leases.py::test_an_engine_that_lost_its_configuration_restarts_only_once_its_streams_end
       - tests/test_model_hub_runtime.py::test_an_engine_that_lost_its_configuration_is_reported_once_and_restarted_by_its_drainer
+  - id: MH-RUNTIME-015
+    name: >-
+      A pre-output 401 is the engine's own only when its engine-local model listing refuses the same gateway key;
+      then the turn ends as the engine being down, the Source keeps its health and the engine is checked again,
+      while an upstream's identical 401 still settles the Source
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_model_hub_retry_lifecycle.py::test_a_401_the_engine_itself_gave_spares_the_source
   - id: MH-USAGE-001
     name: Tokens an upstream reported before the turn ended are still metered
     status: covered

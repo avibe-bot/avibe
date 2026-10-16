@@ -55,6 +55,7 @@ from vibe.model_hub_runtime.client import (
     EngineClientError,
     EngineInvokeHandle,
     completed_handle,
+    engine_refused_gateway_key,
     probe_models,
     upstream_api_url,
 )
@@ -2892,7 +2893,7 @@ class CLIProxyEngineAdapter:
                 "claude": "anthropic",
                 "codex": "openai_responses",
             }.get(origin, getattr(request, "protocol", None) or source.protocol)
-            return await client.invoke(
+            handle = await client.invoke(
                 source,
                 model_id,
                 request,
@@ -2902,6 +2903,12 @@ class CLIProxyEngineAdapter:
                 on_transport_done=release,
                 on_request_sent=request_sent,
             )
+            if handle.outcome_available and engine_refused_gateway_key(await handle.outcome()):
+                # The engine's last health check vouches for it no longer: the
+                # next admission checks it, finds the lost configuration, and
+                # restores it once the open streams end (#2753, #2755).
+                await asyncio.to_thread(self.supervisor.recheck_engine)
+            return handle
         except BaseException:
             release()
             raise
