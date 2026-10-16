@@ -27,8 +27,11 @@ Invariants:
   takes the "same origin" column only if its origin equals the target's **and** its `source_identity` equals the
   hop's. A message another identity served (another Source, or the same Source after its key or relay changed), or
   one no known identity served (after a failover to another Source, or a row written before the field), takes the
-  "different origin" column at a hop that names an identity. So does a message whose identity's provider refused
-  an opaque payload earlier in the run (`ModelEndpoint.opaque_refused`): the refusal does not say which one failed.
+  "different origin" column at a hop that names an identity. A message whose identity's provider refused an opaque
+  payload of a kind in this Session (`ModelEndpoint.opaque_refused`) goes without every payload of that kind: its
+  signatures take the "different origin" column (kind `signature`), or its hosted calls their portable form (kind
+  `hosted`). A relay pooling upstream accounts behind one key changes account without changing identity, so the
+  refusal, not the identity, is what reveals it.
   The gateway applies the same binding at failover (C-6 item 6).
 - Tool-call id normalization is deterministic: the stored id when the target accepts it; otherwise
   `call_` + the first 24 hex characters of SHA-256 of the stored id. Anthropic accepts `^[a-zA-Z0-9_-]{1,64}$`; the

@@ -200,7 +200,7 @@ class InMemoryTranscriptStore:
 
 def _payload(kind, payload: Mapping) -> dict:
     """A payload row's content, as the contract admits it: a payload kind, at the current version."""
-    if kind not in ("compaction", "context_edit", "agent_state"):
+    if kind not in ("compaction", "context_edit", "agent_state", "replay_refusal"):
         raise ValueError(f"not a payload entry kind: {kind!r}")
     if payload.get("version") != 1:
         raise ValueError(f"a {kind} payload needs version 1")

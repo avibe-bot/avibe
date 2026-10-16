@@ -163,7 +163,7 @@ class AdapterTranscriptStore:
         )
 
     async def append_payload(
-        self, session_id: str, kind: Literal["compaction", "context_edit", "agent_state"], payload: Mapping[str, Any]
+        self, session_id: str, kind: Literal["compaction", "context_edit", "agent_state", "replay_refusal"], payload: Mapping[str, Any]
     ) -> ContextEntry:
         return await self._store.append_payload(
             session_id, kind, payload, agent_name=self._agents.get(session_id), turn_id=self._turns.get(session_id)
@@ -172,7 +172,7 @@ class AdapterTranscriptStore:
     async def append_payloads(
         self,
         session_id: str,
-        entries: Sequence[tuple[Literal["compaction", "context_edit", "agent_state"], Mapping[str, Any]]],
+        entries: Sequence[tuple[Literal["compaction", "context_edit", "agent_state", "replay_refusal"], Mapping[str, Any]]],
     ) -> Sequence[ContextEntry]:
         committed = await self._store.append_payloads(
             session_id, entries, agent_name=self._agents.get(session_id), turn_id=self._turns.get(session_id)

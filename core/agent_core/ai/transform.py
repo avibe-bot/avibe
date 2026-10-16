@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from core.agent_core.ai.hosted import portable_hosted
-from core.agent_core.ai.provider import ModelEndpoint
+from core.agent_core.ai.provider import ModelEndpoint, OpaquePayload
 from core.agent_core.messages import (
     AssistantMessage,
     AssistantContent,
@@ -128,7 +128,7 @@ def transform_messages(
         # Opaque payloads are bound to the account that issued them, the Source identity: another account's ciphertext
         # is refused (xAI, OpenAI). A message another identity served, one no known identity did, or one whose
         # identity's provider refused an opaque payload this turn is sent as a different origin's.
-        same_origin = message.origin == target and _opaque_admitted(message, endpoint)
+        same_origin = message.origin == target and _opaque_admitted(message, endpoint, "signature")
         content: list[AssistantContent] = []
         turn_tool_ids: dict[str, list[str]] = {}
         in_flight = position == live
@@ -253,12 +253,13 @@ def in_flight_position(messages: list[Message] | tuple[Message, ...]) -> int | N
     return last
 
 
-def _opaque_admitted(message: AssistantMessage, endpoint: ModelEndpoint | None) -> bool:
-    """Whether ``message``'s opaque payloads may go to ``endpoint``: a hop of the Source identity that served it, whose
-    provider has not refused one this turn (§3.5)."""
+def _opaque_admitted(message: AssistantMessage, endpoint: ModelEndpoint | None, payload: OpaquePayload) -> bool:
+    """Whether ``message``'s opaque payloads of kind ``payload`` may go to ``endpoint``: a hop of the Source identity
+    that served it, whose provider has not refused that kind in this Session (§3.5)."""
 
     return endpoint is None or (
-        message.source_identity == endpoint.source_identity and message.source_identity not in endpoint.opaque_refused
+        message.source_identity == endpoint.source_identity
+        and (message.source_identity, payload) not in endpoint.opaque_refused
     )
 
 
@@ -281,7 +282,7 @@ def native_replay(
     if not blocks or endpoint is None or not endpoint.source_id or endpoint.portable or message.origin != target:
         return False
     # A native payload is opaque provider content too: it goes back only to the account that issued it.
-    if not _opaque_admitted(message, endpoint):
+    if not _opaque_admitted(message, endpoint, "hosted"):
         return False
     if protocol not in ("anthropic", "openai_responses"):
         return False

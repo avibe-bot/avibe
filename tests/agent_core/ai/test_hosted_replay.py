@@ -312,30 +312,49 @@ async def test_pin_unavailable_ends_the_pinned_send_as_a_refusal_with_no_output(
 
 
 _DECRYPT_REFUSAL = "Could not decrypt the provided encrypted_content"
+# Anthropic's, which name what they refused.
+_SEARCH_REFUSAL = "messages.9.content.0: Invalid `encrypted_content` in `search_result` block"
+_SIGNATURE_REFUSAL = "messages.1.content.0: Invalid `signature` in `thinking` block"
 
 
 @pytest.mark.parametrize("native", [True, False], ids=["pinned", "unpinned"])
 @pytest.mark.parametrize(
-    ("body", "refused"),
+    ("protocol", "body", "payloads"),
     [
-        (_DECRYPT_REFUSAL, True),
+        # xAI's says neither which ciphertext nor which kind.
+        ("openai_responses", _DECRYPT_REFUSAL, ("hosted", "signature")),
         # A relay may wrap the provider's text in its own error object.
-        (json.dumps({"error": {"message": _DECRYPT_REFUSAL, "type": "invalid_request_error"}}), True),
-        ("Invalid request: unknown parameter", False),
+        (
+            "openai_responses",
+            json.dumps({"error": {"message": _DECRYPT_REFUSAL, "type": "invalid_request_error"}}),
+            ("hosted", "signature"),
+        ),
+        # Anthropic's names what it refused.
+        ("anthropic", json.dumps({"type": "error", "error": {"type": "invalid_request_error", "message": _SEARCH_REFUSAL}}),
+         ("hosted",)),
+        ("anthropic", json.dumps({"type": "error", "error": {"type": "invalid_request_error",
+                                                              "message": "messages.3.content.1: Invalid `encrypted_index` in citation"}}),
+         ("hosted",)),
+        ("anthropic", json.dumps({"type": "error", "error": {"type": "invalid_request_error", "message": _SIGNATURE_REFUSAL}}),
+         ("signature",)),
+        ("openai_responses", "Invalid request: unknown parameter", ()),
     ],
-    ids=["plain-text", "wrapped", "another-400"],
+    ids=["xai-plain-text", "xai-wrapped", "anthropic-search-result", "anthropic-citation-index",
+         "anthropic-thinking-signature", "another-400"],
 )
-async def test_a_decrypt_refusal_ends_the_send_as_an_opaque_refusal_of_its_source_identity(native, body, refused):
-    """xAI's plain-text 400 for a replayed ciphertext it cannot read says neither which one nor why. The adapter, its
-    one classifier, ends the send with an opaque refusal of the request's Source identity, pinned or not (§3.5)."""
+async def test_an_opaque_payload_refusal_ends_the_send_as_a_refusal_of_its_source_identity(native, protocol, body, payloads):
+    """A provider's 400 for a replayed opaque payload its account cannot read: the adapter, the one classifier, ends
+    the send with an opaque refusal of the request's Source identity and the kinds the provider named, pinned or not
+    (§3.5). Any other 400 is the ordinary error."""
 
-    request = _request(_endpoint("openai_responses", replay=True, native=native))
+    request = _request(_endpoint(protocol, replay=True, native=native))
 
     sent, events = await _send(request, lambda _: httpx.Response(400, text=body))
 
     (error,) = events
     assert len(sent) == 1 and isinstance(error, ProviderError) and error.status == 400 and not error.retryable
-    assert error.refusal == (Refusal("opaque_refused", SOURCE, IDENTITY) if refused else None)
+    expected = Refusal("opaque_refused", SOURCE, IDENTITY, payloads=payloads) if payloads else None
+    assert error.refusal == expected
 
 
 # The loop answers a refusal (§3.5). These run a turn through the Agent loop and the real adapters against a stub
@@ -496,3 +515,113 @@ async def test_a_decrypt_refusal_drops_every_opaque_payload_of_that_identity_for
         assert len(sent) == 3 and ended.reason == "error"
     else:
         assert len(sent) == 4 and ended.reason == "completed"
+
+
+# A relay pooling upstream accounts behind one API key can serve a later turn from another account, which cannot read
+# what the first minted. Anthropic's real refusals, as the provider writes them and as the Model Hub gateway forwards
+# them (its own code, the upstream detail inside its copy).
+
+
+def _anthropic_refusal(detail: str, *, via_gateway: bool) -> dict[str, Any]:
+    from tests.agent_core.fakes import model_hub_error
+
+    if via_gateway:
+        return model_hub_error(detail)
+    return {"type": "error", "error": {"type": "invalid_request_error", "message": detail}}
+
+
+def _searched_and_answered() -> str:
+    """An Anthropic turn that thinks (signed), searches natively, and answers."""
+
+    events = (
+        {"type": "message_start", "message": {"usage": {"input_tokens": 5}}},
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "look it up"}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "sig-account-a"}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "content_block_start", "index": 1, "content_block": USE},
+        {"type": "content_block_stop", "index": 1},
+        {"type": "content_block_start", "index": 2, "content_block": RESULT},
+        {"type": "content_block_stop", "index": 2},
+        {"type": "content_block_start", "index": 3, "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 3, "delta": {"type": "text_delta", "text": "v8 is out"}},
+        {"type": "content_block_stop", "index": 3},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 3}},
+        {"type": "message_stop"},
+    )
+    return _sse("anthropic", events)
+
+
+async def _session(answer: Any, endpoint: ModelEndpoint, turns: int) -> tuple[list[list[httpx.Request]], list[Any]]:
+    """``turns`` turns of one Session (one store): the requests each turn sent, and how each ended."""
+
+    sent: list[list[httpx.Request]] = []
+
+    def gateway(wire: httpx.Request) -> httpx.Response:
+        sent[-1].append(wire)
+        return answer(len(sent), len(sent[-1]))
+
+    store = InMemoryTranscriptStore()
+    ended = []
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        for turn in range(1, turns + 1):
+            sent.append([])
+            router = _Hops(client, (endpoint,))
+            agent = Agent(
+                session_id="session", models=router, tools=(_hosted_tool("web_search"),), hooks=(), store=store,
+                jobs=FakeJobHost(), cwd="/t",
+            )
+            events = [event async for event in agent.run(input_row(f"input-{turn}", "and then?"), turn_id=f"turn-{turn}")]
+            ended.append(events[-1])
+    return sent, ended
+
+
+@pytest.mark.parametrize("via_gateway", [True, False], ids=["through-model-hub", "upstream-body"])
+@pytest.mark.parametrize(
+    ("refusal", "demoted", "kept"),
+    [(_SEARCH_REFUSAL, '"opaque"', "sig-account-a"), (_SIGNATURE_REFUSAL, "sig-account-a", '"opaque"')],
+    ids=["search-result", "thinking-signature"],
+)
+async def test_an_opaque_payload_another_account_refuses_is_sent_portably_from_then_on_in_the_session(
+    refusal, demoted, kept, via_gateway
+):
+    """A relay can serve a later turn from another upstream account, which cannot read the search results or thinking
+    signatures the first minted; Anthropic then refuses the request before any output, naming what it refused. The
+    Session's native search replays verbatim while that is accepted; once refused, the turn is sent again once without
+    that kind of payload from that Source identity, in its portable form, and succeeds. The Session keeps the
+    refusal: its next turn is portable from its first request, with no failed attempt. Only the kind refused goes."""
+
+    def answer(turn: int, attempt: int) -> httpx.Response:
+        if turn == 1:
+            return httpx.Response(200, headers=_served("anthropic"), text=_searched_and_answered())
+        if turn == 3 and attempt == 1:
+            return httpx.Response(400, json=_anthropic_refusal(refusal, via_gateway=via_gateway))
+        return httpx.Response(200, headers=_served("anthropic"), text=_sse("anthropic", _ANSWERED["anthropic"]))
+
+    sent, ended = await _session(answer, _endpoint("anthropic", replay=True), turns=4)
+
+    assert [event.reason for event in ended] == ["completed"] * 4
+    bodies = [[wire.content.decode() for wire in turn] for turn in sent]
+    # Accepted: the earlier turn's search and signed thinking replay verbatim.
+    assert len(bodies[1]) == 1 and demoted in bodies[1][0] and kept in bodies[1][0]
+    # Refused once, then sent again without what was refused, and nothing else lost.
+    assert len(bodies[2]) == 2 and demoted in bodies[2][0]
+    assert demoted not in bodies[2][1] and kept in bodies[2][1]
+    if demoted == '"opaque"':
+        # The search in its portable form: the query and the source, readable, with no encrypted data.
+        assert "avibe release" in bodies[2][1] and "https://avibe.bot/r" in bodies[2][1]
+    # The next turn: portable from its first request.
+    assert len(bodies[3]) == 1 and demoted not in bodies[3][0] and kept in bodies[3][0]
+
+
+async def test_a_refusal_of_what_the_session_already_demoted_stands_as_the_error():
+    """A refusal is answered once: the same refusal again, after the payload it names was demoted, is the error."""
+
+    def answer(turn: int, attempt: int) -> httpx.Response:
+        if turn == 1:
+            return httpx.Response(200, headers=_served("anthropic"), text=_searched_and_answered())
+        return httpx.Response(400, json=_anthropic_refusal(_SEARCH_REFUSAL, via_gateway=True))
+
+    sent, ended = await _session(answer, _endpoint("anthropic", replay=True), turns=2)
+
+    assert len(sent[1]) == 2 and ended[1].reason == "error"

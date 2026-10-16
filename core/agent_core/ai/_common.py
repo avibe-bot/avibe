@@ -44,6 +44,7 @@ from core.agent_core.messages import (
     UserContent,
 )
 from core.agent_core.ai.provider import (
+    OPAQUE_PAYLOADS,
     RETRYABLE_ERROR_KINDS,
     THINKING_DROP_RETRY_KINDS,
     BlockEnd,
@@ -52,6 +53,7 @@ from core.agent_core.ai.provider import (
     MediaLoader,
     ModelEndpoint,
     ModelRequest,
+    OpaquePayload,
     ProviderError,
     Refusal,
     TextDelta,
@@ -1678,6 +1680,23 @@ def _pin_unavailable(body: str) -> PinUnavailable | None:
 
 #: xAI's plain-text refusal of a replayed ciphertext it cannot read (§3.2); it does not say which one.
 _DECRYPT_REFUSAL = re.compile(r"could not decrypt the provided encrypted_content", re.IGNORECASE)
+#: Anthropic's refusal of a replayed opaque payload, by kind: an encrypted search result or citation index another
+#: account minted, or a thinking signature it does not accept. Each names exactly what it refused.
+_OPAQUE_REFUSALS: tuple[tuple[re.Pattern[str], tuple[OpaquePayload, ...]], ...] = (
+    (_DECRYPT_REFUSAL, OPAQUE_PAYLOADS),
+    (re.compile(r"invalid `?encrypted_(?:content|index)`?", re.IGNORECASE), ("hosted",)),
+    (re.compile(r"invalid `?signature`? in `?thinking`? block", re.IGNORECASE), ("signature",)),
+)
+
+
+def opaque_refusal(body: str) -> tuple[OpaquePayload, ...]:
+    """The kinds of opaque payload a 400 body says the provider refused; none when it names no such refusal."""
+
+    kinds: list[OpaquePayload] = []
+    for pattern, payloads in _OPAQUE_REFUSALS:
+        if pattern.search(body):
+            kinds.extend(kind for kind in payloads if kind not in kinds)
+    return tuple(kinds)
 
 
 def pin_refusal(assembler: StreamAssembler, endpoint: ModelEndpoint, handed_back: PinUnavailable) -> ProviderError:
@@ -1877,10 +1896,16 @@ async def drive_sse_stream(
                             if refused is not None and refused(candidate):
                                 yield REFUSED
                                 return
-                            if response.status_code == 400 and _DECRYPT_REFUSAL.search(body or ""):
-                                # A replayed ciphertext this account cannot read, refused before any output: the
-                                # loop renders the request again without that identity's opaque payloads (§3.5).
-                                refusal = Refusal("opaque_refused", endpoint.source_id, endpoint.source_identity)
+                            refused_payloads = opaque_refusal(body or "") if response.status_code == 400 else ()
+                            if refused_payloads:
+                                # A replayed opaque payload this account cannot read, refused before any output: the
+                                # loop renders the request again without that identity's payloads of that kind (§3.5).
+                                refusal = Refusal(
+                                    "opaque_refused",
+                                    endpoint.source_id,
+                                    endpoint.source_identity,
+                                    payloads=refused_payloads,
+                                )
                                 candidate = replace(
                                     candidate, retryable=False, continuable=False, after_thinking=False, refusal=refusal
                                 )
