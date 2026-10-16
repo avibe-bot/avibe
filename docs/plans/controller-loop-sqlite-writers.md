@@ -48,22 +48,46 @@ The rows are bounded by the Turn's Run ids. The store is also constructed on eve
 2. **Transcript order is commit order.** A row's `created_at`, the transcript's sort key, is stamped inside the transaction (`messages_service`), and so is the Session's activity rank. On the loop, persists commit in the order the loop issued them. A multi-thread pool would stamp them in whatever order its threads reach SQLite, so two emits for the same Session can swap. That can happen with a receiver's result and a concurrent Activity-output flush, or with an interim row and a notice.
 3. **The Run terminal record (A) and the persist of the same Turn commit in loop order.** On master both run on the loop, so a Run never records an output whose message row is not yet there, and no later emit's row lands before an earlier emit's record.
 
-**Recommendation: one global ordered writer for the dispatcher's durable writes.** One thread commits the work in the order the loop submitted it. Message persistence goes through it, and so does path A's Run terminal record; A moves from the runtime-work door to this writer. Each emit awaits its own step under the `_store_step` rule, so cancellation points stay where they are on master. The post-commit publishes (`message.new`, `inbox.session.updated`, the activity rank) go out from the loop after the commit lands, in the same order. The controller drains the writer at shutdown, as it drains Run activity today (`drain_agent_run_activity`).
+**Recommendation: one global ordered writer for agent-message persistence and the Run terminal record.** One thread commits the work in the order the loop submitted it. A's Run terminal record moves from the runtime-work door to this writer. Each caller awaits its own step under the `_store_step` rule, so cancellation points stay where master has them. A cancellation that lands during a terminal persist is answered at the next await, which is the same `_stream_chunk` or IM call that would answer it on master, where the persist cannot be interrupted. The tail that may then be skipped, including `on_terminal_delivery_complete`, is a pre-existing gap of the terminal emit. #2714 tracks it, and its fix covers A and A2 together. The post-commit publishes (`message.new`, `inbox.session.updated`, the activity rank) go out from the loop after the commit lands, in the same order. The writer takes its shape from `_TurnModeWriter` in `modules/agents/model_hub.py`: one daemon thread, one FIFO, one future per write.
 
 - **Why one global thread rather than per-Session ordering on a shared pool.** SQLite admits one writer at a time, so a pool cannot commit two Sessions' rows in parallel. Its threads would queue on the write lock, and one slow `fsync` delays every Session either way. A global writer costs no latency the database does not already impose, and the loop no longer pays it. The global writer also gives a single total order across both write kinds, which per-Session keys cannot: Run records and inbox rows are not cleanly keyed by Session. It also leaves room for group commit later, where several queued writes share one transaction and one `fsync`. That would directly help a slow disk; it is not part of this change.
 - **Why A joins it.** With both on one FIFO writer, a Turn's persist and its Run record cannot commit out of loop order. That holds for every pair, not only within one emit, so nothing has to reason about which pairs are safe. A's own guarantees are unchanged: the record re-reads open Activities in its transaction, and the cancellation point is the same.
-- **What it does not change.** Writes outside the dispatcher's emit path (the scheduler, Session Turns, Activities) keep their current owners.
-- **A failing write fails only its own awaiter.** Each submitted write is its own transaction. Its exception is set on its own future and raised to the caller that awaits it, where today's handling applies unchanged: a persistence failure is still reported as one. The writer thread catches everything a write raises and goes on to the next, so one bad write never stops persistence for anyone else. A test submits a write that raises and then one that succeeds: the first awaiter gets the error, the second gets its row, and the thread is still running.
-- **When the queue backs up behind a slow `fsync`.** The queue is unbounded in its type but bounded by construction. Every write is submitted by a caller that awaits it before doing anything else, and no caller fires and forgets. So at most one write is queued per emitting task: a receiver, an Activity-output flush, a notice. That is a handful per active Session, not one per message. A slow disk therefore slows the emitters instead of the loop: each waits for its own write, and its output stream slows down. Everything else on the loop keeps running. This is acceptable for two reasons. The same writes waited on the loop before, holding every Session. And a cap would only add a second wait point in front of the one the database already imposes.
+- **Every agent-message write goes through it.** That is every caller of `persist_agent_message`:
+  - the dispatcher's emits;
+  - the message handler's terminal error row (`_stream_terminal_error`);
+  - the auth service's recovery notice (`maybe_emit_auth_recovery_message`);
+  - the Claude receiver's rows in `handle_message`, `_handle_receiver_eof` and `_handle_receiver_exception`.
+
+  `persist_silent_terminal` goes through it too. All of these already run in coroutines, so each awaits its step instead of calling the helper. A caller left on the loop would bring the stall back. It could also commit ahead of an older write for the same Session that is still in the FIFO, such as an Activity-output flush, and swap the transcript. So the helpers become writer-only. A call on the controller's loop thread logs an error that names the caller, as the #2662 guard does for an activation commit off the loop. A test pins it.
+- **Human rows stay where they are.** `mirror_inbound` and the `link_inbound_message_session` that follows it still run together on the loop, on the legacy direct path. Durable Deliveries still write theirs when native acceptance is recorded, as `on_native_start` does, inside transactions that must not yield. A human row can therefore commit ahead of a queued agent row. That happens only for a message the user sent before that agent row reached them: an agent row is delivered only after its commit. The two were concurrent, and either order matches what the user saw.
+- **What it does not change.** Other writes (the scheduler, Session Turns, Activities) keep their current owners.
+- **Failures keep today's contract.** The writer runs the same functions, so a caller gets what a direct call gives it today:
+  - `persist_agent_message` still catches a database failure, fills `error_sink` and returns `None`. Its awaiter gets `None` and the filled sink. The interim and process rows have no handler around them, and they stay best-effort.
+  - A's record keeps the handling it has after #2715.
+
+  The writer adds isolation on top of that contract. Anything that still escapes a function is set on that write's own future and raised to its awaiter. The thread catches everything a write raises and goes on to the next, so one bad write never stops persistence for anyone else. A test submits a persist whose database write fails, then one that raises past the helper, then one that succeeds. The first awaiter gets `None` with the error in its sink, the second gets the exception, the third gets its row, and the thread is still running.
+- **When the queue backs up behind a slow `fsync`.** Every write is submitted by a coroutine that awaits it before doing anything else, and no caller fires and forgets. So the queue holds exactly one write per coroutine that is waiting for one. The writer creates no coroutines of its own. The waiting coroutines are receivers, Activity flushes and notice paths that exist today. On master each of them would be waiting on the same commit, with the loop frozen.
+
+  What changes is that the loop keeps running during the stall. Work that starts during it can add waiters: one per new emitting coroutine, at the rate new Turns, Activities and notices start. The backlog therefore grows with the work admitted during the stall, not with output volume, and it empties as commits land.
+
+  There is no capacity limit. A cap would hold the same coroutines at a second wait point, so it would bound the queue's length but neither the waiters nor their memory. Its wait would also be a new cancellation point before the step is submitted, which the `_store_step` rule would then have to cover. A real bound on the waiters means admitting less work during a stall. That is a product decision outside this change.
 - **Evidence when it happens.** The loop watchdog stays quiet, because the loop is free; that is the point of the change. If a watchdog dump fires for another reason, it shows the writer thread in `commit`, not the event loop. To keep a backed-up queue visible, the writer logs one rate-limited WARNING when a write has spent longer than the watchdog's 2 s threshold between submission and commit. The warning gives the queue depth and the oldest wait.
+- **Shutdown.** The writer has a close step. After close, it refuses any submission, and the caller gets what the contract already gives a failed write: `None` with the reason in `error_sink` for a persist, and for A's record the failure its caller already handles. So nothing can be queued behind the final drain.
+
+  Close and the final drain must run after the last producer can submit. That rules out the point where `drain_agent_run_activity` runs today, in `_stop_runtime_work_stack`. It comes before the scheduled-task, watch and Model Hub services stop, and the receiver tasks are cancelled only later, in `cleanup_sync`. So the final drain is the last loop step of `cleanup_sync`, after the receivers are cancelled and the IM thread has joined. A cancelled receiver that tries to write after close is refused and logged.
+
+  The drain waits for every accepted write, so their awaiters resolve before the loop closes. Like `drain_turn_mode_stamps`, it waits with a bound. The thread is a daemon, so a commit wedged on a dead disk cannot hold exit, and SQLite rolls back the write it cut off. A Run record lost that way is left for the next start's recovery of interrupted Runs, as a crash leaves it today.
 
 **Test design.**
 - A held writer (an `fsync` that does not return) must not hold the loop.
 - Two concurrent emits for one Session must keep their transcript order.
+- A receiver's direct row (EOF or exception) submitted after a queued emit must commit after it.
 - A Turn's Run record must commit after its persisted row.
 - A cancellation during a persist must be answered at the next await, with the row committed.
-- A write that raises must fail only its own awaiter, and the next write must commit.
+- A persist whose database write fails must return `None` and fill its sink. An exception that escapes must fail only its own awaiter. The next write must commit.
+- A direct call of the helper on the loop thread must log the caller.
 - A write held past 2 s must log the queue warning while the loop stays free.
+- A submission after close must be refused through the contract. Writes accepted before close must commit before the final drain returns.
 
 ## Path B: a durable Turn's terminal write after delivery
 
@@ -119,10 +143,11 @@ The per-Turn admissions all hold the boundary inside the transaction, so they ar
 - `drain_delivery_queue`, `_resume_linked_control_successor`.
 
 `on_native_start` and `register_agent_initiated_turn` commit inside `commit_if_current` and must not yield. The remaining sites hold no boundary and are candidates for the door, one at a time:
-- per Turn: `_start_persisted_turn`, `_finish_steer`, `_interrupt_durable_turn`, `reconcile_terminal_run_delivery`, `controller.set_agent_status`, `persist_agent_message`;
+- per Turn: `_start_persisted_turn`, `_finish_steer`, `_interrupt_durable_turn`, `reconcile_terminal_run_delivery`, `controller.set_agent_status`;
 - per user input: `_delivery_backend`, which writes only on a session's first binding, and `_observe_active_delivery_turn`, which runs per steer, from `_admit_p1` and `_promote_fifo_head`;
-- per pending control item: `_run_pending_interrupt` and `_run_pending_steers`;
-- per silent IM terminal: `persist_silent_terminal`, called from `MessageDispatcher.emit_agent_message`.
+- per pending control item: `_run_pending_interrupt` and `_run_pending_steers`.
+
+The message writers `persist_agent_message` and `persist_silent_terminal` are path A2's (#2725).
 
 The Claude receiver calls `SessionActivityRegistry.start`, `progress` and `complete` synchronously, and their store writes run while the Activity lock and the activation boundary are held (`commit_if_current`). That makes them loop-side boundary holders, in the same class as `on_native_start`.
 
@@ -134,3 +159,4 @@ Each move needs the check this note applies to A. Does a loop section rely on th
 - [ ] A: record the Turn's Run terminal through the runtime-work door with `land_step`; make the blocking-Activity check without taking the registry lock under the writer; hold a caught cancellation until the whole terminal-delivery tail, including `on_terminal_delivery_complete`, has run; construct the store once.
 - [ ] B, step 1: skip the writer for redundant terminalization, the post-terminal read and an empty drain.
 - [ ] B, step 2: a design note for B's remaining write that keeps terminalization and successor selection atomic with respect to admission (orderings 1–5).
+- [ ] A2: one global ordered writer for every agent-message write and A's Run terminal record, with the contract-preserving failures, the loop-thread guard and the final drain after the last producer (#2725).
