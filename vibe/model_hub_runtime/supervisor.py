@@ -53,8 +53,11 @@ MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS = 5.0
 # call checks only that the process is alive. The full check (two management
 # round trips, tens of milliseconds, which a request holds the adapter's routing
 # lock across) runs at start and once this expires. A failed one is not
-# remembered: every call checks again, and a request restarts the engine.
+# remembered: every call checks again, and a request restarts the engine, unless
+# the engine refused Avibe's credentials (``EngineConfigLostError``).
 MODEL_HUB_HEALTH_TTL_SECONDS = 30.0
+# What an engine-local endpoint answers a credential it does not hold.
+_CREDENTIALS_REFUSED_STATUSES = frozenset({401, 403})
 _STARTUP_POLL_INTERVAL_SECONDS = 0.05
 # Durable identity of the engine this state root last spawned. A service that
 # dies without running ``atexit`` (SIGKILL, crash, forced restart) leaves its
@@ -80,6 +83,20 @@ class EngineUnavailableError(RuntimeError):
         self.reason = reason
         self.os_errno = os_errno
         self.direct_mode_available = True
+
+
+class EngineConfigLostError(EngineUnavailableError):
+    """The running engine refuses the credentials Avibe launched it with.
+
+    Its gateway key and management secret come only from the config Avibe
+    rendered, so an engine-local endpoint refusing them proves it no longer runs
+    that config. That is a broken invariant, not a transient failure: the owner
+    of admissions restores it by admitting no new work, letting the streams the
+    engine still serves end, and then calling ``restart_lost_engine``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("models.engine.health_failed", reason="engine_config_lost")
 
 
 class EngineSupervisor:
@@ -110,14 +127,50 @@ class EngineSupervisor:
         self._verified_at: float | None = None
         self._record_os_errno: int | None = None
         self._config_generation = 0
+        self._config_loss_reported = False
 
     def ensure_running(self) -> EngineConnection:
         with self._lock:
-            if self._is_running_locked() and self._healthy_locked():
-                assert self._connection is not None
-                return self._connection
+            if self._is_running_locked():
+                if self._healthy_locked():
+                    assert self._connection is not None
+                    return self._connection
+                failure = self._health_failure_signature
+                if failure is not None and failure[1] == "http_error" and failure[2] in _CREDENTIALS_REFUSED_STATUSES:
+                    # Stopping it here would cut the streams it still serves.
+                    raise self._config_lost_locked(failure[0], failure[2])
             self._stop_locked()
             return self._start_locked()
+
+    def restart_lost_engine(self) -> None:
+        """Restart an engine that lost its configuration, from the config Avibe renders.
+
+        The caller has drained it: no new work is admitted and its streams have
+        ended. The engine is checked again first, so a second caller that waited
+        out the same drain finds it answering and leaves it. A restart whose
+        engine still refuses the credentials fails its start like any other, and
+        is not retried here.
+        """
+        with self._lock:
+            if not self._is_running_locked() or self._connection is None:
+                return
+            if self._check_health_locked(EngineClient(self._connection, timeout=1.0)):
+                self._verified_at = time.monotonic()
+                return
+            self._stop_locked()
+            self._start_locked()
+
+    def _config_lost_locked(self, endpoint: str, http_status: int) -> EngineConfigLostError:
+        # Nothing it answered vouches for it any more, so the next call checks it.
+        self._verified_at = None
+        if not self._config_loss_reported:
+            self._config_loss_reported = True
+            assert self._connection is not None
+            logger.warning(
+                "Model Hub engine lost its configuration endpoint=%s http_status=%s port=%s",
+                endpoint, http_status, self._connection.base_url.rsplit(":", 1)[1],
+            )
+        return EngineConfigLostError()
 
     def stop(self) -> None:
         """Shutdown stop: an unconfirmed survivor stays recorded for the next start."""
@@ -189,6 +242,8 @@ class EngineSupervisor:
         try:
             client.put_config_yaml(text)
         except EngineClientError as exc:
+            if exc.status_code in _CREDENTIALS_REFUSED_STATUSES:
+                raise self._config_lost_locked("/v0/management/config.yaml", exc.status_code) from exc
             if exc.status_code is not None:
                 raise EngineUnavailableError("models.engine.health_failed") from exc
             if not self._is_running_locked():
@@ -253,6 +308,9 @@ class EngineSupervisor:
             try:
                 listed = client.list_model_names(timeout=1.0)
             except EngineClientError as exc:
+                if exc.status_code in _CREDENTIALS_REFUSED_STATUSES:
+                    # The applied file was not the one written: waiting cannot help.
+                    raise self._config_lost_locked("/v1/models", exc.status_code) from exc
                 listed = None
                 os_errno = local_os_errno(exc)
             if (
@@ -544,6 +602,7 @@ class EngineSupervisor:
         self._verified_at = None
         self._health_failure_signature = None
         self._health_os_errno = None
+        self._config_loss_reported = False
         if process is not None and process.poll() is None:
             signal_process_tree(process, signal.SIGTERM, logger, "Model Hub engine")
             try:

@@ -69,7 +69,9 @@ from vibe.model_hub_runtime.state import (
     SourceRecord,
 )
 from vibe.model_hub_runtime.supervisor import (
+    MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS,
     MODEL_HUB_STARTUP_TIMEOUT_SECONDS,
+    EngineConfigLostError,
     EngineSupervisor,
     EngineUnavailableError,
 )
@@ -2952,9 +2954,11 @@ def _write_mock_engine(
     exit_before_ready: int | None = None,
     reload_delay: float = 0.0,
     drop_reload_ack: bool = False,
+    lose_config_on_reload: bool = False,
 ) -> None:
     script = f"""#!{sys.executable}
 import json
+import os
 import sys
 import threading
 import time
@@ -3036,8 +3040,13 @@ class Handler(BaseHTTPRequestHandler):
             handle.write(body)
 
         def apply():
-            global config
+            global config, gateway, management
             config = yaml.safe_load(body)
+            if {lose_config_on_reload!r} and not os.path.exists('config-lost'):
+                # The 3.2.1rc8 race (#2686): the watcher applied a half-written
+                # file, so the engine runs its defaults, not the config written.
+                open('config-lost', 'w').close()
+                gateway = management = 'engine-default'
             with open('config-reloads', 'a', encoding='utf-8') as handle:
                 handle.write('reload\\n')
 
@@ -3176,6 +3185,7 @@ def _fixture_supervisor(
     exit_before_ready: int | None = None,
     reload_delay: float = 0.0,
     drop_reload_ack: bool = False,
+    lose_config_on_reload: bool = False,
 ) -> tuple[EngineSupervisor, EngineStateStore]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     binary = tmp_path / "mock-engine"
@@ -3188,6 +3198,7 @@ def _fixture_supervisor(
         exit_before_ready=exit_before_ready,
         reload_delay=reload_delay,
         drop_reload_ack=drop_reload_ack,
+        lose_config_on_reload=lose_config_on_reload,
     )
     installer = _FixtureInstaller(binary, tmp_path / "versions" / "install-1")
     store = EngineStateStore(tmp_path / "state")
@@ -3222,6 +3233,46 @@ def test_source_sync_hot_reloads_a_running_engine_without_restart(tmp_path: Path
         instance_dir = store.root / "instances" / "install-1"
         assert (instance_dir / "config-reloads").read_text().count("reload") == 2
         assert "model-b" not in (instance_dir / "config.yaml").read_text()
+    finally:
+        supervisor.stop()
+
+
+def test_an_engine_that_lost_its_configuration_is_reported_once_and_restarted_by_its_drainer(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Scenario: MH-RUNTIME-014 -- an engine refusing its launch credentials is not running Avibe's config (#2687).
+
+    The reload that lost it fails at once instead of waiting out its deadline,
+    no caller restarts it under the streams it still serves, and the restart
+    its drainer asks for renders the config again.
+    """
+    supervisor, store = _fixture_supervisor(tmp_path, lose_config_on_reload=True)
+    credential_ref = store.store_api_key("upstream-secret", base_url="https://api.example.test/v1")
+    store.sync_sources([_binding(credential_ref)])
+    connection = supervisor.ensure_running()
+    lost = supervisor._process
+    try:
+        store.sync_sources([_binding(credential_ref, route_model_ids=("model-b",))])
+        started = time.monotonic()
+        with caplog.at_level(logging.WARNING, logger=supervisor_module.__name__):
+            with pytest.raises(EngineConfigLostError):
+                supervisor.reload_config_if_running()
+            assert time.monotonic() - started < MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS
+            with pytest.raises(EngineConfigLostError):
+                supervisor.ensure_running()
+        assert supervisor._process is lost and lost.poll() is None
+        [report] = [record.getMessage() for record in caplog.records if "lost its configuration" in record.getMessage()]
+        assert f"port={connection.base_url.rsplit(':', 1)[1]}" in report and "http_status=401" in report
+
+        supervisor.restart_lost_engine()
+        assert supervisor._process is not lost and lost.poll() is not None
+        prefix = store.get_source("src_fixture123").prefix
+        restored = EngineClient(supervisor.ensure_running())
+        assert restored.list_model_ids() == {f"{prefix}/model-a", f"{prefix}/model-b"}
+        # A second drainer of the same loss finds the engine answering.
+        restarted = supervisor._process
+        supervisor.restart_lost_engine()
+        assert supervisor._process is restarted
     finally:
         supervisor.stop()
 
