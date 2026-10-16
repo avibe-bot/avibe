@@ -9,6 +9,7 @@ against two loopback upstreams, and proves:
 - the engine installs from the packaged manifest and becomes healthy;
 - an API-key Source saves through the real credential check;
 - a Vibey turn and a Claude Code hub-mode turn each get the upstream's reply;
+- a Source credential replacement and newly discovered model serve another turn;
 - after the service is killed outright, the next start reaps the engine it
   left behind and runs a new one.
 """
@@ -32,6 +33,8 @@ from typing import Any, Iterator
 
 import psutil
 import pytest
+
+from core.process_isolation import PROCESS_IDENTITY_ENV, fingerprint_process_marker
 
 pytestmark = pytest.mark.e2e_service
 
@@ -336,11 +339,30 @@ class _Service:
 
 
 def _process_is(entry: dict[str, Any]) -> bool:
-    """Whether the recorded process is still the one the record names."""
+    """Whether a service/UI pid still belongs to the process recorded for cleanup."""
 
     try:
         return abs(psutil.Process(entry["pid"]).create_time() - float(entry["create_time"])) < 0.01
     except (psutil.NoSuchProcess, psutil.AccessDenied, KeyError, TypeError, ValueError):
+        return False
+
+
+def _engine_is(entry: dict[str, Any]) -> bool:
+    """Whether the recorded process still carries the engine's identity marker.
+
+    The marker is the authoritative identity used by the product reaper. The
+    persisted ``create_time`` remains useful diagnostics, but it can drift by a
+    platform/process-sampling tick while the same process stays alive.
+    """
+
+    try:
+        expected = entry.get("worker_fingerprint")
+        if not isinstance(expected, str):
+            return False
+        process = psutil.Process(entry["pid"])
+        marker = process.environ().get(PROCESS_IDENTITY_ENV)
+        return isinstance(marker, str) and bool(marker) and fingerprint_process_marker(marker) == expected
+    except (psutil.Error, KeyError, TypeError, ValueError):
         return False
 
 
@@ -396,6 +418,9 @@ def test_fresh_install_serves_vibey_and_claude_through_the_hub_and_reaps_an_orph
             expected_platform = os.environ.get("AVIBE_EXPECT_ENGINE_PLATFORM")
             if expected_platform:
                 assert runtime["host_platform"] == expected_platform, runtime
+            expected_version = os.environ.get("AVIBE_EXPECT_ENGINE_VERSION")
+            if expected_version:
+                assert runtime["status"]["installed_version"] == expected_version, runtime
 
             # API-key Sources save through the real credential check, which
             # requires the listing to refuse a request without the key.
@@ -422,10 +447,33 @@ def test_fresh_install_serves_vibey_and_claude_through_the_hub_and_reaps_an_orph
             assert _REPLY in (claude.get("result_text") or ""), claude
             assert any(item["path"] == "/v1/messages" for item in anthropic.requests())
 
+            # A saved credential/model update must reach the running engine, not
+            # merely persist in the API. The old route remains valid while the
+            # newly discovered model is registered, then the next turn uses it.
+            replacement_key = "sk-acceptance-chat-replaced-not-real"
+            replacement_model = "mock-model-replaced"
+            chat.configure(required_api_key=replacement_key, models=[_CHAT_MODEL, replacement_model])
+            replaced = service.ok("PUT", f"/api/models/sources/{chat_source['id']}/credential", {
+                "key": replacement_key,
+            }, timeout=120)["source"]
+            assert replaced["id"] == chat_source["id"]
+            assert replaced["credential_ref"] != chat_source["credential_ref"]
+            _route(service, "vibey", _VIBEY_MODEL, chat_source["id"], replacement_model)
+            before_turn = len(chat.requests())
+            updated = _turn(service, "vibey")
+            assert updated["status"] == "succeeded", updated
+            assert _REPLY in (updated.get("result_text") or ""), updated
+            completions = [
+                item for item in chat.requests()[before_turn:]
+                if item["path"] == "/v1/chat/completions"
+            ]
+            assert completions, "the updated Source did not serve the next turn"
+            assert all(item["body"]["model"] == replacement_model for item in completions), completions
+
             # Kill the service outright: its engine is left running.
             first = service.engines()[0]
             service.kill_service()
-            assert _process_is(first), "the engine should outlive a killed service"
+            assert _engine_is(first), "the engine should outlive a killed service"
 
             # The next start reaps that engine before it runs a new one.
             service.vibe("start", "--no-open-browser", timeout=300)
@@ -433,14 +481,14 @@ def test_fresh_install_serves_vibey_and_claude_through_the_hub_and_reaps_an_orph
             service.ok("POST", "/api/models/runtime/start", timeout=_ENGINE_START_SECONDS)
             second = service.healthy_engine()
             started.append(second)
-            assert second["pid"] != first["pid"] or second["create_time"] != first["create_time"]
-            assert not _process_is(first), "the orphaned engine is still running"
+            assert second["worker_fingerprint"] != first["worker_fingerprint"]
+            assert not _engine_is(first), "the orphaned engine is still running"
             log = (service.avibe_home / "logs" / "vibe_remote.log").read_text(encoding="utf-8", errors="replace")
             assert "Reaped a Model Hub engine left running by an earlier service" in log
 
             service.vibe("stop", timeout=120)
             assert service.engines() == []
-            assert not _process_is(second)
+            assert not _engine_is(second)
         except BaseException:
             print(service.diagnostics())
             raise
@@ -448,5 +496,5 @@ def test_fresh_install_serves_vibey_and_claude_through_the_hub_and_reaps_an_orph
             service.stop()
             service.close()
             for entry in started:
-                if _process_is(entry):
+                if _engine_is(entry):
                     psutil.Process(entry["pid"]).kill()

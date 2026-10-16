@@ -103,6 +103,7 @@ capability:
     - tests/e2e/test_codex_request_metadata.py
     - tests/e2e/test_codex_request_gateway.py
     - tests/e2e/test_model_hub_runtime.py
+    - tests/e2e/test_model_hub_engine_hosted_passthrough.py
     - tests/e2e/test_model_hub_sources.py
     - tests/e2e/test_model_hub_usage_events.py
     - tests/e2e/test_model_hub_engine_wire.py
@@ -2534,8 +2535,9 @@ scenarios:
     name: >-
       A fresh install of the installed service, on Windows x64 and Arm64 as on Linux and macOS: the engine installs
       from the packaged manifest and turns healthy, API-key Sources save through the real credential check, a Vibey
-      turn and a Claude Code hub-mode turn get the upstream's reply, a hard-killed service's engine is reaped by the
-      next start, and vibe stop leaves no engine
+      turn and a Claude Code hub-mode turn get the upstream's reply, a credential replacement and newly discovered
+      model serve another Vibey turn, a hard-killed service's engine is reaped by the next start, and vibe stop
+      leaves no engine
     status: assert
     kind: runtime_lifecycle
     layer: e2e-auto
@@ -2605,6 +2607,36 @@ scenarios:
     test: tests/e2e/test_model_hub_engine_wire.py::test_responses_stream_with_reasoning_and_tool_call
     related_tests:
       - tests/test_model_hub_runtime.py::test_only_an_xai_responses_entry_marks_its_models_is_compat
+  - id: MH-ENGINE-HOSTED-001
+    name: The real CPA Responses path preserves complete tool declarations, include cardinality and the complete decoded response event sequence
+    status: assert
+    kind: compatibility
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_engine_hosted_passthrough.py::test_responses_hosted_declarations_and_items_pass_through
+  - id: MH-ENGINE-HOSTED-002
+    name: The real CPA Responses path preserves hosted history content, order and cardinality relative to user and assistant messages
+    status: assert
+    kind: compatibility
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_engine_hosted_passthrough.py::test_responses_hosted_history_replays_verbatim
+  - id: MH-ENGINE-HOSTED-003
+    name: CPA image passthrough mode never injects an image tool absent from the caller request
+    status: assert
+    kind: compatibility
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_engine_hosted_passthrough.py::test_image_generation_is_never_injected_or_answered_by_the_engine
+  - id: MH-ENGINE-HOSTED-004
+    name: The real CPA Anthropic path preserves complete hosted search declarations and the decoded response event sequence including tool inputs, results, citations and usage
+    status: assert
+    kind: compatibility
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_engine_hosted_passthrough.py::test_anthropic_web_search_and_its_results_pass_through
+  - id: MH-ENGINE-HOSTED-005
+    name: The real CPA Anthropic path preserves the complete ordered replay message sequence and its tool, result and citation contents
+    status: assert
+    kind: compatibility
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_engine_hosted_passthrough.py::test_anthropic_hosted_history_replays_verbatim
 next_priority:
   - MH-PROTOCOL-004
   - MH-RUNTIME-001

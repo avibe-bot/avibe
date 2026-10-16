@@ -1,0 +1,59 @@
+diff --git a/internal/api/handlers/management/auth_files_oauth_callback.go b/internal/api/handlers/management/auth_files_oauth_callback.go
+index f33f82e1..b1cefdfa 100644
+--- a/internal/api/handlers/management/auth_files_oauth_callback.go
++++ b/internal/api/handlers/management/auth_files_oauth_callback.go
+@@ -50,7 +50,10 @@ func startCallbackForwarder(port int, provider, targetBase string) (*callbackFor
+ 		stopForwarderInstance(port, prev)
+ 	}
+ 
+-	addr := fmt.Sprintf("0.0.0.0:%d", port)
++	// Avibe: the forwarder only relays the vendor redirect from this machine's
++	// browser, so it listens on loopback alone. A wildcard bind exposes the
++	// port to the network and raises a firewall prompt on Windows.
++	addr := fmt.Sprintf("127.0.0.1:%d", port)
+ 	ln, err := net.Listen("tcp", addr)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("failed to listen on %s: %w", addr, err)
+diff --git a/internal/api/handlers/management/auth_files_provider_oauth.go b/internal/api/handlers/management/auth_files_provider_oauth.go
+index 48fc4ef4..cac82532 100644
+--- a/internal/api/handlers/management/auth_files_provider_oauth.go
++++ b/internal/api/handlers/management/auth_files_provider_oauth.go
+@@ -80,9 +80,9 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
+ 		}
+ 		var errStart error
+ 		if forwarder, errStart = startCallbackForwarder(anthropicCallbackPort, "anthropic", targetURL); errStart != nil {
+-			log.WithError(errStart).Error("failed to start anthropic callback forwarder")
+-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
+-			return
++			// Avibe: an occupied or reserved port must not abort the login. The
++			// callback URL can still be submitted through /oauth-callback.
++			log.WithError(errStart).Warn("anthropic callback forwarder unavailable; waiting for a submitted callback")
+ 		}
+ 	}
+ 
+@@ -241,9 +241,9 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
+ 		}
+ 		var errStart error
+ 		if forwarder, errStart = startCallbackForwarder(codexCallbackPort, "codex", targetURL); errStart != nil {
+-			log.WithError(errStart).Error("failed to start codex callback forwarder")
+-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
+-			return
++			// Avibe: an occupied or reserved port must not abort the login. The
++			// callback URL can still be submitted through /oauth-callback.
++			log.WithError(errStart).Warn("codex callback forwarder unavailable; waiting for a submitted callback")
+ 		}
+ 	}
+ 
+@@ -387,9 +387,9 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
+ 		}
+ 		var errStart error
+ 		if forwarder, errStart = startCallbackForwarder(antigravity.CallbackPort, "antigravity", targetURL); errStart != nil {
+-			log.WithError(errStart).Error("failed to start antigravity callback forwarder")
+-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
+-			return
++			// Avibe: an occupied or reserved port must not abort the login. The
++			// callback URL can still be submitted through /oauth-callback.
++			log.WithError(errStart).Warn("antigravity callback forwarder unavailable; waiting for a submitted callback")
+ 		}
+ 	}
+ 
