@@ -1237,9 +1237,9 @@ class VibeyAgent(BaseAgent):
         """Avibe's injected prompt sections and the skill catalog they offered.
 
         Built off the event loop as the other backends build them: skill resolution
-        scans the filesystem and may run ``claude plugin list``.
+        scans the ordinary static Skill directories.
         """
-        from core.managed_skills import managed_skill_claude_cli_path, managed_skill_project_base
+        from core.managed_skills import managed_skill_project_base
         from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
 
         context = request.context
@@ -1257,7 +1257,6 @@ class VibeyAgent(BaseAgent):
                 enabled_agents=get_enabled_agents_for_prompt(self.controller),
                 skills_cwd=cwd or None,
                 skills_project_base=managed_skill_project_base(context),
-                skills_claude_cli_path=managed_skill_claude_cli_path(self.config),
                 skill_catalog_sink=skill_catalog_sink,
             )
 
@@ -1289,7 +1288,6 @@ class VibeyAgent(BaseAgent):
         from core.caller_context import caller_env_for_platform_payload, environment_without_caller_context
         from core.agent_path import prepend_managed_tools_to_path
         from core.managed_skills import (
-            managed_skill_claude_cli_path,
             managed_skill_environment,
             managed_skill_project_base,
         )
@@ -1307,7 +1305,6 @@ class VibeyAgent(BaseAgent):
             managed_skill_environment(
                 cwd or None,
                 project_base=managed_skill_project_base(context),
-                claude_cli_path=managed_skill_claude_cli_path(self.config),
             )
         )
         prepend_managed_tools_to_path(environment, base_env=environment, working_dir=cwd or None)

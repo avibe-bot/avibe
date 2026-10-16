@@ -46,7 +46,6 @@ from core.agent_tool_policy import (
 from core.agent_session_context import resolve_context_agent_session_target
 from core.caller_context import AVIBE_SESSION_ID_ENV, caller_env_for_platform_payload
 from core.managed_skills import (
-    managed_skill_claude_cli_path,
     managed_skill_environment,
     managed_skill_project_base,
 )
@@ -556,9 +555,6 @@ class SessionHandler(BaseHandler):
                 != managed_skill_environment(
                     working_path,
                     project_base=managed_skill_project_base(context),
-                    claude_cli_path=managed_skill_claude_cli_path(
-                        SimpleNamespace(claude=launch_inputs.config) if launch_inputs is not None else self.config
-                    ),
                 ),
             ),
             ("git_path_changed", getattr(client, "_vibe_git_path_state", None) != self._claude_git_path_state(working_path)),
@@ -1738,7 +1734,6 @@ class SessionHandler(BaseHandler):
             managed_skill_environment(
                 working_path,
                 project_base=managed_skill_project_base(context),
-                claude_cli_path=managed_skill_claude_cli_path(launch_config),
             )
         )
         prepend_managed_tools_to_path(
@@ -1828,7 +1823,6 @@ class SessionHandler(BaseHandler):
             managed_skill_environment(
                 working_path,
                 project_base=managed_skill_project_base(context),
-                claude_cli_path=managed_skill_claude_cli_path(launch_config),
             ),
         )
         setattr(client, "_vibe_git_path_state", git_path_state)
@@ -1968,7 +1962,6 @@ class SessionHandler(BaseHandler):
             enabled_agents=get_enabled_agents_for_prompt(self.controller),
             skills_cwd=working_path,
             skills_project_base=managed_skill_project_base(context),
-            skills_claude_cli_path=managed_skill_claude_cli_path(SimpleNamespace(claude=claude_config)),
             skill_catalog_sink=skill_catalog_sink,
         )
 

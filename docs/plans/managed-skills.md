@@ -128,42 +128,9 @@ ${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills
 ${CODEX_HOME:-$HOME/.codex}/skills/.system
 ```
 
-When Claude has an installed plugin registry, Avibe reads only bounded local JSON
-artifacts and never starts the Claude CLI. The supported local source contract is:
-
-- `plugins/installed_plugins.json` contains a dictionary of plugin IDs to record
-  objects or record lists. By default it is under `${CLAUDE_CONFIG_DIR}/plugins`;
-  an absolute `CLAUDE_CODE_PLUGIN_CACHE_DIR` overrides that local registry root.
-  An invalid or empty override omits optional plugin roots rather than falling
-  back to the default. Records must have an absolute `installPath` and a known
-  scope (`local`, `project`, `user`, or `managed`). Unknown scopes are omitted.
-  Project/local records without an explicit project binding are omitted, so a
-  record cannot broaden a plugin from another project.
-- Each applicable record contributes only its fixed `<installPath>/skills`
-  directory. Manifest-declared roots, root-level `<installPath>/SKILL.md`,
-  marketplace entries, dependency closure, and other plugin source families
-  are not discovered. The normal bounded Skill scanner still applies to the
-  fixed directory and failures affect only optional plugin roots.
-- An explicit `record["enabled"]: false` or bounded local/managed
-  `enabledPlugins[plugin-id]: false` denies that plugin; positive values do not
-  authorize it. Any malformed or unreadable managed settings source makes
-  optional plugin roots fail closed, while static Skill roots remain usable.
-- `.claude-plugin/plugin.json` is optional deny metadata only. A missing
-  manifest is allowed. A present unreadable, malformed, non-object manifest, or
-  manifest with a non-Boolean `defaultEnabled` denies that optional plugin;
-  `defaultEnabled: false` also denies it. Other manifest fields, including
-  `skills`, are ignored for discovery.
-
-Duplicate records are selected deterministically by known scope, valid
-`lastUpdated`/`installedAt` metadata, and a stable absolute-path tie-break;
-`version` is not treated as recency. An explicit deny for a plugin ID applies to
-all duplicate records, so another enabled-looking record cannot evade it. Path
-resolution and malformed optional records never abort static discovery or a
-Turn. This local reader is intentionally incomplete and does not claim Claude's
-complete effective-config behavior: it does not execute the CLI, access the
-network or marketplaces, read MDM/registry/server policy, reconstruct
-worktree-main-checkout settings, discover account-synced or seed plugins, or
-reconstruct dependency closure.
+Claude plugin Skills are intentionally not part of this resolver. It reads only the ordinary static project and user
+Skill roots described above; it does not read plugin registries, caches, manifests, settings, or other plugin
+sources, and Skill resolution never starts the Claude CLI.
 
 Native locations are read in place. Avibe does not migrate or rename them, and
 the Catalog never annotates their source. A successful load still includes the
@@ -197,8 +164,8 @@ Within the same project depth or global scope, family order is:
 
 Here `OpenCode` maps to `.opencode/skills` for project discovery and
 `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills` for global discovery. The
-`.avibe` family slot is reserved in v1. Enabled Claude plugin roots follow the
-static user roots, and Codex `.system` defaults are last. A final stable path
+`.avibe` family slot is reserved in v1, and Codex `.system` defaults are last.
+A final stable path
 order breaks any remaining tie. Winners are sorted by name before Catalog
 pagination.
 
