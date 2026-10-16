@@ -65,7 +65,7 @@ from core.services.agent_steering import (
     result as steer_result,
     steer_active_turn,
 )
-from storage import messages_service
+from storage import loop_writers, messages_service
 from storage import message_deliveries as delivery_store
 from storage.agent_transcript import recovered_watch_ids
 from storage.agent_session_rows import reserve_write_lock
@@ -638,6 +638,7 @@ def _try_reserve_write_lock(conn: Connection) -> bool:
     """``reserve_write_lock`` without waiting: ``False`` when another connection holds
     SQLite's writer, instead of blocking the caller for the busy timeout."""
 
+    loop_writers.mark_never_waits(conn)
     previous = conn.exec_driver_sql("PRAGMA busy_timeout").scalar()
     conn.exec_driver_sql("PRAGMA busy_timeout = 0")
     try:

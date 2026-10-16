@@ -10,6 +10,7 @@ from typing import Any
 
 from sqlalchemy import Connection, func, select, update
 
+from storage import loop_writers
 from storage.models import agent_sessions, scope_settings
 from storage.session_reclaim import (
     OVERRIDABLE_SETTING_COLUMNS,
@@ -202,6 +203,9 @@ def reserve_write_lock(conn: Connection) -> None:
     if conn.connection.dbapi_connection.in_transaction:
         conn.exec_driver_sql(_WRITE_LOCK_RESERVATION_SQL)
         return
+    # A timed-out wait for the writer leaves no transaction, but it held the
+    # caller for the busy timeout: the loop-writer census still counts it.
+    loop_writers.mark_write_attempt(conn)
     conn.exec_driver_sql("BEGIN IMMEDIATE")
 
 
