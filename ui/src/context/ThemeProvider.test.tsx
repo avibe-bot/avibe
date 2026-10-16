@@ -41,6 +41,22 @@ afterEach(() => {
 });
 
 describe('ThemeProvider', () => {
+  it('reconciles storage after installing the listener', () => {
+    const getItem = vi.spyOn(Storage.prototype, 'getItem')
+      .mockImplementationOnce(() => 'light')
+      .mockImplementationOnce(() => 'dark');
+
+    render(
+      <ThemeProvider>
+        <ThemeProbe name="theme" />
+      </ThemeProvider>,
+    );
+
+    expect(screen.getByTestId('theme').textContent).toBe('dark:dark');
+    expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
+    expect(getItem).toHaveBeenCalledTimes(2);
+  });
+
   it('syncs a valid storage change into every mounted provider without writing back', () => {
     window.localStorage.setItem(STORAGE_KEY, 'light');
     render(
