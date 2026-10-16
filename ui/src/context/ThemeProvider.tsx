@@ -69,6 +69,22 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   }, [mode]);
 
   useEffect(() => {
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key !== STORAGE_KEY && event.key !== null) {
+        return;
+      }
+
+      const nextMode = readStoredTheme();
+      setModeState(nextMode);
+      setSystemTheme(resolveTheme(DEFAULT_MODE));
+      applyTheme(nextMode);
+    };
+
+    window.addEventListener('storage', handleStorage);
+    return () => window.removeEventListener('storage', handleStorage);
+  }, []);
+
+  useEffect(() => {
     if (typeof window.matchMedia !== 'function') {
       return;
     }
