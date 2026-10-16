@@ -118,8 +118,8 @@ the main agent; there is no Follow up on cards.
 
 - **Front card:** the **first** card (the main agent card when it exists),
   showing its title and subtitle only: no ×, no stop button.
-- **Layers:** **one per remaining card**, behind the front card (6 cards →
-  front card + 5 layers). For layer `i` (0-based, nearest first):
+- **Layers:** at most **three** behind the front card, regardless of the
+  number of remaining cards. For layer `i` (0-based, nearest first):
   - **the same height as the front card**, offset `(i + 1) × 9px` below it,
     so its bottom edge peeks out `(i + 1) × 9px` under the front card's
     bottom whatever the front card's height. Do not use a fixed layer height:
@@ -129,7 +129,10 @@ the main agent; there is no Follow up on cards.
   - radius 24px, background `#1a1a1e`, border `white / 8%`;
   - **the same opacity as the front card** (no per-depth fade);
   - nearer layers stack above farther ones.
-- The stack's height is the front card plus `layers × 9px`.
+- The stack's height is the front card plus up to `3 × 9px`.
+- When there are at least two cards, the front card's eyebrow row shows a
+  muted count chip: `N items` in English or `共 N 项` in Chinese. Counts above
+  99 display as `99+`.
 - The whole stack is one button: a click expands it.
 
 ## 4. Cards
@@ -596,8 +599,9 @@ GET /api/sessions/main
 
 - [ ] Vibey never moves for any interaction in this spec.
 - [ ] Collapsed: the front card is the first card (main when present); there
-      is one layer per other card, with 9px steps, a `18+6+3i` inset and the
-      same opacity as the front card.
+      are at most three layers, with 9px steps, a `18+6+3i` inset and the
+      same opacity as the front card. Two or more cards show the count chip,
+      capped at `99+`.
 - [ ] Clicking Vibey or the stack expands upward (360ms settle, height plus
       content fade); clicking Vibey again collapses.
 - [ ] Expanded: fixed 3.5-card box; cards bottom-aligned; overflow scrolls;

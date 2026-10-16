@@ -5942,7 +5942,10 @@
       "close": "关闭输入"
     },
     "stack": {
-      "expand": "展开会话卡片"
+      "count_one": "共 {{displayCount}} 项",
+      "count_other": "共 {{displayCount}} 项",
+      "expand_one": "展开 {{displayCount}} 张卡片",
+      "expand_other": "展开 {{displayCount}} 张卡片"
     },
     "activityKind": {
       "watch": "监控",
