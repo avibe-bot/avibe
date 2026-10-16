@@ -538,6 +538,14 @@ fn extract_archive(
         let mut entry = archive
             .by_index(index)
             .map_err(|_| PrivateRuntimeError::ArchiveInvalid)?;
+        let entry_name = entry.name().map_err(|_| PrivateRuntimeError::ArchiveInvalid)?;
+        if Path::new(entry_name.as_ref()).is_absolute()
+            || entry_name.starts_with('/')
+            || entry_name.starts_with('\\')
+            || entry_name.as_bytes().get(1) == Some(&b':')
+        {
+            return Err(PrivateRuntimeError::ArchiveInvalid);
+        }
         unpacked = unpacked
             .checked_add(entry.size())
             .filter(|value| *value <= manifest.unpacked_size)
@@ -801,16 +809,24 @@ mod tests {
     }
 
     fn write_bundle(root: &Path, extra_entry: Option<&str>) -> RuntimeBundleManifest {
+        write_bundle_with_compression(root, extra_entry, CompressionMethod::Deflated)
+    }
+
+    fn write_bundle_with_compression(
+        root: &Path,
+        extra_entry: Option<&str>,
+        compression: CompressionMethod,
+    ) -> RuntimeBundleManifest {
         let bundle = root.join("bundle");
         fs::create_dir_all(&bundle).expect("bundle directory");
         let archive_path = bundle.join("runtime.zip");
         let archive_file = File::create(&archive_path).expect("archive");
         let mut zip = ZipWriter::new(archive_file);
         let executable_options = SimpleFileOptions::default()
-            .compression_method(CompressionMethod::Deflated)
+            .compression_method(compression)
             .unix_permissions(0o755);
         let data_options = SimpleFileOptions::default()
-            .compression_method(CompressionMethod::Deflated)
+            .compression_method(compression)
             .unix_permissions(0o644);
         let (python, node, npm_cli) = entrypoints();
         let mut unpacked_size = 0_u64;
@@ -1486,15 +1502,130 @@ mod tests {
         fs::remove_dir_all(root).ok();
     }
 
+    // Exercise the reader through prepare(), not just a ZipWriter round-trip:
+    // payload hashes, staging cleanup and publication are part of this boundary.
+    fn refresh_archive_identity(root: &Path, manifest: &mut RuntimeBundleManifest) {
+        let bytes = fs::read(root.join("bundle/runtime.zip")).expect("archive bytes");
+        manifest.archive_sha256 = format!("{:x}", Sha256::digest(&bytes));
+        manifest.archive_size = bytes.len() as u64;
+        fs::write(
+            root.join("bundle").join(MANIFEST_NAME),
+            serde_json::to_vec(manifest).expect("manifest JSON"),
+        )
+        .expect("manifest");
+    }
+
+    fn assert_no_published_or_staged_files(path: &Path) {
+        for entry in fs::read_dir(path).expect("install directory") {
+            let entry = entry.expect("entry");
+            assert!(entry.file_type().expect("type").is_dir(), "unexpected file: {entry:?}");
+            assert!(!entry.file_name().to_string_lossy().starts_with(".install-"));
+            assert_no_published_or_staged_files(&entry.path());
+        }
+    }
+
+    #[test]
+    fn installs_unicode_paths_with_stored_and_deflated_entries() {
+        for compression in [CompressionMethod::Stored, CompressionMethod::Deflated] {
+            let root = scratch("zip-compression");
+            write_bundle_with_compression(&root, Some("资料/运行时.txt"), compression);
+            let bundle = PrivateRuntimeBundle::new(root.join("bundle"), root.join("installs"));
+            let installed = bundle.prepare().expect("install");
+            assert_eq!(fs::read(installed.root.join("资料/运行时.txt")).unwrap(), b"runtime");
+            assert!(bundle.prepare().expect("reuse").reused);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
     #[test]
     fn rejects_path_traversal_before_any_file_can_escape() {
-        let root = scratch("traversal");
-        write_bundle(&root, Some("../escape"));
-        let bundle = PrivateRuntimeBundle::new(root.join("bundle"), root.join("installs"));
+        for name in [
+            "../escape",
+            "nested/../../escape",
+            "absolute",
+            r"C:\escape",
+            r"\\server\share\escape",
+        ] {
+            let root = scratch("traversal");
+            // Even the absolute-path negative fixture is test-owned if a
+            // regression lets it through; never point it at a real user file.
+            let outside = root.join("escape");
+            let absolute = outside.to_string_lossy().replace('\\', "/");
+            let name = if name == "absolute" { absolute.as_str() } else { name };
+            write_bundle(&root, Some(name));
+            let bundle = PrivateRuntimeBundle::new(root.join("bundle"), root.join("installs"));
 
-        assert!(matches!(bundle.prepare(), Err(PrivateRuntimeError::ArchiveInvalid)));
-        assert!(!root.join("escape").exists());
-        fs::remove_dir_all(root).ok();
+            let result = bundle.prepare();
+            assert!(
+                matches!(&result, Err(PrivateRuntimeError::ArchiveInvalid)),
+                "{name}: {result:?}"
+            );
+            assert!(!outside.exists());
+            assert_no_published_or_staged_files(&root.join("installs"));
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_zip_metadata_and_cleans_partial_extraction() {
+        for case in ["symlink", "crc", "entry-count", "unpacked-size", "truncated"] {
+            let root = scratch(case);
+            let mut manifest = write_bundle(&root, Some("last-entry"));
+            let archive_path = root.join("bundle/runtime.zip");
+            let mut bytes = fs::read(&archive_path).unwrap();
+            // Mutate the last central record: valid earlier entries are
+            // extracted first, so this also tests failure cleanup. Recompute
+            // the archive digest to avoid passing via the outer hash check.
+            let central = bytes.windows(4).rposition(|b| b == b"PK\x01\x02").unwrap();
+            match case {
+                "symlink" => {
+                    bytes[central + 38..central + 42].copy_from_slice(&(0o120_777_u32 << 16).to_le_bytes());
+                }
+                "crc" => bytes[central + 16] ^= 0xff,
+                "entry-count" => manifest.entry_count += 1,
+                "unpacked-size" => manifest.unpacked_size -= 1,
+                "truncated" => bytes.truncate(12),
+                _ => unreachable!(),
+            }
+            fs::write(archive_path, bytes).unwrap();
+            refresh_archive_identity(&root, &mut manifest);
+            let bundle = PrivateRuntimeBundle::new(root.join("bundle"), root.join("installs"));
+            let failure = bundle.prepare().expect_err(case);
+            if case == "crc" {
+                assert!(
+                    matches!(failure, PrivateRuntimeError::Install(_)),
+                    "{case}: {failure:?}"
+                );
+            } else {
+                assert!(
+                    matches!(failure, PrivateRuntimeError::ArchiveInvalid),
+                    "{case}: {failure:?}"
+                );
+            }
+            assert_no_published_or_staged_files(&root.join("installs"));
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extraction_strips_privileged_permission_bits() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = scratch("zip-modes");
+        let mut manifest = write_bundle(&root, None);
+        let archive_path = root.join("bundle/runtime.zip");
+        let mut bytes = fs::read(&archive_path).unwrap();
+        let central = bytes.windows(4).position(|b| b == b"PK\x01\x02").unwrap();
+        bytes[central + 38..central + 42].copy_from_slice(&(0o107_755_u32 << 16).to_le_bytes());
+        fs::write(archive_path, bytes).unwrap();
+        refresh_archive_identity(&root, &mut manifest);
+        let bundle = PrivateRuntimeBundle::new(root.join("bundle"), root.join("installs"));
+        let installed = bundle.prepare().expect("install");
+        assert_eq!(
+            fs::metadata(installed.python).unwrap().permissions().mode() & 0o7777,
+            0o755
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
