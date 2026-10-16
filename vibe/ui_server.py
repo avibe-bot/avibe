@@ -5836,7 +5836,10 @@ def vault_settings_patch():
     from vibe import api
 
     try:
-        return jsonify(api.save_vault_settings(request.json or {}))
+        return jsonify(api.save_vault_settings(
+            request.json or {},
+            user_context=getattr(g, "authorization_context", None),
+        ))
     except ValueError as exc:
         return _vault_error_response(exc)
 

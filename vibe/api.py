@@ -3305,7 +3305,7 @@ def get_vault_settings() -> dict:
     return {"ok": True, "settings": settings, "policy": vault_service.vault_session_policy(settings)}
 
 
-def save_vault_settings(payload: dict) -> dict:
+def save_vault_settings(payload: dict, *, user_context: Any = None) -> dict:
     from storage import vault_service
 
     if not isinstance(payload, dict):
@@ -3317,7 +3317,9 @@ def save_vault_settings(payload: dict) -> dict:
     engine = _vault_engine()
     try:
         with engine.begin() as conn:
-            settings = vault_service.save_vault_settings(conn, payload)
+            settings = vault_service.save_vault_settings(conn, payload, user_context=user_context)
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.InvalidGrantError as exc:
         raise VaultApiError(str(exc), code="invalid_grant") from exc
     except vault_service.VaultServiceError as exc:

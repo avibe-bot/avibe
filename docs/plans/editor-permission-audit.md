@@ -336,7 +336,7 @@ correct here is not a claim that its whole surface was exercised.
 | Standalone and IM Sessions | E/V effective Session role is None without a Project, including Personal | Boundary retained. **Fixed:** the alternate CLI producer that bypassed it |
 | Harness Task/Watch/Run | E namespace; producers use `ensure_harness_definition_write`; execution checks Agent, current binding and the final Session boundary | **Fixed:** class A refresh, class C Run/callback producers. The proposed org-aware Harness ACL is not shipped and was not used to manufacture a finding |
 | Skills | E; `core/services/skills.py` grants Editor use/management, project-scoped mutation also needs Project Editor | Correct as shipped |
-| Vault secrets/request/grant/audit/settings/pin/reveal/sign | E is only the HTTP floor; metadata/pin/rotation/deletion add M; proof and approval rules stand | **Fixed:** class B Personal use, class C deferred auto-resume and the request-target pre-check, direct CLI metadata |
+| Vault secrets/request/grant/audit/settings/pin/reveal/sign | E is only the HTTP floor; metadata/pin/rotation/deletion and instance-wide protection settings add M; `last_grant_ttl` and grant revocation stay E; proof and approval rules stand | **Fixed:** class B Personal use, class C deferred auto-resume and the request-target pre-check, direct CLI metadata. Vaults controls follow their consuming capability, not the route floor |
 | Memory | V namespace with the Memory principal and its identity isolation | Correct; no Owner-like Memory principal for E/M |
 | Files | E namespace; `file_browser_service` retains path/OS/size/symlink/write-race rules | Correct. No per-Project filesystem sandbox is shipped or proposed here |
 | Terminal websocket and DELETE | WS E with signed context/origin, terminal id subject-scoped; DELETE V so a downgraded user can close their own terminal | Correct |
@@ -349,6 +349,16 @@ correct here is not a claim that its whole surface was exercised.
 | Diagnostics/settings/control/logs/remote transport | M explicit operations; GET config V sanitized; POST config E for whitelisted appearance/ASR fields only; workbench prefs PUT M | Correct. **Fixed:** the banner switch now reads that M tier instead of flipping and reverting |
 | Access/identity/pairing/bind codes/onboarding/users admin | O exact routes; IM admin identity separate | No new grants. **Fixed:** `vibe remote pair` now refuses at the CLI before soliciting a key |
 | SQL/CLI diagnostics | Read-only SQL `skill_usage_daily` and `agent_events` at M; raw Vault data denied | Retained. The CLI families are covered by the floor table, not by a universal Owner exception |
+
+Vault settings retain their Editor GET/PATCH route tier. The service checks
+`can_manage_instance` before any write when a payload contains `strict_approvals`
+or `unlock_window_seconds`, rejecting mixed payloads atomically. The settings
+gear/dialog are therefore management-only. `last_grant_ttl` stays Editor-writable
+because approval cards remember the grant duration for every approver. Revoke
+also stays Editor-tier by design: `_require_secret_names_access` admits Editors
+before its management branch. The HTTP role table in
+`test_member_management_parity.py` and the VaultsPage capability table pin these
+boundaries; the existing route-tier parity fixture is unchanged.
 
 ## Scenario coverage
 
