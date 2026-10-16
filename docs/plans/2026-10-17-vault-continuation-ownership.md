@@ -164,6 +164,27 @@ closed by this change.
 
 ## Status
 
-Root-cause investigation complete; ownership contract recorded before
-implementation. Finalized state shape recorded before production changes.
+Implemented on `fix/vault-continuation-ownership`; not yet published or reviewed.
+
+- `storage/vault_service.py` owns the arbitration: `arm_request_waiter`,
+  `complete_request_waiter`, `timeout_request_waiter` and
+  `claim_request_callback` are the only writers of `waiter` and `continuation`.
+  `storage/lock.py` adds the non-creating lock inspection and the
+  holder-only removal.
+- `core/scheduled_tasks.py` processes each request through
+  `claim_request_callback` and enqueues with the claimed Run id. The periodic
+  Vault callback drain now runs its SQLite work on the runtime-work executor
+  instead of the controller loop. A failed claim leaves the request pending for
+  the next pass rather than marking it failed.
+- `vibe/cli.py` holds the waiter lock for the whole wait and returns
+  `approval_handed_off` without delivering when it loses arm or completion.
+- `skills/use-avibe-vault/SKILL.md` (0.5.0) tells the Agent not to rerun a
+  successful command, and to rerun once after a resume when the command did not run.
+
+The primary regression starts a real `vibe vault run`, hard-kills it with its
+deadline more than five minutes away, approves, and requires the next callback
+pass to send. On the base revision that pass returned `pending`. The stale-scan
+and enqueue-before-mark regressions also fail on the base revision with a
+second callback Run.
+
 No runtime deployment or restart is authorized by this change.

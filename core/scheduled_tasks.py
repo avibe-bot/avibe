@@ -22,7 +22,7 @@ from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED, JobExecutionEv
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from sqlalchemy import select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from config import paths
 from config.atomic_io import write_atomic
@@ -938,12 +938,14 @@ def enqueue_session_callback(
     source_session_id: Optional[str] = None,
     parent_run_id: Optional[str] = None,
     metadata: Optional[dict[str, Any]] = None,
+    run_id: Optional[str] = None,
 ) -> Optional["TaskExecutionRequest"]:
     """Enqueue a callback turn into an existing agent session — the shared entry used by Agent
     Run / watch / scheduled-task callbacks and vault-request auto-resume. Resolves the session's
     agent/backend/model target and enqueues an ``agent_run`` with ``source_kind="callback"`` so
     the running scheduler dispatches it. Returns ``None`` when there is nothing to send;
     ``resolve_session_id_target`` raises for an unresolvable/archived session (caller handles).
+    A caller that recorded ``run_id`` durably before calling gets that Run back on a repeat.
     """
     session_id = (session_id or "").strip()
     if not session_id or not (message or "").strip():
@@ -974,6 +976,7 @@ def enqueue_session_callback(
             **({"callback_parent_run_id": parent_run_id} if parent_run_id else {}),
         },
         callback_parent_to_arm=parent_run_id,
+        run_id=run_id,
     )
 
 
@@ -2801,6 +2804,7 @@ class TaskExecutionStore:
         metadata: Optional[dict[str, Any]] = None,
         expected_enabled_agent_id: Optional[str] = None,
         callback_parent_to_arm: Optional[str] = None,
+        run_id: Optional[str] = None,
     ) -> Optional[TaskExecutionRequest]:
         if not (message or "").strip():
             # Refuse at the door: a blank prompt never reaches an agent backend
@@ -2808,13 +2812,19 @@ class TaskExecutionStore:
             # by a terminal result. Every caller (CLI, callback, delivery) has a
             # real message; a blank one is a bug in the caller.
             raise ValueError("agent run requires a non-empty message")
+        if run_id:
+            # The caller fixed this identity before enqueueing, so a repeat after an
+            # interruption is the same Run, never a second one.
+            existing = self.get_run(run_id)
+            if existing is not None:
+                return TaskExecutionRequest.from_dict(existing)
         normalized_delivery_intent = normalize_agent_run_delivery_intent(delivery_intent)
         if str(delivery_intent or "").strip().lower() == AGENT_RUN_DELIVERY_SEND_NOW:
             normalized_delivery_intent = AGENT_RUN_DELIVERY_SEND_NOW
         run_metadata = dict(metadata or {})
         run_metadata[AGENT_RUN_DELIVERY_INTENT_METADATA_KEY] = normalized_delivery_intent
         request = TaskExecutionRequest(
-            id=uuid4().hex[:12],
+            id=run_id or uuid4().hex[:12],
             request_type="agent_run",
             session_key=session_key,
             session_id=session_id,
@@ -2871,10 +2881,17 @@ class TaskExecutionStore:
             parent_status = _normalize_requested_run_status(parent.get("status"))
             if bool(parent.get("cancel_requested")) and parent_status != "canceled":
                 return None
-        queued = self.enqueue(
-            request,
-            expected_enabled_agent_id=expected_enabled_agent_id,
-        )
+        try:
+            queued = self.enqueue(
+                request,
+                expected_enabled_agent_id=expected_enabled_agent_id,
+            )
+        except IntegrityError:
+            # Two passes raced to the same caller-fixed id; the one that landed is the Run.
+            existing = self.get_run(run_id) if run_id else None
+            if existing is None:
+                raise
+            return TaskExecutionRequest.from_dict(existing)
         if normalized_callback_parent:
             self.update_callback_status(
                 normalized_callback_parent,
@@ -7727,20 +7744,25 @@ class ScheduledTaskService:
         # Runs every tick, so use the process-local cached engine (never dispose it) rather than
         # allocating a fresh engine per sweep.
         engine = get_cached_sqlite_engine(paths.get_sqlite_state_path())
-        try:
+
+        def load_pending() -> list[dict[str, Any]]:
             with engine.begin() as conn:
                 # Expiry is lazy (only on request reads), so proactively expire overdue pending
                 # requests here — otherwise an unattended timed-out request would never arm its
                 # callback until some unrelated read touched it. Both happen in one pass.
                 vault_service.expire_overdue_requests(conn)
-                pending = vault_service.list_pending_request_callbacks(conn)
+                return vault_service.list_pending_request_callbacks(conn)
+
+        try:
+            # Off the controller loop: these are write transactions that can wait for SQLite's lock.
+            pending = await self._run_runtime_sync(load_pending)
         except Exception as exc:
             logger.error("Vault request callback sweep failed to load: %s", exc, exc_info=True)
             return
         for row in pending:
             # Keep the legacy drain aligned with the runtime-work processor, including completed
             # waiter outcomes that belong in the transcript without starting another Agent turn.
-            status = self._process_vault_callback_sync(row)
+            status = await self._run_runtime_sync(self._process_vault_callback_sync, row)
             if status == "sent":
                 # A callback run was enqueued into the run store; drain it promptly.
                 self._wake_runtime_work(RuntimeWorkLane.REQUESTS)
@@ -7809,55 +7831,70 @@ class ScheduledTaskService:
         if not request_id:
             return "skipped"
         engine = get_cached_sqlite_engine(paths.get_sqlite_state_path())
+        try:
+            # Decide on the CURRENT row, never the scan snapshot: a waiter may have armed,
+            # completed, or died since the scan, and only this decision can see that.
+            with engine.begin() as conn:
+                claim = vault_service.claim_request_callback(conn, request_id)
+        except Exception as exc:
+            # Nothing landed, so nothing was decided; the next pass decides again.
+            logger.error("Vault request callback claim failed for %s: %s", request_id, exc, exc_info=True)
+            return "pending"
+        if claim.action == "defer":
+            return "pending"
+        if claim.action == "settled" or claim.row is None or claim.plan is None:
+            # Already decided by an earlier pass (or nothing is owed): report what was recorded.
+            recorded = str((claim.row or {}).get("callback_status") or "")
+            return recorded if recorded in {"sent", "skipped", "failed"} else "skipped"
+        if claim.released_waiter_id:
+            vault_service.discard_request_waiter_lock(engine, claim.released_waiter_id)
+        current, plan = claim.row, claim.plan
         status = "skipped"
         try:
-            with engine.begin() as conn:
-                ready = vault_service.request_callback_ready(conn, row)
-            if not ready:
-                return "pending"
-            plan = vault_service.resolve_request_callback(row)
-            if plan is not None:
-                request_type = str(row.get("request_type") or "")
-                request_status = str(row.get("status") or "")
-                if vault_service.request_callback_consumed_by_waiter(row):
-                    from core.message_mirror import mirror_vault_waiter_outcome
+            request_type = str(current.get("request_type") or "")
+            request_status = str(current.get("status") or "")
+            if claim.action == "mirror":
+                from core.message_mirror import mirror_vault_waiter_outcome
 
-                    mirrored = mirror_vault_waiter_outcome(
-                        session_id=plan.session_id,
-                        request_id=request_id,
-                        request_type=request_type,
-                        request_status=request_status,
-                        message=plan.message,
-                    )
-                    if not mirrored:
-                        # The stable native message id makes this mirror safe to retry. Keep the
-                        # callback pending so a transient SQLite/dispatch failure is retried by
-                        # the next sweep instead of losing the waiter's transcript outcome.
-                        logger.warning("failed to persist Vault waiter outcome for %s; will retry", request_id)
-                        return "pending"
-                else:
-                    callback_metadata: dict[str, Any] = {
-                        "vault_request_type": request_type,
-                        "vault_request_status": request_status,
-                    }
-                    # Auto-resume is deferred work the requesting caller
-                    # authorized, so it travels under the authority that was
-                    # recorded when the request row was created — the same rule
-                    # a Run's callback follows. Re-deriving it inside the
-                    # daemon would resume a remote caller's session as local.
-                    from storage.resource_access_service import RESOURCE_USER_CONTEXT_METADATA_KEY
+                mirrored = mirror_vault_waiter_outcome(
+                    session_id=plan.session_id,
+                    request_id=request_id,
+                    request_type=request_type,
+                    request_status=request_status,
+                    message=plan.message,
+                )
+                if not mirrored:
+                    # The stable native message id makes this mirror safe to retry. Keep the
+                    # callback pending so a transient SQLite/dispatch failure is retried by
+                    # the next sweep instead of losing the waiter's transcript outcome.
+                    logger.warning("failed to persist Vault waiter outcome for %s; will retry", request_id)
+                    return "pending"
+            else:
+                callback_metadata: dict[str, Any] = {
+                    "vault_request_type": request_type,
+                    "vault_request_status": request_status,
+                }
+                # Auto-resume is deferred work the requesting caller
+                # authorized, so it travels under the authority that was
+                # recorded when the request row was created — the same rule
+                # a Run's callback follows. Re-deriving it inside the
+                # daemon would resume a remote caller's session as local.
+                from storage.resource_access_service import RESOURCE_USER_CONTEXT_METADATA_KEY
 
-                    requester_context = vault_service.request_authorization_snapshot(row)
-                    if requester_context:
-                        callback_metadata[RESOURCE_USER_CONTEXT_METADATA_KEY] = requester_context
-                    enqueue_session_callback(
-                        self.request_store,
-                        session_id=plan.session_id,
-                        message=plan.message,
-                        source_actor=f"vault:{request_id}",
-                        metadata=callback_metadata,
-                    )
-                status = "sent"
+                requester_context = vault_service.request_authorization_snapshot(current)
+                if requester_context:
+                    callback_metadata[RESOURCE_USER_CONTEXT_METADATA_KEY] = requester_context
+                # The claim recorded this Run id before enqueueing, so a pass that stopped
+                # between enqueue and the ``sent`` mark finds its Run instead of adding one.
+                enqueue_session_callback(
+                    self.request_store,
+                    session_id=plan.session_id,
+                    message=plan.message,
+                    source_actor=f"vault:{request_id}",
+                    metadata=callback_metadata,
+                    run_id=claim.run_id,
+                )
+            status = "sent"
         except ValueError:
             status = "skipped"
         except Exception as exc:

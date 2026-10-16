@@ -6,7 +6,7 @@ import threading
 import time
 from pathlib import Path
 from types import TracebackType
-from typing import Callable, IO, Optional, Type
+from typing import Callable, IO, Literal, Optional, Type
 
 
 logger = logging.getLogger(__name__)
@@ -311,6 +311,68 @@ def _unlock(handle) -> None:
     import fcntl
 
     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+#: What a look at another process's lock established, without creating or keeping
+#: it: a live handle holds it, nothing does, there is no file, or the look failed.
+LockHolderState = Literal["held", "free", "missing", "unknown"]
+
+
+def probe_lock_holder(lock_path: Path) -> LockHolderState:
+    """Whether a live handle holds the lock at ``lock_path``, leaving the path as found.
+
+    The OS drops a lock when its holding process ends, however it ends, so ``free``
+    is evidence that the holder is gone. The path is never created: a lock that is
+    not there names no holder either way, so ``missing`` and ``unknown`` are
+    reported rather than guessed. Windows answers a failed attempt the same way as
+    a held lock, so there an inspection error reads as ``held``, never ``free``.
+    """
+
+    try:
+        handle = open(lock_path, "r+", encoding="utf-8")
+    except FileNotFoundError:
+        return "missing"
+    except OSError:
+        return "unknown"
+    try:
+        handle.seek(0)
+        if not _try_lock(handle):
+            return "held"
+        _unlock(handle)
+        return "free"
+    except OSError:
+        return "unknown"
+    finally:
+        handle.close()
+
+
+def remove_unheld_lock(lock_path: Path) -> bool:
+    """Delete ``lock_path`` while holding its lock, when no live handle holds it.
+
+    Only for a lock that no later claimant will take again. Unlinking under our own
+    lock then cannot split two claimants across an old and a new inode. Best effort:
+    Windows refuses to delete an open file, which leaves the file in place.
+    """
+
+    try:
+        handle = open(lock_path, "r+", encoding="utf-8")
+    except OSError:
+        return False
+    try:
+        handle.seek(0)
+        if not _try_lock(handle):
+            return False
+        try:
+            lock_path.unlink()
+            return True
+        except OSError:
+            return False
+        finally:
+            _unlock(handle)
+    except OSError:
+        return False
+    finally:
+        handle.close()
 
 
 def fcntl_available() -> bool:

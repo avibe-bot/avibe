@@ -8,7 +8,12 @@ a synchronous CLI waiter already returned the result, then marks the callback se
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from sqlalchemy import select
@@ -149,6 +154,10 @@ def test_field_provision_callback_reports_current_value_free_fields(vault, with_
         assert "totp" not in plan.message and "password" not in plan.message
         assert "do-not-show" not in plan.message
         assert "ciphertext" not in plan.message
+        # The callback decides on the current row and must keep the same current-field projection.
+        claim = vs.claim_request_callback(conn, req["id"])
+        assert claim.action == "deliver"
+        assert claim.plan.message == plan.message
 
 
 @pytest.mark.parametrize(
@@ -830,3 +839,321 @@ def test_legacy_callback_drain_mirrors_completed_waiter_without_second_agent_tur
             only_session="ses_vault_waiter",
         )
     assert inbox["sessions"][0]["replied"] is True
+
+
+# --- continuation ownership: a synchronous CLI waiter versus the Session callback -------------
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _start_waiting_vault_run(session_id: str, *, approval_wait: int = 540):
+    """A real ``vibe vault run`` that blocks on protected approval, in this test's home."""
+
+    env = dict(os.environ)
+    env["AVIBE_SESSION_ID"] = session_id
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(_REPO_ROOT), env.get("PYTHONPATH", "")]))
+    argv = [
+        "vault", "run", "--env", "PROTECTED_KEY", "--approval-wait", str(approval_wait),
+        "--", sys.executable, "-c", "pass",
+    ]
+    return subprocess.Popen(
+        [sys.executable, "-c", "import sys; from vibe import cli; sys.argv = ['vibe', *sys.argv[1:]]; cli.main()", *argv],
+        cwd=str(_REPO_ROOT),
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _wait_for_active_waiter(engine, proc) -> dict:
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        assert proc.poll() is None, "the waiting vault run exited before arming its waiter"
+        with engine.connect() as conn:
+            for row in conn.execute(select(vault_requests).where(vault_requests.c.request_type == "access")).mappings():
+                waiter = (json.loads(row["delivery"] or "{}") or {}).get("waiter") or {}
+                if waiter.get("status") == "active":
+                    return dict(row)
+        time.sleep(0.05)
+    raise AssertionError("the vault run never armed an approval waiter")
+
+
+def _callback_service(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from core import scheduled_tasks as st
+
+    class _Key:
+        def to_key(self) -> str:
+            return "avibe::scope::ses_owner"
+
+    target = SimpleNamespace(
+        session_key=_Key(),
+        agent_name="vibey",
+        agent_id="aid",
+        agent_backend="vibey",
+        model=None,
+        reasoning_effort=None,
+    )
+    monkeypatch.setattr(st, "resolve_session_id_target", lambda session_id: target)
+    request_store = st.TaskExecutionStore(tmp_path / "task_requests")
+
+    def service():
+        # A fresh instance per call is a service restart: no in-memory owner state survives it.
+        return st.ScheduledTaskService(
+            controller=SimpleNamespace(platform_settings_managers={}),
+            store=st.ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+            request_store=request_store,
+        )
+
+    return service, request_store
+
+
+@pytest.mark.reap_processes
+def test_hard_killed_waiter_hands_a_ready_approval_to_the_callback_before_its_deadline(monkeypatch, tmp_path):
+    from vibe import cli
+
+    engine = cli._open_vault_engine()
+    with engine.begin() as conn:
+        vs.create_secret(conn, name="PROTECTED_KEY", sealed=_sealed("kill"), protection="protected")
+    proc = _start_waiting_vault_run("ses_owner")
+    try:
+        armed = _wait_for_active_waiter(engine, proc)
+    finally:
+        proc.kill()
+        proc.wait(timeout=30)
+    waiter = json.loads(armed["delivery"])["waiter"]
+    assert datetime.fromisoformat(waiter["deadline_at"]) > datetime.now(timezone.utc) + timedelta(minutes=5)
+
+    with engine.begin() as conn:
+        request = vs.get_request(conn, armed["id"], audience=vs.REQUEST_AUDIENCE_AGENT)
+        _grant_from_request(conn, request)
+        row = _row(conn, armed["id"])
+    service, request_store = _callback_service(monkeypatch, tmp_path)
+
+    assert service()._process_vault_callback_sync(row) == "sent"
+
+    [callback_run] = request_store.list_pending()
+    assert callback_run.session_id == "ses_owner"
+    assert callback_run.source_actor == f"vault:{armed['id']}"
+    with engine.connect() as conn:
+        delivery = json.loads(_row(conn, armed["id"])["delivery"])
+        assert _callback_status(conn, armed["id"]) == "sent"
+    assert delivery["waiter"]["status"] == "abandoned"
+    assert delivery["continuation"]["run_id"] == callback_run.id
+
+
+def _arm_lock_waiter(engine, request_id: str, *, deadline_at: str | None = None):
+    """Arm a lock-evidenced waiter the way ``vibe vault run`` does; returns its held lock."""
+
+    waiter_id = vs.new_request_waiter_id()
+    lock = vs.acquire_request_waiter_lock(engine, waiter_id)
+    with engine.begin() as conn:
+        vs.arm_request_waiter(
+            conn,
+            request_id,
+            waiter_id=waiter_id,
+            deadline_at=deadline_at or (datetime.now(timezone.utc) + timedelta(minutes=9)).isoformat(),
+            liveness=vs.WAITER_LIVENESS_LOCK,
+        )
+    return waiter_id, lock
+
+
+def _owner_request(conn, name: str, session_id: str = "ses_owner", **kwargs) -> dict:
+    vs.create_secret(conn, name=name, sealed=_sealed(name.lower()), protection="protected", **kwargs)
+    return vs.create_access_request(conn, name, requester={"session_id": session_id}, delivery={"session_id": session_id})
+
+
+def _record_mirrors(monkeypatch) -> list[dict]:
+    mirrored: list[dict] = []
+
+    def mirror(**kwargs):
+        mirrored.append(kwargs)
+        return True
+
+    monkeypatch.setattr("core.message_mirror.mirror_vault_waiter_outcome", mirror)
+    return mirrored
+
+
+def test_live_waiter_keeps_its_approval_past_its_wall_clock_deadline_and_across_restart(monkeypatch, tmp_path):
+    from config import paths
+    from vibe import cli
+
+    engine = cli._open_vault_engine()
+    with engine.begin() as conn:
+        req = _owner_request(conn, "LIVE_KEY")
+    # A suspended machine or a stepped clock: the recorded deadline passed while the owner still waits.
+    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    waiter_id, lock = _arm_lock_waiter(engine, req["id"], deadline_at=past)
+    service, request_store = _callback_service(monkeypatch, tmp_path)
+    mirrored = _record_mirrors(monkeypatch)
+    try:
+        with engine.begin() as conn:
+            _grant_from_request(conn, req)
+            row = _row(conn, req["id"])
+        assert service()._process_vault_callback_sync(row) == "pending"
+        assert service()._process_vault_callback_sync(row) == "pending"
+        with engine.begin() as conn:
+            vs.complete_request_waiter(conn, req["id"], waiter_id=waiter_id)
+    finally:
+        vs.release_request_waiter_lock(lock, discard=True)
+
+    assert service()._process_vault_callback_sync(row) == "sent"
+    assert request_store.list_pending() == []
+    assert [entry["request_id"] for entry in mirrored] == [req["id"]]
+    with engine.connect() as conn:
+        delivery = json.loads(_row(conn, req["id"])["delivery"])
+    assert delivery["waiter"]["status"] == "completed"
+    assert "continuation" not in delivery
+    assert not vs.request_waiter_lock_path(paths.get_sqlite_state_path(), waiter_id).exists()
+
+
+def test_claimed_callback_survives_enqueue_before_mark_and_refuses_a_later_waiter(monkeypatch, tmp_path):
+    from vibe import cli
+
+    engine = cli._open_vault_engine()
+    with engine.begin() as conn:
+        req = _owner_request(conn, "CLAIM_KEY")
+        _grant_from_request(conn, req)
+        row = _row(conn, req["id"])
+    service, request_store = _callback_service(monkeypatch, tmp_path)
+
+    def stopped_before_mark(conn, request_id, *, status):
+        raise RuntimeError("the daemon stopped between enqueue and the sent mark")
+
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(vs, "mark_request_callback", stopped_before_mark)
+        assert service()._process_vault_callback_sync(row) == "pending"
+    [callback_run] = request_store.list_pending()
+
+    # The restarted daemon resumes the claim it recorded instead of deciding (and enqueueing) again.
+    assert service()._process_vault_callback_sync(row) == "sent"
+    assert [run.id for run in request_store.list_pending()] == [callback_run.id]
+    with engine.begin() as conn:
+        assert json.loads(_row(conn, req["id"])["delivery"])["continuation"]["run_id"] == callback_run.id
+        # A command that only now reaches its waiter must not also continue this approval.
+        with pytest.raises(vs.ContinuationClaimedError):
+            vs.arm_request_waiter(
+                conn,
+                req["id"],
+                waiter_id=vs.new_request_waiter_id(),
+                deadline_at=(datetime.now(timezone.utc) + timedelta(minutes=9)).isoformat(),
+                liveness=vs.WAITER_LIVENESS_LOCK,
+            )
+
+
+@pytest.mark.parametrize("case", ["waiter_completed", "sibling_skipped"])
+def test_stale_scan_row_cannot_start_a_second_continuation(monkeypatch, tmp_path, case):
+    from vibe import cli
+
+    engine = cli._open_vault_engine()
+    service, request_store = _callback_service(monkeypatch, tmp_path)
+    mirrored = _record_mirrors(monkeypatch)
+    with engine.begin() as conn:
+        primary = _owner_request(conn, "STALE_A", tags=["deploy"])
+        sibling = vs.create_access_request(
+            conn, "STALE_A", requester={"session_id": "ses_owner"}, delivery={"session_id": "ses_owner"}
+        )
+    deadline_at = (datetime.now(timezone.utc) + timedelta(minutes=9)).isoformat()
+    if case == "waiter_completed":
+        # The scan sees an approved request with no waiter; the command arms and consumes it after.
+        with engine.begin() as conn:
+            _grant_from_request(conn, primary)
+            stale = _row(conn, primary["id"])
+            vs.arm_request_waiter(conn, primary["id"], waiter_id="vw_00000000000a", deadline_at=deadline_at)
+        processed = primary["id"]
+    else:
+        with engine.begin() as conn:
+            vs.arm_request_waiter(conn, primary["id"], waiter_id="vw_00000000000a", deadline_at=deadline_at)
+            _grant_from_request(conn, primary)
+            stale = _row(conn, sibling["id"])
+        processed = sibling["id"]
+    assert stale["callback_status"] == "pending"
+    with engine.begin() as conn:
+        vs.complete_request_waiter(conn, primary["id"], waiter_id="vw_00000000000a")
+
+    status = service()._process_vault_callback_sync(stale)
+
+    assert request_store.list_pending() == []
+    with engine.connect() as conn:
+        if case == "waiter_completed":
+            assert status == "sent"
+            assert [entry["request_id"] for entry in mirrored] == [processed]
+        else:
+            assert status == "skipped"
+            assert mirrored == []
+            assert _callback_status(conn, processed) == "skipped"
+
+
+@pytest.mark.parametrize(
+    "owner, deadline_minutes, expected",
+    [
+        # Released rows keep their recorded deadline: never presumed dead before it.
+        ("legacy", 9, "defer"),
+        ("legacy", -1, "deliver"),
+        # A lock nobody holds proves the owner is gone, whatever its deadline says.
+        ("lock_released", 9, "deliver"),
+        # A missing lock is not proof of death: the owner keeps its own declared wait bound.
+        ("lock_missing", 9, "defer"),
+        ("lock_missing", -1, "deliver"),
+    ],
+)
+def test_claim_follows_waiter_owner_evidence(vault, owner, deadline_minutes, expected):
+    deadline_at = (datetime.now(timezone.utc) + timedelta(minutes=deadline_minutes)).isoformat()
+    with vault.begin() as conn:
+        req = _owner_request(conn, "EVIDENCE_KEY")
+    if owner == "legacy":
+        with vault.begin() as conn:
+            vs.arm_request_waiter(conn, req["id"], waiter_id="vw_000000000001", deadline_at=deadline_at)
+    else:
+        _, lock = _arm_lock_waiter(vault, req["id"], deadline_at=deadline_at)
+        vs.release_request_waiter_lock(lock, discard=owner == "lock_missing")
+    with vault.begin() as conn:
+        _grant_from_request(conn, req)
+        claim = vs.claim_request_callback(conn, req["id"])
+        delivery = json.loads(_row(conn, req["id"])["delivery"])
+
+    assert claim.action == expected
+    if expected == "deliver":
+        assert delivery["waiter"]["status"] == "abandoned"
+        assert delivery["continuation"]["run_id"] == claim.run_id
+    else:
+        assert delivery["waiter"]["status"] == "active"
+        assert "continuation" not in delivery
+
+
+def test_dead_owner_still_waits_for_a_delivery_ready_grant(vault):
+    with vault.begin() as conn:
+        req = _owner_request(conn, "NOT_READY_KEY")
+    waiter_id, lock = _arm_lock_waiter(vault, req["id"])
+    vs.release_request_waiter_lock(lock, discard=False)
+    with vault.begin() as conn:
+        grant = _grant_from_request_with_cache_ready(conn, req, cache_ready=False)
+        assert vs.claim_request_callback(conn, req["id"]).action == "defer"
+        assert "continuation" not in json.loads(_row(conn, req["id"])["delivery"])
+
+        vs.mark_grant_agent_ready(conn, grant["id"])
+        claim = vs.claim_request_callback(conn, req["id"])
+
+    assert claim.action == "deliver"
+    assert claim.released_waiter_id == waiter_id
+
+
+@pytest.mark.parametrize("owner_live, expected", [(True, "defer"), (False, "deliver")])
+def test_covered_sibling_follows_the_grant_owner_waiter(vault, owner_live, expected):
+    with vault.begin() as conn:
+        primary = _owner_request(conn, "SIB_A", tags=["deploy"])
+        sibling = vs.create_access_request(
+            conn, "SIB_A", requester={"session_id": "ses_owner"}, delivery={"session_id": "ses_owner"}
+        )
+    _, lock = _arm_lock_waiter(vault, primary["id"])
+    try:
+        if not owner_live:
+            vs.release_request_waiter_lock(lock, discard=False)
+        with vault.begin() as conn:
+            _grant_from_request(conn, primary)
+            assert vs.claim_request_callback(conn, sibling["id"]).action == expected
+    finally:
+        if owner_live:
+            vs.release_request_waiter_lock(lock, discard=False)

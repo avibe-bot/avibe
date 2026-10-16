@@ -10,6 +10,7 @@ import io
 import json
 import shlex
 import shutil
+import sys
 import threading
 import time
 from pathlib import Path
@@ -1542,7 +1543,96 @@ def test_run_waits_for_protected_approval_then_delivers(tmp_path, capfd, monkeyp
     with cli._open_vault_engine().connect() as conn:
         row = conn.execute(vault_requests.select().where(vault_requests.c.id == approved["request"]["id"])).mappings().one()
     assert row["callback_status"] == "pending"
-    assert json.loads(row["delivery"])["waiter"]["status"] == "completed"
+    waiter = json.loads(row["delivery"])["waiter"]
+    assert waiter["status"] == "completed"
+    assert waiter["liveness"] == vault_service.WAITER_LIVENESS_LOCK
+    lock_path = vault_service.request_waiter_lock_path(cli._open_vault_engine().url.database, waiter["id"])
+    assert not lock_path.exists() or sys.platform == "win32"
+
+
+@pytest.mark.parametrize("operation", ["run", "fetch"])
+@pytest.mark.parametrize("lose_at", ["arm", "complete"])
+def test_waiter_that_loses_the_approval_to_its_callback_does_not_deliver(tmp_path, capfd, monkeypatch, operation, lose_at):
+    from vibe import api
+
+    monkeypatch.chdir(tmp_path)
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(
+            conn,
+            name="PROTECTED_KEY",
+            protection="protected",
+            sealed=_sealed("protected"),
+            policy={"allowed_hosts": ["api.example.com"]},
+        )
+
+    def callback_claims(request_id: str) -> None:
+        with cli._open_vault_engine().begin() as conn:
+            if lose_at == "arm":
+                request = vault_service.get_request(conn, request_id, audience=vault_service.REQUEST_AUDIENCE_AGENT)
+                _grant_from_request(conn, request, session_id="ses_cli")
+            claim = vault_service.claim_request_callback(conn, request_id)
+        assert claim.action == "deliver"
+
+    approver = None
+    if lose_at == "arm":
+        # Approval and a daemon pass land between the request's creation and the waiter's arm.
+        real_arm = vault_service.arm_request_waiter
+
+        def arm_after_claim(conn, request_id, **kwargs):
+            callback_claims(request_id)
+            return real_arm(conn, request_id, **kwargs)
+
+        monkeypatch.setattr(vault_service, "arm_request_waiter", arm_after_claim)
+    else:
+        # A wrong death verdict lets the callback take over a waiter that is about to complete.
+        real_complete = vault_service.complete_request_waiter
+
+        def complete_after_takeover(conn, request_id, **kwargs):
+            with monkeypatch.context() as misjudged:
+                misjudged.setattr(vault_service, "_waiter_lock_state", lambda *_: "free")
+                callback_claims(request_id)
+            return real_complete(conn, request_id, **kwargs)
+
+        monkeypatch.setattr(vault_service, "complete_request_waiter", complete_after_takeover)
+        approver = threading.Thread(target=_approve_next_pending_access_request, kwargs={"session_id": "ses_cli", "purpose": operation})
+        approver.start()
+    deliver = Mock(return_value={"exit_code": 0, "status": 200, "headers": {}, "body": "{}"})
+    for name in ("avault_agent_deliver_run", "avault_deliver_run", "avault_agent_deliver_fetch", "avault_deliver_fetch"):
+        monkeypatch.setattr(api, name, deliver)
+
+    if operation == "run":
+        code = cli.cmd_vault_run(
+            _ns(env=["PROTECTED_KEY"], command_argv=["python3", "-c", "pass"], session_id="ses_cli", approval_wait=APPROVAL_POLL_TIMEOUT)
+        )
+    else:
+        code = cli.cmd_vault_fetch(
+            _ns(
+                auth="PROTECTED_KEY",
+                url="https://api.example.com/v1",
+                method="GET",
+                header=None,
+                data=None,
+                data_file=None,
+                output=None,
+                group=None,
+                session_id="ses_cli",
+                approval_wait=APPROVAL_POLL_TIMEOUT,
+            )
+        )
+    if approver is not None:
+        approver.join(timeout=APPROVAL_POLL_TIMEOUT)
+        assert not approver.is_alive()
+    captured = capfd.readouterr()
+    payload = json.loads(captured.err[captured.err.index("{") :])
+
+    assert code == 1
+    assert payload["code"] == "approval_handed_off"
+    deliver.assert_not_called()
+    with cli._open_vault_engine().connect() as conn:
+        row = conn.execute(vault_requests.select().where(vault_requests.c.id == payload["details"]["request_id"])).mappings().one()
+    delivery = json.loads(row["delivery"])
+    assert delivery["continuation"]["owner"] == "callback"
+    assert delivery.get("waiter", {}).get("status") in (None, "abandoned")
 
 
 def test_run_approval_wait_timeout_keeps_callback_armed_for_later_resolution(capfd):

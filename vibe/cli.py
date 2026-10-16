@@ -10330,42 +10330,89 @@ def _vault_terminal_request_error(request: dict, *, help_command: str) -> TaskCl
     return None
 
 
+def _vault_approval_handed_off_error(args, request_id: str, *, help_command: str) -> TaskCliError:
+    return TaskCliError(
+        f"Vault request '{request_id}' continues through its Session callback; this command did not run",
+        code="approval_handed_off",
+        hint=_approval_wait_timeout_hint(args, request_id),
+        help_command=help_command,
+        details={"request_id": request_id, "callback_expected": _approval_wait_callback_expected(args)},
+    )
+
+
 def _wait_for_vault_delivery_approval(args, exc: TaskCliError, *, timeout: float, help_command: str, operation: str) -> None:
+    """Wait as the request's continuation owner; return only when this command may deliver.
+
+    The waiter holds an OS lock for as long as it owns the request, so a waiter killed in any
+    way hands a ready approval to the Session callback on the daemon's next pass. Losing the
+    request to that callback, at arm or at completion, means this command must not deliver.
+    """
+
     from storage import vault_service
 
     request_id = str((exc.details or {}).get("request_id") or "").strip()
     if not request_id:
         raise exc
-    waiter_id = f"vw_{uuid4().hex[:12]}"
-    deadline_at = (datetime.now(timezone.utc) + timedelta(seconds=timeout)).isoformat()
+    waiter_id = vault_service.new_request_waiter_id()
     engine = _open_vault_engine()
-    with engine.begin() as conn:
-        vault_service.arm_request_waiter(conn, request_id, waiter_id=waiter_id, deadline_at=deadline_at)
-    _print_vault_approval_wait_notice(request_id, timeout=timeout, operation=operation)
-    waited = _wait_for_vault_request(request_id, timeout=timeout, require_delivery_ready=True)
-    if waited is None:
+    try:
+        lock = vault_service.acquire_request_waiter_lock(engine, waiter_id)
+    except OSError:
+        # Without proof of life this command cannot own the request; the callback keeps it.
+        logger.debug("failed to take the vault request waiter lock", exc_info=True)
+        raise exc
+    terminal = True
+    try:
+        deadline_at = (datetime.now(timezone.utc) + timedelta(seconds=timeout)).isoformat()
         try:
             with engine.begin() as conn:
-                vault_service.timeout_request_waiter(conn, request_id, waiter_id=waiter_id)
-        except Exception:
-            logger.debug("failed to mark vault request waiter timed out", exc_info=True)
-        raise TaskCliError(
-            f"Vault approval request '{request_id}' is still waiting for the user",
-            code="approval_wait_timeout",
-            hint=_approval_wait_timeout_hint(args, request_id),
-            help_command=help_command,
-            details={
-                "request_id": request_id,
-                "timeout_seconds": timeout,
-                "callback_expected": _approval_wait_callback_expected(args),
-            },
-        )
-    request = waited.get("request") or {}
-    terminal_error = _vault_terminal_request_error(request, help_command=help_command)
-    with engine.begin() as conn:
-        vault_service.complete_request_waiter(conn, request_id, waiter_id=waiter_id)
-    if terminal_error is not None:
-        raise terminal_error
+                vault_service.arm_request_waiter(
+                    conn,
+                    request_id,
+                    waiter_id=waiter_id,
+                    deadline_at=deadline_at,
+                    liveness=vault_service.WAITER_LIVENESS_LOCK,
+                )
+        except vault_service.ContinuationClaimedError:
+            raise _vault_approval_handed_off_error(args, request_id, help_command=help_command)
+        terminal = False
+        _print_vault_approval_wait_notice(request_id, timeout=timeout, operation=operation)
+        waited = _wait_for_vault_request(request_id, timeout=timeout, require_delivery_ready=True)
+        if waited is None:
+            try:
+                with engine.begin() as conn:
+                    vault_service.timeout_request_waiter(conn, request_id, waiter_id=waiter_id)
+                terminal = True
+            except vault_service.ContinuationClaimedError:
+                terminal = True
+            except Exception:
+                logger.debug("failed to mark vault request waiter timed out", exc_info=True)
+            raise TaskCliError(
+                f"Vault approval request '{request_id}' is still waiting for the user",
+                code="approval_wait_timeout",
+                hint=_approval_wait_timeout_hint(args, request_id),
+                help_command=help_command,
+                details={
+                    "request_id": request_id,
+                    "timeout_seconds": timeout,
+                    "callback_expected": _approval_wait_callback_expected(args),
+                },
+            )
+        request = waited.get("request") or {}
+        terminal_error = _vault_terminal_request_error(request, help_command=help_command)
+        try:
+            with engine.begin() as conn:
+                vault_service.complete_request_waiter(conn, request_id, waiter_id=waiter_id)
+        except vault_service.ContinuationClaimedError:
+            terminal = True
+            raise _vault_approval_handed_off_error(args, request_id, help_command=help_command)
+        terminal = True
+        if terminal_error is not None:
+            raise terminal_error
+    finally:
+        # Discard only once the database no longer says this waiter is active; otherwise a free
+        # lock is the daemon's only evidence that this owner is gone.
+        vault_service.release_request_waiter_lock(lock, discard=terminal)
 
 
 def _vault_provision_success_usage(engine, name: str) -> str:
