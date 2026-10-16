@@ -777,7 +777,7 @@ scenarios:
   - id: MH-RETRY-ADVICE-003
     name: >-
       A 429 that names a plan or billing cause settles its Source by that cause, not as a 60 s rate limit: a plan
-      without the product and an exhausted credit balance need the user, and a spend or usage limit cools as quota
+      without the product, an exhausted credit balance and a spend or usage limit all need the user
     status: covered
     kind: recovery
     layer: unit

@@ -210,6 +210,7 @@
         "balance_exhausted": "models.source.needs_action.balance_exhausted",
         "account_banned": "models.source.needs_action.account_banned",
         "plan_excludes_product": "models.source.needs_action.plan_excludes_product",
+        "spend_limit_reached": "models.source.needs_action.spend_limit_reached",
         "unclassified_error": "models.source.error.unclassified"
       }
     },
@@ -334,6 +335,7 @@
             "models.source.needs_action.credential_revoked",
             "models.source.needs_action.account_banned",
             "models.source.needs_action.plan_excludes_product",
+            "models.source.needs_action.spend_limit_reached",
             "models.source.error.unclassified"
           ],
           "mapping": {
@@ -917,6 +919,7 @@
             "models.source.needs_action.credential_revoked",
             "models.source.needs_action.account_banned",
             "models.source.needs_action.plan_excludes_product",
+            "models.source.needs_action.spend_limit_reached",
             "models.source.error.unclassified",
             "models.probe.native_cli_unavailable"
           ]

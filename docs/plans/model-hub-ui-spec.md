@@ -3974,16 +3974,17 @@ complete server-derived `adopted_by` array from `GET /api/models/sources`, exact
 creation response retained in client state. The fact is registered once and cited twice
 so both consumers select the same active/in-use split.
 
-**`needs_action` is five causes, not one, and the row above resolves to whichever of them
+**`needs_action` is six causes, not one, and the row above resolves to whichever of them
 the payload carries** `[contract]`. `state.detail_key` is required on this state and its
 enum runs `models.source.needs_action.oauth_expired`,
 `models.source.needs_action.balance_exhausted`,
 `models.source.needs_action.credential_revoked`,
 `models.source.needs_action.account_banned`,
-`models.source.needs_action.plan_excludes_product` — five causes with five different
+`models.source.needs_action.plan_excludes_product`,
+`models.source.needs_action.spend_limit_reached` — six causes with six different
 remedies, of which only one is about a credential being wrong. One label reading 凭据失效 was therefore
-false on four of them, and false in the expensive direction: it sends a user whose balance
-ran out to re-enter a key that is fine. So the five have five strings, selected by the key
+false on five of them, and false in the expensive direction: it sends a user whose balance
+ran out to re-enter a key that is fine. So the six have six strings, selected by the key
 the payload already carries. What this does **not** do is enumerate the ways a *request*
 can fail — that set is closed at F1–F5 and stays closed. `detail_key` is a field on the
 source, persisted and read back, and rendering a field the contract requires is not the

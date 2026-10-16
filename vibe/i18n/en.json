@@ -1210,6 +1210,7 @@
         "balance_exhausted": "balance exhausted",
         "account_banned": "account unavailable",
         "plan_excludes_product": "plan excludes this product",
+        "spend_limit_reached": "usage limit reached",
         "unclassified_error": "unclassified source error",
         "no_enabled_source": "no source is enabled",
         "no_eligible_source": "no source is eligible",

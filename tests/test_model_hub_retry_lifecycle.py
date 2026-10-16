@@ -440,7 +440,7 @@ def test_a_usage_cap_cools_its_source_as_quota_until_the_upstream_reset(tmp_path
     asyncio.run(run())
 
 
-_QUOTA_COOLDOWN = ("cooldown", "models.source.cooldown.quota_exhausted")
+_SPEND_LIMIT = ("needs_action", "models.source.needs_action.spend_limit_reached")
 
 
 @pytest.mark.parametrize(("error", "settled"), [
@@ -450,17 +450,22 @@ _QUOTA_COOLDOWN = ("cooldown", "models.source.cooldown.quota_exhausted")
         {"type": "usage_not_included", "message": "To use Codex with your ChatGPT plan, upgrade to Plus."},
         ("needs_action", "models.source.needs_action.plan_excludes_product"),
     ),
-    # OpenAI's error-code guide: a billing 429 names its cause in the code, and
-    # the type may stay the generic insufficient_quota.
+    # OpenAI's error-code guide: a billing 429 names its cause in the code, the
+    # type may stay the generic insufficient_quota, and retrying restores none.
     (
         {"type": "insufficient_quota", "code": "credit_balance_exhausted", "message": "No prepaid credits remain."},
         ("needs_action", "models.source.needs_action.balance_exhausted"),
     ),
-    ({"type": "insufficient_quota", "code": "organization_spend_limit_exceeded", "message": "Spend limit."}, _QUOTA_COOLDOWN),
-    ({"type": "insufficient_quota", "code": "project_spend_limit_exceeded", "message": "Spend limit."}, _QUOTA_COOLDOWN),
-    ({"type": "insufficient_quota", "code": "organization_usage_limit_exceeded", "message": "Usage limit."}, _QUOTA_COOLDOWN),
+    ({"type": "insufficient_quota", "code": "organization_spend_limit_exceeded", "message": "Spend limit."}, _SPEND_LIMIT),
+    ({"type": "insufficient_quota", "code": "project_spend_limit_exceeded", "message": "Spend limit."}, _SPEND_LIMIT),
+    ({"type": "insufficient_quota", "code": "organization_usage_limit_exceeded", "message": "Usage limit."}, _SPEND_LIMIT),
     # A request-class type beside the code does not decide it.
-    ({"type": "invalid_request_error", "code": "project_spend_limit_exceeded", "message": "Spend limit."}, _QUOTA_COOLDOWN),
+    ({"type": "invalid_request_error", "code": "project_spend_limit_exceeded", "message": "Spend limit."}, _SPEND_LIMIT),
+    # The generic type alone names no cause, so it keeps cooling as quota.
+    (
+        {"type": "insufficient_quota", "message": "You exceeded your current quota."},
+        ("cooldown", "models.source.cooldown.quota_exhausted"),
+    ),
 ], ids=lambda value: value.get("code", value.get("type")) if isinstance(value, dict) else None)
 def test_a_plan_or_billing_429_settles_its_source_by_the_code_that_names_it(tmp_path, error, settled):
     """MH-RETRY-ADVICE-003: a 429 naming a plan or billing cause is not a 60 s rate limit (#2530)."""

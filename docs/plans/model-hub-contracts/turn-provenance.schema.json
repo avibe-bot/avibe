@@ -112,6 +112,7 @@
               "balance_exhausted",
               "account_banned",
               "plan_excludes_product",
+              "spend_limit_reached",
               "unclassified_error"
             ],
             "description": "The attempt-failure partition of ResolutionEvent.reason. The mirror registry enforces totality."
@@ -359,6 +360,7 @@
               "balance_exhausted",
               "account_banned",
               "plan_excludes_product",
+              "spend_limit_reached",
               "unclassified_error"
             ]
           }

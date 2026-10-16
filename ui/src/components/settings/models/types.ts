@@ -52,6 +52,7 @@ export const NEEDS_ACTION_DETAIL_KEYS = [
   'models.source.needs_action.credential_revoked',
   'models.source.needs_action.account_banned',
   'models.source.needs_action.plan_excludes_product',
+  'models.source.needs_action.spend_limit_reached',
 ] as const;
 export type NeedsActionDetailKey = (typeof NEEDS_ACTION_DETAIL_KEYS)[number];
 
@@ -552,6 +553,7 @@ export type ResolutionReason =
   | 'balance_exhausted'
   | 'account_banned'
   | 'plan_excludes_product'
+  | 'spend_limit_reached'
   | 'permission_denied'
   | 'unclassified_error'
   | 'no_enabled_source'

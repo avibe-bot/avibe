@@ -8394,6 +8394,8 @@ class ModelHubService:
             return "models.source.needs_action.account_banned", "account_banned"
         if decision.reason == "plan_excludes_product":
             return "models.source.needs_action.plan_excludes_product", "plan_excludes_product"
+        if decision.reason == "spend_limit_reached":
+            return "models.source.needs_action.spend_limit_reached", "spend_limit_reached"
         if outcome.http_status == 403:
             return "models.source.needs_action.credential_revoked", "credential_revoked"
         if decision.reason == "unclassified_error":
@@ -9512,6 +9514,7 @@ class ModelHubService:
                     "balance_exhausted": "models.source.needs_action.balance_exhausted",
                     "account_banned": "models.source.needs_action.account_banned",
                     "plan_excludes_product": "models.source.needs_action.plan_excludes_product",
+                    "spend_limit_reached": "models.source.needs_action.spend_limit_reached",
                     "unclassified_error": "models.source.error.unclassified",
                 }[event_reason]
                 persisted = await self._write_source_blocker_locked(

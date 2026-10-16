@@ -33,6 +33,7 @@ export const SOURCE_STATE_CLASSIFICATION = {
     'models.source.needs_action.credential_revoked': 'needs_user',
     'models.source.needs_action.account_banned': 'needs_user',
     'models.source.needs_action.plan_excludes_product': 'needs_user',
+    'models.source.needs_action.spend_limit_reached': 'needs_user',
     'models.source.error.unclassified': 'needs_user',
   },
 } as const satisfies {

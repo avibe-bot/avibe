@@ -186,7 +186,8 @@
                   "models.source.needs_action.balance_exhausted",
                   "models.source.needs_action.credential_revoked",
                   "models.source.needs_action.account_banned",
-                  "models.source.needs_action.plan_excludes_product"
+                  "models.source.needs_action.plan_excludes_product",
+                  "models.source.needs_action.spend_limit_reached"
                 ]
               },
               "retry_at": {
@@ -258,6 +259,7 @@
         "models.source.needs_action.credential_revoked",
         "models.source.needs_action.account_banned",
         "models.source.needs_action.plan_excludes_product",
+        "models.source.needs_action.spend_limit_reached",
         "models.source.error.unclassified"
       ]
         }

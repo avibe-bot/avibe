@@ -56,6 +56,7 @@ EVENT_REASON_AUTHORITY: dict[str, ReasonClass] = {
     "balance_exhausted": "non_self_healing",
     "account_banned": "non_self_healing",
     "plan_excludes_product": "non_self_healing",
+    "spend_limit_reached": "non_self_healing",
     "unclassified_error": "non_self_healing",
     "no_enabled_source": "structural",
     "no_eligible_source": "structural",
@@ -76,6 +77,7 @@ SOURCE_DETAIL_EVENT_REASONS = {
     "models.source.needs_action.balance_exhausted": "balance_exhausted",
     "models.source.needs_action.account_banned": "account_banned",
     "models.source.needs_action.plan_excludes_product": "plan_excludes_product",
+    "models.source.needs_action.spend_limit_reached": "spend_limit_reached",
     "models.source.error.unclassified": "unclassified_error",
 }
 

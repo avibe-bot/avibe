@@ -862,9 +862,10 @@ as quota exhaustion until its reset instead of being re-probed. The same field
 names in any other error envelope are not advice. A 429 whose machine code names a
 plan or billing cause settles its Source by that cause instead of as a rate limit:
 `usage_not_included` (a ChatGPT plan without Codex) is `plan_excludes_product` and
-`credit_balance_exhausted` is `balance_exhausted`, both needing the user, while
-OpenAI's `organization_spend_limit_exceeded`, `project_spend_limit_exceeded` and
-`organization_usage_limit_exceeded` cool as quota exhaustion. Malformed, past, oversized, and
+`credit_balance_exhausted` is `balance_exhausted`, and OpenAI's
+`organization_spend_limit_exceeded`, `project_spend_limit_exceeded` and
+`organization_usage_limit_exceeded` are `spend_limit_reached`. All of them need the user:
+retrying restores none, so none is a cooldown. Malformed, past, oversized, and
 non-ASCII advice is ignored with a redacted diagnostic. Scheduling and window
 duration are monotonic; aware UTC timestamps are read projections. Network
 state is never persisted. Existing shaped cooldown persistence remains

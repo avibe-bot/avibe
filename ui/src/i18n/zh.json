@@ -2164,7 +2164,8 @@
             "balanceExhausted": "余额用完",
             "credentialRevoked": "凭据被吊销",
             "accountBanned": "账号被限制",
-            "planExcludesProduct": "套餐不含 Codex"
+            "planExcludesProduct": "套餐不含 Codex",
+            "spendLimitReached": "已达用量上限"
           },
           "error": "异常",
           "standbyHintLabel": "这个状态是什么意思",
@@ -2647,7 +2648,8 @@
         "balance_exhausted": "余额不足，需要充值",
         "credential_revoked": "凭据已失效，需要重新填写",
         "account_banned": "账号被限制使用",
-        "plan_excludes_product": "套餐不含 Codex，需要升级套餐或改用其他供应商"
+        "plan_excludes_product": "套餐不含 Codex，需要升级套餐或改用其他供应商",
+        "spend_limit_reached": "已达用量上限，需要提高上限或改用其他供应商"
       },
       "error": {
         "unclassified": "未知错误，暂时不可用"
@@ -5090,6 +5092,7 @@
         "balance_exhausted": "余额不足",
         "account_banned": "账号被封禁",
         "plan_excludes_product": "套餐不含此产品",
+        "spend_limit_reached": "已达用量上限",
         "permission_denied": "无权限",
         "unclassified_error": "未分类的上游错误",
         "no_enabled_source": "没有已启用的供应商",
