@@ -28,10 +28,14 @@ The rows are bounded by the Turn's Run ids. The store is also constructed on eve
 
 **Orderings a move must keep.**
 1. **The Run write lands before the Turn's sink is released.** Awaiting an off-loop step at the same point keeps that order. While the step is in flight, a Stop on the loop can land first and settle the Run `canceled`, which is first-writer-wins in the store. That is a legitimate outcome of a Stop racing a result, and the note accepts it.
-2. **The close-after tail runs after the write and before the release, even when the caller was cancelled during the write.** The tail arms close-after only if the write succeeded. `land_step` returns the landed step together with the caught cancellation, so the tail runs first and the cancellation is answered afterwards. The same dispatcher already records Run activity through the door (`_flush_agent_run_activity` → `run_sync`).
-3. **The blocking-Activity snapshot is taken inside the worker transaction, after the writer is reserved.** It is not taken on the loop before the await. Otherwise an Activity that settles on the loop in between would settle the Run first, and the Turn's status would be dropped.
+2. **A cancellation caught during the write is held until the whole terminal-delivery tail has completed**, not just the close-after tail. After `_record_agent_run_terminal_result`, the dispatcher still has to run `_signal_turn_complete` and release the sink. After the dispatcher returns, `Controller.emit_agent_message` calls `on_terminal_delivery_complete`, which is path B's evidence-carrying terminal write. If the cancellation were answered any earlier, the runner's `runner_release` could terminalize the Turn first, without evidence, which breaks B's ordering 1. So the terminal emit runs as one unit that a cancellation cannot split: the Run write (through `land_step`), the close-after tail, `_signal_turn_complete`, the sink release and `on_terminal_delivery_complete`. The caught cancellation is answered only after all of them have run.
+3. **The blocking-Activity check is made without the Activity registry's lock while SQLite's writer is held.** Activity start and completion hold `SessionActivityRegistry._lock` while their store write waits for SQLite's writer. A worker that reserved the writer and then called `has_blocking_run_activity` would take the two locks in the opposite order, which is a lock inversion. Two placements look possible, and the choice belongs to the implementation:
+   - the check reads the durable Activity rows for the Turn's Runs (session Activity records), inside the same transaction, after the writer is reserved;
+   - the in-memory check stays on the loop before the step, and the write re-validates it against the durable rows.
 
-**Recommendation.** Move it to the runtime-work door (`run_sync` through `land_step`), with the three conditions above. Construct the store once rather than per call.
+   Either way, the lock order stays single, and an Activity that settles in between cannot make the Turn's status get dropped.
+
+**Recommendation.** Move it to the runtime-work door (`run_sync` through `land_step`), with the three conditions above. Construct the store once rather than per call. The same dispatcher already records Run activity through the door (`_flush_agent_run_activity` → `run_sync`).
 
 ## Path B: a durable Turn's terminal write after delivery
 
@@ -57,7 +61,7 @@ The rows are bounded by the Turn's Run ids. The store is also constructed on eve
    - `_terminalize_durable_turn` returns early when the Turn it reads is already terminal, so the `runner_release` and `on_native_terminal` calls stop taking the writer.
    - `_resume_post_terminal` reads without the writer.
    - `drain_delivery_queue` checks for a claimable head before it takes the writer.
-2. **Then, a separate design for B's single remaining write.** The terminal CAS and evidence run off the loop, through the door. Successor promotion runs on the loop, through the paths that already hold the boundary (`drain_delivery_queue`, `_resume_linked_control_successor`). The runner's `finally` awaits the in-flight terminal write before its own release, which keeps ordering 1 and ordering 2. That needs its own review against the tests that pin B's synchronous order. The main ones are in `tests/test_session_delivery_fsm.py`: the late-accepted steer, the Model Hub fence and the reply-less inbox settlement.
+2. **Then, a separate design for B's single remaining write.** That design must keep one more invariant: **5. terminalization and successor selection are atomic with respect to admission.** Once the predecessor is terminal, an admission that sees no live owner may claim or start the FIFO head. So if the terminal CAS ran off the loop and promotion ran later on the loop, a newly admitted Delivery could jump ahead of the linked P0, the start replay or the intended FIFO successor. A runner fence orders only cleanup, not admissions. The design therefore keeps terminalization and successor selection in one transaction, or adds an explicit admission fence that spans both steps, together with the runner fence for orderings 1 and 2. It needs its own review against the tests that pin B's synchronous order. The main ones are in `tests/test_session_delivery_fsm.py`: the late-accepted steer, the Model Hub fence and the reply-less inbox settlement.
 
 ## Path C: startup durable-delivery recovery
 
@@ -68,7 +72,11 @@ The rows are bounded by the Turn's Run ids. The store is also constructed on eve
 **Boundary.** C's own transactions hold none. The functions it calls (terminalize, the admissions, drain) hold it, and they keep B's constraints.
 
 **Recommendation.** Bound the reads; no boundary change is needed:
-- Filter the Run attribution in SQL down to Runs that are still queued or running, or that are settled without a result.
+- Start from the bounded set the recovery actually acts on, then join outward to the terminal Turns that own those Runs. Today it does the reverse: it reads every terminal Turn and filters afterwards. The bounded set is:
+  - Runs still `queued` or `running`;
+  - Runs whose owed failure notice is still `pending` with no Turn id. This is the legacy case, which the code then matches against the Turn's settlement.
+
+  Terminal Runs without a result are permanent history, so filtering on them would still grow without bound. Pending notices are delivered and leave that state, so the set stays bounded by unresolved work. The query plan is pinned in a test, as `AGENTS.md` requires for growing tables.
 - Turn the two read-only `BEGIN IMMEDIATE`s into plain reads.
 - Update only the sessions whose projected status differs.
 
@@ -81,12 +89,15 @@ The per-Turn admissions all hold the boundary inside the transaction, so they ar
 - `drain_delivery_queue`, `_resume_linked_control_successor`.
 
 `on_native_start` and `register_agent_initiated_turn` commit inside `commit_if_current` and must not yield. The remaining sites hold no boundary and are candidates for the door, one at a time:
-- `_start_persisted_turn`, `_finish_steer`, `_interrupt_durable_turn`;
-- `reconcile_terminal_run_delivery`, `controller.set_agent_status`, `persist_agent_message`.
+- per Turn: `_start_persisted_turn`, `_finish_steer`, `_interrupt_durable_turn`, `reconcile_terminal_run_delivery`, `controller.set_agent_status`, `persist_agent_message`;
+- per user input: `_delivery_backend`, which writes only on a session's first binding, and `_observe_active_delivery_turn`, which runs per steer, from `_admit_p1` and `_promote_fifo_head`;
+- per pending control item: `_run_pending_interrupt` and `_run_pending_steers`.
+
+Each move needs the check this note applies to A. Does a loop section rely on the write being synchronous? A Turn can write its running projection before its owner exists, and #2708 showed that moving such a write to a thread can clear a live Turn's status. Where the answer is yes, the alternative is to stay on the loop and never wait for the writer, as `_repair_ownerless_running_projection` does after #2708: a precheck without the writer, then one attempt at the writer with a zero busy timeout.
 
 ## Plan
 
-- [ ] C: bound the recovery reads (SQL filter on Run attribution, read-only transactions, mismatch-only status projection).
-- [ ] A: record the Turn's Run terminal through the runtime-work door with `land_step`; take the Activity snapshot inside the transaction; run the close-after tail before answering a caught cancellation; construct the store once.
+- [ ] C: bound the recovery reads (start from live Runs and pending legacy notices, with a pinned plan; read-only transactions; mismatch-only status projection).
+- [ ] A: record the Turn's Run terminal through the runtime-work door with `land_step`; make the blocking-Activity check without taking the registry lock under the writer; hold a caught cancellation until the whole terminal-delivery tail, including `on_terminal_delivery_complete`, has run; construct the store once.
 - [ ] B, step 1: skip the writer for redundant terminalization, the post-terminal read and an empty drain.
-- [ ] B, step 2: a design note for splitting the terminal write from successor promotion, with the runner fence.
+- [ ] B, step 2: a design note for B's remaining write that keeps terminalization and successor selection atomic with respect to admission (orderings 1–5).
