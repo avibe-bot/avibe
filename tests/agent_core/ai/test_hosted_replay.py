@@ -559,15 +559,18 @@ def _thinking_first_refusal(body: dict[str, Any]) -> Optional[str]:
     """Anthropic's refusal of a request that, with thinking on, continues a tool loop whose assistant message does not
     start with a thinking block; None when it holds."""
 
-    if body.get("thinking", {}).get("type") not in ("enabled", "adaptive"):
+    thinking = body.get("thinking", {}).get("type")
+    if thinking == "disabled" and "opus-5-5" in body.get("model", ""):
+        return "thinking.type: Claude Opus 5.5 does not support `disabled`"
+    # Only manual thinking requires the continued assistant message to start with thinking.
+    if thinking != "enabled":
         return None
     messages = body["messages"]
     last = next((index for index in range(len(messages) - 1, -1, -1) if messages[index]["role"] == "assistant"), None)
-    if last is None or not any(
-        isinstance(block, dict) and block.get("type") == "tool_result"
+    if last is None or last == len(messages) - 1 or not all(
+        isinstance(message["content"], list)
+        and any(isinstance(block, dict) and block.get("type") == "tool_result" for block in message["content"])
         for message in messages[last + 1 :]
-        if isinstance(message["content"], list)
-        for block in message["content"]
     ):
         return None
     first = messages[last]["content"][0]["type"]
@@ -670,43 +673,53 @@ _THOUGHT = ThinkingBlock(text="plan the read", signature="sig-account-a")
 _READ_CALL = ToolCallBlock(id="toolu_1", name="read", arguments={"path": "a"})
 
 
+# Anthropic's rules for thinking in a tool loop (https://platform.claude.com/docs/en/build-with-claude/thinking):
+# "In extended (manual) mode, the API additionally enforces that the final assistant turn of a thinking-enabled request
+# begins with a thinking block. Adaptive mode relaxes this: no assistant turn needs to start with one." And Opus 5.5,
+# Sonnet 5.5, Fable and Mythos "reject `thinking: {type: "disabled"}`".
+_ADAPTIVE_MODEL = "claude-opus-5-5"
+_MANUAL_MODEL = "claude-sonnet-4-5"
+
+
 @pytest.mark.parametrize(
-    ("continued", "after", "thinking"),
+    ("model", "continued", "after", "thinking"),
     [
-        # A tool loop whose assistant message starts with its signed thinking keeps thinking on.
-        ((_THOUGHT, _READ_CALL), "result", "adaptive"),
-        # Its thinking cannot go back (another origin's, or signatures this Session's provider refused): it would start
-        # with text, or with the call itself, which Anthropic refuses while thinking is on.
-        ((ThinkingBlock(text="plan the read"), _READ_CALL), "result", "disabled"),
-        ((_READ_CALL,), "result", "disabled"),
-        # A new turn is no continuation: an earlier assistant message need not start with thinking.
-        ((TextBlock("done"),), "user", "adaptive"),
+        # Adaptive thinking never needs the continued message to start with thinking, and is never turned off.
+        (_ADAPTIVE_MODEL, (ThinkingBlock(text="plan the read"), _READ_CALL), "result", "adaptive"),
+        (_ADAPTIVE_MODEL, (_READ_CALL,), "result", "adaptive"),
+        # Manual thinking: a loop whose signed thinking goes back keeps it on...
+        (_MANUAL_MODEL, (_THOUGHT, _READ_CALL), "result", "enabled"),
+        # ...one whose thinking went as text, or that starts with the call, continues with thinking off...
+        (_MANUAL_MODEL, (ThinkingBlock(text="plan the read"), _READ_CALL), "result", "disabled"),
+        (_MANUAL_MODEL, (_READ_CALL,), "result", "disabled"),
+        # ...and a new user message, even right after tool results, starts a new turn, which keeps it on.
+        (_MANUAL_MODEL, (_READ_CALL,), "result-then-user", "enabled"),
+        (_MANUAL_MODEL, (TextBlock("done"),), "user", "enabled"),
     ],
-    ids=["signed-thinking-first", "thinking-as-text", "call-first", "new-turn"],
+    ids=["adaptive-thinking-as-text", "adaptive-call-first", "manual-signed-thinking-first", "manual-thinking-as-text",
+         "manual-call-first", "manual-new-turn-after-results", "manual-new-turn"],
 )
 async def test_a_tool_loop_whose_assistant_message_cannot_start_with_thinking_continues_with_thinking_off(
-    continued, after, thinking
+    model, continued, after, thinking
 ):
-    """With thinking on, Anthropic requires the assistant message a tool loop continues to start with a thinking block
-    ("When `thinking` is enabled, a final `assistant` message must start with a thinking block ... To avoid this
-    requirement, disable `thinking`"). A request whose continued message cannot (its thinking went as text) is sent
-    with thinking off; every other request keeps it."""
+    """Under manual thinking a request whose continued assistant message cannot start with thinking (its thinking went
+    as text) is sent with thinking off, as Anthropic's refusal advises; adaptive thinking has no such rule and is never
+    turned off, since several adaptive models refuse ``disabled``; a new turn keeps thinking on."""
 
-    endpoint = replace(_endpoint("anthropic", replay=False, native=False), hosted_tools={})
-    tail = (
-        ToolResultMessage("toolu_1", "read", (TextBlock("contents"),))
-        if after == "result"
-        else UserMessage((TextBlock("and then?"),))
-    )
-    provider, model = MODELS["anthropic"]
-    stop = "tool_use" if after == "result" else "stop"
-    message = AssistantMessage(continued, Origin(provider, "anthropic", model), stop, source_identity=IDENTITY)
-    request = replace(_request(endpoint, message, tail), reasoning_effort="high")
+    endpoint = replace(_endpoint("anthropic", replay=False, native=False), hosted_tools={}, model_id=model)
+    result = ToolResultMessage("toolu_1", "read", (TextBlock("contents"),))
+    tail = {
+        "result": (result,),
+        "result-then-user": (result, UserMessage((TextBlock("and then?"),))),
+        "user": (UserMessage((TextBlock("and then?"),)),),
+    }[after]
+    stop = "stop" if after == "user" else "tool_use"
+    message = AssistantMessage(continued, Origin("anthropic", "anthropic", model), stop, source_identity=IDENTITY)
+    request = replace(_request(endpoint, message, *tail), reasoning_effort="high")
 
     wire = await build_wire_request(request, gateway=True)
 
     assert wire.body["thinking"]["type"] == thinking
-    assert ("output_config" in wire.body) is (thinking == "adaptive")
 
 
 def _thought_and_read() -> str:
@@ -727,11 +740,19 @@ def _thought_and_read() -> str:
     return _sse("anthropic", events)
 
 
-async def test_a_session_whose_signatures_were_refused_still_finishes_tool_loops_with_thinking_on():
+@pytest.mark.parametrize(
+    ("model", "continuation"), [(_ADAPTIVE_MODEL, "adaptive"), (_MANUAL_MODEL, "disabled")], ids=["adaptive", "manual"]
+)
+async def test_a_session_whose_signatures_were_refused_still_finishes_tool_loops_with_thinking_on(
+    monkeypatch, model, continuation
+):
     """After the provider refused a thinking signature, the Session's thinking goes back as text, including thinking the
-    turn minted a moment ago. A tool loop it continues would then break Anthropic's rule that, with thinking on, the
-    continued assistant message starts with a thinking block (the gateway here enforces it as Anthropic does), so that
-    request goes with thinking off and the loop finishes."""
+    turn minted a moment ago. Under manual thinking a tool loop it continues would break Anthropic's rule that the
+    continued assistant message starts with a thinking block, so that request goes with thinking off; adaptive thinking
+    has no such rule and keeps thinking on (Opus 5.5 refuses ``disabled``). The gateway here enforces both as
+    Anthropic does, and the loop finishes either way."""
+
+    monkeypatch.setitem(MODELS, "anthropic", ("anthropic", model))
 
     def answer(turn: int, attempt: int) -> httpx.Response:
         if turn == 1:
@@ -748,4 +769,5 @@ async def test_a_session_whose_signatures_were_refused_still_finishes_tool_loops
     bodies = [json.loads(wire.content) for wire in sent[1]]
     # Refused, resent without signatures, then the loop's continuation with thinking off.
     assert len(bodies) == 3
-    assert [body["thinking"]["type"] for body in bodies] == ["adaptive", "adaptive", "disabled"]
+    first = "adaptive" if model == _ADAPTIVE_MODEL else "enabled"
+    assert [body["thinking"]["type"] for body in bodies] == [first, first, continuation]

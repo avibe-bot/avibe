@@ -941,21 +941,21 @@ class AnthropicAdapter(ProviderAdapter):
 
 
 def _continues_unthought_tool_loop(messages: list[dict[str, Any]]) -> bool:
-    """Whether a request continues a tool loop (results follow its last assistant message) whose assistant message does
-    not start with a thinking block, which Anthropic refuses while thinking is on."""
+    """Whether a request continues a tool loop (everything after its last assistant message is tool results) whose
+    assistant message does not start with a thinking block, which Anthropic refuses under manual thinking."""
 
     last = next((index for index in range(len(messages) - 1, -1, -1) if messages[index]["role"] == "assistant"), None)
-    if last is None:
+    if last is None or last == len(messages) - 1:
         return False
-    results = any(
-        isinstance(block, Mapping) and block.get("type") == "tool_result"
+    # A plain user message after the results starts a new turn, which needs no thinking first.
+    continues = all(
+        isinstance(message["content"], list)
+        and any(isinstance(block, Mapping) and block.get("type") == "tool_result" for block in message["content"])
         for message in messages[last + 1 :]
-        if isinstance(message["content"], list)
-        for block in message["content"]
     )
     content = messages[last]["content"]
     first = content[0] if isinstance(content, list) and content else None
-    return results and not (isinstance(first, Mapping) and first.get("type") in ("thinking", "redacted_thinking"))
+    return continues and not (isinstance(first, Mapping) and first.get("type") in ("thinking", "redacted_thinking"))
 
 
 def build_messages_payload(
@@ -1006,13 +1006,18 @@ def build_messages_payload(
     if tools:
         payload["tools"] = tools
     effort = (request.reasoning_effort or "").lower()
-    if effort in {"none", "off", "disabled"} or (effort and _continues_unthought_tool_loop(payload_messages)):
-        # With thinking on, Anthropic requires the assistant message a tool loop continues to start with its thinking
-        # block, signed by the account serving now. One whose thinking cannot go back (another origin's, or a Session
-        # whose signatures the provider refused) continues with thinking off, as Anthropic's refusal itself advises.
+    adaptive = _uses_adaptive_thinking(request.endpoint.model_id)
+    if effort in {"none", "off", "disabled"} or (
+        effort and not adaptive and _continues_unthought_tool_loop(payload_messages)
+    ):
+        # Under manual thinking, Anthropic requires the assistant message a tool loop continues to start with its
+        # thinking block. One whose thinking cannot go back (another origin's, or a Session whose signatures the
+        # provider refused) continues with thinking off, as Anthropic's refusal itself advises; the models that take
+        # manual thinking all accept that. Adaptive thinking has no such rule, and several adaptive models refuse
+        # ``disabled``, so it stays on.
         payload["thinking"] = {"type": "disabled"}
     elif effort:
-        if _uses_adaptive_thinking(request.endpoint.model_id):
+        if adaptive:
             payload["thinking"] = {"type": "adaptive"}
             payload["output_config"] = {"effort": sent_effort(request.endpoint.model_id, effort)}
         else:
