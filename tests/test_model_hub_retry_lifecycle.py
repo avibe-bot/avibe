@@ -86,7 +86,7 @@ async def gateway_client(service, backend, model):
 
 
 @asynccontextmanager
-async def loopback_engine(tmp_path, service, respond):
+async def loopback_engine(tmp_path, service, respond, *, models=None):
     """Use the production client/admission/stream observer against local HTTP."""
     config = service.store.load()
     source = config.sources[0]
@@ -96,6 +96,8 @@ async def loopback_engine(tmp_path, service, respond):
     state.sync_sources(service._bindings(config))
     app = web.Application()
     app.router.add_post("/{path:.*}", respond)
+    if models is not None:
+        app.router.add_get("/v1/models", models)
     runner = web.AppRunner(app, handler_cancellation=True)
     await runner.setup()
     await web.TCPSite(runner, "127.0.0.1", 0).start()
@@ -437,6 +439,44 @@ def test_a_usage_cap_cools_its_source_as_quota_until_the_upstream_reset(tmp_path
         assert state.retry_at == datetime.fromtimestamp(resets_at, timezone.utc).isoformat()
         # The cap is not probed again inside the turn's recovery window.
         assert len(calls) == 1 and clock.delays == []
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("engine_refuses", [True, False], ids=["engine", "upstream"])
+def test_a_401_the_engine_itself_gave_spares_the_source(tmp_path, engine_refuses):
+    """MH-RUNTIME-015: the engine's own 401 is told from an upstream's by a witness no upstream answers (#2755).
+
+    The bodies are identical, as an upstream JSON error passes through the
+    engine unchanged. Only the engine-local listing refusing the same key makes
+    the 401 the engine's: the turn ends as the engine being down, the Source
+    keeps its health, and the next admission checks the engine again.
+    """
+    async def run():
+        service, _clock, models = configured_service(tmp_path)
+        before = service.store.load().sources[0].state
+
+        async def respond(request):
+            await request.read()
+            return web.json_response({"error": "Invalid API key"}, status=401)
+
+        async def listing(_request):
+            if engine_refuses:
+                return web.json_response({"error": "Invalid API key"}, status=401)
+            return web.json_response({"object": "list", "data": []})
+
+        rechecks = []
+        async with loopback_engine(tmp_path, service, respond, models=listing) as (adapter, _engine):
+            adapter.supervisor.recheck_engine = lambda: rechecks.append(True)
+            async with gateway_client(service, "codex", models["codex"]) as (_gateway, client, url, headers):
+                async with client.post(url, headers=headers, json={"model": "shared-model"}) as response:
+                    assert response.status >= 400
+        state = service.store.load().sources[0].state
+        if engine_refuses:
+            assert state == before
+            assert rechecks == [True]
+        else:
+            assert (state.status, state.detail_key) == ("needs_action", "models.source.needs_action.credential_revoked")
+            assert rechecks == []
     asyncio.run(run())
 
 

@@ -632,6 +632,19 @@ class EngineClient:
                     response.close()
                     await session.close()
                     return ended(outcome)
+                if response.status == 401 and await self._engine_refuses_gateway_key(session):
+                    # The engine itself refused Avibe's key, so no upstream judged
+                    # the Source's credential and nothing was sent past the engine.
+                    response.close()
+                    await session.close()
+                    return ended(_outcome(
+                        kind=RawOutcomeKind.NETWORK_ERROR,
+                        source=source,
+                        model_id=model_id,
+                        http_status=response.status,
+                        error_code="engine_down",
+                        message="engine refused Avibe's gateway key",
+                    ))
                 outcome = _reduce_protocol_observation(
                     replace(
                         observed_payload,
@@ -920,6 +933,28 @@ class EngineClient:
                 "engine API is unavailable", error_type=type(exc).__name__,
                 os_errno=local_os_errno(exc),
             ) from None
+
+    async def _engine_refuses_gateway_key(self, session: aiohttp.ClientSession) -> bool:
+        """Whether the engine itself refuses Avibe's gateway key (#2755).
+
+        A 401 body cannot tell the engine's refusal from an upstream's: the engine
+        passes an upstream's JSON error body through unchanged, so a relay
+        answering ``{"error":"Invalid API key"}`` reads exactly like the engine's
+        own access check. ``/v1/models`` is answered by the engine alone, so the
+        same key refused there is the engine's refusal. A witness that cannot be
+        asked proves nothing, and the 401 stays the upstream's.
+        """
+
+        try:
+            async with session.get(
+                self._url("/v1/models"),
+                headers={"Authorization": f"Bearer {self.connection.gateway_token}"},
+                timeout=aiohttp.ClientTimeout(total=min(self.timeout, 2.0)),
+                allow_redirects=False,
+            ) as witness:
+                return witness.status == 401
+        except (asyncio.TimeoutError, aiohttp.ClientError):
+            return False
 
     def _url(self, path: str, *, query: Mapping[str, str] | None = None) -> str:
         url = f"{self.connection.base_url.rstrip('/')}{path}"
@@ -1357,6 +1392,16 @@ def _project_model_inventory_before_deadline(
         payload,
         _project_model_inventory,
         deadline=deadline,
+    )
+
+
+def engine_refused_gateway_key(outcome: RawCallOutcome) -> bool:
+    """Whether a call ended on the engine refusing Avibe's own gateway key, which the client witnessed."""
+
+    return (
+        outcome.kind is RawOutcomeKind.NETWORK_ERROR
+        and outcome.error_code == "engine_down"
+        and outcome.http_status == 401
     )
 
 

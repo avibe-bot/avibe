@@ -30,6 +30,7 @@ from core.handlers.model_hub.adapter import (
     EngineHealth,
     OAuthSubmissionRejectedError,
     OriginNotAllowedError,
+    RawCallOutcome,
     RawOutcomeKind,
     RetainedMaterialDisposition,
     RuntimePlatformUnsupportedError,
@@ -55,7 +56,7 @@ from vibe.model_hub_runtime import installer as runtime_installer_module
 from vibe.model_hub_runtime import supervisor as supervisor_module
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
 from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_catalog, official_models_dev_provider
-from vibe.model_hub_runtime.client import EngineClient, EngineClientError, EngineConnection
+from vibe.model_hub_runtime.client import EngineClient, EngineClientError, EngineConnection, completed_handle
 from vibe.model_hub_runtime.config import expected_model_names, write_engine_config
 from vibe.model_hub_runtime.environment import engine_subprocess_environment
 from vibe.model_hub_runtime.installer import (
@@ -2944,6 +2945,14 @@ def test_adapter_provisions_probes_and_revokes_credential(tmp_path: Path) -> Non
         asyncio.run(run(base_url, handler))
 
 
+def _served_handle(source, model_id):
+    """A real handle for a call the stub engine served: the adapter reads its outcome."""
+    return completed_handle(RawCallOutcome(
+        kind=RawOutcomeKind.SUCCESS, http_status=200, error_code=None, redacted_message=None,
+        stream_started=False, model_id=model_id, source_id=source.source_id,
+    ))
+
+
 def _write_mock_engine(
     path: Path,
     *,
@@ -4649,7 +4658,7 @@ def test_adapter_uses_origin_protocol_for_engine_translation(
             self.request_protocol = request_protocol
             self.request_headers = request_headers
             on_transport_done()
-            return object()
+            return _served_handle(source, model_id)
 
     class Supervisor:
         def __init__(self, client: Client) -> None:
@@ -4816,7 +4825,7 @@ def test_adapter_serializes_source_sync_with_new_invocations(tmp_path: Path) -> 
         ):
             invoked_refs.append(source.credential_ref)
             on_transport_done()
-            return object()
+            return _served_handle(source, model_id)
 
     class Supervisor:
         def __init__(self) -> None:
