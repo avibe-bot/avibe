@@ -130,7 +130,18 @@ def test_doc_suffix_never_hides_non_document_modes(repo: Path, kind: str) -> Non
             path.unlink()
             path.symlink_to("core.py")
         commit(repo)
-    assert not push(repo, before)[0]
+    result = push(repo, before)
+    assert result[0] is False and result[3] is False
+
+
+def test_windows_control_ipc_survives_an_irregular_sibling_diff(repo: Path) -> None:
+    before = git(repo, "rev-parse", "HEAD")
+    write(repo, "core/managed_skills.py", "print('runtime')\n")
+    (repo / "docs").mkdir(exist_ok=True)
+    (repo / "docs/link.md").symlink_to("../core.py")
+    commit(repo)
+    result = push(repo, before)
+    assert result[0] is False and result[3] is True
 
 
 def synthetic_pr(repo: Path) -> tuple[dict, str]:
@@ -177,14 +188,17 @@ def test_unknown_push_evidence_falls_back_to_full(repo: Path, change: dict) -> N
     before = git(repo, "rev-parse", "HEAD")
     write(repo, "AGENTS.md")
     commit(repo)
-    assert not push(repo, before, **change)[0]
+    result = push(repo, before, **change)
+    assert result[0] is False and result[3] is True
 
 
 def test_empty_diff_and_unsupported_or_broken_events_are_not_docs(repo: Path) -> None:
     sha = git(repo, "rev-parse", "HEAD")
-    assert not push(repo, sha)[0]
+    result = push(repo, sha)
+    assert result[0] is False and result[3] is True
     for name, payload in (("workflow_dispatch", {}), ("pull_request", {}), ("push", [])):
-        assert not classify(name, payload, sha, repo)[0]
+        classified = classify(name, payload, sha, repo)
+        assert classified[0] is False and classified[3] is True
 
 
 @pytest.mark.parametrize("event_name,expected", [("pull_request", "true"), ("push", "false")])
@@ -222,7 +236,7 @@ def test_cli_keeps_docs_pr_fast_but_master_replaces_full_coverage(
         f"docs_only={expected}",
         "windows_control_ipc=false",
         "docs_only=false",
-        "windows_control_ipc=false",
+        "windows_control_ipc=true",
     ]
     assert "Impact shadow: **unknown**" in summary.read_text()
     assert "full" in summary.read_text()

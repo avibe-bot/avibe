@@ -113,23 +113,29 @@ def classify(event_name: str, event: dict, sha: str, repo: Path) -> tuple[bool, 
         if len(fields) % 2:
             raise ValueError("incomplete diff records")
         paths = []
+        irregular = False
         for header, name in zip(fields[::2], fields[1::2]):
             meta = header.decode("ascii").split()
             if len(meta) != 5 or not meta[0].startswith(":"):
                 raise ValueError("unexpected diff record")
             old_mode, new_mode = meta[0][1:], meta[1]
+            path = name.decode("utf-8")
+            paths.append(path)
             if meta[4] not in {"A", "M", "D"} or {old_mode, new_mode} - {"000000", "100644"}:
-                return False, "non-document file type or mode changed", "unknown", False
-            paths.append(name.decode("utf-8"))
-        impact = impact_category(paths)
+                irregular = True
         windows_control_ipc = any(path in WINDOWS_CONTROL_IPC_PATHS for path in paths)
+        if irregular:
+            return False, "non-document file type or mode changed", "unknown", windows_control_ipc
+        impact = impact_category(paths)
         for path in paths:
             if not narrative_path(path):
                 return False, f"full CI required by {json.dumps(path, ensure_ascii=True)}", impact, windows_control_ipc
         return True, f"all {len(paths)} changed paths are narrative documentation", impact, False
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
         # Do not print Git stderr, event payloads or arbitrary commit data.
-        return False, f"full CI: classification unavailable ({type(exc).__name__})", "unknown", False
+        # Conservatively select the Windows job when classification cannot prove
+        # the Skill publication paths are absent from this event.
+        return False, f"full CI: classification unavailable ({type(exc).__name__})", "unknown", True
 
 
 def main() -> None:

@@ -78,21 +78,30 @@ def _isolate_live_commands(monkeypatch, tmp_path: Path) -> tuple[Path, Path]:
 
 
 def _install_zero_identity_scandir(monkeypatch) -> None:
-    """Make DirEntry.stat() report st_dev/st_ino as zero, as Windows listings do."""
+    """Make DirEntry.stat() report unstable zero identities, as Windows listings do.
+
+    Real Windows DirEntry.stat() zeros st_dev/st_ino. Two enumerations of an
+    unchanged tree can therefore disagree if publication tokens those fields
+    from the listing instead of the path. Keep the rest of the listing so
+    callers that read attributes still work, and vary the zeroed identity
+    across enumerations so a same-token fixture cannot hide the mismatch.
+    """
 
     real_scandir = os.scandir
     sequence_fields = {"st_mode", "st_ino", "st_dev", "st_nlink", "st_uid", "st_gid", "st_size"}
+    enumerations = 0
 
     class _WindowsLikeEntry:
-        def __init__(self, entry: os.DirEntry) -> None:
+        def __init__(self, entry: os.DirEntry, generation: int) -> None:
             self.name = entry.name
             self.path = entry.path
             self._entry = entry
+            self._generation = generation
 
         def stat(self, *, follow_symlinks: bool = True) -> os.stat_result:
             real = self._entry.stat(follow_symlinks=follow_symlinks)
             values = list(real)
-            values[1] = 0  # st_ino
+            values[1] = self._generation  # st_ino: listing identity, not the inode
             values[2] = 0  # st_dev
             extras = {
                 name: getattr(real, name)
@@ -106,10 +115,14 @@ def _install_zero_identity_scandir(monkeypatch) -> None:
 
     class _WindowsLikeScandir:
         def __init__(self, path) -> None:
+            nonlocal enumerations
+            enumerations += 1
+            self._generation = enumerations
             self._iterator = real_scandir(path)
 
         def __enter__(self):
-            return (_WindowsLikeEntry(entry) for entry in self._iterator)
+            generation = self._generation
+            return (_WindowsLikeEntry(entry, generation) for entry in self._iterator)
 
         def __exit__(self, *exc_info) -> None:
             self._iterator.close()
