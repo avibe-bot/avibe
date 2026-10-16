@@ -7205,10 +7205,11 @@ class SessionTurnManager:
             # Only the sessions projected ``running`` that have Turn history and no
             # live Turn, each checked by an indexed lookup -- not every session that
             # ever ran a Turn, a set that grows with history (#2706).
+            # Seeks ``ix_agent_sessions_agent_status`` (agent_status, status).
             stale_running = (
                 update(agent_sessions)
-                .where(agent_sessions.c.status == "active")
                 .where(agent_sessions.c.agent_status == "running")
+                .where(agent_sessions.c.status == "active")
                 .where(
                     exists(
                         select(session_turn_rows.c.id).where(

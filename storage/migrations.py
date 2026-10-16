@@ -915,6 +915,18 @@ def _ensure_messages_query_indexes(conn: sqlite3.Connection, tables: set[str]) -
             "create index if not exists ix_agent_sessions_scope_status_pinned_activity "
             "on agent_sessions (scope_id, status, pinned, last_active_at, created_at, id)"
         )
+        status_index = import_module(
+            "storage.alembic.versions.20261016_0068_agent_sessions_agent_status_index"
+        )
+        status_row = conn.execute(
+            "select sql from sqlite_master where type = 'index' and name = ?",
+            (status_index._INDEX,),
+        ).fetchone()
+        if status_row is None or _normalized_index_sql(status_row[0]) != _normalized_index_sql(
+            status_index.CREATE_INDEX_SQL
+        ):
+            conn.execute(status_index.DROP_INDEX_SQL)
+            conn.execute(status_index.CREATE_INDEX_SQL)
     if "messages" not in tables:
         return
     transcript_index = import_module(

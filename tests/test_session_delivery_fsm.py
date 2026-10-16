@@ -8358,8 +8358,8 @@ def test_legacy_effective_author_survives_queue_collect_merge_hydrate(
 
 def test_startup_recovery_reads_growing_tables_only_through_index_seeks(tmp_path: Path, sqlite_db_factory) -> None:
     """#2706: durable-delivery recovery runs on the controller loop at every start, before producers are admitted.
-    ``agent_runs``, ``session_turns`` and ``message_deliveries`` grow with every Turn ever run, and a read of their
-    history held the loop at start. Every statement recovery issues must reach them by an index seek, or by walking a
+    ``agent_runs``, ``session_turns`` and ``message_deliveries`` grow with every Turn ever run, and ``agent_sessions``
+    with every Session kept; a read of their history held the loop at start. Every statement recovery issues must reach them by an index seek, or by walking a
     partial index that holds only live rows -- never by scanning the table or a full index."""
 
     from sqlalchemy import event
@@ -8382,7 +8382,7 @@ def test_startup_recovery_reads_growing_tables_only_through_index_seeks(tmp_path
         event.remove(engine, "before_cursor_execute", capture)
         engine.dispose()
 
-    growing = ("agent_runs", "session_turns", "message_deliveries")
+    growing = ("agent_runs", "session_turns", "message_deliveries", "agent_sessions")
     live_only_indexes = {
         "uq_session_turns_live_session",
         "uq_session_turns_waiting_successor",
