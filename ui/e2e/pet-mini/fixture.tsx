@@ -1,4 +1,5 @@
 import { createRoot } from 'react-dom/client';
+import { PetAvatar, type PetPose } from '../../src/pet/PetAvatar';
 import { PetPage } from '../../src/pet/PetPage';
 import { PetWindow } from '../../src/pet/PetWindow';
 import { petBridge } from '../../src/pet/petBridge';
@@ -12,6 +13,20 @@ import '../../src/index.css';
 
 const params = new URLSearchParams(location.search);
 await i18n.changeLanguage(params.get('lang') ?? 'en');
+const PINNED_POSES: readonly PetPose[] = [
+  'idle',
+  'sleeping',
+  'listening',
+  'running',
+  'team',
+  'ready',
+  'needs_input',
+  'blocked',
+];
+const requestedPose = params.get('pose');
+const pinnedPose = requestedPose && PINNED_POSES.includes(requestedPose as PetPose)
+  ? requestedPose as PetPose
+  : null;
 declare global {
   interface Window {
     petLayoutHitRegions: Parameters<typeof petBridge.setHitRegions>[0];
@@ -138,7 +153,17 @@ window.setPetLayoutVisible = (visible) => root.render(
   <ToastProvider>
     <ApiProvider>
       <InstanceAuthorizationProvider session={{ remote: false, instance_kind: 'personal', capabilities: OWNER_INSTANCE_CAPABILITIES }}>
-        <WorkbenchInboxProvider><PetWindow>{visible ? <PetPage /> : null}</PetWindow></WorkbenchInboxProvider>
+        {pinnedPose ? (
+          visible ? (
+            <PetWindow>
+              <div className="pet-mini-avatar-wrap" style={{ position: 'relative', width: 115, height: 115 }}>
+                <PetAvatar pose={pinnedPose} />
+              </div>
+            </PetWindow>
+          ) : null
+        ) : (
+          <WorkbenchInboxProvider><PetWindow>{visible ? <PetPage /> : null}</PetWindow></WorkbenchInboxProvider>
+        )}
       </InstanceAuthorizationProvider>
     </ApiProvider>
   </ToastProvider>,

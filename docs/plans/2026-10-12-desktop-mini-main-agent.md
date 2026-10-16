@@ -414,6 +414,17 @@ Two beats, so the exit reads before the reflow:
   - breathing on working poses;
   - the 30s breathing settle on resting poses, which keeps idle cost near
     zero.
+- Use the layered Vibey art in `ui/src/pet/VibeyArt.tsx` for the accessory
+  motion. `needs_input` reveals three dots from bottom to top before the
+  envelope pops; `blocked` lets the sweat drop flow down; `running` lights its
+  trail dots and rocks the question mark; `team` uses the same body with a
+  turning wrench in the thought bubble; `ready` bursts confetti outward and
+  down; and `sleeping` sends a small `z` followed by a large `Z` upward.
+  `idle` and `listening` render body-only art with the existing breathing.
+- The layered loops animate `transform` and `opacity` only. They pause while
+  the page is inactive. Reduced motion disables every animation and leaves the
+  full static composition visible. Sleeping deliberately keeps its `z`/`Z`
+  loop while the window is visible, even though idle still settles after 30s.
 - Vibey on the mini stage is **115px** (the owner tuned it on the prototype:
   2×, then −10%). Verify the size on a real desktop with the owner.
 
@@ -432,13 +443,13 @@ Use the first matching condition, following the approved prototype's `POSES`:
 3. Blocked: the main session failed.
 4. Running: the main session is running.
 5. Ready: main unread results or a nondismissed replied card.
-6. Team working: an eligible activity is active.
+6. Team working: an eligible activity is active. This uses the `team` pose,
+   with the wrench bubble, while Vibey's own turn keeps the `running` pose.
 7. Idle; sleeping after five idle minutes.
 
 Cards and team activity use the same filtered snapshot. Background definitions
 alone do not create cards or a busy pose. Quick-reply suggestions do not count
-as needs input. Keep the current static images (team uses the existing running
-image); layered pose animation is deferred. Preserve reduced-motion behavior.
+as needs input. Preserve reduced-motion behavior.
 The lower-left green activity-count badge is removed; the stack and team pose
 already communicate activity. Keep the upper-right red unread badge.
 

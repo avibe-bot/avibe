@@ -516,7 +516,7 @@ describe('PetPage other conversations', () => {
     runningAgents = workingIn('T');
     mainSession('S');
     render(<PetPage />);
-    await waitFor(() => expect(pose()).toBe('running'));
+    await waitFor(() => expect(pose()).toBe('team'));
     expect(dataState()).toBe('idle');
     runningAgents = { ...runningAgents, agents: [] };
     await emit((h) => h.onTurnEnd?.({ session_id: 'T' }));
@@ -533,7 +533,7 @@ describe('PetPage other conversations', () => {
     await waitFor(() => expect(api.getRunningAgents.mock.calls.length).toBeGreaterThanOrEqual(2));
     expect(pose()).toBe('idle');
     runningAgents = workingIn('T');
-    await waitFor(() => expect(pose()).toBe('running'), { timeout: 5000 });
+    await waitFor(() => expect(pose()).toBe('team'), { timeout: 5000 });
     // Registered: no more retries for it.
     const settled = api.getRunningAgents.mock.calls.length;
     await new Promise((resolve) => setTimeout(resolve, 2500));
@@ -551,7 +551,7 @@ describe('PetPage other conversations', () => {
     await emit((h) => h.onTurnStart?.({ session_id: 'T' }));
     await waitFor(() => expect(api.getRunningAgents.mock.calls.length).toBe(before + 1));
     runningAgents = workingIn('T');
-    await waitFor(() => expect(pose()).toBe('running'), { timeout: 5000 });
+    await waitFor(() => expect(pose()).toBe('team'), { timeout: 5000 });
   }, 15000);
 
   it('re-reads on every event that can change who is working, and catches up on visibility', async () => {
@@ -560,7 +560,7 @@ describe('PetPage other conversations', () => {
     runningAgents = workingIn('T');
     mainSession('S');
     render(<PetPage />);
-    await waitFor(() => expect(pose()).toBe('running'));
+    await waitFor(() => expect(pose()).toBe('team'));
     for (const trigger of REFRESH_TRIGGERS) {
       const before = api.getRunningAgents.mock.calls.length;
       await emit((h) => (h[trigger] as ((data: unknown) => void) | undefined)?.({ session_id: 'T', scope_id: null, event: 'updated' }));
@@ -576,7 +576,7 @@ describe('PetPage other conversations', () => {
     canUseAgents = true;
     runningAgents = workingIn('T');
     render(<PetPage />);
-    await waitFor(() => expect(pose()).toBe('running'));
+    await waitFor(() => expect(pose()).toBe('team'));
   });
 
   it('never reads other conversations without the agents permission', async () => {
@@ -1806,7 +1806,7 @@ describe('desktop mini v2 interaction contract', () => {
     expect(pose()).toBe('idle');
     turn([activity('run:r1', 'agent_run')]);
     await emit((h) => h.onRunsUpdated?.({}));
-    await waitFor(() => expect(pose()).toBe('running'));
+    await waitFor(() => expect(pose()).toBe('team'));
     expect(screen.queryByLabelText('pet.stop.stop')).toBeNull();
   });
 
@@ -2063,7 +2063,7 @@ describe('Personal Agent review invariants', () => {
       expect(pose()).toBe('sleeping');
       runningAgents = workingIn('visible');
       await emit((h) => h.onRunsUpdated?.({}));
-      expect(pose()).toBe('running');
+      expect(pose()).toBe('team');
     } finally { vi.useRealTimers(); }
   });
 
