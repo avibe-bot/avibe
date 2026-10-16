@@ -14,6 +14,62 @@ from vibe.desktop_backends import is_desktop_backend_path, resolve_published_des
 
 logger = logging.getLogger(__name__)
 
+def _ordered_cli_candidates(
+    binary: str,
+    *,
+    include_npm_global: bool,
+    candidate_paths=None,
+) -> list[Path]:
+    """Return one ordered candidate list for runnable and presence-only probes.
+
+    The order is deliberately shared by both consumers: standard locations,
+    the active ``PATH``, then the active npm-global locations.  A non-executable
+    earlier candidate therefore remains visible to presence-only health checks,
+    while runnable resolution still selects the first executable later in the
+    same sequence.
+    """
+    if not binary:
+        return []
+
+    candidate_paths = candidate_paths or _candidate_cli_paths
+    expanded = Path(os.path.expanduser(binary))
+    has_path_separator = os.sep in binary or (os.altsep is not None and os.altsep in binary)
+    candidates: list[Path] = []
+
+    def add(candidate: Path) -> None:
+        if candidate not in candidates:
+            candidates.append(candidate)
+
+    # Explicit paths are never redirected through PATH or npm-global discovery.
+    for candidate in candidate_paths(binary, include_npm_global=False):
+        add(candidate)
+    if expanded.is_absolute() or has_path_separator:
+        return candidates
+
+    # shutil.which preserves the platform's executable lookup semantics and
+    # gives us the first runnable PATH result. Raw PATH entries follow so a
+    # non-executable file can still be reported as a broken, present candidate.
+    path_match = shutil.which(os.path.expanduser(binary))
+    if path_match:
+        add(Path(path_match))
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        path_candidates = [Path(entry) / binary]
+        if os.name == "nt":
+            path_candidates = _windows_executable_candidates(path_candidates)
+        for candidate in path_candidates:
+            add(candidate)
+
+    if include_npm_global:
+        # Use the same injected candidate source as the standard phase. Besides
+        # keeping tests deterministic, this preserves the resolver's existing
+        # npm-prefix query boundary while placing npm after PATH.
+        for candidate in candidate_paths(binary, include_npm_global=True):
+            add(candidate)
+    return candidates
+
+
 def _is_executable_file(path: Path) -> bool:
     return path.exists() and path.is_file() and os.access(path, os.X_OK)
 
@@ -217,18 +273,13 @@ def _resolve_cli_path_once(
 ) -> str | None:
     candidate_paths = candidate_paths or _candidate_cli_paths
     is_executable_file = is_executable_file or _is_executable_file
-    for candidate in candidate_paths(binary, include_npm_global=False):
+    for candidate in _ordered_cli_candidates(
+        binary,
+        include_npm_global=include_npm_global,
+        candidate_paths=candidate_paths,
+    ):
         if is_executable_file(candidate):
             return str(candidate)
-
-    path = shutil.which(os.path.expanduser(binary)) if binary else None
-    if path:
-        return path
-
-    if include_npm_global:
-        for candidate in _npm_global_binary_candidates(binary):
-            if _is_executable_file(candidate):
-                return str(candidate)
     return None
 
 

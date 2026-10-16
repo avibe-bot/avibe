@@ -22,7 +22,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from http.client import HTTPSConnection
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 
 import yaml
 from sqlalchemy import select
@@ -77,6 +77,7 @@ from vibe.cli_paths import (
     _candidate_cli_paths,
     _command_env_for,
     _is_executable_file,
+    _ordered_cli_candidates,
     _npm_binary_candidates_for_prefix,
     _npm_global_binary_candidates,
     _npm_global_prefixes,
@@ -471,71 +472,109 @@ def _is_npm_codex_install(codex_path: str) -> bool:
     return False
 
 
-def _homebrew_prefixes(brew_path: str) -> list[Path]:
-    prefixes: list[Path] = []
-    for command in ([brew_path, "--prefix"], [brew_path, "--prefix", "--cask"]):
-        try:
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=10,
-                env=_command_env_for(brew_path),
-            )
-        except Exception:
-            continue
-        if result.returncode == 0:
-            lines = (result.stdout or "").strip().splitlines()
-            if lines:
-                prefixes.append(Path(os.path.expanduser(lines[-1])))
-    prefixes.extend([Path("/opt/homebrew"), Path("/usr/local"), Path("/home/linuxbrew/.linuxbrew")])
-    return prefixes
-
-
-def _homebrew_codex_target(brew_path: str, selected_path: str) -> str | None:
-    """Return a selected Codex launcher attributable to Homebrew's stable bin link."""
-    selected = Path(selected_path).expanduser()
-    if selected.name not in {"codex", "codex.exe"}:
-        return None
-    try:
-        resolved = selected.resolve()
-    except OSError:
-        return None
-    for prefix in _homebrew_prefixes(brew_path):
-        try:
-            selected.absolute().relative_to((prefix / "bin").absolute())
-        except ValueError:
-            continue
-        if _path_is_relative_to(resolved, prefix):
-            return str(selected)
-    return None
-
-
-def _is_homebrew_codex_install(codex_path: str) -> bool:
-    brew_path = resolve_cli_path("brew")
-    if not brew_path:
-        return False
-
+def _homebrew_prefix(brew_path: str) -> Path | None:
+    """Return the active Homebrew prefix reported by the selected brew binary."""
     try:
         result = subprocess.run(
-            [brew_path, "list", "--cask", "codex"],
+            [brew_path, "--prefix"],
             capture_output=True,
             text=True,
             timeout=10,
             env=_command_env_for(brew_path),
         )
     except Exception:
-        return False
+        return None
     if result.returncode != 0:
-        return False
-
+        return None
+    lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+    if len(lines) != 1:
+        return None
     try:
-        resolved = Path(codex_path).expanduser().resolve()
+        prefix = Path(os.path.expanduser(lines[0])).resolve()
+        brew = Path(brew_path).expanduser().resolve()
     except OSError:
-        return False
+        return None
+    if brew != prefix / "bin" / "brew":
+        return None
+    return prefix
 
-    brew_prefixes = _homebrew_prefixes(brew_path)
-    return any(_path_is_relative_to(resolved, prefix) for prefix in brew_prefixes)
+
+def _homebrew_codex_probe(brew_path: str) -> tuple[str, Path | None, Path | None]:
+    """Inspect the active installed Codex cask without guessing from paths.
+
+    Returns ``(state, prefix, payload)`` where state is ``installed``,
+    ``not_installed``, or ``unknown``.  The JSON ``--installed`` query is
+    supported by Homebrew and distinguishes an absent cask from a failed or
+    malformed metadata query without using the unsupported ``--prefix --cask``
+    command shape.
+    """
+    prefix = _homebrew_prefix(brew_path)
+    if prefix is None:
+        return "unknown", None, None
+    try:
+        result = subprocess.run(
+            [brew_path, "info", "--cask", "--json=v2", "--installed", "codex"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=_command_env_for(brew_path),
+        )
+    except Exception:
+        return "unknown", prefix, None
+    if result.returncode != 0:
+        return "unknown", prefix, None
+    try:
+        payload = json.loads(result.stdout or "")
+        if not isinstance(payload, dict):
+            return "unknown", prefix, None
+        casks = payload.get("casks")
+        if not isinstance(casks, list):
+            return "unknown", prefix, None
+        codex_casks = [cask for cask in casks if isinstance(cask, dict) and cask.get("token") == "codex"]
+        if not codex_casks:
+            return "not_installed", prefix, None
+        if len(codex_casks) != 1:
+            return "unknown", prefix, None
+        installed = codex_casks[0].get("installed")
+        if not isinstance(installed, str):
+            return "unknown", prefix, None
+        version = installed
+        version_path = Path(version)
+        if version_path.is_absolute() or len(version_path.parts) != 1 or version_path.name != version:
+            return "unknown", prefix, None
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return "unknown", prefix, None
+    return "installed", prefix, prefix / "Caskroom" / "codex" / version
+
+
+def _homebrew_codex_target(brew_path: str, selected_path: str) -> str | None:
+    """Return a selected Codex launcher attributable to the active cask payload."""
+    selected = Path(selected_path).expanduser()
+    if selected.name not in {"codex", "codex.exe"}:
+        return None
+    state, prefix, payload = _homebrew_codex_probe(brew_path)
+    if state != "installed" or prefix is None or payload is None:
+        return None
+    try:
+        selected_absolute = selected.absolute()
+        expected = (prefix / "bin" / selected.name).absolute()
+        if selected_absolute != expected or not selected.is_symlink():
+            return None
+        resolved = selected.resolve(strict=True)
+    except OSError:
+        return None
+    if not _path_is_relative_to(resolved, payload):
+        return None
+    return str(selected)
+
+
+def _is_homebrew_codex_install(codex_path: str) -> bool:
+    brew_path = resolve_cli_path("brew")
+    return bool(brew_path and _homebrew_codex_target(brew_path, codex_path))
+
+
+def _codex_path_is_ambiguous_homebrew_target(codex_path: str, state: str) -> bool:
+    return state in {"installed", "unknown"} and Path(codex_path).name in {"codex", "codex.exe"}
 
 
 def _codex_cli_supports_update(codex_path: str) -> bool:
@@ -556,24 +595,22 @@ def _codex_cli_supports_update(codex_path: str) -> bool:
 
 
 def _codex_upgrade_command(existing_path: str) -> tuple[list[str], dict[str, str] | None] | dict:
-    if _is_homebrew_codex_install(existing_path):
-        brew_path = resolve_cli_path("brew")
-        if not brew_path:
-            return {
-                "ok": False,
-                "message": "Codex appears to be installed via Homebrew, but brew was not found. Please upgrade Codex manually.",
-                "output": None,
-            }
-        if _homebrew_codex_target(brew_path, existing_path) is None:
+    brew_path = resolve_cli_path("brew")
+    npm_install = _is_npm_codex_install(existing_path)
+    if brew_path:
+        brew_state, _, _ = _homebrew_codex_probe(brew_path)
+        homebrew_target = _homebrew_codex_target(brew_path, existing_path)
+        if homebrew_target is not None:
+            return [brew_path, "upgrade", "--cask", "codex"], None
+        if not npm_install and _codex_path_is_ambiguous_homebrew_target(existing_path, brew_state):
             return {
                 "ok": False,
                 "code": "cli_target_unknown",
                 "message": "Codex Homebrew installation target could not be attributed to the selected executable; no upgrade was started.",
                 "output": None,
             }
-        return [brew_path, "upgrade", "--cask", "codex"], None
 
-    if _is_npm_codex_install(existing_path):
+    if npm_install:
         npm_path = resolve_cli_path("npm")
         if not npm_path:
             return {
@@ -5919,8 +5956,11 @@ def _cli_detection_target(binary: str, backend: str | None) -> tuple[str | None,
     if path is None and backend is not None and not explicit:
         # Discovery normally skips non-executable files. If no runnable candidate
         # resolved, retain a present candidate so its failed launch is 'broken'.
-        candidates = _candidate_cli_paths(binary, include_npm_global=True)
-        candidates += [Path(entry or os.curdir) / binary for entry in os.environ.get("PATH", "").split(os.pathsep)]
+        candidates = _ordered_cli_candidates(
+            binary,
+            include_npm_global=True,
+            candidate_paths=_candidate_cli_paths,
+        )
         path = next((str(p.absolute()) for p in candidates if p.is_file()), None)
     return backend, path
 
@@ -8146,6 +8186,14 @@ def _install_agent(name: str) -> dict:
         return _repair_broken_cli(name, health["path"] or configured_path, _truncate_output)
     existing_path = health["path"]
     if existing_path:
+        readback_validator = None
+        if name == "codex":
+            brew_path = resolve_cli_path("brew")
+            homebrew_target = _homebrew_codex_target(brew_path, existing_path) if brew_path else None
+            if homebrew_target is not None:
+                readback_validator = lambda path, brew=brew_path, expected=homebrew_target: (
+                    path == expected and _homebrew_codex_target(brew, path) == expected
+                )
         if name == "claude":
             cmd = [existing_path, "update"]
             command_env = None
@@ -8174,6 +8222,7 @@ def _install_agent(name: str) -> dict:
                 env=command_env,
                 expected_path=declared_target or existing_path,
                 preserve_selected_path=existing_path if declared_target else None,
+                readback_validator=readback_validator,
             )
 
     # A damaged private toolchain must fail closed. Falling through here would
@@ -8405,6 +8454,7 @@ def _run_install_command(
     resolve_from: str | None = None,
     expected_path: str | None = None,
     preserve_selected_path: str | None = None,
+    readback_validator: Callable[[str], bool] | None = None,
 ) -> dict:
     """Shared subprocess + post-success bookkeeping for install / upgrade.
 
@@ -8472,6 +8522,20 @@ def _run_install_command(
                     "output": None,
                     "detection": health,
                 }
+            if readback_validator is not None:
+                try:
+                    identity_ok = bool(readback_validator(installed_path))
+                except Exception:
+                    identity_ok = False
+                if not identity_ok:
+                    return {
+                        "ok": False,
+                        "code": "cli_readback_failed",
+                        "message": backend_t("cliHealth.installReadbackFailed", _configured_backend_language()),
+                        "path": installed_path,
+                        "output": None,
+                        "detection": health,
+                    }
             logger.info("Agent %s %s succeeded at %s", name, mode, installed_path)
 
             # Persist real Agent backend CLI paths to V2Config so the next

@@ -2538,13 +2538,17 @@ def test_install_codex_npm_install_runs_npm_upgrade(monkeypatch, tmp_path):
 
 @pytest.mark.usefixtures("healthy_cli_observation")
 def test_install_codex_homebrew_install_runs_brew_upgrade(monkeypatch, tmp_path):
-    brew_path = tmp_path / "homebrew" / "bin" / "brew"
+    prefix = tmp_path / "homebrew"
+    brew_path = prefix / "bin" / "brew"
     brew_path.parent.mkdir(parents=True)
     brew_path.write_text("#!/bin/sh\n")
     brew_path.chmod(0o755)
-    codex_path = tmp_path / "homebrew" / "bin" / "codex"
-    codex_path.write_text("#!/bin/sh\n")
-    codex_path.chmod(0o755)
+    target = prefix / "Caskroom" / "codex" / "1.2.3" / "libexec" / "codex"
+    target.parent.mkdir(parents=True)
+    target.write_text("#!/bin/sh\n")
+    target.chmod(0o755)
+    codex_path = prefix / "bin" / "codex"
+    codex_path.symlink_to(target)
     calls = []
 
     class CompletedProcess:
@@ -2555,12 +2559,10 @@ def test_install_codex_homebrew_install_runs_brew_upgrade(monkeypatch, tmp_path)
 
     def fake_run(cmd, **kwargs):
         calls.append((cmd, kwargs.get("env", {})))
-        if cmd == [str(brew_path), "list", "--cask", "codex"]:
-            return CompletedProcess()
         if cmd == [str(brew_path), "--prefix"]:
-            return CompletedProcess(stdout=f"{tmp_path / 'homebrew'}\n")
-        if cmd == [str(brew_path), "--prefix", "--cask"]:
-            return CompletedProcess(stdout=f"{tmp_path / 'homebrew' / 'Caskroom'}\n")
+            return CompletedProcess(stdout=f"{prefix}\n")
+        if cmd == [str(brew_path), "info", "--cask", "--json=v2", "--installed", "codex"]:
+            return CompletedProcess(stdout=json.dumps({"casks": [{"token": "codex", "installed": "1.2.3"}]}))
         if cmd == [str(brew_path), "upgrade", "--cask", "codex"]:
             return CompletedProcess(stdout="upgraded")
         raise AssertionError(f"unexpected command: {cmd}")
@@ -2591,10 +2593,15 @@ def test_install_codex_prefers_homebrew_when_npm_shares_prefix(monkeypatch, tmp_
     brew_path = prefix / "bin" / "brew"
     npm_path = prefix / "bin" / "npm"
     codex_path = prefix / "bin" / "codex"
-    for path in (brew_path, npm_path, codex_path):
+    for path in (brew_path, npm_path):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("#!/bin/sh\n")
         path.chmod(0o755)
+    target = prefix / "Caskroom" / "codex" / "1.2.3" / "libexec" / "codex"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("#!/bin/sh\n")
+    target.chmod(0o755)
+    codex_path.symlink_to(target)
     calls = []
 
     class CompletedProcess:
@@ -2605,12 +2612,10 @@ def test_install_codex_prefers_homebrew_when_npm_shares_prefix(monkeypatch, tmp_
 
     def fake_run(cmd, **kwargs):
         calls.append((cmd, kwargs.get("env", {})))
-        if cmd == [str(brew_path), "list", "--cask", "codex"]:
-            return CompletedProcess()
         if cmd == [str(brew_path), "--prefix"]:
             return CompletedProcess(stdout=f"{prefix}\n")
-        if cmd == [str(brew_path), "--prefix", "--cask"]:
-            return CompletedProcess(stdout=f"{prefix / 'Caskroom'}\n")
+        if cmd == [str(brew_path), "info", "--cask", "--json=v2", "--installed", "codex"]:
+            return CompletedProcess(stdout=json.dumps({"casks": [{"token": "codex", "installed": "1.2.3"}]}))
         if cmd == [str(npm_path), "config", "get", "prefix"]:
             return CompletedProcess(stdout=f"{prefix}\n")
         if cmd == [str(brew_path), "upgrade", "--cask", "codex"]:

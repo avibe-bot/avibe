@@ -550,44 +550,143 @@ def test_windows_npm_prefix_query_failure_fails_closed(tmp_path, monkeypatch):
     assert api._declared_codex_npm_target(None) is None
 
 
-def test_homebrew_symlinked_stable_bin_target_is_attributable(tmp_path, monkeypatch):
-    prefix = tmp_path / "homebrew"
-    brew = executable(prefix / "bin/brew", "#!/bin/sh\n")
-    cell = prefix / "Caskroom/codex/1.2.3"
-    target = executable(cell / "codex", 'print("codex-cli 0.162.1")\n')
-    launcher = prefix / "bin/codex"
-    launcher.symlink_to(target)
+def test_cli_discovery_preserves_path_before_npm_for_presence_and_run(tmp_path, monkeypatch):
+    path_dir = tmp_path / "path-bin"
+    npm_dir = tmp_path / "npm-bin"
+    path_cli = path_dir / "codex"
+    npm_cli = npm_dir / "codex"
+    path_dir.mkdir()
+    npm_dir.mkdir()
+    path_cli.write_text("#!/bin/sh\n", encoding="utf-8")
+    npm_cli.write_text("#!/bin/sh\n", encoding="utf-8")
+    path_cli.chmod(0o644)
+    npm_cli.chmod(0o644)
+    monkeypatch.setenv("PATH", str(path_dir))
 
+    def candidates(binary, *, include_npm_global=True):
+        assert binary == "codex"
+        return [npm_cli] if include_npm_global else []
+
+    monkeypatch.setattr(api, "_candidate_cli_paths", candidates)
+    assert api.resolve_cli_path("codex") is None
+    backend, detected = api._cli_detection_target("codex", "codex")
+    assert backend == "codex" and detected == str(path_cli.absolute())
+
+
+def _fake_homebrew_cask_run(brew: Path, prefix: Path, *, version: str = "1.2.3", query_ok: bool = True):
     def fake_run(cmd, **_kwargs):
         if cmd == [str(brew), "--prefix"]:
             return SimpleNamespace(returncode=0, stdout=str(prefix) + "\n", stderr="")
-        if cmd == [str(brew), "--prefix", "--cask"]:
-            return SimpleNamespace(returncode=0, stdout=str(prefix / "Caskroom") + "\n", stderr="")
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if cmd == [str(brew), "info", "--cask", "--json=v2", "--installed", "codex"]:
+            if not query_ok:
+                return SimpleNamespace(returncode=1, stdout="", stderr="metadata unavailable")
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"casks": [{"token": "codex", "installed": version}]}),
+                stderr="",
+            )
+        raise AssertionError(f"unexpected Homebrew command: {cmd!r}")
 
-    monkeypatch.setattr(api.subprocess, "run", fake_run)
+    return fake_run
+
+
+def test_homebrew_symlinked_stable_bin_target_is_attributable(tmp_path, monkeypatch):
+    prefix = tmp_path / "homebrew"
+    brew = executable(prefix / "bin/brew", "#!/bin/sh\n")
+    payload = prefix / "Caskroom/codex/1.2.3/libexec"
+    target = executable(payload / "codex", 'print("codex-cli 0.162.1")\n')
+    launcher = prefix / "bin/codex"
+    launcher.symlink_to(target)
+
+    monkeypatch.setattr(api.subprocess, "run", _fake_homebrew_cask_run(brew, prefix))
     assert api._homebrew_codex_target(str(brew), str(launcher)) == str(launcher)
-    assert api._homebrew_codex_target(str(brew), str(tmp_path / "other/bin/codex")) is None
+
+
+def test_homebrew_codex_attribution_fails_closed_for_ambiguous_targets(tmp_path, monkeypatch):
+    prefix = tmp_path / "homebrew"
+    brew = executable(prefix / "bin/brew", "#!/bin/sh\n")
+    payload = prefix / "Caskroom/codex/1.2.3/libexec"
+    target = executable(payload / "codex", 'print("codex-cli 0.162.1")\n')
+    outside = executable(tmp_path / "outside/codex", 'print("codex-cli 0.162.1")\n')
+    regular = prefix / "bin/codex"
+    regular.parent.mkdir(parents=True, exist_ok=True)
+    regular.write_text("#!/bin/sh\n", encoding="utf-8")
+    regular.chmod(0o755)
+    other_prefix = tmp_path / "other-homebrew"
+    other_target = executable(other_prefix / "Caskroom/codex/1.2.3/libexec/codex", 'print("codex-cli 0.162.1")\n')
+    other_launcher = other_prefix / "bin/codex"
+    other_launcher.parent.mkdir(parents=True, exist_ok=True)
+    other_launcher.symlink_to(other_target)
+    nested = prefix / "bin/nested/codex"
+    nested.parent.mkdir(parents=True, exist_ok=True)
+    nested.symlink_to(target)
+    unrelated_target = executable(prefix / "Caskroom/other/1.2.3/libexec/codex", 'print("codex-cli 0.162.1")\n')
+
+    monkeypatch.setattr(api.subprocess, "run", _fake_homebrew_cask_run(brew, prefix))
+    assert api._homebrew_codex_target(str(brew), str(regular)) is None
+    assert api._homebrew_codex_target(str(brew), str(other_launcher)) is None
+    assert api._homebrew_codex_target(str(brew), str(nested)) is None
+    regular.unlink()
+    regular.symlink_to(outside)
+    assert api._homebrew_codex_target(str(brew), str(regular)) is None
+    regular.unlink()
+    regular.symlink_to(unrelated_target)
+    assert api._homebrew_codex_target(str(brew), str(regular)) is None
+    monkeypatch.setattr(api, "resolve_cli_path", lambda name, **_kwargs: str(brew) if name == "brew" else None)
+    monkeypatch.setattr(api, "_is_npm_codex_install", lambda _path: False)
+    monkeypatch.setattr(api, "_codex_cli_supports_update", lambda _path: pytest.fail("ambiguous target must not self-update"))
+    result = api._codex_upgrade_command(str(regular))
+    assert result["code"] == "cli_target_unknown"
+
+
+def test_homebrew_codex_metadata_query_failure_refuses_upgrade(tmp_path, monkeypatch):
+    prefix = tmp_path / "homebrew"
+    brew = executable(prefix / "bin/brew", "#!/bin/sh\n")
+    launcher = executable(prefix / "bin/codex", 'print("codex-cli 0.162.1")\n')
+    monkeypatch.setattr(api.subprocess, "run", _fake_homebrew_cask_run(brew, prefix, query_ok=False))
+    monkeypatch.setattr(api, "resolve_cli_path", lambda name, **_kwargs: str(brew) if name == "brew" else None)
+    monkeypatch.setattr(api, "_is_npm_codex_install", lambda _path: False)
+    monkeypatch.setattr(api, "_codex_cli_supports_update", lambda _path: pytest.fail("ambiguous target must not self-update"))
+    result = api._codex_upgrade_command(str(launcher))
+    assert result["code"] == "cli_target_unknown"
 
 
 def test_codex_homebrew_upgrade_plan_binds_the_stable_launcher(tmp_path, monkeypatch):
     prefix = tmp_path / "homebrew"
     brew = executable(prefix / "bin/brew", "#!/bin/sh\n")
-    target = executable(prefix / "Cellar/codex/1.2.3/codex", 'print("codex-cli 0.162.1")\n')
+    target = executable(prefix / "Caskroom/codex/1.2.3/libexec/codex", 'print("codex-cli 0.162.1")\n')
     launcher = prefix / "bin/codex"
     launcher.symlink_to(target)
 
-    def fake_run(cmd, **_kwargs):
-        if cmd == [str(brew), "--prefix"]:
-            return SimpleNamespace(returncode=0, stdout=str(prefix) + "\n", stderr="")
-        if cmd == [str(brew), "--prefix", "--cask"]:
-            return SimpleNamespace(returncode=0, stdout=str(prefix / "Caskroom") + "\n", stderr="")
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(api.subprocess, "run", fake_run)
+    monkeypatch.setattr(api.subprocess, "run", _fake_homebrew_cask_run(brew, prefix))
     monkeypatch.setattr(api, "resolve_cli_path", lambda name, **_kwargs: str(brew) if name == "brew" else None)
-    monkeypatch.setattr(api, "_is_homebrew_codex_install", lambda _path: True)
+    monkeypatch.setattr(api, "_is_npm_codex_install", lambda _path: False)
     plan = api._codex_upgrade_command(str(launcher))
     assert plan == ([str(brew), "upgrade", "--cask", "codex"], None)
-    plan = api._codex_upgrade_command(str(tmp_path / "other/bin/codex"))
-    assert plan["code"] == "cli_target_unknown"
+
+
+def test_codex_homebrew_upgrade_readback_rechecks_identity(tmp_path, monkeypatch):
+    prefix = tmp_path / "homebrew"
+    brew = executable(prefix / "bin/brew", "#!/bin/sh\n")
+    payload = prefix / "Caskroom/codex/1.2.3/libexec"
+    target = executable(payload / "codex", 'print("codex-cli 0.162.1")\n')
+    escape = executable(tmp_path / "escape/codex", 'print("codex-cli 0.162.1")\n')
+    launcher = prefix / "bin/codex"
+    launcher.symlink_to(target)
+    installer = executable(
+        tmp_path / "upgrade",
+        f'from pathlib import Path\np=Path({str(launcher)!r}); p.unlink(); p.symlink_to({str(escape)!r})\n',
+    )
+    monkeypatch.setattr(api.subprocess, "run", _fake_homebrew_cask_run(brew, prefix))
+    monkeypatch.setattr(api, "detect_cli", lambda _binary, _backend: api.CliHealth(True, str(launcher), "ok").payload())
+    persisted = []
+    monkeypatch.setattr(api, "_persist_agent_cli_path", lambda _name, path: persisted.append(path))
+    result = api._run_install_command(
+        "codex",
+        [str(installer)],
+        lambda value: value,
+        mode="upgrade",
+        expected_path=str(launcher),
+        readback_validator=lambda path: api._homebrew_codex_target(str(brew), path) == str(launcher),
+    )
+    assert not result["ok"] and result["code"] == "cli_readback_failed" and persisted == []
