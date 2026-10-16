@@ -1,9 +1,10 @@
 # Avibe-owned CPA v8.0.29 compatibility patches
 
 This directory records the source patches for Avibe's planned
-`model-hub-engine-v8.0.29-1` build. Apply the five patches in the order listed
-in `docs/plans/model-hub-cpa-v8.0.29.md`; adoption will record that order in the
-runtime manifest's `build.patches`. The packaged manifest is unchanged.
+`model-hub-engine-v8.0.29-1` build. Apply the five patches in the order below,
+matching `docs/plans/model-hub-cpa-v8.0.29.md`. Candidate manifests must record
+these ordered inputs in `build.patches`; this evidence is not deferred until
+adoption. The packaged manifest is unchanged.
 The config-write/reload atomicity fix tracked in issue #2686 is planned for
 3.2.2 but is not implemented here; its 3.2.1-stable-tag implementation hold,
 Go regressions and upstream handoff are recorded in the upgrade plan.
@@ -13,6 +14,20 @@ Base:
 - Repository: `router-for-me/CLIProxyAPI`
 - Release: `v8.0.29`
 - Source commit: `5fc580b1d72d87a7bcfe5cfb6f479c1aea5625b3`
+
+## Ordered patch checksums
+
+These SHA-256 digests pin the raw patch-file bytes in application order. Verify
+both the order and digests against the candidate manifest's `build.patches`
+before building or consuming candidate artifacts.
+
+| Order | Patch file | SHA-256 |
+| --- | --- | --- |
+| 1 | `openai-compat-native-token-field.patch` | `15494e9100baad5a0f3c517ce846e59fab0152d667807df4b09c7dc17b3b033f` |
+| 2 | `oauth-callback-forwarder-loopback.patch` | `3a7d7f0c99cb0260a80723dc0aeaa86eb750fe89484f264fc0a8cf403b1a79d1` |
+| 3 | `antigravity-static-catalog-until-probe.patch` | `34c31c00ecd0e1844c79cf891223d7aeb5e4befb1e438387a7cfbbf37ed4bdef` |
+| 4 | `codex-utls-h2-ping-health-check.patch` | `af49da073bdd31e381e1b3f2a90f3cab9815858c8c7c50dbd74344103a89464d` |
+| 5 | `fallback-transport-h2-ping-health-check.patch` | `bae8cb5cff3f043b10c950d9ff71c768d1e3e877a21ebb543889bf2f00241e4f` |
 
 Carried over from `model-hub-cpa-v8.0.23/`: patches 1 to 5. Patches 1 to 4 rebase
 unchanged (only `index` lines and hunk offsets differ; patch 1 is byte-identical).

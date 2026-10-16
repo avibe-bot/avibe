@@ -116,7 +116,8 @@ E2E, rather than clearing every exploratory trial item before adoption.
   sidecars and manifest. Candidate manifest SHA-256:
   `b53c236ce02c3fcb0218824153df4bb3d1927246a3b889752c07a633857d9f2b`.
   This is local build/verification evidence, not publication or six-platform
-  runtime acceptance. The packaged manifest remains unchanged.
+  runtime acceptance. The ordered patch-file SHA-256 inputs are recorded in
+  `patches/model-hub-cpa-v8.0.29/README.md`. The packaged manifest remains unchanged.
 - After repairing the identity assertion, the single local Linux Arm64
   installed-service `MH-SERVICE-001` run passed in **46.36 seconds** with the
   exact v8.0.29 candidate. It covered install/version/health, Source creation,
@@ -124,8 +125,12 @@ E2E, rather than clearing every exploratory trial item before adoption.
   discovered model serving another turn, engine survival after a hard service
   kill, restart/orphan reaping, and clean stop. The temporary target was deleted;
   the existing local master stayed healthy with its PID unchanged. The Source
-  update/version-check extension and its catalog edit remain uncommitted in the
-  owner worktree; the identity repair does not silently include those prior edits.
+  update/version-check extension and its catalog entry are now committed in this
+  PR alongside the identity repair. This records the already-executed acceptance
+  scope; it does not add another service E2E. The 2026-10-17 rebase retained
+  master's #2751 change to require Bearer authentication throughout the
+  Anthropic relay fixture, including Source verification. The historical pass
+  predates that fixture change and is not an exact-rebased-head service E2E.
 - The former orphan assertion was a false negative: the same live PID and
   identity marker survived while psutil's reported `create_time` shifted by one
   second. Engine checks now compare the inherited `AVIBE_PROCESS_IDENTITY`
