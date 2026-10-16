@@ -8398,3 +8398,36 @@ def test_startup_recovery_reads_growing_tables_only_through_index_seeks(tmp_path
                     scans.append(f"{detail}  <-  {' '.join(statement.split())}")
     assert statements, "recovery issued no statements, so this test proves nothing"
     assert not scans, "startup recovery scans a growing table:\n" + "\n".join(scans)
+
+
+@pytest.mark.anyio
+async def test_a_turn_end_after_its_terminal_write_takes_no_writer(managers) -> None:
+    """#2706: a Turn end reaches SQLite's writer from several owners on the controller loop: the evidence-carrying
+    terminal write, then the runner's release, the post-terminal resume and the queue drain. Once the Turn is
+    terminal and nothing is queued, the later three change nothing, and they answer from a read instead of waiting for
+    the writer another process may hold."""
+
+    from sqlalchemy import event
+
+    manager, _other, engine, _engine_b, _starts = managers
+    turn_id, context = await _activate(manager, text="request")
+    manager.on_terminal_result(context, is_error=False)
+    manager.on_terminal_delivery_complete(context)
+    with engine.connect() as conn:
+        assert delivery_store.get_turn(conn, turn_id)["state"] == "terminal"
+    writers: list[str] = []
+
+    def capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+        if statement.lstrip().upper().startswith(("BEGIN IMMEDIATE", "UPDATE AGENT_SESSIONS SET ID = ID")):
+            writers.append(statement)
+
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        released = manager._terminalize_durable_turn(turn_id, "completed", evidence_kind="runner_release")
+        await manager._resume_post_terminal("ses_fsm")
+        drained = await manager.drain_delivery_queue("ses_fsm")
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+
+    assert released["changed"] is False and drained is False
+    assert writers == [], f"a Turn end took SQLite's writer {len(writers)} more time(s) to change nothing"
