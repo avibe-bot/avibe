@@ -33,8 +33,6 @@ COMPUTER_USE_SCHEMA_VERSION = 1
 COMPUTER_USE_STATE_DIR_ENV = "AVIBE_COMPUTER_USE_STATE_DIR"
 COMPUTER_USE_STATE_FILE = "computer-use.json"
 COMPUTER_USE_LOCK_FILE = "computer-use.lock"
-COMPUTER_USE_LEASE_FILE = "computer-lease.json"
-COMPUTER_USE_LEASE_LOCK_FILE = "computer-lease.lock"
 COMPUTER_USE_TOOL_SNAPSHOT_SHA256 = (
     "edf496838092b2fa21807724b30308c4e9a90a404c9a9b7783a299b71e427144"
 )
@@ -214,14 +212,6 @@ def computer_use_state_path(**kwargs: Any) -> Path:
 
 def computer_use_lock_path(**kwargs: Any) -> Path:
     return desktop_computer_use_dir(**kwargs) / COMPUTER_USE_LOCK_FILE
-
-
-def computer_use_lease_path(**kwargs: Any) -> Path:
-    return desktop_computer_use_dir(**kwargs) / COMPUTER_USE_LEASE_FILE
-
-
-def computer_use_lease_lock_path(**kwargs: Any) -> Path:
-    return desktop_computer_use_dir(**kwargs) / COMPUTER_USE_LEASE_LOCK_FILE
 
 
 def _required_bool(payload: Mapping[str, Any], key: str) -> bool:

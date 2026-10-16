@@ -21,7 +21,7 @@ vibe computer key --arg key=return --arg pid=123 --arg window_id=456
 vibe computer hotkey --arg keys='["cmd","c"]' --arg pid=123 --arg window_id=456
 vibe computer scroll --arg direction=down --arg pid=123 --arg window_id=456
 vibe computer drag --arg from_x=10 --arg from_y=10 --arg to_x=100 --arg to_y=100 --arg pid=123 --arg window_id=456
-vibe computer set-value --arg pid=123 --arg value=enabled --arg element_token=el_1
+vibe computer set-value --arg pid=123 --arg window_id=456 --arg value=enabled --arg element_token=el_1
 vibe computer clipboard read --arg include_text=true
 vibe computer clipboard write --arg text="copied text"
 vibe computer launch --arg bundle_id=com.example.App
@@ -85,6 +85,10 @@ vibe computer click --arg pid=123 --arg window_id=456 --arg element_token=el_1
 vibe computer click --arg pid=123 --arg window_id=456 --arg element_token=el_2
 vibe computer observe window --arg pid=123 --arg window_id=456
 ```
+
+Several Avibe Sessions can observe and mutate different windows in parallel.
+Mutating calls briefly lock only their target; a call that cannot acquire its
+target within the bounded wait returns `target_busy`.
 
 Each call still passes the Controller's safety checks. A later observation
 replaces the earlier element tokens. At the start of every later Agent Turn,
@@ -150,9 +154,11 @@ retrying automatically:
 - `starting`: the desktop driver is still starting.
 - `error`: the desktop application reported a terminal setup or driver error.
 - `unavailable`: the state file, shell, or driver endpoint is unavailable.
-- `desktop_busy`: another Avibe Session holds the desktop lease.
+- `target_busy`: another Computer Use operation currently holds the requested
+  target lock.
 - `observe_first`: the exact target has not been observed in the current
-  Session lease epoch.
+  Session snapshot, or another Session changed that window after the
+  observation.
 - `foreground_forbidden` or `focus_shortcut_forbidden`: the safety policy
   rejected the requested input.
 

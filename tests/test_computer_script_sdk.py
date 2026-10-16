@@ -919,14 +919,13 @@ def test_sdk_controller_error_ambiguity_table(tmp_path: Path) -> None:
         "computer_script_descriptor_required",
         "stale_app_handle",
         "stale_window_handle",
-        "desktop_busy",
+        "target_busy",
         "platform_unsupported",
         "foreground_forbidden",
         "focus_shortcut_forbidden",
         "foreground_consent_required",
         "window_target_required",
         "observe_first",
-        "desktop_lease_lost",
         "session_unavailable",
     ]
     post_send_codes = [
@@ -1128,7 +1127,7 @@ def test_sdk_maps_stable_controller_codes_to_typed_errors(tmp_path: Path) -> Non
     payload, _server, _requests = _run_node_script(
         tmp_path,
         """
-import { computer, DesktopBusy } from "@avibe/computer";
+import { computer, TargetBusy } from "@avibe/computer";
 
 export default async () => {
   const mail = await computer.app({ bundleId: "com.apple.mail" });
@@ -1138,7 +1137,39 @@ export default async () => {
       .element({ role: "button", label: "Send", index: 0 })
       .click();
   } catch (error) {
-    return { typed: error instanceof DesktopBusy, code: error.code };
+    return { typed: error instanceof TargetBusy, code: error.code };
+  }
+  throw new Error("target_busy was not raised");
+};
+""",
+        click_error="target_busy",
+    )
+
+    assert payload == {
+        "ok": True,
+        "result": {"typed": True, "code": "target_busy"},
+    }
+
+
+def test_sdk_keeps_the_released_desktop_busy_alias(tmp_path: Path) -> None:
+    payload, _server, _requests = _run_node_script(
+        tmp_path,
+        """
+import { computer, DesktopBusy, TargetBusy } from "@avibe/computer";
+
+export default async () => {
+  const mail = await computer.app({ bundleId: "com.apple.mail" });
+  const window = await mail.window({ labelContains: "New Message" });
+  try {
+    await window
+      .element({ role: "button", label: "Send", index: 0 })
+      .click();
+  } catch (error) {
+    return {
+      desktopAlias: error instanceof DesktopBusy,
+      targetType: error instanceof TargetBusy,
+      code: error.code,
+    };
   }
   throw new Error("desktop_busy was not raised");
 };
@@ -1148,7 +1179,11 @@ export default async () => {
 
     assert payload == {
         "ok": True,
-        "result": {"typed": True, "code": "desktop_busy"},
+        "result": {
+            "desktopAlias": True,
+            "targetType": True,
+            "code": "target_busy",
+        },
     }
 
 

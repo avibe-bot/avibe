@@ -17,7 +17,6 @@ import logging
 import os
 from pathlib import Path
 import sys
-import time
 from typing import Any, Awaitable, Callable, Mapping, Protocol
 
 # Managed MCP launches this file as an absolute script with Python isolated
@@ -29,11 +28,8 @@ if __package__ in {None, ""}:
     if str(_PACKAGE_ROOT) not in sys.path:
         sys.path.insert(0, str(_PACKAGE_ROOT))
 
-from config.atomic_io import write_atomic
 from core.agent_core.ai.errors import redact_provider_text
 from core.computer_use import (
-    COMPUTER_USE_LEASE_FILE,
-    COMPUTER_USE_LEASE_LOCK_FILE,
     COMPUTER_USE_TOOL_SNAPSHOT_SHA256,
     COMPUTER_USE_TOOL_NAMES,
     ComputerUseState,
@@ -49,12 +45,13 @@ from core.computer_script_handles import (
     validate_handle_is_current,
 )
 
-_LEASE_TTL_SECONDS = 60.0
-_LEASE_HEARTBEAT_SECONDS = 10.0
+_TARGET_LOCK_WAIT_SECONDS = 5.0
+_LEGACY_LEASE_FILE = "computer-lease.json"
+_LEGACY_LEASE_LOCK_FILE = "computer-lease.lock"
 _UPSTREAM_RESPONSE_LIMIT = 128 * 1024 * 1024
 # Cua permits individual accessibility calls to run for 120 seconds. Keep the
 # transport deadline above that documented bound while still preventing a dead
-# reader from holding the desktop lease forever.
+# reader from holding a target lock forever.
 _UPSTREAM_REQUEST_TIMEOUT_SECONDS = 180.0
 _UPSTREAM_DETAIL_LIMIT = 2048
 _UPSTREAM_DIAGNOSTIC_SCAN_LIMIT = 8192
@@ -85,6 +82,7 @@ _INPUT_TOOLS = frozenset(
         "set_value",
     }
 )
+_WINDOW_MUTATION_TOOLS = _INPUT_TOOLS | {"set_window_frame"}
 _OBSERVE_TOOLS = frozenset({"get_window_state", "zoom"})
 _ALLOWED_TARGET_KEYS = frozenset({"kind", "pid", "window_id"})
 _UPSTREAM_NOT_DISPATCHED_CODES = frozenset({"foreground_consent_required"})
@@ -110,10 +108,6 @@ class _DaemonGenerationChanged(RuntimeError):
     """The desktop state changed before this call could be admitted."""
 
 
-class _LeaseLost(RuntimeError):
-    """The caller no longer owns the desktop lease."""
-
-
 class Upstream(Protocol):
     serial: int
 
@@ -125,232 +119,6 @@ class Upstream(Protocol):
     async def notify(self, method: str, params: Mapping[str, Any]) -> None: ...
 
     async def close(self) -> None: ...
-
-
-@dataclass(frozen=True)
-class Lease:
-    holder: str
-    refreshed_at: float
-    epoch: int
-    daemon_instance_id: str
-    daemon_generation: int
-
-    @property
-    def daemon_key(self) -> tuple[str, int]:
-        return (self.daemon_instance_id, self.daemon_generation)
-
-
-@dataclass(frozen=True)
-class LeaseAcquisition:
-    lease: Lease
-    newly_claimed: bool
-
-
-class DesktopLeaseManager:
-    """Cross-process desktop lease protected by an operating-system lock."""
-
-    def __init__(
-        self,
-        directory: Path,
-        *,
-        now: Callable[[], float] = time.monotonic,
-        ttl_seconds: float = _LEASE_TTL_SECONDS,
-    ) -> None:
-        self._record_path = directory / COMPUTER_USE_LEASE_FILE
-        self._lock_path = directory / COMPUTER_USE_LEASE_LOCK_FILE
-        self._now = now
-        self._ttl_seconds = ttl_seconds
-
-    @staticmethod
-    def _parse(payload: Any) -> Lease | None:
-        if not isinstance(payload, dict):
-            return None
-        try:
-            holder = payload["holder"]
-            refreshed_at = payload["refreshed_at"]
-            epoch = payload["epoch"]
-            daemon_instance_id = payload["daemon_instance_id"]
-            daemon_generation = payload["daemon_generation"]
-        except KeyError:
-            return None
-        if (
-            not isinstance(holder, str)
-            or isinstance(refreshed_at, bool)
-            or not isinstance(refreshed_at, (int, float))
-            or isinstance(epoch, bool)
-            or not isinstance(epoch, int)
-            or epoch < 1
-            or not isinstance(daemon_instance_id, str)
-            or not daemon_instance_id
-            or isinstance(daemon_generation, bool)
-            or not isinstance(daemon_generation, int)
-            or daemon_generation < 0
-        ):
-            return None
-        return Lease(
-            holder=holder,
-            refreshed_at=float(refreshed_at),
-            epoch=epoch,
-            daemon_instance_id=daemon_instance_id,
-            daemon_generation=daemon_generation,
-        )
-
-    def _read(self) -> Lease | None:
-        try:
-            payload = json.loads(self._record_path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
-            return None
-        return self._parse(payload)
-
-    def _write(self, lease: Lease) -> None:
-        self._record_path.parent.mkdir(parents=True, exist_ok=True)
-        write_atomic(
-            self._record_path,
-            (
-                json.dumps(
-                    {
-                        "holder": lease.holder,
-                        "refreshed_at": lease.refreshed_at,
-                        "epoch": lease.epoch,
-                        "daemon_instance_id": lease.daemon_instance_id,
-                        "daemon_generation": lease.daemon_generation,
-                    },
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )
-                + "\n"
-            ).encode("utf-8"),
-        )
-
-    def _under_lock(self, operation: Callable[[], Any]) -> Any:
-        if os.name == "nt":
-            raise ComputerServerError(
-                "platform_unsupported",
-                "Computer use is available on macOS in Phase 1.",
-            )
-        import fcntl
-
-        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._lock_path.open("a+b") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                return operation()
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
-    def acquire(
-        self,
-        session: str,
-        daemon_key: tuple[str, int],
-        current_daemon_key: Callable[[], tuple[str, int] | None],
-    ) -> LeaseAcquisition:
-        def operation() -> LeaseAcquisition:
-            if current_daemon_key() != daemon_key:
-                raise _DaemonGenerationChanged(
-                    "computer-use daemon generation changed during lease admission"
-                )
-            previous = self._read()
-            now = self._now()
-            valid = (
-                previous is not None
-                and previous.daemon_key == daemon_key
-                and now - previous.refreshed_at < self._ttl_seconds
-            )
-            if valid and previous.holder != session:
-                if previous.holder:
-                    raise ComputerServerError(
-                        "desktop_busy",
-                        "Desktop computer use is held by another Avibe Session.",
-                    )
-            if valid and previous.holder == session:
-                epoch = previous.epoch
-            else:
-                epoch = (previous.epoch if previous is not None else 0) + 1
-            newly_claimed = not (
-                valid and previous is not None and previous.holder == session
-            )
-            lease = Lease(
-                holder=session,
-                refreshed_at=now,
-                epoch=epoch,
-                daemon_instance_id=daemon_key[0],
-                daemon_generation=daemon_key[1],
-            )
-            self._write(lease)
-            return LeaseAcquisition(
-                lease=lease,
-                newly_claimed=newly_claimed,
-            )
-
-        return self._under_lock(operation)
-
-    def refresh(self, lease: Lease) -> bool:
-        def operation() -> bool:
-            current = self._read()
-            if (
-                current is None
-                or current.holder != lease.holder
-                or current.epoch != lease.epoch
-                or current.daemon_key != lease.daemon_key
-            ):
-                return False
-            self._write(
-                Lease(
-                    holder=current.holder,
-                    refreshed_at=self._now(),
-                    epoch=current.epoch,
-                    daemon_instance_id=current.daemon_instance_id,
-                    daemon_generation=current.daemon_generation,
-                )
-            )
-            return True
-
-        return bool(self._under_lock(operation))
-
-    def release(self, lease: Lease) -> None:
-        def operation() -> None:
-            current = self._read()
-            if (
-                current is None
-                or current.holder != lease.holder
-                or current.epoch != lease.epoch
-                or current.daemon_key != lease.daemon_key
-            ):
-                return
-            self._write(
-                Lease(
-                    holder="",
-                    refreshed_at=self._now(),
-                    epoch=current.epoch,
-                    daemon_instance_id=current.daemon_instance_id,
-                    daemon_generation=current.daemon_generation,
-                )
-            )
-
-        self._under_lock(operation)
-
-    def release_holder(self, holder: str) -> None:
-        """Release a current holder during explicit Avibe Session retirement."""
-
-        normalized = str(holder or "").strip()
-        if not normalized:
-            return
-
-        def operation() -> None:
-            current = self._read()
-            if current is None or current.holder != normalized:
-                return
-            self._write(
-                Lease(
-                    holder="",
-                    refreshed_at=self._now(),
-                    epoch=current.epoch,
-                    daemon_instance_id=current.daemon_instance_id,
-                    daemon_generation=current.daemon_generation,
-                )
-            )
-
-        self._under_lock(operation)
 
 
 class JsonRpcUpstream:
@@ -595,8 +363,7 @@ class JsonRpcUpstream:
 class _SessionState:
     active_proxy_serial: int | None = None
     active_daemon_key: tuple[str, int] | None = None
-    last_epoch: int | None = None
-    observed_windows: set[tuple[int | None, int]] = field(default_factory=set)
+    observed_windows: dict[tuple[int, int], int] = field(default_factory=dict)
 
 
 def _load_snapshot(state_path: Path) -> tuple[list[dict[str, Any]], set[str]]:
@@ -861,6 +628,148 @@ def _window_key(arguments: Mapping[str, Any]) -> tuple[int | None, int] | None:
     return (pid, window_id)
 
 
+def _exact_window_key(arguments: Mapping[str, Any]) -> tuple[int, int]:
+    key = _window_key(arguments)
+    if key is None or key[0] is None:
+        raise ComputerServerError(
+            "window_target_required",
+            "The operation must target an exact window with pid and window_id.",
+        )
+    return key[0], key[1]
+
+
+def _target_lock_keys(
+    tool_name: str,
+    arguments: Mapping[str, Any],
+) -> tuple[tuple[str, str], ...]:
+    if tool_name in _WINDOW_MUTATION_TOOLS:
+        pid, window_id = _exact_window_key(arguments)
+        return (("window", f"{pid}:{window_id}"),)
+    if tool_name == "launch_app":
+        identity = arguments.get("bundle_id") or arguments.get("name")
+        if not isinstance(identity, str) or not identity.strip():
+            raise ComputerServerError(
+                "invalid_arguments",
+                "launch_app must provide a bundle_id or name.",
+            )
+        return (("launch", identity.strip()),)
+    if tool_name == "kill_app":
+        pid = arguments.get("pid")
+        if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+            raise ComputerServerError(
+                "invalid_arguments",
+                "kill_app must provide a positive pid.",
+            )
+        return (("pid", str(pid)),)
+    if tool_name == "clipboard_write":
+        return (("clipboard", "clipboard"),)
+    return ()
+
+
+class _TargetLockLease:
+    def __init__(
+        self,
+        manager: "_TargetLockManager",
+        keys: tuple[tuple[str, str], ...],
+    ) -> None:
+        self._manager = manager
+        self._keys = keys
+        self._released = False
+
+    async def __aenter__(self) -> "_TargetLockLease":
+        return self
+
+    async def __aexit__(self, *_exc_info: Any) -> None:
+        if not self._released:
+            self._released = True
+            await self._manager.release(self._keys)
+
+
+class _TargetLockManager:
+    """In-process locks for one Controller's independently usable targets."""
+
+    def __init__(self, *, wait_seconds: float = _TARGET_LOCK_WAIT_SECONDS) -> None:
+        self._wait_seconds = wait_seconds
+        self._condition = asyncio.Condition()
+        self._held: dict[tuple[str, str], int] = {}
+
+    @staticmethod
+    def _conflicts(
+        held_key: tuple[str, str],
+        requested_key: tuple[str, str],
+    ) -> bool:
+        if held_key == requested_key:
+            return True
+        held_kind, held_value = held_key
+        requested_kind, requested_value = requested_key
+        if held_kind == "pid" and requested_kind == "window":
+            return requested_value.startswith(f"{held_value}:")
+        if held_kind == "window" and requested_kind == "pid":
+            return held_value.startswith(f"{requested_value}:")
+        return False
+
+    def _available(self, keys: tuple[tuple[str, str], ...]) -> bool:
+        return not any(
+            self._conflicts(held_key, requested_key)
+            for held_key in self._held
+            for requested_key in keys
+        )
+
+    async def acquire(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+    ) -> _TargetLockLease:
+        keys = _target_lock_keys(tool_name, arguments)
+        if not keys:
+            return _TargetLockLease(self, ())
+        deadline = asyncio.get_running_loop().time() + self._wait_seconds
+        async with self._condition:
+            while not self._available(keys):
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise ComputerServerError(
+                        "target_busy",
+                        "The requested Computer Use target is busy.",
+                    )
+                try:
+                    await asyncio.wait_for(self._condition.wait(), remaining)
+                except asyncio.TimeoutError as exc:
+                    raise ComputerServerError(
+                        "target_busy",
+                        "The requested Computer Use target is busy.",
+                    ) from exc
+            for key in keys:
+                self._held[key] = self._held.get(key, 0) + 1
+        return _TargetLockLease(self, keys)
+
+    async def release(self, keys: tuple[tuple[str, str], ...]) -> None:
+        if not keys:
+            return
+        async with self._condition:
+            for key in keys:
+                count = self._held.get(key, 0)
+                if count <= 1:
+                    self._held.pop(key, None)
+                else:
+                    self._held[key] = count - 1
+            self._condition.notify_all()
+
+
+def _remove_legacy_lease_files(directory: Path) -> None:
+    for filename in (_LEGACY_LEASE_FILE, _LEGACY_LEASE_LOCK_FILE):
+        try:
+            (directory / filename).unlink()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            logger.debug(
+                "could not remove legacy Computer Use file %s",
+                directory / filename,
+                exc_info=True,
+            )
+
+
 def _normalize_key(value: Any) -> str:
     return str(value or "").strip().lower().replace("⌘", "cmd")
 
@@ -992,22 +901,22 @@ class ComputerUseServer:
         state_path: Path | None = None,
         status_reader: Callable[[], ComputerUseStatus] | None = None,
         upstream_factory: Callable[[ComputerUseState], Awaitable[Upstream]] = JsonRpcUpstream.start,
-        lease_manager: DesktopLeaseManager | None = None,
+        target_lock_manager: _TargetLockManager | None = None,
     ) -> None:
         self._state_path = state_path or computer_use_state_path()
+        _remove_legacy_lease_files(self._state_path.parent)
         self._tools, self._upstream_accepts_session = _load_snapshot(self._state_path)
         self._status_reader = status_reader or (
             lambda: effective_computer_use_status(state_path=self._state_path)
         )
         self._upstream_factory = upstream_factory
-        self._lease_manager = lease_manager or DesktopLeaseManager(
-            self._state_path.parent
-        )
+        self._target_lock_manager = target_lock_manager or _TargetLockManager()
         self._upstream: Upstream | None = None
         self._upstream_daemon_key: tuple[str, int] | None = None
         self._upstream_lock = asyncio.Lock()
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._sessions: dict[str, _SessionState] = {}
+        self._window_versions: dict[tuple[int, int], int] = {}
 
     @property
     def tools(self) -> list[dict[str, Any]]:
@@ -1088,20 +997,15 @@ class ComputerUseServer:
         session_state: _SessionState,
         upstream: Upstream,
         state: ComputerUseState,
-        lease: Lease,
     ) -> None:
-        if session_state.last_epoch is None or session_state.last_epoch != lease.epoch:
-            session_state.observed_windows.clear()
         session_state.active_proxy_serial = upstream.serial
         session_state.active_daemon_key = state.daemon_key
-        session_state.last_epoch = lease.epoch
 
     async def _prepare_session(
         self,
         upstream: Upstream,
         session: str,
         state: ComputerUseState,
-        lease: Lease,
         session_state: _SessionState,
         *,
         explicit_start: bool,
@@ -1110,23 +1014,6 @@ class ComputerUseServer:
             session_state.active_proxy_serial == upstream.serial
             and session_state.active_daemon_key == state.daemon_key
         )
-        epoch_changed = (
-            session_state.last_epoch is not None
-            and session_state.last_epoch != lease.epoch
-        )
-        if active and epoch_changed:
-            result = await self._upstream_call(
-                upstream,
-                "end_session",
-                {"session": session},
-            )
-            if result.get("isError"):
-                raise ComputerServerError(
-                    "session_unavailable",
-                    "The driver could not retire the previous computer-use session.",
-                )
-            self._commit_session_ended(session_state)
-            active = False
         if not active and not explicit_start:
             result = await self._upstream_call(
                 upstream,
@@ -1142,41 +1029,7 @@ class ComputerUseServer:
                 session_state,
                 upstream,
                 state,
-                lease,
             )
-
-    async def _heartbeat(self, lease: Lease) -> None:
-        try:
-            while True:
-                await asyncio.sleep(_LEASE_HEARTBEAT_SECONDS)
-                if not await asyncio.to_thread(self._lease_manager.refresh, lease):
-                    raise _LeaseLost("the desktop lease changed holders")
-        except asyncio.CancelledError:
-            raise
-        except _LeaseLost:
-            raise
-        except Exception as exc:
-            raise _LeaseLost("the desktop lease could not be refreshed") from exc
-
-    async def _run_while_lease_owned(
-        self,
-        heartbeat: asyncio.Task[None],
-        operation: Awaitable[Any],
-    ) -> Any:
-        """Run one setup or forwarding step while observing lease loss."""
-
-        operation_task = asyncio.ensure_future(operation)
-        done, _pending = await asyncio.wait(
-            (operation_task, heartbeat),
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if heartbeat in done:
-            operation_task.cancel()
-            with suppress(BaseException):
-                await operation_task
-            await heartbeat
-            raise _LeaseLost("the desktop lease heartbeat stopped")
-        return await operation_task
 
     def _require_observation(
         self,
@@ -1184,20 +1037,55 @@ class ComputerUseServer:
         arguments: Mapping[str, Any],
         session_state: _SessionState,
     ) -> None:
-        element_token = arguments.get("element_token")
-        if tool_name not in _INPUT_TOOLS or (
-            isinstance(element_token, str) and bool(element_token.strip())
-        ):
+        if tool_name not in _INPUT_TOOLS:
             return
         key = _window_key(arguments)
         if key is None:
             return
-        wildcard = (None, key[1])
-        if key not in session_state.observed_windows and wildcard not in session_state.observed_windows:
+        exact_key = (key[0], key[1]) if key[0] is not None else None
+        if (
+            exact_key is None
+            or session_state.observed_windows.get(exact_key)
+            != self._window_versions.get(exact_key, 0)
+        ):
             raise ComputerServerError(
                 "observe_first",
                 "Observe this exact window with get_window_state or zoom before sending input.",
             )
+
+    def _record_observation(
+        self,
+        arguments: Mapping[str, Any],
+        session_state: _SessionState,
+    ) -> None:
+        key = _window_key(arguments)
+        if key is None or key[0] is None:
+            return
+        exact_key = (key[0], key[1])
+        version = self._window_versions.setdefault(exact_key, 0)
+        session_state.observed_windows[exact_key] = version
+
+    def _record_successful_mutation(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        session_state: _SessionState,
+    ) -> None:
+        if tool_name in _WINDOW_MUTATION_TOOLS:
+            key = _exact_window_key(arguments)
+            version = self._window_versions.get(key, 0) + 1
+            self._window_versions[key] = version
+            # The acting Session's driver snapshot remains valid for the
+            # consecutive calls promised by the Computer Use contract.
+            session_state.observed_windows[key] = version
+            return
+        if tool_name == "kill_app":
+            pid = arguments.get("pid")
+            if not isinstance(pid, int) or isinstance(pid, bool):
+                return
+            for key in tuple(self._window_versions):
+                if key[0] == pid:
+                    self._window_versions[key] += 1
 
     async def call_tool(
         self,
@@ -1242,9 +1130,7 @@ class ComputerUseServer:
                 return _error_result(exc.code, str(exc), dispatched=False)
 
             for admission_attempt in range(_ADMISSION_RETRY_LIMIT + 1):
-                acquisition: LeaseAcquisition | None = None
                 upstream: Upstream | None = None
-                heartbeat: asyncio.Task[None] | None = None
                 pre_forward = True
                 try:
                     status = await asyncio.to_thread(self._status_reader)
@@ -1257,42 +1143,21 @@ class ComputerUseServer:
                             reason=status.reason,
                         )
                     state = status.state
-                    acquisition = await asyncio.to_thread(
-                        self._lease_manager.acquire,
-                        session,
+                    upstream = await self._ensure_upstream(state)
+                    await asyncio.to_thread(
+                        self._revalidate_daemon_key,
                         state.daemon_key,
-                        self._current_ready_daemon_key,
-                    )
-                    lease = acquisition.lease
-                    heartbeat = asyncio.create_task(
-                        self._heartbeat(lease),
-                        name=f"computer-use-lease-heartbeat-{session}",
-                    )
-                    upstream = await self._run_while_lease_owned(
-                        heartbeat,
-                        self._ensure_upstream(state),
-                    )
-                    await self._run_while_lease_owned(
-                        heartbeat,
-                        asyncio.to_thread(
-                            self._revalidate_daemon_key,
-                            state.daemon_key,
-                        ),
                     )
                     session_state = self._sessions.setdefault(
                         session,
                         _SessionState(),
                     )
-                    await self._run_while_lease_owned(
-                        heartbeat,
-                        self._prepare_session(
-                            upstream,
-                            session,
-                            state,
-                            lease,
-                            session_state,
-                            explicit_start=name == "start_session",
-                        ),
+                    await self._prepare_session(
+                        upstream,
+                        session,
+                        state,
+                        session_state,
+                        explicit_start=name == "start_session",
                     )
                     if handle_descriptor is not _NO_SCRIPT_HANDLE:
                         async def discover(
@@ -1312,13 +1177,10 @@ class ComputerUseServer:
                             )
 
                         try:
-                            validation_error = await self._run_while_lease_owned(
-                                heartbeat,
-                                validate_handle_is_current(
-                                    parsed_handle,
-                                    name,
-                                    discover,
-                                ),
+                            validation_error = await validate_handle_is_current(
+                                parsed_handle,
+                                name,
+                                discover,
                             )
                         except ComputerScriptHandleError as exc:
                             return _error_result(
@@ -1329,81 +1191,49 @@ class ComputerUseServer:
                         if validation_error is not None:
                             return _not_dispatched_error_result(validation_error)
                     self._require_observation(name, arguments, session_state)
-                    await self._run_while_lease_owned(
-                        heartbeat,
-                        asyncio.sleep(0),
-                    )
-                    pre_forward = False
-
                     forwarded = dict(arguments)
                     forwarded["session"] = session
                     if name not in self._upstream_accepts_session:
                         forwarded.pop("session", None)
-                    result = await self._run_while_lease_owned(
-                        heartbeat,
-                        self._upstream_call(
+
+                    target_lock = await self._target_lock_manager.acquire(
+                        name,
+                        arguments,
+                    )
+                    async with target_lock:
+                        # A request can wait while another Session mutates the
+                        # same window. Recheck before the first byte is sent so
+                        # a stale observation is always dispatched=false.
+                        self._require_observation(name, arguments, session_state)
+                        pre_forward = False
+                        result = await self._upstream_call(
                             upstream,
                             name,
                             forwarded,
-                        ),
-                    )
+                        )
+                        if not result.get("isError"):
+                            self._record_successful_mutation(
+                                name,
+                                arguments,
+                                session_state,
+                            )
 
                     if name in _OBSERVE_TOOLS and not result.get("isError"):
-                        key = _window_key(arguments)
-                        if key is not None:
-                            session_state.observed_windows.add(key)
+                        self._record_observation(arguments, session_state)
                     if name == "start_session":
-                        if result.get("isError"):
-                            if acquisition.newly_claimed:
-                                await asyncio.to_thread(
-                                    self._lease_manager.release,
-                                    lease,
-                                )
-                        else:
+                        if not result.get("isError"):
                             self._commit_session_started(
                                 session_state,
                                 upstream,
                                 state,
-                                lease,
                             )
                     elif name == "end_session" and not result.get("isError"):
                         self._commit_session_ended(session_state)
-                        await asyncio.to_thread(
-                            self._lease_manager.release,
-                            lease,
-                        )
                         self._sessions.pop(session, None)
-                        self._session_locks.pop(session, None)
                     return result
-                except _LeaseLost:
-                    if upstream is not None:
-                        await self._discard_upstream(upstream)
-                    if (
-                        acquisition is not None
-                        and pre_forward
-                        and acquisition.newly_claimed
-                    ):
-                        await asyncio.to_thread(
-                            self._lease_manager.release,
-                            acquisition.lease,
-                        )
-                    return _error_result(
-                        "desktop_lease_lost",
-                        "The desktop lease changed before computer use completed.",
-                        dispatched=False if pre_forward else None,
-                    )
                 except _DaemonGenerationChanged:
                     if upstream is not None:
                         await self._discard_upstream(upstream)
-                    if acquisition is not None and acquisition.newly_claimed:
-                        # A transient not-ready status can use this same path
-                        # without changing the daemon key. Keep a lease this
-                        # call merely renewed; the next admission invalidates
-                        # it under the lock if the generation really changed.
-                        await asyncio.to_thread(
-                            self._lease_manager.release,
-                            acquisition.lease,
-                        )
                     if admission_attempt < _ADMISSION_RETRY_LIMIT:
                         continue
                     return _error_result(
@@ -1414,43 +1244,16 @@ class ComputerUseServer:
                         reason="daemon_generation_changed",
                     )
                 except ComputerServerError as exc:
-                    if (
-                        acquisition is not None
-                        and pre_forward
-                        and acquisition.newly_claimed
-                    ):
-                        await asyncio.to_thread(
-                            self._lease_manager.release,
-                            acquisition.lease,
-                        )
                     return _error_result(
                         exc.code,
                         str(exc),
                         dispatched=False if pre_forward else None,
                     )
                 except asyncio.CancelledError:
-                    if (
-                        acquisition is not None
-                        and pre_forward
-                        and acquisition.newly_claimed
-                    ):
-                        await asyncio.to_thread(
-                            self._lease_manager.release,
-                            acquisition.lease,
-                        )
                     raise
                 except UpstreamUnavailable as exc:
                     if upstream is not None:
                         await self._discard_upstream(upstream)
-                    if (
-                        acquisition is not None
-                        and pre_forward
-                        and acquisition.newly_claimed
-                    ):
-                        await asyncio.to_thread(
-                            self._lease_manager.release,
-                            acquisition.lease,
-                        )
                     detail = _bounded_diagnostic(str(exc))
                     logger.warning(
                         "computer-use upstream unavailable during %s: %s",
@@ -1464,15 +1267,6 @@ class ComputerUseServer:
                         dispatched=False if pre_forward else None,
                     )
                 except Exception as exc:
-                    if (
-                        acquisition is not None
-                        and pre_forward
-                        and acquisition.newly_claimed
-                    ):
-                        await asyncio.to_thread(
-                            self._lease_manager.release,
-                            acquisition.lease,
-                        )
                     detail = _bounded_diagnostic(str(exc))
                     logger.warning(
                         "computer-use call failed during %s (%s): %s",
@@ -1486,11 +1280,6 @@ class ComputerUseServer:
                         dispatched=False if pre_forward else None,
                         error_type=type(exc).__name__,
                     )
-                finally:
-                    if heartbeat is not None:
-                        heartbeat.cancel()
-                        with suppress(BaseException):
-                            await heartbeat
 
             raise AssertionError("computer-use admission loop exhausted")
 
@@ -1523,9 +1312,6 @@ class ComputerUseServer:
         if lock is not None:
             async with lock:
                 self._sessions.pop(normalized, None)
-                if self._session_locks.get(normalized) is lock:
-                    self._session_locks.pop(normalized, None)
-        await asyncio.to_thread(self._lease_manager.release_holder, normalized)
         return result
 
     async def handle(self, message: Mapping[str, Any]) -> dict[str, Any] | None:

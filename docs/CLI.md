@@ -240,9 +240,9 @@ uses the driver's SIGKILL operation; unsaved application state can be lost.
 
 The command reaches the running Controller over local control IPC, so the
 existing `require_bind`, observe-first, exact-window, focus-shortcut,
-single-holder lease, desktop state, and driver admission checks remain in the
+target-scoped lock, desktop state, and driver admission checks remain in the
 same enforcement path. A missing active Turn, `off`, `needs_permission`,
-`needs_runtime`, `starting`, `error`, `unavailable`, or `desktop_busy` result is
+`needs_runtime`, `starting`, `error`, `unavailable`, or `target_busy` result is
 reported to the caller; the CLI does not retry it automatically. The driver
 session and observation state are keyed by Avibe Session and are retired when
 the Session is explicitly ended or archived, rather than at every Turn

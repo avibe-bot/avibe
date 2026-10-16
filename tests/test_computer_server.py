@@ -3,11 +3,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import multiprocessing
-import os
 from pathlib import Path
 import shutil
-import time
 from typing import Any, Mapping
 
 import pytest
@@ -15,8 +12,8 @@ import pytest
 from core.computer_server import (
     ComputerServerError,
     ComputerUseServer,
-    DesktopLeaseManager,
     JsonRpcUpstream,
+    _TargetLockManager,
     UpstreamUnavailable,
     _fold_tool_result,
     _validate_input,
@@ -84,6 +81,8 @@ class FakeUpstream:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.inflight = 0
         self.max_inflight = 0
+        self.inflight_by_tool: dict[str, int] = {}
+        self.max_inflight_by_tool: dict[str, int] = {}
         self.block: asyncio.Event | None = None
         self.blocked_tools: set[str] = {"list_apps"}
         self.tool_errors: set[str] = set()
@@ -99,8 +98,16 @@ class FakeUpstream:
         self.calls.append((method, copied))
         self.inflight += 1
         self.max_inflight = max(self.max_inflight, self.inflight)
+        tool_name = params.get("name")
+        if isinstance(tool_name, str):
+            self.inflight_by_tool[tool_name] = (
+                self.inflight_by_tool.get(tool_name, 0) + 1
+            )
+            self.max_inflight_by_tool[tool_name] = max(
+                self.max_inflight_by_tool.get(tool_name, 0),
+                self.inflight_by_tool[tool_name],
+            )
         try:
-            tool_name = params.get("name")
             if self.block is not None and tool_name in self.blocked_tools:
                 await self.block.wait()
             if self.fail_after_unblock:
@@ -124,6 +131,8 @@ class FakeUpstream:
             }
         finally:
             self.inflight -= 1
+            if isinstance(tool_name, str):
+                self.inflight_by_tool[tool_name] -= 1
 
     async def notify(self, method: str, params: Mapping[str, Any]) -> None:
         return None
@@ -131,48 +140,6 @@ class FakeUpstream:
     async def close(self) -> None:
         self.close_calls += 1
         self.alive = False
-
-
-class FakeLeaseManager:
-    def __init__(self) -> None:
-        self.epoch = 1
-        self.holder: str | None = None
-        self.daemon_key: tuple[str, int] | None = None
-        self.refresh_count = 0
-
-    def acquire(
-        self,
-        session: str,
-        daemon_key: tuple[str, int],
-        current_daemon_key,
-    ):
-        from core.computer_server import (
-            ComputerServerError,
-            Lease,
-            LeaseAcquisition,
-        )
-
-        if current_daemon_key() != daemon_key:
-            raise RuntimeError("stale fake daemon key")
-        if self.daemon_key != daemon_key:
-            self.holder = None
-            self.daemon_key = daemon_key
-        if self.holder is not None and self.holder != session:
-            raise ComputerServerError("desktop_busy", f"held by {self.holder}")
-        newly_claimed = self.holder != session
-        self.holder = session
-        return LeaseAcquisition(
-            lease=Lease(session, 1.0, self.epoch, daemon_key[0], daemon_key[1]),
-            newly_claimed=newly_claimed,
-        )
-
-    def refresh(self, lease) -> bool:
-        self.refresh_count += 1
-        return self.holder == lease.holder and self.daemon_key == lease.daemon_key
-
-    def release(self, lease) -> None:
-        if self.holder == lease.holder and self.daemon_key == lease.daemon_key:
-            self.holder = None
 
 
 class _TestStdin:
@@ -353,26 +320,6 @@ for line in sys.stdin:
     path.chmod(0o755)
 
 
-def _acquire_lease_in_process(
-    directory: str,
-    session: str,
-    start: multiprocessing.synchronize.Event,
-    results: multiprocessing.queues.Queue,
-) -> None:
-    manager = DesktopLeaseManager(Path(directory), now=time.monotonic)
-    start.wait()
-    try:
-        acquisition = manager.acquire(
-            session,
-            ("shell-a", 1),
-            lambda: ("shell-a", 1),
-        )
-    except ComputerServerError as exc:
-        results.put(("error", exc.code))
-    else:
-        results.put(("ok", acquisition.lease.holder))
-
-
 def test_advertised_surface_requires_session_and_drops_output_schema(
     tmp_path: Path,
 ) -> None:
@@ -383,7 +330,6 @@ def test_advertised_surface_requires_session_and_drops_output_schema(
         state_path=state_path,
         status_reader=lambda: ComputerUseStatus("ready", None, state),
         upstream_factory=lambda _state: None,  # type: ignore[arg-type]
-        lease_manager=FakeLeaseManager(),  # type: ignore[arg-type]
     )
     assert len(server.tools) == 28
     assert {tool["name"] for tool in server.tools} == set(COMPUTER_USE_TOOL_NAMES)
@@ -439,7 +385,6 @@ async def test_non_ready_call_names_status_and_never_spawns_upstream(
         state_path=state_path,
         status_reader=lambda: ComputerUseStatus(status, reason),
         upstream_factory=factory,
-        lease_manager=FakeLeaseManager(),  # type: ignore[arg-type]
     )
     result = await server.call_tool("list_apps", {"session": "ses-a"})
     assert result["isError"] is True
@@ -582,7 +527,6 @@ async def test_script_handle_descriptors_are_validated_before_the_action(
         state_path=state_path,
         status_reader=lambda: ComputerUseStatus("ready", None, state),
         upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
-        lease_manager=FakeLeaseManager(),  # type: ignore[arg-type]
     )
 
     result = await server.call_tool(
@@ -647,7 +591,6 @@ async def test_current_script_window_descriptor_is_not_forwarded_to_driver(
         state_path=state_path,
         status_reader=lambda: ComputerUseStatus("ready", None, state),
         upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
-        lease_manager=FakeLeaseManager(),  # type: ignore[arg-type]
     )
     descriptor = {
         "kind": "window",
@@ -696,12 +639,10 @@ async def test_daemon_generation_and_child_exit_each_replace_proxy_once(
         upstreams.append(upstream)
         return upstream
 
-    leases = FakeLeaseManager()
     server = ComputerUseServer(
         state_path=state_path,
         status_reader=lambda: ComputerUseStatus("ready", None, current),
         upstream_factory=factory,
-        lease_manager=leases,  # type: ignore[arg-type]
     )
     await server.call_tool("list_apps", {"session": "ses-a"})
     await server.call_tool("list_apps", {"session": "ses-a"})
@@ -718,7 +659,6 @@ async def test_daemon_generation_and_child_exit_each_replace_proxy_once(
             "generation": 2,
         }
     )
-    leases.epoch += 1
     await server.call_tool("list_apps", {"session": "ses-a"})
     assert len(upstreams) == 2
     assert [params["name"] for _method, params in upstreams[1].calls] == [
@@ -1083,7 +1023,6 @@ async def test_call_tool_preserves_upstream_unavailable_detail_and_logs(
         state_path=state_path,
         status_reader=lambda: ComputerUseStatus("ready", None, state),
         upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
-        lease_manager=FakeLeaseManager(),  # type: ignore[arg-type]
     )
 
     result = await server.call_tool("list_apps", {"session": "ses-a"})
@@ -1107,7 +1046,6 @@ async def test_post_forward_upstream_failure_does_not_claim_not_dispatched(
         state_path=state_path,
         status_reader=lambda: ComputerUseStatus("ready", None, state),
         upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
-        lease_manager=FakeLeaseManager(),  # type: ignore[arg-type]
     )
 
     started = await server.call_tool("start_session", {"session": "ses-a"})
@@ -1197,12 +1135,10 @@ async def test_one_sessions_calls_are_serial_and_end_releases_after_queue(
     state_path, state = _state(tmp_path)
     upstream = FakeUpstream()
     upstream.block = asyncio.Event()
-    leases = FakeLeaseManager()
     server = ComputerUseServer(
         state_path=state_path,
         status_reader=lambda: ComputerUseStatus("ready", None, state),
         upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
-        lease_manager=leases,  # type: ignore[arg-type]
     )
     first = asyncio.create_task(
         server.call_tool("list_apps", {"session": "ses-a"})
@@ -1217,7 +1153,6 @@ async def test_one_sessions_calls_are_serial_and_end_releases_after_queue(
     await first
     await ending
     assert upstream.max_inflight == 1
-    assert leases.holder is None
     names = [params["name"] for _method, params in upstream.calls]
     assert names == ["start_session", "list_apps", "end_session"]
 
@@ -1230,12 +1165,10 @@ async def test_named_sessions_start_independently_and_revive_after_end(
 
     state_path, state = _state(tmp_path)
     upstream = FakeUpstream()
-    leases = FakeLeaseManager()
     server = ComputerUseServer(
         state_path=state_path,
         status_reader=lambda: ComputerUseStatus("ready", None, state),
         upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
-        lease_manager=leases,  # type: ignore[arg-type]
     )
 
     await server.call_tool("list_apps", {"session": "ses-a"})
@@ -1266,12 +1199,10 @@ async def test_end_session_if_active_releases_without_starting_unknown_session(
 ) -> None:
     state_path, state = _state(tmp_path)
     upstream = FakeUpstream()
-    leases = FakeLeaseManager()
     server = ComputerUseServer(
         state_path=state_path,
         status_reader=lambda: ComputerUseStatus("ready", None, state),
         upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
-        lease_manager=leases,  # type: ignore[arg-type]
     )
 
     idle = await server.end_session_if_active("ses-never-used")
@@ -1280,130 +1211,9 @@ async def test_end_session_if_active_releases_without_starting_unknown_session(
 
     assert idle["isError"] is False
     assert ended.get("isError") is not True
-    assert leases.holder is None
     assert "ses-a" not in server._sessions
-    assert "ses-a" not in server._session_locks
     names = [params["name"] for _method, params in upstream.calls]
     assert names == ["start_session", "list_apps", "end_session"]
-
-
-@pytest.mark.asyncio
-async def test_failed_explicit_end_keeps_session_observations_and_real_lease(
-    tmp_path: Path,
-) -> None:
-    """A driver refusal to end cannot publish or lease an inactive session."""
-
-    state_path, state = _state(tmp_path)
-    leases = DesktopLeaseManager(tmp_path)
-    upstream = FakeUpstream()
-    server = ComputerUseServer(
-        state_path=state_path,
-        status_reader=lambda: ComputerUseStatus("ready", None, state),
-        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
-        lease_manager=leases,
-    )
-    observed = await server.call_tool(
-        "get_window_state",
-        {"session": "ses-a", "pid": 7, "window_id": 9},
-    )
-    assert not observed.get("isError")
-    session_state = server._sessions["ses-a"]
-    expected_proxy = session_state.active_proxy_serial
-    expected_key = session_state.active_daemon_key
-    expected_epoch = session_state.last_epoch
-    expected_observations = set(session_state.observed_windows)
-
-    upstream.tool_errors.add("end_session")
-    ended = await server.call_tool("end_session", {"session": "ses-a"})
-
-    assert ended.get("isError")
-    assert session_state.active_proxy_serial == expected_proxy
-    assert session_state.active_daemon_key == expected_key
-    assert session_state.last_epoch == expected_epoch
-    assert session_state.observed_windows == expected_observations
-    with pytest.raises(
-        ComputerServerError,
-        match="Desktop computer use is held by another Avibe Session",
-    ):
-        leases.acquire(
-            "ses-b",
-            state.daemon_key,
-            lambda: state.daemon_key,
-        )
-
-
-@pytest.mark.asyncio
-async def test_retire_session_releases_an_inactive_proxy_owned_lease_without_starting_driver(
-    tmp_path: Path,
-) -> None:
-    state_path, state = _state(tmp_path)
-    leases = DesktopLeaseManager(tmp_path)
-    starts = 0
-
-    async def upstream_factory(_state):
-        nonlocal starts
-        starts += 1
-        return FakeUpstream()
-
-    server = ComputerUseServer(
-        state_path=state_path,
-        status_reader=lambda: ComputerUseStatus("ready", None, state),
-        upstream_factory=upstream_factory,
-        lease_manager=leases,
-    )
-
-    leases.acquire("ses-a", state.daemon_key, lambda: state.daemon_key)
-    retired = await server.retire_session("ses-a")
-
-    assert retired["isError"] is False
-    assert starts == 0
-    assert "ses-a" not in server._sessions
-    assert "ses-a" not in server._session_locks
-    assert leases.acquire(
-        "ses-b",
-        state.daemon_key,
-        lambda: state.daemon_key,
-    ).lease.holder == "ses-b"
-
-
-@pytest.mark.asyncio
-async def test_retire_session_preserves_a_replacement_lease_holder(
-    tmp_path: Path,
-) -> None:
-    state_path, first_state = _state(tmp_path)
-    leases = DesktopLeaseManager(tmp_path)
-    server = ComputerUseServer(
-        state_path=state_path,
-        status_reader=lambda: ComputerUseStatus("ready", None, first_state),
-        upstream_factory=lambda _state: pytest.fail("retirement started a driver"),
-        lease_manager=leases,
-    )
-
-    leases.acquire(
-        "ses-retired",
-        first_state.daemon_key,
-        lambda: first_state.daemon_key,
-    )
-    replacement_key = (first_state.instance_id, first_state.generation + 1)
-    replacement = leases.acquire(
-        "ses-replacement",
-        replacement_key,
-        lambda: replacement_key,
-    ).lease
-
-    retired = await server.retire_session("ses-retired")
-
-    assert retired["isError"] is False
-    assert leases.refresh(replacement) is True
-    with pytest.raises(
-        ComputerServerError,
-        match="Desktop computer use is held by another Avibe Session",
-    ):
-        leases.acquire(
-            "ses-other",
-            replacement_key,
-            lambda: replacement_key,
-        )
 
 
 @pytest.mark.asyncio
@@ -1418,7 +1228,6 @@ async def test_explicit_start_forwards_options_and_normalized_session(
         state_path=state_path,
         status_reader=lambda: ComputerUseStatus("ready", None, state),
         upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
-        lease_manager=FakeLeaseManager(),  # type: ignore[arg-type]
     )
     result = await server.call_tool(
         "start_session",
@@ -1452,57 +1261,6 @@ async def test_explicit_start_forwards_options_and_normalized_session(
     session_state = server._sessions["ses-a"]
     assert session_state.active_proxy_serial == upstream.serial
     assert session_state.active_daemon_key == state.daemon_key
-    assert session_state.last_epoch == 1
-
-
-@pytest.mark.asyncio
-async def test_failed_explicit_start_does_not_change_committed_epoch(
-    tmp_path: Path,
-) -> None:
-    """A failed explicit restart cannot publish a new session generation."""
-
-    state_path, state = _state(tmp_path)
-    leases = DesktopLeaseManager(tmp_path)
-    upstream = FakeUpstream()
-    server = ComputerUseServer(
-        state_path=state_path,
-        status_reader=lambda: ComputerUseStatus("ready", None, state),
-        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
-        lease_manager=leases,
-    )
-    started = await server.call_tool("list_apps", {"session": "ses-a"})
-    assert not started.get("isError")
-    session_state = server._sessions["ses-a"]
-    expected_proxy = session_state.active_proxy_serial
-    expected_key = session_state.active_daemon_key
-    expected_epoch = session_state.last_epoch
-
-    upstream.tool_errors.add("start_session")
-    result = await server.call_tool(
-        "start_session",
-        {"session": "ses-a", "capture_scope": "desktop"},
-    )
-
-    assert result.get("isError")
-    payload = json.loads(result["content"][0]["text"])
-    assert payload == {
-        "code": "upstream_tool_error",
-        "detail": "tool failed",
-        "params": {"tool": "start_session"},
-    }
-    assert [params["name"] for _method, params in upstream.calls][-1] == "start_session"
-    assert session_state.active_proxy_serial == expected_proxy
-    assert session_state.active_daemon_key == expected_key
-    assert session_state.last_epoch == expected_epoch
-    with pytest.raises(
-        ComputerServerError,
-        match="Desktop computer use is held by another Avibe Session",
-    ):
-        leases.acquire(
-            "ses-b",
-            state.daemon_key,
-            lambda: state.daemon_key,
-        )
 
 
 @pytest.mark.asyncio
@@ -1517,7 +1275,6 @@ async def test_session_label_is_normalized_before_forwarding(
         state_path=state_path,
         status_reader=lambda: ComputerUseStatus("ready", None, state),
         upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
-        lease_manager=FakeLeaseManager(),  # type: ignore[arg-type]
     )
 
     await server.call_tool("list_apps", {"session": "  ses-a  "})
@@ -1539,7 +1296,6 @@ async def test_window_input_requires_observation_and_rejects_focus_routes(
         state_path=state_path,
         status_reader=lambda: ComputerUseStatus("ready", None, state),
         upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
-        lease_manager=FakeLeaseManager(),  # type: ignore[arg-type]
     )
 
     first = await server.call_tool(
@@ -1650,92 +1406,6 @@ def test_raw_click_mode_is_admitted_only_for_exact_background_pixel_click() -> N
 
 
 @pytest.mark.asyncio
-async def test_real_lease_epoch_survives_handoff_and_rejects_stale_observation(
-    tmp_path: Path,
-) -> None:
-    """A released lease keeps its epoch so a later holder revives the session."""
-
-    now = 100.0
-    leases = DesktopLeaseManager(tmp_path, now=lambda: now, ttl_seconds=60.0)
-    state_path, state = _state(tmp_path)
-    upstream = FakeUpstream()
-    server = ComputerUseServer(
-        state_path=state_path,
-        status_reader=lambda: ComputerUseStatus("ready", None, state),
-        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
-        lease_manager=leases,
-    )
-
-    observed = await server.call_tool(
-        "get_window_state",
-        {"session": "ses-a", "pid": 7, "window_id": 9},
-    )
-    assert not observed.get("isError")
-
-    now += 61.0
-    observed_by_b = await server.call_tool(
-        "get_window_state",
-        {"session": "ses-b", "pid": 8, "window_id": 10},
-    )
-    assert not observed_by_b.get("isError")
-    ended = await server.call_tool("end_session", {"session": "ses-b"})
-    assert not ended.get("isError")
-
-    stale = await server.call_tool(
-        "click",
-        {"session": "ses-a", "pid": 7, "window_id": 9, "x": 1, "y": 2},
-    )
-    assert "observe_first" in stale["content"][0]["text"]
-    assert [params["name"] for _method, params in upstream.calls][-2:] == [
-        "end_session",
-        "start_session",
-    ]
-
-
-@pytest.mark.asyncio
-async def test_failed_internal_end_blocks_revival_and_element_token_input(
-    tmp_path: Path,
-) -> None:
-    """A failed epoch handoff cannot preserve tokens from the previous holder."""
-
-    now = 100.0
-    leases = DesktopLeaseManager(tmp_path, now=lambda: now, ttl_seconds=60.0)
-    state_path, state = _state(tmp_path)
-    upstream = FakeUpstream()
-    server = ComputerUseServer(
-        state_path=state_path,
-        status_reader=lambda: ComputerUseStatus("ready", None, state),
-        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
-        lease_manager=leases,
-    )
-
-    first = await server.call_tool("list_apps", {"session": "ses-a"})
-    assert not first.get("isError")
-    now += 61.0
-    handoff = await server.call_tool("list_apps", {"session": "ses-b"})
-    assert not handoff.get("isError")
-    ended = await server.call_tool("end_session", {"session": "ses-b"})
-    assert not ended.get("isError")
-
-    upstream.tool_errors.add("end_session")
-    before = len(upstream.calls)
-    stale = await server.call_tool(
-        "click",
-        {"session": "ses-a", "element_token": "old-element", "x": 1, "y": 2},
-    )
-
-    assert "session_unavailable" in stale["content"][0]["text"]
-    assert [
-        params["name"] for _method, params in upstream.calls[before:]
-    ] == ["end_session"]
-    assert leases.acquire(
-        "ses-b",
-        state.daemon_key,
-        lambda: state.daemon_key,
-    ).newly_claimed
-
-
-@pytest.mark.asyncio
 async def test_proxy_replacement_clears_observations(tmp_path: Path) -> None:
     """A fresh upstream proxy cannot reuse observations from the old process."""
 
@@ -1751,7 +1421,6 @@ async def test_proxy_replacement_clears_observations(tmp_path: Path) -> None:
         state_path=state_path,
         status_reader=lambda: ComputerUseStatus("ready", None, state),
         upstream_factory=factory,
-        lease_manager=FakeLeaseManager(),  # type: ignore[arg-type]
     )
     await server.call_tool(
         "get_window_state",
@@ -1784,7 +1453,6 @@ async def test_transport_failure_discards_an_alive_proxy_and_its_observations(
         state_path=state_path,
         status_reader=lambda: ComputerUseStatus("ready", None, state),
         upstream_factory=factory,
-        lease_manager=FakeLeaseManager(),  # type: ignore[arg-type]
     )
     await server.call_tool(
         "get_window_state",
@@ -1828,7 +1496,6 @@ async def test_late_failure_from_old_proxy_preserves_new_proxy_observations(
         state_path=state_path,
         status_reader=lambda: ComputerUseStatus("ready", None, current),
         upstream_factory=factory,
-        lease_manager=FakeLeaseManager(),  # type: ignore[arg-type]
     )
     old_call = asyncio.create_task(
         server.call_tool("list_apps", {"session": "ses-a"})
@@ -1841,7 +1508,6 @@ async def test_late_failure_from_old_proxy_preserves_new_proxy_observations(
     old.fail_after_unblock = True
 
     current = ComputerUseState(**{**first_state.__dict__, "generation": 2})
-    server._lease_manager.epoch += 1  # type: ignore[attr-defined]
     observed = await server.call_tool(
         "get_window_state",
         {"session": "ses-b", "pid": 7, "window_id": 9},
@@ -1864,67 +1530,15 @@ async def test_late_failure_from_old_proxy_preserves_new_proxy_observations(
 
 
 @pytest.mark.asyncio
-async def test_epoch_change_restarts_session_and_requires_each_window_again(
-    tmp_path: Path,
-) -> None:
-    """A reacquired desktop invalidates Cua state and each observed window."""
-
-    state_path, state = _state(tmp_path)
-    upstream = FakeUpstream()
-    leases = FakeLeaseManager()
-    server = ComputerUseServer(
-        state_path=state_path,
-        status_reader=lambda: ComputerUseStatus("ready", None, state),
-        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
-        lease_manager=leases,  # type: ignore[arg-type]
-    )
-
-    for window_id in (9, 10):
-        result = await server.call_tool(
-            "get_window_state",
-            {"session": "ses-a", "pid": 7, "window_id": window_id},
-        )
-        assert not result.get("isError")
-
-    leases.epoch += 1
-    stale = await server.call_tool(
-        "click",
-        {"session": "ses-a", "pid": 7, "window_id": 9, "x": 1, "y": 2},
-    )
-    assert "observe_first" in stale["content"][0]["text"]
-    assert [params["name"] for _method, params in upstream.calls][-2:] == [
-        "end_session",
-        "start_session",
-    ]
-
-    await server.call_tool(
-        "get_window_state",
-        {"session": "ses-a", "pid": 7, "window_id": 9},
-    )
-    window_a = await server.call_tool(
-        "click",
-        {"session": "ses-a", "pid": 7, "window_id": 9, "x": 1, "y": 2},
-    )
-    window_b = await server.call_tool(
-        "click",
-        {"session": "ses-a", "pid": 7, "window_id": 10, "x": 1, "y": 2},
-    )
-    assert not window_a.get("isError")
-    assert "observe_first" in window_b["content"][0]["text"]
-
-
-@pytest.mark.asyncio
 async def test_new_server_process_requires_observation_again(tmp_path: Path) -> None:
     """Observation state is intentionally process-local and starts empty."""
 
     state_path, state = _state(tmp_path)
-    leases = FakeLeaseManager()
     first_upstream = FakeUpstream()
     first = ComputerUseServer(
         state_path=state_path,
         status_reader=lambda: ComputerUseStatus("ready", None, state),
         upstream_factory=lambda _state: asyncio.sleep(0, result=first_upstream),
-        lease_manager=leases,  # type: ignore[arg-type]
     )
     await first.call_tool(
         "get_window_state",
@@ -1937,119 +1551,12 @@ async def test_new_server_process_requires_observation_again(tmp_path: Path) -> 
         state_path=state_path,
         status_reader=lambda: ComputerUseStatus("ready", None, state),
         upstream_factory=lambda _state: asyncio.sleep(0, result=second_upstream),
-        lease_manager=leases,  # type: ignore[arg-type]
     )
     result = await second.call_tool(
         "click",
         {"session": "ses-a", "pid": 7, "window_id": 9, "x": 1, "y": 2},
     )
     assert "observe_first" in result["content"][0]["text"]
-
-
-@pytest.mark.asyncio
-async def test_setup_failure_releases_lease_before_returning(tmp_path: Path) -> None:
-    """A pre-forward transport failure must not strand a newly claimed lease."""
-
-    state_path, state = _state(tmp_path)
-    leases = DesktopLeaseManager(tmp_path)
-
-    async def fail_upstream(_state: ComputerUseState) -> Any:
-        raise UpstreamUnavailable("proxy failed before the first tool call")
-
-    server = ComputerUseServer(
-        state_path=state_path,
-        status_reader=lambda: ComputerUseStatus("ready", None, state),
-        upstream_factory=fail_upstream,
-        lease_manager=leases,  # type: ignore[arg-type]
-    )
-
-    result = await server.call_tool("start_session", {"session": "ses-a"})
-
-    assert result["isError"]
-    assert "upstream_unavailable" in result["content"][0]["text"]
-    acquisition = leases.acquire(
-        "ses-b",
-        state.daemon_key,
-        lambda: state.daemon_key,
-    )
-    assert acquisition.lease.holder == "ses-b"
-
-
-@pytest.mark.asyncio
-async def test_renewed_lease_survives_observe_first_guard(tmp_path: Path) -> None:
-    """A guard failure must not release a lease this call merely renewed."""
-
-    state_path, state = _state(tmp_path)
-    leases = DesktopLeaseManager(tmp_path)
-    upstream = FakeUpstream()
-    server = ComputerUseServer(
-        state_path=state_path,
-        status_reader=lambda: ComputerUseStatus("ready", None, state),
-        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
-        lease_manager=leases,
-    )
-
-    started = await server.call_tool("list_apps", {"session": "ses-a"})
-    assert not started.get("isError")
-    guarded = await server.call_tool(
-        "click",
-        {"session": "ses-a", "pid": 7, "window_id": 9, "x": 1, "y": 2},
-    )
-    assert "observe_first" in guarded["content"][0]["text"]
-
-    with pytest.raises(
-        ComputerServerError,
-        match="Desktop computer use is held by another Avibe Session",
-    ):
-        leases.acquire(
-            "ses-b",
-            state.daemon_key,
-            lambda: state.daemon_key,
-        )
-
-
-@pytest.mark.asyncio
-async def test_stale_state_cannot_overwrite_current_generation_holder(
-    tmp_path: Path,
-) -> None:
-    """Lease admission re-reads D under the lock before changing its holder."""
-
-    state_path, stale_state = _state(tmp_path)
-    current_state = ComputerUseState(
-        **{**stale_state.__dict__, "generation": 2}
-    )
-    leases = DesktopLeaseManager(tmp_path)
-    current_claim = leases.acquire(
-        "ses-current",
-        current_state.daemon_key,
-        lambda: current_state.daemon_key,
-    )
-    status_reads = 0
-
-    def status_reader() -> ComputerUseStatus:
-        nonlocal status_reads
-        status_reads += 1
-        state = stale_state if status_reads == 1 else current_state
-        return ComputerUseStatus("ready", None, state)
-
-    starts = 0
-
-    async def factory(_state: ComputerUseState) -> FakeUpstream:
-        nonlocal starts
-        starts += 1
-        return FakeUpstream()
-
-    server = ComputerUseServer(
-        state_path=state_path,
-        status_reader=status_reader,
-        upstream_factory=factory,
-        lease_manager=leases,
-    )
-    result = await server.call_tool("list_apps", {"session": "ses-stale"})
-
-    assert "desktop_busy" in result["content"][0]["text"]
-    assert starts == 0
-    assert leases.refresh(current_claim.lease)
 
 
 @pytest.mark.asyncio
@@ -2079,7 +1586,6 @@ async def test_post_proxy_creation_revalidates_generation_before_forwarding(
         state_path=state_path,
         status_reader=status_reader,
         upstream_factory=factory,
-        lease_manager=DesktopLeaseManager(tmp_path),
     )
 
     result = await server.call_tool("list_apps", {"session": "ses-a"})
@@ -2119,7 +1625,6 @@ async def test_admission_retries_generation_change_exactly_once(
         state_path=state_path,
         status_reader=status_reader,
         upstream_factory=factory,
-        lease_manager=DesktopLeaseManager(tmp_path),
     )
 
     result = await server.call_tool("list_apps", {"session": "ses-a"})
@@ -2129,96 +1634,6 @@ async def test_admission_retries_generation_change_exactly_once(
     assert len(upstreams) == 2
     assert all(upstream.calls == [] for upstream in upstreams)
     assert all(upstream.close_calls == 1 for upstream in upstreams)
-
-
-@pytest.mark.asyncio
-async def test_new_claim_is_released_after_same_key_generation_guard(
-    tmp_path: Path,
-) -> None:
-    """A newly claimed lease cannot survive a pre-forward readiness change."""
-
-    state_path, state = _state(tmp_path)
-    leases = DesktopLeaseManager(tmp_path)
-    status_reads = 0
-
-    def status_reader() -> ComputerUseStatus:
-        nonlocal status_reads
-        status_reads += 1
-        if status_reads in {3, 4}:
-            return ComputerUseStatus("unavailable", "daemon_unreachable")
-        return ComputerUseStatus("ready", None, state)
-
-    server = ComputerUseServer(
-        state_path=state_path,
-        status_reader=status_reader,
-        upstream_factory=lambda _state: asyncio.sleep(0, result=FakeUpstream()),
-        lease_manager=leases,
-    )
-
-    result = await server.call_tool("list_apps", {"session": "ses-a"})
-
-    assert result["isError"]
-    assert "computer_use_unavailable" in result["content"][0]["text"]
-    assert leases.acquire(
-        "ses-b",
-        state.daemon_key,
-        lambda: state.daemon_key,
-    ).newly_claimed
-
-
-@pytest.mark.asyncio
-async def test_readiness_blip_keeps_a_renewed_lease_epoch(
-    tmp_path: Path,
-) -> None:
-    """A same-key not-ready read must not release and reclaim an existing holder."""
-
-    state_path, state = _state(tmp_path)
-    leases = DesktopLeaseManager(tmp_path)
-    blip = False
-    blip_reads = 0
-
-    def status_reader() -> ComputerUseStatus:
-        nonlocal blip_reads
-        if blip:
-            blip_reads += 1
-            if blip_reads == 3:
-                return ComputerUseStatus("unavailable", "daemon_unreachable")
-        return ComputerUseStatus("ready", None, state)
-
-    server = ComputerUseServer(
-        state_path=state_path,
-        status_reader=status_reader,
-        upstream_factory=lambda _state: asyncio.sleep(0, result=FakeUpstream()),
-        lease_manager=leases,
-    )
-
-    first = await server.call_tool("list_apps", {"session": "ses-a"})
-    assert not first.get("isError")
-    assert leases.acquire(
-        "ses-a",
-        state.daemon_key,
-        lambda: state.daemon_key,
-    ).lease.epoch == 1
-
-    blip = True
-    second = await server.call_tool("list_apps", {"session": "ses-a"})
-
-    assert not second.get("isError")
-    assert blip_reads >= 6
-    assert leases.acquire(
-        "ses-a",
-        state.daemon_key,
-        lambda: state.daemon_key,
-    ).lease.epoch == 1
-    with pytest.raises(
-        ComputerServerError,
-        match="Desktop computer use is held by another Avibe Session",
-    ):
-        leases.acquire(
-            "ses-b",
-            state.daemon_key,
-            lambda: state.daemon_key,
-        )
 
 
 @pytest.mark.parametrize(
@@ -2289,219 +1704,307 @@ def test_all_documented_focus_shortcuts_are_rejected(
     assert raised.value.code == "focus_shortcut_forbidden"
 
 
-def test_desktop_lease_expires_and_daemon_generation_voids_it(
-    tmp_path: Path,
-) -> None:
-    """A crash cannot hold the desktop past TTL, and native restart clears it."""
-
-    now = 100.0
-    manager = DesktopLeaseManager(tmp_path, now=lambda: now)
-    first = manager.acquire(
-        "ses-a",
-        ("shell-a", 1),
-        lambda: ("shell-a", 1),
-    ).lease
-    with pytest.raises(
-        ComputerServerError,
-        match="Desktop computer use is held by another Avibe Session",
-    ):
-        manager.acquire(
-            "ses-b",
-            ("shell-a", 1),
-            lambda: ("shell-a", 1),
-        )
-
-    now += 61.0
-    second = manager.acquire(
-        "ses-b",
-        ("shell-a", 1),
-        lambda: ("shell-a", 1),
-    ).lease
-    assert second.epoch == first.epoch + 1
-
-    third = manager.acquire(
-        "ses-c",
-        ("shell-a", 2),
-        lambda: ("shell-a", 2),
-    ).lease
-    assert third.epoch == second.epoch + 1
-
-
-def test_desktop_busy_does_not_disclose_the_current_session(
-    tmp_path: Path,
-) -> None:
-    manager = DesktopLeaseManager(tmp_path)
-    manager.acquire(
-        "secret-session-id",
-        ("shell-a", 1),
-        lambda: ("shell-a", 1),
-    )
-
-    with pytest.raises(ComputerServerError) as raised:
-        manager.acquire(
-            "other-session",
-            ("shell-a", 1),
-            lambda: ("shell-a", 1),
-        )
-
-    assert raised.value.code == "desktop_busy"
-    assert str(raised.value) == "Desktop computer use is held by another Avibe Session."
-    assert "secret-session-id" not in str(raised.value)
-
-
-@pytest.mark.skipif(os.name == "nt", reason="Phase 1 cross-process lease is macOS-only")
-def test_cross_process_first_calls_have_exactly_one_lease_holder(
-    tmp_path: Path,
-) -> None:
-    """The filesystem lock serializes simultaneous first calls across servers."""
-
-    context = multiprocessing.get_context("spawn")
-    start = context.Event()
-    results = context.Queue()
-    processes = [
-        context.Process(
-            target=_acquire_lease_in_process,
-            args=(str(tmp_path), session, start, results),
-        )
-        for session in ("ses-a", "ses-b")
-    ]
-    for process in processes:
-        process.start()
-    start.set()
-    observed = [results.get(timeout=10) for _process in processes]
-    for process in processes:
-        process.join(timeout=10)
-        assert process.exitcode == 0
-    assert sorted(kind for kind, _detail in observed) == ["error", "ok"]
-    assert {detail for kind, detail in observed if kind == "error"} == {
-        "desktop_busy"
-    }
-
-
 @pytest.mark.asyncio
-async def test_long_call_refreshes_lease_until_it_finishes(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The heartbeat keeps a lease alive while one upstream call is blocked."""
+async def test_observations_are_not_serialized_across_sessions(tmp_path: Path) -> None:
+    """Read-only window observations can run concurrently."""
 
-    monkeypatch.setattr("core.computer_server._LEASE_HEARTBEAT_SECONDS", 0.01)
     state_path, state = _state(tmp_path)
     upstream = FakeUpstream()
     upstream.block = asyncio.Event()
-    leases = FakeLeaseManager()
+    upstream.blocked_tools = {"get_window_state"}
     server = ComputerUseServer(
         state_path=state_path,
         status_reader=lambda: ComputerUseStatus("ready", None, state),
         upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
-        lease_manager=leases,  # type: ignore[arg-type]
     )
-    call = asyncio.create_task(
-        server.call_tool("list_apps", {"session": "ses-a"})
+
+    first = asyncio.create_task(
+        server.call_tool(
+            "get_window_state",
+            {"session": "ses-a", "pid": 7, "window_id": 9},
+        )
+    )
+    second = asyncio.create_task(
+        server.call_tool(
+            "get_window_state",
+            {"session": "ses-b", "pid": 7, "window_id": 9},
+        )
     )
     for _attempt in range(100):
-        if leases.refresh_count >= 2:
+        if upstream.max_inflight == 2:
             break
-        await asyncio.sleep(0.005)
-    assert leases.refresh_count >= 2
+        await asyncio.sleep(0)
+    assert upstream.max_inflight == 2
     upstream.block.set()
-    await call
-    refreshes_at_completion = leases.refresh_count
-    await asyncio.sleep(0.03)
-    assert leases.refresh_count == refreshes_at_completion
+    assert not (await first).get("isError")
+    assert not (await second).get("isError")
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_starts_before_proxy_setup_finishes(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Proxy setup cannot age a newly acquired lease past its TTL."""
+async def test_different_window_mutations_run_concurrently(tmp_path: Path) -> None:
+    """Different window targets do not wait on one another."""
 
-    monkeypatch.setattr("core.computer_server._LEASE_HEARTBEAT_SECONDS", 0.01)
-    now = 100.0
-    leases = DesktopLeaseManager(tmp_path, now=lambda: now, ttl_seconds=60.0)
-    state_path, state = _state(tmp_path)
-    setup_started = asyncio.Event()
-    finish_setup = asyncio.Event()
-
-    async def factory(_state: ComputerUseState) -> FakeUpstream:
-        setup_started.set()
-        await finish_setup.wait()
-        return FakeUpstream()
-
-    server = ComputerUseServer(
-        state_path=state_path,
-        status_reader=lambda: ComputerUseStatus("ready", None, state),
-        upstream_factory=factory,
-        lease_manager=leases,
-    )
-    call = asyncio.create_task(
-        server.call_tool("list_apps", {"session": "ses-a"})
-    )
-    await asyncio.wait_for(setup_started.wait(), timeout=1)
-    now += 61.0
-    await asyncio.sleep(0.03)
-
-    with pytest.raises(
-        ComputerServerError,
-        match="Desktop computer use is held by another Avibe Session",
-    ):
-        leases.acquire(
-            "ses-b",
-            state.daemon_key,
-            lambda: state.daemon_key,
-        )
-
-    finish_setup.set()
-    result = await asyncio.wait_for(call, timeout=1)
-    assert not result.get("isError")
-
-
-@pytest.mark.asyncio
-async def test_lease_loss_during_session_setup_aborts_before_user_forward(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A 180-second-capable session call cannot outlive desktop ownership."""
-
-    monkeypatch.setattr("core.computer_server._LEASE_HEARTBEAT_SECONDS", 0.01)
-    now = 100.0
-    leases = DesktopLeaseManager(tmp_path, now=lambda: now, ttl_seconds=60.0)
     state_path, state = _state(tmp_path)
     upstream = FakeUpstream()
-    upstream.block = asyncio.Event()
-    upstream.blocked_tools = {"start_session"}
     server = ComputerUseServer(
         state_path=state_path,
         status_reader=lambda: ComputerUseStatus("ready", None, state),
         upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
-        lease_manager=leases,
     )
-    call = asyncio.create_task(
-        server.call_tool("list_apps", {"session": "ses-a"})
+    for session, window_id in (("ses-a", 9), ("ses-b", 10)):
+        observed = await server.call_tool(
+            "get_window_state",
+            {"session": session, "pid": 7, "window_id": window_id},
+        )
+        assert not observed.get("isError")
+
+    upstream.block = asyncio.Event()
+    upstream.blocked_tools = {"click"}
+    first = asyncio.create_task(
+        server.call_tool(
+            "click",
+            {"session": "ses-a", "pid": 7, "window_id": 9, "x": 1, "y": 2},
+        )
+    )
+    second = asyncio.create_task(
+        server.call_tool(
+            "click",
+            {"session": "ses-b", "pid": 7, "window_id": 10, "x": 1, "y": 2},
+        )
     )
     for _attempt in range(100):
-        if upstream.calls:
+        if upstream.max_inflight >= 2:
             break
-        await asyncio.sleep(0.005)
-    assert [params["name"] for _method, params in upstream.calls] == [
-        "start_session"
-    ]
+        await asyncio.sleep(0)
+    assert upstream.max_inflight == 2
+    upstream.block.set()
+    assert not (await first).get("isError")
+    assert not (await second).get("isError")
 
-    now += 61.0
-    assert leases.acquire(
-        "ses-b",
-        state.daemon_key,
-        lambda: state.daemon_key,
-    ).newly_claimed
-    result = await asyncio.wait_for(call, timeout=1)
 
-    assert "desktop_lease_lost" in result["content"][0]["text"]
-    assert [params["name"] for _method, params in upstream.calls] == [
-        "start_session"
-    ]
-    assert upstream.close_calls == 1
+@pytest.mark.asyncio
+async def test_same_window_lock_waits_then_releases_to_the_next_session(
+) -> None:
+    """A target lock waits for release, then admits the next operation."""
+
+    manager = _TargetLockManager(wait_seconds=0.1)
+    arguments = {"pid": 7, "window_id": 9}
+    first = await manager.acquire("click", arguments)
+    second_task = asyncio.create_task(manager.acquire("click", arguments))
+    await asyncio.sleep(0.01)
+    assert not second_task.done()
+    await first.__aexit__(None, None, None)
+    second = await second_task
+    await second.__aexit__(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_target_lock_timeout_returns_target_busy_without_dispatch(
+    tmp_path: Path,
+) -> None:
+    """A bounded lock wait returns a retryable, pre-dispatch error."""
+
+    state_path, state = _state(tmp_path)
+    upstream = FakeUpstream()
+    upstream.block = asyncio.Event()
+    upstream.blocked_tools = {"click"}
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+        target_lock_manager=_TargetLockManager(wait_seconds=0.01),
+    )
+    for session in ("ses-a", "ses-b"):
+        observed = await server.call_tool(
+            "get_window_state",
+            {"session": session, "pid": 7, "window_id": 9},
+        )
+        assert not observed.get("isError")
+
+    first = asyncio.create_task(
+        server.call_tool(
+            "click",
+            {"session": "ses-a", "pid": 7, "window_id": 9, "x": 1, "y": 2},
+        )
+    )
+    for _attempt in range(100):
+        if upstream.inflight:
+            break
+        await asyncio.sleep(0)
+    second = await server.call_tool(
+        "click",
+        {"session": "ses-b", "pid": 7, "window_id": 9, "x": 3, "y": 4},
+    )
+    payload = json.loads(second["content"][0]["text"])
+    assert payload["code"] == "target_busy"
+    assert payload["dispatched"] is False
+    assert sum(params["name"] == "click" for _method, params in upstream.calls) == 1
+    upstream.block.set()
+    assert not (await first).get("isError")
+
+
+@pytest.mark.asyncio
+async def test_force_quit_conflicts_with_window_lock_for_same_pid(
+    tmp_path: Path,
+) -> None:
+    """Killing a process waits behind every mutation lock for its windows."""
+
+    state_path, state = _state(tmp_path)
+    upstream = FakeUpstream()
+    upstream.block = asyncio.Event()
+    upstream.blocked_tools = {"click"}
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+        target_lock_manager=_TargetLockManager(wait_seconds=0.01),
+    )
+    for session in ("ses-a", "ses-b"):
+        observed = await server.call_tool(
+            "get_window_state",
+            {"session": session, "pid": 7, "window_id": 9},
+        )
+        assert not observed.get("isError")
+
+    click = asyncio.create_task(
+        server.call_tool(
+            "click",
+            {"session": "ses-a", "pid": 7, "window_id": 9, "x": 1, "y": 2},
+        )
+    )
+    for _attempt in range(100):
+        if upstream.inflight:
+            break
+        await asyncio.sleep(0)
+    killed = await server.call_tool("kill_app", {"session": "ses-b", "pid": 7})
+    payload = json.loads(killed["content"][0]["text"])
+    assert payload["code"] == "target_busy"
+    assert payload["dispatched"] is False
+    assert not any(params["name"] == "kill_app" for _method, params in upstream.calls)
+    upstream.block.set()
+    assert not (await click).get("isError")
+
+
+@pytest.mark.asyncio
+async def test_clipboard_writes_are_serialized(tmp_path: Path) -> None:
+    """Clipboard writes share one target lock across sessions."""
+
+    state_path, state = _state(tmp_path)
+    upstream = FakeUpstream()
+    upstream.block = asyncio.Event()
+    upstream.blocked_tools = {"clipboard_write"}
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+    )
+    first = asyncio.create_task(
+        server.call_tool(
+            "clipboard_write",
+            {"session": "ses-a", "text": "first"},
+        )
+    )
+    for _attempt in range(100):
+        if upstream.inflight:
+            break
+        await asyncio.sleep(0)
+    second = asyncio.create_task(
+        server.call_tool(
+            "clipboard_write",
+            {"session": "ses-b", "text": "second"},
+        )
+    )
+    await asyncio.sleep(0.01)
+    assert sum(
+        params["name"] == "clipboard_write"
+        for _method, params in upstream.calls
+    ) == 1
+    upstream.block.set()
+    assert not (await first).get("isError")
+    assert not (await second).get("isError")
+    assert upstream.max_inflight_by_tool["clipboard_write"] == 1
+
+
+def test_legacy_lease_files_are_removed_on_server_start(tmp_path: Path) -> None:
+    """Released lease artifacts are ignored and cleaned up best-effort."""
+
+    state_path, _state_value = _state(tmp_path)
+    (tmp_path / "computer-lease.json").write_text(
+        '{"holder":"old-session","epoch":4}',
+        encoding="utf-8",
+    )
+    (tmp_path / "computer-lease.lock").write_bytes(b"legacy")
+
+    ComputerUseServer(state_path=state_path)
+
+    assert not (tmp_path / "computer-lease.json").exists()
+    assert not (tmp_path / "computer-lease.lock").exists()
+
+
+@pytest.mark.asyncio
+async def test_action_from_stale_observation_is_rejected_before_dispatch(
+    tmp_path: Path,
+) -> None:
+    """Another session's action invalidates the first session's element token."""
+
+    state_path, state = _state(tmp_path)
+    upstream = FakeUpstream()
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+    )
+    for session in ("ses-a", "ses-b"):
+        observed = await server.call_tool(
+            "get_window_state",
+            {"session": session, "pid": 7, "window_id": 9},
+        )
+        assert not observed.get("isError")
+
+    upstream.block = asyncio.Event()
+    upstream.blocked_tools = {"click"}
+    first_task = asyncio.create_task(
+        server.call_tool(
+            "click",
+            {
+                "session": "ses-a",
+                "pid": 7,
+                "window_id": 9,
+                "element_token": "token-from-ses-a",
+                "x": 1,
+                "y": 2,
+            },
+        )
+    )
+    for _attempt in range(100):
+        if upstream.inflight:
+            break
+        await asyncio.sleep(0)
+    stale_task = asyncio.create_task(
+        server.call_tool(
+            "click",
+            {
+                "session": "ses-b",
+                "pid": 7,
+                "window_id": 9,
+                "element_token": "token-from-ses-b-observation",
+                "x": 3,
+                "y": 4,
+            },
+        )
+    )
+    await asyncio.sleep(0.01)
+    upstream.block.set()
+    first = await first_task
+    stale = await stale_task
+    assert not first.get("isError")
+    payload = json.loads(stale["content"][0]["text"])
+    assert payload["code"] == "observe_first"
+    assert payload["dispatched"] is False
+    assert sum(
+        params["name"] == "click"
+        for _method, params in upstream.calls
+    ) == 1
 
 
 @pytest.mark.asyncio
@@ -2522,7 +2025,7 @@ async def test_upstream_eof_before_request_registration_fails_promptly() -> None
 async def test_upstream_request_has_a_bounded_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A silent but live child cannot hold the desktop lease indefinitely."""
+    """A silent but live child cannot hold a target lock indefinitely."""
 
     monkeypatch.setattr(
         "core.computer_server._UPSTREAM_REQUEST_TIMEOUT_SECONDS",

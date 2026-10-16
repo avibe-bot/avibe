@@ -79,15 +79,15 @@ own live active-Turn registry. Turn IDs are not exported or accepted as
 capabilities. An Agent cannot choose a different Session or pass a driver
 `session` value. Requests use the existing Controller and `ComputerUseServer`
 checks, including the authenticated `require_bind` entry path, observe-first,
-exact window targets, focus-shortcut rejection, the single-holder desktop
-lease, and native state/admission checks. Driver state is keyed by Avibe
+exact window targets, target-scoped mutation locks, focus-shortcut rejection,
+and native state/admission checks. Driver state is keyed by Avibe
 Session and survives Turn boundaries until the Session is ended or archived.
 
 `observe window` and `zoom` can write screenshots to a caller-selected path.
 Human output includes accessibility state and element tokens when available;
 `--json` returns the structured service response. The CLI reports `off`,
 `needs_permission`, `needs_runtime`, `starting`, `error`, `unavailable`,
-`desktop_busy`, and safety rejections instead of retrying automatically.
+`target_busy`, and safety rejections instead of retrying automatically.
 
 ## Remote and shared-channel use
 

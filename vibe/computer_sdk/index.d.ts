@@ -132,7 +132,9 @@ export class ControllerError extends Error {
 export class NotFound extends ControllerError {}
 export class Ambiguous extends ControllerError {}
 export class Timeout extends ControllerError {}
-export class DesktopBusy extends ControllerError {}
+export class TargetBusy extends ControllerError {}
+/** @deprecated Use TargetBusy. */
+export const DesktopBusy: typeof TargetBusy;
 export class ForegroundConsentRequired extends ControllerError {}
 export class Unavailable extends ControllerError {}
 
