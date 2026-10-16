@@ -55,7 +55,7 @@ from vibe.model_hub_runtime.client import (
     EngineClientError,
     EngineInvokeHandle,
     completed_handle,
-    engine_refused_gateway_key,
+    engine_disowned_call,
     probe_models,
     upstream_api_url,
 )
@@ -2037,7 +2037,12 @@ class CLIProxyEngineAdapter:
             }.get(normalized_vendor)
             if expected_provider is None:
                 raise EngineStateError("OAuth credential validation is unsupported")
-            client = await run_owned_in_thread(self.supervisor.client)
+            try:
+                client = await run_owned_in_thread(self.supervisor.client)
+            except EngineConfigLostError:
+                # Already drained: the routing lock is held and transports are idle.
+                await self._restart_lost_engine()
+                client = await run_owned_in_thread(self.supervisor.client)
             try:
                 inventory = await run_owned_in_thread(_auth_inventory, client)
             except EngineClientError as exc:
@@ -2903,7 +2908,7 @@ class CLIProxyEngineAdapter:
                 on_transport_done=release,
                 on_request_sent=request_sent,
             )
-            if handle.outcome_available and engine_refused_gateway_key(await handle.outcome()):
+            if handle.outcome_available and engine_disowned_call(await handle.outcome()):
                 # The engine's last health check vouches for it no longer: the
                 # next admission checks it, finds the lost configuration, and
                 # restores it once the open streams end (#2753, #2755).

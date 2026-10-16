@@ -1186,7 +1186,8 @@ scenarios:
     test: tests/test_model_hub_retry_lifecycle.py::test_a_silent_engine_stream_is_cancelled_and_retried_at_its_idle_bound
   - id: MH-RUNTIME-014
     name: >-
-      An engine that refuses the credentials Avibe launched it with is reported once as having lost its configuration,
+      An engine that no longer runs the config Avibe launched it with (it refuses Avibe's credentials, serves no
+      management route, or refuses connections on its port, as after its own torn reload) is reported once as having lost its configuration,
       admits no new work, and restarts from the rendered config only after its open streams end; the waiting save or
       turn then runs on the restarted engine
     status: covered
@@ -1195,6 +1196,7 @@ scenarios:
     test:
       - tests/test_model_hub_transport_leases.py::test_an_engine_that_lost_its_configuration_restarts_only_once_its_streams_end
       - tests/test_model_hub_runtime.py::test_an_engine_that_lost_its_configuration_is_reported_once_and_restarted_by_its_drainer
+      - tests/test_model_hub_runtime.py::test_a_source_save_restores_an_engine_whose_reload_tore_its_config
   - id: MH-RUNTIME-015
     name: >-
       A pre-output 401 is the engine's own only when its engine-local model listing refuses the same gateway key;
@@ -2568,6 +2570,15 @@ scenarios:
     test: tests/test_model_hub_hosted_evidence.py::test_a_served_response_proves_only_its_own_completed_search_item
     related_tests:
       - tests/test_model_hub_hosted_evidence.py::test_a_native_success_is_recorded_at_settlement_for_a_tool_the_request_declared
+  - id: MH-HOSTED-GATEWAY-009
+    name: >-
+      A model-not-found for an executor model its Source lists marks that Source, and the background schedule's own
+      due rule lists it once its listing is 15 minutes old; the row leaves only when that listing, under the identity
+      that refused it, no longer names it either and its removal moves no route, so the next chain skips it
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_model_hub_hosted_executor.py::test_a_refused_listed_executor_model_is_listed_again_and_leaves_once_unlisted
   - id: MH-HOSTED-GATEWAY-007
     name: image_generate runs directly on the images endpoint of a model its turn's frozen enum names, admitted on the final snapshot with no fallback; an argument the model does not take or a model no longer admitted fails before anything runs; only usable base64 images complete; only an upstream refusal of the model or its endpoint is learned; each offered path is verified through the pinned engine
     status: covered

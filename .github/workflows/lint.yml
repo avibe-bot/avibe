@@ -53,6 +53,9 @@ jobs:
     # An administrator can rename that requirement after this compatibility job
     # has landed; the job itself is a substantive removal contract, not a shim.
     runs-on: ubuntu-latest
+    # Every pytest run in this job writes its junit report here (tests/conftest.py).
+    env:
+      AVIBE_CI_JUNIT_DIR: ${{ github.workspace }}/ci-junit
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
       - name: Prepare hermetic UI asset placeholder
@@ -75,6 +78,17 @@ jobs:
         run: |
           pytest -q tests/test_memory_removal.py tests/test_admin_notifications.py \
             tests/test_message_facts_generic.py
+
+      # Read by scenario-evidence, which proves each covered scenario row's
+      # evidence ran (scripts/ci_scenario_evidence.py).
+      - name: Upload junit reports
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        with:
+          name: junit-${{ github.job }}-${{ strategy.job-index }}
+          path: ci-junit/
+          if-no-files-found: ignore
+          retention-days: 7
 
   ruff:
     needs: changes
@@ -269,6 +283,9 @@ jobs:
         # Preserve discovery, watchdogs and one-process-per-file isolation.
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
         shard-total: [8]
+    # Every pytest run in this job writes its junit report here (tests/conftest.py).
+    env:
+      AVIBE_CI_JUNIT_DIR: ${{ github.workspace }}/ci-junit
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
 
@@ -304,11 +321,22 @@ jobs:
       - name: Run unit tests shard ${{ matrix.shard }}/${{ matrix.shard-total }}
         run: bash scripts/ci_loopback_only.sh bash scripts/ci_unit_tests.sh "${{ matrix.shard }}" "${{ matrix.shard-total }}"
 
+      # Read by scenario-evidence, which proves each covered scenario row's
+      # evidence ran (scripts/ci_scenario_evidence.py).
+      - name: Upload junit reports
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        with:
+          name: junit-${{ github.job }}-${{ strategy.job-index }}
+          path: ci-junit/
+          if-no-files-found: ignore
+          retention-days: 7
+
   unit-tests:
     runs-on: ubuntu-latest
     # Keep UI validation in the existing required gate while allowing artifact
     # consumers to start as soon as their production bundle is built.
-    needs: [changes, unit-test-shards, ui-checks, ui-browser-checks]
+    needs: [changes, unit-test-shards, scenario-evidence, ui-checks, ui-browser-checks]
     if: always()
     steps:
       - name: Verify unit test shards and UI checks
@@ -316,6 +344,7 @@ jobs:
           SCOPE_RESULT: ${{ needs.changes.result }}
           DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
           UNIT_RESULT: ${{ needs['unit-test-shards'].result }}
+          EVIDENCE_RESULT: ${{ needs['scenario-evidence'].result }}
           UI_RESULT: ${{ needs['ui-checks'].result }}
           BROWSER_RESULT: ${{ needs['ui-browser-checks'].result }}
         run: |
@@ -328,7 +357,7 @@ jobs:
             false) expected="success" ;;
             *) echo "Missing or invalid change classification."; exit 1 ;;
           esac
-          for result in "$UNIT_RESULT" "$UI_RESULT" "$BROWSER_RESULT"; do
+          for result in "$UNIT_RESULT" "$EVIDENCE_RESULT" "$UI_RESULT" "$BROWSER_RESULT"; do
             if [ "$result" != "$expected" ]; then
               echo "Unit/UI checks finished with result: $result"
               exit 1
@@ -336,10 +365,63 @@ jobs:
           done
           echo "Unit/UI results match the classified scope (docs_only=$DOCS_ONLY)."
 
+  # Every case a covered scenario row cites as evidence ran and passed in some
+  # job, or a release workflow runs it (scripts/ci_scenario_evidence.py). It
+  # waits for every job that writes junit; one that a path or event filter
+  # skipped leaves no report, and its cases count as not run, never as failed.
+  scenario-evidence:
+    needs:
+      - changes
+      - unit-test-shards
+      - memory-insight-contract
+      - migration-release-guard
+      - install-upgrade-shards
+      - windows-model-hub
+      - windows-control-ipc
+      - windows-agent
+    if: always() && needs.changes.outputs.docs_only == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+
+      - name: Prepare minimal UI asset placeholder
+        run: |
+          mkdir -p ui/dist
+          printf '%s\n' '<!doctype html><html><body></body></html>' > ui/dist/index.html
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned uv
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.12.10
+
+      - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25  # v5
+        with:
+          path: ~/.cache/uv
+          key: ${{ runner.os }}-${{ runner.arch }}-ci-uv-0.12.10-py3.12-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+
+      # Deciding what a workflow's pytest command selects collects test modules.
+      - name: Install package and test deps
+        run: uv pip install --system -e . --group dev
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
+        with:
+          pattern: junit-*
+          path: ci-junit
+
+      - name: Check that covered scenario evidence ran
+        run: python scripts/ci_scenario_evidence.py ci-junit
+
   migration-release-guard:
     needs: changes
     if: needs.changes.outputs.docs_only == 'false'
     runs-on: ubuntu-latest
+    # Every pytest run in this job writes its junit report here (tests/conftest.py).
+    env:
+      AVIBE_CI_JUNIT_DIR: ${{ github.workspace }}/ci-junit
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
         with:
@@ -384,6 +466,17 @@ jobs:
             exit 1
           fi
 
+      # Read by scenario-evidence, which proves each covered scenario row's
+      # evidence ran (scripts/ci_scenario_evidence.py).
+      - name: Upload junit reports
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        with:
+          name: junit-${{ github.job }}-${{ strategy.job-index }}
+          path: ci-junit/
+          if-no-files-found: ignore
+          retention-days: 7
+
   npm-wrapper:
     needs: changes
     if: needs.changes.outputs.docs_only == 'false'
@@ -411,6 +504,9 @@ jobs:
       fail-fast: false
       matrix:
         suite: [installer]
+    # Every pytest run in this job writes its junit report here (tests/conftest.py).
+    env:
+      AVIBE_CI_JUNIT_DIR: ${{ github.workspace }}/ci-junit
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
 
@@ -478,6 +574,17 @@ jobs:
             tests/test_install_script.py \
             tests/e2e/test_install_command.py \
             -v
+
+      # Read by scenario-evidence, which proves each covered scenario row's
+      # evidence ran (scripts/ci_scenario_evidence.py).
+      - name: Upload junit reports
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        with:
+          name: junit-${{ github.job }}-${{ strategy.job-index }}
+          path: ci-junit/
+          if-no-files-found: ignore
+          retention-days: 7
 
   install-upgrade-regression:
     runs-on: ubuntu-latest
@@ -729,6 +836,9 @@ jobs:
             engine_platform: windows-amd64
           - runner: windows-11-arm
             engine_platform: windows-arm64
+    # Every pytest run in this job writes its junit report here (tests/conftest.py).
+    env:
+      AVIBE_CI_JUNIT_DIR: ${{ github.workspace }}/ci-junit
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
 
@@ -765,10 +875,24 @@ jobs:
             throw "The service acceptance did not run"
           }
 
+      # Read by scenario-evidence, which proves each covered scenario row's
+      # evidence ran (scripts/ci_scenario_evidence.py).
+      - name: Upload junit reports
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        with:
+          name: junit-${{ github.job }}-${{ strategy.job-index }}
+          path: ci-junit/
+          if-no-files-found: ignore
+          retention-days: 7
+
   windows-control-ipc:
     runs-on: windows-latest
     needs: [changes, build-linux-artifacts]
     if: needs.changes.outputs.docs_only == 'false' && (github.event_name != 'pull_request' || needs.changes.outputs.windows_control_ipc == 'true')
+    # Every pytest run in this job writes its junit report here (tests/conftest.py).
+    env:
+      AVIBE_CI_JUNIT_DIR: ${{ github.workspace }}/ci-junit
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
 
@@ -866,6 +990,17 @@ jobs:
   # text-mode descriptors without O_BINARY, st_ctime that means creation time).
   # Both runners use x64 Python: no win_arm64 wheel of cryptography exists, so
   # Avibe runs on Windows on Arm through x64 Python.
+
+      # Read by scenario-evidence, which proves each covered scenario row's
+      # evidence ran (scripts/ci_scenario_evidence.py).
+      - name: Upload junit reports
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        with:
+          name: junit-${{ github.job }}-${{ strategy.job-index }}
+          path: ci-junit/
+          if-no-files-found: ignore
+          retention-days: 7
   windows-agent:
     name: windows-agent (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -876,6 +1011,9 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-latest, windows-11-arm]
+    # Every pytest run in this job writes its junit report here (tests/conftest.py).
+    env:
+      AVIBE_CI_JUNIT_DIR: ${{ github.workspace }}/ci-junit
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
 
@@ -951,3 +1089,14 @@ jobs:
       # this file on Windows.
       - name: Verify the watch worker's job object
         run: python -m pytest -q -ra tests/test_watch_worker.py
+
+      # Read by scenario-evidence, which proves each covered scenario row's
+      # evidence ran (scripts/ci_scenario_evidence.py).
+      - name: Upload junit reports
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        with:
+          name: junit-${{ github.job }}-${{ strategy.job-index }}
+          path: ci-junit/
+          if-no-files-found: ignore
+          retention-days: 7

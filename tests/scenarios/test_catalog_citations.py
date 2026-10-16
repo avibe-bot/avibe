@@ -33,17 +33,13 @@ deselecting hook, a test defined in a branch not taken.
 
 A cited Python file must be one pytest's default discovery collects
 (``test_*.py`` or ``*_test.py``). Conditional skips (``skipif``) depend on the
-environment, and whether a case actually ran belongs to CI's results (#2565).
+environment; whether each case a ``covered`` row cites actually ran is decided
+from CI's own results by ``scripts/ci_scenario_evidence.py``.
 """
 
 from __future__ import annotations
 
-import json
-import os
 import re
-import subprocess
-import sys
-import tempfile
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
@@ -51,14 +47,14 @@ from pathlib import Path
 import pytest
 import yaml
 
+from scripts import pytest_collection
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCENARIO_ROOT = REPO_ROOT / "tests" / "scenarios"
 _UI_SUFFIXES = {".ts", ".tsx", ".mts", ".mjs"}
 _POINTER_KEYS = ("related_tests", "supporting_tests")
 # pytest's default ``python_files``, which this repository does not override.
 _DISCOVERED = re.compile(r"(test_.*|.*_test)\.py")
-# One collection of every cited file runs in about 20 s; the bound only stops a hang.
-_COLLECTION_TIMEOUT_SECONDS = 240
 
 
 @dataclass(frozen=True)
@@ -69,50 +65,6 @@ class _Case:
     param: str
     doc: str
     skipped: bool
-
-
-class _Recorder:
-    """A pytest plugin that writes what a collection-only run collected, as JSON."""
-
-    def __init__(self, out: str) -> None:
-        self.out = out
-
-    def pytest_collection_finish(self, session: pytest.Session) -> None:
-        cases = []
-        for item in session.items:
-            function = getattr(item, "function", None)
-            cases.append(
-                {
-                    "nodeid": item.nodeid,
-                    "doc": (function.__doc__ if function is not None else None) or "",
-                    "skipped": _declares_skip(item),
-                }
-            )
-        Path(self.out).write_text(json.dumps(cases), encoding="utf-8")
-
-
-def _declares_skip(item: pytest.Item) -> bool:
-    """Whether the case, its class, its module or its parameter set declares a skip.
-
-    Only a declared ``skip``: one a hook adds while collecting, such as the
-    e2e suites' opt-in, depends on the run's options as ``skipif`` depends on
-    the environment.
-    """
-
-    function, owner, module = (getattr(item, name, None) for name in ("function", "cls", "module"))
-    marks = list(getattr(getattr(item, "callspec", None), "marks", None) or [])
-    for target in (function, owner, module):
-        declared = getattr(target, "pytestmark", None) or []
-        marks.extend(declared if isinstance(declared, (list, tuple)) else [declared])
-    return any(getattr(mark, "name", None) == "skip" for mark in marks) or any(
-        getattr(target, "__unittest_skip__", False) for target in (function, owner)
-    )
-
-
-def _collect(out: str, files: list[str]) -> int:
-    """Collect ``files`` as CI does, without running them, and record each case in ``out``."""
-
-    return int(pytest.main(["--collect-only", "-q", "-p", "no:cacheprovider", "-o", "addopts=", *files], plugins=[_Recorder(out)]))
 
 
 def _catalogs() -> list[Path]:
@@ -162,40 +114,10 @@ def _citations(row: dict) -> tuple[list[tuple[str, object]], list[str]]:
 
 
 def _collect_cases(files: list[str], cwd: Path) -> dict[str, list[_Case]]:
-    """Every case pytest collects from ``files``, relative to ``cwd``, by file.
+    """Every case pytest collects from ``files``, relative to ``cwd``, by file."""
 
-    One collection-only run in a child process, with the conftest files that
-    apply there: a nested ``pytest.main`` would share this session's modules and
-    plugins.
-    """
-
-    with tempfile.TemporaryDirectory() as directory:
-        out = Path(directory) / "collected.json"
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                "import sys\nfrom tests.scenarios.test_catalog_citations import _collect\n"
-                "sys.exit(_collect(sys.argv[1], sys.argv[2:]))",
-                str(out),
-                *files,
-            ],
-            cwd=cwd,
-            # Without the caller's PYTEST_ADDOPTS, whose selection would drop cited cases.
-            env={
-                **{name: value for name, value in os.environ.items() if name != "PYTEST_ADDOPTS"},
-                "PYTHONPATH": os.pathsep.join(filter(None, [str(REPO_ROOT), os.environ.get("PYTHONPATH")])),
-            },
-            capture_output=True,
-            text=True,
-            timeout=_COLLECTION_TIMEOUT_SECONDS,
-        )
-        assert result.returncode == 0 and out.is_file(), (
-            f"pytest could not collect the cited files (exit {result.returncode}):\n{result.stdout[-4000:]}{result.stderr[-4000:]}"
-        )
-        recorded = json.loads(out.read_text(encoding="utf-8"))
     cases: dict[str, list[_Case]] = {file: [] for file in files}
-    for entry in recorded:
+    for entry in pytest_collection.collect(files, cwd):
         file, _, rest = entry["nodeid"].partition("::")
         base, bracket, param = rest.partition("[")
         cases.setdefault(file, []).append(
