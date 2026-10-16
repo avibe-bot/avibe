@@ -65,7 +65,11 @@ class Evidence:
 
 
 def covered_evidence(scenario_root: Path = SCENARIO_ROOT) -> dict[str, Evidence]:
-    """Every pytest case a ``covered`` row cites under ``test``, by citation."""
+    """Every pytest case a ``covered`` row cites as evidence, by citation.
+
+    Its evidence keys are those the citation check reads as evidence: each case
+    under ``test``, and the one ``partial_evidence.test`` names.
+    """
 
     evidence: dict[str, Evidence] = {}
     for catalog in sorted(scenario_root.glob("*/catalog.yaml")):
@@ -73,7 +77,11 @@ def covered_evidence(scenario_root: Path = SCENARIO_ROOT) -> dict[str, Evidence]
             if row.get("status") != "covered":
                 continue
             cited = row.get("test")
-            for citation in cited if isinstance(cited, list) else [cited]:
+            cited = list(cited) if isinstance(cited, list) else [cited]
+            partial = row.get("partial_evidence")
+            if isinstance(partial, dict):
+                cited.append(partial.get("test"))
+            for citation in cited:
                 if isinstance(citation, str) and citation.partition("::")[0].endswith(".py") and "::" in citation:
                     evidence.setdefault(citation, Evidence(citation, [])).rows.append(row["id"])
     return evidence

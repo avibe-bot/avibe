@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from scripts import pytest_collection
 from scripts.ci_scenario_evidence import (
@@ -129,3 +130,30 @@ def test_release_gating_is_read_from_the_release_workflows() -> None:
     assert evidence["tests/e2e/test_model_hub_mock_upstream.py::test_mh_routing_001_mock_model_errors_are_request_scoped_and_inventory_independent"].rows == ["MH-ROUTING-001"]
     assert "tests/e2e/test_model_hub_mock_upstream.py::test_mh_routing_001_mock_model_errors_are_request_scoped_and_inventory_independent" in gated
     assert "tests/e2e/test_retired_updater_bridge.py::test_released_updater_replaces_companion_without_touching_user_data" in gated
+
+
+def test_a_covered_rows_partial_evidence_case_is_evidence_too(tmp_path: Path) -> None:
+    """#2775: the case ``partial_evidence.test`` names must run as its row's ``test`` cases must."""
+
+    (tmp_path / "capability").mkdir()
+    (tmp_path / "capability" / "catalog.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "scenarios": [
+                    {
+                        "id": "ROW-1",
+                        "status": "covered",
+                        "test": "tests/test_x.py::test_main",
+                        "partial_evidence": {"test": "tests/test_x.py::test_more", "covers": "the second half"},
+                    },
+                    {"id": "ROW-2", "status": "partial", "test": "tests/test_x.py::test_not_covered"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    evidence = covered_evidence(tmp_path)
+
+    assert sorted(evidence) == ["tests/test_x.py::test_main", "tests/test_x.py::test_more"]
+    assert evidence["tests/test_x.py::test_more"].rows == ["ROW-1"]
