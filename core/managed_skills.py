@@ -692,8 +692,10 @@ def _scan_root_or_skill(
         root_stat = root.stat(follow_symlinks=False)
     except (OSError, RuntimeError):
         return []
-    if not stat.S_ISDIR(root_stat.st_mode):
+    resolved_root = _resolved_candidate_directory(root, root_stat)
+    if resolved_root is None:
         return []
+    root, _, root_identity = resolved_root
 
     direct_skill = root / "SKILL.md"
     try:
@@ -711,7 +713,7 @@ def _scan_root_or_skill(
     if budget.parse_exhausted or budget.remaining_children <= 0:
         return []
 
-    directory_identity = _directory_identity(root_stat)
+    directory_identity = root_identity
     if seen_directory_identities is not None:
         if directory_identity in seen_directory_identities:
             return []
@@ -997,7 +999,7 @@ def _read_bounded_json_with_presence(
         os.close(fd)
     try:
         return True, json.loads(bytes(raw).decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (UnicodeDecodeError, ValueError):
         return True, None
 
 
@@ -1056,9 +1058,8 @@ def _claude_plugin_denied_plugins(
         )
         if not present:
             continue
-        valid, source_denied = _claude_plugin_settings_denies(payload)
-        if valid:
-            denied.update(source_denied)
+        _, source_denied = _claude_plugin_settings_denies(payload)
+        denied.update(source_denied)
 
     managed_authority_unknown = False
     managed_path, managed_dropins = _claude_plugin_managed_settings_sources()
@@ -1086,16 +1087,17 @@ def _claude_plugin_denied_plugins(
                 managed_authority_unknown = True
                 dropin_paths = []
             else:
-                dropin_paths = sorted(
-                    (
-                        path
-                        for path in managed_dropins.iterdir()
-                        if not path.name.startswith(".") and path.suffix == ".json"
-                    ),
-                    key=lambda path: path.name,
-                )
-                if len(dropin_paths) > CLAUDE_PLUGIN_MANAGED_SETTINGS_MAX_FILES:
-                    managed_authority_unknown = True
+                dropin_paths = []
+                for index, path in enumerate(managed_dropins.iterdir()):
+                    if index >= CLAUDE_PLUGIN_MANAGED_SETTINGS_MAX_FILES:
+                        managed_authority_unknown = True
+                        break
+                    if not path.name.startswith(".") and path.suffix == ".json":
+                        dropin_paths.append(path)
+                if not managed_authority_unknown:
+                    dropin_paths.sort(key=lambda path: path.name)
+                else:
+                    dropin_paths = []
         except (OSError, RuntimeError):
             managed_authority_unknown = True
             dropin_paths = []
@@ -1138,8 +1140,8 @@ def _claude_plugin_registry_records(payload: Any) -> list[tuple[str, dict[str, A
                 for record in entries:
                     if isinstance(record, dict):
                         records.append((plugin_id, record))
-                        if len(records) >= CLAUDE_PLUGIN_REGISTRY_MAX_ENTRIES:
-                            return records
+                        if len(records) > CLAUDE_PLUGIN_REGISTRY_MAX_ENTRIES:
+                            return []
     elif isinstance(payload, list):
         for record in payload:
             if not isinstance(record, dict):
@@ -1147,8 +1149,8 @@ def _claude_plugin_registry_records(payload: Any) -> list[tuple[str, dict[str, A
             plugin_id = record.get("id")
             if isinstance(plugin_id, str) and plugin_id:
                 records.append((plugin_id, record))
-                if len(records) >= CLAUDE_PLUGIN_REGISTRY_MAX_ENTRIES:
-                    break
+                if len(records) > CLAUDE_PLUGIN_REGISTRY_MAX_ENTRIES:
+                    return []
     return records
 
 
@@ -1305,7 +1307,7 @@ def _claude_plugin_skill_roots(
             continue
         try:
             plugin_root = Path(raw_path).expanduser()
-        except (OSError, TypeError, ValueError):
+        except (OSError, RuntimeError, TypeError, ValueError):
             continue
         if not plugin_root.is_absolute() or not _path_is_utf8(plugin_root):
             continue

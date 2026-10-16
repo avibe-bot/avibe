@@ -1224,6 +1224,44 @@ def test_claude_plugin_skills_use_only_the_fixed_skills_directory(
     assert [skill.name for skill in skills] == ["format-code"]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="symlink fixture requires POSIX semantics")
+def test_claude_plugin_fixed_skills_symlink_is_discovered(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    claude_home = home / ".claude"
+    registry = claude_home / "plugins" / "installed_plugins.json"
+    registry.parent.mkdir(parents=True)
+    plugin = tmp_path / "plugin-cache" / "linked"
+    real_skills = tmp_path / "real-skills"
+    _write_skill(real_skills, "linked", "linked", "Linked")
+    plugin.mkdir(parents=True)
+    (plugin / "skills").symlink_to(real_skills, target_is_directory=True)
+    registry.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "linked@example": [
+                        {"scope": "user", "installPath": str(plugin), "enabled": True}
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert [
+        skill.name
+        for skill in _isolated_resolve(
+            cwd,
+            tmp_path,
+            home=home,
+            claude_home=claude_home,
+        )
+    ] == ["linked"]
+
+
 def test_claude_plugin_same_scope_selects_newest_install_by_time_then_stable_path(
     tmp_path: Path,
 ) -> None:
@@ -1671,6 +1709,46 @@ def test_claude_plugin_record_deny_blocks_duplicate_enabled_record(
     ) == []
 
 
+def test_claude_plugin_registry_overflow_fails_closed_before_duplicate_deny(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    claude_home = home / ".claude"
+    registry = claude_home / "plugins" / "installed_plugins.json"
+    registry.parent.mkdir(parents=True)
+    other = tmp_path / "plugin-cache" / "other"
+    enabled = tmp_path / "plugin-cache" / "enabled-overflow"
+    _write_skill(enabled / "skills", "overflow", "overflow", "Overflow")
+    records = [
+        {"scope": "user", "installPath": str(other)}
+        for _ in range(managed_skills.CLAUDE_PLUGIN_REGISTRY_MAX_ENTRIES - 1)
+    ]
+    records.extend(
+        [
+            {"scope": "user", "installPath": str(enabled), "enabled": True},
+            {"scope": "user", "installPath": str(enabled), "enabled": False},
+        ]
+    )
+    registry.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {"other@example": records[:-2], "duplicate@example": records[-2:]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _isolated_resolve(
+        cwd,
+        tmp_path,
+        home=home,
+        claude_home=claude_home,
+    ) == []
+
+
 def test_malformed_plugin_manifest_does_not_block_static_skills(
     tmp_path: Path,
 ) -> None:
@@ -2007,7 +2085,14 @@ def test_claude_plugin_deny_settings_override_positive_user_settings(tmp_path: P
     )
     (project / ".claude").mkdir()
     (project / ".claude" / "settings.local.json").write_text(
-        json.dumps({"enabledPlugins": {"formatter@example": False}}),
+        json.dumps(
+            {
+                "enabledPlugins": {
+                    "formatter@example": False,
+                    "malformed@example": "yes",
+                }
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -2040,6 +2125,77 @@ def test_claude_plugin_discovery_fails_closed_on_invalid_registry(tmp_path: Path
         xdg_config_home=home / ".config",
         builtin_catalog_root="",
     ) == []
+
+
+def test_claude_plugin_discovery_fails_closed_on_json_numeric_limit(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    _write_skill(cwd / ".claude" / "skills", "static", "static", "Static")
+    claude_home = home / ".claude"
+    registry = claude_home / "plugins" / "installed_plugins.json"
+    registry.parent.mkdir(parents=True)
+    plugin = tmp_path / "plugin-cache" / "numeric"
+    _write_skill(plugin / "skills", "numeric", "numeric", "Numeric")
+    install_path = json.dumps(str(plugin))
+    registry.write_text(
+        '{"plugins":{"numeric@example":[{"scope":"user","installPath":'
+        + install_path
+        + "]},\"oversized\":"
+        + "9" * 5000
+        + "}",
+        encoding="utf-8",
+    )
+
+    assert [
+        skill.name
+        for skill in _isolated_resolve(
+            cwd,
+            tmp_path,
+            home=home,
+            claude_home=claude_home,
+        )
+    ] == ["static"]
+
+
+def test_claude_plugin_install_path_expanduser_failure_is_omitted(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    _write_skill(cwd / ".claude" / "skills", "static", "static", "Static")
+    claude_home = home / ".claude"
+    registry = claude_home / "plugins" / "installed_plugins.json"
+    registry.parent.mkdir(parents=True)
+    registry.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "missing-user@example": [
+                        {
+                            "scope": "user",
+                            "installPath": "~avibe-missing-user-2547/plugin",
+                        }
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert [
+        skill.name
+        for skill in _isolated_resolve(
+            cwd,
+            tmp_path,
+            home=home,
+            claude_home=claude_home,
+        )
+    ] == ["static"]
 
 
 def test_registry_backed_claude_plugin_skill_overrides_codex_system_default(tmp_path: Path) -> None:
