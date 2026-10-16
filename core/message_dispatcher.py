@@ -13,10 +13,11 @@ import re
 import tempfile
 import time
 import unicodedata
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional, Sequence
+from typing import Any, AsyncIterator, Callable, Mapping, Optional, Sequence
 from urllib.parse import urljoin
 from modules.agents.catalog import AGENT_BACKENDS
 
@@ -28,7 +29,7 @@ from core.delivery_evidence import STAGE_PERSIST, STAGE_SEND, STAGE_STREAM, Deli
 from core.delivery_target import routed_delivery_context
 from core.citations import CitationBundle, materialize_citations
 from core import failure_notices
-from core.message_context import resolve_turn_sink_key
+from core.message_context import TERMINAL_COMMIT_KEY, resolve_turn_sink_key
 from core.message_mirror import (
     agent_message_exists,
     persist_agent_message,
@@ -239,48 +240,65 @@ async def _stream_chunk(
     if completes_turn is None:
         completes_turn = kind == "result"
     if completes_turn:
-        # The result is the turn's final answer — release the streaming dispatch
-        # so it can close the SSE stream right after this chunk. Unlike chunk
-        # forwarding above, the COMPLETION signal IS turn-token-gated (mirrors
-        # ``Controller.mark_turn_complete`` / ``_is_active_turn``): a late ``result``
-        # from a SUPERSEDED or OLDER turn (stopped / timed-out / a scheduled-watch run
-        # that carries no token) resolves the CURRENT turn's sink by session key, and
-        # setting its ``done_event`` would pop ``in_flight`` / publish ``turn.end`` /
-        # flush the queue while the active backend is still running (Codex P1/P2).
-        # When the live sink HAS a token, only a result with the MATCHING token may
-        # complete it — a different OR absent token is stale. Fail-open only when the
-        # sink itself is tokenless. The reused-receiver Claude case keeps completing
-        # because its result emit adopts the live turn's token (see ClaudeAgent).
-        if not emit_matches_active_turn(sink, context):
-            return
-        # Record WHY the waiter is being released, before releasing it. This is the
-        # honest settlement: a real terminal result arrived, so ``dispatch_turn``
-        # must leave the run's terminal state to the out-of-band writer. The
-        # fallback releasers use ``setdefault``, so this value always wins over them.
-        #
-        # An acknowledged Stop is NOT one of those fallbacks and must not be
-        # overwritten (Codex P2). ``settle_bound_turn_sink`` bails out when ``done`` is
-        # already set, so reaching here with ``stopped`` recorded means the user's stop
-        # won the race and was already reported to them; replacing the reason would
-        # make ``_execute_agent_run`` skip the guarded ``canceled`` settlement and let
-        # the outcome depend on which coroutine happened to resume first. The run's
-        # terminal STATUS is still first-writer-wins in the store, so a result whose row
-        # write already landed keeps its ``succeeded`` — this only stops the reason from
-        # silently disagreeing with what the user was told.
-        #
-        # A contained backend teardown is the same case for the same reason: the
-        # service retired the runtime itself and the release already named that as
-        # the settlement, so a straggler result must not relabel an infrastructure
-        # interruption as a healthy terminal result. Only these two are protected --
-        # NOT all of ``SETTLEMENTS_WITHOUT_RESULT`` -- because
-        # ``SETTLED_BY_NO_TERMINAL_RESULT`` is the pessimistic default a fallback
-        # releaser writes, and upgrading THAT when a real result lands is the whole
-        # point of this line.
-        if sink.get("settled_by") not in (SETTLED_BY_STOPPED, SETTLED_BY_BACKEND_REFRESH, SETTLED_BY_BACKEND_DISABLED):
-            sink["settled_by"] = SETTLED_BY_TERMINAL_RESULT
-        done = sink.get("done_event")
-        if done is not None:
-            done.set()
+        _complete_turn_sink(sink, context)
+
+
+def _complete_turn_sink(sink: dict, context) -> None:
+    """Release the turn sink's waiter for a terminal result, recording why."""
+
+    # The result is the turn's final answer — release the streaming dispatch
+    # so it can close the SSE stream right after this chunk. Unlike chunk
+    # forwarding in ``_stream_chunk``, the COMPLETION signal IS turn-token-gated (mirrors
+    # ``Controller.mark_turn_complete`` / ``_is_active_turn``): a late ``result``
+    # from a SUPERSEDED or OLDER turn (stopped / timed-out / a scheduled-watch run
+    # that carries no token) resolves the CURRENT turn's sink by session key, and
+    # setting its ``done_event`` would pop ``in_flight`` / publish ``turn.end`` /
+    # flush the queue while the active backend is still running (Codex P1/P2).
+    # When the live sink HAS a token, only a result with the MATCHING token may
+    # complete it — a different OR absent token is stale. Fail-open only when the
+    # sink itself is tokenless. The reused-receiver Claude case keeps completing
+    # because its result emit adopts the live turn's token (see ClaudeAgent).
+    if not emit_matches_active_turn(sink, context):
+        return
+    # Record WHY the waiter is being released, before releasing it. This is the
+    # honest settlement: a real terminal result arrived, so ``dispatch_turn``
+    # must leave the run's terminal state to the out-of-band writer. The
+    # fallback releasers use ``setdefault``, so this value always wins over them.
+    #
+    # An acknowledged Stop is NOT one of those fallbacks and must not be
+    # overwritten (Codex P2). ``settle_bound_turn_sink`` bails out when ``done`` is
+    # already set, so reaching here with ``stopped`` recorded means the user's stop
+    # won the race and was already reported to them; replacing the reason would
+    # make ``_execute_agent_run`` skip the guarded ``canceled`` settlement and let
+    # the outcome depend on which coroutine happened to resume first. The run's
+    # terminal STATUS is still first-writer-wins in the store, so a result whose row
+    # write already landed keeps its ``succeeded`` — this only stops the reason from
+    # silently disagreeing with what the user was told.
+    #
+    # A contained backend teardown is the same case for the same reason: the
+    # service retired the runtime itself and the release already named that as
+    # the settlement, so a straggler result must not relabel an infrastructure
+    # interruption as a healthy terminal result. Only these two are protected --
+    # NOT all of ``SETTLEMENTS_WITHOUT_RESULT`` -- because
+    # ``SETTLED_BY_NO_TERMINAL_RESULT`` is the pessimistic default a fallback
+    # releaser writes, and upgrading THAT when a real result lands is the whole
+    # point of this line.
+    if sink.get("settled_by") not in (SETTLED_BY_STOPPED, SETTLED_BY_BACKEND_REFRESH, SETTLED_BY_BACKEND_DISABLED):
+        sink["settled_by"] = SETTLED_BY_TERMINAL_RESULT
+    done = sink.get("done_event")
+    if done is not None:
+        done.set()
+
+
+def _complete_streamed_turn(controller, context) -> None:
+    """The completion half of ``_stream_chunk``, for a terminal emit's Turn commit."""
+
+    get_sink = getattr(controller, "get_turn_sink", None)
+    if not callable(get_sink):
+        return
+    sink = get_sink(resolve_turn_sink_key(controller, context))
+    if sink is not None:
+        _complete_turn_sink(sink, context)
 
 
 _WECHAT_TEXT_LIMIT = 1900
@@ -302,6 +320,29 @@ _INTERIM_MIN_WIDTH = 500
 # Name the result attachment gets when a platform has no native Markdown upload
 # and the full text has to ride its ordinary file path instead.
 _RESULT_DOCUMENT_NAME = "result.md"
+
+
+@dataclass
+class _TerminalCommit:
+    """A terminal emit's Turn commit, armed once its durable steps have passed (#2714).
+
+    ``signal`` releases the Turn's waiter. ``after_signal`` is what the emit runs
+    between that signal and its return; whatever it raises is held until the
+    commit has run, so a failure there cannot separate the signal from the
+    Turn's evidence write.
+    """
+
+    output_semantics: MessageOutput
+    signal: Optional[Callable[[], None]] = None
+    after_signal: Optional[Callable[[], None]] = None
+
+    def arm(
+        self,
+        signal: Callable[[], None],
+        after_signal: Optional[Callable[[], None]] = None,
+    ) -> None:
+        self.signal = signal
+        self.after_signal = after_signal
 
 
 @dataclass(frozen=True)
@@ -466,6 +507,90 @@ class ConsolidatedMessageDispatcher:
             if getattr(output_semantics, "settles_run", True)
             else SETTLED_BY_TURN_ONLY_RESULT
         )
+
+    @asynccontextmanager
+    async def _terminal_emit(
+        self,
+        context: MessageContext,
+        output_semantics: MessageOutput,
+        *,
+        mutates_turn_lifecycle: bool,
+    ) -> AsyncIterator[_TerminalCommit]:
+        """End a terminal emit: its IM surfaces first, then its Turn commit.
+
+        The emit runs its durable steps, arms the commit, then its IM surfaces.
+        On every exit, including a cancellation in a surface, the processing
+        indicator is finished and the armed commit then runs with no await
+        inside it: the signal, the emit's post-signal steps, the runtime release
+        and the Turn's evidence write. Neither the runner nor a cancellation can
+        get between the signal and that write (#2714). An emit that never armed
+        only releases the runtime, as before.
+        """
+
+        commit = _TerminalCommit(output_semantics)
+        failed = False
+        try:
+            yield commit
+        except BaseException:
+            failed = True
+            raise
+        finally:
+            if mutates_turn_lifecycle:
+                held: BaseException | None = None
+                try:
+                    await self._finish_processing_indicator_turn(context)
+                finally:
+                    held = self._commit_terminal_turn(context, commit)
+                if held is not None:
+                    if not failed:
+                        raise held
+                    logger.warning(
+                        "Terminal emit's post-signal step failed while the emit was already failing",
+                        exc_info=held,
+                    )
+
+    def _commit_terminal_turn(
+        self, context: MessageContext, commit: _TerminalCommit
+    ) -> BaseException | None:
+        """Run an armed commit synchronously; return the post-signal step's error."""
+
+        if commit.signal is None:
+            self._release_runtime_turn(context, commit.output_semantics)
+            return None
+        commit.signal()
+        held: BaseException | None = None
+        if commit.after_signal is not None:
+            try:
+                commit.after_signal()
+            except Exception as error:
+                held = error
+        try:
+            self._release_runtime_turn(context, commit.output_semantics)
+        finally:
+            self._record_terminal_commit(context)
+            manager = getattr(self.controller, "session_turns", None)
+            complete = getattr(manager, "on_terminal_delivery_complete", None)
+            if callable(complete):
+                complete(context)
+        return held
+
+    def _record_terminal_commit(self, context: MessageContext) -> None:
+        """Leave the evidence this commit hands to its Turn write on the Turn's sink.
+
+        ``dispatch_turn`` passes it to the runner, which commits it if the write
+        itself fails. Only a commit marks the sink, so a release that never
+        reached the write hands over nothing.
+        """
+
+        get_sink = getattr(self.controller, "get_turn_sink", None)
+        if not callable(get_sink):
+            return
+        sink = get_sink(resolve_turn_sink_key(self.controller, context))
+        if not isinstance(sink, dict) or not emit_matches_active_turn(sink, context):
+            return
+        evidence = sink.get("terminal_evidence")
+        if isinstance(evidence, dict):
+            sink[TERMINAL_COMMIT_KEY] = dict(evidence)
 
     def _release_runtime_turn(
         self, context: MessageContext, output_semantics: MessageOutput
@@ -2839,7 +2964,11 @@ class ConsolidatedMessageDispatcher:
         # streaming — no user-facing bubble, regardless of body. An empty/stripped
         # body (e.g. a ``<silent>`` directive reduced to nothing) is silent too.
         if level == "silent" or not text or not text.strip():
-            try:
+            async with self._terminal_emit(
+                context,
+                output_semantics,
+                mutates_turn_lifecycle=mutates_turn_lifecycle,
+            ) as commit:
                 if activity_local_settlement_only:
                     settlement_complete = self._settle_activity_output_claims(
                         output_semantics,
@@ -2893,34 +3022,39 @@ class ConsolidatedMessageDispatcher:
                         terminal_error=terminal_error,
                         output_semantics=output_semantics,
                     )
+
+                def settle_invisible_output() -> None:
+                    if output_semantics.requires_delivery_for_run_settlement:
+                        settlement_complete = self._settle_activity_output_claims(
+                            output_semantics,
+                            accepted_message_exists=False,
+                            visible_output=False,
+                        )
+                        if settlement_complete is False:
+                            raise ActivityOutputDeliveryError(
+                                "Invisible Activity output local settlement is incomplete",
+                                delivered=False,
+                            )
+
                 if mutates_turn_lifecycle:
                     # A terminal result — even silent/empty — still means the turn
-                    # finished: release the streaming SSE waiter so it closes now
-                    # instead of hanging until the safety timeout, with no visible chunk.
-                    # Collapse any eagerly-posted footer-only bubble first so it
-                    # doesn't stay stuck (missing agent / exception / user stop).
+                    # finished: the commit releases the streaming SSE waiter so it
+                    # closes now instead of hanging until the safety timeout, with no
+                    # visible chunk. Collapse any eagerly-posted footer-only bubble
+                    # first so it doesn't stay stuck (missing agent / exception / user
+                    # stop).
+                    commit.arm(
+                        lambda: self._signal_turn_complete(
+                            context,
+                            settled_by=self._turn_release_settlement(output_semantics),
+                        ),
+                        settle_invisible_output,
+                    )
                     await self._collapse_status_bubble(context, im_client, reason=terminal_reason)
                     await self._clear_consolidated_state(context)
-                    self._signal_turn_complete(
-                        context,
-                        settled_by=self._turn_release_settlement(output_semantics),
-                    )
-                if output_semantics.requires_delivery_for_run_settlement:
-                    settlement_complete = self._settle_activity_output_claims(
-                        output_semantics,
-                        accepted_message_exists=False,
-                        visible_output=False,
-                    )
-                    if settlement_complete is False:
-                        raise ActivityOutputDeliveryError(
-                            "Invisible Activity output local settlement is incomplete",
-                            delivered=False,
-                        )
+                else:
+                    settle_invisible_output()
                 return None
-            finally:
-                if mutates_turn_lifecycle:
-                    await self._finish_processing_indicator_turn(context)
-                    self._release_runtime_turn(context, output_semantics)
 
         # Resolve the delivery target once. Routed / post_to / thread replies
         # land in a different channel than the source context, and the persisted
@@ -3013,7 +3147,11 @@ class ConsolidatedMessageDispatcher:
                     "native_message_id": native_output_id,
                     "evidence": "duplicate_short_circuit",
                 }
-            try:
+            async with self._terminal_emit(
+                context,
+                accepted_output_semantics,
+                mutates_turn_lifecycle=mutates_turn_lifecycle,
+            ) as commit:
                 if canonical_type == "result" and accepted_output_semantics.settles_run:
                     accepted_is_error = self._accepted_message_is_error(
                         accepted_message,
@@ -3032,36 +3170,40 @@ class ConsolidatedMessageDispatcher:
                         terminal_error=(terminal_error if accepted_is_error else None),
                         output_semantics=accepted_output_semantics,
                     )
+
+                def settle_accepted_output() -> None:
+                    if accepted_output_semantics.requires_delivery_for_run_settlement:
+                        settlement_complete = self._settle_activity_output_claims(
+                            accepted_output_semantics,
+                            accepted_message_exists=True,
+                        )
+                        if settlement_complete is False:
+                            raise ActivityOutputDeliveryError(
+                                "Accepted Activity output has incomplete local settlement",
+                                delivered=True,
+                                durable=True,
+                                message_id=native_output_id,
+                            )
+
                 if mutates_turn_lifecycle:
+                    commit.arm(
+                        lambda: self._signal_turn_complete(
+                            context,
+                            settled_by=self._turn_release_settlement(
+                                accepted_output_semantics
+                            ),
+                        ),
+                        settle_accepted_output,
+                    )
                     await self._collapse_status_bubble(context, im_client, reason=terminal_reason)
                     await self._clear_consolidated_state(context)
-                    self._signal_turn_complete(
-                        context,
-                        settled_by=self._turn_release_settlement(
-                            accepted_output_semantics
-                        ),
-                    )
-                if accepted_output_semantics.requires_delivery_for_run_settlement:
-                    settlement_complete = self._settle_activity_output_claims(
-                        accepted_output_semantics,
-                        accepted_message_exists=True,
-                    )
-                    if settlement_complete is False:
-                        raise ActivityOutputDeliveryError(
-                            "Accepted Activity output has incomplete local settlement",
-                            delivered=True,
-                            durable=True,
-                            message_id=native_output_id,
-                        )
+                else:
+                    settle_accepted_output()
                 # A previously persisted output is a successful idempotent
                 # delivery attempt. Return its stable identity so a recovered
                 # Activity can acknowledge its durable Outbox snapshot instead
                 # of retrying forever after a crash between emit and ack.
                 return native_output_id
-            finally:
-                if mutates_turn_lifecycle:
-                    await self._finish_processing_indicator_turn(context)
-                    self._release_runtime_turn(context, accepted_output_semantics)
 
         if activity_batch_incomplete:
             raise ActivityOutputDeliveryError(
@@ -3095,7 +3237,11 @@ class ConsolidatedMessageDispatcher:
         persists_without_delivery = target_context.platform == "avibe"
 
         if suppresses_outward_delivery:
-            try:
+            async with self._terminal_emit(
+                context,
+                output_semantics,
+                mutates_turn_lifecycle=mutates_turn_lifecycle,
+            ) as commit:
                 recorded_text = self._fold_footer(persist_text, result_footer)
                 persisted_output = None
                 if visible_output_type:
@@ -3177,31 +3323,35 @@ class ConsolidatedMessageDispatcher:
                         None,
                         terminal_status=terminal_status,
                     )
+
+                def settle_suppressed_output() -> None:
+                    if output_semantics.requires_delivery_for_run_settlement:
+                        settlement_complete = self._settle_activity_output_claims(
+                            output_semantics,
+                            accepted_message_exists=persisted_output is not None,
+                            visible_output=False,
+                        )
+                        if settlement_complete is False:
+                            raise ActivityOutputDeliveryError(
+                                "Suppressed Activity output local settlement is incomplete",
+                                delivered=False,
+                            )
+
                 if mutates_turn_lifecycle:
                     # A suppressed result still ends the turn; collapse any concise
                     # status bubble posted to a real channel so it doesn't stay stuck.
+                    commit.arm(
+                        lambda: self._signal_turn_complete(
+                            context,
+                            settled_by=self._turn_release_settlement(output_semantics),
+                        ),
+                        settle_suppressed_output,
+                    )
                     await self._collapse_status_bubble(context, im_client, reason=terminal_reason)
                     await self._clear_consolidated_state(context)
-                    self._signal_turn_complete(
-                        context,
-                        settled_by=self._turn_release_settlement(output_semantics),
-                    )
-                if output_semantics.requires_delivery_for_run_settlement:
-                    settlement_complete = self._settle_activity_output_claims(
-                        output_semantics,
-                        accepted_message_exists=persisted_output is not None,
-                        visible_output=False,
-                    )
-                    if settlement_complete is False:
-                        raise ActivityOutputDeliveryError(
-                            "Suppressed Activity output local settlement is incomplete",
-                            delivered=False,
-                        )
+                else:
+                    settle_suppressed_output()
                 return local_message_id
-            finally:
-                if mutates_turn_lifecycle:
-                    await self._finish_processing_indicator_turn(context)
-                    self._release_runtime_turn(context, output_semantics)
 
         if canonical_type == "notify":
             # Three steps, three error scopes — deliberately NOT one blanket ``try``.
@@ -3263,7 +3413,11 @@ class ConsolidatedMessageDispatcher:
             return message_id
 
         if visible_output_type:
-            try:
+            async with self._terminal_emit(
+                context,
+                output_semantics,
+                mutates_turn_lifecycle=mutates_turn_lifecycle,
+            ) as commit:
                 primary_message_id: Optional[str] = None
                 scheduled_anchor_message_id: Optional[str] = None
                 delivered_as_attachment = False
@@ -3451,55 +3605,11 @@ class ConsolidatedMessageDispatcher:
                         except Exception as split_err:
                             logger.error("Split message fallback also failed: %s", split_err)
 
-                # Explain attachment-only delivery or total failure once all attempts settle.
-                try:
-                    if delivered_as_attachment:
-                        notice = self._t("info.resultDeliveredAsAttachment")
-                    elif primary_message_id is None and display_text:
-                        notice = self._t("error.resultDeliveryFailed")
-                    else:
-                        notice = None
-                    if notice:
-                        await im_client.send_message(target_context, notice, parse_mode="markdown")
-                except Exception:
-                    logger.error("Failed to send delivery status notification")
-
-                # Upload extracted file attachments
-                if enhanced and enhanced.files:
-                    await self._upload_file_links(
-                        im_client, target_context, _written_files(enhanced.files, citations)
-                    )
-
                 if scheduled_anchor_message_id and mutates_turn_lifecycle:
                     try:
                         self.controller.session_handler.finalize_scheduled_delivery(context, scheduled_anchor_message_id)
                     except Exception as err:
                         logger.warning("Failed to finalize scheduled delivery anchor: %s", err)
-
-                # Retire the transient status bubble now the result is delivered as
-                # its own (notifying) message: DELETE it so the turn ends as just the
-                # fresh result. When the platform can't delete (or the delete fails,
-                # or nothing was delivered) fall back to collapsing it to a terminal
-                # marker (✅ done / ⏹ stopped|failed) so it never reads as running.
-                if status_bubble_id:
-                    await self._retire_status_bubble(
-                        context,
-                        im_client,
-                        status_bubble_id,
-                        delivered=primary_message_id is not None,
-                        reason=terminal_reason,
-                    )
-
-                # Final result closes the current turn: clear consolidated
-                # assistant/tool/system message state so the next user turn starts
-                # a fresh log message instead of appending to the previous one.
-                # Use the key captured at the top of this branch when present so
-                # teardown can't drift onto a recomputed key (C5).
-                if mutates_turn_lifecycle:
-                    if status_consolidated_key:
-                        await self._drop_status_keys(status_consolidated_key)
-                    else:
-                        await self._clear_consolidated_state(context)
 
                 # Agent-run records keep the complete body+footer text for every
                 # platform. The Web message row separately persists a clean body
@@ -3665,49 +3775,112 @@ class ConsolidatedMessageDispatcher:
                             )
                             activity_settlement_error = err
 
-                if primary_message_id and display_text and not output_semantics.detached:
-                    # Stream the delivered result to live consumers (avibe SSE).
+                # The result has reached the user (or, on avibe, its row is the
+                # delivery), and its durable steps have passed: arm the Turn commit
+                # before the IM surfaces below, so a failure or cancellation in them
+                # cannot skip it (#2714).
+                streams_result = bool(
+                    primary_message_id and display_text and not output_semantics.detached
+                )
+
+                def settle_delivered_output() -> None:
+                    if activity_delivery_error is not None:
+                        raise activity_delivery_error
+                    if output_semantics.requires_delivery_for_run_settlement:
+                        settlement_complete = self._settle_activity_output_claims(
+                            settlement_output_semantics,
+                            accepted_message_exists=durable_output_exists,
+                            settlement_error=activity_settlement_error,
+                        )
+                        if settlement_complete is False:
+                            raise ActivityOutputDeliveryError(
+                                "Activity output was delivered but local settlement is incomplete",
+                                delivered=activity_was_delivered or durable_output_exists,
+                                durable=durable_output_exists,
+                                message_id=primary_message_id,
+                                cause=activity_settlement_error,
+                            )
+
+                if mutates_turn_lifecycle:
+                    if streams_result:
+                        commit.arm(
+                            lambda: _complete_streamed_turn(self.controller, context),
+                            settle_delivered_output,
+                        )
+                    else:
+                        # A terminal result still completes the turn even if every IM
+                        # delivery path failed and therefore produced no durable message
+                        # id. Without this release, direct agent_run and avibe turn
+                        # waiters keep waiting forever despite the backend having
+                        # already finished.
+                        commit.arm(
+                            lambda: self._signal_turn_complete(
+                                context,
+                                settled_by=self._turn_release_settlement(output_semantics),
+                            ),
+                            settle_delivered_output,
+                        )
+
+                # Explain attachment-only delivery or total failure once all attempts settle.
+                try:
+                    if delivered_as_attachment:
+                        notice = self._t("info.resultDeliveredAsAttachment")
+                    elif primary_message_id is None and display_text:
+                        notice = self._t("error.resultDeliveryFailed")
+                    else:
+                        notice = None
+                    if notice:
+                        await im_client.send_message(target_context, notice, parse_mode="markdown")
+                except Exception:
+                    logger.error("Failed to send delivery status notification")
+
+                # Upload extracted file attachments
+                if enhanced and enhanced.files:
+                    await self._upload_file_links(
+                        im_client, target_context, _written_files(enhanced.files, citations)
+                    )
+
+                # Retire the transient status bubble now the result is delivered as
+                # its own (notifying) message: DELETE it so the turn ends as just the
+                # fresh result. When the platform can't delete (or the delete fails,
+                # or nothing was delivered) fall back to collapsing it to a terminal
+                # marker (✅ done / ⏹ stopped|failed) so it never reads as running.
+                if status_bubble_id:
+                    await self._retire_status_bubble(
+                        context,
+                        im_client,
+                        status_bubble_id,
+                        delivered=primary_message_id is not None,
+                        reason=terminal_reason,
+                    )
+
+                # Final result closes the current turn: clear consolidated
+                # assistant/tool/system message state so the next user turn starts
+                # a fresh log message instead of appending to the previous one.
+                # Use the key captured at the top of this branch when present so
+                # teardown can't drift onto a recomputed key (C5).
+                if mutates_turn_lifecycle:
+                    if status_consolidated_key:
+                        await self._drop_status_keys(status_consolidated_key)
+                    else:
+                        await self._clear_consolidated_state(context)
+
+                if streams_result:
+                    # Stream the delivered result to live consumers (avibe SSE). Its
+                    # completion is the Turn commit's signal.
                     await _stream_chunk(
                         self.controller,
                         context,
                         text=display_text,
                         message_id=primary_message_id,
                         kind=communication_type,
-                        completes_turn=mutates_turn_lifecycle,
-                    )
-                elif mutates_turn_lifecycle:
-                    # A terminal result still completes the turn even if every IM
-                    # delivery path failed and therefore produced no durable message id.
-                    # Without this release, direct agent_run and avibe turn waiters keep
-                    # waiting forever despite the backend having already finished.
-                    self._signal_turn_complete(
-                        context,
-                        settled_by=self._turn_release_settlement(output_semantics),
+                        completes_turn=False,
                     )
 
-                if activity_delivery_error is not None:
-                    raise activity_delivery_error
-
-                if output_semantics.requires_delivery_for_run_settlement:
-                    settlement_complete = self._settle_activity_output_claims(
-                        settlement_output_semantics,
-                        accepted_message_exists=durable_output_exists,
-                        settlement_error=activity_settlement_error,
-                    )
-                    if settlement_complete is False:
-                        raise ActivityOutputDeliveryError(
-                            "Activity output was delivered but local settlement is incomplete",
-                            delivered=activity_was_delivered or durable_output_exists,
-                            durable=durable_output_exists,
-                            message_id=primary_message_id,
-                            cause=activity_settlement_error,
-                        )
+                if not mutates_turn_lifecycle:
+                    settle_delivered_output()
 
                 return primary_message_id
-            finally:
-                if mutates_turn_lifecycle:
-                    await self._finish_processing_indicator_turn(context)
-                    self._release_runtime_turn(context, output_semantics)
 
         if canonical_type not in {"system", "assistant", "toolcall"}:
             canonical_type = "assistant"

@@ -36,7 +36,7 @@ from core.run_settlement import (
     SETTLED_BY_NO_TERMINAL_RESULT,
     SETTLED_BY_REFUSED_CONCURRENT_TURN,
 )
-from core.message_context import resolve_turn_sink_key
+from core.message_context import TERMINAL_COMMIT_KEY, resolve_turn_sink_key
 from core.native_dispatch_phase import backend_dispatch_attempted
 from modules.im import MessageContext
 
@@ -236,6 +236,19 @@ async def dispatch_turn_with_outcome(
             backend_dispatch_attempted=backend_dispatch_attempted(context),
         )
     finally:
+        # A terminal emit that reached its Turn write left that write's evidence
+        # on our sink. Hand it to the runner on every exit, cancellation included,
+        # since the sink goes away here.
+        sink = controller.get_turn_sink(session_key)
+        if isinstance(sink, dict) and sink.get("done_event") is done:
+            committed = sink.get(TERMINAL_COMMIT_KEY)
+            if isinstance(committed, dict):
+                if context.platform_specific is None:
+                    context.platform_specific = {}
+                context.platform_specific[TERMINAL_COMMIT_KEY] = {
+                    "settled_by": str(sink.get("settled_by") or ""),
+                    "evidence": dict(committed),
+                }
         # Pass our own done event so a turn that was superseded by a newer
         # concurrent turn doesn't evict the newer turn's sink on cleanup.
         controller.pop_turn_sink(session_key, done)

@@ -172,6 +172,13 @@ def build_context_turn_sink_key(
     return base
 
 
+# The Turn evidence a terminal emit's commit handed to its write (#2714). The
+# dispatcher sets it on the Turn's sink beside that write; ``dispatch_turn`` moves
+# it onto the dispatch context before popping the sink, so the runner can commit
+# the same evidence when the write itself failed.
+TERMINAL_COMMIT_KEY = "terminal_commit"
+
+
 def resolve_turn_sink_key(controller: object, context: MessageContext) -> str:
     """Resolve ``context``'s turn-sink key, preferring ``controller``'s own accessor.
 
