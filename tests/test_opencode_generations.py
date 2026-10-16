@@ -1891,7 +1891,7 @@ def test_adoption_never_holds_a_recorded_lease_longer_than_any_lease_is_granted(
 def test_a_controller_starting_with_opencode_disabled_stops_a_crashed_controllers_servers(
     isolated_launch, monkeypatch, opencode_enabled
 ):
-    """A controller that crashed left a server recorded. Started with OpenCode
+    """RUNTIME-GEN-025: A controller that crashed left a server recorded. Started with OpenCode
     disabled, no agent will ever adopt it, so startup stops it. Started with
     OpenCode enabled, the agent adopts it and its restorable runs."""
 

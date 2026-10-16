@@ -104,7 +104,7 @@ async def test_hfr_151_supervisor_coalesces_wakes_and_keeps_partition_single_fli
 
 @pytest.mark.anyio
 async def test_hfr_170_guarded_noop_uses_partition_backoff() -> None:
-    """HFR-151: a stale guarded no-op cannot become a tight retry loop."""
+    """HFR-151, HFR-170: a stale guarded no-op cannot become a tight retry loop."""
 
     attempted = asyncio.Event()
     backoff_entered = asyncio.Event()
@@ -269,6 +269,8 @@ async def test_hfr_162_partition_backoff_state_is_lane_bounded() -> None:
 
 @pytest.mark.anyio
 async def test_hfr_288_expired_backoff_preserves_forward_scan_before_retry() -> None:
+    """HFR-288: expired partition backoff preserves forward scan before retry rewind."""
+
     retry_entered = asyncio.Event()
     release_retry = asyncio.Event()
     first_window_attempted = asyncio.Event()
@@ -693,7 +695,7 @@ async def test_hfr_151_stale_first_page_does_not_starve_later_partition() -> Non
 
 @pytest.mark.anyio
 async def test_hfr_152_supervisor_starts_paused_and_periodic_reconcile_wakes_lane() -> None:
-    """HFR-152: startup is paused and periodic reconciliation re-reads work."""
+    """HFR-152, HFR-157: startup is paused and periodic reconciliation re-reads work."""
     first_scan = asyncio.Event()
     tick_waiting = asyncio.Event()
     release_tick = asyncio.Event()
@@ -898,6 +900,8 @@ async def test_hfr_155_events_wake_only_their_durable_lanes(
     event_type: str,
     expected: set[RuntimeWorkLane],
 ) -> None:
+    """HFR-155: runtime work hints wake only their mapped durable lanes."""
+
     started: set[RuntimeWorkLane] = set()
     events = {lane: asyncio.Event() for lane in RuntimeWorkLane}
 
@@ -982,6 +986,8 @@ async def test_hfr_162_failed_scan_rearms_after_bounded_backoff() -> None:
 
 @pytest.mark.anyio
 async def test_hfr_162_wake_during_final_empty_scan_is_not_lost() -> None:
+    """HFR-162: a final-scan wake is retained and rearmed after failure."""
+
     processed = asyncio.Event()
     holder: dict[str, RuntimeWorkSupervisor] = {}
 
@@ -1012,6 +1018,8 @@ async def test_hfr_162_wake_during_final_empty_scan_is_not_lost() -> None:
 
 @pytest.mark.anyio
 async def test_hfr_159_blocked_store_scan_does_not_block_another_lane() -> None:
+    """HFR-159: blocking store scans do not block the controller loop or other lanes."""
+
     scan_entered = threading.Event()
     release_scan = threading.Event()
     other_processed = asyncio.Event()
@@ -1055,6 +1063,8 @@ async def test_hfr_159_blocked_store_scan_does_not_block_another_lane() -> None:
 
 @pytest.mark.anyio
 async def test_hfr_163_lane_capacity_bounds_distinct_partition_workers() -> None:
+    """HFR-163: runtime work lanes enforce global and per-partition single flight."""
+
     release = asyncio.Event()
     two_started = asyncio.Event()
     all_completed = asyncio.Event()
@@ -1110,6 +1120,8 @@ async def test_hfr_163_lane_capacity_bounds_distinct_partition_workers() -> None
 async def test_hfr_171_overdue_report_names_lane_partition_and_generation(
     caplog,
 ) -> None:
+    """HFR-171: overdue runtime work identifies lane partition and generation."""
+
     release = asyncio.Event()
     started = asyncio.Event()
     tick = asyncio.Event()
@@ -1753,6 +1765,8 @@ async def test_hfr_165_old_generation_delayed_wake_cannot_rearm_replacement() ->
 async def test_hfr_175_global_lease_loss_joins_every_registration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """HFR-175: global lease loss stops and joins every runtime work registration."""
+
     owns_lease = True
     scanned = threading.Event()
     stop_started = asyncio.Event()

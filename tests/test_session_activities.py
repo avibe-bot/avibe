@@ -68,6 +68,8 @@ def test_activity_lifecycle_keeps_state_axes_orthogonal():
 def test_hfr_166_recovered_unbound_grace_uses_first_durable_completion(
     tmp_path: Path,
 ) -> None:
+    """HFR-166: recovered Activity batches retain durable live batching grace."""
+
     db_path = tmp_path / "state" / "vibe.sqlite"
     ensure_sqlite_state(db_path=db_path, primary_platform="avibe")
     engine = create_sqlite_engine(db_path)
@@ -175,6 +177,8 @@ def test_hfr_166_recovered_runtime_scan_applies_keyset_limit_in_registry() -> No
 
 
 def test_hfr_285_deferred_runtime_scan_bounds_raw_rows_and_indexes_deadline() -> None:
+    """HFR-285: deferred Activity recovery scans bounded raw pages with indexed eligibility."""
+
     completed_at = datetime.now(timezone.utc).isoformat()
 
     class _Store:
@@ -956,6 +960,8 @@ def test_single_recovery_claim_expands_a_persisted_output_batch():
 
 
 def test_recovery_marks_an_incomplete_persisted_output_batch_for_fail_closed_emit():
+    """HFR-168: incomplete recovered Activity batches fail closed before transport."""
+
     store = SimpleNamespace(
         upsert_activity=mock.Mock(),
         upsert_activities=mock.Mock(),

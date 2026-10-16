@@ -182,6 +182,8 @@ def test_require_bind_off_allows_any_channel_member():
 
 def test_telegram_thread_auth_uses_topic_override_before_parent():
     # Scenario: TELEGRAM-TOPIC-002
+    """TELEGRAM-TOPIC-002: An unconfigured topic inherits its parent group while a configured topic wins."""
+
     store = _Store()
     parent = SimpleNamespace(enabled=True, require_bind=False)
     topic = SimpleNamespace(enabled=True, require_bind=True)

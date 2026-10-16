@@ -956,6 +956,8 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_recovered_durable_message_retries_only_local_settlement_after_restart(self):
+        """HFR-167: accepted Activity output retries local settlement without transport replay."""
+
         from core.scheduled_tasks import ScheduledTaskService
 
         class _ActivityStore:

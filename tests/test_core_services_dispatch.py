@@ -363,7 +363,7 @@ def test_outcome_reports_refused_concurrent_turn():
 
 
 def test_busy_sibling_thread_does_not_refuse_this_threads_turn():
-    """A turn in flight on ANOTHER thread of the same channel must not block this one.
+    """TELEGRAM-TOPIC-005: A turn in flight on ANOTHER thread of the same channel must not block this one.
 
     The field bug: ``dispatch_turn_with_outcome`` keyed its concurrency slot off the
     channel-scoped ``_get_session_key``, because

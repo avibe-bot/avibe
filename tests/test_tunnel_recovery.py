@@ -107,6 +107,8 @@ def _setup_recovery(monkeypatch, tmp_path, candidate_quality: dict):
 
 
 def test_ra_tq_004_candidate_promotes_before_active_drains(monkeypatch, tmp_path) -> None:
+    """RA-TQ-004: Better candidate is promoted before the active Connector drains."""
+
     config, active_pid, candidate_pid, alive = _setup_recovery(monkeypatch, tmp_path, _quality(180))
     drained = []
     results = []
@@ -131,6 +133,8 @@ def test_ra_tq_004_candidate_promotes_before_active_drains(monkeypatch, tmp_path
 
 
 def test_ra_tq_005_non_improving_candidate_keeps_active(monkeypatch, tmp_path) -> None:
+    """RA-TQ-005: Non-improving candidate is removed without changing the active Connector."""
+
     config, active_pid, candidate_pid, alive = _setup_recovery(monkeypatch, tmp_path, _quality(220))
     stopped = []
     results = []
@@ -188,6 +192,8 @@ def test_ra_tq_028_settings_candidate_failure_keeps_active_config(monkeypatch, t
 
 
 def test_ra_tq_028_settings_promote_before_draining_previous_connector(monkeypatch, tmp_path) -> None:
+    """RA-TQ-028: Live Tunnel setting changes promote a ready replacement before draining the previous Connector."""
+
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
     config.remote_access.vibe_cloud.tunnel_token = "tunnel-token"
@@ -436,6 +442,8 @@ def test_ra_tq_028_settings_auto_protocol_falls_back_after_preference_fails(
 
 
 def test_ra_tq_012_tail_recovery_keeps_better_alternate_protocol(monkeypatch, tmp_path) -> None:
+    """RA-TQ-012: Auto mode keeps a materially better alternate protocol."""
+
     config, active_pid, candidate_pid, alive = _setup_recovery(monkeypatch, tmp_path, _quality(180))
     alternate_pid = 333
     alive.add(alternate_pid)
@@ -487,6 +495,8 @@ def test_ra_tq_012_tail_recovery_keeps_better_alternate_protocol(monkeypatch, tm
 
 
 def test_ra_tq_013_tail_recovery_rolls_back_protocol(monkeypatch, tmp_path) -> None:
+    """RA-TQ-013: Non-improving protocol switch rolls back make-before-break."""
+
     config, active_pid, first_candidate_pid, alive = _setup_recovery(monkeypatch, tmp_path, _quality(180))
     alternate_pid = 333
     rollback_pid = 444
@@ -538,6 +548,8 @@ def test_ra_tq_021_tail_rollback_stays_pending_if_replacement_loses_readiness(
     monkeypatch,
     tmp_path,
 ) -> None:
+    """RA-TQ-021: A rollback replacement that loses readiness remains pending for reconciliation."""
+
     config, _active_pid, first_candidate_pid, alive = _setup_recovery(
         monkeypatch,
         tmp_path,
@@ -589,6 +601,8 @@ def test_ra_tq_021_tail_rollback_stays_pending_if_replacement_loses_readiness(
 
 
 def test_ra_tq_018_tail_candidate_must_pass_connector_error_gates(monkeypatch, tmp_path) -> None:
+    """RA-TQ-018: Tail candidates must pass connector availability and error gates."""
+
     config, active_pid, first_candidate_pid, alive = _setup_recovery(
         monkeypatch,
         tmp_path,
@@ -712,6 +726,8 @@ def test_ra_tq_033_availability_recovery_protocol_follows_route_outage(
     expected_protocol,
     expected_preference,
 ) -> None:
+    """RA-TQ-033: A route that serves no public requests recovers over the other transport despite cooldown."""
+
     config, active_pid, candidate_pid, alive = _setup_recovery(
         monkeypatch,
         tmp_path,
@@ -897,6 +913,8 @@ def test_ra_tq_022_public_probe_session_honors_host_network_environment(
     monkeypatch,
     tmp_path,
 ) -> None:
+    """RA-TQ-022: Public probes honor the host proxy and CA environment."""
+
     ca_bundle = tmp_path / "host-ca.pem"
     ca_bundle.write_text("test CA", encoding="utf-8")
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy.test:8080")
@@ -1076,6 +1094,8 @@ def test_failed_drain_remains_tracked_for_reconcile(monkeypatch, tmp_path) -> No
 
 
 def test_ra_tq_016_monitor_lifecycle_retries_failed_drain(monkeypatch, tmp_path) -> None:
+    """RA-TQ-016: Failed old-connector drains are retried during monitor lifecycle reconciliation."""
+
     config, active_pid, candidate_pid, alive = _setup_recovery(monkeypatch, tmp_path, _quality(180))
     state = json.loads(remote_access._state_path().read_text(encoding="utf-8"))
     state["active"] = remote_access._connector_record(
@@ -1128,6 +1148,8 @@ def test_monitor_lifecycle_preserves_pending_work_after_transient_error(
 
 
 def test_ra_tq_008_restart_removes_orphan_candidate(monkeypatch, tmp_path) -> None:
+    """RA-TQ-008: Restart removes an orphan candidate while retaining a healthy active Connector."""
+
     _, active_pid, candidate_pid, alive = _setup_recovery(monkeypatch, tmp_path, _quality(180))
     state = json.loads(remote_access._state_path().read_text(encoding="utf-8"))
     state["candidate"] = remote_access._connector_record(
@@ -1157,6 +1179,8 @@ def test_ra_tq_008_restart_removes_orphan_candidate(monkeypatch, tmp_path) -> No
 
 
 def test_ra_tq_017_restart_rolls_back_unverified_tail_candidate(monkeypatch, tmp_path) -> None:
+    """RA-TQ-017: Restart rolls back a promoted tail route that was never verified."""
+
     config, previous_pid, unverified_pid, alive = _setup_recovery(monkeypatch, tmp_path, _quality(180))
     rollback_pid = 333
     state = json.loads(remote_access._state_path().read_text(encoding="utf-8"))
@@ -1212,6 +1236,8 @@ def test_ra_tq_017_restart_rolls_back_unverified_tail_candidate(monkeypatch, tmp
 
 
 def test_ra_tq_019_live_tail_recovery_owns_pending_rollback(monkeypatch, tmp_path) -> None:
+    """RA-TQ-019: Live tail recovery retains ownership of its pending rollback marker."""
+
     _, previous_pid, candidate_pid, _alive = _setup_recovery(monkeypatch, tmp_path, _quality(180))
     state = json.loads(remote_access._state_path().read_text(encoding="utf-8"))
     state["active"] = remote_access._connector_record(
@@ -1255,6 +1281,8 @@ def test_ra_tq_023_status_preserves_rollback_after_promoted_process_exit(
     monkeypatch,
     tmp_path,
 ) -> None:
+    """RA-TQ-023: Status cleanup preserves rollback after a promoted process exits."""
+
     config, _previous_pid, promoted_pid, alive = _setup_recovery(
         monkeypatch,
         tmp_path,
@@ -1303,6 +1331,8 @@ def test_ra_tq_024_pinned_protocol_rejects_stale_tail_evidence(
     monkeypatch,
     tmp_path,
 ) -> None:
+    """RA-TQ-024: Pinned transport rejects stale comparison evidence from another protocol."""
+
     config, active_pid, _candidate_pid, _alive = _setup_recovery(
         monkeypatch,
         tmp_path,
@@ -1469,6 +1499,8 @@ def test_reconciled_recovery_uses_only_contract_trigger_values(monkeypatch) -> N
 
 
 def test_ra_tq_009_restart_promotes_ready_candidate(monkeypatch, tmp_path) -> None:
+    """RA-TQ-009: Restart promotes a ready candidate when the previous active Connector is gone."""
+
     _, active_pid, candidate_pid, alive = _setup_recovery(monkeypatch, tmp_path, _quality(180))
     state = json.loads(remote_access._state_path().read_text(encoding="utf-8"))
     state["candidate"] = remote_access._connector_record(
@@ -1537,6 +1569,8 @@ def _wait_connector_exit(timeout: float = 5.0) -> None:
 
 
 def test_ra_tq_034_connector_exited_before_network_is_restarted_with_backoff(monkeypatch, tmp_path) -> None:
+    """RA-TQ-034: A requested Connector that exits on its own restarts with backoff; a stopped or disabled one stays down."""
+
     config, network_up = _setup_exiting_connector(monkeypatch, tmp_path)
     schedule = remote_access._ConnectorRestartSchedule()
     try:

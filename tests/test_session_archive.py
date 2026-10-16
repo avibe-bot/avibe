@@ -259,6 +259,8 @@ def test_hfr_287_new_session_teardown_publishes_run_updates_after_commit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """HFR-287: new-session teardown publishes committed Run cancellations."""
+
     from storage import background
 
     service = SQLiteSessionsService(tmp_path / "vibe.sqlite")

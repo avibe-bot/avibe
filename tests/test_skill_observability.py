@@ -358,6 +358,8 @@ def test_invalid_observations_do_not_write(engine, mutate):
 
 @pytest.mark.parametrize("role", ["owner", "member", "editor", "viewer", None])
 def test_manager_sql_access_including_cte(engine, role):
+    """PERMISSIONS-019: Instance operational diagnostics admit Member and preserve query safety."""
+
     from storage.read_only_query import ReadOnlyQueryError, run_read_only_query
     from vibe.authorization import AuthorizationContext
 

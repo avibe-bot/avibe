@@ -57,6 +57,8 @@ def test_inbox_bridge_tracks_current_status(monkeypatch):
 
 
 def test_hfr_173_local_event_echo_is_suppressed_once(monkeypatch):
+    """HFR-173: local event fanout and bounded bridge echo dedupe deliver once."""
+
     from vibe import inbox_bridge
 
     published = []

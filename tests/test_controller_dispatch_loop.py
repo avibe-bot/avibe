@@ -369,6 +369,8 @@ async def test_runtime_work_stack_stops_supervisor_after_service_failure() -> No
 
 @pytest.mark.anyio
 async def test_hfr_284_runtime_work_stack_joins_controller_lanes_before_service_teardown() -> None:
+    """HFR-284: controller delivery recovery joins before final Turn owner release."""
+
     controller = Controller.__new__(Controller)
     controller._shutdown_tainted = False
     controller._runtime_work_tokens = [object()]
@@ -525,6 +527,8 @@ async def test_runtime_work_stack_does_not_drain_after_task_service_failure() ->
 
 
 def test_request_shutdown_keeps_loop_owned_supervisor_join_alive_after_grace() -> None:
+    """HFR-178: loop-owned shutdown retains supervisor join past outer grace."""
+
     controller = Controller.__new__(Controller)
     loop = asyncio.new_event_loop()
     controller._loop = loop

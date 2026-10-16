@@ -384,6 +384,8 @@ def test_unauthenticated_remote_management_is_denied(management_http):
 
 
 def test_member_channel_and_dm_preferences_preserve_access_state(management_http):
+    """PERMISSIONS-013: Instance Member manages settings while preserving access administration."""
+
     store = SettingsStore.get_instance()
     store.set_channels_for_platform("telegram", {"chat": ChannelSettings(require_bind=True)})
     store.set_users_for_platform("telegram", {"bound": UserSettings(is_admin=True, enabled=False, bound_at="old")})

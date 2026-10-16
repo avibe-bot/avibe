@@ -73,6 +73,8 @@ def test_archive_definition_wakes_do_not_block_the_asgi_loop(monkeypatch):
 
 
 def test_hfr_283_archive_run_cancellations_wake_runtime_consumers(monkeypatch):
+    """HFR-283: session archive wakes cancellation processing after its Run commit."""
+
     published: list[tuple[str, dict[str, str], float]] = []
 
     async def _publish(event_type, data, *, timeout):  # noqa: ANN001, ANN202

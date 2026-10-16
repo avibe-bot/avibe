@@ -23,6 +23,8 @@ def test_source_policy_has_one_explicit_delivery_intent(
     trigger_kind: str,
     expected_intent: str,
 ) -> None:
+    """MESSAGE-DELIVERY-201: Every approved producer class maps to one explicit delivery priority."""
+
     from core.message_priority import delivery_intent_for_trigger
 
     assert delivery_intent_for_trigger(trigger_kind) == expected_intent

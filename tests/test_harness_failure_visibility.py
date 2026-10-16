@@ -605,7 +605,7 @@ def test_all_deferred_turn_runs_elect_and_propagate_the_first_stable_owner(
 def test_hfr_459_deferred_owner_election_reserves_writer_before_reads(
     tmp_path: Path,
 ) -> None:
-    """Independent Activity releases serialize before choosing a Turn owner."""
+    """HFR-459: Independent Activity releases serialize before choosing a Turn owner."""
 
     sqlite, requests = _store(tmp_path)
     definitions = ["watch-deferred-lock-a", "watch-deferred-lock-b"]
@@ -659,7 +659,7 @@ def test_hfr_459_deferred_owner_election_reserves_writer_before_reads(
 def test_hfr_447_fallback_owner_requires_writable_notice_metadata(
     tmp_path: Path,
 ) -> None:
-    """Owner election and notice persistence share one eligibility predicate."""
+    """HFR-447: Owner election and notice persistence share one eligibility predicate."""
 
     from sqlalchemy import update as sa_update
 
@@ -2659,7 +2659,7 @@ def test_visible_send_promotes_the_stable_suppressed_history_row(tmp_path: Path)
 
 
 def test_hfr_446_promoted_receipt_uses_visible_delivery_order(tmp_path: Path) -> None:
-    """Promotion orders the stable row by its visible send, not hidden creation."""
+    """HFR-446: Promotion orders the stable row by its visible send, not hidden creation."""
 
     from storage import messages_service
     from storage.models import agent_sessions
@@ -7499,7 +7499,7 @@ def _settle_linked_turn_failures(sqlite, runs, *, delivered: bool) -> None:
 def test_hfr_437_visible_turn_failure_suppresses_all_linked_run_notices(
     tmp_path: Path,
 ) -> None:
-    """One acknowledged backend error is enough, regardless of Run provenance."""
+    """HFR-437: One acknowledged backend error is enough, regardless of Run provenance."""
 
     _migrated_state_db()
     controller, _dispatcher, _touched = _live_turn_dispatcher()
@@ -7520,7 +7520,7 @@ def test_hfr_437_visible_turn_failure_suppresses_all_linked_run_notices(
 
 
 def test_hfr_438_missing_turn_notification_delivers_one_fallback(tmp_path: Path) -> None:
-    """A lost primary elects one Run fallback, not one fallback per definition."""
+    """HFR-438: A lost primary elects one Run fallback, not one fallback per definition."""
 
     _migrated_state_db()
     controller, _dispatcher, _touched = _live_turn_dispatcher()
@@ -7546,7 +7546,7 @@ def test_hfr_438_missing_turn_notification_delivers_one_fallback(tmp_path: Path)
 def test_hfr_440_one_sibling_callback_suppresses_the_whole_turn_fallback(
     tmp_path: Path,
 ) -> None:
-    """A callback reports the shared Turn result, not only its parent Run."""
+    """HFR-440: A callback reports the shared Turn result, not only its parent Run."""
 
     sqlite, requests = _store(tmp_path)
     _task(sqlite, "watch-callback-a", deliver_key="slack::channel::C123")
@@ -7620,7 +7620,7 @@ def test_hfr_440_one_sibling_callback_suppresses_the_whole_turn_fallback(
 def test_hfr_443_deferred_sibling_callback_blocks_the_turn_fallback(
     tmp_path: Path,
 ) -> None:
-    """A deferred participant remains part of the Turn callback snapshot."""
+    """HFR-443: A deferred participant remains part of the Turn callback snapshot."""
 
     from sqlalchemy import update as sa_update
 
@@ -7683,7 +7683,7 @@ def test_hfr_443_deferred_sibling_callback_blocks_the_turn_fallback(
 def test_hfr_448_cancel_requested_callback_does_not_block_turn_fallback(
     tmp_path: Path,
 ) -> None:
-    """A stopped deferred participant no longer owns callback membership."""
+    """HFR-448: A stopped deferred participant no longer owns callback membership."""
 
     from sqlalchemy import update as sa_update
 
@@ -7747,7 +7747,7 @@ def test_hfr_448_cancel_requested_callback_does_not_block_turn_fallback(
 def test_hfr_449_canceled_parent_keeps_armed_callback_evidence(
     tmp_path: Path,
 ) -> None:
-    """Cancellation removes unarmed parents, not callback work already accepted."""
+    """HFR-449: Cancellation removes unarmed parents, not callback work already accepted."""
 
     sqlite, requests = _store(tmp_path)
     _callback_session(sqlite)
@@ -7831,7 +7831,7 @@ def test_hfr_449_canceled_parent_keeps_armed_callback_evidence(
 def test_hfr_450_terminal_replay_promotes_new_turn_delivery_evidence(
     tmp_path: Path,
 ) -> None:
-    """A same-Turn replay upgrades its notice without resetting drain progress."""
+    """HFR-450: A same-Turn replay upgrades its notice without resetting drain progress."""
 
     import core.scheduled_tasks as scheduled_tasks
 
@@ -7894,7 +7894,7 @@ def test_hfr_450_terminal_replay_promotes_new_turn_delivery_evidence(
 def test_hfr_451_turn_callback_lookup_uses_bounded_ownership(
     tmp_path: Path,
 ) -> None:
-    """Turn callback reads use Run ids and indexed Delivery ownership, never JSON scans."""
+    """HFR-451: Turn callback reads use Run ids and indexed Delivery ownership, never JSON scans."""
 
     sqlite, _requests = _store(tmp_path)
     _pending_failure(
@@ -7947,7 +7947,7 @@ def test_hfr_451_turn_callback_lookup_uses_bounded_ownership(
 def test_hfr_452_callback_children_cannot_own_a_turn_fallback(
     tmp_path: Path,
 ) -> None:
-    """Owner election applies every suppression used by the notice writer."""
+    """HFR-452: Owner election applies every suppression used by the notice writer."""
 
     sqlite, requests = _store(tmp_path)
     parent = requests.enqueue(
@@ -8013,7 +8013,7 @@ def test_hfr_452_callback_children_cannot_own_a_turn_fallback(
 def test_hfr_453_callback_enqueue_arms_the_parent_in_one_transaction(
     tmp_path: Path,
 ) -> None:
-    """A durable callback child is never visible without its parent marker."""
+    """HFR-453: A durable callback child is never visible without its parent marker."""
 
     sqlite, requests = _store(tmp_path)
     parent = requests.enqueue(
@@ -8071,7 +8071,7 @@ def test_hfr_453_callback_enqueue_arms_the_parent_in_one_transaction(
 def test_hfr_455_turn_owner_excludes_same_batch_parent_suppression(
     tmp_path: Path,
 ) -> None:
-    """A child cannot own when its earlier parent acquires a notice in the batch."""
+    """HFR-455: A child cannot own when its earlier parent acquires a notice in the batch."""
 
     sqlite, requests = _store(tmp_path)
     parent = requests.enqueue(
@@ -8118,7 +8118,7 @@ def test_hfr_455_turn_owner_excludes_same_batch_parent_suppression(
 def test_hfr_456_late_canceled_failed_parent_rejects_only_new_callbacks(
     tmp_path: Path,
 ) -> None:
-    """Late cancellation blocks new failure callbacks but preserves accepted evidence."""
+    """HFR-456: Late cancellation blocks new failure callbacks but preserves accepted evidence."""
 
     sqlite, requests = _store(tmp_path)
 
@@ -8190,7 +8190,7 @@ def test_hfr_456_late_canceled_failed_parent_rejects_only_new_callbacks(
 def test_hfr_457_missing_turn_participant_does_not_rollback_valid_runs(
     tmp_path: Path,
 ) -> None:
-    """A stale attribution id is excluded before ownership and settlement."""
+    """HFR-457: A stale attribution id is excluded before ownership and settlement."""
 
     sqlite, requests = _store(tmp_path)
     run = requests.enqueue(
@@ -8229,7 +8229,7 @@ def test_hfr_457_missing_turn_participant_does_not_rollback_valid_runs(
 def test_hfr_458_steered_callback_uses_its_shared_turn_output_receipt(
     tmp_path: Path,
 ) -> None:
-    """A callback need not be the primary Run named by its persisted result."""
+    """HFR-458: A callback need not be the primary Run named by its persisted result."""
 
     from storage import messages_service
 
@@ -8294,7 +8294,7 @@ def test_hfr_442_bare_turn_provenance_does_not_enter_the_fallback_lane(
     tmp_path: Path,
     turn_notification: dict[str, Any] | None,
 ) -> None:
-    """A direct error result has a Turn id but no notification ownership contract."""
+    """HFR-442: A direct error result has a Turn id but no notification ownership contract."""
 
     sqlite, requests = _store(tmp_path)
     _task(sqlite, "task-direct-error", deliver_key="slack::channel::C123")
@@ -9264,7 +9264,7 @@ def test_a_watch_reports_processing_health_separately_from_waiter_health(capsys)
 
 
 def test_hfr_444_first_in_flight_waiter_health_remains_unknown(tmp_path: Path) -> None:
-    """Starting a cycle is not evidence that its waiter succeeded."""
+    """HFR-444: Starting a cycle is not evidence that its waiter succeeded."""
 
     sqlite, _requests = _store(tmp_path)
     _watch(
@@ -11576,7 +11576,7 @@ def test_hfr_475_restart_notice_is_one_calm_action_without_internal_details(
     tmp_path: Path,
     language: str,
 ) -> None:
-    """A restart notice names readable work but never exposes an orphaned id."""
+    """HFR-475: A restart notice names readable work but never exposes an orphaned id."""
 
     from types import SimpleNamespace
 

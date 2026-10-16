@@ -3921,7 +3921,7 @@ def test_scheduled_gate_idle_runs_turn_with_lifecycle(monkeypatch, tmp_path):
 
 
 def test_hfr_482_create_per_run_delivery_adopts_reserved_session(monkeypatch, tmp_path):
-    """A create-per-run Run adopts its freshly reserved Session at admission."""
+    """HFR-482: A create-per-run Run adopts its freshly reserved Session at admission."""
     from core.scheduled_tasks import TaskExecutionStore
     from core.services import sessions as sessions_service
     from storage.background import attach_agent_run_delivery_in_connection
@@ -6090,7 +6090,7 @@ def _cancel_run_through_live_turn(controller, session_id, turn_id, run_id):
 
 
 def test_hfr_476_run_cancel_stops_a_shared_turn(monkeypatch, tmp_path):
-    """Canceling a Run steered into a live Turn stops that Turn like Session Stop."""
+    """HFR-476: Canceling a Run steered into a live Turn stops that Turn like Session Stop."""
 
     from core.scheduled_tasks import TaskExecutionStore
     from storage.background import attach_agent_run_delivery_in_connection

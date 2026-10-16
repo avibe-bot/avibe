@@ -1659,6 +1659,8 @@ def test_fifo_head_mismatch_does_not_bind_session_route(managers) -> None:
 
 
 def test_im_p1_materializes_only_after_exact_native_acceptance(managers) -> None:
+    """MESSAGE-DELIVERY-202: Ordinary IM input remains outside transcript until exact P1 acceptance."""
+
     manager, _other, engine, _engine_b, _starts = managers
 
     async def run() -> tuple[str, str]:
@@ -3355,6 +3357,8 @@ def test_accepted_receipt_recovery_preserves_attempt_batch_and_run_attachment(
 def test_missing_restart_evidence_keeps_unknown_without_resteer(
     managers,
 ) -> None:
+    """MESSAGE-DELIVERY-312: Unknown steer evidence remains unreplayed while reconciliation stays conservative."""
+
     first, restarted, engine, _engine_b, _starts = managers
     turn_id, _ = asyncio.run(_activate(first))
     first._active_identity = lambda _b, _s, logical: (logical, f"native-{logical}")
@@ -4972,6 +4976,8 @@ def test_exact_missing_start_attempt_requeues_only_its_own_delivery(managers) ->
 
 @pytest.mark.anyio
 async def test_permanent_start_rejection_retires_delivery_without_retry(managers) -> None:
+    """MESSAGE-DELIVERY-020: Permanent native start rejection retires one Delivery and unblocks FIFO."""
+
     manager, _other, engine, _engine_b, starts = managers
     admitted = await manager.deliver(
         DeliveryRequest(session_id="ses_fsm", priority="p3", content="invalid payload"),
@@ -7652,7 +7658,7 @@ def test_hfr_474_startup_collapses_legacy_restart_notices_by_durable_turn(
     tmp_path: Path,
     sent_before_recovery: bool,
 ) -> None:
-    """Upgrade recovery uses exact Delivery ownership before notices can drain."""
+    """HFR-474: Upgrade recovery uses exact Delivery ownership before notices can drain."""
 
     from core import failure_notices
     from core.scheduled_tasks import ScheduledTaskService, TaskExecutionStore

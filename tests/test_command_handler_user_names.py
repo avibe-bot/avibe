@@ -692,6 +692,11 @@ class NewCommandStorageIntegrationTests(unittest.IsolatedAsyncioTestCase):
     """
 
     async def test_new_keeps_a_superseded_session_and_its_definitions_but_clears_the_live_one(self):
+        """HFR-242: /new end to end keeps a superseded session and its bound definitions.
+
+        HFR-274: the live session map must keep what the teardown SQL deliberately kept.
+        """
+
         from sqlalchemy import select as sa_select
 
         from config.v2_sessions import SessionsStore

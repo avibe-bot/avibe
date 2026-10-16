@@ -62,6 +62,8 @@ def test_ra_tq_026_route_assessment_is_conservative() -> None:
 
 
 def test_ra_tq_025_network_path_combines_nodes_ips_and_location(monkeypatch) -> None:
+    """RA-TQ-025: Local status exposes bounded live Cloudflare network-path diagnostics without uploading them."""
+
     monkeypatch.setattr(cloudflare_network, "location_catalog", lambda: (_catalog(), False))
     monkeypatch.setattr(
         cloudflare_network,

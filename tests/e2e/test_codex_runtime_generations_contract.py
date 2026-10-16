@@ -88,6 +88,8 @@ def codex_home_runtime(tmp_path, rejected_external_proxy):
 
 
 async def test_runtime_gen_019_a_thread_moves_between_app_servers_only_after_release(codex_home_runtime):
+    """RUNTIME-GEN-019: The real Codex CLI moves a thread between two app-servers in one directory only after release, without touching its rollout."""
+
     binary, runtime, cwd = codex_home_runtime
     old = _Server(binary, runtime, cwd)
     new = _Server(binary, runtime, cwd)

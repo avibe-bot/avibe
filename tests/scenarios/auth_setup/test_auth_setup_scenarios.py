@@ -250,7 +250,7 @@ def test_setup_completion_uses_the_same_authorized_config_flow(monkeypatch, tmp_
 
 
 def test_authorized_config_envelope_and_completion_persistence_closed_loop(monkeypatch, tmp_path):
-    """Scenario: AUTH-SETUP-122 — the authorized `/api/config` envelope, and completion
+    """AUTH-SETUP-123: Scenario: AUTH-SETUP-122 — the authorized `/api/config` envelope, and completion
     persistence that reads back.
 
     This is the producer half of setup's config prerequisite. Unauthenticated remote
@@ -3594,6 +3594,8 @@ class CodexRelayRoundTripScenarioTests(unittest.IsolatedAsyncioTestCase):
     _expected_provider_id = "OpenAI"
 
     async def test_codex_oauth_api_key_relay_round_trip_scenario(self) -> None:
+        """AUTH-SETUP-110: Codex OAuth round trip keeps the relay base URL through settings save and relaunch config."""
+
         runner = ScenarioRunner(self.harness)
         api = self._api_module()
         await self._run_round_trip(runner, api)

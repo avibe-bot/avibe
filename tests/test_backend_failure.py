@@ -242,7 +242,7 @@ class BackendFailureTests(unittest.IsolatedAsyncioTestCase):
     async def test_hfr_454_delivery_only_ack_uses_the_routed_target_platform(
         self,
     ) -> None:
-        """Transport-only ids are evidence according to where the notify was sent."""
+        """HFR-454: Transport-only ids are evidence according to where the notify was sent."""
 
         for source, target, expected in (
             ("avibe", "slack", True),

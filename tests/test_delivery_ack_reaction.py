@@ -205,6 +205,8 @@ class AdmissionAckTests(unittest.IsolatedAsyncioTestCase):
         # MESSAGE-DELIVERY-302: the promoted Delivery is re-dispatched with its
         # original native message id, so the receipt and the running indicator
         # target the same message and must not coexist.
+        """MESSAGE-DELIVERY-302: A queued admission receipt is replaced by the running turn indicator."""
+
         im = _FakeIM()
         svc = _svc(im)
         context = _ctx()
@@ -231,6 +233,8 @@ class AdmissionAckTests(unittest.IsolatedAsyncioTestCase):
         # replies) merge into one Turn, but only the first hydrates the dispatch
         # context. The rest are accepted as part of that Turn and never
         # dispatched, so nothing else would ever take their receipt down.
+        """MESSAGE-DELIVERY-309: One Turn clears the receipt of every Delivery merged into it."""
+
         im = _FakeIM()
         svc = _svc(im)
         first = _ctx(message_id=None)
@@ -287,6 +291,8 @@ class AdmissionAckTests(unittest.IsolatedAsyncioTestCase):
         # Both halves await a platform call. Without serialization the add
         # records its emoji after start() has looked for one, stranding 👌 next to
         # the running indicator.
+        """MESSAGE-DELIVERY-304: A receipt racing the turn start is cleared exactly once."""
+
         im = _GatedIM()
         svc = _svc(im)
         context = _ctx()

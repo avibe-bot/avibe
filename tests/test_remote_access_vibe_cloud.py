@@ -107,6 +107,8 @@ def _session_cookie(
 
 
 def test_ra_tq_026_remote_status_uses_cf_ray_on_paired_public_host(monkeypatch, tmp_path):
+    """RA-TQ-026: Only paired-public-host CF-Ray metadata participates in conservative route assessment."""
+
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
     config.save()
@@ -166,6 +168,8 @@ def test_ra_tq_026_remote_status_ignores_spoofed_cf_ray(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("role", ["owner", "member"])
 def test_ra_tq_032_remote_status_keeps_page_fields_and_drops_host_internals(monkeypatch, tmp_path, role):
+    """RA-TQ-032: Remote status keeps the Remote Access page fields while dropping host internals."""
+
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
     config.save()
@@ -1225,6 +1229,8 @@ def test_pair_origin_service_uses_ipv6_loopback_for_ipv6_wildcard(monkeypatch, t
 
 
 def test_ra_tq_007_runtime_status_payload_includes_tunnel_quality(monkeypatch, tmp_path) -> None:
+    """RA-TQ-007: Doctor and avibe.bot consume the same V1 aggregate."""
+
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
     config.ui.setup_host = "100.97.103.112"
@@ -1268,6 +1274,8 @@ def test_ra_tq_007_runtime_status_payload_includes_tunnel_quality(monkeypatch, t
 
 
 def test_ra_tq_014_runtime_status_payload_includes_v2_request_path(monkeypatch, tmp_path) -> None:
+    """RA-TQ-014: Local and cloud surfaces consume the bounded V2 aggregate."""
+
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
     config.save()
@@ -3238,6 +3246,8 @@ def test_cloud_token_endpoint_remote_origin_with_session_mints_token(
 
 
 def test_ra_tq_029_connector_environment_applies_ip_and_interface_controls() -> None:
+    """RA-TQ-029: Edge IP and outbound-interface controls reach cloudflared only through currently assigned addresses."""
+
     config = _config()
     cloud = config.remote_access.vibe_cloud
     cloud.tunnel_token = "tunnel-token"
@@ -3288,6 +3298,8 @@ def test_ra_tq_029_network_interfaces_exclude_unusable_addresses(monkeypatch) ->
 
 
 def test_ra_tq_030_connectivity_diagnostics_do_not_guess_quic_reachability(monkeypatch) -> None:
+    """RA-TQ-030: Connectivity diagnostics report proven TCP reachability without guessing unobserved QUIC reachability."""
+
     config = _config()
     monkeypatch.setattr(
         remote_access,

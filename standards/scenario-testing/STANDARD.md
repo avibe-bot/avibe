@@ -197,8 +197,16 @@ rewrite unnoticed for five days. A pointer key such as `related_tests` may name
 bare files precisely because it claims no coverage; anything that does claim
 coverage names its case. A pointer that does name a case must still name one
 that exists, or a rename leaves it leading nowhere. A pointer may also name a
-group: a test class, or, for a vitest file, every case whose name contains the
-term it names, such as an ID.
+group: every case whose name contains the term it names, such as a test class
+or, for a vitest file, an ID; or, for a pytest file, a scenario ID, which names
+every case whose docstring carries it.
+
+A citation resolves against the suite's own collection of the cited file —
+pytest's for Python, vitest's for UI — so a case the runner would not collect,
+such as one in a suppressed or deselected class, is not evidence. A pytest
+evidence case must also name the citing row's ID in its docstring; a case that
+proves several rows names each of them. Then a case written for something else
+cannot be attached to a row unnoticed.
 
 ## 5. Harness Design Rules
 
