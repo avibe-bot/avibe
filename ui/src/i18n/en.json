@@ -5942,7 +5942,10 @@
       "close": "Close input"
     },
     "stack": {
-      "expand": "Expand session cards"
+      "count_one": "{{displayCount}} item",
+      "count_other": "{{displayCount}} items",
+      "expand_one": "Expand {{displayCount}} session card",
+      "expand_other": "Expand {{displayCount}} session cards"
     },
     "activityKind": {
       "watch": "Monitor",

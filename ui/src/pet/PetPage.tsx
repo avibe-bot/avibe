@@ -36,6 +36,8 @@ const STOP_CONFIRM_MS = 3000;
 const STOP_LINGER_MS = 2500;
 const STACK_HEIGHT = 304; // 292px scroll box + 6px panel padding on each side.
 const FADE_PX = 32;
+const MAX_COLLAPSED_LAYERS = 3;
+const MAX_COLLAPSED_COUNT = 99;
 const EMPTY_INBOX: InboxSession[] = [];
 const REFUSED_SEND_STATUSES = new Set([400, 403, 404, 409, 422]);
 const sendRefused = (error: unknown) => error instanceof ApiError && REFUSED_SEND_STATUSES.has(error.status);
@@ -710,7 +712,7 @@ const PetSurface: React.FC = () => {
                 t={(key, options) => String(t(key as never, options as never))}
               />
             ) : (
-              <CollapsedCards cards={visibleCards} onOpen={openCards} t={(key) => String(t(key as never))} />
+              <CollapsedCards cards={visibleCards} onOpen={openCards} t={(key, options) => String(t(key as never, options as never))} />
             )
           )}
           </div>
@@ -982,16 +984,32 @@ const MiniDock: React.FC<{ enabled: boolean; listening: boolean; typing: boolean
   </div>
 );
 
-const CollapsedCards: React.FC<{ cards: PetCard[]; onOpen: () => void; t: (key: string) => string }> = ({ cards, onOpen, t }) => {
-  const [front, ...layers] = cards;
+const CollapsedCards: React.FC<{ cards: PetCard[]; onOpen: () => void; t: (key: string, options?: Record<string, unknown>) => string }> = ({ cards, onOpen, t }) => {
+  const [front, ...remainingCards] = cards;
   if (!front) return null;
+  const layers = remainingCards.slice(0, MAX_COLLAPSED_LAYERS);
+  const count = cards.length;
+  const displayCount = count > MAX_COLLAPSED_COUNT ? `${MAX_COLLAPSED_COUNT}+` : String(count);
   return (
-    <button type="button" className="pet-mini-collapsed" style={{ paddingBottom: layers.length * 9 }} onClick={onOpen} aria-label={t('pet.stack.expand')}>
+    <button
+      type="button"
+      className="pet-mini-collapsed"
+      style={{ paddingBottom: layers.length * 9 }}
+      onClick={onOpen}
+      aria-label={t('pet.stack.expand', { count, displayCount })}
+    >
       {layers.map((card, index) => {
         const inset = 18 + 6 + index * 3;
         return <span key={card.id} data-pet-hit className="pet-mini-layer" style={{ top: (index + 1) * 9, bottom: (layers.length - index - 1) * 9, left: inset, right: inset, zIndex: layers.length - index }} aria-hidden />;
       })}
-      <div className="pet-mini-front" style={{ zIndex: layers.length + 1 }}><CardBody card={front} expanded={false} t={t} /></div>
+      <div className="pet-mini-front" style={{ zIndex: layers.length + 1 }}>
+        <CardBody
+          card={front}
+          expanded={false}
+          t={t}
+          stackCount={count > 1 ? t('pet.stack.count', { count, displayCount }) : undefined}
+        />
+      </div>
     </button>
   );
 };
@@ -1038,7 +1056,7 @@ const ExpandedCards: React.FC<{ cards: PetCard[]; leaving: string[]; onReference
   );
 };
 
-const CardBody: React.FC<{ card: PetCard; expanded: boolean; t: (key: string, options?: Record<string, unknown>) => string; phase?: StopPhase; onDismiss?: () => void; onStop?: () => void; onClick?: () => void }> = ({ card, expanded, t, phase, onDismiss, onStop, onClick }) => {
+const CardBody: React.FC<{ card: PetCard; expanded: boolean; t: (key: string, options?: Record<string, unknown>) => string; stackCount?: string; phase?: StopPhase; onDismiss?: () => void; onStop?: () => void; onClick?: () => void }> = ({ card, expanded, t, stackCount, phase, onDismiss, onStop, onClick }) => {
   const running = card.running && phase !== 'stopped' && phase !== 'stopping';
   const subtitle = phase === 'stopping' ? t('pet.stop.stopping') : phase === 'stopped' ? t('pet.stop.stopped') : phase === 'failed' ? t('pet.stop.failed') : card.status;
   const stopText = phase === 'confirm' ? t('pet.stop.confirmStop') : t('pet.stop.stop', { title: card.title });
@@ -1047,7 +1065,10 @@ const CardBody: React.FC<{ card: PetCard; expanded: boolean; t: (key: string, op
     <article className={clsx('pet-mini-card', card.needsInput && 'is-needs-input')} title={card.title} data-session-id={card.sessionId} data-pet-hit>
       {expanded && <button type="button" className="pet-mini-dismiss" data-pet-hit onClick={onDismiss} aria-label={t('pet.dismiss')}><svg viewBox="0 0 16 16" aria-hidden><path d="m4 4 8 8M12 4 4 12" /></svg></button>}
       <Reference className="pet-mini-card-content pet-mini-card-reference" onClick={onClick} {...(expanded ? { type: 'button' as const, 'aria-label': t('pet.referenceSession', { title: card.title }) } : {})}>
-        <div className="pet-mini-eyebrow"><span title={card.eyebrow}>{card.eyebrow}</span></div>
+        <div className="pet-mini-eyebrow">
+          <span className="pet-mini-eyebrow-text" title={card.eyebrow}>{card.eyebrow}</span>
+          {stackCount && <span className="pet-mini-stack-count">{stackCount}</span>}
+        </div>
         <div className="pet-mini-title">{card.title}</div>
         <div className={clsx('pet-mini-subtitle', phase === 'stopped' && 'is-stopped')} title={subtitle}>
           {running && <span className="pet-mini-running-dot" aria-hidden />}

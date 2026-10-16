@@ -63,7 +63,8 @@ for (const main of [true, false]) {
       const errors: string[] = [];
       page.on('pageerror', (error) => errors.push(error.message));
       await page.goto(`/e2e/pet-mini/fixture.html?main=${main}&layers=${layers}`);
-      await expect(page.locator('.pet-mini-layer')).toHaveCount(layers);
+      const renderedLayers = Math.min(layers, 3);
+      await expect(page.locator('.pet-mini-layer')).toHaveCount(renderedLayers);
       // Wait for the real CSS entrance before measuring its transformed bounds.
       await page.locator('.pet-mini-swap').evaluate(async (node) => {
         await Promise.all(node.getAnimations().map((animation) => animation.finished));
@@ -73,8 +74,8 @@ for (const main of [true, false]) {
         const backs = Array.from(stack.querySelectorAll('.pet-mini-layer'), (layer) => layer.getBoundingClientRect().toJSON());
         return { stack: stack.getBoundingClientRect().toJSON(), front: front.toJSON(), backs };
       });
-      expect(bounds.stack.height).toBeCloseTo(bounds.front.height + layers * 9, 1);
-      expect(bounds.backs.at(-1)!.bottom - bounds.front.bottom).toBeCloseTo(layers * 9, 1);
+      expect(bounds.stack.height).toBeCloseTo(bounds.front.height + renderedLayers * 9, 1);
+      expect(bounds.backs.at(-1)!.bottom - bounds.front.bottom).toBeCloseTo(renderedLayers * 9, 1);
       for (const [index, layer] of bounds.backs.entries()) {
         expect(layer.height).toBeCloseTo(bounds.front.height, 1);
         expect(layer.bottom - bounds.front.bottom).toBeCloseTo((index + 1) * 9, 1);
@@ -104,6 +105,53 @@ for (const main of [true, false]) {
       if (main) await page.locator('.pet-mini-reply-toggle').click();
       expect(await page.locator('.pet-mini-avatar-button').boundingBox()).toEqual(avatar);
       expect(errors).toEqual([]);
+    });
+  }
+}
+
+for (const cards of [2, 4, 20]) {
+  test(`caps collapsed layers for ${cards} cards`, async ({ page }) => {
+    await page.goto(`/e2e/pet-mini/fixture.html?activities=${cards}&layers=1`);
+    await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
+    await expect(page.locator('.pet-mini-layer')).toHaveCount(Math.min(cards - 1, 3));
+    await expect(page.locator('.pet-mini-collapsed')).toHaveAttribute(
+      'aria-label',
+      `Expand ${cards} session cards`,
+    );
+  });
+}
+
+for (const cards of [1, 2, 12, 120]) {
+  test(`shows the collapsed count for ${cards} cards`, async ({ page }) => {
+    await page.goto(`/e2e/pet-mini/fixture.html?activities=${cards}&layers=1`);
+    await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
+    const displayCount = cards > 99 ? '99+' : String(cards);
+    const countChip = page.locator('.pet-mini-stack-count');
+    if (cards === 1) {
+      await expect(countChip).toHaveCount(0);
+    } else {
+      await expect(countChip).toHaveText(`${displayCount} items`);
+    }
+    const expectedLabel = cards === 1
+      ? `Expand ${displayCount} session card`
+      : `Expand ${displayCount} session cards`;
+    await expect(page.locator('.pet-mini-collapsed')).toHaveAttribute(
+      'aria-label',
+      expectedLabel,
+    );
+  });
+}
+
+for (const theme of ['light', 'dark']) {
+  for (const cards of [2, 4, 20]) {
+    test(`captures collapsed stack count (${theme}, ${cards} cards)`, async ({ page }, testInfo) => {
+      await page.goto(`/e2e/pet-mini/fixture.html?activities=${cards}&layers=1`);
+      await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
+      await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
+      await page.locator('.pet-mini-swap').evaluate(async (node) => {
+        await Promise.all(node.getAnimations().map((animation) => animation.finished));
+      });
+      await page.screenshot({ path: testInfo.outputPath(`collapsed-${theme}-${cards}.png`), scale: 'css', animations: 'disabled' });
     });
   }
 }
