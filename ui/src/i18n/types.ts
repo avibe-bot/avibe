@@ -10,7 +10,7 @@ type TextKey<K extends ParseKeys> = K extends unknown
   ? [TFunctionReturn<'translation', K, { returnObjects: false }>] extends [never] ? never
     : TFunctionReturn<'translation', K, { returnObjects: false }> extends string ? K : never
   : never;
-export type TranslationKey = TextKey<Extract<ParseKeys, ResourceTextKey>>;
+export type TranslationKey = TextKey<Extract<ResourceTextKey, ParseKeys>>;
 
 /** Finite suffixes/prefixes for consumers that intentionally compose a path. */
 export type TranslationSuffix<Prefix extends string> =

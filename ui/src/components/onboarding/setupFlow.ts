@@ -47,6 +47,9 @@ type PluralBase<Key> = Key extends `${infer Base}_other` ? Base : never;
  * than left to the shell to guess.
  */
 export type SetupCountedLabelKey = PluralBase<ParseKeys>;
+/** Isolated browser/e2e type programs omit the resource augmentation; preserve the
+ * counted-label shape there without widening the bundle-backed production type. */
+type SetupCountedLabelKeyForConsumer = [SetupCountedLabelKey] extends [never] ? string : SetupCountedLabelKey;
 
 /** Interpolation values for `labelKey`, e.g. `{ count: 2 }` or `{ name: 'Codex' }`. */
 export type SetupActionArgs = Record<string, string | number>;
@@ -70,7 +73,7 @@ export type SetupAction = {
   icon: SetupActionIcon;
 } & (
   | { labelKey: TranslationKey; labelArgs?: SetupActionArgs }
-  | { labelKey: SetupCountedLabelKey; labelArgs: SetupActionArgs & { count: number } }
+  | { labelKey: SetupCountedLabelKeyForConsumer; labelArgs: SetupActionArgs & { count: number } }
 );
 
 /**
