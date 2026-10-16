@@ -3365,24 +3365,25 @@ def _runs_blocked_by_live_activities(
     blocked: set[str] = set()
     # ``record_type`` is checked here, not in SQL: as a term it would let the planner
     # prefer ``ix_runtime_records_type_scope_expiry``, which matches every Activity row.
-    for record_type, payload_json in conn.execute(
-        select(runtime_records.c.record_type, runtime_records.c.payload_json)
-        .where(runtime_records.c.scope_id.is_(None))
-        .where(runtime_records.c.session_anchor.in_(sessions))
-    ):
-        if record_type != ACTIVITY_RECORD_TYPE:
-            continue
-        payload = _json_loads(payload_json, {})
-        if not isinstance(payload, dict):
-            continue
-        activity = payload.get("activity")
-        if payload.get("phase") != "active" or not isinstance(activity, dict) or activity.get("detached_from_run"):
-            continue
-        owners = {str(activity.get("run_id") or "").strip()}
-        metadata = activity.get("metadata")
-        if isinstance(metadata, dict) and isinstance(metadata.get("run_ids"), list):
-            owners.update(str(value or "").strip() for value in metadata["run_ids"])
-        blocked |= owners & wanted
+    for batch in _id_batches(sessions):
+        for record_type, payload_json in conn.execute(
+            select(runtime_records.c.record_type, runtime_records.c.payload_json)
+            .where(runtime_records.c.scope_id.is_(None))
+            .where(runtime_records.c.session_anchor.in_(batch))
+        ):
+            if record_type != ACTIVITY_RECORD_TYPE:
+                continue
+            payload = _json_loads(payload_json, {})
+            if not isinstance(payload, dict):
+                continue
+            activity = payload.get("activity")
+            if payload.get("phase") != "active" or not isinstance(activity, dict) or activity.get("detached_from_run"):
+                continue
+            owners = {str(activity.get("run_id") or "").strip()}
+            metadata = activity.get("metadata")
+            if isinstance(metadata, dict) and isinstance(metadata.get("run_ids"), list):
+                owners.update(str(value or "").strip() for value in metadata["run_ids"])
+            blocked |= owners & wanted
     return blocked
 
 class SQLiteBackgroundTaskStore:
@@ -6396,9 +6397,13 @@ class SQLiteBackgroundTaskStore:
         with run_update_event_transaction(self.engine) as conn:
             reserve_write_lock(conn)
             if _durable_activity_blockers is not None and terminal_status:
-                run_sessions = conn.execute(
-                    select(agent_runs.c.session_id).where(agent_runs.c.id.in_(normalized_run_ids))
-                ).scalars()
+                run_sessions = [
+                    session_id
+                    for batch in _id_batches(normalized_run_ids)
+                    for session_id in conn.execute(
+                        select(agent_runs.c.session_id).where(agent_runs.c.id.in_(batch))
+                    ).scalars()
+                ]
                 deferred_ids |= _runs_blocked_by_live_activities(
                     conn, normalized_run_ids, {*_activity_session_ids, *run_sessions}
                 )

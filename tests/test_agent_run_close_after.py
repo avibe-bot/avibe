@@ -1333,3 +1333,43 @@ def test_the_runs_terminal_record_reads_only_its_sessions_activities(tmp_path, m
     with sqlite3.connect(store.db_path) as raw:
         plan = " ".join(row[-1] for row in raw.execute("EXPLAIN QUERY PLAN " + statement, parameters))
     assert "ix_runtime_records_scope_anchor" in plan and "SCAN runtime_records" not in plan, plan
+
+
+def test_the_runs_terminal_record_binds_within_an_old_sqlite_variable_limit(tmp_path, monkeypatch) -> None:
+    """#2706: a terminal output's Run ids have no size cap, and the record's Activity re-read looks up their Sessions.
+    That lookup binds in batches like the rest of the record, so an output with more Run ids than an older SQLite
+    build's 999 host parameters still records its Runs instead of failing with ``too many SQL variables``."""
+
+    import sqlite3
+
+    from sqlalchemy import event
+
+    from core.scheduled_tasks import TaskExecutionStore
+
+    if not hasattr(sqlite3.Connection, "setlimit"):
+        pytest.skip("sqlite3.Connection.setlimit needs Python 3.11")
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    queued = request_store.enqueue_agent_run(message="run", agent_backend="claude", session_id="session-1")
+    assert request_store.claim(queued.id) is not None
+    store = request_store.sqlite_backend
+
+    def old_sqlite_limit(dbapi_connection, _record):
+        dbapi_connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+
+    event.listen(store.engine, "connect", old_sqlite_limit)
+    store.engine.dispose()
+    try:
+        deferred = store.record_turn_terminal_outputs(
+            [queued.id, *(f"run-gone-{index}" for index in range(1000))],
+            activity_session_ids=["session-1"],
+            output_id="terminal",
+            text="done",
+            terminal_status="succeeded",
+        )
+    finally:
+        event.remove(store.engine, "connect", old_sqlite_limit)
+        store.engine.dispose()
+
+    assert deferred == []
+    assert normalize_run_status(request_store.get_run(queued.id)["status"]) == "succeeded"
