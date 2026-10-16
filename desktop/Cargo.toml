@@ -18,4 +18,4 @@ sys-locale = "0.3.2"
 thiserror = "2"
 tokio = { version = "1", default-features = false, features = ["rt", "time"] }
 url = "2"
-zip = { version = "4.6.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zip = { version = "9.0.4", default-features = false, features = ["deflate-flate2-zlib-rs"] }
