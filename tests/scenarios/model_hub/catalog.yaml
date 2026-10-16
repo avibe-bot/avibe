@@ -105,6 +105,7 @@ capability:
     - tests/e2e/test_model_hub_runtime.py
     - tests/e2e/test_model_hub_sources.py
     - tests/e2e/test_model_hub_usage_events.py
+    - tests/e2e/test_model_hub_engine_wire.py
     - tests/e2e/test_model_hub_service_acceptance.py
     - tests/e2e/test_model_hub_codex_image.py
     - tests/e2e/test_model_hub_images.py
@@ -2585,6 +2586,14 @@ scenarios:
       - tests/test_model_hub_hosted_images.py::test_an_image_call_costs_its_delivered_images_at_their_list_price
       - tests/e2e/test_model_hub_images.py::test_each_offered_image_path_reaches_the_vendors_images_endpoint
       - tests/e2e/test_model_hub_images.py::test_only_an_upstream_refusal_teaches_that_a_source_lacks_an_image_model
+  - id: MH-HOSTED-GATEWAY-008
+    name: A reasoning item replayed to the Source that issued it reaches that upstream through the pinned engine with its encrypted_content and id, xAI's envelope-less ciphertext included
+    status: covered
+    kind: contract
+    layer: e2e
+    test: tests/e2e/test_model_hub_engine_wire.py::test_responses_stream_with_reasoning_and_tool_call
+    related_tests:
+      - tests/test_model_hub_runtime.py::test_only_an_xai_responses_entry_marks_its_models_is_compat
 next_priority:
   - MH-PROTOCOL-004
   - MH-RUNTIME-001

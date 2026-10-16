@@ -1876,6 +1876,42 @@ def test_an_api_key_engine_entry_registers_its_vendors_image_models(tmp_path: Pa
     assert f'{sources["src_gemini0001"].prefix}/gemini-3-pro-image-preview' in expected
 
 
+def test_only_an_xai_responses_entry_marks_its_models_is_compat(tmp_path: Path) -> None:
+    """MH-HOSTED-GATEWAY-008: the engine keeps a replayed reasoning item's envelope-less ciphertext only for an
+    is-compat model; xAI's ciphertext has none, OpenAI's Fernet one does, and other Responses Sources stay stock."""
+
+    store = EngineStateStore(tmp_path / "state")
+    instance_dir, runtime_secrets = store.prepare_instance("install-1")
+    store.sync_sources([
+        _binding(store.store_api_key("xai-secret", vendor="xai", protocol="openai_responses"),
+                 source_id="src_xai000001", vendor="xai", protocol="openai_responses", base_url=None,
+                 model_ids=("grok-4.3", "grok-4.20-0309-reasoning")),
+        _binding(store.store_api_key("openai-secret", vendor="openai", protocol="openai_responses"),
+                 source_id="src_openai0001", vendor="openai", protocol="openai_responses", base_url=None,
+                 model_ids=("gpt-6-astra",)),
+        _binding(store.store_api_key("custom-secret", protocol="openai_responses",
+                                     base_url="https://relay.example.test/v1"),
+                 source_id="src_custom0001", protocol="openai_responses", base_url="https://relay.example.test/v1",
+                 model_ids=("grok-4.3",)),
+    ])
+    config_path = instance_dir / "config.yaml"
+    write_engine_config(
+        config_path, host="127.0.0.1", port=18231, auth_dir=store.auth_dir, runtime_secrets=runtime_secrets,
+        sources=store.list_sources(), state_store=store,
+    )
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+    compat = {
+        entry["base-url"]: {model["name"]: model.get("is-compat") for model in entry["models"]}
+        for entry in payload["codex-api-key"]
+    }
+    assert compat == {
+        "https://api.x.ai/v1": {"grok-4.3": True, "grok-4.20-0309-reasoning": True},
+        "https://api.openai.com/v1": {"gpt-6-astra": None, "gpt-image-2": None},
+        "https://relay.example.test/v1": {"grok-4.3": None},
+    }
+
+
 def _rendered_text_only(tmp_path: Path, model_ids: tuple[str, ...], text_only: tuple[str, ...]) -> set[str]:
     store = EngineStateStore(tmp_path / "state")
     instance_dir, runtime_secrets = store.prepare_instance("install-1")
