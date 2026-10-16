@@ -12765,7 +12765,7 @@ def test_private_show_page_hmr_websocket_requires_private_page(monkeypatch, tmp_
     try:
         with app.test_client().websocket_connect(
             "/show/ses123/__vite_hmr",
-            headers={"host": "127.0.0.1:5123"},
+            headers={"host": "127.0.0.1:5123", "origin": "http://127.0.0.1:5123"},
             subprotocols=["vite-hmr"],
         ):
             raise AssertionError("websocket should not connect")
@@ -12780,7 +12780,7 @@ def test_private_show_page_hmr_websocket_requires_remote_session(monkeypatch, tm
 
     with app.test_client().websocket_connect(
         "wss://alex.avibe.bot/show/ses123/__vite_hmr",
-        headers={"host": "alex.avibe.bot"},
+        headers={"host": "alex.avibe.bot", "origin": "https://alex.avibe.bot"},
         subprotocols=["vite-hmr"],
     ) as websocket:
         with pytest.raises(WebSocketDisconnect) as exc:
@@ -12804,7 +12804,7 @@ def test_private_show_page_hmr_websocket_requires_editor(monkeypatch, tmp_path):
     try:
         with client.websocket_connect(
             "wss://alex.avibe.bot/show/ses123/__vite_hmr",
-            headers={"host": "alex.avibe.bot"},
+            headers={"host": "alex.avibe.bot", "origin": "https://alex.avibe.bot"},
             subprotocols=["vite-hmr"],
         ) as websocket:
             websocket.receive_text()
@@ -12889,7 +12889,7 @@ def test_private_show_page_hmr_websocket_accepts_remote_session(monkeypatch, tmp
     try:
         with client.websocket_connect(
             "wss://alex.avibe.bot/show/ses123/__vite_hmr",
-            headers={"host": "alex.avibe.bot"},
+            headers={"host": "alex.avibe.bot", "origin": "https://alex.avibe.bot"},
             subprotocols=["vite-hmr"],
         ) as websocket:
             websocket.receive_text()
@@ -13096,6 +13096,7 @@ def test_private_show_page_hmr_websocket_accepts_setup_host_local_peer(monkeypat
             "/show/ses123/__vite_hmr",
             headers={
                 "host": "192.168.2.3:5123",
+                "origin": "http://192.168.2.3:5123",
                 "x-vibe-test-remote-addr": "192.168.2.44",
             },
             subprotocols=["vite-hmr"],
@@ -13138,6 +13139,7 @@ def test_shared_mode_show_page_hmr_websocket_accepts_local_peer(
             "/show/ses123/__vite_hmr",
             headers={
                 "host": "192.168.2.3:5123",
+                "origin": "http://192.168.2.3:5123",
                 "x-vibe-test-remote-addr": "192.168.2.44",
             },
             subprotocols=["vite-hmr"],
@@ -13221,7 +13223,7 @@ def test_public_show_page_hmr_websocket_uses_share_path(monkeypatch, tmp_path):
     try:
         with app.test_client().websocket_connect(
             f"wss://alex.avibe.bot/p/{share_id}/__vite_hmr?token=test-token",
-            headers={"host": "alex.avibe.bot"},
+            headers={"host": "alex.avibe.bot", "origin": "https://alex.avibe.bot"},
             subprotocols=["vite-hmr"],
         ) as websocket:
             websocket.receive_text()
@@ -13247,12 +13249,91 @@ def test_public_show_page_hmr_websocket_requires_public_page(monkeypatch, tmp_pa
     try:
         with app.test_client().websocket_connect(
             f"wss://alex.avibe.bot/p/{share_id}/__vite_hmr",
-            headers={"host": "alex.avibe.bot"},
+            headers={"host": "alex.avibe.bot", "origin": "https://alex.avibe.bot"},
             subprotocols=["vite-hmr"],
         ):
             raise AssertionError("websocket should not connect")
     except Exception as exc:
         assert getattr(exc, "code", None) == 1008
+
+
+_HMR_ORIGIN_ROUTES = (
+    # Private HMR from a loopback peer: no cookie gate, so Origin is the only guard.
+    pytest.param("/show/ses123/__vite_hmr", "127.0.0.1:5123", "http://127.0.0.1:5123", id="private-loopback"),
+    # Public HMR: public visibility, no authentication at all.
+    pytest.param(None, "alex.avibe.bot", "https://alex.avibe.bot", id="public-share"),
+)
+
+
+def _hmr_route_url(route, host, share_id):
+    if route is not None:
+        return route
+    return f"wss://{host}/p/{share_id}/__vite_hmr"
+
+
+def _hmr_origin_variants(page_origin: str) -> dict[str, str | None]:
+    parsed = urllib.parse.urlsplit(page_origin)
+    other_scheme = "https" if parsed.scheme == "http" else "http"
+    return {
+        "cross-site": "https://evil.example",
+        "other-port": f"{parsed.scheme}://{parsed.hostname}:6123",
+        "other-scheme": f"{other_scheme}://{parsed.netloc}",
+        "missing": None,
+    }
+
+
+@pytest.mark.parametrize("variant", ("cross-site", "other-port", "other-scheme", "missing"))
+@pytest.mark.parametrize("route,host,page_origin", _HMR_ORIGIN_ROUTES)
+def test_show_page_hmr_websocket_rejects_foreign_origin(monkeypatch, tmp_path, route, host, page_origin, variant):
+    # Browsers do not enforce same-origin on WebSocket handshakes. Whatever other
+    # gate a route has, an Origin other than the page's own must never reach the
+    # runtime socket.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    share_id = _create_show_page("ses123", "public")
+    manager = _FakeShowRuntimeManager()
+    set_show_runtime_manager_for_tests(manager)
+    headers = {"host": host}
+    origin = _hmr_origin_variants(page_origin)[variant]
+    if origin is not None:
+        headers["origin"] = origin
+    try:
+        with app.test_client().websocket_connect(
+            _hmr_route_url(route, host, share_id),
+            headers=headers,
+            subprotocols=["vite-hmr"],
+        ):
+            raise AssertionError("websocket should not connect")
+    except Exception as exc:
+        assert getattr(exc, "code", None) == 1008
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert manager.websocket_paths == []
+
+
+@pytest.mark.parametrize("route,host,page_origin", _HMR_ORIGIN_ROUTES)
+def test_show_page_hmr_websocket_accepts_page_origin(monkeypatch, tmp_path, route, host, page_origin):
+    # Control: the page's own origin passes the gate and reaches the runtime proxy
+    # (which fails with 1011 here because the runtime is a fake).
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    share_id = _create_show_page("ses123", "public")
+    manager = _FakeShowRuntimeManager()
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        with app.test_client().websocket_connect(
+            _hmr_route_url(route, host, share_id),
+            headers={"host": host, "origin": page_origin},
+            subprotocols=["vite-hmr"],
+        ) as websocket:
+            websocket.receive_text()
+    except Exception as exc:
+        assert getattr(exc, "code", None) == 1011
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert len(manager.websocket_paths) == 1
 
 
 def test_private_show_page_redirects_without_trailing_slash(monkeypatch, tmp_path):
