@@ -4679,6 +4679,15 @@ class SessionTurnManager:
         expected_head_version: int | None = None,
     ) -> bool:
         turn_id: str | None = None
+        with self._sqlite_engine().connect() as conn:
+            # Most drains find nothing to claim -- every Turn end asks. Those answer
+            # from a read, as the claim below would, without taking the writer (#2706).
+            claimable = (
+                delivery_store.active_turn(conn, session_id) is None
+                and delivery_store.claimable_fifo_head(conn, session_id) is not None
+            )
+        if not claimable:
+            return False
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             turn_id = self._claim_fifo_batch_in_transaction(
@@ -4752,6 +4761,16 @@ class SessionTurnManager:
         linked_activation_deferred = False
         with self._sqlite_engine().connect() as conn:
             observed_turn = delivery_store.get_turn(conn, turn_id)
+        if observed_turn is None or observed_turn["state"] == "terminal":
+            # Terminal is final, and a missing Turn stays missing: the answer the
+            # recheck under the writer would give, without the boundary or the writer.
+            # A Turn end reaches here again after its terminal write (#2706).
+            return {
+                "changed": False,
+                "successor_turn_id": None,
+                "delivery_id": None,
+                "defer_queue_resume": False,
+            }
         owner_session_id = str((observed_turn or {}).get("session_id") or "")
         owner_backend = str((observed_turn or {}).get("backend") or "")
         with self._runtime_start_owner(owner_session_id, owner_backend) as start_owner, self._sqlite_engine().begin() as conn:
@@ -7441,8 +7460,8 @@ class SessionTurnManager:
         return successor_id
 
     async def _resume_post_terminal(self, session_id: str) -> None:
-        with self._sqlite_engine().begin() as conn:
-            reserve_write_lock(conn)
+        # A read: both continuations recheck under their own writer.
+        with self._sqlite_engine().connect() as conn:
             owner = delivery_store.active_turn(conn, session_id)
         if owner is not None:
             await self._resume_durable_session(session_id)
