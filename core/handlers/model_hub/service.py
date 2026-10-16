@@ -4880,7 +4880,7 @@ class ModelHubService:
 
         self._request_discovery_pass(max_age=_VIEWED_DISCOVERY_AGE)
 
-    def mark_stale_listing(self, source: ModelHubSourceConfig, model_id: str) -> None:
+    async def mark_stale_listing(self, source: ModelHubSourceConfig, model_id: str) -> None:
         """A Source refused a model it lists: have the schedule list it again soon (#2682).
 
         Only a mark: the schedule's own due rule lists the Source once its
@@ -4891,7 +4891,8 @@ class ModelHubService:
         """
 
         identity = source_identity(source)
-        current = next((item for item in self.store.load().sources if item.id == source.id), None)
+        config = await asyncio.to_thread(self.store.load)
+        current = next((item for item in config.sources if item.id == source.id), None)
         if current is None or source_identity(current) != identity:
             # A turn still running on a replaced key or URL was refused: that
             # says nothing about what the current one lists (#2777).
@@ -7047,7 +7048,7 @@ class ModelHubService:
                 # An executor runs only on a model its Source lists, so the
                 # listing may be stale: mark it for the schedule (#2682). A
                 # manual row is the user's, and only they remove it.
-                self.mark_stale_listing(source, model_id)
+                await self.mark_stale_listing(source, model_id)
             return True
         decision = classify_outcome(replace(outcome, stream_started=False))
         return decision.action in {"fallback", "refresh"}

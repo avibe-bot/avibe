@@ -524,6 +524,19 @@ def _openai(service):
     return next(item for item in service.store.config.sources if item.id == OPENAI)
 
 
+def _held_listing(service, *model_ids):
+    """List these models once released, so refusals that arrive meanwhile are answered by that listing."""
+
+    release = asyncio.Event()
+
+    async def discover_models(*_args, **_kwargs):
+        await release.wait()
+        return [DiscoveredModel(id=model_id) for model_id in model_ids]
+
+    service.adapter.discover_models = discover_models
+    return release
+
+
 async def _settled(service):
     async with asyncio.timeout(2):
         await asyncio.sleep(0)
@@ -561,7 +574,7 @@ async def test_a_refused_listed_executor_model_is_listed_again_and_leaves_once_u
         await _settled(service)
         assert listings == ["openai"]
         # The Source was just listed, so the same refusal again lists nothing.
-        service.mark_stale_listing(_openai(service), model_id)
+        await service.mark_stale_listing(_openai(service), model_id)
         await _settled(service)
         assert listings == ["openai"]
     finally:
@@ -599,7 +612,7 @@ async def test_a_stale_mark_is_answered_by_a_running_listing_and_keeps_the_sched
         async with asyncio.timeout(2):
             while not listings:
                 await asyncio.sleep(0.01)
-        service.mark_stale_listing(_openai(service), "gpt-6-astra")
+        await service.mark_stale_listing(_openai(service), "gpt-6-astra")
         release.set()
         await _settled(service)
         assert listings == ["openai"]
@@ -608,10 +621,10 @@ async def test_a_stale_mark_is_answered_by_a_running_listing_and_keeps_the_sched
         fail = True
         for minutes in (16, 32):
             clock[0] = base + timedelta(minutes=minutes)
-            service.mark_stale_listing(_openai(service), "gpt-6-chat")
+            await service.mark_stale_listing(_openai(service), "gpt-6-chat")
             await _settled(service)
         clock[0] = base + timedelta(minutes=48)
-        service.mark_stale_listing(_openai(service), "gpt-6-chat")
+        await service.mark_stale_listing(_openai(service), "gpt-6-chat")
         await _settled(service)
         assert listings == ["openai"] * 3
     finally:
@@ -631,7 +644,7 @@ async def test_a_stale_mark_drops_nothing_once_its_source_identity_changed(tmp_p
     service.adapter.discover_models = discover_models
     service.start_background_discovery()
     try:
-        service.mark_stale_listing(_openai(service), "gpt-6-astra")
+        await service.mark_stale_listing(_openai(service), "gpt-6-astra")
         _openai(service).base_url = "https://replaced.example/v1"
         await _settled(service)
     finally:
@@ -649,19 +662,16 @@ async def test_every_refused_row_leaves_but_a_retired_tombstone_stays(tmp_path):
     openai.last_discovered_at = None
     openai.models.append(ModelHubModelConfig(id="gpt-6-luna", provenance="discovered"))
     openai.models.append(ModelHubModelConfig(id="gpt-6-sol", provenance="discovered"))
-
-    async def discover_models(*_args, **_kwargs):
-        return [DiscoveredModel(id="gpt-6-chat")]
-
-    service.adapter.discover_models = discover_models
+    release = _held_listing(service, "gpt-6-chat")
     service.start_background_discovery()
     try:
         # Two turns frozen on different executor models are each refused.
-        service.mark_stale_listing(_openai(service), "gpt-6-astra")
-        service.mark_stale_listing(_openai(service), "gpt-6-luna")
-        service.mark_stale_listing(_openai(service), "gpt-6-sol")
+        await service.mark_stale_listing(_openai(service), "gpt-6-astra")
+        await service.mark_stale_listing(_openai(service), "gpt-6-luna")
+        await service.mark_stale_listing(_openai(service), "gpt-6-sol")
         # The user retires gpt-6-sol before the listing returns.
         next(model for model in _openai(service).models if model.id == "gpt-6-sol").retired = True
+        release.set()
         await _settled(service)
     finally:
         await service.stop()
@@ -686,7 +696,7 @@ async def test_a_disowned_row_leaves_even_when_the_rest_of_the_listing_must_wait
     ))
     service.start_background_discovery()
     try:
-        service.mark_stale_listing(_openai(service), "gpt-6-astra")
+        await service.mark_stale_listing(_openai(service), "gpt-6-astra")
         await _settled(service)
     finally:
         await service.stop()
@@ -706,15 +716,12 @@ async def test_a_disowned_row_on_a_route_does_not_hold_back_one_on_none(tmp_path
     xai = next(item for item in service.store.config.sources if item.id == XAI)
     xai.models.append(ModelHubModelConfig(id="gpt-6-luna", provenance="discovered"))
     service.store.config.agents["vibey"].models.append(ModelHubBackendModelConfig(id="gpt-6-luna"))
-
-    async def discover_models(*_args, **_kwargs):
-        return [DiscoveredModel(id="gpt-6-chat")]
-
-    service.adapter.discover_models = discover_models
+    release = _held_listing(service, "gpt-6-chat")
     service.start_background_discovery()
     try:
-        service.mark_stale_listing(_openai(service), "gpt-6-astra")
-        service.mark_stale_listing(_openai(service), "gpt-6-luna")
+        await service.mark_stale_listing(_openai(service), "gpt-6-astra")
+        await service.mark_stale_listing(_openai(service), "gpt-6-luna")
+        release.set()
         await _settled(service)
     finally:
         await service.stop()
@@ -730,15 +737,13 @@ async def test_a_late_refusal_under_a_replaced_identity_keeps_the_current_mark(t
     _openai(service).last_discovered_at = None
     replaced = replace(_openai(service))
     _openai(service).base_url = "https://replaced.example/v1"
-
-    async def discover_models(*_args, **_kwargs):
-        return [DiscoveredModel(id="gpt-6-chat")]
-
-    service.adapter.discover_models = discover_models
+    release = _held_listing(service, "gpt-6-chat")
     service.start_background_discovery()
     try:
-        service.mark_stale_listing(_openai(service), "gpt-6-astra")
-        service.mark_stale_listing(replaced, "gpt-6-astra")
+        await service.mark_stale_listing(_openai(service), "gpt-6-astra")
+        # The old identity's refusal arrives while the new one's listing runs.
+        await service.mark_stale_listing(replaced, "gpt-6-astra")
+        release.set()
         await _settled(service)
     finally:
         await service.stop()
