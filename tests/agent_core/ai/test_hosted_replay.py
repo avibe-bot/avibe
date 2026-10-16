@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 import pytest
@@ -40,6 +40,7 @@ from core.agent_core.messages import (
     HostedToolBlock,
     Origin,
     TextBlock,
+    ThinkingBlock,
     ToolCallBlock,
     ToolResultMessage,
     UserMessage,
@@ -367,13 +368,15 @@ READ = FakeTool("read")
 
 
 class _Hops:
-    def __init__(self, client: httpx.AsyncClient, hops: tuple[ModelEndpoint, ...]) -> None:
-        self.client, self.hops, self.resolved = client, hops, 0
+    def __init__(
+        self, client: httpx.AsyncClient, hops: tuple[ModelEndpoint, ...], capabilities: ModelCapabilities = CAPABILITIES
+    ) -> None:
+        self.client, self.hops, self.resolved, self.capabilities = client, hops, 0, capabilities
 
     async def resolve(self) -> ModelSelection:
         hop = self.hops[min(self.resolved, len(self.hops) - 1)]
         self.resolved += 1
-        return ModelSelection(hop, CAPABILITIES)
+        return ModelSelection(hop, self.capabilities)
 
     def provider_for(self, protocol: str) -> Any:
         return create_adapter(protocol, client=self.client, gateway=True)  # type: ignore[arg-type]
@@ -552,24 +555,64 @@ def _searched_and_answered() -> str:
     return _sse("anthropic", events)
 
 
-async def _session(answer: Any, endpoint: ModelEndpoint, turns: int) -> tuple[list[list[httpx.Request]], list[Any]]:
-    """``turns`` turns of one Session (one store): the requests each turn sent, and how each ended."""
+def _thinking_first_refusal(body: dict[str, Any]) -> Optional[str]:
+    """Anthropic's refusal of a request that, with thinking on, continues a tool loop whose assistant message does not
+    start with a thinking block; None when it holds."""
+
+    thinking = body.get("thinking", {}).get("type")
+    if thinking == "disabled" and "opus-5-5" in body.get("model", ""):
+        return "thinking.type: Claude Opus 5.5 does not support `disabled`"
+    # Only manual thinking requires the continued assistant message to start with thinking.
+    if thinking != "enabled":
+        return None
+    messages = body["messages"]
+    last = next((index for index in range(len(messages) - 1, -1, -1) if messages[index]["role"] == "assistant"), None)
+    if last is None or not any(
+        isinstance(block, dict) and block.get("type") == "tool_result"
+        for message in messages[last + 1 :]
+        if isinstance(message["content"], list)
+        for block in message["content"]
+    ):
+        return None
+    first = messages[last]["content"][0]["type"]
+    if first in ("thinking", "redacted_thinking"):
+        return None
+    return (
+        f"messages.{last}.content.0.type: Expected `thinking` or `redacted_thinking`, but found `{first}`. When "
+        "`thinking` is enabled, a final `assistant` message must start with a thinking block (preceeding the lastmost "
+        "set of `tool_use` and `tool_result` blocks). We recommend you include thinking blocks from previous turns. To "
+        "avoid this requirement, disable `thinking`."
+    )
+
+
+async def _session(
+    answer: Any, endpoint: ModelEndpoint, turns: int, *, thinking: bool = False
+) -> tuple[list[list[httpx.Request]], list[Any]]:
+    """``turns`` turns of one Session (one store): the requests each turn sent, and how each ended. ``thinking`` runs
+    the Agent with thinking on, and the gateway enforces Anthropic's rule for it."""
 
     sent: list[list[httpx.Request]] = []
 
     def gateway(wire: httpx.Request) -> httpx.Response:
         sent[-1].append(wire)
+        refused = _thinking_first_refusal(json.loads(wire.content))
+        if refused is not None:
+            return httpx.Response(400, json={"type": "error", "error": {"type": "invalid_request_error", "message": refused}})
         return answer(len(sent), len(sent[-1]))
+
+    capabilities = (
+        replace(CAPABILITIES, supports_reasoning=True, reasoning_efforts=("high",)) if thinking else CAPABILITIES
+    )
 
     store = InMemoryTranscriptStore()
     ended = []
     async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
         for turn in range(1, turns + 1):
             sent.append([])
-            router = _Hops(client, (endpoint,))
+            router = _Hops(client, (endpoint,), capabilities)
             agent = Agent(
-                session_id="session", models=router, tools=(_hosted_tool("web_search"),), hooks=(), store=store,
-                jobs=FakeJobHost(), cwd="/t",
+                session_id="session", models=router, tools=(_hosted_tool("web_search"), READ), hooks=(), store=store,
+                jobs=FakeJobHost(), cwd="/t", reasoning_effort="high" if thinking else None,
             )
             events = [event async for event in agent.run(input_row(f"input-{turn}", "and then?"), turn_id=f"turn-{turn}")]
             ended.append(events[-1])
@@ -625,3 +668,109 @@ async def test_a_refusal_of_what_the_session_already_demoted_stands_as_the_error
     sent, ended = await _session(answer, _endpoint("anthropic", replay=True), turns=2)
 
     assert len(sent[1]) == 2 and ended[1].reason == "error"
+
+
+_THOUGHT = ThinkingBlock(text="plan the read", signature="sig-account-a")
+_READ_CALL = ToolCallBlock(id="toolu_1", name="read", arguments={"path": "a"})
+
+
+# Anthropic's rules for thinking in a tool loop (https://platform.claude.com/docs/en/build-with-claude/thinking):
+# "In extended (manual) mode, the API additionally enforces that the final assistant turn of a thinking-enabled request
+# begins with a thinking block. Adaptive mode relaxes this: no assistant turn needs to start with one." And Opus 5.5,
+# Sonnet 5.5, Fable and Mythos "reject `thinking: {type: "disabled"}`".
+_ADAPTIVE_MODEL = "claude-opus-5-5"
+_MANUAL_MODEL = "claude-sonnet-4-5"
+
+
+@pytest.mark.parametrize(
+    ("model", "continued", "after", "thinking"),
+    [
+        # Adaptive thinking never needs the continued message to start with thinking, and is never turned off.
+        (_ADAPTIVE_MODEL, (ThinkingBlock(text="plan the read"), _READ_CALL), "result", "adaptive"),
+        (_ADAPTIVE_MODEL, (_READ_CALL,), "result", "adaptive"),
+        # Manual thinking: a loop whose signed thinking goes back keeps it on...
+        (_MANUAL_MODEL, (_THOUGHT, _READ_CALL), "result", "enabled"),
+        # ...one whose thinking went as text, or that starts with the call, continues with thinking off...
+        (_MANUAL_MODEL, (ThinkingBlock(text="plan the read"), _READ_CALL), "result", "disabled"),
+        (_MANUAL_MODEL, (_READ_CALL,), "result", "disabled"),
+        # ...also when a user message follows the results: Anthropic combines consecutive user messages into one turn,
+        # so the tool loop the rule names is still the last one...
+        (_MANUAL_MODEL, (_READ_CALL,), "result-then-user", "disabled"),
+        # ...while a new turn after an answer keeps it on.
+        (_MANUAL_MODEL, (TextBlock("done"),), "user", "enabled"),
+    ],
+    ids=["adaptive-thinking-as-text", "adaptive-call-first", "manual-signed-thinking-first", "manual-thinking-as-text",
+         "manual-call-first", "manual-user-message-after-results", "manual-new-turn"],
+)
+async def test_a_tool_loop_whose_assistant_message_cannot_start_with_thinking_continues_with_thinking_off(
+    model, continued, after, thinking
+):
+    """Under manual thinking a request whose continued assistant message cannot start with thinking (its thinking went
+    as text) is sent with thinking off, as Anthropic's refusal advises; adaptive thinking has no such rule and is never
+    turned off, since several adaptive models refuse ``disabled``; a new turn after an answer keeps thinking on."""
+
+    endpoint = replace(_endpoint("anthropic", replay=False, native=False), hosted_tools={}, model_id=model)
+    result = ToolResultMessage("toolu_1", "read", (TextBlock("contents"),))
+    tail = {
+        "result": (result,),
+        "result-then-user": (result, UserMessage((TextBlock("and then?"),))),
+        "user": (UserMessage((TextBlock("and then?"),)),),
+    }[after]
+    stop = "stop" if after == "user" else "tool_use"
+    message = AssistantMessage(continued, Origin("anthropic", "anthropic", model), stop, source_identity=IDENTITY)
+    request = replace(_request(endpoint, message, *tail), reasoning_effort="high")
+
+    wire = await build_wire_request(request, gateway=True)
+
+    assert wire.body["thinking"]["type"] == thinking
+
+
+def _thought_and_read() -> str:
+    """An Anthropic response that thinks (signed) and calls read."""
+
+    events = (
+        {"type": "message_start", "message": {"usage": {"input_tokens": 5}}},
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "read it first"}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "sig-account-b"}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "content_block_start", "index": 1,
+         "content_block": {"type": "tool_use", "id": "toolu_read", "name": "read", "input": {"path": "a"}}},
+        {"type": "content_block_stop", "index": 1},
+        {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 3}},
+        {"type": "message_stop"},
+    )
+    return _sse("anthropic", events)
+
+
+@pytest.mark.parametrize(
+    ("model", "continuation"), [(_ADAPTIVE_MODEL, "adaptive"), (_MANUAL_MODEL, "disabled")], ids=["adaptive", "manual"]
+)
+async def test_a_session_whose_signatures_were_refused_still_finishes_tool_loops_with_thinking_on(
+    monkeypatch, model, continuation
+):
+    """After the provider refused a thinking signature, the Session's thinking goes back as text, including thinking the
+    turn minted a moment ago. Under manual thinking a tool loop it continues would break Anthropic's rule that the
+    continued assistant message starts with a thinking block, so that request goes with thinking off; adaptive thinking
+    has no such rule and keeps thinking on (Opus 5.5 refuses ``disabled``). The gateway here enforces both as
+    Anthropic does, and the loop finishes either way."""
+
+    monkeypatch.setitem(MODELS, "anthropic", ("anthropic", model))
+
+    def answer(turn: int, attempt: int) -> httpx.Response:
+        if turn == 1:
+            return httpx.Response(200, headers=_served("anthropic"), text=_searched_and_answered())
+        if attempt == 1:
+            return httpx.Response(400, json=_anthropic_refusal(_SIGNATURE_REFUSAL, via_gateway=True))
+        if attempt == 2:
+            return httpx.Response(200, headers=_served("anthropic"), text=_thought_and_read())
+        return httpx.Response(200, headers=_served("anthropic"), text=_sse("anthropic", _ANSWERED["anthropic"]))
+
+    sent, ended = await _session(answer, _endpoint("anthropic", replay=True), turns=2, thinking=True)
+
+    assert [event.reason for event in ended] == ["completed", "completed"]
+    bodies = [json.loads(wire.content) for wire in sent[1]]
+    # Refused, resent without signatures, then the loop's continuation with thinking off.
+    assert len(bodies) == 3
+    first = "adaptive" if model == _ADAPTIVE_MODEL else "enabled"
+    assert [body["thinking"]["type"] for body in bodies] == [first, first, continuation]
