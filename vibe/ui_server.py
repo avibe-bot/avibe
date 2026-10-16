@@ -3663,6 +3663,11 @@ async def show_runtime_hmr_websocket(websocket: WebSocket, session_id: str):
 async def public_show_runtime_hmr_websocket(websocket: WebSocket, share_id: str):
     from core.show_pages import ShowPageStore
 
+    # Public visibility lets anyone view the page; it does not let a cross-site
+    # page attach to its live socket.
+    if not _show_runtime_hmr_origin_allowed(websocket):
+        await websocket.close(code=1008)
+        return
     store = ShowPageStore()
     try:
         page = store.get_by_share_id(share_id)
@@ -4007,10 +4012,15 @@ def _show_runtime_websocket_resource_context(
 
 
 def _show_runtime_hmr_origin_allowed(websocket: Any) -> bool:
-    config = _load_remote_access_config()
-    if not _websocket_trusted_public_origin_local_request(websocket, config):
-        return True
-    return _websocket_origin_matches_effective_request(websocket)
+    """Gate every Show HMR socket on the page's own exact origin.
+
+    Browsers do not apply same-origin policy to WebSocket handshakes, so a
+    cross-site page could otherwise open the socket (local requests carry no
+    cookie gate, and a public share has no gate at all). Show pages are served
+    same-origin (their iframes keep ``allow-same-origin``), so the real client
+    always presents a matching Origin. This is the terminal socket's contract.
+    """
+    return _terminal_origin_allowed(websocket)
 
 
 def _authorization_websocket_close_code(state: str) -> int:
@@ -4222,22 +4232,6 @@ def _terminal_origin_allowed(websocket: Any) -> bool:
         if config is None:
             return False
         return _remote_access_public_origin_matches(origin, config)
-    origin_port = _origin_port(parsed_origin.netloc, parsed_origin.scheme)
-    websocket_scheme = _websocket_effective_scheme(websocket)
-    request_port = _origin_port(_websocket_effective_request_host(websocket), websocket_scheme)
-    return origin_port == request_port and _terminal_origin_scheme_matches_socket(
-        parsed_origin.scheme,
-        websocket_scheme,
-    )
-
-
-def _websocket_origin_matches_effective_request(websocket: Any) -> bool:
-    origin = _request_origin(websocket.headers.get("origin"))
-    if not origin:
-        return False
-    parsed_origin = urlparse(origin)
-    if _normalized_host(parsed_origin.netloc) != _websocket_normalized_host(websocket):
-        return False
     origin_port = _origin_port(parsed_origin.netloc, parsed_origin.scheme)
     websocket_scheme = _websocket_effective_scheme(websocket)
     request_port = _origin_port(_websocket_effective_request_host(websocket), websocket_scheme)
