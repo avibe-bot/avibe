@@ -84,6 +84,8 @@ Because producers are gated and the function already yields, moving the remainin
 
 ## Other writer sites on the loop (scope only)
 
+This list holds the sites known so far and is **not exhaustive**: writers are reached through many indirections, and two review rounds each found more. The complete inventory will be measured at runtime rather than reviewed by hand (#2710), and this section will cite it then.
+
 The per-Turn admissions all hold the boundary inside the transaction, so they are loop-side boundary holders and fall under B's split analysis:
 - `_admit_p0`, `_admit_p1`, `_admit_p3`, `_promote_fifo_head`;
 - `drain_delivery_queue`, `_resume_linked_control_successor`.
@@ -91,7 +93,10 @@ The per-Turn admissions all hold the boundary inside the transaction, so they ar
 `on_native_start` and `register_agent_initiated_turn` commit inside `commit_if_current` and must not yield. The remaining sites hold no boundary and are candidates for the door, one at a time:
 - per Turn: `_start_persisted_turn`, `_finish_steer`, `_interrupt_durable_turn`, `reconcile_terminal_run_delivery`, `controller.set_agent_status`, `persist_agent_message`;
 - per user input: `_delivery_backend`, which writes only on a session's first binding, and `_observe_active_delivery_turn`, which runs per steer, from `_admit_p1` and `_promote_fifo_head`;
-- per pending control item: `_run_pending_interrupt` and `_run_pending_steers`.
+- per pending control item: `_run_pending_interrupt` and `_run_pending_steers`;
+- per silent IM terminal: `persist_silent_terminal`, called from `MessageDispatcher.emit_agent_message`.
+
+The Claude receiver calls `SessionActivityRegistry.start`, `progress` and `complete` synchronously, and their store writes run while the Activity lock and the activation boundary are held (`commit_if_current`). That makes them loop-side boundary holders, in the same class as `on_native_start`.
 
 Each move needs the check this note applies to A. Does a loop section rely on the write being synchronous? A Turn can write its running projection before its owner exists, and #2708 showed that moving such a write to a thread can clear a live Turn's status. Where the answer is yes, the alternative is to stay on the loop and never wait for the writer, as `_repair_ownerless_running_projection` does after #2708: a precheck without the writer, then one attempt at the writer with a zero busy timeout.
 
