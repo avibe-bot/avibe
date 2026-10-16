@@ -1,46 +1,10 @@
-import importlib.util
-import sys
-import types
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from config.v2_config import LarkConfig
 from core.auth import AuthResult
 from modules.im.base import MessageContext
-
-
-def _install_opencode_utils_module() -> None:
-    if "aiohttp" not in sys.modules:
-        sys.modules["aiohttp"] = types.ModuleType("aiohttp")
-
-    if "modules.agents.opencode.utils" in sys.modules:
-        return
-
-    repo_root = Path(__file__).resolve().parents[1]
-    if "modules.agents" not in sys.modules:
-        agents_mod = types.ModuleType("modules.agents")
-        agents_mod.__path__ = [str(repo_root / "modules" / "agents")]
-        sys.modules["modules.agents"] = agents_mod
-    if "modules.agents.opencode" not in sys.modules:
-        opencode_mod = types.ModuleType("modules.agents.opencode")
-        opencode_mod.__path__ = [str(repo_root / "modules" / "agents" / "opencode")]
-        sys.modules["modules.agents.opencode"] = opencode_mod
-
-    spec = importlib.util.spec_from_file_location(
-        "modules.agents.opencode.utils",
-        repo_root / "modules" / "agents" / "opencode" / "utils.py",
-    )
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["modules.agents.opencode.utils"] = module
-    spec.loader.exec_module(module)
-
-
-_install_opencode_utils_module()
-
 from modules.im.feishu import FeishuBot
 
 
