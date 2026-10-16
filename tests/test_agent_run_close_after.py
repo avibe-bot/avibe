@@ -1200,3 +1200,73 @@ def test_an_activity_started_while_the_runs_terminal_record_waits_still_defers_t
     assert context.platform_specific.get("_close_after_wait_for_run_ids") == (queued.id,), (
         "close-after does not wait for the Run the open Activity holds"
     )
+
+
+def test_an_activity_that_settles_while_the_runs_terminal_record_waits_stays_first(tmp_path, monkeypatch) -> None:
+    """#2706: the other order. An owned Activity that the loop saw open ends -- durably -- and settles the Run while
+    the record waits for SQLite's writer. The Activity's settlement committed first, so it stays first: the Run keeps
+    the Activity's status and the record adds only its output, exactly as when the Activity had ended before the result
+    on the loop."""
+
+    from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore, TaskExecutionStore
+    from storage.background import SQLiteBackgroundTaskStore
+    from storage.db import create_sqlite_engine
+    from storage.session_activities import SQLiteSessionActivityStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    queued = request_store.enqueue_agent_run(message="run", agent_backend="claude", session_id="session-1")
+    assert request_store.claim(queued.id) is not None
+    activity_store = SQLiteSessionActivityStore(create_sqlite_engine(request_store.sqlite_backend.db_path))
+    activity_row = {
+        "id": "activity-1",
+        "backend": "claude",
+        "runtime_key": "runtime-1",
+        "session_id": "session-1",
+        "run_id": queued.id,
+        "detached_from_run": False,
+        "metadata": {},
+    }
+    activity_store.upsert_activity(activity_row, phase="active")
+    writing, release = threading.Event(), threading.Event()
+
+    class _WaitsForTheWriter(SQLiteBackgroundTaskStore):
+        def record_turn_run_outputs(self, *args, **kwargs):
+            writing.set()
+            assert release.wait(5)
+            return super().record_turn_run_outputs(*args, **kwargs)
+
+    async def exercise() -> None:
+        controller = SimpleNamespace()
+        service = AgentService(controller)
+        controller.agent_service = service
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        scheduled = ScheduledTaskService(
+            controller=controller,
+            store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+            request_store=request_store,
+        )
+        blocked = [True]
+        service.activities.has_blocking_run_activity = lambda _run_id: blocked[0]
+        with patch("core.message_dispatcher.SQLiteBackgroundTaskStore", new=_WaitsForTheWriter):
+            record = asyncio.create_task(
+                _record_terminal(
+                    dispatcher,
+                    _agent_run_context(queued.id),
+                    is_error=True,
+                    terminal_error="the turn failed",
+                    output_semantics=MessageOutput(completes_turn=True, completes_run=True),
+                )
+            )
+            assert await asyncio.to_thread(writing.wait, 5)
+            # The Activity ends on the loop and its Run owner settles it, before the record commits.
+            blocked[0] = False
+            activity_store.upsert_activity(activity_row, phase="awaiting_output")
+            activity = SimpleNamespace(id="activity-1", status="stopped", run_id=queued.id, metadata={})
+            assert scheduled.settle_activity_runs(activity) == [queued.id]
+            release.set()
+            await record
+
+    asyncio.run(exercise())
+    settled = request_store.get_run(queued.id)
+    assert normalize_run_status(settled["status"]) == "canceled", "the later record replaced the Activity's settlement"
