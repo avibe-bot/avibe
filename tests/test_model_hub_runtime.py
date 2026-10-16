@@ -1611,6 +1611,39 @@ def test_engine_version_check_uses_minimal_environment(
     assert captured_env == engine_subprocess_environment()
 
 
+def test_a_claude_model_is_registered_with_the_thinking_it_takes_upstream(tmp_path: Path) -> None:
+    """A budget-only Claude model registers a budget range: CPA reads ``levels`` as adaptive thinking on its Claude
+    path and rewrites budget thinking to ``adaptive``, which Claude 4.5 and older refuse (#2737)."""
+
+    store = EngineStateStore(tmp_path / "state")
+    instance_dir, runtime_secrets = store.prepare_instance("install-1")
+    ref = store.store_api_key(
+        "relay-secret", vendor="custom", protocol="anthropic", base_url="https://relay.example.test",
+    )
+    efforts = ("low", "medium", "high", "max")
+    models = ("claude-sonnet-4-5-20250929", "claude-sonnet-4-6", "claude-opus-4.5", "kimi-k2")
+    store.sync_sources([_binding(
+        ref, source_id="src_relayclaude", vendor="custom", protocol="anthropic",
+        base_url="https://relay.example.test", model_ids=models,
+        model_reasoning_efforts=tuple((model, efforts) for model in models),
+    )])
+    config_path = instance_dir / "config.yaml"
+    write_engine_config(
+        config_path, host="127.0.0.1", port=18231, auth_dir=store.auth_dir, runtime_secrets=runtime_secrets,
+        sources=store.list_sources(), state_store=store,
+    )
+    (entry,) = yaml.safe_load(config_path.read_text())["claude-api-key"]
+    thinking = {model["name"]: model["thinking"] for model in entry["models"]}
+    budget = {"min": 1024, "max": 128000, "zero-allowed": True}
+    assert thinking == {
+        "claude-sonnet-4-5-20250929": budget,
+        "claude-sonnet-4-6": {"levels": ["max", "high", "medium", "low"]},
+        "claude-opus-4.5": budget,
+        # Not a Claude model: the Anthropic protocol alone says nothing about its thinking.
+        "kimi-k2": {"levels": ["max", "high", "medium", "low"]},
+    }
+
+
 def test_config_generation_is_private_and_never_logs_secrets(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
