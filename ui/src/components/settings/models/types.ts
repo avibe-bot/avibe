@@ -10,8 +10,8 @@
 // and the PR records the server implementation and feature-flag activation
 // edge. The client never synthesizes a fallback payload shape.
 
-export const CONTRACT_VERSION = 15 as const;
-export const PERSISTED_TURN_CONTRACT_VERSIONS = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] as const;
+export const CONTRACT_VERSION = 16 as const;
+export const PERSISTED_TURN_CONTRACT_VERSIONS = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16] as const;
 export const AGENT_CHAIN_CONTRACT_VERSION = CONTRACT_VERSION;
 export const PROBE_RESULT_CONTRACT_VERSION = CONTRACT_VERSION;
 
@@ -51,6 +51,8 @@ export const NEEDS_ACTION_DETAIL_KEYS = [
   'models.source.needs_action.balance_exhausted',
   'models.source.needs_action.credential_revoked',
   'models.source.needs_action.account_banned',
+  'models.source.needs_action.plan_excludes_product',
+  'models.source.needs_action.spend_limit_reached',
 ] as const;
 export type NeedsActionDetailKey = (typeof NEEDS_ACTION_DETAIL_KEYS)[number];
 
@@ -550,6 +552,8 @@ export type ResolutionReason =
   | 'credential_revoked'
   | 'balance_exhausted'
   | 'account_banned'
+  | 'plan_excludes_product'
+  | 'spend_limit_reached'
   | 'permission_denied'
   | 'unclassified_error'
   | 'no_enabled_source'

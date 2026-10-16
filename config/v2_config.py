@@ -2249,6 +2249,8 @@ class ModelHubSourceStateConfig:
             "models.source.needs_action.balance_exhausted",
             "models.source.needs_action.credential_revoked",
             "models.source.needs_action.account_banned",
+            "models.source.needs_action.plan_excludes_product",
+            "models.source.needs_action.spend_limit_reached",
         }
         if status in {"active", "standby"} and (retry_at is not None or detail_key is not None):
             raise ValueError(f"Config healthy source state '{status}' cannot carry blocker detail")

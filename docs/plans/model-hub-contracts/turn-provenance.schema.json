@@ -36,7 +36,7 @@
   "additionalProperties": false,
   "properties": {
     "contract_version": {
-      "enum": [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+      "enum": [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
       "$comment": "The only versioned object written to disk, so released versions form a set rather than a constant. Historical records validate after the existing persistence-read normalization of retired reasons; tests/fixtures/model_hub/released_v5_permission_denied.json exercises that boundary, not raw-file validation. Reading preserves the writer generation and requires no new route fields. New records carry the terminal member. Other versioned objects are ephemeral envelopes pinned to that value alone.",
       "description": "Generation that wrote this record. Readers retain every supported released value, apply existing retired-reason normalization independently of version, and do not require route_origin or manual_override."
     },
@@ -111,6 +111,8 @@
               "credential_revoked",
               "balance_exhausted",
               "account_banned",
+              "plan_excludes_product",
+              "spend_limit_reached",
               "unclassified_error"
             ],
             "description": "The attempt-failure partition of ResolutionEvent.reason. The mirror registry enforces totality."
@@ -223,6 +225,11 @@
             "insufficient_quota",
             "usage_limit_reached",
             "billing_error",
+            "usage_not_included",
+            "credit_balance_exhausted",
+            "organization_spend_limit_exceeded",
+            "project_spend_limit_exceeded",
+            "organization_usage_limit_exceeded",
             "overloaded",
             "overloaded_error",
             "server_error",
@@ -352,6 +359,8 @@
               "credential_revoked",
               "balance_exhausted",
               "account_banned",
+              "plan_excludes_product",
+              "spend_limit_reached",
               "unclassified_error"
             ]
           }
@@ -478,7 +487,7 @@
   ],
   "examples": [
     {
-      "contract_version": 15,
+      "contract_version": 16,
       "turn_id": "turn_01k9x2m4",
       "ts": "2026-07-29T06:32:11Z",
       "agent": "claude",
@@ -503,7 +512,7 @@
       "blockers": []
     },
     {
-      "contract_version": 15,
+      "contract_version": 16,
       "turn_id": "turn_01k9x33p",
       "ts": "2026-07-29T06:41:02Z",
       "agent": "opencode",
@@ -524,7 +533,7 @@
       "blockers": []
     },
     {
-      "contract_version": 15,
+      "contract_version": 16,
       "turn_id": "turn_01k9x3zq",
       "ts": "2026-07-29T06:48:20Z",
       "agent": "codex",
@@ -544,7 +553,7 @@
       ]
     },
     {
-      "contract_version": 15,
+      "contract_version": 16,
       "turn_id": "turn_01k9x4b7",
       "ts": "2026-07-29T07:02:44Z",
       "agent": "claude",
@@ -564,7 +573,7 @@
       "blockers": []
     },
     {
-      "contract_version": 15,
+      "contract_version": 16,
       "turn_id": "turn_modelmissing01",
       "ts": "2026-09-05T17:31:10Z",
       "agent": "claude",
@@ -586,7 +595,7 @@
       "blockers": []
     },
     {
-      "contract_version": 15,
+      "contract_version": 16,
       "turn_id": "turn_01k9x5ca",
       "ts": "2026-07-29T07:08:00Z",
       "agent": "codex",

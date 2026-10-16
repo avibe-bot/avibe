@@ -2163,7 +2163,9 @@
             "oauthExpired": "Sign in again",
             "balanceExhausted": "Out of balance",
             "credentialRevoked": "Credential revoked",
-            "accountBanned": "Account restricted"
+            "accountBanned": "Account restricted",
+            "planExcludesProduct": "Plan doesn't include Codex",
+            "spendLimitReached": "Usage limit reached"
           },
           "error": "Error",
           "standbyHintLabel": "What this status means",
@@ -2645,7 +2647,9 @@
         "oauth_expired": "Needs a new sign-in",
         "balance_exhausted": "Out of balance — top it up",
         "credential_revoked": "Credential revoked — enter a new one",
-        "account_banned": "Account is restricted"
+        "account_banned": "Account is restricted",
+        "plan_excludes_product": "Plan doesn't include Codex — upgrade it or use another Source",
+        "spend_limit_reached": "Usage limit reached — raise it or use another Source"
       },
       "error": {
         "unclassified": "Unknown error — temporarily unavailable"
@@ -5087,6 +5091,8 @@
         "credential_revoked": "Credential revoked",
         "balance_exhausted": "Balance exhausted",
         "account_banned": "Account suspended",
+        "plan_excludes_product": "Plan doesn't include this product",
+        "spend_limit_reached": "Usage limit reached",
         "permission_denied": "Permission denied",
         "unclassified_error": "Unclassified upstream error",
         "no_enabled_source": "No source is enabled",

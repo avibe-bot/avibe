@@ -54,6 +54,8 @@ const NEEDS_ACTION_KEY: Readonly<Record<NeedsActionDetailKey, TranslationKey>> =
   'models.source.needs_action.balance_exhausted': 'settings.models.sourceDetail.status.needsAction.balanceExhausted',
   'models.source.needs_action.credential_revoked': 'settings.models.sourceDetail.status.needsAction.credentialRevoked',
   'models.source.needs_action.account_banned': 'settings.models.sourceDetail.status.needsAction.accountBanned',
+  'models.source.needs_action.plan_excludes_product': 'settings.models.sourceDetail.status.needsAction.planExcludesProduct',
+  'models.source.needs_action.spend_limit_reached': 'settings.models.sourceDetail.status.needsAction.spendLimitReached',
 };
 
 type Rule = (state: SourceState, surface: SourceStateSurface, locale: string, now: number) => SourceStatePresentation;
