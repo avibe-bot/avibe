@@ -141,7 +141,8 @@ OPENCODE_V4_S4_VARIANT_FIXTURES = {
     "responses_to_anthropic": {
         "protocol": "anthropic",
         "frontend_protocol": "openai_responses",
-        "stored_model": "claude-sonnet-4-5",
+        # A model that takes adaptive thinking: Claude 4.5 takes a budget instead (#2737).
+        "stored_model": "claude-sonnet-4-6",
         "variant": {"reasoningEffort": "high"},
         "upstream_fragment": {
             "thinking": {"type": "adaptive"},
