@@ -126,16 +126,29 @@ class _OrderRecordingDispatcher:
         return "echo-msg"
 
 
+class _OrderRecordingCheckpoints:
+    def __init__(self, log: list[str]):
+        self._log = log
+
+    async def wait_for_turn_start(self, session_id):
+        self._log.append(f"show_checkpoint:{session_id}")
+
+
 class _TurnStartController:
     """Records the relative order of the turn-start hooks vs the agent run."""
 
     def __init__(self, log: list[str]):
         self.session_turns = _OrderRecordingTurnManager(log)
         self.message_dispatcher = _OrderRecordingDispatcher(log)
+        self.show_git_checkpoint_service = _OrderRecordingCheckpoints(log)
         self._log = log
 
     def update_thread_message_id(self, _context):
         self._log.append("update_thread_message_id")
+
+    @staticmethod
+    def _session_id_from_context(_context):
+        return "ses_order"
 
 
 class _OrderRecordingAgent(_RuntimeAgent):
@@ -164,10 +177,13 @@ def test_agent_service_runs_turn_start_hooks_after_gate_before_agent() -> None:
         # on_running (gate confirmed) must precede the bubble hooks, which in turn
         # precede the agent run. This is what keeps a queued turn from claiming
         # the trigger id / posting a premature bubble before it actually starts.
+        # The Session's PRE_TURN Show checkpoint is waited for before the prompt
+        # reaches the backend, so it snapshots the workspace before any edit.
         assert log == [
             "on_running",
             "update_thread_message_id",
             "begin_status_bubble",
+            "show_checkpoint:ses_order",
             "handle_message",
         ]
         assert backend_dispatch_attempted(request.context) is False

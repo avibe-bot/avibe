@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -9,6 +10,7 @@ import re
 import shutil
 import subprocess
 import time
+from concurrent.futures import Future
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +18,7 @@ from typing import Any
 
 from config import paths
 from core.git_binary import ResolvedGit, resolve_git
+from core.ordered_worker import OrderedWorker
 from vibe.message_types import input_author_type_pairs
 
 logger = logging.getLogger(__name__)
@@ -28,6 +31,8 @@ MAX_GITDIR_BYTES = 200 * 1024 * 1024
 STALE_INDEX_LOCK_SECONDS = 5 * 60
 GIT_COMMAND_TIMEOUT_SECONDS = 60
 GIT_MAINTENANCE_TIMEOUT_SECONDS = 5 * 60
+# Queued checkpoints get this long at service stop before the rest are abandoned.
+CHECKPOINT_DRAIN_SECONDS = 10.0
 
 _PLATFORM_EXCLUDES = ("node_modules/", "dist/", ".vite/")
 _CHECKPOINT_KINDS = {PRE_TURN, POST_TURN, ADOPT}
@@ -713,14 +718,27 @@ _UNSET = object()
 
 
 class ShowGitCheckpointService:
-    """Synchronous turn-boundary subscriber owned by the Controller process."""
+    """Turn-boundary subscriber owned by the Controller process.
+
+    The bus delivers turn events on the controller loop. The subscriber records
+    them there and runs the checkpoint work, storage reads and ``git``, on one
+    ordered worker thread (#2734), so a slow or hung ``git`` stalls no Session.
+    Order is kept per event: a Turn's PRE_TURN snapshot runs before its POST_TURN
+    one, and before the next Turn's. A Turn's dispatch waits for its own PRE_TURN
+    snapshot (``wait_for_turn_start``) before the prompt reaches the backend, so
+    the snapshot still precedes the agent's first edit.
+    """
 
     def __init__(self, git: ResolvedGit | None | object = _UNSET) -> None:
         self.git = resolve_git() if git is _UNSET else git
         self._bus: Any = None
         self._subscription_id: int | None = None
+        # Read and written only by the worker.
         self._active_turns: dict[str, _ActiveTurnCheckpoint] = {}
         self._open_bus_turns: set[str] = set()
+        self._worker = OrderedWorker("show-git-checkpoints")
+        # Each Session's latest PRE_TURN job, until its dispatch has waited for it.
+        self._pre_turn_jobs: dict[str, Future[None]] = {}
 
     @property
     def enabled(self) -> bool:
@@ -746,8 +764,11 @@ class ShowGitCheckpointService:
             self._bus.unsubscribe(self._subscription_id)
         self._bus = None
         self._subscription_id = None
+        # A Turn that ended just before shutdown still gets its POST_TURN snapshot.
+        self._worker.drain(CHECKPOINT_DRAIN_SECONDS)
         self._active_turns.clear()
         self._open_bus_turns.clear()
+        self._pre_turn_jobs.clear()
         _record_checkpoint_service_state(False)
         _checkpoint_service_active = None
 
@@ -857,6 +878,20 @@ class ShowGitCheckpointService:
                 event["turn_id"] = turn_id
             self._bus.publish("turn.end", event)
 
+    async def wait_for_turn_start(self, session_id: str) -> None:
+        """Wait, without holding the loop, for this Session's PRE_TURN snapshot."""
+
+        job = self._pre_turn_jobs.get(session_id)
+        if job is None:
+            return
+        try:
+            # Shielded: a Stop that cancels the dispatch must not cancel the
+            # snapshot the Turn's POST_TURN checkpoint is compared against.
+            await asyncio.shield(asyncio.wrap_future(job))
+        finally:
+            if self._pre_turn_jobs.get(session_id) is job:
+                del self._pre_turn_jobs[session_id]
+
     def _handle_event(self, event_type: str, data: Any) -> None:
         if event_type not in {"turn.start", "turn.end"} or not isinstance(data, dict):
             return
@@ -869,28 +904,37 @@ class ShowGitCheckpointService:
             self._open_bus_turns.discard(session_id)
         if not paths.get_show_page_dir(session_id).is_dir():
             if event_type == "turn.end":
-                self._active_turns.pop(session_id, None)
+                self._worker.submit(self._active_turns.pop, session_id, None)
             return
-        try:
-            if event_type == "turn.start":
-                started_at = datetime.now(timezone.utc).isoformat()
-                turn_id = str(data.get("turn_id") or "").strip() or None
-                context = (
-                    load_turn_checkpoint_context(session_id, turn_id=turn_id)
-                    if turn_id
-                    else load_turn_checkpoint_context(session_id)
-                )
-                self._active_turns[session_id] = _ActiveTurnCheckpoint(
-                    context=context,
-                    started_at=started_at,
-                    turn_id=turn_id or context.turn_id,
-                )
-                self._repository(session_id).checkpoint(PRE_TURN, run_id=context.run_id)
-                return
+        turn_id = str(data.get("turn_id") or "").strip() or None
+        if event_type == "turn.start":
+            started_at = datetime.now(timezone.utc).isoformat()
+            self._pre_turn_jobs[session_id] = self._worker.submit(
+                self._checkpoint_turn_start, session_id, turn_id, started_at
+            )
+        else:
+            self._worker.submit(self._checkpoint_turn_end, session_id, turn_id)
 
+    def _checkpoint_turn_start(self, session_id: str, turn_id: str | None, started_at: str) -> None:
+        try:
+            context = (
+                load_turn_checkpoint_context(session_id, turn_id=turn_id)
+                if turn_id
+                else load_turn_checkpoint_context(session_id)
+            )
+            self._active_turns[session_id] = _ActiveTurnCheckpoint(
+                context=context,
+                started_at=started_at,
+                turn_id=turn_id or context.turn_id,
+            )
+            self._repository(session_id).checkpoint(PRE_TURN, run_id=context.run_id)
+        except Exception:
+            logger.exception("Show Page checkpoint failed at turn.start for session=%s", session_id)
+
+    def _checkpoint_turn_end(self, session_id: str, turn_id: str | None) -> None:
+        try:
             active = self._active_turns.pop(session_id, None)
             if active is None:
-                turn_id = str(data.get("turn_id") or "").strip() or None
                 context = (
                     load_turn_checkpoint_context(session_id, turn_id=turn_id)
                     if turn_id
@@ -919,7 +963,7 @@ class ShowGitCheckpointService:
                 run_id=run_id,
             )
         except Exception:
-            logger.exception("Show Page checkpoint failed at %s for session=%s", event_type, session_id)
+            logger.exception("Show Page checkpoint failed at turn.end for session=%s", session_id)
 
     def _repository(self, session_id: str) -> ShowGitRepository:
         if not isinstance(self.git, ResolvedGit):
