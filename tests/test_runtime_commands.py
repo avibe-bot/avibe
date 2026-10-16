@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -157,3 +158,44 @@ def test_sweep_evicts_orphaned_err_companion(tmp_path: Path) -> None:
     asyncio.run(watcher._sweep_once())
 
     assert not err_marker.exists()
+
+
+def test_a_slow_directory_listing_never_holds_the_controller_loop(tmp_path: Path, monkeypatch) -> None:
+    """#2768: the sweep reads the state disk off the loop, so a slow disk delays only the sweep.
+
+    On a USB state disk the listing alone held the controller loop for 2.6 s,
+    and with it every Session.
+    """
+
+    calls: list[str] = []
+
+    async def handler(name: str) -> None:
+        calls.append(name)
+
+    watcher, marker = _make_watcher(tmp_path, handler)
+    listing = threading.Event()
+    loop_answered = threading.Event()
+    answered_during_listing: list[bool] = []
+    real_iterdir = Path.iterdir
+
+    def slow_iterdir(self):
+        if self == tmp_path:
+            listing.set()
+            answered_during_listing.append(loop_answered.wait(2))
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", slow_iterdir)
+
+    async def scenario() -> None:
+        sweep = asyncio.create_task(watcher._sweep_once())
+        while not listing.is_set():
+            await asyncio.sleep(0.01)
+        # The loop is free to serve other work while the listing waits on the disk.
+        loop_answered.set()
+        await sweep
+
+    asyncio.run(asyncio.wait_for(scenario(), 10))
+
+    assert answered_during_listing == [True]
+    assert calls == ["opencode"]
+    assert not marker.exists()

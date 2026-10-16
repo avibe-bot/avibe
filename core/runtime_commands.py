@@ -67,7 +67,7 @@ class RuntimeCommandWatcher:
         if self._task and not self._task.done():
             return
         try:
-            self._directory.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(self._directory.mkdir, parents=True, exist_ok=True)
         except OSError as exc:
             logger.warning("Runtime command watcher disabled: %s", exc)
             return
@@ -100,10 +100,21 @@ class RuntimeCommandWatcher:
                 continue
 
     async def _sweep_once(self) -> None:
+        # The directory lives on the state disk, so reading it runs on a
+        # thread: a slow disk stalled the controller loop for 2.6 s in this
+        # listing (#2768). The refreshes themselves run on the loop, in the
+        # order the scan found their markers.
+        for backend, marker in await asyncio.to_thread(self._scan):
+            await self._handle_restart(backend, marker)
+
+    def _scan(self) -> list[tuple[str, Path]]:
+        """The restart markers to handle, after dropping unknown ones and orphaned ``.err`` companions."""
+
         try:
             entries = list(self._directory.iterdir())
         except FileNotFoundError:
-            return
+            return []
+        pending: list[tuple[str, Path]] = []
         for marker in entries:
             if not marker.is_file():
                 continue
@@ -125,7 +136,8 @@ class RuntimeCommandWatcher:
                 logger.debug("Ignoring unsupported backend marker: %s", backend)
                 marker.unlink(missing_ok=True)
                 continue
-            await self._handle_restart(backend, marker)
+            pending.append((backend, marker))
+        return pending
 
     @staticmethod
     def _maybe_evict_stale_err(err_marker: Path) -> None:
@@ -150,7 +162,7 @@ class RuntimeCommandWatcher:
             logger.debug("Could not evict stale err marker %s: %s", err_marker, exc)
 
     async def _handle_restart(self, backend: str, marker: Path) -> None:
-        metadata = self._read_marker_metadata(marker)
+        metadata = await asyncio.to_thread(self._read_marker_metadata, marker)
         if metadata:
             logger.info("Runtime command: refresh backend=%s metadata=%s", backend, metadata)
         else:
@@ -160,18 +172,18 @@ class RuntimeCommandWatcher:
         )
         if handler is None:
             logger.warning("AgentAuthService missing _refresh_backend_runtime; dropping marker")
-            self._fail_marker(marker, "refresh handler unavailable")
+            await asyncio.to_thread(self._fail_marker, marker, "refresh handler unavailable")
             return
         try:
             await handler(backend)
         except Exception as exc:
             logger.error("Backend refresh failed for %s: %s", backend, exc, exc_info=True)
-            self._fail_marker(marker, str(exc) or exc.__class__.__name__)
+            await asyncio.to_thread(self._fail_marker, marker, str(exc) or exc.__class__.__name__)
             return
         # Success path: silently drop the marker so the UI server reads the
         # absence-of-``.err`` as a clean ack.
         try:
-            marker.unlink(missing_ok=True)
+            await asyncio.to_thread(marker.unlink, missing_ok=True)
         except OSError as exc:  # pragma: no cover - best-effort cleanup
             logger.debug("Could not remove marker %s: %s", marker, exc)
 
