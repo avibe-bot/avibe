@@ -9,6 +9,8 @@ import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { VaultRequest, VaultSecret } from '@/context/ApiContext';
+import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationContext';
+import { capabilitiesFor } from '@/lib/testing/instanceRoleCapabilities';
 import { VaultApprovalCard } from '@/components/ui/vault-approval-card';
 import { VaultRequestCard } from '@/components/ui/vault-request-card';
 import { VaultSecretForm } from '@/components/ui/vault-secret-form';
@@ -47,9 +49,6 @@ const vault = vi.hoisted(() => ({
 
 vi.mock('@/context/ApiContext', () => ({ useApi: () => api }));
 vi.mock('@/context/ToastContext', () => ({ useToast: () => ({ showToast: vi.fn() }) }));
-vi.mock('@/context/InstanceAuthorizationContext', () => ({
-  useInstanceAuthorization: () => ({ capabilities: { can_use_vault_secrets: true } }),
-}));
 vi.mock('@/lib/useProtectedVault', () => ({
   useProtectedVault: () => vault,
   useVaultLock: () => ({ unlocked: false, remainingMs: 0, lockNow: vi.fn() }),
@@ -161,6 +160,7 @@ const cases: Array<{
   requests?: VaultRequest[];
   secrets?: VaultSecret[];
   vaultStatus?: string;
+  role?: 'editor' | 'member';
   resumed: () => Promise<void>;
 }> = [
   {
@@ -228,6 +228,7 @@ const cases: Array<{
   },
   {
     surface: 'protected field edit',
+    role: 'member', // Editing is management-only; other handoffs remain Editor use.
     desktop: () => <VaultSecretForm editSecret={protectedSecret} onCancel={vi.fn()} onCreated={vi.fn()} />,
     clicks: [openInBrowser],
     secrets: [protectedSecret],
@@ -240,11 +241,15 @@ const cases: Array<{
 
 const ceremonies = [vault.setupPasskey, vault.unlockPasskey, vault.approveProtectedRelease, vault.signProtectedRequest, vault.revealProtectedValue];
 
-function renderAt(path: string, ui: ReactElement) {
+function renderAt(path: string, ui: ReactElement, role: 'editor' | 'member' = 'editor') {
   return render(
-    <I18nextProvider i18n={i18n}>
-      <MemoryRouter initialEntries={[path]}>{ui}</MemoryRouter>
-    </I18nextProvider>,
+    <InstanceAuthorizationContext.Provider value={{
+      remote: true, instanceKind: 'organization', instanceRole: role, capabilities: capabilitiesFor(role),
+    }}>
+      <I18nextProvider i18n={i18n}>
+        <MemoryRouter initialEntries={[path]}>{ui}</MemoryRouter>
+      </I18nextProvider>
+    </InstanceAuthorizationContext.Provider>,
   );
 }
 
@@ -304,7 +309,7 @@ describe('desktop shell protected-vault browser handoff', () => {
     const open = vi.spyOn(window, 'open').mockReturnValue(null);
 
     Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
-    renderAt('/vaults', c.desktop());
+    renderAt('/vaults', c.desktop(), c.role);
     for (const click of c.clicks) await user.click(await screen.findByRole(click.role, { name: click.name }));
 
     expect(open).toHaveBeenCalledTimes(1);
@@ -318,7 +323,7 @@ describe('desktop shell protected-vault browser handoff', () => {
 
     cleanup();
     delete (window as { __AVIBE_DESKTOP_SHELL__?: true }).__AVIBE_DESKTOP_SHELL__;
-    renderAt(`${target.pathname}${target.search}`, <VaultsPage />);
+    renderAt(`${target.pathname}${target.search}`, <VaultsPage />, c.role);
     await c.resumed();
 
     expect(open).toHaveBeenCalledTimes(1);

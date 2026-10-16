@@ -242,9 +242,10 @@ describe('PERMISSIONS-013 VaultsPage capability-gated management actions', () =>
     renderPage(editor, '/vaults?edit=protected-secret');
     await screen.findAllByText('protected-secret');
 
-    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    // Wait for the handoff effect, not the initially absent dialog, before checking its result.
+    await waitFor(() => expect(screen.getByTestId('location').textContent).not.toContain('edit='));
+    expect(screen.queryByRole('dialog')).toBeNull();
     expect(screen.getByRole('list', { name: 'Vaults' })).toBeTruthy();
-    expect(screen.getByTestId('location').textContent).not.toContain('edit=');
   });
 });
 
