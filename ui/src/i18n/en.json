@@ -5902,6 +5902,7 @@
       "sleeping": "Vibey is asleep",
       "listening": "Listening",
       "running": "Working…",
+      "team": "The team is working",
       "ready": "Reply ready",
       "needs_input": "Needs your input",
       "blocked": "Something went wrong"

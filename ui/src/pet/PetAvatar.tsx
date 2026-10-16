@@ -1,33 +1,17 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import vibey from '@/assets/pet/vibey.png';
-import vibeyCelebrate from '@/assets/pet/vibey-celebrate.png';
-import vibeyError from '@/assets/pet/vibey-error.png';
-import vibeyFocus from '@/assets/pet/vibey-focus.png';
-import vibeyMessage from '@/assets/pet/vibey-message.png';
-import vibeySleep from '@/assets/pet/vibey-sleep.png';
-import vibeyThinking from '@/assets/pet/vibey-thinking.png';
 import { usePageActive } from '@/lib/pageActivity';
 
+import { VibeyArt, type VibeyPose } from './VibeyArt';
 import type { PetState } from './petState';
 import './pet.css';
 
-/** What the avatar draws: a pet state, plus the two pose-only states. */
-export type PetPose = PetState | 'listening' | 'sleeping';
+/** What the avatar draws: a pet state, plus pose-only listening, sleeping, and team states. */
+export type PetPose = PetState | 'listening' | 'sleeping' | 'team';
 
-const POSES: Record<PetPose, string> = {
-  idle: vibey,
-  sleeping: vibeySleep,
-  listening: vibeyFocus,
-  running: vibeyThinking,
-  ready: vibeyCelebrate,
-  needs_input: vibeyMessage,
-  blocked: vibeyError,
-};
-
-// Breathing stops after a while in a resting pose, so a pet left alone costs
-// nothing; any other pose keeps breathing while the window is visible.
+// Breathing stops after a while in idle, so a pet left alone costs nothing.
+// Sleeping is deliberate motion and keeps looping while the window is visible.
 const BREATHING_SETTLE_MS = 30 * 1000;
 
 /** The caller derives the pose from eligible activities; badge counts unread replies. */
@@ -55,7 +39,7 @@ export const PetAvatar: React.FC<{ pose: PetPose; badge?: number }> = ({
 
 const PetPoseImage: React.FC<{ pose: PetPose; alt: string }> = ({ pose, alt }) => {
   const pageActive = usePageActive();
-  const resting = pose === 'idle' || pose === 'sleeping';
+  const resting = pose === 'idle';
   const [settled, setSettled] = useState(false);
 
   useEffect(() => {
@@ -65,12 +49,11 @@ const PetPoseImage: React.FC<{ pose: PetPose; alt: string }> = ({ pose, alt }) =
   }, [resting]);
 
   return (
-    <img
-      className="pet-avatar__pose"
-      src={POSES[pose]}
-      alt={alt}
-      data-breathing={pageActive && !settled ? 'true' : 'false'}
-      draggable={false}
+    <VibeyArt
+      pose={pose as VibeyPose}
+      label={alt}
+      active={pageActive}
+      breathing={!resting || !settled}
     />
   );
 };
