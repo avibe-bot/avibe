@@ -241,10 +241,12 @@ Known data limitations for P1:
   - Background `#2a2a2e`, padding 4px, border 1px `white / 8%`, no shadow.
   - Two 32px buttons with a 4px gap and a 1px × 16px `white / 10%` hairline
     between them:
-    - **mic** starts or stops dictation; it turns solid rose with a stop
-      square while dictating;
-    - **keyboard** opens or closes the input bubble; it is filled white while
-      the bubble is open.
+    - **mic** starts or stops dictation; while dictating, it uses the same
+      background as the button hover state with a stop square icon;
+    - **keyboard** opens or closes the input bubble; while the bubble is open,
+      it uses the same background as the button hover state. Hover, dictation,
+      and the open keyboard state share this background and the normal button
+      icon color.
   - Hidden by default. It fades and rises in (opacity 180ms ease, transform
     220ms settle, from `translateY(-6px) scale(.92)`) on hover over Vibey or
     the dock, or on keyboard focus.

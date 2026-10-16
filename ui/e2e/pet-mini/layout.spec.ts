@@ -211,6 +211,39 @@ test('Vibey and its dock are reported as the hover zone, and a shell hover shows
   await expect(dock).toHaveCSS('opacity', '0');
 });
 
+for (const theme of ['light', 'dark']) {
+  test(`dock active states use the hover surface (${theme})`, async ({ page }) => {
+    await page.goto('/e2e/pet-mini/fixture.html?main=true&layers=0');
+    await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
+    const dock = page.locator('.pet-mini-dock');
+    await page.locator('.pet-mini-avatar-button').hover();
+    await expect(dock).toHaveCSS('opacity', '1');
+    const keyboard = dock.locator('button').last();
+    await keyboard.click();
+    await expect(keyboard).toHaveClass(/is-typing/);
+
+    const typingSurface = await keyboard.evaluate((node) => getComputedStyle(node).backgroundColor);
+    const typingColor = await keyboard.evaluate((node) => getComputedStyle(node).color);
+    expect(typingSurface).not.toBe('rgb(255, 255, 255)');
+
+    await keyboard.evaluate((node) => node.classList.remove('is-typing'));
+    await keyboard.hover();
+    const hoverSurface = await keyboard.evaluate((node) => getComputedStyle(node).backgroundColor);
+    expect(typingSurface).toBe(hoverSurface);
+
+    await keyboard.evaluate((node) => node.classList.add('is-listening'));
+    const listeningSurface = await keyboard.evaluate((node) => getComputedStyle(node).backgroundColor);
+    const listeningColor = await keyboard.evaluate((node) => getComputedStyle(node).color);
+    const regularColor = await keyboard.evaluate((node) => {
+      node.classList.remove('is-listening');
+      return getComputedStyle(node).color;
+    });
+    expect(listeningSurface).toBe(hoverSurface);
+    expect(typingColor).toBe(regularColor);
+    expect(listeningColor).toBe(regularColor);
+  });
+}
+
 test('the reply bubble names Vibey as written', async ({ page }) => {
   await page.goto('/e2e/pet-mini/fixture.html?main=true&layers=0');
   const eyebrow = page.locator('.pet-mini-bubble-speaker');
