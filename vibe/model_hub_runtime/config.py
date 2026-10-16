@@ -221,6 +221,13 @@ def _append_source(
         if not base_url:
             raise EngineStateError("Responses API source requires a base URL")
         entry = {"api-key": api_key, "prefix": source.prefix, "base-url": base_url}
+        if models and source.vendor == "xai":
+            # CPA (MIT) v8.0.23, internal/runtime/executor/openai_responses_signature.go: a replayed
+            # reasoning item keeps an encrypted_content without OpenAI's Fernet envelope, and its id,
+            # only for an is-compat model. xAI's ciphertext has no envelope, so without the flag the
+            # engine strips both and xAI loses its reasoning on every replay. The flag also replays
+            # reasoning content as xAI returned it and drops Codex multi-agent fields xAI never takes.
+            models = [{**model, "is-compat": True} for model in models]
         if models:
             entry["models"] = models
         payload.setdefault("codex-api-key", []).append(entry)

@@ -9,6 +9,7 @@ including Model Hub's own outcome for the Turn, so two engines can be compared.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import signal
@@ -80,11 +81,12 @@ _CHAT_FINISH = _sse({"id": "chatcmpl-fixture", "object": "chat.completion.chunk"
 _CHAT_USAGE = _sse({"id": "chatcmpl-fixture", "object": "chat.completion.chunk", "created": 1700000000,
                     "model": MODEL, "choices": [],
                     "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4}})
-# Fernet-shaped, so the engine keeps it with its id (CPA strips other shapes).
+# OpenAI's reasoning ciphertext is Fernet-shaped; xAI's carries no envelope, only opaque base64.
 _ENCRYPTED = "g" + "A" * 97
+_XAI_ENCRYPTED = base64.b64encode(bytes(range(7, 199))).decode()
 
 
-def _responses_reasoning_tool_frames() -> list[bytes]:
+def _responses_reasoning_tool_frames(encrypted: str = _ENCRYPTED) -> list[bytes]:
     events = [
         {"type": "response.created", "response": {"id": "resp_rt", "object": "response", "status": "in_progress",
                                                   "model": MODEL, "output": []}},
@@ -101,7 +103,7 @@ def _responses_reasoning_tool_frames() -> list[bytes]:
         {"type": "response.reasoning_summary_part.done", "item_id": "rs_1", "output_index": 0,
          "summary_index": 0, "part": {"type": "summary_text", "text": "Checking the weather tool."}},
         {"type": "response.output_item.done", "output_index": 0,
-         "item": {"id": "rs_1", "type": "reasoning", "encrypted_content": _ENCRYPTED,
+         "item": {"id": "rs_1", "type": "reasoning", "encrypted_content": encrypted,
                   "summary": [{"type": "summary_text", "text": "Checking the weather tool."}]}},
         {"type": "response.output_item.added", "output_index": 1,
          "item": {"id": "fc_1", "type": "function_call", "status": "in_progress", "call_id": "call_fixture",
@@ -172,7 +174,9 @@ class _Harness:
 
 
 @asynccontextmanager
-async def _through_engine(tmp_path, monkeypatch, protocol: str, *handlers, model_id: str = MODEL, efforts=()):
+async def _through_engine(
+    tmp_path, monkeypatch, protocol: str, *handlers, model_id: str = MODEL, efforts=(), vendor: str = "custom",
+):
     """A route of one Source per handler, in order, all speaking ``protocol`` and serving ``model_id``."""
     requests: list[list[dict]] = [[] for _ in handlers]
 
@@ -192,12 +196,12 @@ async def _through_engine(tmp_path, monkeypatch, protocol: str, *handlers, model
             sources = []
             for index, handler in enumerate(handlers):
                 root = await stack.enter_async_context(_server(recording(index, handler)))
-                source = _source(f"src_wire{index:04d}", f"Wire fixture {index}", vendor="custom",
+                source = _source(f"src_wire{index:04d}", f"Wire fixture {index}", vendor=vendor,
                                  protocol=protocol, model_id=model_id)
                 source.models[0].reasoning_efforts = list(efforts)
                 source.base_url = root + ("/v1" if protocol == "openai_responses" else "")
                 source.credential_ref = adapter.state_store.store_api_key(
-                    f"sk-synthetic-wire-{index}", vendor="custom", protocol=protocol, base_url=source.base_url,
+                    f"sk-synthetic-wire-{index}", vendor=vendor, protocol=protocol, base_url=source.base_url,
                 )
                 sources.append(source)
             config = _vibey_service(tmp_path, sources).store.config
@@ -424,14 +428,17 @@ async def test_chat_stream_terminal_depends_on_finish_reason(tmp_path, monkeypat
     assert following["status"] == 200, following
 
 
-async def test_responses_stream_with_reasoning_and_tool_call(tmp_path, monkeypatch) -> None:
-    """Reasoning summaries and a tool call pass through in order; the replay keeps its items."""
+@pytest.mark.parametrize(("vendor", "encrypted"), [("custom", _ENCRYPTED), ("xai", _XAI_ENCRYPTED)],
+                         ids=["fernet", "xai"])
+async def test_responses_stream_with_reasoning_and_tool_call(tmp_path, monkeypatch, vendor, encrypted) -> None:
+    """MH-HOSTED-GATEWAY-008: reasoning summaries and a tool call pass through in order; the replay keeps its
+    items, and a reasoning item reaches the Source that issued it with its ciphertext and id, xAI's included."""
     async def handler(request, body):
-        return await _stream(request, _responses_reasoning_tool_frames())
+        return await _stream(request, _responses_reasoning_tool_frames(encrypted))
 
     replay = [
         {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "weather in 上海?"}]},
-        {"type": "reasoning", "id": "rs_1", "status": "completed", "encrypted_content": _ENCRYPTED,
+        {"type": "reasoning", "id": "rs_1", "status": "completed", "encrypted_content": encrypted,
          "summary": [{"type": "summary_text", "text": "Checking the weather tool."}]},
         {"type": "function_call", "id": "fc_1", "status": "completed", "call_id": "call_fixture",
          "name": "weather", "arguments": "{\"city\":\"上海\"}"},
@@ -439,7 +446,7 @@ async def test_responses_stream_with_reasoning_and_tool_call(tmp_path, monkeypat
     ]
     tools = [{"type": "function", "name": "weather", "description": "fixture",
               "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}]
-    async with _through_engine(tmp_path, monkeypatch, "openai_responses", handler) as harness:
+    async with _through_engine(tmp_path, monkeypatch, "openai_responses", handler, vendor=vendor) as harness:
         url, body = _frontend_request("openai_responses", harness.hop, stream=True, extra={
             "tools": tools, "reasoning": {"effort": "high", "summary": "auto"},
             "include": ["reasoning.encrypted_content"],
@@ -463,7 +470,7 @@ async def test_responses_stream_with_reasoning_and_tool_call(tmp_path, monkeypat
     assert [item["type"] for item in completed["response"]["output"]] == ["reasoning", "function_call"]
     assert second["status"] == 200, second
     reasoning, call = replayed[1], replayed[2]
-    assert reasoning["id"] == "rs_1" and reasoning["encrypted_content"] == _ENCRYPTED, reasoning
+    assert reasoning["id"] == "rs_1" and reasoning["encrypted_content"] == encrypted, reasoning
     assert call["call_id"] == "call_fixture" and call["arguments"] == "{\"city\":\"上海\"}", call
 
 
