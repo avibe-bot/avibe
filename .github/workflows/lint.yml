@@ -299,8 +299,10 @@ jobs:
         # jsonschema) cannot drift from pyproject.
         run: uv pip install --system -e . --group dev
 
+      # Only the tests run with loopback alone, so no process a test starts can
+      # reach past it; installing dependencies above still needs the network.
       - name: Run unit tests shard ${{ matrix.shard }}/${{ matrix.shard-total }}
-        run: bash scripts/ci_unit_tests.sh "${{ matrix.shard }}" "${{ matrix.shard-total }}"
+        run: bash scripts/ci_loopback_only.sh bash scripts/ci_unit_tests.sh "${{ matrix.shard }}" "${{ matrix.shard-total }}"
 
   unit-tests:
     runs-on: ubuntu-latest
