@@ -8766,3 +8766,49 @@ async def test_a_turn_end_after_its_terminal_write_takes_no_writer(managers) -> 
 
     assert released["changed"] is False and drained is False
     assert writers == [], f"a Turn end took SQLite's writer {len(writers)} more time(s) to change nothing"
+
+
+def test_runtime_recovery_reads_a_starting_turns_owner_off_the_controller_loop(managers, monkeypatch) -> None:
+    """#2706: the runtime-work lane's re-entry of a ``starting`` Turn reads its owner off the loop.
+
+    On a slow state disk that read held the controller loop for 3 s, and every
+    Session with it. The Turn still starts exactly as before.
+    """
+
+    first, restarted, engine, _engine_b, starts = managers
+    admitted = asyncio.run(
+        first.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="recover me"),
+            context=_context(),
+        )
+    )
+    turn_id = str(admitted.turn_id)
+    with engine.connect() as conn:
+        assert delivery_store.get_turn(conn, turn_id)["state"] == "starting"
+    observations, _ = restarted.scan_runtime_delivery_recovery(limit=10, occupied=frozenset())
+    observation = next(item for item in observations if item.turn_id == turn_id)
+
+    reading = threading.Event()
+    loop_answered = threading.Event()
+    answered_during_read: list[bool] = []
+    real_initial_deliveries = delivery_store.initial_deliveries_for_turn
+
+    def slow_initial_deliveries(conn, requested_turn_id):
+        if requested_turn_id == turn_id and not reading.is_set():
+            reading.set()
+            answered_during_read.append(loop_answered.wait(2))
+        return real_initial_deliveries(conn, requested_turn_id)
+
+    monkeypatch.setattr(delivery_store, "initial_deliveries_for_turn", slow_initial_deliveries)
+
+    async def scenario() -> bool:
+        recovery = asyncio.create_task(restarted.recover_runtime_delivery_observation(observation))
+        while not reading.is_set():
+            await asyncio.sleep(0.01)
+        # The loop serves other work while the read waits on the disk.
+        loop_answered.set()
+        return await recovery
+
+    assert asyncio.run(asyncio.wait_for(scenario(), 10))
+    assert answered_during_read == [True]
+    assert [started for started, _text in starts] == [turn_id, turn_id]
