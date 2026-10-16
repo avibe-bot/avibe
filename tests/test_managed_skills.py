@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -1409,6 +1410,47 @@ def test_publication_reclaims_interrupted_staging_and_retries(tmp_path: Path) ->
     assert publish_builtin_skills(source_root=source, destination_root=destination) == destination
     assert not staging.exists()
     assert (destination / "alpha" / "SKILL.md").is_file()
+
+
+def test_publication_removes_directory_reparse_points_with_rmdir(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    staging = tmp_path / ".builtin-skills.staging"
+    staging.mkdir()
+    original_lstat = Path.lstat
+    original_rmdir = Path.rmdir
+    original_unlink = Path.unlink
+    rmdir_paths: list[Path] = []
+    unlink_paths: list[Path] = []
+
+    class _ReparseStat:
+        st_mode = stat.S_IFDIR
+        st_file_attributes = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+
+    def lstat(self):
+        if self == staging:
+            return _ReparseStat()
+        return original_lstat(self)
+
+    def rmdir(self):
+        rmdir_paths.append(self)
+        return original_rmdir(self)
+
+    def unlink(self):
+        unlink_paths.append(self)
+        return original_unlink(self)
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+    monkeypatch.setattr(Path, "rmdir", rmdir)
+    monkeypatch.setattr(Path, "unlink", unlink)
+    monkeypatch.setattr(managed_skills.stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+    managed_skills._remove_snapshot_staging(staging)
+
+    assert rmdir_paths == [staging]
+    assert unlink_paths == []
+    assert not staging.exists()
 
 
 def test_publication_rejects_nonportable_and_wrong_type_paths(tmp_path: Path) -> None:

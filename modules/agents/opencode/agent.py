@@ -2977,6 +2977,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     else None
                 )
                 restored_catalog_root = None
+                catalog_present = (
+                    _MANAGED_SKILL_BUILTIN_CATALOG_KEY in processing_snapshot
+                    or "opencode_managed_skill_builtin_snapshot" in processing_snapshot
+                )
                 restored_catalog = processing_snapshot.get(
                     _MANAGED_SKILL_BUILTIN_CATALOG_KEY
                 )
@@ -2988,6 +2992,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     restored_catalog.get("root"), str
                 ):
                     restored_catalog_root = restored_catalog.get("root")
+                elif catalog_present:
+                    restored_catalog_root = ""
                 restored_managed_skills_env = managed_skill_environment(
                     poll_info.working_path,
                     project_base=restored_project_base,

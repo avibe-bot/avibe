@@ -1601,7 +1601,10 @@ def _remove_snapshot_staging(path: Path) -> None:
     reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
     file_attributes = int(getattr(value, "st_file_attributes", 0))
     if stat.S_ISLNK(value.st_mode) or (reparse_flag and file_attributes & reparse_flag):
-        path.unlink()
+        if stat.S_ISDIR(value.st_mode):
+            path.rmdir()
+        else:
+            path.unlink()
         return
     if not stat.S_ISDIR(value.st_mode):
         path.unlink()
