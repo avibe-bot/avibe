@@ -19,13 +19,17 @@ from core.message_dispatcher import ActivityOutputDeliveryError, ConsolidatedMes
 from core.message_output import MessageOutput
 from core.native_dispatch_phase import DISPATCH_PHASE_ATTEMPTING, set_dispatch_phase
 from core.session_turns import SessionTurnManager
+from sqlalchemy import update
+
 from storage import message_deliveries as delivery_store
+from storage.models import agent_sessions
 from tests.test_message_dispatcher_result_fallback import (
     _StubIMClient,
     _StubSessionHandler,
     _StubSettingsManager,
 )
 from core.session_turns import DeliveryRequest
+from core.message_context import resolve_turn_sink_key
 from tests.test_session_delivery_fsm import (  # noqa: F401 - pytest fixtures
     _activate,
     _context,
@@ -283,15 +287,15 @@ def test_a_durable_step_failure_keeps_the_turn_owner_live(managers, monkeypatch)
     harness.controller.agent_service.release_runtime_turn.assert_called_once()
 
 
-def _fail_first_turn_write(manager, monkeypatch) -> list[str]:
-    """Make the first evidence-carrying Turn write raise, as a busy database would."""
+def _fail_first_turn_write(manager, monkeypatch, *, failures: int = 1) -> list[str]:
+    """Make the first evidence-carrying Turn writes raise, as a busy database would."""
 
     original = manager._terminalize_durable_turn
     calls: list[str] = []
 
     def terminalize(turn_id, outcome, **kwargs):
         calls.append(str(kwargs.get("evidence_kind")))
-        if calls == ["terminal_result"]:
+        if len(calls) <= failures and calls[-1] == "terminal_result":
             raise RuntimeError("database is locked")
         return original(turn_id, outcome, **kwargs)
 
@@ -421,3 +425,119 @@ def test_a_stop_while_the_turn_write_fails_still_commits_the_evidence(managers, 
 
 async def _no_wait(_context) -> None:
     return None
+
+
+def _record_turn_boundary_events(engine, session_id: str) -> tuple[list[str], int]:
+    """Subscribe to the Session's terminal events, with the Session projected running."""
+
+    from core.inbox_events import bus
+
+    with engine.begin() as conn:
+        conn.execute(update(agent_sessions).where(agent_sessions.c.id == session_id).values(agent_status="running"))
+
+    events: list[str] = []
+
+    def record(event_type, data):
+        if isinstance(data, dict) and data.get("session_id") == session_id and event_type in {
+            "session.status",
+            "turn.end",
+        }:
+            events.append(event_type)
+
+    return events, bus.subscribe_callback(record)
+
+
+def test_the_runner_fallback_commits_before_hub_finalization_and_turn_end(managers, monkeypatch) -> None:
+    """#2735: when the emit's own Turn write fails, the runner's write stands in for
+    it, so it lands where that one would have. The Turn is terminal before Model Hub
+    finalization, which the Hub's successor fence relies on, and its session.status
+    goes out before turn.end."""
+
+    from core.inbox_events import bus
+
+    manager, _other, engine, _engine_b, _starts = managers
+    harness = _Harness(manager, engine, monkeypatch)
+    _fail_first_turn_write(manager, monkeypatch)
+    states_at_hub_finalization: list[str] = []
+
+    def settle_model_hub_turn(context, _settled_by):
+        states_at_hub_finalization.append(harness.turn(context.platform_specific["turn_token"])["state"])
+
+    monkeypatch.setattr(manager, "_settle_model_hub_turn", settle_model_hub_turn)
+    events, subscription = _record_turn_boundary_events(engine, "ses_fsm")
+
+    async def run() -> str:
+        turn_id, context = await _activate(manager, text="prompt")
+        runner = await harness.start(turn_id, context)
+        await asyncio.wait_for(runner, WAIT_S)
+        await asyncio.wait_for(asyncio.gather(*harness.receivers), WAIT_S)
+        return turn_id
+
+    try:
+        turn_id = asyncio.run(run())
+    finally:
+        bus.unsubscribe(subscription)
+
+    assert harness.turn(turn_id)["terminal_evidence_kind"] == "terminal_result"
+    assert states_at_hub_finalization == ["terminal"]
+    assert events == ["session.status", "turn.end"]
+
+
+def test_the_agent_initiated_holder_publishes_turn_end_after_its_terminal_write(managers) -> None:
+    """#2735: the agent-initiated holder's own terminal write publishes the Turn's
+    session.status; turn.end follows it, as it does after the emit's write."""
+
+    from core.inbox_events import bus
+    from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
+
+    manager, _other, engine, _engine_b, _starts = managers
+    events, subscription = _record_turn_boundary_events(engine, "ses_fsm")
+
+    async def run() -> str:
+        context = _context()
+        assert manager.register_agent_initiated_turn(context) is True
+        await asyncio.sleep(0)
+        turn_id = str(context.platform_specific["turn_token"])
+        holder = manager.in_flight["ses_fsm"].task
+        sink = manager.get_turn_sink(resolve_turn_sink_key(manager.controller, context))
+        sink["settled_by"] = SETTLED_BY_TERMINAL_RESULT
+        sink["done_event"].set()
+        await asyncio.wait_for(asyncio.gather(holder, return_exceptions=True), WAIT_S)
+        return turn_id
+
+    try:
+        turn_id = asyncio.run(run())
+    finally:
+        bus.unsubscribe(subscription)
+
+    assert harness_state(engine, turn_id) == "terminal"
+    assert events[-2:] == ["session.status", "turn.end"]
+
+
+def harness_state(engine, turn_id: str) -> str:
+    with engine.connect() as conn:
+        return str(delivery_store.get_turn(conn, turn_id)["state"])
+
+
+def test_a_fallback_write_that_fails_again_is_retried_after_hub_finalization(managers, monkeypatch) -> None:
+    """When the runner's early fallback write meets the same busy database, it still
+    gets the attempt after Model Hub finalization that it had on master, and the
+    Turn ends with its evidence instead of staying active with its queue held."""
+
+    manager, _other, engine, _engine_b, _starts = managers
+    harness = _Harness(manager, engine, monkeypatch)
+    calls = _fail_first_turn_write(manager, monkeypatch, failures=2)
+
+    async def run() -> str:
+        turn_id, context = await _activate(manager, text="prompt")
+        runner = await harness.start(turn_id, context)
+        await asyncio.wait_for(runner, WAIT_S)
+        await asyncio.wait_for(asyncio.gather(*harness.receivers), WAIT_S)
+        return turn_id
+
+    turn_id = asyncio.run(run())
+
+    assert calls == ["terminal_result", "terminal_result", "terminal_result"]
+    turn = harness.turn(turn_id)
+    assert turn["state"] == "terminal"
+    assert turn["terminal_evidence_kind"] == "terminal_result"

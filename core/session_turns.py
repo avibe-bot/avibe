@@ -7835,6 +7835,33 @@ class SessionTurnManager:
                         settled_by = (
                             getattr(turn, "cancel_settled_by", None) if turn is not None else None
                         ) or SETTLED_BY_NO_TERMINAL_RESULT
+                    terminal_commit = (context.platform_specific or {}).pop(
+                        TERMINAL_COMMIT_KEY, None
+                    )
+                    reconciled = False
+
+                    def reconcile_release() -> dict[str, Any]:
+                        return self._reconcile_durable_runner_release(
+                            logical_turn_id,
+                            cancelled=cancelled,
+                            failed=failed,
+                            prewrite_refused=prewrite_refused,
+                            definitive_prewrite_exit=definitive_prewrite_exit,
+                            settled_by=settled_by,
+                            terminal_is_error=terminal_is_error,
+                            cancel_defers_queue_resume=cancel_defers_queue_resume,
+                            failure_evidence=prewrite_failure_evidence(context),
+                            terminal_commit=terminal_commit,
+                        )
+
+                    if terminal_commit is not None and logical_turn_id and durable_turn_registered:
+                        # The emit's own Turn write failed (#2714); this write stands in
+                        # for it, so it lands where that one would have: before Hub
+                        # finalization, which relies on the row being terminal (#2735).
+                        durable_terminal_result = reconcile_release()
+                        # A write that failed again carries no ``changed``; it gets the
+                        # attempt after finalization that it would have had on its own.
+                        reconciled = "changed" in durable_terminal_result
                     completion = self._settle_model_hub_turn(context, settled_by)
                     if inspect.isawaitable(completion):
                         from core.handlers.model_hub.async_owner import await_owned_task
@@ -7846,26 +7873,17 @@ class SessionTurnManager:
                     # Durable output may already have marked the old row terminal.
                     # _start_persisted_turn still fences its successor on this live
                     # runner, so release the projection only after Hub finalization.
-                    if turn is not None and self.in_flight.get(session_id) is turn:
+                    released_projection = turn is not None and self.in_flight.get(session_id) is turn
+                    if released_projection:
                         self.in_flight.pop(session_id, None)
+                    if not reconciled and logical_turn_id and durable_turn_registered:
+                        durable_terminal_result = reconcile_release()
+                    if released_projection:
+                        # After the terminal write, so its session.status precedes
+                        # turn.end as it does when the emit's own write lands (#2735).
                         bus.publish(
                             "turn.end",
                             _turn_event_payload(session_id, logical_turn_id),
-                        )
-                    if logical_turn_id and durable_turn_registered:
-                        durable_terminal_result = self._reconcile_durable_runner_release(
-                            logical_turn_id,
-                            cancelled=cancelled,
-                            failed=failed,
-                            prewrite_refused=prewrite_refused,
-                            definitive_prewrite_exit=definitive_prewrite_exit,
-                            settled_by=settled_by,
-                            terminal_is_error=terminal_is_error,
-                            cancel_defers_queue_resume=cancel_defers_queue_resume,
-                            failure_evidence=prewrite_failure_evidence(context),
-                            terminal_commit=(context.platform_specific or {}).pop(
-                                TERMINAL_COMMIT_KEY, None
-                            ),
                         )
                     # Only definitive pre-write failure may synthesize an empty
                     # terminal result. Once native work may have produced output, a
@@ -9357,11 +9375,6 @@ class SessionTurnManager:
                 )
                 if turn is not None:
                     self.in_flight.pop(session_id, None)
-                if turn is not None:
-                    bus.publish(
-                        "turn.end",
-                        _turn_event_payload(session_id, turn_token),
-                    )
                 if durable_turn_registered:
                     try:
                         durable_terminal_result = self._terminalize_durable_turn(
@@ -9398,6 +9411,13 @@ class SessionTurnManager:
                             turn_token,
                         )
                         durable_terminal_result = {"defer_queue_resume": True}
+                if turn is not None:
+                    # After the terminal write, so its session.status precedes
+                    # turn.end (#2735).
+                    bus.publish(
+                        "turn.end",
+                        _turn_event_payload(session_id, turn_token),
+                    )
                 should_flush = not (
                     queue_resume_deferred
                     or bool(durable_terminal_result.get("defer_queue_resume"))
