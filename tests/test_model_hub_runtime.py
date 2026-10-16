@@ -1621,7 +1621,7 @@ def test_a_claude_model_is_registered_with_the_thinking_it_takes_upstream(tmp_pa
         "relay-secret", vendor="custom", protocol="anthropic", base_url="https://relay.example.test",
     )
     efforts = ("low", "medium", "high", "max")
-    models = ("claude-sonnet-4-5-20250929", "claude-sonnet-4-6", "claude-opus-4.5", "kimi-k2")
+    models = ("claude-sonnet-4-5-20250929", "claude-sonnet-4-6", "claude-opus-4.5", "claude-latest", "kimi-k2")
     store.sync_sources([_binding(
         ref, source_id="src_relayclaude", vendor="custom", protocol="anthropic",
         base_url="https://relay.example.test", model_ids=models,
@@ -1639,6 +1639,8 @@ def test_a_claude_model_is_registered_with_the_thinking_it_takes_upstream(tmp_pa
         "claude-sonnet-4-5-20250929": budget,
         "claude-sonnet-4-6": {"levels": ["max", "high", "medium", "low"]},
         "claude-opus-4.5": budget,
+        # An alias or a later family names no budget-only version, so it keeps its levels.
+        "claude-latest": {"levels": ["max", "high", "medium", "low"]},
         # Not a Claude model: the Anthropic protocol alone says nothing about its thinking.
         "kimi-k2": {"levels": ["max", "high", "medium", "low"]},
     }
