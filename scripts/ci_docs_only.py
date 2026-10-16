@@ -20,6 +20,12 @@ ROOT_DOCS = frozenset({
 # full: tests also glob plan prose, so a list of individual exceptions cannot
 # safely describe that boundary. AGENTS.md has a dedicated lightweight check.
 CONTRACT_DOCS = frozenset({"docs/INSTALL_FOR_AI.md", "docs/INSTALL_FOR_AI_ZH.md"})
+# Built-in Skill publication compares directory identities. Windows DirEntry
+# listings zero those identities, so that path must run on the real Windows job.
+WINDOWS_CONTROL_IPC_PATHS = frozenset({
+    "core/managed_skills.py",
+    "tests/test_managed_skills.py",
+})
 
 
 def narrative_path(path: str) -> bool:
@@ -67,8 +73,8 @@ def impact_category(paths: list[str]) -> str:
     return "shared-or-mixed"
 
 
-def classify(event_name: str, event: dict, sha: str, repo: Path) -> tuple[bool, str, str]:
-    """Return docs disposition, reason, and non-authoritative impact telemetry."""
+def classify(event_name: str, event: dict, sha: str, repo: Path) -> tuple[bool, str, str, bool]:
+    """Return docs disposition, reason, impact telemetry, and Windows IPC selection."""
     try:
         if not isinstance(event, dict):
             raise ValueError("event payload is not an object")
@@ -107,22 +113,29 @@ def classify(event_name: str, event: dict, sha: str, repo: Path) -> tuple[bool, 
         if len(fields) % 2:
             raise ValueError("incomplete diff records")
         paths = []
+        irregular = False
         for header, name in zip(fields[::2], fields[1::2]):
             meta = header.decode("ascii").split()
             if len(meta) != 5 or not meta[0].startswith(":"):
                 raise ValueError("unexpected diff record")
             old_mode, new_mode = meta[0][1:], meta[1]
+            path = name.decode("utf-8")
+            paths.append(path)
             if meta[4] not in {"A", "M", "D"} or {old_mode, new_mode} - {"000000", "100644"}:
-                return False, "non-document file type or mode changed", "unknown"
-            paths.append(name.decode("utf-8"))
+                irregular = True
+        windows_control_ipc = any(path in WINDOWS_CONTROL_IPC_PATHS for path in paths)
+        if irregular:
+            return False, "non-document file type or mode changed", "unknown", windows_control_ipc
         impact = impact_category(paths)
         for path in paths:
             if not narrative_path(path):
-                return False, f"full CI required by {json.dumps(path, ensure_ascii=True)}", impact
-        return True, f"all {len(paths)} changed paths are narrative documentation", impact
+                return False, f"full CI required by {json.dumps(path, ensure_ascii=True)}", impact, windows_control_ipc
+        return True, f"all {len(paths)} changed paths are narrative documentation", impact, False
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
         # Do not print Git stderr, event payloads or arbitrary commit data.
-        return False, f"full CI: classification unavailable ({type(exc).__name__})", "unknown"
+        # Conservatively select the Windows job when classification cannot prove
+        # the Skill publication paths are absent from this event.
+        return False, f"full CI: classification unavailable ({type(exc).__name__})", "unknown", True
 
 
 def main() -> None:
@@ -131,7 +144,7 @@ def main() -> None:
     except (OSError, ValueError, KeyError):
         event = {}
     event_name = os.environ.get("GITHUB_EVENT_NAME", "")
-    docs_only, reason, impact = classify(
+    docs_only, reason, impact, windows_control_ipc = classify(
         event_name, event, os.environ.get("GITHUB_SHA", ""), Path.cwd(),
     )
     # A master push supersedes the preceding run even when only docs changed.
@@ -146,7 +159,9 @@ def main() -> None:
     if output:
         with Path(output).open("a", encoding="utf-8") as stream:
             stream.write(f"docs_only={str(docs_only).lower()}\n")
+            stream.write(f"windows_control_ipc={str(windows_control_ipc).lower()}\n")
     print(f"docs_only={str(docs_only).lower()}: {reason}")
+    print(f"windows_control_ipc={str(windows_control_ipc).lower()}")
     print(f"Impact shadow: {impact} (observation only; no test selection)")
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
