@@ -880,7 +880,7 @@ describe('the registered journey', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Add' }));
     await waitFor(() => expect(mock.models.createApiKeySource).toHaveBeenCalledOnce());
     expect(screenId()).toBe('providers');
-    expect(primaryAction().hasAttribute('disabled')).toBe(true);
+    await waitFor(() => expect(primaryAction().hasAttribute('disabled')).toBe(true));
     fireEvent.click(primaryAction());
     expect(screenId()).toBe('providers');
 
