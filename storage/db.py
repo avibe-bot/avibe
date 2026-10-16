@@ -7,6 +7,7 @@ from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.engine import URL
 
 from config import paths
+from storage import loop_writers
 
 
 def escape_sql_like(value: str) -> str:
@@ -58,6 +59,8 @@ def create_sqlite_engine(db_path: Path | None = None, *, read_only: bool = False
         cursor.execute("PRAGMA busy_timeout = 5000")
         cursor.close()
 
+    # Counts the write transactions this engine runs on the controller loop (#2710).
+    loop_writers.watch_engine(engine)
     return engine
 
 

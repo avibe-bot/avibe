@@ -90,7 +90,7 @@ Because producers are gated and the function already yields, moving the remainin
 
 ## Other writer sites on the loop (scope only)
 
-This list holds the sites known so far and is **not exhaustive**: writers are reached through many indirections, and two review rounds each found more. The complete inventory will be measured at runtime rather than reviewed by hand (#2710), and this section will cite it then.
+This list holds the sites known so far and is **not exhaustive**: writers are reached through many indirections, and two review rounds each found more. The complete inventory is measured at runtime rather than reviewed by hand (#2710). `storage/loop_writers.py` counts every write transaction the controller loop runs, by code location, and logs the ranked list ("Controller-loop SQLite writers") every five minutes while writes arrive and at shutdown. This section will cite that list after a soak.
 
 The per-Turn admissions all hold the boundary inside the transaction, so they are loop-side boundary holders and fall under B's split analysis:
 - `_admit_p0`, `_admit_p1`, `_admit_p3`, `_promote_fifo_head`;

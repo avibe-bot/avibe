@@ -52,6 +52,7 @@ from core.vibe_agents import VibeAgent, VibeAgentStore
 from core.blocking import run_blocking
 from vibe.i18n import get_supported_languages, t as i18n_t
 from core.loop_watchdog import EventLoopWatchdog
+from storage import loop_writers
 from vibe.runtime import current_process_owns_service_instance, mark_service_instance_started
 
 if TYPE_CHECKING:
@@ -2181,6 +2182,8 @@ class Controller:
             # This thread runs the loop: the one thread an activation commit may hold
             # the runtime boundary across its I/O on.
             self.runtime_activation.bind_loop_thread()
+            # The thread whose SQLite write transactions are counted (#2710).
+            loop_writers.bind_loop_thread()
             # Names whatever blocks this loop while it blocks; see core/loop_watchdog.py.
             self._loop_watchdog = EventLoopWatchdog(self._loop)
             self._loop_watchdog.start()
@@ -2704,6 +2707,7 @@ class Controller:
         except Exception as e:
             logger.warning("OpenCode server cleanup failed: %s", e)
 
+        loop_writers.log_summary(final=True)
         logger.info("Controller cleanup (sync) complete")
 
     def _model_hub_snapshot_refresh_completed(self) -> None:
