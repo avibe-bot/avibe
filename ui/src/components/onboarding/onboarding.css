@@ -767,7 +767,11 @@
   transition: clip-path 100ms ease-out, opacity 80ms ease-out;
 }
 .onboarding-write-visible { opacity: 1; clip-path: inset(0 0 0 0); }
-.onboarding-skeleton { flex: 1; min-height: 0; padding-top: calc(17 * var(--ob-u)); position: relative; overflow: hidden; }
+/* The skeleton clips only across, which is what keeps the working sweep inside it. Its
+   rows are design units under tier-authored chrome, so at the large reading the last
+   test row reaches a pixel past the box; the card's own bottom inset is where that
+   pixel lands, instead of being cut off the row. */
+.onboarding-skeleton { flex: 1; min-height: 0; padding-top: calc(17 * var(--ob-u)); position: relative; overflow-x: clip; }
 .onboarding-bar {
   display: block;
   height: calc(6 * var(--ob-u));
@@ -787,24 +791,22 @@
 }
 @keyframes onboarding-shimmer { to { transform: translateX(110%); } }
 
-/* The coordinator's plan: one row per assistant it hands a part to — the step, an
-   arrow, and the assistant's name — 26 tall on a 6 gap, 10 below the status line. */
-.onboarding-skeleton-handoffs { display: flex; flex-direction: column; gap: calc(6 * var(--ob-u)); padding-top: calc(10 * var(--ob-u)); }
-.onboarding-handoff-row {
-  display: flex;
-  align-items: center;
-  gap: calc(8 * var(--ob-u));
-  min-height: calc(26 * var(--ob-u));
-  padding: 0 calc(10 * var(--ob-u));
-  border-radius: 8px;
-  background: var(--ob-well);
-  border: 1px solid var(--ob-divider);
-  font-size: var(--ob-cap-fs);
-  white-space: nowrap;
+/* The coordinator's plan, drawn like the other cards' work rather than as type: one
+   row per assistant it hands a part to — that assistant's mark, then its task as a
+   skeleton line — on the tests card's 23 pitch with each row's centre on a test row's,
+   so the two lists read as one line across the diagram. A mark needs two units more
+   than a checkbox to stay legible, so its row starts one higher. The rows are in
+   design units, so the plan scales with the card, as the code and the tests do. */
+.onboarding-skeleton-handoffs { display: flex; flex-direction: column; gap: calc(9 * var(--ob-u)); padding-top: calc(16 * var(--ob-u)); }
+.onboarding-handoff-row { display: flex; align-items: center; gap: calc(9 * var(--ob-u)); height: calc(14 * var(--ob-u)); }
+/* The mark is geometry, so its size is a design unit and wins over the inline size
+   `BackendIcon` writes on its span, as the identity logo's does. */
+.onboarding-handoff-mark, .onboarding-handoff-mark > span {
+  width: calc(14 * var(--ob-u)) !important;
+  height: calc(14 * var(--ob-u)) !important;
 }
-.onboarding-handoff-step { min-width: calc(48 * var(--ob-u)); color: var(--muted); }
-.onboarding-handoff-arrow { flex-shrink: 0; color: var(--mint-ink); }
-.onboarding-handoff-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--foreground); }
+.onboarding-handoff-mark { flex-shrink: 0; display: grid; place-items: center; }
+.onboarding-handoff-mark svg { width: 100%; height: 100%; display: block; }
 
 /* u3bGM: six 11-tall rows on a 16 pitch, 14 below the box top — and, like the document,
    14 left under the last one. The row is 11 because that is what its line number
@@ -817,8 +819,10 @@
 .onboarding-bar-violet { background: var(--ob-code-violet); }
 /* The reviewer reads a diff rather than writing one: the code is there from the start,
    a removed line and two added ones are tinted across the row, and the working card's
-   sweep is what reads as the review passing over it. */
-.onboarding-skeleton-review .onboarding-code-row { margin: 0 calc(-4 * var(--ob-u)); padding: 0 calc(4 * var(--ob-u)); border-radius: 3px; }
+   sweep is what reads as the review passing over it. The tint spans the row and no
+   further, as design_desktop.pen draws it: an outdent past the skeleton is only cut
+   square by the skeleton's clip. */
+.onboarding-skeleton-review .onboarding-code-row { border-radius: 3px; }
 .onboarding-code-row[data-diff="removed"] { background: var(--ob-diff-removed); }
 .onboarding-code-row[data-diff="added"] { background: var(--ob-diff-added); }
 
