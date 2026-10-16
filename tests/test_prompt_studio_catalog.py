@@ -176,9 +176,9 @@ def test_use_avibe_entry_routes_to_all_bundled_references() -> None:
 
 
 def test_published_skill_keeps_references_available_without_eagerly_loading_them(tmp_path) -> None:
-    destination = tmp_path / "snapshots"
-    snapshot = publish_builtin_skills(source_root=ROOT / "skills", destination_root=destination)
-    directory = destination / snapshot / "use-avibe"
+    destination = tmp_path / "builtin-skills"
+    catalog = publish_builtin_skills(source_root=ROOT / "skills", destination_root=destination)
+    directory = catalog / "use-avibe"
     skill = parse_skill_file(directory / "SKILL.md", priority=(0, 0, 0, str(directory)), include_body=True)
     assert skill is not None
     assert "references/global-config.md" in skill.body
