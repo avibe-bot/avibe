@@ -199,3 +199,30 @@ def test_a_slow_directory_listing_never_holds_the_controller_loop(tmp_path: Path
     assert answered_during_listing == [True]
     assert calls == ["opencode"]
     assert not marker.exists()
+
+
+def test_a_marker_withdrawn_during_an_earlier_refresh_is_not_run(tmp_path: Path) -> None:
+    """A requester whose acknowledgement wait expired while another backend refreshed removed its marker.
+
+    The sweep found both markers before either refresh ran; the withdrawn one
+    must not run after the first refresh finishes.
+    """
+
+    markers = {name: tmp_path / f"restart-{name}.cmd" for name in ("claude", "opencode")}
+    calls: list[str] = []
+
+    async def handler(name: str) -> None:
+        calls.append(name)
+        for other, marker in markers.items():
+            if other != name:
+                marker.unlink(missing_ok=True)
+
+    auth_service = SimpleNamespace(_refresh_backend_runtime=handler)
+    watcher = RuntimeCommandWatcher(SimpleNamespace(agent_auth_service=auth_service), directory=tmp_path)  # type: ignore[arg-type]
+    for marker in markers.values():
+        marker.write_text("{}", encoding="utf-8")
+
+    asyncio.run(watcher._sweep_once())
+
+    assert len(calls) == 1
+    assert not any(marker.exists() for marker in markers.values())

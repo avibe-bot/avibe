@@ -162,7 +162,11 @@ class RuntimeCommandWatcher:
             logger.debug("Could not evict stale err marker %s: %s", err_marker, exc)
 
     async def _handle_restart(self, backend: str, marker: Path) -> None:
-        metadata = await asyncio.to_thread(self._read_marker_metadata, marker)
+        # Checked again just before the refresh: while an earlier marker's
+        # refresh ran, the requester may have timed out and removed this one.
+        metadata = await asyncio.to_thread(self._pending_metadata, marker)
+        if metadata is None:
+            return
         if metadata:
             logger.info("Runtime command: refresh backend=%s metadata=%s", backend, metadata)
         else:
@@ -186,6 +190,14 @@ class RuntimeCommandWatcher:
             await asyncio.to_thread(marker.unlink, missing_ok=True)
         except OSError as exc:  # pragma: no cover - best-effort cleanup
             logger.debug("Could not remove marker %s: %s", marker, exc)
+
+    @classmethod
+    def _pending_metadata(cls, marker: Path) -> Optional[dict]:
+        """The marker's metadata while its request still stands; None once the marker is gone."""
+
+        if not marker.is_file():
+            return None
+        return cls._read_marker_metadata(marker)
 
     @staticmethod
     def _read_marker_metadata(marker: Path) -> dict:
