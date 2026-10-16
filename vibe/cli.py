@@ -35,7 +35,7 @@ from sqlalchemy import select
 from config import paths
 from config.atomic_io import write_atomic
 from config.v2_config import V2Config
-from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, display_name_for_backend
+from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, display_name_for_backend, is_native_cli_backend
 from core.scheduled_tasks import (
     AGENT_RUN_CLOSE_AFTER_METADATA_KEY,
     AGENT_RUN_DELIVERY_QUEUE,
@@ -5805,50 +5805,89 @@ def cmd_agent_models(args):
         return 1
 
 
-def _agent_value_warning_fields(agent) -> dict:
-    """Best-effort, non-fatal warnings when an Agent's model/effort is unknown.
+def _catalog_mismatches(
+    backend: str, model: Optional[str], reasoning_effort: Optional[str], *, language: str
+) -> tuple[list[str], bool]:
+    """What the backend's model catalog says against ``model`` and ``reasoning_effort``, and whether it is authoritative.
 
-    Cheap (file-based) check for claude/codex only; OpenCode availability is
-    live (needs the OpenCode server) so it is skipped here to keep create/update
-    fast — ``vibe agent models`` is the place for the full OpenCode check.
+    The catalog is ``api.agent_model_options``, the one ``vibe agent models`` and the Web picker read. Vibey's is the
+    Model Hub menu, authoritative: a model it does not list cannot run, and an effort its model does not list is never
+    sent, so one it cannot load vouches for nothing and is itself a mismatch. claude and codex catalogs are bundled and
+    may lag behind a new release, so a mismatch is advisory. OpenCode's is live (it needs the OpenCode server), so it
+    is not checked here, keeping the commands fast; ``vibe agent models`` is the place for the full OpenCode check.
     """
-    if agent.backend not in ("claude", "codex"):
-        return {}
-    if not agent.model and not agent.reasoning_effort:
-        return {}
+    if backend == "opencode" or (not model and not reasoning_effort):
+        return [], False
+    words = "harness.cli.agentRunModel"
+    authoritative = not is_native_cli_backend(backend)
     try:
-        options = api.agent_model_options(agent.backend)
+        options = api.agent_model_options(backend)
     except Exception:
-        return {}
+        options = {}
     if not options.get("ok"):
-        return {}
+        return ([i18n_t(f"{words}.catalogUnavailable", language, backend=backend)] if authoritative else []), authoritative
     by_value = {entry.get("value"): entry for entry in options.get("models") or []}
-    model_unknown = bool(agent.model) and agent.model not in by_value
-    warnings: list[str] = []
+    model_unknown = bool(model) and model not in by_value
+    mismatches: list[str] = []
     if model_unknown:
-        warnings.append(
-            f"model '{agent.model}' is not in the known {agent.backend} model list; "
-            "it may be a typo or newer than the catalog"
-        )
-    if agent.reasoning_effort:
-        if agent.model and not model_unknown:
-            allowed = set(by_value[agent.model].get("reasoning_efforts") or [])
-            scope = f"model '{agent.model}'"
+        key = "modelNotInCatalog" if authoritative else "modelMaybeNewer"
+        mismatches.append(i18n_t(f"{words}.{key}", language, model=model, backend=backend))
+    if reasoning_effort:
+        if model and not model_unknown:
+            allowed = set(by_value[model].get("reasoning_efforts") or [])
+            # An authoritative model that lists no efforts takes none.
+            constrained = bool(allowed) or authoritative
+            message = i18n_t(f"{words}.effortInvalidForModel", language, effort=reasoning_effort, model=model)
         else:
             # model unset or unknown: accept any effort valid for some model of this backend
             # (Codex efforts are backend-wide; Claude's widest set still lives in some model)
             allowed = set()
             for entry in by_value.values():
                 allowed.update(entry.get("reasoning_efforts") or [])
-            scope = f"backend '{agent.backend}'"
-        if allowed and agent.reasoning_effort not in allowed:
-            warnings.append(f"reasoning_effort '{agent.reasoning_effort}' is not valid for {scope}")
+            constrained = bool(allowed)
+            message = i18n_t(f"{words}.effortInvalidForBackend", language, effort=reasoning_effort, backend=backend)
+        if constrained and reasoning_effort not in allowed:
+            mismatches.append(message)
+    return mismatches, authoritative
+
+
+def _agent_value_warning_fields(agent) -> dict:
+    """Best-effort, non-fatal warnings when an Agent's model/effort is unknown (``_catalog_mismatches``)."""
+    if agent.backend not in ("claude", "codex"):
+        return {}
+    language = _configured_cli_language()
+    warnings, _ = _catalog_mismatches(agent.backend, agent.model, agent.reasoning_effort, language=language)
     if not warnings:
         return {}
     return {
         "warnings": warnings,
-        "hint": f"Run `vibe agent models {agent.name}` to list valid models and reasoning efforts.",
+        "hint": i18n_t("harness.cli.agentRunModel.catalogHint", language, agent=agent.name),
     }
+
+
+def _session_model_override_fields(
+    *, backend: str, agent_label: str, model: Optional[str], reasoning_effort: Optional[str], help_command: str
+) -> dict:
+    """Check the model and effort a new Session will run on against the target Agent's catalog.
+
+    ``model`` and ``reasoning_effort`` are the effective pair: the run's overrides over the defaults the Session would
+    otherwise keep. Where the catalog is authoritative (Vibey's Model Hub menu), a pair it does not offer is refused
+    and its reservation released; elsewhere a mismatch is a warning on the run, as ``vibe agent create/update`` gives.
+    """
+    language = _configured_cli_language()
+    mismatches, authoritative = _catalog_mismatches(backend, model, reasoning_effort, language=language)
+    if not mismatches:
+        return {}
+    hint = i18n_t("harness.cli.agentRunModel.catalogHint", language, agent=agent_label)
+    if authoritative:
+        raise TaskCliError(
+            mismatches[0],
+            code="session_model_unavailable",
+            hint=hint,
+            help_command=help_command,
+            details={"backend": backend, "model": model, "reasoning_effort": reasoning_effort},
+        )
+    return {"warnings": mismatches, "hint": hint}
 
 
 def cmd_agent_create(args):
@@ -6133,14 +6172,15 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
             hint="Fork creates a new Session from the source Session.",
             help_command=help_command,
         )
-    if not (fork_session or fork_self) and (
+    if session_id and (
         (getattr(args, "model", None) or "").strip()
         or (getattr(args, "reasoning_effort", None) or "").strip()
     ):
+        language = _configured_cli_language()
         raise TaskCliError(
-            "--model and --reasoning-effort are only valid with forked Sessions",
-            code="fork_override_without_fork",
-            hint="Use --agent, --model, and --reasoning-effort as overrides when forking a Session.",
+            i18n_t("harness.cli.agentRunModel.existingSession", language),
+            code="model_override_with_existing_session",
+            hint=i18n_t("harness.cli.agentRunModel.existingSessionHint", language),
             help_command=help_command,
         )
     if session_id and (same_scope or scope_id):
@@ -6763,7 +6803,10 @@ def _reserve_cli_session(
     session_anchor_target=None,
     visibility: str = "background",
     authorization_context=None,
+    model: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> str:
+    """Reserve a new Agent Session; ``model`` and ``reasoning_effort`` override the Agent's defaults for it."""
     # Route through ``core.services.sessions`` so the CLI shares the same
     # business API as the UI server and the future N3 internal endpoint;
     # see docs/plans/workbench-dispatch-architecture.md §6 (C2).
@@ -6779,8 +6822,8 @@ def _reserve_cli_session(
             session_anchor=session_anchor,
             agent_id=agent.id,
             agent_name=agent.name,
-            model=agent.model,
-            reasoning_effort=agent.reasoning_effort,
+            model=model or agent.model,
+            reasoning_effort=reasoning_effort or agent.reasoning_effort,
             workdir=workdir,
             visibility=visibility,
             metadata={"scope_placement": "explicit", **dict(metadata or {})},
@@ -6794,8 +6837,8 @@ def _reserve_cli_session(
             session_anchor=session_anchor,
             agent_id=agent.id,
             agent_name=agent.name,
-            model=agent.model,
-            reasoning_effort=agent.reasoning_effort,
+            model=model or agent.model,
+            reasoning_effort=reasoning_effort or agent.reasoning_effort,
             workdir=workdir,
             visibility=visibility,
             metadata=metadata,
@@ -7079,6 +7122,10 @@ def cmd_agent_run(args):
         # The caller's own authority, resolved once. A remote caller reserves
         # under it; a local caller stays ``None`` and keeps Owner semantics.
         caller_authorization = caller_resource_user_context(caller_context)
+        # A new Session (blank, --create-session, or a fork) may run on its own model, kept on the Session, which
+        # every later turn reads; it is checked against the Agent's catalog once the Session is reserved (below).
+        model_override = (getattr(args, "model", None) or "").strip() or None
+        effort_override = (getattr(args, "reasoning_effort", None) or "").strip() or None
         if session_policy == "create":
             session_id = _reserve_cli_session(
                 agent=agent,
@@ -7088,6 +7135,8 @@ def cmd_agent_run(args):
                 session_anchor_target=legacy_reservation_target,
                 visibility=visibility,
                 authorization_context=caller_authorization,
+                model=model_override,
+                reasoning_effort=effort_override,
             )
             reserved_session_id = session_id
         elif session_policy == "none":
@@ -7098,6 +7147,8 @@ def cmd_agent_run(args):
                 metadata=session_metadata,
                 visibility=visibility,
                 authorization_context=caller_authorization,
+                model=model_override,
+                reasoning_effort=effort_override,
             )
             reserved_session_id = session_id
         elif session_policy == "fork":
@@ -7124,6 +7175,21 @@ def cmd_agent_run(args):
                 agent_name=agent_name or None,
                 session_id=session_id,
                 session_key=session_key,
+                help_command="vibe agent run --help",
+            )
+        override_fields: dict = {}
+        if model_override or effort_override:
+            # Checked only after the reservation, which admitted the caller to the source Session or the Agent, so a
+            # refusal tells nothing about a Session or Agent the caller cannot reach; a refused pair releases the
+            # reservation (the ``except`` below). The pair is the one the Session will run on: each override over the
+            # default it would otherwise keep, the source Session's for a fork, else the Agent's.
+            override_fields = _session_model_override_fields(
+                backend=agent.backend,
+                agent_label=agent.name,
+                model=fork_result.model if fork_result else model_override or agent.model,
+                reasoning_effort=(
+                    fork_result.reasoning_effort if fork_result else effort_override or agent.reasoning_effort
+                ),
                 help_command="vibe agent run --help",
             )
         if (session_policy in {"create", "none"} or fork_result) and args.post_to:
@@ -7156,9 +7222,12 @@ def cmd_agent_run(args):
             agent_name=agent.name if agent else None,
             agent_id=agent.id if agent else None,
             agent_backend=agent.backend if agent else None,
-            model=fork_result.model if fork_result else (agent.model if agent else None),
+            # An existing Session's run never carries an override (``_validate_run_session_policy``).
+            model=fork_result.model if fork_result else model_override or (agent.model if agent else None),
             reasoning_effort=(
-                fork_result.reasoning_effort if fork_result else (agent.reasoning_effort if agent else None)
+                fork_result.reasoning_effort
+                if fork_result
+                else effort_override or (agent.reasoning_effort if agent else None)
             ),
             session_policy=session_policy,
             session_key=session_key,
@@ -7221,7 +7290,7 @@ def cmd_agent_run(args):
                 request_store.mark_callback_pending(request.id)
                 run_payload["callback_status"] = "pending"
             payload["run"] = run_payload
-        _print_cli_payload("agent_run", **payload)
+        _print_cli_payload("agent_run", **payload, **override_fields)
         return 0
     except Exception as exc:
         if reserved_session_id:
@@ -17887,8 +17956,13 @@ def build_parser():
         help="Make the new or forked Session user-facing from the start",
     )
     agent_run_parser.add_argument("--deliver-key", help=argparse.SUPPRESS)
-    agent_run_parser.add_argument("--model", help="Model override for the new forked Session")
-    agent_run_parser.add_argument("--reasoning-effort", help="Reasoning effort override for the new forked Session")
+    agent_run_help_language = _configured_cli_language()
+    agent_run_parser.add_argument(
+        "--model", help=i18n_t("harness.cli.agentRunModel.helpModel", agent_run_help_language)
+    )
+    agent_run_parser.add_argument(
+        "--reasoning-effort", help=i18n_t("harness.cli.agentRunModel.helpEffort", agent_run_help_language)
+    )
     agent_run_parser.add_argument(
         "--cwd",
         help=(

@@ -91,6 +91,18 @@
   "harness": {
     "agentInitiatedContinuation": "Agent-initiated continuation",
     "cli": {
+      "agentRunModel": {
+        "existingSession": "--model and --reasoning-effort only apply when the run creates a new Session",
+        "existingSessionHint": "An existing Session keeps its model; change it in the Web UI's Session model picker. To run on another model now, start a new Session (--agent <name> --model ...) or fork this one (--fork-session <id> --model ...).",
+        "modelNotInCatalog": "model '{model}' is not in the {backend} model catalog",
+        "modelMaybeNewer": "model '{model}' is not in the {backend} model catalog; it may be a typo or newer than the catalog",
+        "effortInvalidForModel": "reasoning_effort '{effort}' is not valid for model '{model}'",
+        "effortInvalidForBackend": "reasoning_effort '{effort}' is not valid for backend '{backend}'",
+        "catalogUnavailable": "the {backend} model catalog could not be loaded, so the model and reasoning effort cannot be checked",
+        "catalogHint": "Run `vibe agent models {agent}` to list valid models and reasoning efforts.",
+        "helpModel": "Model for the new Session this run creates (a blank new Session, --create-session, or a fork); kept on that Session for its later turns. Not valid with --session-id. See `vibe agent models <agent>`.",
+        "helpEffort": "Reasoning effort for the new Session this run creates; kept on that Session. Not valid with --session-id."
+      },
       "help": {
         "command": "Inspect unified Harness live state and anomalies",
         "description": "Inspect active Runs, armed Watches, upcoming Tasks, and live anomalies.",

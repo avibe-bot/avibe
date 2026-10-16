@@ -91,6 +91,18 @@
   "harness": {
     "agentInitiatedContinuation": "Agent 主动发起的续接",
     "cli": {
+      "agentRunModel": {
+        "existingSession": "--model 和 --reasoning-effort 只在这次运行创建新 Session 时可用",
+        "existingSessionHint": "已有 Session 保持自己的模型；请在 Web UI 的 Session 模型选择器中修改。如果现在就要换模型运行，请新建一个 Session（--agent <名称> --model ...），或分叉当前 Session（--fork-session <id> --model ...）。",
+        "modelNotInCatalog": "模型 '{model}' 不在 {backend} 的模型目录中",
+        "modelMaybeNewer": "模型 '{model}' 不在 {backend} 的模型目录中；可能是拼写错误，也可能比目录更新",
+        "effortInvalidForModel": "推理强度 '{effort}' 不适用于模型 '{model}'",
+        "effortInvalidForBackend": "推理强度 '{effort}' 不适用于 backend '{backend}'",
+        "catalogUnavailable": "无法加载 {backend} 的模型目录，因此无法检查模型和推理强度",
+        "catalogHint": "运行 `vibe agent models {agent}` 查看可用的模型和推理强度。",
+        "helpModel": "这次运行所创建的新 Session（空白新 Session、--create-session 或分叉）使用的模型；该 Session 之后的轮次会沿用它。不能与 --session-id 一起使用。参见 `vibe agent models <agent>`。",
+        "helpEffort": "这次运行所创建的新 Session 使用的推理强度；该 Session 会沿用它。不能与 --session-id 一起使用。"
+      },
       "help": {
         "command": "检查统一的 Harness 实时状态和异常",
         "description": "检查活跃 Run、已启用 Watch、即将触发的 Task 和实时异常。",
