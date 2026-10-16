@@ -8356,6 +8356,50 @@ def test_legacy_effective_author_survives_queue_collect_merge_hydrate(
         assert "resource_user_context" not in public["metadata"]
 
 
+def test_startup_recovery_reads_growing_tables_only_through_index_seeks(tmp_path: Path, sqlite_db_factory) -> None:
+    """#2706: durable-delivery recovery runs on the controller loop at every start, before producers are admitted.
+    ``agent_runs``, ``session_turns`` and ``message_deliveries`` grow with every Turn ever run, and ``agent_sessions``
+    with every Session kept; a read of their history held the loop at start. Every statement recovery issues must reach them by an index seek, or by walking a
+    partial index that holds only live rows -- never by scanning the table or a full index."""
+
+    from sqlalchemy import event
+
+    db_path = sqlite_db_factory(tmp_path / "recovery.sqlite")
+    engine = create_sqlite_engine(db_path)
+    _seed_session(engine)
+    manager = SessionTurnManager(_Controller(), build_context=_context)
+    manager._engine = engine
+    statements: list[tuple[str, object]] = []
+
+    def capture(_conn, _cursor, statement, parameters, _context, _executemany):
+        if statement.lstrip().upper().startswith(("SELECT", "UPDATE", "WITH")):
+            statements.append((statement, parameters))
+
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        asyncio.run(manager.recover_durable_delivery_state())
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+        engine.dispose()
+
+    growing = ("agent_runs", "session_turns", "message_deliveries", "agent_sessions")
+    live_only_indexes = {
+        "uq_session_turns_live_session",
+        "uq_session_turns_waiting_successor",
+        "ix_message_deliveries_session_order",
+    }
+    scans: list[str] = []
+    with closing(sqlite3.connect(db_path)) as raw:
+        for statement, parameters in statements:
+            for row in raw.execute("EXPLAIN QUERY PLAN " + statement, parameters):
+                detail = str(row[-1])
+                words = detail.split()
+                if detail.startswith("SCAN ") and words[1] in growing and words[-1] not in live_only_indexes:
+                    scans.append(f"{detail}  <-  {' '.join(statement.split())}")
+    assert statements, "recovery issued no statements, so this test proves nothing"
+    assert not scans, "startup recovery scans a growing table:\n" + "\n".join(scans)
+
+
 @pytest.mark.anyio
 async def test_a_turn_end_after_its_terminal_write_takes_no_writer(managers) -> None:
     """#2706: a Turn end reaches SQLite's writer from several owners on the controller loop: the evidence-carrying

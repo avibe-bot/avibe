@@ -182,9 +182,8 @@ def test_restore_rebinds_persisted_remote_caller_context(monkeypatch) -> None:
             "AVIBE_CALLER_SESSION_PROOF": "stale-process-proof",
         },
         "opencode_managed_skill_project_base": "/tmp",
-        "opencode_managed_skill_builtin_snapshot": {
-            "id": "d" * 64,
-            "root": "/old-avibe-home/builtin-skills/" + "d" * 64,
+        "opencode_managed_skill_builtin_catalog": {
+            "root": "/old-avibe-home/builtin-skills",
         },
     }
     agent, _, _, _ = _build_agent({"oc-1": poll})
@@ -216,13 +215,118 @@ def test_restore_rebinds_persisted_remote_caller_context(monkeypatch) -> None:
     assert bound[0]["path"] == binding_path
     assert bound[0]["extra_env"]["AVIBE_CALLER_RESOURCE_CONTEXT"] == '{"sub":"user-1"}'
     assert bound[0]["extra_env"]["AVIBE_SKILL_PROJECT_BASE"] == str(Path("/tmp").resolve())
-    assert bound[0]["extra_env"]["AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID"] == "d" * 64
+    assert "AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID" not in bound[0]["extra_env"]
     assert bound[0]["extra_env"]["AVIBE_BUILTIN_SKILLS_ROOT"] == (
-        "/old-avibe-home/builtin-skills/" + "d" * 64
+        "/old-avibe-home/builtin-skills"
     )
     assert "IGNORED_ENV" not in bound[0]["extra_env"]
     assert "AVIBE_CALLER_SESSION_PROOF" not in bound[0]["extra_env"]
     assert unbound == [("oc-1", bound[0]["binding_token"], binding_path)]
+
+
+def test_restore_rebinds_an_explicitly_disabled_builtin_catalog(monkeypatch) -> None:
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    poll.processing_indicator = {
+        "platform": "avibe",
+        "user_id": "remote:user-1",
+        "opencode_caller_context_env": {
+            "AVIBE_SESSION_ID": "ses_wb",
+            "AVIBE_CALLER_PLATFORM": "avibe",
+            "AVIBE_CALLER_USER_ID": "remote:user-1",
+            "AVIBE_CALLER_REMOTE": "1",
+        },
+        "opencode_managed_skill_builtin_catalog": {"root": ""},
+    }
+    agent, _, _, _ = _build_agent({"oc-1": poll})
+    bound: list[dict] = []
+
+    def bind(session_id, payload, **kwargs):
+        bound.append({"session_id": session_id, "payload": payload, **kwargs})
+        return True
+
+    monkeypatch.setattr("modules.agents.opencode.agent.bind_caller_context_session", bind)
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.unbind_caller_context_session",
+        lambda *args, **kwargs: True,
+    )
+
+    async def run() -> int:
+        restored = await agent.restore_active_polls()
+        await asyncio.gather(*agent._active_requests.values())
+        return restored
+
+    assert asyncio.run(run()) == 1
+    assert bound[0]["extra_env"]["AVIBE_BUILTIN_SKILLS_ROOT"] == ""
+
+
+def test_restore_disables_an_invalid_persisted_builtin_catalog(monkeypatch) -> None:
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    poll.processing_indicator = {
+        "platform": "avibe",
+        "user_id": "remote:user-1",
+        "opencode_caller_context_env": {
+            "AVIBE_SESSION_ID": "ses_wb",
+            "AVIBE_CALLER_PLATFORM": "avibe",
+            "AVIBE_CALLER_USER_ID": "remote:user-1",
+            "AVIBE_CALLER_REMOTE": "1",
+        },
+        "opencode_managed_skill_builtin_catalog": {"root": "relative-catalog"},
+    }
+    agent, _, _, _ = _build_agent({"oc-1": poll})
+    bound: list[dict] = []
+
+    def bind(session_id, payload, **kwargs):
+        bound.append({"session_id": session_id, "payload": payload, **kwargs})
+        return True
+
+    monkeypatch.setattr("modules.agents.opencode.agent.bind_caller_context_session", bind)
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.unbind_caller_context_session",
+        lambda *args, **kwargs: True,
+    )
+
+    async def run() -> int:
+        restored = await agent.restore_active_polls()
+        await asyncio.gather(*agent._active_requests.values())
+        return restored
+
+    assert asyncio.run(run()) == 1
+    assert bound[0]["extra_env"]["AVIBE_BUILTIN_SKILLS_ROOT"] == ""
+
+
+def test_restore_disables_a_malformed_persisted_builtin_catalog(monkeypatch) -> None:
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    poll.processing_indicator = {
+        "platform": "avibe",
+        "user_id": "remote:user-1",
+        "opencode_caller_context_env": {
+            "AVIBE_SESSION_ID": "ses_wb",
+            "AVIBE_CALLER_PLATFORM": "avibe",
+            "AVIBE_CALLER_USER_ID": "remote:user-1",
+            "AVIBE_CALLER_REMOTE": "1",
+        },
+        "opencode_managed_skill_builtin_catalog": {"root": None},
+    }
+    agent, _, _, _ = _build_agent({"oc-1": poll})
+    bound: list[dict] = []
+
+    def bind(session_id, payload, **kwargs):
+        bound.append({"session_id": session_id, "payload": payload, **kwargs})
+        return True
+
+    monkeypatch.setattr("modules.agents.opencode.agent.bind_caller_context_session", bind)
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.unbind_caller_context_session",
+        lambda *args, **kwargs: True,
+    )
+
+    async def run() -> int:
+        restored = await agent.restore_active_polls()
+        await asyncio.gather(*agent._active_requests.values())
+        return restored
+
+    assert asyncio.run(run()) == 1
+    assert bound[0]["extra_env"]["AVIBE_BUILTIN_SKILLS_ROOT"] == ""
 
 
 def test_restore_binding_failure_does_not_strand_durable_poll(monkeypatch) -> None:

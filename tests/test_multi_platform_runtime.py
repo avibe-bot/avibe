@@ -3911,10 +3911,8 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms(monkeypatch, c
     from core.system_prompt_injection import build_system_prompt_injection
 
     monkeypatch.setattr("core.managed_skills.resolve_skills", lambda *_args, **_kwargs: [])
-    snapshot_id = "f" * 64
-    snapshot_root = f"/old-avibe-home/builtin-skills/{snapshot_id}"
-    monkeypatch.setenv("AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID", snapshot_id)
-    monkeypatch.setenv("AVIBE_BUILTIN_SKILLS_ROOT", snapshot_root)
+    catalog_root = "/old-avibe-home/builtin-skills"
+    monkeypatch.setenv("AVIBE_BUILTIN_SKILLS_ROOT", catalog_root)
     calls = []
     active_polls = []
     active_poll_updates = []
@@ -4101,8 +4099,8 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms(monkeypatch, c
     steering_snapshot = active_polls[0]["processing_indicator"]["opencode_native_steering"]
     assert steering_snapshot["system"] == calls[0]["system"]
     assert active_polls[0]["processing_indicator"][
-        "opencode_managed_skill_builtin_snapshot"
-    ] == {"id": snapshot_id, "root": snapshot_root}
+        "opencode_managed_skill_builtin_catalog"
+    ] == {"root": catalog_root}
     assert prompt_skill_cwds == ["/tmp/work"]
 
     binding_failures = []

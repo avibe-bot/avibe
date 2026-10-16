@@ -171,6 +171,36 @@ def test_bind_session_writes_env_binding(tmp_path: Path, monkeypatch) -> None:
     assert "expires_at" in entry
 
 
+def test_bind_session_preserves_an_empty_builtin_catalog_root(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    avibe_home = tmp_path / "avibe"
+    monkeypatch.setenv("AVIBE_HOME", str(avibe_home))
+    monkeypatch.setattr(git_runtime, "prepend_vendored_git_to_path", lambda *args, **kwargs: False)
+
+    ok = bridge.bind_session(
+        "oc-session",
+        {
+            "task_execution_id": "run123",
+            "task_trigger_kind": "agent_run",
+            "agent_session_target": {
+                "id": "ses123",
+                "agent_backend": "opencode",
+                "native_session_id": "oc-session",
+            },
+        },
+        base_env={"PATH": "/usr/bin"},
+        working_dir=tmp_path / "workspace",
+        extra_env={"AVIBE_BUILTIN_SKILLS_ROOT": ""},
+    )
+
+    assert ok is True
+    data = json.loads(bridge.binding_path().read_text(encoding="utf-8"))
+    assert data["sessions"]["oc-session"]["env"]["AVIBE_BUILTIN_SKILLS_ROOT"] == ""
+    assert 'key === "AVIBE_BUILTIN_SKILLS_ROOT"' in bridge.PLUGIN_SOURCE
+
+
 def test_prune_sessions_keeps_unexpired_released_entries() -> None:
     now = datetime(2026, 9, 2, tzinfo=timezone.utc)
     sessions = {
