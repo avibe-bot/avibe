@@ -119,10 +119,12 @@ Error classification is part of the contract because the loop branches on it:
 
 `retryable` permits replay of the same request. `continuable` (default false) separately permits a new run
 from the committed transcript after the failed run closes. Classified transient errors grant continuation even
-when streamed output forbids replay. Model Hub's `model_hub_recovery_exhausted` ending, explicit pin/opaque
+when streamed output forbids replay. A `model_hub_recovery_exhausted` ending remains non-retryable: for a
+pre-output `server` or `network` cause, it may grant Vibey one of its existing bounded transcript-only continuation
+runs, which cannot replay the original input or committed tools. Rate-limit/quota exhaustion, explicit pin/opaque
 refusals, permanent/protocol errors, unclassified failures, and local preparation errors grant no continuation.
-Neither the terminal sanitizer nor a downstream consumer may infer permission from `kind` alone. In particular,
-a recovery-exhausted error naming `server` stays non-retryable and non-continuable after thinking, too.
+Neither the terminal sanitizer nor a downstream consumer may infer permission from `kind` alone. A recovery-exhausted
+error after thinking remains non-continuable, because the partial response is not safe to replay or continue implicitly.
 
 The loop carries both permissions and `retry_after_s` into the terminal `AgentError` unchanged. These fields do
 not grant permission to replay committed tools or manufacture user input; Vibey uses `Agent.resume` under its

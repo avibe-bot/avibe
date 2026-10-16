@@ -1427,7 +1427,7 @@ async def test_a_transient_failure_shows_one_notice_after_five_continuations(
         ("streamed eof", True),
         ("streamed rate limit", True),
         ("rate limit past budget", False),
-        ("recovery exhausted", False),
+        ("recovery exhausted", True),
         ("recovery exhausted after thinking", False),
         ("unknown", False),
         ("malformed", False),
@@ -1436,7 +1436,8 @@ async def test_a_transient_failure_shows_one_notice_after_five_continuations(
 async def test_provider_continuation_decision_reaches_vibey(
     engine, session, tmp_path, published, continuation_policy, failure, continues
 ):
-    """Classification -> loop -> adapter: neither an exhausted Hub nor a permanent stream fault may be retried.
+    """Classification -> loop -> adapter: exhausted Hub recovery may use one safe transcript continuation only when
+    no output was produced; it must never replay a request after thinking or replay committed tools.
 
     Kind-only scripted tests missed real producers and erased Retry-After before the consumer saw it.
     """
