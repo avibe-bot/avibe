@@ -2,8 +2,7 @@ import asyncio
 import sys
 import unittest
 from types import SimpleNamespace
-
-import pytest
+from unittest.mock import patch
 
 from config.v2_config import SlackConfig
 from modules.im import slack as slack_module
@@ -21,9 +20,16 @@ class _OfflineWebClient:
         return {"user_id": "U_BOT"}
 
 
-@pytest.fixture(autouse=True)
-def _offline_slack_web_client(monkeypatch):
-    monkeypatch.setattr(slack_module, "AsyncWebClient", _OfflineWebClient)
+# Module-scoped so it holds under pytest and under ``unittest.main()`` alike.
+_offline_web_client = patch.object(slack_module, "AsyncWebClient", _OfflineWebClient)
+
+
+def setUpModule():
+    _offline_web_client.start()
+
+
+def tearDownModule():
+    _offline_web_client.stop()
 
 
 class _ResponseLike:
