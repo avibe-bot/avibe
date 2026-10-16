@@ -100,7 +100,70 @@ Focused Python tests and changed-file Ruff precede CI/exact-head review.
 - Align the bundled Vault Skill with real synchronous success versus deferred
   continuation behavior; do not tell the Agent to replay a successful command.
 
+## Finalized state shape
+
+All new state lives in the existing `vault_requests.delivery` JSON; there is no
+schema migration.
+
+```json
+"waiter": {
+  "id": "vw_<12 lowercase hex>",
+  "status": "active | completed | timed_out | abandoned",
+  "liveness": "lock",
+  "deadline_at": "<ISO-8601>",
+  "updated_at": "<ISO-8601>",
+  "completed_at | timed_out_at | abandoned_at": "<ISO-8601>"
+},
+"continuation": {"owner": "callback", "run_id": "<12 hex>", "claimed_at": "<ISO-8601>"}
+```
+
+- `waiter.liveness == "lock"` marks a new waiter whose liveness evidence is the
+  OS lock at `<directory of the resolved SQLite database>/vault-waiters/<id>.lock`.
+  The CLI acquires it through `storage.lock.MigrationFileLock` (zero timeout)
+  before committing the arm and holds it until after its terminal commit.
+  `deadline_at` remains the CLI's own declared wait bound.
+- The daemon inspects that lock without creating it. `held` means live and
+  `free` means the owner process is gone. `missing` or an inspection error is
+  never treated as death: the owner stays presumed live until its own declared
+  `deadline_at`, after which takeover still goes through the fence below.
+- A waiter without `liveness` is a released row shape. It stays live until its
+  recorded `deadline_at`, exactly as before; it is never presumed dead early.
+- `continuation` is the callback's durable claim and `run_id` is the callback
+  Run's id. One request has at most one waiter and at most one claim.
+
+Every transition runs in a write-reserved transaction, re-reads the row, and
+applies a conditional update on the read `delivery` text, requiring one
+affected row:
+
+| Transition | Actor | Requires | Writes |
+| --- | --- | --- | --- |
+| arm | CLI | no waiter, no continuation, `callback_status != 'sent'` | `waiter` active |
+| complete | CLI | own waiter active, no continuation, `callback_status != 'sent'` | waiter completed; unclaimed covered siblings skipped |
+| time out | CLI | own waiter active | waiter timed_out |
+| claim | daemon | `callback_status == 'pending'`, no continuation, waiter absent/timed_out/abandoned or active but not live, delivery-ready gate, a callback plan | `continuation` (and an active dead waiter becomes abandoned) |
+
+A CLI that loses arm or complete returns `approval_handed_off` and delivers
+nothing. After a claim the daemon enqueues the callback Run with `run_id`; an
+existing Run with that id is reused, so a restart between enqueue and the
+conditional `pending -> sent` mark re-enters with the same identity. A completed
+waiter is mirrored to the transcript only. A row without a callback plan is
+marked `skipped` and keeps no claim, so its waiter may still complete.
+
+The lock file is removed only by a process that holds it after the waiter is
+terminal in the database: the CLI after its own terminal commit, or the daemon
+after it claimed a dead owner's request. No later claimant exists for a
+terminal waiter id. A CLI exiting without a terminal commit releases without
+unlinking, so the next pass sees `free`. Windows refuses to unlink an open
+file, so there the file is left behind.
+
+Mixed versions: a released daemon neither inspects locks nor writes claims. It
+keeps deferring a new waiter until `deadline_at`, and a new CLI refuses to arm
+or complete once that daemon has marked `sent`. A released daemon's own
+enqueue-before-mark window and a released CLI's unconditional completion are not
+closed by this change.
+
 ## Status
 
 Root-cause investigation complete; ownership contract recorded before
-implementation. No runtime deployment or restart is authorized by this change.
+implementation. Finalized state shape recorded before production changes.
+No runtime deployment or restart is authorized by this change.
