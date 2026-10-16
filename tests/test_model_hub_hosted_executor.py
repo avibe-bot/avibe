@@ -504,6 +504,29 @@ async def test_a_model_the_source_does_not_serve_moves_on_and_refuses_no_tool(tm
     assert [slot.source_id for slot in chain] == [source_id, XAI]
 
 
+def _stale_listing_service(tmp_path, handles=()):
+    """Vibey with OpenAI's executor row not on any route: its turns route to gpt-6-chat."""
+
+    sources = _sources()
+    next(item for item in sources if item.id == OPENAI).models.insert(
+        0, ModelHubModelConfig(id="gpt-6-chat", provenance="discovered"),
+    )
+    service = _vibey_service(tmp_path, sources, handles=handles)
+    _chain(service, "web_search", (OPENAI, "gpt-6-astra"), (XAI, "grok-4.6"))
+    service.adapter.stop = lambda: asyncio.sleep(0)
+    return service
+
+
+def _openai(service):
+    return next(item for item in service.store.config.sources if item.id == OPENAI)
+
+
+async def _settled(service):
+    async with asyncio.timeout(2):
+        while service._stale_listing_tasks or service._background_discovery_inflight:
+            await asyncio.sleep(0.01)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("listed_again", [False, True], ids=["unlisted", "still_listed"])
 async def test_a_refused_listed_executor_model_is_listed_again_and_leaves_once_unlisted(tmp_path, listed_again):
@@ -517,13 +540,7 @@ async def test_a_refused_listed_executor_model_is_listed_again_and_leaves_once_u
     source_id, model_id, protocol, body = MODEL_NOT_SERVED["openai"]
     not_served = replace(await _engine_outcome(protocol, 404, body), source_id=source_id)
     served = LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=XAI), _responses(WEB_CALL, WEB_ANSWER))
-    sources = _sources()
-    # Its turns route to another model, so the executor row moves no route.
-    next(item for item in sources if item.id == source_id).models.insert(
-        0, ModelHubModelConfig(id="gpt-6-chat", provenance="discovered"),
-    )
-    service = _vibey_service(tmp_path, sources, handles=[InvokeHandle(not_served), served])
-    _chain(service, "web_search", (source_id, model_id), (XAI, "grok-4.6"))
+    service = _stale_listing_service(tmp_path, handles=[InvokeHandle(not_served), served])
     listed = [DiscoveredModel(id="gpt-6-chat"), *([DiscoveredModel(id=model_id)] if listed_again else [])]
     listings = []
 
@@ -532,7 +549,6 @@ async def test_a_refused_listed_executor_model_is_listed_again_and_leaves_once_u
         return listed
 
     service.adapter.discover_models = discover_models
-    service.adapter.stop = lambda: asyncio.sleep(0)
     service.start_background_discovery()
     try:
         status, answer = await _call(service, "web_search", {"arguments": {"query": "q"}})
@@ -540,17 +556,90 @@ async def test_a_refused_listed_executor_model_is_listed_again_and_leaves_once_u
         async with asyncio.timeout(2):
             while not listings:
                 await asyncio.sleep(0.01)
-        await asyncio.sleep(0.05)
+        await _settled(service)
         # Inside the debounce the same refusal lists nothing.
-        service.request_stale_listing_refresh(source_id, model_id)
-        await asyncio.sleep(0.05)
+        service.request_stale_listing_refresh(_openai(service), model_id)
+        await _settled(service)
         assert listings == ["openai"]
     finally:
         await service.stop()
-    openai = next(item for item in service.store.config.sources if item.id == source_id)
-    assert [model.id for model in openai.models] == (["gpt-6-chat", model_id] if listed_again else ["gpt-6-chat"])
+    assert [model.id for model in _openai(service).models] == (["gpt-6-chat", model_id] if listed_again else ["gpt-6-chat"])
     chain = service.freeze_turn_hosted_tools(service.store.config).executors["web_search"]
     assert [slot.source_id for slot in chain] == ([source_id, XAI] if listed_again else [XAI])
+
+
+@pytest.mark.asyncio
+async def test_a_stale_listing_waits_out_a_running_listing_and_keeps_the_schedules_backoff(tmp_path):
+    """MH-HOSTED-GATEWAY-008: a listing already running spends no debounce, and a failing one keeps its backoff."""
+
+    service = _stale_listing_service(tmp_path)
+    base = service.now()
+    clock = [base]
+    service.now = lambda: clock[0]
+    release = asyncio.Event()
+    fail = False
+    listings = []
+
+    async def discover_models(vendor, *_args, **_kwargs):
+        if vendor != "openai":
+            return []
+        listings.append(vendor)
+        await release.wait()
+        if fail:
+            raise RuntimeError("listing unavailable")
+        return [DiscoveredModel(id="gpt-6-chat")]
+
+    service.adapter.discover_models = discover_models
+    service.start_background_discovery()
+    try:
+        # A viewer's pass is listing the Source when the refusal arrives: nothing is spent.
+        service.request_inventory_refresh()
+        async with asyncio.timeout(2):
+            while not listings:
+                await asyncio.sleep(0.01)
+        service.request_stale_listing_refresh(_openai(service), "gpt-6-astra")
+        release.set()
+        await _settled(service)
+        await asyncio.sleep(0.05)
+        service.request_stale_listing_refresh(_openai(service), "gpt-6-astra")
+        await _settled(service)
+        assert listings == ["openai", "openai"]
+        assert [model.id for model in _openai(service).models] == ["gpt-6-chat"]
+        # A failing listing backs off for longer than the debounce, whoever asks.
+        fail = True
+        for minutes in (16, 32):
+            clock[0] = base + timedelta(minutes=minutes)
+            service.request_stale_listing_refresh(_openai(service), "gpt-6-chat")
+            await _settled(service)
+        clock[0] = base + timedelta(minutes=48)
+        service.request_stale_listing_refresh(_openai(service), "gpt-6-chat")
+        await _settled(service)
+        assert listings == ["openai"] * 4
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_disowned_row_leaves_even_when_the_rest_of_the_listing_must_wait(tmp_path, monkeypatch):
+    """MH-HOSTED-GATEWAY-008: a supply change elsewhere in the listing does not hold back the disowned row."""
+
+    service = _stale_listing_service(tmp_path)
+
+    async def discover_models(*_args, **_kwargs):
+        return [DiscoveredModel(id="gpt-6-chat"), DiscoveredModel(id="gpt-6-new")]
+
+    service.adapter.discover_models = discover_models
+    # Admitting gpt-6-new is the change a manual refresh must confirm.
+    monkeypatch.setattr(service, "_moves_supply", lambda _previous, updated: any(
+        model.id == "gpt-6-new" for source in updated.sources for model in source.models
+    ))
+    service.start_background_discovery()
+    try:
+        service.request_stale_listing_refresh(_openai(service), "gpt-6-astra")
+        await _settled(service)
+    finally:
+        await service.stop()
+    assert [model.id for model in _openai(service).models] == ["gpt-6-chat"]
 
 
 @pytest.mark.asyncio
