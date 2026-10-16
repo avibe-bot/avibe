@@ -388,9 +388,14 @@ vibe agent run --no-callback --create-session --scope-id slack::channel::C999 --
 vibe agent run --close-after --no-callback --agent release-reviewer --message 'Run a disposable batch review.'
 ```
 
-`--send-now` 只能和现有 `--session-id` 一起使用，它显式选择普通的带内容 P1
-语义：新消息会 steering 进活动 native Turn，Session 空闲时立即启动；只有明确
-拒绝后才回退到 P3。它不会提升更早的排队消息。`vibe session send-now` 是无内容
+对于现有 `--session-id`，默认投递是 P1：新 Run 会 steering 进活动 native Turn，
+Session 空闲时立即启动。如果活动 Turn 中包含用户本人发送的消息，Run 不会 steering
+进去，而是进入 P3 队列，在该 Turn 结束后作为独立 Turn 执行，这样用户得到的答复仍是
+该 Turn 的结果。Watch、Hook、Webhook 和回调投递遵循同一规则。
+
+`--send-now` 只能和现有 `--session-id` 一起使用，它显式把新消息 steering 进活动
+native Turn，包括包含用户消息的 Turn；Session 空闲时立即启动；只有明确拒绝后才
+回退到 P3。它不会提升更早的排队消息。`vibe session send-now` 是无内容
 P1 操作，只提升现有的精确 FIFO 队头，不新增消息。过期队头会被拒绝，而不会改为
 提升下一条；两个命令都不会调用 Stop。
 

@@ -108,13 +108,24 @@ instead of claiming equivalent durability.
 | --- | --- | --- |
 | Web composer | P3 | Starts when idle; otherwise joins the FIFO backlog. |
 | Ordinary IM message | P1 | Steers the active Turn or starts when idle; a definitive refusal falls back to P3. |
-| Existing-Session Agent Run | P1 | Same as ordinary IM. `--queue` selects P3. `--send-now` explicitly selects the same content-bearing P1 behavior and never promotes older queued work. |
-| Watch, Hook, Webhook | P1 | Continues the target Session without interrupting it. |
+| Existing-Session Agent Run | P1 | Same as ordinary IM, except behind a Turn a person's input is part of (below). `--queue` selects P3. `--send-now` steers even that Turn and never promotes older queued work. |
+| Watch, Hook, Webhook | P1 | Continues the target Session without interrupting it; behind a person's Turn it queues (below). |
 | Show annotation | P1 | Delivers the annotation to the current Turn when possible. |
-| Session callback | P1 | Delivers each completed child Run independently. |
+| Session callback | P1 | Delivers each completed child Run independently; behind a person's Turn it queues (below). |
 | Scheduled Task | P3 | Never interrupts or steers the work a user is already doing. |
 | Stop | Empty P0 | Stops the exact live Turn. Definitive terminal settlement immediately starts the oldest claimable P3 segment. |
 | Send Now existing head | Empty P1 | Promotes only the exact observed FIFO head. |
+
+A scheduled Harness input (one a Watch, Hook, Webhook, or Agent Run delivers,
+callbacks included) is an automatic signal, not a person speaking. When a
+person's input is part of the active Turn (the input it started with, one
+steered into it, or one still being steered into it), P1 admission writes that
+Harness input as P3 instead of steering it, under the same writer lock that
+observes the Turn. It waits in the FIFO and runs as its own Turn after that Turn
+ends, however it ends. Steered in, it would continue the Turn past the person's
+answer, which would then be narration rather than the Turn's result. A person's
+input (IM, a Show annotation), an explicit `--send-now`, and content-free Send
+Now keep steering; a Turn no person's input is part of is still steered.
 
 Attachments remain part of the same Delivery and follow the same P1 admission
 as text. Send Now can steer pure-image and mixed text/file messages into the
