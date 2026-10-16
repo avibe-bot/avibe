@@ -23,8 +23,9 @@ import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, ContextManager, Iterator, Literal, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, ContextManager, Iterator, Literal, Optional, TypeVar
 
 from sqlalchemy import and_, exists, literal, or_, select, update
 from sqlalchemy.engine import Connection, Engine
@@ -97,6 +98,7 @@ if TYPE_CHECKING:
     from modules.im import MessageContext
 
 logger = logging.getLogger(__name__)
+_T = TypeVar("_T")
 
 
 @dataclass
@@ -4399,46 +4401,81 @@ class SessionTurnManager:
             }
         return receipt_result
 
+    def _read_start_owner(
+        self,
+        turn_id: str,
+        expected_start_attempt_id: str | None,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
+        """The starting Turn and its initial Deliveries; None when it is not this start's to make.
+
+        A plain read, safe on any thread: it writes nothing, and the start's own
+        write transaction re-validates every field it reads, under SQLite's
+        writer, before the native dispatch.
+        """
+
+        with self._sqlite_engine().connect() as conn:
+            turn = delivery_store.get_turn(conn, turn_id)
+            if turn is None or turn["state"] != "starting":
+                return None
+            if (
+                expected_start_attempt_id is not None
+                and str(turn.get("start_attempt_id") or "")
+                != expected_start_attempt_id
+            ):
+                return None
+            return turn, delivery_store.initial_deliveries_for_turn(conn, turn_id)
+
+    async def _run_off_loop(self, operation: Callable[[], _T]) -> _T:
+        from core.runtime_work import RuntimeWorkSupervisor
+
+        supervisor = getattr(self.controller, "runtime_work_supervisor", None)
+        if isinstance(supervisor, RuntimeWorkSupervisor):
+            return await supervisor.run_sync(operation)
+        return await asyncio.to_thread(operation)
+
     async def _start_persisted_turn(
         self,
         turn_id: str,
         *,
         context: Optional["MessageContext"] = None,
         expected_start_attempt_id: str | None = None,
+        read_owner_off_loop: bool = False,
     ) -> bool:
-        with self._sqlite_engine().begin() as conn:
-            reserve_write_lock(conn)
-            turn = delivery_store.get_turn(conn, turn_id)
-            if turn is None or turn["state"] != "starting":
-                return False
-            if (
-                expected_start_attempt_id is not None
-                and str(turn.get("start_attempt_id") or "")
-                != expected_start_attempt_id
-            ):
-                return False
-            backend = str(turn.get("backend") or "").strip()
-            if backend in self._draining_backends:
-                self._deferred_restart_sessions.setdefault(backend, set()).add(
-                    str(turn["session_id"])
-                )
-                return False
-            deliveries = delivery_store.initial_deliveries_for_turn(conn, turn_id)
-            delivery = deliveries[0] if deliveries else None
-            if (
-                delivery is None
-                or any(row["state"] != "claimed" for row in deliveries)
-                or not turn.get("start_attempt_id")
-                or not turn.get("dispatch_sha256")
-            ):
-                logger.error("durable Turn has no exact start-attempt owner: %s", turn_id)
-                return False
-            attempt_id = str(turn["start_attempt_id"])
-            # The row stays ``starting`` until native acceptance, so the live
-            # projection is the launch fence for concurrent resume callers.
-            projected = self.in_flight.get(str(turn["session_id"]))
-            if projected is not None and not projected.task.done():
-                return projected.logical_turn_id == turn_id
+        # The runtime-work lane's re-entry reads its owner off the loop: on a
+        # slow state disk this read held the loop for 3 s (#2706). That Turn
+        # was already ``starting`` with no live projection when the lane found
+        # it, so the yield exposes nothing new. The other callers keep reading
+        # on the loop: most start a Turn they have just committed, in the same
+        # synchronous step, and a yield there would let other loop sections
+        # see it ``starting`` without a projection.
+        read = partial(self._read_start_owner, turn_id, expected_start_attempt_id)
+        owner = await self._run_off_loop(read) if read_owner_off_loop else read()
+        if owner is None:
+            return False
+        turn, deliveries = owner
+        backend = str(turn.get("backend") or "").strip()
+        if backend in self._draining_backends:
+            self._deferred_restart_sessions.setdefault(backend, set()).add(
+                str(turn["session_id"])
+            )
+            return False
+        delivery = deliveries[0] if deliveries else None
+        if (
+            delivery is None
+            or any(row["state"] != "claimed" for row in deliveries)
+            or not turn.get("start_attempt_id")
+            or not turn.get("dispatch_sha256")
+        ):
+            logger.error("durable Turn has no exact start-attempt owner: %s", turn_id)
+            return False
+        attempt_id = str(turn["start_attempt_id"])
+        # The row stays ``starting`` until native acceptance, so the live
+        # projection is the launch fence for concurrent resume callers. It is
+        # read on the loop, after any off-loop read, and nothing below yields
+        # before ``_run`` projects this Turn.
+        projected = self.in_flight.get(str(turn["session_id"]))
+        if projected is not None and not projected.task.done():
+            return projected.logical_turn_id == turn_id
         try:
             resolved = (
                 self._delivery_context(str(turn["session_id"]))
@@ -6476,6 +6513,7 @@ class SessionTurnManager:
             return await self._start_persisted_turn(
                 str(turn["id"]),
                 expected_start_attempt_id=str(turn.get("start_attempt_id") or ""),
+                read_owner_off_loop=True,
             )
         if turn is not None and turn["state"] == "waiting":
             if predecessor is None:

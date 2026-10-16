@@ -194,6 +194,7 @@ async def test_hfr_149_session_lane_recovers_only_current_exact_observation(
     manager._start_persisted_turn.assert_awaited_once_with(
         "turn-current",
         expected_start_attempt_id="attempt-current",
+        read_owner_off_loop=True,
     )
     engine.dispose()
 
