@@ -22,8 +22,8 @@ class ModelEndpoint:            # built by the adapter layer from C-6 HopResolut
     source_id: str | None       # HopResolution.source_id: the pin of a request with native hosted content
     source_identity: str | None # HopResolution.source_identity: the account its opaque payloads are bound to
     portable: bool              # never pinned, and no native hosted content (vibey-hosted-tools.md §3.5)
-    opaque_refused: frozenset[str | None]   # identities whose provider refused an opaque payload in this run; the
-                                # messages they served are sent as a different origin's (cross-provider.md)
+    opaque_refused: frozenset[tuple[str | None, str]]   # (Source identity, payload kind) pairs whose provider
+                                # refused that kind in this Session; its messages go without them (cross-provider.md)
     hosted_tools: Mapping[str, HostedToolRoute]   # HopResolution.hosted_tools, in Model Hub's order: per enabled
                                 # search tool its mode and replay, and for native its declaration and Responses
                                 # include values (vibey-hosted-tools.md §3.4)
@@ -74,19 +74,25 @@ continuation, later with the hop's current `replay`, and pinned to that Source e
 
 **Refusals before any output** (`vibey-hosted-tools.md` §3.5). The gateway answers a pinned request it cannot serve
 from that Source with `409 pin_unavailable`, matched on its `type` and `code`, and names the narrow hosted rule that
-fired in `error.reason` when one did. xAI answers a replayed ciphertext it cannot read with a plain-text 400, `Could
-not decrypt the provided encrypted_content`, on any request. The adapter ends either send with a `ProviderError` that
-has no output, is not `retryable`, and carries a `refusal`: `pin_unavailable` with the hop's Source and the rule's
-tool and aspect, or `opaque_refused` with the hop's Source identity. The loop answers it by rendering the request
-again, never by the generic retry:
+fired in `error.reason` when one did. A provider refuses an opaque payload replayed under an account that cannot read
+it (a key change, or a relay serving a later turn from another pooled account, which no Source identity can see) with
+a 400 naming it: xAI's plain-text `Could not decrypt the provided encrypted_content`, which does not say which kind;
+Anthropic's `Invalid \`encrypted_content\`` (or `encrypted_index`) for a search result (kind `hosted`) and
+`Invalid \`signature\` in \`thinking\` block` (kind `signature`), on any request. The adapter ends either send with a
+`ProviderError` that has no output, is not `retryable`, and carries a `refusal`: `pin_unavailable` with the hop's
+Source and the rule's tool and aspect, or `opaque_refused` with the hop's Source identity and the kinds refused (both
+for xAI's). The loop answers it by rendering the request again, never by the generic retry:
 
 - by a fresh hop, rendered normally, at most once per (Source, tool, aspect) a narrow rule names and at most twice
   per run, whatever the reason;
 - in portable form on the hop it has, past either bound, or at once when a hand-back's fresh hop is the refused one
   again (the same Source, identity, model and hosted-tool facts). A portable request is never pinned, so the gateway
   never hands it back;
-- after `opaque_refused`, with that identity in `opaque_refused` for the rest of the run, so none of its opaque
-  payloads is sent again. That is answered once per identity: refused again, the error ends the run.
+- after `opaque_refused`, with each refused (identity, kind) in `opaque_refused`, so none of that identity's payloads
+  of that kind is sent again: its earlier search calls take their portable form (the query and sources, readable;
+  no encrypted data), and its thinking goes without signatures. The loop keeps each new pair as a `replay_refusal`
+  row before resending, so the Session's later turns, and its forks, start without them (`transcript.md`). Each
+  pair is answered once; refused again, the error ends the run.
 
 A `pause_turn` continuation's `pin_unavailable` comes after output, so it is no refusal (`conversion-tables.md`).
 

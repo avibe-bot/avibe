@@ -196,13 +196,18 @@ async def test_each_append_returns_the_entry_load_reads_back_in_commit_order(bac
         await store.append_response(SESSION, assistant(calls=[call]), final=False, request={"tokens": 120}),
         await store.append_tool_result(SESSION, _result("call-1", "body"), details={"path": "f"}),
         await store.append_payload(SESSION, "agent_state", {"version": 1, "state": {}}),
+        await store.append_payload(
+            SESSION, "replay_refusal", {"version": 1, "source_identity": "sha256:relay", "payloads": ["hosted"]}
+        ),
         await store.append_response(SESSION, assistant("done"), final=True),
     ]
     after = time.time()
     loaded = list(await store.load(SESSION))
     assert loaded == written
-    assert [entry.kind for entry in loaded] == ["input", "response", "tool_result", "agent_state", "response"]
-    assert [entry.context_seq for entry in loaded] == list(range(1, 6))
+    assert [entry.kind for entry in loaded] == [
+        "input", "response", "tool_result", "agent_state", "replay_refusal", "response"
+    ]
+    assert [entry.context_seq for entry in loaded] == list(range(1, 7))
     assert [entry.message for entry in loaded if entry.message is not None] == [
         user("hello"),
         assistant(calls=[call]),

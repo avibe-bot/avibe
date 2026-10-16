@@ -15,7 +15,7 @@ from typing import Any, Literal, Mapping, Optional, Protocol, Sequence
 
 from core.agent_core.messages import AssistantMessage, HostedImage, Message, ToolResultMessage, UserMessage
 
-EntryKind = Literal["input", "response", "tool_result", "compaction", "context_edit", "agent_state"]
+EntryKind = Literal["input", "response", "tool_result", "compaction", "context_edit", "agent_state", "replay_refusal"]
 
 
 @dataclass(frozen=True)
@@ -72,11 +72,11 @@ class TranscriptStore(Protocol):
     ) -> ContextEntry: ...
 
     async def append_payload(
-        self, session_id: str, kind: Literal["compaction", "context_edit", "agent_state"], payload: Mapping[str, Any]
+        self, session_id: str, kind: Literal["compaction", "context_edit", "agent_state", "replay_refusal"], payload: Mapping[str, Any]
     ) -> ContextEntry: ...
 
     async def append_payloads(
-        self, session_id: str, entries: Sequence[tuple[Literal["compaction", "context_edit", "agent_state"], Mapping[str, Any]]]
+        self, session_id: str, entries: Sequence[tuple[Literal["compaction", "context_edit", "agent_state", "replay_refusal"], Mapping[str, Any]]]
     ) -> Sequence[ContextEntry]:
         """Commit several payload entries in order, in one transaction: all of them or none (C-9 section 10)."""
         ...

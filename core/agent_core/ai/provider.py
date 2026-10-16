@@ -113,9 +113,9 @@ class ModelEndpoint:
     #: A portable request (§3.5, ``portable_endpoint``): never pinned, and no native hosted content. Its Source and
     #: identity stay, so a response its own Source serves is still attributed to them.
     portable: bool = False
-    #: The Source identities whose opaque payloads go nowhere for the rest of the turn: their provider refused one
-    #: (§3.5). A message they served is sent as a different origin's.
-    opaque_refused: frozenset[str | None] = frozenset()
+    #: The opaque payloads, by (Source identity, kind), that go nowhere: their provider refused one in this Session
+    #: (§3.5). A message that identity served is sent without them, as a different origin's would be.
+    opaque_refused: frozenset[tuple[str | None, str]] = frozenset()
     #: Each enabled search tool's route on this hop, in Model Hub's order; empty when none is enabled.
     hosted_tools: Mapping[str, HostedToolRoute] = field(default_factory=dict)
     #: The models ``image_generate`` may call; None when the tool is off or no model is available.
@@ -231,9 +231,11 @@ class Refusal:
     """Why a request was refused before any output, so the next attempt renders it differently (§3.5).
 
     ``pin_unavailable``: the gateway handed a pinned request back; ``tool`` and ``aspect`` name the narrow hosted rule
-    that fired, when one did. ``opaque_refused``: the provider refused a replayed ciphertext (xAI's "Could not decrypt
-    the provided encrypted_content"), which does not say which one. ``source_id`` and ``source_identity`` are the
-    refused request's hop.
+    that fired, when one did. ``opaque_refused``: the provider refused an opaque payload a response of this Source
+    identity minted, replayed under an account that cannot read it (a key change, or a relay serving from another
+    account); ``payloads`` says which kind (``OPAQUE_PAYLOADS``): Anthropic names it, xAI's "Could not decrypt the
+    provided encrypted_content" does not, so it is both. ``source_id`` and ``source_identity`` are the refused
+    request's hop.
     """
 
     kind: Literal["pin_unavailable", "opaque_refused"]
@@ -241,6 +243,13 @@ class Refusal:
     source_identity: Optional[str] = None
     tool: Optional[str] = None
     aspect: Optional[str] = None
+    payloads: tuple["OpaquePayload", ...] = ()
+
+
+#: The kinds of opaque payload a response carries for its own account: ``hosted``, a hosted call's native payload
+#: (Anthropic's encrypted search results); ``signature``, signed or redacted thinking and other per-block signatures.
+OpaquePayload = Literal["hosted", "signature"]
+OPAQUE_PAYLOADS: tuple[OpaquePayload, ...] = ("hosted", "signature")
 
 
 ProviderEvent = Union[TextDelta, ThinkingDelta, ToolCallStart, ToolCallDelta, BlockEnd, Done, ProviderError]

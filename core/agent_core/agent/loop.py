@@ -199,20 +199,26 @@ class _Refusals:
 
     A refusal is answered by a fresh hop, rendered normally: at most once per (Source, tool, aspect) a narrow hosted
     rule names, and at most ``MAX_REFUSAL_RESOLVES`` times in the run. Past a bound, or when a gateway hand-back's
-    fresh hop is the refused one again, the request goes portable instead. A Source identity whose provider refused
-    an opaque payload sends none for the rest of the run; that refusal is answered once per identity.
+    fresh hop is the refused one again, the request goes portable instead.
+
+    A Source identity whose provider refused an opaque payload of a kind sends none of that kind again in this Session:
+    ``opaque`` starts with the Session's earlier refusals (``replay_refusal`` rows), and each new one is answered once,
+    then kept (``unsaved`` until the loop persists it). A refusal of a kind already demoted stands as the error.
     """
 
     resolves: int = 0
     rules: set[tuple[Optional[str], str, Optional[str]]] = field(default_factory=set)
-    identities: set[Optional[str]] = field(default_factory=set)
+    opaque: set[tuple[Optional[str], str]] = field(default_factory=set)
+    unsaved: dict[Optional[str], list[str]] = field(default_factory=dict)
 
     def answer(self, refusal: Refusal) -> Optional[Literal["resolve", "portable"]]:
         """How the next attempt answers ``refusal``, counted; None when the refusal stands as the error."""
         if refusal.kind == "opaque_refused":
-            if refusal.source_identity in self.identities:
+            fresh = [kind for kind in refusal.payloads if (refusal.source_identity, kind) not in self.opaque]
+            if not fresh:
                 return None
-            self.identities.add(refusal.source_identity)
+            self.opaque.update((refusal.source_identity, kind) for kind in fresh)
+            self.unsaved.setdefault(refusal.source_identity, []).extend(fresh)
         rule = (refusal.source_id, refusal.tool, refusal.aspect) if refusal.tool is not None else None
         if self.resolves >= MAX_REFUSAL_RESOLVES or rule in self.rules:
             return "portable"
@@ -225,8 +231,8 @@ class _Refusals:
         """``selection`` as the next request goes out: without the refused identities' opaque payloads, and portable
         when the refusal it answers asked for that."""
         endpoint = selection.endpoint
-        if self.identities:
-            endpoint = replace(endpoint, opaque_refused=frozenset(self.identities))
+        if self.opaque:
+            endpoint = replace(endpoint, opaque_refused=frozenset(self.opaque))
         if portable:
             endpoint = portable_endpoint(endpoint)
         return selection if endpoint is selection.endpoint else replace(selection, endpoint=endpoint)
@@ -513,6 +519,17 @@ class Agent:
                     self._running = self._open = False
                     self._run_tools = None
 
+    async def _save_refusals(self) -> None:
+        """Keep the run's new opaque refusals in the Session, so its later turns never send what was refused."""
+        unsaved, self._refusals.unsaved = self._refusals.unsaved, {}
+        for identity, payloads in unsaved.items():
+            entry = {"version": 1, "source_identity": identity, "payloads": payloads}
+            row = await self._scope.call(
+                lambda entry=entry: self.store.append_payload(self.session_id, "replay_refusal", entry),
+                interruptible=False,
+            )
+            self._rows.append(row)
+
     async def _save_state(self, *, cleanup: bool = False) -> None:
         """Hook state at a commit point; a C-9 transition writes it with its own rows (``_commit_context``)."""
         representation = state_representation(self._ctx.state)
@@ -611,7 +628,8 @@ class Agent:
                 if consume:
                     self._turn_inputs = set()
                 self._attempts = []
-                self._refusals = _Refusals()
+                # The Session's earlier opaque refusals hold from this run's first request.
+                self._refusals = _Refusals(opaque=set(projection.opaque_refused))
                 if consume:
                     self._generated_images = []
                 loaded = True
@@ -930,6 +948,8 @@ class Agent:
                 # ladder step (section 8).
                 await self._settle_attempts(first)
                 terminal = replace(terminal, partial=None)
+                if rerender is not None:
+                    await self._save_refusals()
                 if rerender == "portable":
                     selected, portable = route, True
                     continue

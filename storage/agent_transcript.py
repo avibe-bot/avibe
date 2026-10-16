@@ -108,12 +108,13 @@ _AUDIT_EVENT_TYPE: dict[str, str] = {"attempt": "model_attempt", "fork_turn": "f
 CONTEXT_WRITER = "vibey"
 PAYLOAD_VERSION = 1
 
-PayloadKind = Literal["compaction", "context_edit", "agent_state"]
+PayloadKind = Literal["compaction", "context_edit", "agent_state", "replay_refusal"]
 _EVENT_TYPE_BY_KIND: dict[str, str] = {
     "tool_result": "tool_result",
     "compaction": "context_compaction",
     "context_edit": "context_edit",
     "agent_state": "agent_state",
+    "replay_refusal": "replay_refusal",
 }
 _KIND_BY_EVENT_TYPE = {event_type: kind for kind, event_type in _EVENT_TYPE_BY_KIND.items()}
 
@@ -889,7 +890,7 @@ def _canonical(value: dict[str, Any], what: str) -> dict[str, Any]:
 
 
 def _payload(kind: str, payload: Mapping[str, Any]) -> dict[str, Any]:
-    if kind not in ("compaction", "context_edit", "agent_state"):
+    if kind not in ("compaction", "context_edit", "agent_state", "replay_refusal"):
         raise ValueError(f"not a payload entry kind: {kind!r}")
     data = _canonical(dict(payload), f"{kind} payload")
     if not _is_current_version(data):

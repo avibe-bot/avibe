@@ -17,6 +17,7 @@ unique per Session across both tables (partial unique index on each table, plus 
 | checkpoint | `agent_events` | `context_compaction` | `context` | `content_json` = `Compaction` |
 | cleared result | `agent_events` | `context_edit` | `context` | `content_json` = `ContextEdit` |
 | hook state | `agent_events` | `agent_state` | `context` | `content_json` = `AgentState` |
+| replay refusal | `agent_events` | `replay_refusal` | `context` | `content_json` = `{version, source_identity, payloads}` |
 
 A final response is `error` when it failed by itself (no text of its own: an empty answer, or a refusal or safety
 stop without an explanation), as the other backends' failed terminal rows are. A successful final with nothing to show
@@ -73,8 +74,9 @@ and usage) or
 2. Order by `context_seq`.
 3. If a `context_compaction` row exists, take the latest; the context becomes its checkpoint message (its `summary`,
    then each `state` text as its own block) followed by the rows with `context_seq >= first_kept_seq`, excluding every
-   `context_compaction` row (including the selected one) and `agent_state` rows. A tool result whose call was
-   summarized leaves with it.
+   `context_compaction` row (including the selected one), `agent_state` and `replay_refusal` rows. A tool result
+   whose call was summarized leaves with it. Every `replay_refusal` row of the ancestry holds, whatever a checkpoint
+   cut: the (Source identity, payload kind) pairs it names are never sent again in this Session (`provider.md`).
 4. Apply `context_edit` rows: the latest edit per target replaces that tool result's content with its placeholder;
    the `context_edit` rows themselves are then removed, so the result is only messages.
 5. Answer any tool call that still has no committed result with the synthetic interrupted result from
