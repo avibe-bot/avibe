@@ -90,7 +90,27 @@ Because producers are gated and the function already yields, moving the remainin
 
 ## Other writer sites on the loop (scope only)
 
-This list holds the sites known so far and is **not exhaustive**: writers are reached through many indirections, and two review rounds each found more. The complete inventory is measured at runtime rather than reviewed by hand (#2710). `storage/loop_writers.py` counts every write transaction the controller loop runs, by code location, and logs the ranked list ("Controller-loop SQLite writers") every five minutes while writes arrive and at shutdown. This section will cite that list after a soak.
+The inventory is measured, not reviewed by hand: writers are reached through many indirections, and two review rounds each found sites a manual read had missed (#2710). `storage/loop_writers.py` counts every write transaction the controller loop runs, by code location, and logs the ranked list ("Controller-loop SQLite writers") every five minutes while writes arrive and at shutdown. That log is the inventory for any run; this section records what a soak measured.
+
+**Soak 1** (2026-10-17, master 10f6b8d38). The run used a hermetic home with its state on a USB disk, for about ten minutes, with Vibey Turns, Source adds and a Model Hub engine restart running alongside. At shutdown the census reported 83 writes at 19 sites. The leading sites, by total loop time:
+
+| Site (caller) | Writes | Total | Max |
+| --- | --- | --- | --- |
+| `_start_persisted_turn` `:4409` (`recover_runtime_delivery_observation`) | 2 | 5867 ms | 3049 ms |
+| `backfill_agent_session_title` (`_backfill_session_title_once`) | 5 | 234 ms | 135 ms |
+| `_admit_p1` (`deliver`) | 8 | 222 ms | 118 ms |
+| `on_native_start` (`commit_native_start`) | 5 | 211 ms | 123 ms |
+| `persist_agent_message` (`emit_agent_message` `:3286`) | 5 | 184 ms | 120 ms |
+| `persist_agent_message` (`emit_agent_message` `:3387`) | 5 | 77 ms | 19 ms |
+| `_terminalize_durable_turn` (`_finish_durable_terminal_result`, path B) | 8 | 72 ms | 35 ms |
+| `controller.set_agent_status` (the Turn runner) | 8 | 70 ms | 51 ms |
+
+The remaining eleven sites each took under 60 ms of loop time in total and under 50 ms per write.
+
+What it shows:
+- **The only multi-second writes** were `_start_persisted_turn` re-entered by the runtime-work lane's recovery. Each took about 3 s: 2818 ms when first seen, and 3049 ms at its maximum. The loop watchdog's 3.2 s and 4.0 s stalls match them. The same call's next write (`:4469`) took 2.9 ms, so the time went to opening the transaction on a slow disk, not to its own work. The census does not separate waiting for SQLite's writer from waiting for the disk, and in this run the disk was slow: 8 s before the first of these writes, the loop also stalled 2.6 s listing the runtime-command directory (#2768). `_start_persisted_turn` holds no boundary. It is the next candidate in the list below, either through the door or as a never-waiting attempt at the writer.
+- **Every other site stayed under 135 ms per write**, on the same disk and under the same load. That includes `persist_agent_message` (#2725, parked until evidence shows a need) and path B's terminal write.
+- **Coverage.** The soak exercised the Vibey and Model Hub paths. It did not exercise IM transports, the Claude or Codex receivers, or Harness Runs. Sites that review found and that this soak did not reach stay listed below until a soak measures them.
 
 The per-Turn admissions all hold the boundary inside the transaction, so they are loop-side boundary holders and fall under B's split analysis:
 - `_admit_p0`, `_admit_p1`, `_admit_p3`, `_promote_fifo_head`;
