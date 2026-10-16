@@ -5649,19 +5649,16 @@
       },
       "claude": {
         "role": "开发",
-        "step": "开发",
         "working": "编写功能代码",
         "complete": "功能代码已就绪"
       },
       "codex": {
         "role": "评审",
-        "step": "评审",
         "working": "评审代码改动",
         "complete": "评审通过"
       },
       "opencode": {
         "role": "测试",
-        "step": "测试",
         "working": "执行测试用例",
         "complete": "测试全部通过"
       }

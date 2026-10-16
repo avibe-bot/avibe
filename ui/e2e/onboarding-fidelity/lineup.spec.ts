@@ -3,7 +3,7 @@
 // models never has the shell's aside drawn over it while the action stays where every
 // screen puts it. Hermetic: every read is answered here and every write is refused.
 import { expect, test, type Page } from '@playwright/test';
-import { PHASES, freezeAt, openOnboarding, openSetup, serveProduct } from './support';
+import { PHASES, VIEWPORTS, freezeAt, openOnboarding, openSetup, serveProduct, size } from './support';
 import { CONTRACT_VERSION } from '../../src/components/settings/models/types';
 
 const LINEUP = ['vibey', 'claude', 'codex', 'opencode'];
@@ -96,6 +96,56 @@ test('the lineup stands the built-in assistant first, on the reference tracks of
   expect(destinations.map((box) => Math.round(box.x))).toEqual(intro.map((box) => Math.round(box.x)));
   await expect(page.locator('.setup-destination').first()).toContainText('Built-in');
 });
+
+/**
+ * The coordinator's card draws its plan in the same language as the work the other cards
+ * show, and no card's work is cut off by the box it is drawn in. Every row is checked
+ * against every clipping box between it and its card, the card included, so a row that
+ * reaches past a clipped skeleton fails here however the skeleton is laid out.
+ */
+for (const viewport of VIEWPORTS) {
+  test(`${size(viewport)}: the plan wears each assistant's mark and every card's work is drawn whole`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    const denied = await serveProduct(page);
+    await openOnboarding(page, { lang: 'zh' });
+    await freezeAt(page, PHASES['tests-running']);
+
+    // One plan row per assistant the coordinator hands a part to, in the lineup's order,
+    // each wearing the mark that assistant's own card wears — and no type to truncate.
+    const marks = await page.locator('.onboarding-collaboration-card').evaluateAll((cards) => {
+      const mark = (node: Element | null) => node?.querySelector('svg path')?.getAttribute('d') ?? null;
+      const plan = [...cards[0].querySelectorAll('.onboarding-handoff-row')];
+      return {
+        plan: plan.map((row) => mark(row.querySelector('.onboarding-handoff-mark'))),
+        cards: cards.slice(1).map((card) => mark(card.querySelector('.onboarding-card-logo'))),
+        text: plan.map((row) => row.textContent?.trim() ?? ''),
+      };
+    });
+    expect(marks.plan).toEqual(marks.cards);
+    expect(marks.plan.every(Boolean)).toBe(true);
+    expect(marks.text.every((text) => text === '')).toBe(true);
+
+    const clipped = await page.locator('.onboarding-collaboration-card').evaluateAll((cards) => cards.flatMap((card) =>
+      [...card.querySelectorAll('.onboarding-skeleton > *')].flatMap((row, index) => {
+        const box = row.getBoundingClientRect();
+        const cuts: string[] = [];
+        for (let node = row.parentElement; node; node = node.parentElement) {
+          const style = getComputedStyle(node);
+          const edge = node.getBoundingClientRect();
+          const inner = {
+            left: edge.left + parseFloat(style.borderLeftWidth), right: edge.right - parseFloat(style.borderRightWidth),
+            top: edge.top + parseFloat(style.borderTopWidth), bottom: edge.bottom - parseFloat(style.borderBottomWidth),
+          };
+          if (style.overflowX !== 'visible' && (box.left < inner.left - 0.5 || box.right > inner.right + 0.5)) cuts.push('x');
+          if (style.overflowY !== 'visible' && (box.top < inner.top - 0.5 || box.bottom > inner.bottom + 0.5)) cuts.push('y');
+          if (node === card) break;
+        }
+        return cuts.length ? [`${card.getAttribute('data-backend')} row ${index + 1}: ${cuts.join('')}`] : [];
+      })));
+    expect(clipped).toEqual([]);
+    expect(denied).toEqual([]);
+  });
+}
 
 /**
  * The caption is a row of the assistants' own grid and OpenCode asks for its permission in
