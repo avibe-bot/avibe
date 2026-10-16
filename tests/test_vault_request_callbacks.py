@@ -879,7 +879,7 @@ def _wait_for_active_waiter(engine, proc) -> dict:
     raise AssertionError("the vault run never armed an approval waiter")
 
 
-def _callback_service(monkeypatch, tmp_path):
+def _callback_service(monkeypatch, tmp_path, *, backend="file"):
     from types import SimpleNamespace
 
     from core import scheduled_tasks as st
@@ -897,7 +897,7 @@ def _callback_service(monkeypatch, tmp_path):
         reasoning_effort=None,
     )
     monkeypatch.setattr(st, "resolve_session_id_target", lambda session_id: target)
-    request_store = st.TaskExecutionStore(tmp_path / "task_requests")
+    request_store = st.TaskExecutionStore() if backend == "sqlite" else st.TaskExecutionStore(tmp_path / "task_requests")
 
     def service():
         # A fresh instance per call is a service restart: no in-memory owner state survives it.
@@ -1009,7 +1009,8 @@ def test_live_waiter_keeps_its_approval_past_its_wall_clock_deadline_and_across_
     assert not vs.request_waiter_lock_path(paths.get_sqlite_state_path(), waiter_id).exists()
 
 
-def test_claimed_callback_survives_enqueue_before_mark_and_refuses_a_later_waiter(monkeypatch, tmp_path):
+@pytest.mark.parametrize("backend", ["sqlite", "file"])
+def test_claimed_callback_survives_enqueue_before_mark_and_refuses_a_later_waiter(monkeypatch, tmp_path, backend):
     from vibe import cli
 
     engine = cli._open_vault_engine()
@@ -1017,7 +1018,7 @@ def test_claimed_callback_survives_enqueue_before_mark_and_refuses_a_later_waite
         req = _owner_request(conn, "CLAIM_KEY")
         _grant_from_request(conn, req)
         row = _row(conn, req["id"])
-    service, request_store = _callback_service(monkeypatch, tmp_path)
+    service, request_store = _callback_service(monkeypatch, tmp_path, backend=backend)
 
     def stopped_before_mark(conn, request_id, *, status):
         raise RuntimeError("the daemon stopped between enqueue and the sent mark")

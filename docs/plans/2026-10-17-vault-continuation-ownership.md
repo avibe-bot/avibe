@@ -46,9 +46,10 @@ continuation arbitration; the job layer only owns command execution.
    remain authoritative. Callback enqueue is idempotent across the enqueue/mark
    crash window: `source_actor` alone is currently only a label for Vault
    callbacks, not a deduplication guarantee. Reuse durable Run identity and the
-   existing request store rather than add a parallel queue. Covered sibling
-   requests must follow the same ownership decision without duplicate Agent
-   turns for the same resolved approval.
+   existing request store rather than add a parallel queue. Preserve the existing
+   suppression of covered sibling callbacks when a synchronous owner completes.
+   Separate requests are not merged merely because they share a grant: a grant
+   authorizes access, not the identity of an operation to execute.
 7. Released waiter rows without ownership evidence need an explicit bounded
    compatibility policy. Missing historical proof is not evidence of death;
    do not release possibly live old waiters by guessing.
@@ -74,8 +75,8 @@ Additional distinct risks:
 - Dead-owner recovery and live-owner preservation across a service instance
   change are distinguished.
 - Approval without a delivery-ready grant still waits.
-- Covered siblings and repeated scheduler processing do not create duplicate
-  Agent turns.
+- Covered siblings preserve the existing synchronous-owner suppression, and
+  repeated processing of the same request does not create duplicate Agent turns.
 - Legacy records follow the documented bounded rollout policy.
 
 Tests use temporary homes/databases and only processes they start; no real
@@ -172,10 +173,15 @@ Implemented on `fix/vault-continuation-ownership`; not yet published or reviewed
   `storage/lock.py` adds the non-creating lock inspection and the
   holder-only removal.
 - `core/scheduled_tasks.py` processes each request through
-  `claim_request_callback` and enqueues with the claimed Run id. The periodic
-  Vault callback drain now runs its SQLite work on the runtime-work executor
-  instead of the controller loop. A failed claim leaves the request pending for
-  the next pass rather than marking it failed.
+  `claim_request_callback` and enqueues with the claimed Run id. Caller-fixed
+  identities use insert-only arbitration in `storage/background.py`, under the
+  SQLite writer reservation, rather than the ordinary Run upsert. The file
+  backend similarly serializes its final lookup and insertion with an OS lock.
+  An early lookup is only an optimization; a concurrently started or completed
+  Run can never be rewritten to `queued`. The periodic Vault callback drain runs
+  its SQLite work on the runtime-work executor instead of the controller loop.
+  A failed claim leaves the request pending for the next pass rather than marking
+  it failed.
 - `vibe/cli.py` holds the waiter lock for the whole wait and returns
   `approval_handed_off` without delivering when it loses arm or completion.
 - `skills/use-avibe-vault/SKILL.md` (0.5.0) tells the Agent not to rerun a
@@ -185,6 +191,11 @@ The primary regression starts a real `vibe vault run`, hard-kills it with its
 deadline more than five minutes away, approves, and requires the next callback
 pass to send. On the base revision that pass returned `pending`. The stale-scan
 and enqueue-before-mark regressions also fail on the base revision with a
-second callback Run.
+second callback Run. Independent review additionally reproduced a stale-absence
+race against the first implementation: a competing producer completed the same
+fixed-id Run after an initial missing lookup, and the ordinary upsert reset it to
+`queued` (or recreated its pending file). The regression fails on that version
+for both SQLite and file stores and passes with insert-only arbitration. Crash
+replay is also exercised through both stores, not only the legacy file backend.
 
 No runtime deployment or restart is authorized by this change.

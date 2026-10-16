@@ -4114,11 +4114,18 @@ class SQLiteBackgroundTaskStore:
         *,
         expected_enabled_agent_id: Optional[str] = None,
         expected_reference_agent_id: Optional[str] = None,
+        if_absent: bool = False,
     ) -> None:
         values = self._run_values(payload)
         with run_update_event_transaction(self.engine) as conn:
-            if expected_enabled_agent_id is not None or expected_reference_agent_id is not None:
+            if if_absent or expected_enabled_agent_id is not None or expected_reference_agent_id is not None:
                 reserve_write_lock(conn)
+            if if_absent and conn.execute(
+                select(agent_runs.c.id).where(agent_runs.c.id == values["id"])
+            ).scalar_one_or_none() is not None:
+                # A caller-fixed identity is insert-only. The ordinary enqueue helper
+                # upserts, which would reset a concurrently started/completed Run to queued.
+                return
             if expected_enabled_agent_id is not None:
                 _require_enabled_agent_identity(
                     conn,

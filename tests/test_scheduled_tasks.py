@@ -633,6 +633,45 @@ def test_task_execution_store_uses_sqlite_runs_when_root_is_default(tmp_path: Pa
     assert saved["session_key"] == "slack::channel::C123"
 
 
+@pytest.mark.parametrize("backend", ["sqlite", "file"])
+def test_caller_fixed_run_id_cannot_requeue_a_run_inserted_after_the_initial_lookup(tmp_path, monkeypatch, backend):
+    """A second callback pass must not overwrite the first pass's already-settled Run.
+
+    Sequential recovery covered only an existing initial lookup. Here the lookup
+    sees no row, then another producer enqueues and completes before it returns.
+    Both stores must arbitrate at the write, not trust that stale absence.
+    """
+    store = TaskExecutionStore() if backend == "sqlite" else TaskExecutionStore(tmp_path / "fixed-runs")
+    arguments = {
+        "message": "Resume the approved task once",
+        "source_kind": "callback",
+        "source_actor": "vault:vrq_test",
+        "agent_backend": "vibey",
+        "run_id": "012345abcdef",
+    }
+    real_get = store.get_run
+    raced = False
+
+    def lookup_then_competing_completion(run_id):
+        nonlocal raced
+        snapshot = real_get(run_id)
+        if not raced:
+            raced = True
+            winner = store.enqueue_agent_run(**arguments)
+            claimed = store.claim(winner.id)
+            assert claimed is not None
+            store.complete(claimed, ok=True)
+            assert real_get(run_id)["status"] == "succeeded"
+        return snapshot
+
+    monkeypatch.setattr(store, "get_run", lookup_then_competing_completion)
+    replay = store.enqueue_agent_run(**arguments)
+
+    assert replay.id == arguments["run_id"]
+    assert real_get(replay.id)["status"] == "succeeded"
+    assert store.list_pending() == []
+
+
 def test_sqlite_complete_persists_resolved_run_target(tmp_path: Path) -> None:
     sqlite = SQLiteBackgroundTaskStore(tmp_path / "state" / "vibe.sqlite")
     store = TaskExecutionStore(tmp_path / "task_requests")

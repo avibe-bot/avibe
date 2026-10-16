@@ -22,7 +22,7 @@ from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED, JobExecutionEv
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy.exc import SQLAlchemyError
 
 from config import paths
 from config.atomic_io import write_atomic
@@ -2555,6 +2555,34 @@ class TaskExecutionStore:
         write_atomic(path, json.dumps(request.to_dict(), indent=2))
         return request
 
+    def _enqueue_identified_run(
+        self,
+        request: TaskExecutionRequest,
+        *,
+        expected_enabled_agent_id: Optional[str],
+    ) -> TaskExecutionRequest:
+        """Insert a caller-owned identity without ever resetting an existing Run."""
+
+        if self._sqlite is not None:
+            self._sqlite.enqueue_run(
+                self.queued_run_payload(request),
+                expected_enabled_agent_id=expected_enabled_agent_id,
+                if_absent=True,
+            )
+            stored = self._sqlite.get_run(request.id)
+        else:
+            from storage.lock import MigrationFileLock
+
+            # File-backed producers also serialize their final check and write. Keep
+            # this inode: another store/process may already be waiting on it.
+            with MigrationFileLock(self.root / "identified-enqueue.lock", timeout_seconds=None):
+                stored = self.get_run(request.id)
+                if stored is None:
+                    return self.enqueue(request, expected_enabled_agent_id=expected_enabled_agent_id)
+        if stored is None:
+            raise RuntimeError(f"Identified Run {request.id} was not persisted")
+        return TaskExecutionRequest.from_dict(stored)
+
     def enqueue_task_run(
         self,
         task_id: str,
@@ -2881,17 +2909,15 @@ class TaskExecutionStore:
             parent_status = _normalize_requested_run_status(parent.get("status"))
             if bool(parent.get("cancel_requested")) and parent_status != "canceled":
                 return None
-        try:
+        if run_id:
+            queued = self._enqueue_identified_run(
+                request, expected_enabled_agent_id=expected_enabled_agent_id
+            )
+        else:
             queued = self.enqueue(
                 request,
                 expected_enabled_agent_id=expected_enabled_agent_id,
             )
-        except IntegrityError:
-            # Two passes raced to the same caller-fixed id; the one that landed is the Run.
-            existing = self.get_run(run_id) if run_id else None
-            if existing is None:
-                raise
-            return TaskExecutionRequest.from_dict(existing)
         if normalized_callback_parent:
             self.update_callback_status(
                 normalized_callback_parent,
