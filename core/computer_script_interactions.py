@@ -79,6 +79,8 @@ class _PendingConfirm:
     context: MessageContext
     question: PendingQuestion
     future: asyncio.Future[bool]
+    # Answerable only once the owner has been shown the prompt.
+    armed: bool = False
 
 
 class ComputerScriptInteractionManager:
@@ -97,18 +99,11 @@ class ComputerScriptInteractionManager:
     async def notify(self, token: str, message: str) -> dict[str, Any]:
         binding = self._admit_message(token, message)
         context = routed_delivery_context(binding.turn.context)
-        try:
-            message_id = await self._controller.emit_agent_message(
-                context,
-                "notify",
-                message,
-            )
-        except Exception as exc:
-            logger.exception("Computer script notify delivery failed")
-            raise ComputerScriptInteractionError(
-                "computer_script_notify_failed",
-                status_code=503,
-            ) from exc
+        message_id = await self._deliver(
+            context,
+            message,
+            failure_code="computer_script_notify_failed",
+        )
         return {
             "status": "confirmed",
             "effect": "confirmed",
@@ -122,7 +117,12 @@ class ComputerScriptInteractionManager:
 
     async def confirm(self, token: str, message: str) -> dict[str, Any]:
         binding = self._admit_message(token, message)
-        if token in self._pending_by_token:
+        # A yes/no reply carries no prompt identity, so a Session may have only
+        # one question open; otherwise one answer could approve another action.
+        if any(
+            record.question.base_session_id == binding.session_id
+            for record in self._pending.values()
+        ):
             raise ComputerScriptInteractionError("confirm_already_pending")
 
         context = routed_delivery_context(binding.turn.context)
@@ -150,20 +150,23 @@ class ComputerScriptInteractionManager:
             future=loop.create_future(),
         )
         confirm_id = secrets.token_urlsafe(18)
+        # Registered before the prompt is sent so it holds the Session's single
+        # slot and observes invalidation, but not answerable until delivered.
         self._pending[confirm_id] = record
         self._pending_by_token[token] = confirm_id
         try:
-            prompt = self._translate(
-                "computer.cli.confirm.prompt",
-                message=message,
+            await self._deliver(
+                context,
+                self._translate("computer.cli.confirm.prompt", message=message),
+                failure_code="confirm_prompt_failed",
             )
-            await self._controller.emit_agent_message(context, "notify", prompt)
+            record.armed = True
             approved = await record.future
-        except asyncio.CancelledError:
-            self._remove(confirm_id)
-            raise
         finally:
             self._remove(confirm_id)
+            if record.future.done() and not record.future.cancelled():
+                # Consume an invalidation that raced a failed prompt send.
+                record.future.exception()
 
         # The answer itself is consumed before Turn admission, so this notice is
         # the transcript's durable record of how the owner answered.
@@ -209,6 +212,7 @@ class ComputerScriptInteractionManager:
             if (
                 record.question.base_session_id == normalized_session_id
                 and record.question.expected_approver_id == normalized_approver_id
+                and record.armed
                 and not record.future.done()
             ):
                 return confirm_id, answer
@@ -269,6 +273,32 @@ class ComputerScriptInteractionManager:
             return self._script_sessions.admit(token)
         except ComputerScriptSessionError:
             raise
+
+    async def _deliver(
+        self,
+        context: MessageContext,
+        message: str,
+        *,
+        failure_code: str,
+    ) -> str:
+        """Send one notify and return its id; a missing id means not delivered."""
+
+        try:
+            message_id = await self._controller.emit_agent_message(
+                context,
+                "notify",
+                message,
+            )
+        except Exception as exc:
+            logger.exception("Computer script message delivery failed")
+            raise ComputerScriptInteractionError(
+                failure_code,
+                status_code=503,
+            ) from exc
+        if message_id is None:
+            # The dispatcher reports a failed IM send by returning no id.
+            raise ComputerScriptInteractionError(failure_code, status_code=503)
+        return message_id
 
     async def _best_effort_notify(self, context: MessageContext, message: str) -> None:
         try:

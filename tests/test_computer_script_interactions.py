@@ -32,26 +32,35 @@ def _context(
 
 
 class _FakeScriptSessions:
-    def __init__(self, binding) -> None:
-        self.binding = binding
+    def __init__(self, *bindings) -> None:
+        self.bindings = {binding.token: binding for binding in bindings}
 
     def admit(self, token: str):
-        if token != self.binding.token:
+        if token not in self.bindings:
             raise AssertionError(f"unexpected token: {token}")
-        return self.binding
+        return self.bindings[token]
 
 
 class _FakeController:
     def __init__(self, language: str = "en") -> None:
         self.config = SimpleNamespace(language=language)
         self.messages: list[tuple[MessageContext, str, str]] = []
+        # ``"none"`` mimics the dispatcher's failed IM send; ``"raise"`` an error.
+        self.delivery = "ok"
+        self.release: asyncio.Event | None = None
 
     async def emit_agent_message(
         self,
         context: MessageContext,
         message_type: str,
         text: str,
-    ) -> str:
+    ) -> str | None:
+        if self.release is not None:
+            await self.release.wait()
+        if self.delivery == "raise":
+            raise RuntimeError("adapter failed")
+        if self.delivery == "none":
+            return None
         self.messages.append((context, message_type, text))
         return f"message-{len(self.messages)}"
 
@@ -63,11 +72,14 @@ def _manager(
 ) -> tuple[ComputerScriptInteractionManager, _FakeController, SimpleNamespace]:
     context = _context(user_id=owner_id, platform=platform)
     turn = SimpleNamespace(context=context)
-    binding = SimpleNamespace(token="script-token", session_id="session", turn=turn)
+    bindings = [
+        SimpleNamespace(token=token, session_id="session", turn=turn)
+        for token in ("script-token", "second-script-token")
+    ]
     controller = _FakeController()
     manager = ComputerScriptInteractionManager(
         controller,
-        _FakeScriptSessions(binding),
+        _FakeScriptSessions(*bindings),
     )
     return manager, controller, turn
 
@@ -99,6 +111,73 @@ def test_notify_reuses_the_launching_surface(platform: str) -> None:
     assert text == "A progress update"
 
 
+@pytest.mark.parametrize(
+    ("operation", "delivery", "code"),
+    [
+        ("notify", "none", "computer_script_notify_failed"),
+        ("notify", "raise", "computer_script_notify_failed"),
+        ("confirm", "none", "confirm_prompt_failed"),
+        ("confirm", "raise", "confirm_prompt_failed"),
+    ],
+)
+def test_undelivered_interaction_fails_typed(
+    operation: str, delivery: str, code: str
+) -> None:
+    """A message the owner never received is never reported as delivered."""
+
+    async def exercise() -> tuple[str, bool]:
+        manager, controller, _turn = _manager(platform="slack")
+        controller.delivery = delivery
+        try:
+            await getattr(manager, operation)("script-token", "Send it?")
+        except ComputerScriptInteractionError as exc:
+            return exc.code, manager.pending_for_token("script-token") is None
+        raise AssertionError("undelivered interaction succeeded")
+
+    assert asyncio.run(exercise()) == (code, True)
+
+
+def test_confirm_is_answerable_only_after_its_prompt_is_delivered() -> None:
+    async def exercise() -> dict:
+        manager, controller, _turn = _manager(platform="slack")
+        controller.release = asyncio.Event()
+        pending = asyncio.create_task(manager.confirm("script-token", "Send it?"))
+        await asyncio.sleep(0)
+        answer = {"session_id": "session", "approver_id": "owner", "message": "yes"}
+        assert manager.pending_for_token("script-token") is not None
+        assert manager.match_answer(**answer) is None
+        controller.release.set()
+        for _ in range(3):
+            await asyncio.sleep(0)
+        matched = manager.match_answer(**answer)
+        assert matched is not None
+        manager.resolve_answer(*matched)
+        return await pending
+
+    assert asyncio.run(exercise())["effect"] == "confirmed"
+
+
+def test_a_session_has_at_most_one_pending_confirm() -> None:
+    """A yes/no reply names no prompt, so a second script cannot open another."""
+
+    async def exercise() -> tuple[str, bool]:
+        manager, _controller, _turn = _manager(platform="slack")
+        first = asyncio.create_task(manager.confirm("script-token", "Send A?"))
+        await asyncio.sleep(0)
+        try:
+            await manager.confirm("second-script-token", "Send B?")
+        except ComputerScriptInteractionError as exc:
+            code = exc.code
+        else:
+            raise AssertionError("second confirm was admitted")
+        still_waiting = not first.done()
+        first.cancel()
+        await asyncio.gather(first, return_exceptions=True)
+        return code, still_waiting
+
+    assert asyncio.run(exercise()) == ("confirm_already_pending", True)
+
+
 @pytest.mark.parametrize("invalidation_code", ["script_turn_ended", "script_timeout"])
 def test_pending_confirm_is_invalidated_with_the_script_connection(
     invalidation_code: str,
@@ -117,8 +196,14 @@ def test_pending_confirm_is_invalidated_with_the_script_connection(
     assert asyncio.run(exercise()) == invalidation_code
 
 
-def test_turn_binding_invalidation_wakes_a_pending_confirm() -> None:
-    async def exercise() -> str:
+@pytest.mark.parametrize(
+    ("ending", "code"),
+    [("turn_ended", "script_turn_ended"), ("closed", "script_connection_invalid")],
+)
+def test_script_connection_end_wakes_a_pending_confirm(ending: str, code: str) -> None:
+    """No confirm outlives its script, whether the Turn ends or the script closes."""
+
+    async def exercise() -> tuple[str, bool]:
         controller = _FakeController()
         controller._session_id_from_context = lambda context: (
             context.platform_specific or {}
@@ -142,18 +227,23 @@ def test_turn_binding_invalidation_wakes_a_pending_confirm() -> None:
         token = script_sessions.open("session", 30)["connection_token"]
         pending = asyncio.create_task(interactions.confirm(token, "Continue?"))
         await asyncio.sleep(0)
-        script_sessions.invalidate_turn(turn)
+        if ending == "turn_ended":
+            script_sessions.invalidate_turn(turn)
+        else:
+            script_sessions.close(token)
         try:
             await pending
         except ComputerScriptInteractionError as exc:
-            return exc.code
+            return exc.code, interactions.match_answer(
+                session_id="session", approver_id="owner", message="yes"
+            ) is None
         finally:
             script_sessions.close_all()
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        raise AssertionError("Turn invalidation left confirm pending")
+        raise AssertionError("ended script left confirm pending")
 
-    assert asyncio.run(exercise()) == "script_turn_ended"
+    assert asyncio.run(exercise()) == (code, True)
 
 
 def test_internal_routes_bound_interactions_and_reject_oversized_messages() -> None:

@@ -157,6 +157,10 @@ class ComputerScriptSessionManager:
         if binding is None:
             return False
         self._cancel_binding_handles(binding)
+        if binding.invalid_code is None:
+            # A normal close ends the connection too: state bound to it, such as
+            # a pending confirm, must not outlive the script.
+            self._notify_invalidation(token, "script_connection_invalid")
         return True
 
     def close_all(self) -> None:
@@ -182,6 +186,9 @@ class ComputerScriptSessionManager:
             self.close,
             token,
         )
+        self._notify_invalidation(token, code)
+
+    def _notify_invalidation(self, token: str, code: str) -> None:
         for listener in tuple(self._invalidation_listeners):
             try:
                 listener(token, code)

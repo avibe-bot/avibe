@@ -141,6 +141,13 @@ Turn ending or the script deadline, is admitted unchanged. The confirm then
 posts a short approved/declined notice on the launching surface, which is the
 transcript's record of the answer.
 
+A yes/no reply names no prompt, so a Session has at most one pending confirm;
+a second one fails with `confirm_already_pending`. A confirm becomes answerable
+only after its prompt is delivered; an undelivered prompt fails the confirm with
+`confirm_prompt_failed`, and an undelivered notify fails with
+`computer_script_notify_failed`. Closing the script connection, like the Turn
+ending or the script deadline, invalidates its pending confirm.
+
 ## Execution and runtime
 
 The command is:

@@ -59,6 +59,11 @@ def _result(payload: dict, *, is_error: bool = False, image: bool = False) -> di
     }
 
 
+# An interaction answer that arrives after the request was sent but cannot be
+# decoded, so the client cannot know whether the Controller acted on it.
+_GARBLED_RESPONSE = "<garbled-response>"
+
+
 @contextmanager
 def _fake_controller(
     *,
@@ -102,7 +107,9 @@ def _fake_controller(
             }:
                 operation = self.path.rsplit("/", 1)[-1]
                 error = (interaction_errors or {}).get(operation)
-                if error is not None:
+                if error == _GARBLED_RESPONSE:
+                    body = None
+                elif error is not None:
                     body = {
                         "ok": False,
                         "error": error,
@@ -352,7 +359,7 @@ def _fake_controller(
                         {"code": "unknown_tool", "params": {"tool": tool}},
                         is_error=True,
                     )
-            encoded = json.dumps(body).encode()
+            encoded = b"{" if body is None else json.dumps(body).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(encoded)))
@@ -833,6 +840,38 @@ export default async () => {
             "ambiguous": False,
             "step": "avibe.confirm",
         },
+    }
+
+
+@pytest.mark.parametrize(
+    ("operation", "ambiguous"),
+    [("notify", True), ("confirm", False)],
+)
+def test_avibe_interaction_lost_response_ambiguity(
+    tmp_path: Path, operation: str, ambiguous: bool
+) -> None:
+    """A notify may already be delivered; a lost confirm never approved anything."""
+
+    payload, _server, _requests = _run_node_script(
+        tmp_path,
+        f"""
+import {{ avibe }} from "@avibe/computer";
+
+export default async () => {{
+  try {{
+    await avibe.{operation}("Continue?");
+  }} catch (error) {{
+    return {{ code: error.code, ambiguous: error.ambiguous }};
+  }}
+  throw new Error("lost response was not raised");
+}};
+""",
+        interaction_errors={operation: _GARBLED_RESPONSE},
+    )
+
+    assert payload == {
+        "ok": True,
+        "result": {"code": "invalid_computer_use_response", "ambiguous": ambiguous},
     }
 
 

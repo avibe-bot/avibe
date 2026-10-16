@@ -929,6 +929,7 @@
         "confirmRefused": "所有者拒绝了这次确认。",
         "confirmAlreadyPending": "脚本已经有一个等待回答的确认请求。",
         "confirmApproverUnavailable": "无法确定这次确认的所有者身份。",
+        "confirmPromptFailed": "确认问题未能送达，因此没有任何操作获得批准。",
         "scriptControllerUnavailable": "Controller 当前不可用。",
         "scriptDeadlineExpired": "脚本截止时间已到。",
         "scriptElementNotActionable": "匹配到的元素无法执行操作。",

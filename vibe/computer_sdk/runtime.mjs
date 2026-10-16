@@ -213,9 +213,9 @@ export async function callScriptInteraction(operation, message) {
       message,
     });
   } catch (error) {
-    // Confirm has no desktop side effect. Even a transport failure after the
-    // request was sent cannot make the confirmation itself ambiguous.
-    if (error instanceof ControllerFault) {
+    // Confirm has no desktop side effect, and a lost confirm never approved
+    // anything, so it is never ambiguous. A notify may already be delivered.
+    if (operation === "confirm" && error instanceof ControllerFault) {
       error.ambiguous = false;
     }
     throw error;
