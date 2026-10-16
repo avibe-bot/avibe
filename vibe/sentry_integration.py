@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import platform
@@ -10,9 +11,15 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import quote, urlsplit
 
 from config.v2_config import V2Config
 from config import paths
+
+try:
+    from sentry_sdk.transport import HttpTransport as _SentryHttpTransport
+except Exception:  # pragma: no cover - the dependency is required in packaged builds
+    _SentryHttpTransport = None
 
 logger = logging.getLogger(__name__)
 
@@ -24,28 +31,199 @@ DEPLOYMENT_ENV_VAR = "VIBE_DEPLOYMENT_ENV"
 
 _SENSITIVE_KEY_PARTS = (
     "access_key",
+    "aes_key",
     "api_key",
     "app_token",
     "authorization",
     "bot_token",
     "client_secret",
     "cookie",
+    "credential",
     "dsn",
+    "management_key",
+    "passphrase",
     "password",
+    "private_key",
     "secret",
     "signing_secret",
     "token",
     "webhook",
     "workspace_token",
 )
+# Generic names a credential also travels under, matched only as the whole key so
+# ``cache_key`` or ``author`` stay readable. Model Hub sends ``{"key": ...}`` to
+# validate a credential before it is stored anywhere.
+_SENSITIVE_EXACT_KEYS = ("auth", "key")
+# Fields that carry a request's query string; dropped whole.
+_DROPPED_KEYS = frozenset({"http.query", "http.fragment", "query_string"})
 _REDACTED = "[Filtered]"
+
+
+def _normalized_key(key: str) -> str:
+    # ``api_key``, ``apiKey``, ``x-api-key`` and ``API-KEY`` name the same credential.
+    return re.sub(r"[^a-z0-9]", "", key.lower())
+
+
+_SENSITIVE_KEY_TOKENS = tuple(_normalized_key(part) for part in _SENSITIVE_KEY_PARTS)
+
+
+def _text_key_pattern(token: str) -> str:
+    # A normalized key as it may be written in text: any case, with an optional
+    # ``_``, ``-`` or ``.`` between its characters.
+    return "[_.-]?".join(re.escape(char) for char in token)
+
+
+# A sensitive key rendered into free text: a dataclass repr, a header line,
+# ``key=value``, or JSON, including JSON nested inside a JSON string. The key
+# starts at a word boundary, and the key and its escaping depth are bounded so
+# long runs of word characters or backslashes stay linear.
+# A quoted value ends at its first unescaped closing delimiter; when none is
+# found, everything after the opening delimiter is redacted rather than kept. An
+# unquoted value led by an auth scheme (``Bearer <token>``) includes the token.
+_SENSITIVE_KEY_VALUE_RE = re.compile(
+    r"(?i)(?<![\w.-])(?P<kq>\\{0,4}[\"']?)"
+    r"(?:[\w.-]{0,40}(?:" + "|".join(_text_key_pattern(token) for token in _SENSITIVE_KEY_TOKENS) + r")[\w.-]{0,40}"
+    r"|" + "|".join(_text_key_pattern(key) for key in _SENSITIVE_EXACT_KEYS) + r")"
+    r"(?P=kq)\s*[:=]\s*"
+    r"(?:(?P<vq>\\{0,4}[\"'])(?P<quoted>.*?)(?:(?<!\\)(?P=vq)|\Z)"
+    r"|(?P<bare>(?:(?:basic|bearer|bot|digest|token)\s+)?(?:[^\s\"'\\]|\\(?![\"']))+))",
+    re.DOTALL,
+)
+
+
+def _redact_key_value(match: re.Match[str]) -> str:
+    group = "quoted" if match.group("quoted") is not None else "bare"
+    start, end = match.span(group)
+    offset = match.start()
+    text = match.group(0)
+    return text[: start - offset] + _REDACTED + text[end - offset :]
+
+
+# Any URL keeps only its origin. A path, query, fragment or userinfo carries
+# capabilities no key name announces: a Slack response_url, a Discord
+# interaction token, WeChat CDN parameters, a Telegram bot token, a proxy
+# password. An authority that is not a plain host[:port] is dropped whole. The
+# scheme is length-bounded so runs like ``a.a.a`` stay linear, and a backslash
+# stands for a slash as browsers read it; it ends the URL only before a quote.
+# A ``user:pass`` whose password holds a quote or bracket would end the URL
+# early, so a colon-bearing authority cut by one of them, with an ``@`` before
+# the next space, is read as userinfo running to that ``@`` - unless the cut is
+# compact JSON structure (``","`` or ``":"``), as after ``"http://host:8080"``.
+_URL_RE = re.compile(
+    r"(?i)\b(?P<scheme>[a-z][a-z0-9+.-]{0,30}:[/\\]{2})"
+    r"(?:(?P<userinfo>[^\s/\\?#\"'<>`@]*:[^\s/\\?#\"'<>`@]*"
+    r"(?![\"'][,:][\"'])\\{0,4}[\"'<>`](?:(?![\"'][,:][\"'])[^\s@]){0,256})@)?"
+    r"(?P<authority>[^\s/\\?#\"'<>`]*)"
+    r"(?P<rest>(?:[^\s\"'<>`\\]|\\(?![\"']))*)"
+)
+# The same for a URL written without its scheme: ``hooks.slack.com/actions/...``,
+# ``//host/path``, ``10.0.0.5:8080/path``, ``localhost:5123/path``.
+_SCHEMELESS_URL_RE = re.compile(
+    r"(?i)(?:(?<=//)|(?<![\w.@/-]))"
+    r"(?P<host>(?:(?:[a-z0-9-]{1,63}\.){1,10}[a-z]{2,24}|\d{1,3}(?:\.\d{1,3}){3}|localhost|\[[0-9a-f:.]{2,45}\])"
+    r"(?::\d{1,5})?)(?P<rest>/(?:[^\s\"'<>`\\]|\\(?![\"']))*)"
+)
+# URL delimiters spelled another way: percent-encoded (any depth of ``%25``),
+# JSON ``\u00XX`` or ``\/``, or an HTML character reference. They are read as
+# the delimiter itself before URLs and keys are matched.
+_DELIMITER_CHARACTERS = {
+    "3a": ":", "2f": "/", "5c": "\\", "3f": "?", "23": "#", "40": "@", "3d": "=", "26": "&",
+}
+_DELIMITER_DECIMALS = {"58": ":", "47": "/", "92": "\\", "63": "?", "35": "#", "64": "@", "61": "=", "38": "&"}
+_DELIMITER_NAMES = {
+    "colon": ":", "sol": "/", "bsol": "\\", "quest": "?", "num": "#", "commat": "@", "equals": "=", "amp": "&",
+}
+_ENCODED_DELIMITER_RE = re.compile(
+    r"(?i)%(?:25)*(?P<pct>3a|2f|5c|3f|23|40|3d|26)"
+    r"|\\u00(?P<uni>3a|2f|5c|3f|23|40|3d|26)"
+    r"|&#x0*(?P<hex>3a|2f|5c|3f|23|40|3d|26);?"
+    r"|&#0*(?P<dec>58|47|92|63|35|64|61|38);?"
+    r"|&(?P<name>colon|sol|bsol|quest|num|commat|equals|amp);"
+    r"|\\(?P<slash>/)"
+)
+
+
+def _decoded_delimiter(match: re.Match[str]) -> str:
+    if match.group("slash"):
+        return "/"
+    if match.group("dec"):
+        return _DELIMITER_DECIMALS[match.group("dec")]
+    if match.group("name"):
+        return _DELIMITER_NAMES[match.group("name").lower()]
+    code = match.group("pct") or match.group("uni") or match.group("hex")
+    return _DELIMITER_CHARACTERS[code.lower()]
+
+
+_URL_HOST_RE = re.compile(r"(?i)(?:[a-z0-9.-]+|\[[0-9a-f:.]+\])(?::\d{1,5})?")
+_URL_TRAILING_PUNCTUATION = ".,;:!?)]}"
+
+
+def _reduced_url(origin: str, rest: str) -> str:
+    marker = "/" + _REDACTED
+    if rest.startswith(marker) and not rest[len(marker) :].rstrip(_URL_TRAILING_PUNCTUATION):
+        # Already reduced: scrubbing runs on a breadcrumb and again on its event.
+        return origin + rest
+    path = rest.rstrip(_URL_TRAILING_PUNCTUATION)
+    return origin + (marker if path else "") + rest[len(path) :]
+
+
+def _url_origin(match: re.Match[str]) -> str:
+    _, at, host = match.group("authority").rpartition("@")
+    if not _URL_HOST_RE.fullmatch(host):
+        return match.group("scheme") + _REDACTED
+    has_userinfo = bool(at or match.group("userinfo") is not None)
+    return _reduced_url(match.group("scheme") + (_REDACTED + "@" if has_userinfo else "") + host, match.group("rest"))
+
+
+def _schemeless_url_origin(match: re.Match[str]) -> str:
+    return _reduced_url(match.group("host"), match.group("rest"))
+
+
+_URL_REPLACEMENTS = (
+    (_URL_RE, _url_origin),
+    (_SCHEMELESS_URL_RE, _schemeless_url_origin),
+)
 _STRING_REPLACEMENTS = (
+    (_ENCODED_DELIMITER_RE, _decoded_delimiter),
+    *_URL_REPLACEMENTS,
     (re.compile(r"(?i)(authorization[:=]\s*)(bearer\s+)?\S+"), r"\1" + _REDACTED),
     (re.compile(r"(?i)(token=)[^&\s]+"), r"\1" + _REDACTED),
     (re.compile(r"(?i)(cookie[:=]\s*)\S+"), r"\1" + _REDACTED),
     (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]+\b"), _REDACTED),
     (re.compile(r"\bxapp-[A-Za-z0-9-]+\b"), _REDACTED),
+    (_SENSITIVE_KEY_VALUE_RE, _redact_key_value),
+    # A Telegram bot token outside a URL (``bot<id>:<secret>``).
+    (re.compile(r"\b(bot)?\d{5,}:[A-Za-z0-9_-]{30,}"), r"\1" + _REDACTED),
 )
+# Credential values Avibe stores. Values shorter than this are not secrets worth
+# the noise; short ones (below the boundary length) match only as a whole word.
+_KNOWN_SECRET_MIN_LENGTH = 4
+_KNOWN_SECRET_BOUNDARY_LENGTH = 12
+# These caps bound the process-lifetime observation set and the compiled matcher.
+# They are deliberately fail-closed: once a cap is exceeded, old observations are
+# retained and telemetry is dropped rather than evicting a still-usable secret.
+_KNOWN_SECRET_MAX_VALUES = 4096
+_KNOWN_SECRET_MAX_VALUE_BYTES = 256 * 1024
+_KNOWN_SECRET_MAX_PATTERN_BYTES = 512 * 1024
+_KNOWN_SECRET_MAX_FILE_BYTES = 1024 * 1024
+_KNOWN_SECRET_MAX_FILES = 1024
+_KNOWN_SECRETS_LOCK = threading.RLock()
+# path -> file signature; secret values live only in the process-lifetime union below.
+_known_secret_files_state: dict[str, tuple[int, int, int, int]] = {}
+_known_secret_values: set[str] = set()
+# (ready, retained values at publication, compiled matcher). Hooks read this one
+# immutable pointer; refresh publishes only after the worker has completed its scan.
+_known_secret_snapshot: tuple[bool, frozenset[str] | None, re.Pattern[str] | None] = (False, None, None)
+_known_secret_collection_uncertain = False
+_known_secret_collection_overflowed = False
+
+
+class _DropEnvelope(Exception):
+    """Private, secret-free signal used to fail closed before HTTP serialization."""
+
+    pass
+
+
 _ONE_DAY_SECONDS = 60 * 60 * 24
 _NOISY_EVENT_TTL_SECONDS = _ONE_DAY_SECONDS
 _NOISY_EVENT_CACHE_LIMIT = 128
@@ -66,33 +244,363 @@ _NETWORK_EXCEPTION_TYPES = {
 }
 
 
-def _redact_string(value: str) -> str:
+def _redact_string(value: str, *, minimize_urls: bool = True) -> str:
     redacted = value
     for pattern, replacement in _STRING_REPLACEMENTS:
+        if not minimize_urls and (pattern, replacement) in _URL_REPLACEMENTS:
+            continue
         redacted = pattern.sub(replacement, redacted)
     return redacted
 
 
 def _is_sensitive_key(key: str) -> bool:
-    lowered = key.lower()
-    return any(part in lowered for part in _SENSITIVE_KEY_PARTS)
+    normalized = _normalized_key(key)
+    return normalized in _SENSITIVE_EXACT_KEYS or any(token in normalized for token in _SENSITIVE_KEY_TOKENS)
 
 
-def scrub_data(value: Any) -> Any:
+def scrub_data(value: Any, *, minimize_urls: bool = True) -> Any:
     if isinstance(value, dict):
         scrubbed: dict[Any, Any] = {}
         for key, item in value.items():
-            if isinstance(key, str) and _is_sensitive_key(key):
-                scrubbed[key] = _REDACTED
+            # A key can itself be a secret, such as a token naming a cache entry.
+            out_key = _redact_string(key, minimize_urls=minimize_urls) if isinstance(key, str) else key
+            if isinstance(key, str) and (key in _DROPPED_KEYS or _is_sensitive_key(key)):
+                scrubbed[out_key] = _REDACTED
             else:
-                scrubbed[key] = scrub_data(item)
+                scrubbed[out_key] = scrub_data(item, minimize_urls=minimize_urls)
         return scrubbed
     if isinstance(value, list):
-        return [scrub_data(item) for item in value]
+        return [scrub_data(item, minimize_urls=minimize_urls) for item in value]
     if isinstance(value, tuple):
-        return tuple(scrub_data(item) for item in value)
+        return tuple(scrub_data(item, minimize_urls=minimize_urls) for item in value)
     if isinstance(value, str):
-        return _redact_string(value)
+        return _redact_string(value, minimize_urls=minimize_urls)
+    return value
+
+
+def _program_name(command: Any) -> str | None:
+    # A command line carries whatever its caller passed; keep the program name.
+    words = command.split() if isinstance(command, str) else []
+    return os.path.basename(words[0]) if words else None
+
+
+def _minimize_breadcrumb(crumb: dict[str, Any]) -> dict[str, Any]:
+    if crumb.get("type") != "subprocess" and crumb.get("category") != "subprocess":
+        return crumb
+    return {**crumb, "message": _program_name(crumb.get("message")), "data": {}}
+
+
+def _minimize_span(span: dict[str, Any]) -> dict[str, Any]:
+    operation = str(span.get("op") or span.get("name") or "")
+    if not operation.startswith("subprocess"):
+        return span
+    minimized = dict(span)
+    for key in ("description", "name"):
+        if key in span:
+            minimized[key] = _program_name(span.get(key))
+    for key in ("data", "attributes"):
+        if key in span:
+            minimized[key] = {}
+    return minimized
+
+
+def _minimize_event(event: dict[str, Any]) -> dict[str, Any]:
+    minimized = dict(event)
+    request = event.get("request")
+    if isinstance(request, dict):
+        # An incoming request's query, body, cookies, headers and environment
+        # stay local; the transaction already names the route.
+        minimized["request"] = {key: request[key] for key in ("method", "url") if key in request}
+    breadcrumbs = event.get("breadcrumbs")
+    if isinstance(breadcrumbs, dict) and isinstance(breadcrumbs.get("values"), list):
+        minimized["breadcrumbs"] = {
+            **breadcrumbs,
+            "values": [
+                _minimize_breadcrumb(crumb) if isinstance(crumb, dict) else crumb for crumb in breadcrumbs["values"]
+            ],
+        }
+    spans = event.get("spans")
+    if isinstance(spans, list):
+        minimized["spans"] = [_minimize_span(span) if isinstance(span, dict) else span for span in spans]
+    return minimized
+
+
+def _collect_secret_values(
+    node: Any, found: set[str], *, value_keys: frozenset[str] = frozenset(), sensitive: bool = False
+) -> None:
+    if isinstance(node, dict):
+        for key, item in node.items():
+            item_sensitive = sensitive or (isinstance(key, str) and (key in value_keys or _is_sensitive_key(key)))
+            _collect_secret_values(item, found, value_keys=value_keys, sensitive=item_sensitive)
+    elif isinstance(node, list):
+        for item in node:
+            _collect_secret_values(item, found, value_keys=value_keys, sensitive=sensitive)
+    elif isinstance(node, str):
+        if sensitive and len(node) >= _KNOWN_SECRET_MIN_LENGTH:
+            found.add(node)
+        # A stored URL's userinfo is a credential whatever its key is called,
+        # such as a platform ``proxy_url`` of ``http://user:pass@host``.
+        if "@" in node and "://" in node:
+            try:
+                parts = urlsplit(node.strip())
+            except ValueError:
+                return
+            if parts.password and len(parts.password) >= _KNOWN_SECRET_MIN_LENGTH:
+                found.add(parts.password)
+            # A username is a secret when it carries the credential alone
+            # (``https://<token>@host``) or is token-length; ``admin`` is not.
+            username = parts.username or ""
+            if username and (not parts.password or len(username) >= _KNOWN_SECRET_BOUNDARY_LENGTH):
+                if len(username) >= _KNOWN_SECRET_MIN_LENGTH:
+                    found.add(username)
+
+
+def _known_secret_files() -> list[tuple[Path, frozenset[str]]]:
+    """Files where Avibe stores credentials, with any extra keys naming a secret."""
+
+    model_hub_state = paths.get_runtime_dir() / "model-hub" / "state"
+    files = [(paths.get_config_path(), frozenset())]
+    for pattern in ("instances/*/runtime-secrets.json", "auth/*.json", "oauth-staging/*.json"):
+        files.extend((path, frozenset()) for path in model_hub_state.glob(pattern))
+    # An API-key credential keeps its secret under ``value``.
+    files.extend((path, frozenset({"value"})) for path in model_hub_state.glob("credentials/*.json"))
+    return files
+
+
+def _secret_spellings(value: str) -> set[str]:
+    # The value as it appears raw, URL-encoded, escaped inside JSON or a repr, and
+    # with either quote backslash-escaped as a repr picks its quote. Every spelling
+    # also gets the same delimiter normalization that the outbound scrubber applies,
+    # so an early breadcrumb cannot turn a credential into a new unmatched value.
+    backslashed = value.replace("\\", "\\\\")
+    base_spellings = {
+        value,
+        quote(value, safe=""),
+        json.dumps(value)[1:-1],
+        repr(value)[1:-1],
+        backslashed.replace("'", "\\'"),
+        backslashed.replace('"', '\\"'),
+    }
+    spellings: set[str] = set()
+    for spelling in base_spellings:
+        normalized = spelling
+        for _ in range(4):
+            decoded = _ENCODED_DELIMITER_RE.sub(_decoded_delimiter, normalized)
+            spellings.add(decoded)
+            if decoded == normalized:
+                break
+            normalized = decoded
+    return spellings
+
+
+def _secret_alternative(spelling: str) -> str:
+    escaped = re.escape(spelling)
+    if len(spelling) < _KNOWN_SECRET_BOUNDARY_LENGTH:
+        return r"(?<![A-Za-z0-9])" + escaped + r"(?![A-Za-z0-9])"
+    return escaped
+
+
+def _read_secret_values(
+    path: Path, value_keys: frozenset[str], signature: tuple[int, int, int, int]
+) -> tuple[frozenset[str], bool]:
+    cached = _known_secret_files_state.get(str(path))
+    if cached == signature:
+        return frozenset(), False
+    if signature[2] > _KNOWN_SECRET_MAX_FILE_BYTES:
+        return frozenset(), True
+    try:
+        raw = path.read_bytes()
+        after = path.stat()
+    except OSError:
+        return frozenset(), True
+    after_signature = (after.st_ino, after.st_mtime_ns, after.st_size, after.st_mode & 0o7777)
+    if len(raw) != signature[2] or after_signature != signature:
+        return frozenset(), True
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return frozenset(), True
+    found: set[str] = set()
+    _collect_secret_values(data, found, value_keys=value_keys)
+    return frozenset(found), False
+
+
+def _compile_secret_pattern(values: frozenset[str]) -> tuple[re.Pattern[str] | None, bool]:
+    spellings = {spelling for value in values for spelling in _secret_spellings(value)}
+    source = "|".join(_secret_alternative(spelling) for spelling in sorted(spellings, key=len, reverse=True))
+    if len(source.encode("utf-8")) > _KNOWN_SECRET_MAX_PATTERN_BYTES:
+        return None, True
+    try:
+        return (re.compile(source) if source else None), False
+    except re.error:
+        return None, True
+
+
+def _refresh_known_secret_state() -> bool:
+    """Refresh observed stores without ever evicting process-lifetime values."""
+
+    global _known_secret_snapshot, _known_secret_collection_uncertain, _known_secret_collection_overflowed
+    with _KNOWN_SECRETS_LOCK:
+        if _known_secret_collection_overflowed:
+            _known_secret_collection_uncertain = True
+            _known_secret_snapshot = (False, _known_secret_snapshot[1], _known_secret_snapshot[2])
+            return False
+
+        uncertain = False
+        present: set[str] = set()
+        try:
+            files = _known_secret_files()
+        except OSError:
+            files = []
+            uncertain = True
+        if len(files) > _KNOWN_SECRET_MAX_FILES:
+            _known_secret_collection_overflowed = True
+            _known_secret_collection_uncertain = True
+            _known_secret_snapshot = (False, _known_secret_snapshot[1], _known_secret_snapshot[2])
+            return False
+        for path, value_keys in files:
+            try:
+                stat = path.stat()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                uncertain = True
+                continue
+            path_key = str(path)
+            present.add(path_key)
+            signature = (stat.st_ino, stat.st_mtime_ns, stat.st_size, stat.st_mode & 0o7777)
+            values, read_uncertain = _read_secret_values(path, value_keys, signature)
+            uncertain |= read_uncertain
+            if read_uncertain:
+                continue
+            new_values = values - _known_secret_values
+            new_value_bytes = sum(len(value.encode("utf-8")) for value in new_values)
+            current_value_bytes = sum(len(value.encode("utf-8")) for value in _known_secret_values)
+            if (
+                len(_known_secret_values) + len(new_values) > _KNOWN_SECRET_MAX_VALUES
+                or current_value_bytes + new_value_bytes > _KNOWN_SECRET_MAX_VALUE_BYTES
+            ):
+                _known_secret_collection_overflowed = True
+                _known_secret_collection_uncertain = True
+                return False
+            _known_secret_values.update(new_values)
+            _known_secret_files_state[path_key] = signature
+
+        if len(_known_secret_files_state) > _KNOWN_SECRET_MAX_FILES:
+            _known_secret_collection_overflowed = True
+            _known_secret_collection_uncertain = True
+            _known_secret_snapshot = (False, _known_secret_snapshot[1], _known_secret_snapshot[2])
+            return False
+
+        for stale in set(_known_secret_files_state) - present:
+            del _known_secret_files_state[stale]
+
+        if not uncertain and _known_secret_snapshot[1] == frozenset(_known_secret_values):
+            _known_secret_collection_uncertain = False
+            _known_secret_snapshot = (True, _known_secret_snapshot[1], _known_secret_snapshot[2])
+            return True
+
+        pattern, pattern_uncertain = _compile_secret_pattern(frozenset(_known_secret_values))
+        if pattern_uncertain:
+            _known_secret_collection_overflowed = True
+            uncertain = True
+        if not uncertain:
+            retained = frozenset(_known_secret_values)
+            _known_secret_snapshot = (True, retained, pattern)
+        else:
+            _known_secret_snapshot = (False, _known_secret_snapshot[1], _known_secret_snapshot[2])
+        _known_secret_collection_uncertain = uncertain
+        return not uncertain
+
+
+def _published_secret_snapshot() -> tuple[bool, re.Pattern[str] | None]:
+    snapshot = _known_secret_snapshot
+    return snapshot[0], snapshot[2]
+
+
+def _known_secret_pattern() -> re.Pattern[str] | None:
+    """Read the immutable published matcher without waiting for worker refresh."""
+
+    return _published_secret_snapshot()[1]
+
+
+def _known_secret_collection_is_complete() -> bool:
+    return _published_secret_snapshot()[0]
+
+
+_ROOT_USER_MAPS = frozenset({"extra", "tags"})
+_USER_MAP_BOUNDARIES = frozenset({"attributes", "cookies", "data", "env", "headers", "params", "vars"})
+_TYPED_CONTEXT_NAMES = frozenset(
+    {
+        "app",
+        "browser",
+        "cloud_resource",
+        "culture",
+        "device",
+        "gpu",
+        "os",
+        "profile",
+        "replay",
+        "runtime",
+        "trace",
+    }
+)
+
+
+def _redaction_child_mode(owner: str, path: tuple[str, ...], key: str) -> str:
+    """Choose ownership from the containing Sentry shape, not from key names alone."""
+
+    if owner == "user":
+        return "user"
+    if owner == "contexts":
+        return "typed_context" if key in _TYPED_CONTEXT_NAMES else "user"
+    if owner == "typed_context":
+        return "user" if key in _USER_MAP_BOUNDARIES else "protocol"
+    if owner == "user_object":
+        return "user" if key == "data" else "protocol"
+    if owner == "request":
+        return "user" if key in {"body", "cookies", "data", "env", "headers"} else "protocol"
+    if owner == "protocol":
+        if not path:
+            if key in _ROOT_USER_MAPS:
+                return "user"
+            if key == "contexts":
+                return "contexts"
+            if key == "request":
+                return "request"
+            if key == "user":
+                return "user_object"
+        if key in _USER_MAP_BOUNDARIES:
+            return "user"
+        return "protocol"
+    return "user"
+
+
+def _redact_matches(
+    value: Any,
+    pattern: re.Pattern[str],
+    *,
+    mode: str = "protocol",
+    path: tuple[str, ...] = (),
+) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[Any, Any] = {}
+        for key, item in value.items():
+            if isinstance(key, str) and mode in {"user", "contexts"} and (
+                mode == "user" or key not in _TYPED_CONTEXT_NAMES
+            ):
+                out_key = pattern.sub(_REDACTED, key)
+            else:
+                out_key = key
+            child_mode = _redaction_child_mode(mode, path, key) if isinstance(key, str) else mode
+            redacted[out_key] = _redact_matches(item, pattern, mode=child_mode, path=path + (key,))
+        return redacted
+    if isinstance(value, list):
+        return [_redact_matches(item, pattern, mode=mode, path=path) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_matches(item, pattern, mode=mode, path=path) for item in value)
+    if isinstance(value, str):
+        return pattern.sub(_REDACTED, value)
     return value
 
 
@@ -413,23 +921,215 @@ def _should_drop_repeated_event(event: dict[str, Any]) -> bool:
 
 def before_send(event: dict[str, Any], hint: dict[str, Any]) -> Optional[dict[str, Any]]:
     del hint
-    scrubbed = scrub_data(event)
-    if _should_drop_noisy_event(scrubbed):
+    if not _known_secret_collection_is_complete():
         return None
-    if _should_drop_repeated_event(scrubbed):
+    # Drop decisions stay in process and match on URL paths (Slack's
+    # ``apps.connections.open``) and tell errors on one host apart, so they see
+    # the text before URLs are reduced to their origin.
+    fingerprinted = scrub_data(event, minimize_urls=False)
+    if _should_drop_noisy_event(fingerprinted):
         return None
+    if _should_drop_repeated_event(fingerprinted):
+        return None
+    return _scrub_outgoing(event)
+
+
+def before_send_transaction(event: dict[str, Any], hint: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Performance transactions skip ``before_send``; their spans get the same scrub."""
+
+    del hint
+    if not _known_secret_collection_is_complete():
+        return None
+    return _scrub_outgoing(event)
+
+
+def _scrub_outgoing(event: dict[str, Any], *, breadcrumb: bool = False) -> Optional[dict[str, Any]]:
+    ready, known_secrets = _published_secret_snapshot()
+    if not ready:
+        return None
+    # Match stored credentials before normalization, then once again after it.
+    # The second pass covers values that arrived through before_breadcrumb or were
+    # transformed by URL/delimiter minimization into another spelling.
+    protected: Any = event
+    if known_secrets is not None:
+        protected = _redact_matches(protected, known_secrets)
+    minimized = _minimize_breadcrumb(protected) if breadcrumb else _minimize_event(protected)
+    scrubbed = scrub_data(minimized)
+    if known_secrets is not None:
+        scrubbed = _redact_matches(scrubbed, known_secrets)
     return scrubbed
 
 
-def before_breadcrumb(crumb: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any]:
+def before_breadcrumb(crumb: dict[str, Any], hint: dict[str, Any]) -> Optional[dict[str, Any]]:
     del hint
-    return scrub_data(crumb)
+    return _scrub_outgoing(crumb, breadcrumb=True)
+
+
+_STRUCTURED_ITEM_TYPES = frozenset(
+    {
+        "event",
+        "transaction",
+        "log",
+        "trace_metric",
+        "span",
+        "session",
+        "sessions",
+        "client_report",
+        "check_in",
+        "profile",
+        "profile_chunk",
+    }
+)
+_DROPPED_ITEM_TYPES = frozenset({"attachment"})
+_HEADER_PROTOCOL_KEYS = frozenset(
+    {
+        "baggage",
+        "content_type",
+        "dsn",
+        "event_id",
+        "host",
+        "item_count",
+        "length",
+        "platform",
+        "sample_rates",
+        "sdk",
+        "section",
+        "sent_at",
+        "trace",
+        "type",
+    }
+)
+
+
+def _immutable_json_copy(value: Any) -> Any:
+    """Copy only JSON-shaped values so unsupported payloads fail closed."""
+
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, dict):
+        if any(not isinstance(key, str) for key in value):
+            raise _DropEnvelope
+        return {key: _immutable_json_copy(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_immutable_json_copy(item) for item in value]
+    raise _DropEnvelope
+
+
+def _header_contains_secret(value: Any, pattern: re.Pattern[str] | None) -> bool:
+    if pattern is None:
+        return False
+    if isinstance(value, dict):
+        return any(_header_contains_secret(item, pattern) for item in value.values())
+    if isinstance(value, list):
+        return any(_header_contains_secret(item, pattern) for item in value)
+    return isinstance(value, str) and pattern.search(value) is not None
+
+
+def _scrub_header_value(value: Any, pattern: re.Pattern[str] | None) -> Any:
+    if isinstance(value, dict):
+        scrubbed: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise _DropEnvelope
+            if key in _HEADER_PROTOCOL_KEYS:
+                copied = _immutable_json_copy(item)
+                if _header_contains_secret(copied, pattern):
+                    raise _DropEnvelope
+                scrubbed[key] = copied
+            elif key in _DROPPED_KEYS or _is_sensitive_key(key):
+                scrubbed[key] = _REDACTED
+            else:
+                scrubbed[key] = _scrub_header_value(item, pattern)
+        return scrubbed
+    if isinstance(value, list):
+        return [_scrub_header_value(item, pattern) for item in value]
+    if isinstance(value, str):
+        scrubbed = _redact_string(value)
+        return pattern.sub(_REDACTED, scrubbed) if pattern is not None else scrubbed
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    raise _DropEnvelope
+
+
+def _scrub_item_payload(payload: Any, item_type: str, pattern: re.Pattern[str] | None) -> Any:
+    copied = _immutable_json_copy(payload)
+    if pattern is not None:
+        copied = _redact_matches(copied, pattern)
+    if item_type in {"event", "transaction"}:
+        if not isinstance(copied, dict):
+            raise _DropEnvelope
+        copied = _minimize_event(copied)
+    elif item_type == "span" and isinstance(copied, dict) and isinstance(copied.get("items"), list):
+        copied = {**copied, "items": [_minimize_span(item) if isinstance(item, dict) else item for item in copied["items"]]}
+    copied = scrub_data(copied)
+    if pattern is not None:
+        copied = _redact_matches(copied, pattern)
+    return _immutable_json_copy(copied)
+
+
+def _scrub_envelope(envelope: Any) -> Any:
+    """Return a new envelope, or refuse it before the SDK serializer sees it."""
+
+    if not _refresh_known_secret_state():
+        raise _DropEnvelope
+    ready, pattern = _published_secret_snapshot()
+    if not ready:
+        raise _DropEnvelope
+    try:
+        from sentry_sdk.envelope import Envelope, Item, PayloadRef
+
+        headers = _scrub_header_value(envelope.headers, pattern)
+        items = []
+        for item in envelope.items:
+            item_type = item.type
+            if item_type in _DROPPED_ITEM_TYPES:
+                continue
+            if item_type not in _STRUCTURED_ITEM_TYPES:
+                continue
+            payload = item.payload.json
+            if payload is None:
+                continue
+            scrubbed_payload = _scrub_item_payload(payload, item_type, pattern)
+            scrubbed_headers = _scrub_header_value(item.headers, pattern)
+            items.append(Item(payload=PayloadRef(json=scrubbed_payload), headers=scrubbed_headers))
+        if not items:
+            raise _DropEnvelope
+        return Envelope(headers=headers, items=items)
+    except _DropEnvelope:
+        raise
+    except Exception as exc:
+        del exc
+        raise _DropEnvelope from None
+
+
+if _SentryHttpTransport is not None:
+
+    class _RedactingHttpTransport(_SentryHttpTransport):
+        """Pinned SDK HTTP transport with final worker-side envelope scrubbing."""
+
+        def __init__(self, options: dict[str, Any]) -> None:
+            import sentry_sdk
+
+            if sentry_sdk.VERSION != "2.56.0" or not hasattr(_SentryHttpTransport, "_serialize_envelope"):
+                raise RuntimeError("unsupported sentry-sdk transport serialization seam")
+            super().__init__(options)
+
+        def _serialize_envelope(self, envelope: Any) -> tuple[Optional[str], Any]:
+            scrubbed = _scrub_envelope(envelope)
+            return super()._serialize_envelope(scrubbed)
+
+else:  # pragma: no cover - only reachable in an incomplete installation
+    _RedactingHttpTransport = None
 
 
 def init_sentry(config: V2Config, component: str, enable_fastapi: bool = False) -> bool:
     options = resolve_sentry_options()
     if not options:
         return False
+    if _RedactingHttpTransport is None:
+        logger.warning("Sentry initialization skipped: supported transport seam unavailable")
+        return False
+    _refresh_known_secret_state()
 
     try:
         import sentry_sdk
@@ -463,6 +1163,7 @@ def init_sentry(config: V2Config, component: str, enable_fastapi: bool = False) 
             release=f"avibe@{__version__}",
             integrations=integrations,
             before_send=before_send,
+            before_send_transaction=before_send_transaction,
             before_breadcrumb=before_breadcrumb,
             attach_stacktrace=True,
             # Frame locals hold user data the scrubber cannot see into: an Agent's tool
@@ -474,6 +1175,8 @@ def init_sentry(config: V2Config, component: str, enable_fastapi: bool = False) 
             traces_sample_rate=options["traces_sample_rate"],
             profiles_sample_rate=options["profiles_sample_rate"],
             send_client_reports=False,
+            spotlight=False,
+            transport=_RedactingHttpTransport,
             send_default_pii=True,
             server_name=socket.gethostname(),
         )
