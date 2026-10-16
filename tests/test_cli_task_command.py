@@ -5663,12 +5663,12 @@ def test_agent_run_starts_a_new_session_on_a_chosen_model_that_its_later_turns_k
     ids=["unknown-model", "effort-the-model-does-not-take", "effort-on-a-model-that-takes-none",
          "effort-over-the-agents-model", "model-over-the-agents-effort", "menu-unavailable", "zh"],
 )
-def test_agent_run_refuses_a_vibey_model_its_menu_does_not_offer_before_any_session_is_reserved(
+def test_agent_run_refuses_a_vibey_model_its_menu_does_not_offer_and_keeps_no_session(
     tmp_path: Path, capsys, sqlite_schema_db_factory, defaults, extra, catalog, language, message
 ) -> None:
     """The effective pair a new Vibey Session would run on (each override over the Agent's default) is checked against
     the Model Hub menu, which is authoritative: a pair it does not offer, or a menu that cannot load, is refused in the
-    caller's language with the catalog hint, before any Session is reserved or run queued."""
+    caller's language with the catalog hint; the reserved Session is released and no run is queued."""
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     agent_store = cli.VibeAgentStore(db_path)
     agent_store.create(name="worker", backend="vibey", **defaults)
@@ -5690,10 +5690,13 @@ def test_agent_run_refuses_a_vibey_model_its_menu_does_not_offer_before_any_sess
     assert not list(request_store.pending_dir.glob("*.json"))
 
 
+@pytest.mark.parametrize(("forkable", "code"), [(True, "session_model_unavailable"), (False, "session_fork_failed")])
 def test_agent_run_refuses_a_fork_onto_a_vibey_model_its_menu_does_not_offer(
-    tmp_path: Path, capsys, sqlite_schema_db_factory
+    tmp_path: Path, capsys, sqlite_schema_db_factory, forkable, code
 ) -> None:
-    """A fork's override is checked by the same rule as a new Session's, against the source Session's Agent."""
+    """A fork's override is checked by the same rule as a new Session's, against the source Session's Agent, but only
+    once the fork service has admitted the caller to the source: a source it refuses answers with the fork's own
+    refusal, never a catalog one that would tell what the source runs on. The fork it reserved is released."""
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     agent_store = cli.VibeAgentStore(db_path)
     agent_store.create(name="worker", backend="vibey")
@@ -5702,6 +5705,13 @@ def test_agent_run_refuses_a_fork_onto_a_vibey_model_its_menu_does_not_offer(
         tmp_path, capsys, db_path, agent_store, request_store, ["--agent", "worker", "--message", "source"]
     )
     assert result == 0, payload
+    if forkable:
+        # The source has run a turn, so its native Session exists to fork.
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "update agent_sessions set native_session_id = ? where id = ?",
+                (f"vibey:{payload['session_id']}", payload["session_id"]),
+            )
 
     with patch("core.scheduled_tasks.paths.get_sqlite_state_path", return_value=db_path):
         result, payload = _run_on_new_session(
@@ -5710,7 +5720,7 @@ def test_agent_run_refuses_a_fork_onto_a_vibey_model_its_menu_does_not_offer(
         )
 
     assert result == 1
-    assert payload["code"] == "session_model_unavailable"
+    assert payload["code"] == code
     with sqlite3.connect(db_path) as conn:
         assert conn.execute("select count(*) from agent_sessions").fetchone() == (1,)
 

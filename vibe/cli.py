@@ -5872,7 +5872,7 @@ def _session_model_override_fields(
 
     ``model`` and ``reasoning_effort`` are the effective pair: the run's overrides over the defaults the Session would
     otherwise keep. Where the catalog is authoritative (Vibey's Model Hub menu), a pair it does not offer is refused
-    before any Session is reserved; elsewhere a mismatch is a warning on the run, as ``vibe agent create/update`` gives.
+    and its reservation released; elsewhere a mismatch is a warning on the run, as ``vibe agent create/update`` gives.
     """
     language = _configured_cli_language()
     mismatches, authoritative = _catalog_mismatches(backend, model, reasoning_effort, language=language)
@@ -7122,29 +7122,10 @@ def cmd_agent_run(args):
         # The caller's own authority, resolved once. A remote caller reserves
         # under it; a local caller stays ``None`` and keeps Owner semantics.
         caller_authorization = caller_resource_user_context(caller_context)
-        # A new Session (blank, --create-session, or a fork) may run on its own model: checked against the target
-        # Agent's catalog before anything is reserved, then kept on the Session, which every later turn reads.
+        # A new Session (blank, --create-session, or a fork) may run on its own model, kept on the Session, which
+        # every later turn reads; it is checked against the Agent's catalog once the Session is reserved (below).
         model_override = (getattr(args, "model", None) or "").strip() or None
         effort_override = (getattr(args, "reasoning_effort", None) or "").strip() or None
-        override_fields: dict = {}
-        if model_override or effort_override:
-            # The pair the Session will run on: each override over the default it would otherwise keep, the source
-            # Session's for a fork (whose Agent may only restate the source's backend), else the Agent's.
-            if session_policy == "fork":
-                source = resolve_session_id_target(source_session_id or "")
-                base_model, base_effort = source.model, source.reasoning_effort
-                target_backend = agent.backend if agent else source.agent_backend
-                target_label = agent.name if agent else source.agent_name or source.agent_backend
-            else:
-                base_model, base_effort = agent.model, agent.reasoning_effort
-                target_backend, target_label = agent.backend, agent.name
-            override_fields = _session_model_override_fields(
-                backend=target_backend,
-                agent_label=target_label,
-                model=model_override or base_model,
-                reasoning_effort=effort_override or base_effort,
-                help_command="vibe agent run --help",
-            )
         if session_policy == "create":
             session_id = _reserve_cli_session(
                 agent=agent,
@@ -7194,6 +7175,21 @@ def cmd_agent_run(args):
                 agent_name=agent_name or None,
                 session_id=session_id,
                 session_key=session_key,
+                help_command="vibe agent run --help",
+            )
+        override_fields: dict = {}
+        if model_override or effort_override:
+            # Checked only after the reservation, which admitted the caller to the source Session or the Agent, so a
+            # refusal tells nothing about a Session or Agent the caller cannot reach; a refused pair releases the
+            # reservation (the ``except`` below). The pair is the one the Session will run on: each override over the
+            # default it would otherwise keep, the source Session's for a fork, else the Agent's.
+            override_fields = _session_model_override_fields(
+                backend=agent.backend,
+                agent_label=agent.name,
+                model=fork_result.model if fork_result else model_override or agent.model,
+                reasoning_effort=(
+                    fork_result.reasoning_effort if fork_result else effort_override or agent.reasoning_effort
+                ),
                 help_command="vibe agent run --help",
             )
         if (session_policy in {"create", "none"} or fork_result) and args.post_to:

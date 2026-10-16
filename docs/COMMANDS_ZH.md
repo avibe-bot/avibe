@@ -911,6 +911,13 @@ fork 会保持源 Session 的 backend；只有 backend 不变时，`--agent`、`
 和 `--reasoning-effort` 才能覆盖 fork 后 Session 的 Agent、模型或推理强度。
 不要把 `--fork-session` 和 `--session-id` 或 `--create-session` 混用。
 
+`--model` 和 `--reasoning-effort` 可以为这次运行创建的任何新 Session（空白新
+Session、`--create-session` 或 fork）设置模型，该 Session 会沿用它。与
+`--session-id` 一起使用会被拒绝（`model_override_with_existing_session`）。新 Session
+实际运行的组合（覆盖值加上它原本沿用的默认值）会被检查：Vibey 的 Model Hub 菜单不提供
+的模型或推理强度，或菜单无法加载时，会被拒绝（`session_model_unavailable`）；claude
+和 codex 的未知值只给出警告。`vibe agent models <agent>` 会列出可用的值。
+
 ## 5.4 `vibe runs`
 
 `vibe runs` 用来查看由 task、watch 或直接 Agent Run 产生的一次次实际执行记录。
