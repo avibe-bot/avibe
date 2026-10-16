@@ -4667,9 +4667,6 @@ class ScheduledTaskService:
         ack_terminal = getattr(registry, "ack_recovered_terminal", None)
         remaining: list[Any] = []
         for activity in self._pending_recovered_activity_terminals:
-            if self.hold_activity_terminal(activity, None):
-                remaining.append(activity)
-                continue
             if callable(has_pending_output) and any(
                 has_pending_output(run_id)
                 for run_id in self._activity_run_ids(activity)
@@ -7627,16 +7624,6 @@ class ScheduledTaskService:
                 # only the actions that no longer address anything.
                 lines.extend(self._deleted_definition_lines(run_id))
         return "\n".join(lines)
-
-    def hold_activity_terminal(self, activity: Any, replay: Callable[[], object] | None) -> bool:
-        """Whether a Turn's terminal record for one of this Activity's Runs is off the
-        loop (#2706). Its settlement then waits -- before any write, which would wait
-        on the loop for the record's writer -- and ``replay`` runs once the record
-        lands, so the two merge their terminal intents as they did on the loop."""
-
-        dispatcher = getattr(self.controller, "message_dispatcher", None)
-        hold = getattr(dispatcher, "hold_activity_settlement", None)
-        return callable(hold) and hold(self._activity_run_ids(activity), replay) is True
 
     def settle_activity_runs(self, activity: Any) -> list[str]:
         """Settle deferred Runs when a failed/stopped owned Activity is last.

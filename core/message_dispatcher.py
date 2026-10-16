@@ -390,11 +390,6 @@ class ConsolidatedMessageDispatcher:
         # shutdown drains that exact task before stopping the shared executor.
         self._pending_agent_run_activity_ids: set[str] = set()
         self._agent_run_activity_flush_task: asyncio.Task[None] | None = None
-        # A Turn's Run terminal record runs off the loop (#2706). While it is out, an
-        # Activity settlement for the same Run waits here and is replayed once the
-        # record lands, so the two merge as they did when both ran on the loop.
-        self._run_terminal_records_in_flight: dict[str, int] = {}
-        self._held_activity_settlements: dict[str, list[Callable[[], object]]] = {}
         # Injectable monotonic-ish clock (wall time) so tests get deterministic
         # elapsed/stale values without sleeping.
         self._now = time.time
@@ -1312,10 +1307,12 @@ class ConsolidatedMessageDispatcher:
     ) -> list[str]:
         """Record a Turn's output on its Runs; may run off the loop.
 
-        ``blocked_run_ids`` is the blocking-Activity check, made on the loop before
-        this runs: the Activity registry is loop-owned, and Activity writes take its
-        lock and then SQLite's writer, so reading it under the writer would take the
-        two in the opposite order.
+        ``blocked_run_ids`` is the in-memory blocking-Activity check, made on the loop
+        before this runs: the Activity registry is loop-owned, and Activity writes
+        take its lock and then SQLite's writer, so reading it under the writer would
+        take the two in the opposite order. The SQLite store adds the Runs its durable
+        Activity rows still block when the write commits, and returns the Runs it
+        deferred.
         """
 
         normalized_run_ids = list(
@@ -1344,6 +1341,19 @@ class ConsolidatedMessageDispatcher:
                 if terminal_status
                 else []
             )
+            # Looked up on the class: a stand-in store answers any attribute.
+            if callable(getattr(type(store), "record_turn_terminal_outputs", None)):
+                return store.record_turn_terminal_outputs(
+                    normalized_run_ids,
+                    output_id=output_id,
+                    text=text,
+                    message_id=message_id,
+                    sequence=output_semantics.sequence,
+                    provenance=provenance,
+                    terminal_status=terminal_status,
+                    error=terminal_error,
+                    deferred_run_ids=deferred_run_ids,
+                )
             record_turn_outputs(
                 normalized_run_ids,
                 output_id=output_id,
@@ -1698,9 +1708,14 @@ class ConsolidatedMessageDispatcher:
         The write waits for SQLite's writer, which another process can hold for the
         whole busy timeout, so it runs on the runtime-work door (#2706). It keeps the
         cancellation point it had on the loop: a cancellation that arrives while the
-        write runs waits for it to land, the synchronous tail (held Activity
-        settlements, close-after) runs, and the cancellation is delivered at the
-        caller's next await -- where it landed before.
+        write runs waits for it to land, the synchronous tail (close-after) runs, and
+        the cancellation is delivered at the caller's next await -- where it landed
+        before.
+
+        Which Runs an open Activity still blocks is decided inside the write's own
+        transaction, from the durable Activity rows (``defer_for_live_activities``),
+        so the record follows the order the loop committed the Activity events in,
+        whatever happened while it waited for the writer.
         """
 
         semantics = output_semantics or MessageOutput(completes_turn=True)
@@ -1741,17 +1756,7 @@ class ConsolidatedMessageDispatcher:
             finally:
                 store.close()
 
-        for run_id in run_ids:
-            self._run_terminal_records_in_flight[run_id] = self._run_terminal_records_in_flight.get(run_id, 0) + 1
-        try:
-            step, cancelled = await land_step(self._run_off_loop(record))
-        finally:
-            held = self._land_run_terminal_records(run_ids)
-        for replay in held:
-            try:
-                replay()
-            except Exception:
-                logger.warning("Failed to settle a held Activity's Runs", exc_info=True)
+        step, cancelled = await land_step(self._run_off_loop(record))
         if step_failed(step):
             if cancelled:
                 answer_caught_cancellation(step)
@@ -1788,38 +1793,6 @@ class ConsolidatedMessageDispatcher:
         if isinstance(supervisor, RuntimeWorkSupervisor):
             return await supervisor.run_sync(operation)
         return await asyncio.to_thread(operation)
-
-    def _land_run_terminal_records(self, run_ids: Sequence[str]) -> list[Callable[[], object]]:
-        """Mark these Runs' terminal record landed; return the settlements it held."""
-
-        held: list[Callable[[], object]] = []
-        for run_id in run_ids:
-            remaining = self._run_terminal_records_in_flight.get(run_id, 0) - 1
-            if remaining > 0:
-                self._run_terminal_records_in_flight[run_id] = remaining
-                continue
-            self._run_terminal_records_in_flight.pop(run_id, None)
-            for replay in self._held_activity_settlements.pop(run_id, ()):
-                if all(replay is not other for other in held):
-                    held.append(replay)
-        return held
-
-    def hold_activity_settlement(
-        self, run_ids: Sequence[str], replay: Callable[[], object] | None
-    ) -> bool:
-        """Hold an Activity's settlement while a terminal record for one of its Runs
-        is off the loop; ``replay``, if any, runs once that record lands. ``False``
-        when none is out."""
-
-        out = [run_id for run_id in run_ids if run_id in self._run_terminal_records_in_flight]
-        if not out:
-            return False
-        if replay is not None:
-            for run_id in out:
-                held = self._held_activity_settlements.setdefault(run_id, [])
-                if all(replay is not other for other in held):
-                    held.append(replay)
-        return True
 
     async def _wait_for_close_after_runs(self, run_ids: tuple[str, ...]) -> bool:
         """Wait for the Run writer, not a Turn output, to finish disposal ownership."""

@@ -35,7 +35,11 @@ The rows are bounded by the Turn's Run ids. The store is also constructed on eve
    - the check reads the durable Activity rows for the Turn's Runs (session Activity records), inside the same transaction, after the writer is reserved;
    - the in-memory check stays on the loop before the step, and the write re-validates it against the durable rows.
 
-   Either way, the lock order stays single, and an Activity that settles in between cannot make the Turn's status get dropped.
+   As implemented: the in-memory check stays on the loop, and the transaction adds the Runs that its durable Activity rows still block (`record_turn_terminal_outputs`). The registry persists an Activity before it changes its own state, so its `active` rows are exactly the Activities it holds open. The record therefore follows the order in which the loop committed the Activity events:
+   - an Activity that started while the record waited for the writer still defers the Run, and close-after waits for it;
+   - an Activity that ended and settled the Run first stays first, with its own status, exactly as when it ended before the result on the loop.
+
+   No settlement is held or replayed. A first version held Activity terminals until the record landed; every round of review then found a new interleaving, which this rule removes at its root.
 
 **Recommendation.** Move it to the runtime-work door (`run_sync` through `land_step`), with the three conditions above. Construct the store once rather than per call. The same dispatcher already records Run activity through the door (`_flush_agent_run_activity` → `run_sync`).
 
@@ -105,6 +109,6 @@ Each move needs the check this note applies to A. Does a loop section rely on th
 ## Plan
 
 - [x] C: bound the recovery reads (start from live Runs and pending legacy notices, with a pinned plan; read-only transactions; mismatch-only status projection).
-- [x] A: record the Turn's Run terminal through the runtime-work door with `land_step`, keeping the cancellation point it had on the loop; make the blocking-Activity check on the loop, and hold an Activity terminal that arrives while the record is out (before any write) until it lands; build the store off the loop. The IM network tail is #2714.
+- [x] A: record the Turn's Run terminal through the runtime-work door with `land_step`, keeping the cancellation point it had on the loop; make the blocking-Activity check on the loop and re-read the durable Activity rows inside the write's transaction; build the store off the loop. The IM network tail is #2714.
 - [ ] B, step 1: skip the writer for redundant terminalization, the post-terminal read and an empty drain.
 - [ ] B, step 2: a design note for B's remaining write that keeps terminalization and successor selection atomic with respect to admission (orderings 1–5).

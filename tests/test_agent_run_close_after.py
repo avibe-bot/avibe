@@ -1131,60 +1131,72 @@ def test_a_cancellation_during_the_runs_terminal_record_is_answered_at_the_next_
     assert asyncio.run(exercise()) == ["recorded", "cancelled at the next await"]
 
 
-def test_an_activity_settling_during_the_runs_terminal_record_merges_as_on_the_loop(tmp_path, monkeypatch) -> None:
-    """#2706: the blocking-Activity check is made on the loop before the Run terminal record leaves it. An owned
-    Activity that ends while the write is out must not settle the Run first, with its own weaker status, nor write at
-    all while the record holds SQLite's writer: its terminal is held, unacknowledged, and replayed once the record
-    lands, so the Run settles with the stronger of the two terminal intents, exactly as when both ran on the loop (a
-    failed Turn outranks a stopped Activity)."""
+def test_an_activity_started_while_the_runs_terminal_record_waits_still_defers_the_run(tmp_path, monkeypatch) -> None:
+    """#2706: the Run terminal record runs off the loop, so an owned Activity can start -- durably -- while it waits
+    for SQLite's writer, after the loop's in-memory blocking check. The record re-reads the durable Activity rows inside
+    its own transaction: the Run's terminal intent is deferred while that Activity is open, and close-after waits for
+    the Run, exactly as when the Activity had started before the record."""
 
-    from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore, TaskExecutionStore
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.background import SQLiteBackgroundTaskStore
+    from storage.db import create_sqlite_engine
+    from storage.session_activities import SQLiteSessionActivityStore
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     request_store = TaskExecutionStore()
     queued = request_store.enqueue_agent_run(message="run", agent_backend="claude", session_id="session-1")
     assert request_store.claim(queued.id) is not None
-    real_store = request_store.sqlite_backend
-    assert real_store is not None
+    db_path = request_store.sqlite_backend.db_path
+    writing, release = threading.Event(), threading.Event()
 
-    async def exercise() -> None:
+    class _WaitsForTheWriter(SQLiteBackgroundTaskStore):
+        def record_turn_run_outputs(self, *args, **kwargs):
+            writing.set()
+            assert release.wait(5)
+            return super().record_turn_run_outputs(*args, **kwargs)
+
+    async def exercise() -> MessageContext:
         controller = SimpleNamespace()
         service = AgentService(controller)
         controller.agent_service = service
         dispatcher = ConsolidatedMessageDispatcher(controller)
-        controller.message_dispatcher = dispatcher
-        scheduled = ScheduledTaskService(
-            controller=controller,
-            store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
-            request_store=request_store,
-        )
-        controller.scheduled_task_service = scheduled
-        blocked = [True]
-        service.activities.has_blocking_run_activity = lambda _run_id: blocked[0]
-        writing, release = threading.Event(), threading.Event()
-        store = _blocking_store(writing, release, record=real_store.record_turn_run_outputs)
-        store.defer_run_terminal = real_store.defer_run_terminal
-        with patch("core.message_dispatcher.SQLiteBackgroundTaskStore", return_value=store):
+        context = _agent_run_context(queued.id)
+        gate = service._get_turn_gate("runtime-1")
+        await gate.lock.acquire()
+        gate.token = "turn-1"
+        gate.backend = "claude"
+        with patch("core.message_dispatcher.SQLiteBackgroundTaskStore", new=_WaitsForTheWriter):
             record = asyncio.create_task(
                 _record_terminal(
                     dispatcher,
-                    _agent_run_context(queued.id),
-                    is_error=True,
-                    terminal_error="the turn failed",
+                    context,
+                    is_error=False,
                     output_semantics=MessageOutput(completes_turn=True, completes_run=True),
                 )
             )
             assert await asyncio.to_thread(writing.wait, 5)
-            blocked[0] = False  # the owned Activity ends while the record is out
-            activity = SimpleNamespace(id="activity-1", status="stopped", run_id=queued.id, metadata={})
-            settlements: list[object] = []
-            real_settle = scheduled.settle_activity_runs
-            scheduled.settle_activity_runs = lambda held: settlements.append(held) or real_settle(held)
-            assert service.on_activity_terminal(activity) is False, "the held terminal was acknowledged"
-            assert settlements == [], "the Activity settled -- and wrote -- while the record held the writer"
+            # The receiver starts an Activity owned by the same Run; it persists before the record commits.
+            SQLiteSessionActivityStore(create_sqlite_engine(db_path)).upsert_activity(
+                {
+                    "id": "activity-1",
+                    "backend": "claude",
+                    "runtime_key": "runtime-1",
+                    "session_id": "session-1",
+                    "run_id": queued.id,
+                    "detached_from_run": False,
+                    "metadata": {},
+                },
+                phase="active",
+            )
             release.set()
             await record
-            assert settlements == [activity], "the held Activity terminal was not replayed"
+        gate.lock.release()
+        return context
 
-    asyncio.run(exercise())
-    assert normalize_run_status(request_store.get_run(queued.id)["status"]) == "failed"
+    context = asyncio.run(exercise())
+    assert normalize_run_status(request_store.get_run(queued.id)["status"]) == "running", (
+        "the record settled a Run that an open Activity still owns"
+    )
+    assert context.platform_specific.get("_close_after_wait_for_run_ids") == (queued.id,), (
+        "close-after does not wait for the Run the open Activity holds"
+    )
