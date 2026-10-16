@@ -534,7 +534,7 @@ async def _settled(service):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("listed_again", [False, True], ids=["unlisted", "still_listed"])
 async def test_a_refused_listed_executor_model_is_listed_again_and_leaves_once_unlisted(tmp_path, listed_again):
-    """MH-HOSTED-GATEWAY-008: a model-not-found for an executor model its Source lists marks that Source (#2682).
+    """MH-HOSTED-GATEWAY-009: a model-not-found for an executor model its Source lists marks that Source (#2682).
 
     The schedule's own due rule lists a marked Source once its listing is older
     than the debounce. Only a model both the call and that listing disown
@@ -573,7 +573,7 @@ async def test_a_refused_listed_executor_model_is_listed_again_and_leaves_once_u
 
 @pytest.mark.asyncio
 async def test_a_stale_mark_is_answered_by_a_running_listing_and_keeps_the_schedules_backoff(tmp_path):
-    """MH-HOSTED-GATEWAY-008: a listing already running answers the mark, and a failing one keeps its backoff."""
+    """MH-HOSTED-GATEWAY-009: a listing already running answers the mark, and a failing one keeps its backoff."""
 
     service = _stale_listing_service(tmp_path)
     _openai(service).last_discovered_at = None
@@ -620,7 +620,7 @@ async def test_a_stale_mark_is_answered_by_a_running_listing_and_keeps_the_sched
 
 @pytest.mark.asyncio
 async def test_a_stale_mark_drops_nothing_once_its_source_identity_changed(tmp_path):
-    """MH-HOSTED-GATEWAY-008: a refusal belongs to the identity that gave it; a replaced key or URL voids it."""
+    """MH-HOSTED-GATEWAY-009: a refusal belongs to the identity that gave it; a replaced key or URL voids it."""
 
     service = _stale_listing_service(tmp_path)
     _openai(service).last_discovered_at = None
@@ -642,7 +642,7 @@ async def test_a_stale_mark_drops_nothing_once_its_source_identity_changed(tmp_p
 
 @pytest.mark.asyncio
 async def test_a_disowned_row_leaves_even_when_the_rest_of_the_listing_must_wait(tmp_path, monkeypatch):
-    """MH-HOSTED-GATEWAY-008: a supply change elsewhere in the listing does not hold back the disowned row."""
+    """MH-HOSTED-GATEWAY-009: a supply change elsewhere in the listing does not hold back the disowned row."""
 
     service = _stale_listing_service(tmp_path)
     _openai(service).last_discovered_at = None
