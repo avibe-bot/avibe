@@ -44,6 +44,7 @@ capability:
     - tests/test_model_hub_declared_tools.py
     - tests/test_model_hub_l3.py
     - tests/test_model_hub_migration_bearer.py
+    - tests/test_model_hub_transport_leases.py
     - tests/test_model_hub_hosted_executor.py
     - tests/test_model_hub_hosted_evidence.py
     - tests/test_model_hub_hosted_images.py
@@ -1164,6 +1165,17 @@ scenarios:
     kind: timeout_cancel
     layer: contract
     test: tests/test_model_hub_retry_lifecycle.py::test_a_silent_engine_stream_is_cancelled_and_retried_at_its_idle_bound
+  - id: MH-RUNTIME-014
+    name: >-
+      An engine that refuses the credentials Avibe launched it with is reported once as having lost its configuration,
+      admits no new work, and restarts from the rendered config only after its open streams end; the waiting save or
+      turn then runs on the restarted engine
+    status: covered
+    kind: recovery
+    layer: contract
+    test:
+      - tests/test_model_hub_transport_leases.py::test_an_engine_that_lost_its_configuration_restarts_only_once_its_streams_end
+      - tests/test_model_hub_runtime.py::test_an_engine_that_lost_its_configuration_is_reported_once_and_restarted_by_its_drainer
   - id: MH-USAGE-001
     name: Tokens an upstream reported before the turn ended are still metered
     status: covered
