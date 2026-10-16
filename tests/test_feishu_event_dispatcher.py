@@ -1,4 +1,3 @@
-import importlib.util
 import sys
 import types
 import unittest
@@ -11,35 +10,6 @@ from config.v2_config import LarkConfig
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-
-def _install_opencode_utils_module() -> None:
-    if "aiohttp" not in sys.modules:
-        sys.modules["aiohttp"] = types.ModuleType("aiohttp")
-
-    if "modules.agents.opencode.utils" in sys.modules:
-        return
-
-    if "modules.agents" not in sys.modules:
-        agents_mod = types.ModuleType("modules.agents")
-        agents_mod.__path__ = [str(ROOT / "modules" / "agents")]
-        sys.modules["modules.agents"] = agents_mod
-    if "modules.agents.opencode" not in sys.modules:
-        opencode_mod = types.ModuleType("modules.agents.opencode")
-        opencode_mod.__path__ = [str(ROOT / "modules" / "agents" / "opencode")]
-        sys.modules["modules.agents.opencode"] = opencode_mod
-
-    spec = importlib.util.spec_from_file_location(
-        "modules.agents.opencode.utils",
-        ROOT / "modules" / "agents" / "opencode" / "utils.py",
-    )
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["modules.agents.opencode.utils"] = module
-    spec.loader.exec_module(module)
-
-
-_install_opencode_utils_module()
 
 from modules.im.feishu import FeishuBot
 

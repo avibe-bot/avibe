@@ -1,112 +1,9 @@
-import importlib
-import sys
-import types
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from config.v2_config import SlackConfig
-
-
-def _install_slack_stubs() -> None:
-    if "aiohttp" not in sys.modules:
-        aiohttp_mod = types.ModuleType("aiohttp")
-
-        class _ClientWebSocketResponse:
-            closed = False
-
-        class _ClientSession:
-            async def close(self):
-                return None
-
-        class _ClientTimeout:
-            def __init__(self, *args, **kwargs):
-                pass
-
-        aiohttp_mod.ClientWebSocketResponse = _ClientWebSocketResponse
-        aiohttp_mod.ClientSession = _ClientSession
-        aiohttp_mod.ClientTimeout = _ClientTimeout
-        sys.modules["aiohttp"] = aiohttp_mod
-
-    if "markdown_to_mrkdwn" not in sys.modules:
-        markdown_mod = types.ModuleType("markdown_to_mrkdwn")
-
-        class _SlackMarkdownConverter:
-            def convert(self, text):
-                return text
-
-        markdown_mod.SlackMarkdownConverter = _SlackMarkdownConverter
-        sys.modules["markdown_to_mrkdwn"] = markdown_mod
-
-    if "slack_sdk" not in sys.modules:
-        slack_sdk = types.ModuleType("slack_sdk")
-        web_mod = types.ModuleType("slack_sdk.web")
-        web_async_mod = types.ModuleType("slack_sdk.web.async_client")
-        socket_mode_mod = types.ModuleType("slack_sdk.socket_mode")
-        socket_mode_aiohttp_mod = types.ModuleType("slack_sdk.socket_mode.aiohttp")
-        socket_mode_request_mod = types.ModuleType("slack_sdk.socket_mode.request")
-        socket_mode_response_mod = types.ModuleType("slack_sdk.socket_mode.response")
-        errors_mod = types.ModuleType("slack_sdk.errors")
-
-        class _AsyncWebClient:
-            def __init__(self, *args, **kwargs):
-                pass
-
-            async def auth_test(self):
-                return {"user_id": "U_BOT"}
-
-        class _SocketModeClient:
-            def __init__(self, *args, **kwargs):
-                pass
-
-        class _SocketModeRequest:
-            pass
-
-        class _SocketModeResponse:
-            def __init__(self, *args, **kwargs):
-                pass
-
-        class _SlackApiError(Exception):
-            def __init__(self, message="", response=None):
-                super().__init__(message)
-                self.response = response
-
-        web_async_mod.AsyncWebClient = _AsyncWebClient
-        socket_mode_aiohttp_mod.SocketModeClient = _SocketModeClient
-        socket_mode_request_mod.SocketModeRequest = _SocketModeRequest
-        socket_mode_response_mod.SocketModeResponse = _SocketModeResponse
-        errors_mod.SlackApiError = _SlackApiError
-
-        sys.modules["slack_sdk"] = slack_sdk
-        sys.modules["slack_sdk.web"] = web_mod
-        sys.modules["slack_sdk.web.async_client"] = web_async_mod
-        sys.modules["slack_sdk.socket_mode"] = socket_mode_mod
-        sys.modules["slack_sdk.socket_mode.aiohttp"] = socket_mode_aiohttp_mod
-        sys.modules["slack_sdk.socket_mode.request"] = socket_mode_request_mod
-        sys.modules["slack_sdk.socket_mode.response"] = socket_mode_response_mod
-        sys.modules["slack_sdk.errors"] = errors_mod
-
-
-def _load_local_slack_bot():
-    repo_root = Path(__file__).resolve().parents[1]
-    sys.path.insert(0, str(repo_root))
-    loaded = sys.modules.get("modules.im.slack")
-    loaded_path = Path(getattr(loaded, "__file__", "")).resolve() if loaded is not None else None
-    local_path = (repo_root / "modules" / "im" / "slack.py").resolve()
-    if loaded is not None and loaded_path == local_path:
-        return loaded.SlackBot
-    sys.modules.pop("modules.im.slack", None)
-    spec = importlib.util.spec_from_file_location("modules.im.slack", local_path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["modules.im.slack"] = module
-    spec.loader.exec_module(module)
-    return module.SlackBot
-
-
-_install_slack_stubs()
-SlackBot = _load_local_slack_bot()
+from modules.im.slack import SlackBot
 
 
 class _ResponseLike:
@@ -118,14 +15,6 @@ class _ResponseLike:
 
 
 class SlackAppMentionEmptyTests(unittest.IsolatedAsyncioTestCase):
-    def test_loader_preserves_the_canonical_slack_module(self):
-        canonical = sys.modules["modules.im.slack"]
-
-        loaded_class = _load_local_slack_bot()
-
-        self.assertIs(sys.modules["modules.im.slack"], canonical)
-        self.assertIs(loaded_class, canonical.SlackBot)
-
     async def test_empty_app_mention_dispatches_empty_message_for_start_menu(self):
         slack = SlackBot(SlackConfig(bot_token="xoxb-test"))
         received = {}

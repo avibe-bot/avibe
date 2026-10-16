@@ -1,123 +1,29 @@
-import importlib.util
 import asyncio
-import unittest
 import sys
-import types
-from pathlib import Path
+import unittest
 from types import SimpleNamespace
 
+import pytest
+
 from config.v2_config import SlackConfig
+from modules.im import slack as slack_module
 from modules.im.base import InlineButton, InlineKeyboard, MessageContext
-
-
-def _install_slack_stubs() -> None:
-    if "aiohttp" not in sys.modules:
-        try:
-            __import__("aiohttp")
-        except ImportError:
-            aiohttp_mod = types.ModuleType("aiohttp")
-
-            class _ClientWebSocketResponse:
-                closed = False
-
-            class _ClientSession:
-                async def close(self):
-                    return None
-
-            class _ClientTimeout:
-                def __init__(self, *args, **kwargs):
-                    pass
-
-            aiohttp_mod.ClientWebSocketResponse = _ClientWebSocketResponse
-            aiohttp_mod.ClientSession = _ClientSession
-            aiohttp_mod.ClientTimeout = _ClientTimeout
-            sys.modules["aiohttp"] = aiohttp_mod
-
-    if "markdown_to_mrkdwn" not in sys.modules:
-        markdown_mod = types.ModuleType("markdown_to_mrkdwn")
-
-        class _SlackMarkdownConverter:
-            def convert(self, text):
-                return text
-
-        markdown_mod.SlackMarkdownConverter = _SlackMarkdownConverter
-        sys.modules["markdown_to_mrkdwn"] = markdown_mod
-
-    if "slack_sdk" in sys.modules:
-        pass
-
-    slack_sdk = types.ModuleType("slack_sdk")
-    web_mod = types.ModuleType("slack_sdk.web")
-    web_async_mod = types.ModuleType("slack_sdk.web.async_client")
-    socket_mode_mod = types.ModuleType("slack_sdk.socket_mode")
-    socket_mode_aiohttp_mod = types.ModuleType("slack_sdk.socket_mode.aiohttp")
-    socket_mode_request_mod = types.ModuleType("slack_sdk.socket_mode.request")
-    socket_mode_response_mod = types.ModuleType("slack_sdk.socket_mode.response")
-    errors_mod = types.ModuleType("slack_sdk.errors")
-
-    class _AsyncWebClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        async def auth_test(self):
-            return {"user_id": "U_BOT"}
-
-    class _SocketModeClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
-    class _SocketModeRequest:
-        pass
-
-    class _SocketModeResponse:
-        def __init__(self, *args, **kwargs):
-            pass
-
-    class _SlackApiError(Exception):
-        def __init__(self, message="", response=None):
-            super().__init__(message)
-            self.response = response
-
-    web_async_mod.AsyncWebClient = _AsyncWebClient
-    socket_mode_aiohttp_mod.SocketModeClient = _SocketModeClient
-    socket_mode_request_mod.SocketModeRequest = _SocketModeRequest
-    socket_mode_response_mod.SocketModeResponse = _SocketModeResponse
-    errors_mod.SlackApiError = _SlackApiError
-
-    if "slack_sdk" not in sys.modules:
-        sys.modules["slack_sdk"] = slack_sdk
-        sys.modules["slack_sdk.web"] = web_mod
-        sys.modules["slack_sdk.web.async_client"] = web_async_mod
-        sys.modules["slack_sdk.socket_mode"] = socket_mode_mod
-        sys.modules["slack_sdk.socket_mode.aiohttp"] = socket_mode_aiohttp_mod
-        sys.modules["slack_sdk.socket_mode.request"] = socket_mode_request_mod
-        sys.modules["slack_sdk.socket_mode.response"] = socket_mode_response_mod
-        sys.modules["slack_sdk.errors"] = errors_mod
-
-    if "modules.agents.opencode.utils" not in sys.modules:
-        repo_root = Path(__file__).resolve().parents[1]
-        agents_mod = types.ModuleType("modules.agents")
-        agents_mod.__path__ = [str(repo_root / "modules" / "agents")]
-        opencode_mod = types.ModuleType("modules.agents.opencode")
-        opencode_mod.__path__ = [str(repo_root / "modules" / "agents" / "opencode")]
-
-        sys.modules["modules.agents"] = agents_mod
-        sys.modules["modules.agents.opencode"] = opencode_mod
-
-        spec = importlib.util.spec_from_file_location(
-            "modules.agents.opencode.utils",
-            repo_root / "modules" / "agents" / "opencode" / "utils.py",
-        )
-        assert spec is not None
-        assert spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        sys.modules["modules.agents.opencode.utils"] = module
-        spec.loader.exec_module(module)
-
-
-_install_slack_stubs()
-
 from modules.im.slack import SlackApiError, SlackBot
+
+
+class _OfflineWebClient:
+    """The Slack web client a bot builds here: no network, and it names the bot ``U_BOT``."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def auth_test(self):
+        return {"user_id": "U_BOT"}
+
+
+@pytest.fixture(autouse=True)
+def _offline_slack_web_client(monkeypatch):
+    monkeypatch.setattr(slack_module, "AsyncWebClient", _OfflineWebClient)
 
 
 class _ResponseLike:
