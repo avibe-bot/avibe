@@ -60,6 +60,13 @@ from core.run_settlement import (
 )
 from core.session_activities import SessionActivity
 from core.session_turns import emit_matches_active_turn
+from core.runtime_work import (
+    RuntimeWorkSupervisor,
+    answer_caught_cancellation,
+    land_step,
+    rearm_caught_cancellation,
+    step_failed,
+)
 from storage.background import (
     SQLiteBackgroundTaskStore,
     TERMINAL_RUN_STATUSES,
@@ -1296,7 +1303,19 @@ class ConsolidatedMessageDispatcher:
         terminal_error: str | None,
         output_semantics: MessageOutput,
         provenance: dict[str, Any],
+        blocked_run_ids: frozenset[str],
+        session_id: str | None = None,
     ) -> list[str]:
+        """Record a Turn's output on its Runs; may run off the loop.
+
+        ``blocked_run_ids`` is the in-memory blocking-Activity check, made on the loop
+        before this runs: the Activity registry is loop-owned, and Activity writes
+        take its lock and then SQLite's writer, so reading it under the writer would
+        take the two in the opposite order. The SQLite store adds the Runs its durable
+        Activity rows still block when the write commits, and returns the Runs it
+        deferred.
+        """
+
         normalized_run_ids = list(
             dict.fromkeys(
                 run_id
@@ -1318,11 +1337,25 @@ class ConsolidatedMessageDispatcher:
                 [
                     run_id
                     for run_id in normalized_run_ids
-                    if terminal_status and self._run_has_blocking_activity(run_id)
+                    if terminal_status and run_id in blocked_run_ids
                 ]
                 if terminal_status
                 else []
             )
+            # Looked up on the class: a stand-in store answers any attribute.
+            if callable(getattr(type(store), "record_turn_terminal_outputs", None)):
+                return store.record_turn_terminal_outputs(
+                    normalized_run_ids,
+                    activity_session_ids=[session_id] if session_id else [],
+                    output_id=output_id,
+                    text=text,
+                    message_id=message_id,
+                    sequence=output_semantics.sequence,
+                    provenance=provenance,
+                    terminal_status=terminal_status,
+                    error=terminal_error,
+                    deferred_run_ids=deferred_run_ids,
+                )
             record_turn_outputs(
                 normalized_run_ids,
                 output_id=output_id,
@@ -1364,7 +1397,7 @@ class ConsolidatedMessageDispatcher:
             if callable(get_run) and _run_is_cancelled(get_run(run_id)):
                 continue
             run_terminal_status = terminal_status
-            if run_terminal_status and self._run_has_blocking_activity(run_id):
+            if run_terminal_status and run_id in blocked_run_ids:
                 deferred_run_ids.append(run_id)
                 defer_terminal = getattr(store, "defer_run_terminal", None)
                 if callable(defer_terminal):
@@ -1661,7 +1694,7 @@ class ConsolidatedMessageDispatcher:
             return False
         return fallback
 
-    def _record_agent_run_terminal_result(
+    async def _record_agent_run_terminal_result(
         self,
         context: MessageContext,
         text: str,
@@ -1672,6 +1705,21 @@ class ConsolidatedMessageDispatcher:
         output_semantics: MessageOutput | None = None,
         log_label: str = "agent run terminal result",
     ) -> None:
+        """Record a Turn's terminal result on its Runs, off the controller loop.
+
+        The write waits for SQLite's writer, which another process can hold for the
+        whole busy timeout, so it runs on the runtime-work door (#2706). It keeps the
+        cancellation point it had on the loop: a cancellation that arrives while the
+        write runs waits for it to land, the synchronous tail (close-after) runs, and
+        the cancellation is delivered at the caller's next await -- where it landed
+        before.
+
+        Which Runs an open Activity still blocks is decided inside the write's own
+        transaction, from the durable Activity rows (``defer_for_live_activities``),
+        so the record follows the order the loop committed the Activity events in,
+        whatever happened while it waited for the writer.
+        """
+
         semantics = output_semantics or MessageOutput(completes_turn=True)
         if not semantics.records_run_output:
             return
@@ -1682,27 +1730,46 @@ class ConsolidatedMessageDispatcher:
         terminal_status = None
         if semantics.settles_run:
             terminal_status = "failed" if is_error else "succeeded"
-        store = None
         try:
-            store = SQLiteBackgroundTaskStore()
-            deferred_run_ids = self._record_agent_run_terminal_for_ids(
-                store=store,
-                run_ids=run_ids,
-                text=text,
-                message_id=message_id,
-                terminal_status=terminal_status,
-                terminal_error=terminal_error,
-                output_semantics=semantics,
-                provenance=semantics.provenance(context),
-            )
+            provenance = semantics.provenance(context)
         except Exception as err:
             logger.warning("Failed to record %s for %s: %s", log_label, ",".join(run_ids), err)
             if require_confirmation:
                 raise
             return
-        finally:
-            if store is not None:
+        blocked_run_ids = frozenset(
+            run_id for run_id in run_ids if terminal_status and self._run_has_blocking_activity(run_id)
+        )
+
+        def record() -> list[str]:
+            store = SQLiteBackgroundTaskStore()
+            try:
+                return self._record_agent_run_terminal_for_ids(
+                    store=store,
+                    run_ids=run_ids,
+                    text=text,
+                    message_id=message_id,
+                    terminal_status=terminal_status,
+                    terminal_error=terminal_error,
+                    output_semantics=semantics,
+                    provenance=provenance,
+                    blocked_run_ids=blocked_run_ids,
+                    session_id=str((getattr(context, "platform_specific", None) or {}).get("agent_session_id") or "")
+                    or None,
+                )
+            finally:
                 store.close()
+
+        step, cancelled = await land_step(self._run_off_loop(record))
+        if step_failed(step):
+            if cancelled:
+                answer_caught_cancellation(step)
+            err = step.exception()
+            logger.warning("Failed to record %s for %s: %s", log_label, ",".join(run_ids), err)
+            if require_confirmation:
+                raise err
+            return
+        deferred_run_ids = step.result()
         if semantics.settles_run:
             payload = getattr(context, "platform_specific", None) or {}
             defer_close_after = bool(
@@ -1722,6 +1789,14 @@ class ConsolidatedMessageDispatcher:
                 payload["_close_after_runtime_pending"] = True
             else:
                 self._schedule_close_after_runtime(context)
+        if cancelled:
+            rearm_caught_cancellation()
+
+    async def _run_off_loop(self, operation: Callable[[], Any]) -> Any:
+        supervisor = getattr(self.controller, "runtime_work_supervisor", None)
+        if isinstance(supervisor, RuntimeWorkSupervisor):
+            return await supervisor.run_sync(operation)
+        return await asyncio.to_thread(operation)
 
     async def _wait_for_close_after_runs(self, run_ids: tuple[str, ...]) -> bool:
         """Wait for the Run writer, not a Turn output, to finish disposal ownership."""
@@ -2036,7 +2111,7 @@ class ConsolidatedMessageDispatcher:
             )
             return []
 
-    def _record_suppressed_agent_run_terminal_result(
+    async def _record_suppressed_agent_run_terminal_result(
         self,
         context: MessageContext,
         text: str,
@@ -2046,7 +2121,7 @@ class ConsolidatedMessageDispatcher:
         terminal_error: str | None = None,
         output_semantics: MessageOutput | None = None,
     ) -> None:
-        self._record_agent_run_terminal_result(
+        await self._record_agent_run_terminal_result(
             context,
             text,
             message_id,
@@ -2810,7 +2885,7 @@ class ConsolidatedMessageDispatcher:
                     # Run completion is independent from visible Message and Turn
                     # completion cardinality. A detached/empty final output may
                     # settle its origin Run without touching the current Turn.
-                    self._record_agent_run_terminal_result(
+                    await self._record_agent_run_terminal_result(
                         context,
                         materialize_citations(text, citations),
                         None,
@@ -2949,7 +3024,7 @@ class ConsolidatedMessageDispatcher:
                         materialize_citations(persist_text, citations),
                         result_footer if mutates_turn_lifecycle else None,
                     )
-                    self._record_agent_run_terminal_result(
+                    await self._record_agent_run_terminal_result(
                         context,
                         duplicate_result_text,
                         None,
@@ -3087,7 +3162,7 @@ class ConsolidatedMessageDispatcher:
                 # a sidecar bound to the body the reader is actually shown.
                 written_recorded_text = materialize_citations(recorded_text, citations)
                 if canonical_type == "result" and suppressed_trigger_kind in HARNESS_TRIGGER_KINDS:
-                    self._record_suppressed_agent_run_terminal_result(
+                    await self._record_suppressed_agent_run_terminal_result(
                         context,
                         written_recorded_text,
                         None,
@@ -3457,7 +3532,7 @@ class ConsolidatedMessageDispatcher:
                 settlement_result_text = written_result_text
 
                 if not settlement_waits_for_persistence:
-                    self._record_agent_run_terminal_result(
+                    await self._record_agent_run_terminal_result(
                         context,
                         written_result_text,
                         primary_message_id,
@@ -3558,7 +3633,7 @@ class ConsolidatedMessageDispatcher:
                     if workbench_run_waits_for_persistence and not durable_output_exists:
                         raise RuntimeError("Workbench run output was not durably persisted")
                     try:
-                        self._record_agent_run_terminal_result(
+                        await self._record_agent_run_terminal_result(
                             context,
                             settlement_result_text,
                             primary_message_id,

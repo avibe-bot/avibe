@@ -54,6 +54,7 @@ from core.runtime_work import (
     RuntimeWorkSupervisor,
     answer_caught_cancellation,
     land_step,
+    rearm_caught_cancellation,
     step_failed,
 )
 from core.run_settlement import (
@@ -4034,22 +4035,6 @@ class _ScheduledRuntimeWorkHandler(RuntimeWorkHandler):
         return True
 
 
-def _rearm_cancellation() -> None:
-    """Deliver a cancellation the current task caught, but did not answer, at its next await.
-
-    ``uncancel`` first (Python 3.11+, absent on 3.10, which counts no requests), so the
-    request is counted once, as an ``asyncio.timeout`` around the caller expects.
-    """
-
-    current = asyncio.current_task()
-    if current is None:
-        return
-    uncancel = getattr(current, "uncancel", None)
-    if uncancel is not None:
-        uncancel()
-    current.cancel()
-
-
 class ScheduledTaskService:
     """Controller-owned runtime that executes persisted scheduled tasks."""
 
@@ -5083,7 +5068,7 @@ class ScheduledTaskService:
         if cancelled:
             if step_failed(step):
                 answer_caught_cancellation(step)
-            _rearm_cancellation()
+            rearm_caught_cancellation()
         return step.result()
 
     async def _land_runtime_step(self, operation, /, *args, **kwargs):  # noqa: ANN001, ANN202

@@ -28,12 +28,18 @@ The rows are bounded by the Turn's Run ids. The store is also constructed on eve
 
 **Orderings a move must keep.**
 1. **The Run write lands before the Turn's sink is released.** Awaiting an off-loop step at the same point keeps that order. While the step is in flight, a Stop on the loop can land first and settle the Run `canceled`, which is first-writer-wins in the store. That is a legitimate outcome of a Stop racing a result, and the note accepts it.
-2. **A cancellation caught during the write is held until the whole terminal-delivery tail has completed**, not just the close-after tail. After `_record_agent_run_terminal_result`, the dispatcher still has to run `_signal_turn_complete` and release the sink. After the dispatcher returns, `Controller.emit_agent_message` calls `on_terminal_delivery_complete`, which is path B's evidence-carrying terminal write. If the cancellation were answered any earlier, the runner's `runner_release` could terminalize the Turn first, without evidence, which breaks B's ordering 1. So the terminal emit runs as one unit that a cancellation cannot split: the Run write (through `land_step`), the close-after tail, `_signal_turn_complete`, the sink release and `on_terminal_delivery_complete`. The caught cancellation is answered only after all of them have run.
+2. **A cancellation caught during the write keeps the cancellation point it had on the loop** (the `_store_step` rule from #2654). It waits for the write to land, the synchronous tail runs (held Activity settlements, close-after arming), and it is delivered at the emitter's next await -- where it landed when the write ran on the loop. The uncancellable unit is the write and that tail, with no network inside.
+
+   The rule first proposed here held the cancellation through the whole terminal emit, up to `on_terminal_delivery_complete`. In every terminal branch, though, IM network awaits (`_collapse_status_bubble`, `_clear_consolidated_state`, `_stream_chunk`, `_finish_processing_indicator_turn`) sit between the Run write and `_signal_turn_complete`, the sink release and that evidence-carrying write. That rule would hold a cancellation across network calls, so the orchestrator chose this one instead. A cancellation that lands at those network awaits can skip the evidence write and let `runner_release` terminalize first. That is the case on master too; it is unchanged here and tracked in #2714.
 3. **The blocking-Activity check is made without the Activity registry's lock while SQLite's writer is held.** Activity start and completion hold `SessionActivityRegistry._lock` while their store write waits for SQLite's writer. A worker that reserved the writer and then called `has_blocking_run_activity` would take the two locks in the opposite order, which is a lock inversion. Two placements look possible, and the choice belongs to the implementation:
    - the check reads the durable Activity rows for the Turn's Runs (session Activity records), inside the same transaction, after the writer is reserved;
    - the in-memory check stays on the loop before the step, and the write re-validates it against the durable rows.
 
-   Either way, the lock order stays single, and an Activity that settles in between cannot make the Turn's status get dropped.
+   As implemented: the in-memory check stays on the loop, and the transaction adds the Runs that its durable Activity rows still block (`record_turn_terminal_outputs`). The registry persists an Activity before it changes its own state, so its `active` rows are exactly the Activities it holds open. The record therefore follows the order in which the loop committed the Activity events:
+   - an Activity that started while the record waited for the writer still defers the Run, and close-after waits for it;
+   - an Activity that ended and settled the Run first stays first, with its own status, exactly as when it ended before the result on the loop.
+
+   No settlement is held or replayed. A first version held Activity terminals until the record landed; every round of review then found a new interleaving, which this rule removes at its root.
 
 **Recommendation.** Move it to the runtime-work door (`run_sync` through `land_step`), with the three conditions above. Construct the store once rather than per call. The same dispatcher already records Run activity through the door (`_flush_agent_run_activity` → `run_sync`).
 
@@ -102,7 +108,7 @@ Each move needs the check this note applies to A. Does a loop section rely on th
 
 ## Plan
 
-- [ ] C: bound the recovery reads (start from live Runs and pending legacy notices, with a pinned plan; read-only transactions; mismatch-only status projection).
-- [ ] A: record the Turn's Run terminal through the runtime-work door with `land_step`; make the blocking-Activity check without taking the registry lock under the writer; hold a caught cancellation until the whole terminal-delivery tail, including `on_terminal_delivery_complete`, has run; construct the store once.
+- [x] C: bound the recovery reads (start from live Runs and pending legacy notices, with a pinned plan; read-only transactions; mismatch-only status projection).
+- [x] A: record the Turn's Run terminal through the runtime-work door with `land_step`, keeping the cancellation point it had on the loop; make the blocking-Activity check on the loop and re-read the durable Activity rows inside the write's transaction; build the store off the loop. The IM network tail is #2714.
 - [ ] B, step 1: skip the writer for redundant terminalization, the post-terminal read and an empty drain.
 - [ ] B, step 2: a design note for B's remaining write that keeps terminalization and successor selection atomic with respect to admission (orderings 1–5).

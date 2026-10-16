@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
+
+import pytest
 
 from core.inbox_events import RUNS_UPDATED_EVENT, bus
 from modules.im import MessageContext
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.message_output import MessageOutput, stop_output_for
 from modules.agents.service import AgentService
+from storage.background import normalize_run_status
 
 
 def test_close_after_releases_the_owned_runtime_after_terminal_result() -> None:
@@ -449,7 +455,7 @@ def test_detached_close_after_reserves_idle_gate_before_teardown() -> None:
         ):
             dispatcher._terminal_agent_run_ids = lambda *_args: ["run-1"]
             dispatcher._record_agent_run_terminal_for_ids = lambda **_kwargs: None
-            dispatcher._record_agent_run_terminal_result(
+            await dispatcher._record_agent_run_terminal_result(
                 context,
                 "done",
                 None,
@@ -512,7 +518,7 @@ def test_failed_run_write_does_not_arm_close_after() -> None:
             dispatcher._record_agent_run_terminal_for_ids = Mock(
                 side_effect=RuntimeError("SQLite write failed")
             )
-            dispatcher._record_agent_run_terminal_result(
+            await dispatcher._record_agent_run_terminal_result(
                 context,
                 "done",
                 None,
@@ -583,7 +589,7 @@ def test_blocking_activity_delays_close_after_until_run_settles() -> None:
             patch("core.message_dispatcher.SQLiteBackgroundTaskStore", return_value=store),
             patch("core.services.running_agents.end_running_agent", new=end_running_agent),
         ):
-            dispatcher._record_agent_run_terminal_result(
+            await dispatcher._record_agent_run_terminal_result(
                 context, "done", None, is_error=False, output_semantics=output
             )
             assert recorded[0]["deferred_run_ids"] == ["run-1"]
@@ -1002,3 +1008,368 @@ def test_turn_only_result_keeps_close_after_runtime_for_activity_retry() -> None
         end_running_agent.assert_not_awaited()
 
     asyncio.run(exercise())
+
+
+def _agent_run_context(run_id: str) -> MessageContext:
+    return MessageContext(
+        user_id="user",
+        channel_id="session-1",
+        platform="avibe",
+        platform_specific={
+            "agent_session_id": "session-1",
+            "agent_backend": "claude",
+            "close_after": True,
+            "task_execution_id": run_id,
+            "task_trigger_kind": "agent_run",
+            "agent_session_target": {
+                "agent_backend": "claude",
+                "session_anchor": "base-session-1",
+            },
+            "agent_runtime_turn_key": "runtime-1",
+            "agent_runtime_turn_token": "turn-1",
+        },
+    )
+
+
+async def _record_terminal(dispatcher: ConsolidatedMessageDispatcher, context: MessageContext, **kwargs) -> None:
+    # The recorder became a coroutine when its write left the loop; called the same way on either side of that.
+    result = dispatcher._record_agent_run_terminal_result(context, "done", None, **kwargs)
+    if inspect.isawaitable(result):
+        await result
+
+
+def _blocking_store(writing: threading.Event, release: threading.Event, record=None) -> SimpleNamespace:
+    def record_turn_run_outputs(run_ids, **kwargs):
+        writing.set()
+        assert release.wait(5)
+        if record is not None:
+            return record(run_ids, **kwargs)
+        return None
+
+    return SimpleNamespace(record_turn_run_outputs=record_turn_run_outputs, close=lambda: None)
+
+
+def test_a_runs_terminal_record_never_holds_the_controller_loop() -> None:
+    """#2706: a Turn's terminal result is recorded on its Runs in one SQLite write transaction, which waits while
+    another process holds SQLite's writer. The emit runs on the controller loop, so the write runs off it: the loop
+    keeps turning while the write waits, and the recorder returns once it lands."""
+
+    async def exercise() -> None:
+        controller = SimpleNamespace()
+        controller.agent_service = AgentService(controller)
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        writing, release = threading.Event(), threading.Event()
+        threading.Timer(1.0, release.set).start()  # the other writer lets go, eventually
+        with patch("core.message_dispatcher.SQLiteBackgroundTaskStore", return_value=_blocking_store(writing, release)):
+            record = asyncio.create_task(
+                _record_terminal(
+                    dispatcher,
+                    _agent_run_context("run-1"),
+                    is_error=False,
+                    output_semantics=MessageOutput(completes_turn=True, completes_run=True),
+                )
+            )
+            started = time.monotonic()
+            await asyncio.sleep(0.05)  # the recorder starts here, and must not hold the loop
+            loop_lag = time.monotonic() - started - 0.05
+            release.set()
+            await record
+        assert writing.is_set()
+        assert loop_lag < 0.1, f"the controller loop was held {loop_lag:.2f}s by the Run terminal write"
+
+    asyncio.run(exercise())
+
+
+def test_a_cancellation_during_the_runs_terminal_record_is_answered_at_the_next_await() -> None:
+    """#2706: the Run terminal record keeps the cancellation point it had on the loop. A cancellation (a Stop, a
+    shutdown) that reaches the emitting task while the write runs off the loop waits for it: the Run row lands, the
+    close-after tail runs, and the cancellation is delivered at the emitter's next await -- never between the write and
+    the bookkeeping that depends on it."""
+
+    async def exercise() -> list[str]:
+        controller = SimpleNamespace()
+        service = AgentService(controller)
+        controller.agent_service = service
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = _agent_run_context("run-1")
+        gate = service._get_turn_gate("runtime-1")
+        await gate.lock.acquire()
+        gate.token = "turn-1"
+        gate.backend = "claude"
+        writing, release = threading.Event(), threading.Event()
+        recorded: list[dict] = []
+        store = _blocking_store(writing, release, record=lambda _run_ids, **kwargs: recorded.append(kwargs))
+        outcomes: list[str] = []
+
+        async def emit() -> None:
+            await _record_terminal(
+                dispatcher,
+                context,
+                is_error=False,
+                output_semantics=MessageOutput(completes_turn=True, completes_run=True),
+            )
+            outcomes.append("recorded")
+            try:
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                outcomes.append("cancelled at the next await")
+                raise
+
+        with patch("core.message_dispatcher.SQLiteBackgroundTaskStore", return_value=store):
+            emitter = asyncio.create_task(emit())
+            assert await asyncio.to_thread(writing.wait, 5)
+            emitter.cancel()
+            await asyncio.sleep(0.05)
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await emitter
+        assert recorded, "the Run write did not land"
+        assert context.platform_specific.get("_close_after_runtime_pending") is True, "close-after was not armed"
+        gate.lock.release()
+        return outcomes
+
+    assert asyncio.run(exercise()) == ["recorded", "cancelled at the next await"]
+
+
+def test_an_activity_started_while_the_runs_terminal_record_waits_still_defers_the_run(tmp_path, monkeypatch) -> None:
+    """#2706: the Run terminal record runs off the loop, so an owned Activity can start -- durably -- while it waits
+    for SQLite's writer, after the loop's in-memory blocking check. The record re-reads the durable Activity rows inside
+    its own transaction: the Run's terminal intent is deferred while that Activity is open, and close-after waits for
+    the Run, exactly as when the Activity had started before the record."""
+
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.background import SQLiteBackgroundTaskStore
+    from storage.db import create_sqlite_engine
+    from storage.session_activities import SQLiteSessionActivityStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    queued = request_store.enqueue_agent_run(message="run", agent_backend="claude", session_id="session-1")
+    assert request_store.claim(queued.id) is not None
+    db_path = request_store.sqlite_backend.db_path
+    writing, release = threading.Event(), threading.Event()
+
+    class _WaitsForTheWriter(SQLiteBackgroundTaskStore):
+        def record_turn_run_outputs(self, *args, **kwargs):
+            writing.set()
+            assert release.wait(5)
+            return super().record_turn_run_outputs(*args, **kwargs)
+
+    async def exercise() -> MessageContext:
+        controller = SimpleNamespace()
+        service = AgentService(controller)
+        controller.agent_service = service
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = _agent_run_context(queued.id)
+        gate = service._get_turn_gate("runtime-1")
+        await gate.lock.acquire()
+        gate.token = "turn-1"
+        gate.backend = "claude"
+        with patch("core.message_dispatcher.SQLiteBackgroundTaskStore", new=_WaitsForTheWriter):
+            record = asyncio.create_task(
+                _record_terminal(
+                    dispatcher,
+                    context,
+                    is_error=False,
+                    output_semantics=MessageOutput(completes_turn=True, completes_run=True),
+                )
+            )
+            assert await asyncio.to_thread(writing.wait, 5)
+            # The receiver starts an Activity owned by the same Run; it persists before the record commits.
+            SQLiteSessionActivityStore(create_sqlite_engine(db_path)).upsert_activity(
+                {
+                    "id": "activity-1",
+                    "backend": "claude",
+                    "runtime_key": "runtime-1",
+                    "session_id": "session-1",
+                    "run_id": queued.id,
+                    "detached_from_run": False,
+                    "metadata": {},
+                },
+                phase="active",
+            )
+            release.set()
+            await record
+        gate.lock.release()
+        return context
+
+    context = asyncio.run(exercise())
+    assert normalize_run_status(request_store.get_run(queued.id)["status"]) == "running", (
+        "the record settled a Run that an open Activity still owns"
+    )
+    assert context.platform_specific.get("_close_after_wait_for_run_ids") == (queued.id,), (
+        "close-after does not wait for the Run the open Activity holds"
+    )
+
+
+def test_an_activity_that_settles_while_the_runs_terminal_record_waits_stays_first(tmp_path, monkeypatch) -> None:
+    """#2706: the other order. An owned Activity that the loop saw open ends -- durably -- and settles the Run while
+    the record waits for SQLite's writer. The Activity's settlement committed first, so it stays first: the Run keeps
+    the Activity's status and the record adds only its output, exactly as when the Activity had ended before the result
+    on the loop."""
+
+    from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore, TaskExecutionStore
+    from storage.background import SQLiteBackgroundTaskStore
+    from storage.db import create_sqlite_engine
+    from storage.session_activities import SQLiteSessionActivityStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    queued = request_store.enqueue_agent_run(message="run", agent_backend="claude", session_id="session-1")
+    assert request_store.claim(queued.id) is not None
+    activity_store = SQLiteSessionActivityStore(create_sqlite_engine(request_store.sqlite_backend.db_path))
+    activity_row = {
+        "id": "activity-1",
+        "backend": "claude",
+        "runtime_key": "runtime-1",
+        "session_id": "session-1",
+        "run_id": queued.id,
+        "detached_from_run": False,
+        "metadata": {},
+    }
+    activity_store.upsert_activity(activity_row, phase="active")
+    writing, release = threading.Event(), threading.Event()
+
+    class _WaitsForTheWriter(SQLiteBackgroundTaskStore):
+        def record_turn_run_outputs(self, *args, **kwargs):
+            writing.set()
+            assert release.wait(5)
+            return super().record_turn_run_outputs(*args, **kwargs)
+
+    async def exercise() -> None:
+        controller = SimpleNamespace()
+        service = AgentService(controller)
+        controller.agent_service = service
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        scheduled = ScheduledTaskService(
+            controller=controller,
+            store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+            request_store=request_store,
+        )
+        blocked = [True]
+        service.activities.has_blocking_run_activity = lambda _run_id: blocked[0]
+        with patch("core.message_dispatcher.SQLiteBackgroundTaskStore", new=_WaitsForTheWriter):
+            record = asyncio.create_task(
+                _record_terminal(
+                    dispatcher,
+                    _agent_run_context(queued.id),
+                    is_error=True,
+                    terminal_error="the turn failed",
+                    output_semantics=MessageOutput(completes_turn=True, completes_run=True),
+                )
+            )
+            assert await asyncio.to_thread(writing.wait, 5)
+            # The Activity ends on the loop and its Run owner settles it, before the record commits.
+            blocked[0] = False
+            activity_store.upsert_activity(activity_row, phase="awaiting_output")
+            activity = SimpleNamespace(id="activity-1", status="stopped", run_id=queued.id, metadata={})
+            assert scheduled.settle_activity_runs(activity) == [queued.id]
+            release.set()
+            await record
+
+    asyncio.run(exercise())
+    settled = request_store.get_run(queued.id)
+    assert normalize_run_status(settled["status"]) == "canceled", "the later record replaced the Activity's settlement"
+
+
+def test_the_runs_terminal_record_reads_only_its_sessions_activities(tmp_path, monkeypatch) -> None:
+    """#2706: the record re-reads open Activities under SQLite's writer, so that read must stay bounded by the Turn's
+    work: it seeks the Turn's Session through ``ix_runtime_records_scope_anchor`` instead of walking every Activity row,
+    and a malformed Activity row is skipped rather than failing every Run's terminal record."""
+
+    import sqlite3
+
+    from sqlalchemy import event
+
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.db import create_sqlite_engine
+    from storage.session_activities import SQLiteSessionActivityStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    queued = request_store.enqueue_agent_run(message="run", agent_backend="claude", session_id="session-1")
+    assert request_store.claim(queued.id) is not None
+    store = request_store.sqlite_backend
+    engine = create_sqlite_engine(store.db_path)
+    with engine.begin() as conn:
+        conn.exec_driver_sql(
+            "insert into runtime_records (id, record_type, record_key, scope_id, session_anchor, workdir, payload_json,"
+            " expires_at, created_at, updated_at) values ('runtime::session_activity::bad', 'session_activity', 'bad',"
+            " null, 'session-1', null, '[]', null, '2026-10-16T00:00:00Z', '2026-10-16T00:00:00Z')"
+        )
+    SQLiteSessionActivityStore(engine).upsert_activity(
+        {
+            "id": "activity-elsewhere",
+            "backend": "claude",
+            "runtime_key": "runtime-2",
+            "session_id": "session-2",
+            "run_id": queued.id,
+            "detached_from_run": False,
+            "metadata": {},
+        },
+        phase="active",
+    )
+    statements: list[tuple[str, object]] = []
+
+    def capture(_conn, _cursor, statement, parameters, _context, _executemany):
+        if "runtime_records" in statement:
+            statements.append((statement, parameters))
+
+    event.listen(store.engine, "before_cursor_execute", capture)
+    try:
+        deferred = store.record_turn_terminal_outputs(
+            [queued.id],
+            activity_session_ids=["session-1"],
+            output_id="terminal",
+            text="done",
+            terminal_status="succeeded",
+        )
+    finally:
+        event.remove(store.engine, "before_cursor_execute", capture)
+
+    assert deferred == [], "an Activity in another Session blocked this Turn's Run"
+    assert normalize_run_status(request_store.get_run(queued.id)["status"]) == "succeeded"
+    (statement, parameters), = statements
+    with sqlite3.connect(store.db_path) as raw:
+        plan = " ".join(row[-1] for row in raw.execute("EXPLAIN QUERY PLAN " + statement, parameters))
+    assert "ix_runtime_records_scope_anchor" in plan and "SCAN runtime_records" not in plan, plan
+
+
+def test_the_runs_terminal_record_binds_within_an_old_sqlite_variable_limit(tmp_path, monkeypatch) -> None:
+    """#2706: a terminal output's Run ids have no size cap, and the record's Activity re-read looks up their Sessions.
+    That lookup binds in batches like the rest of the record, so an output with more Run ids than an older SQLite
+    build's 999 host parameters still records its Runs instead of failing with ``too many SQL variables``."""
+
+    import sqlite3
+
+    from sqlalchemy import event
+
+    from core.scheduled_tasks import TaskExecutionStore
+
+    if not hasattr(sqlite3.Connection, "setlimit"):
+        pytest.skip("sqlite3.Connection.setlimit needs Python 3.11")
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    queued = request_store.enqueue_agent_run(message="run", agent_backend="claude", session_id="session-1")
+    assert request_store.claim(queued.id) is not None
+    store = request_store.sqlite_backend
+
+    def old_sqlite_limit(dbapi_connection, _record):
+        dbapi_connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+
+    event.listen(store.engine, "connect", old_sqlite_limit)
+    store.engine.dispose()
+    try:
+        deferred = store.record_turn_terminal_outputs(
+            [queued.id, *(f"run-gone-{index}" for index in range(1000))],
+            activity_session_ids=["session-1"],
+            output_id="terminal",
+            text="done",
+            terminal_status="succeeded",
+        )
+    finally:
+        event.remove(store.engine, "connect", old_sqlite_limit)
+        store.engine.dispose()
+
+    assert deferred == []
+    assert normalize_run_status(request_store.get_run(queued.id)["status"]) == "succeeded"

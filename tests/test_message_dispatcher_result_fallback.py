@@ -247,6 +247,7 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
             terminal_error="stream disconnected",
             output_semantics=output,
             provenance=dict(output.metadata),
+            blocked_run_ids=frozenset(),
         )
 
         store.record_turn_run_outputs.assert_called_once_with(
@@ -535,7 +536,7 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         dispatcher = ConsolidatedMessageDispatcher(controller)
         dispatcher._collapse_status_bubble = mock.AsyncMock()
         dispatcher._clear_consolidated_state = mock.AsyncMock()
-        dispatcher._record_agent_run_terminal_result = mock.Mock()
+        dispatcher._record_agent_run_terminal_result = mock.AsyncMock()
         context = MessageContext(
             user_id="U1",
             channel_id="C1",
@@ -623,7 +624,7 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         dispatcher = ConsolidatedMessageDispatcher(controller)
         dispatcher._collapse_status_bubble = mock.AsyncMock()
         dispatcher._clear_consolidated_state = mock.AsyncMock()
-        dispatcher._record_agent_run_terminal_result = mock.Mock()
+        dispatcher._record_agent_run_terminal_result = mock.AsyncMock()
         platform_specific = {
             "agent_runtime_turn_key": "runtime-1",
             "agent_runtime_turn_token": "runtime-turn-1",
@@ -1120,7 +1121,7 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
 
         controller = _StubController(platform="avibe")
         dispatcher = ConsolidatedMessageDispatcher(controller)
-        dispatcher._record_agent_run_terminal_result = mock.Mock()
+        dispatcher._record_agent_run_terminal_result = mock.AsyncMock()
         context = MessageContext(
             user_id="U1",
             channel_id="ses-1",
@@ -1153,7 +1154,7 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_workbench_persistence_failure_does_not_settle_the_run(self):
         controller = _StubController(platform="avibe")
         dispatcher = ConsolidatedMessageDispatcher(controller)
-        dispatcher._record_agent_run_terminal_result = mock.Mock()
+        dispatcher._record_agent_run_terminal_result = mock.AsyncMock()
         context = MessageContext(
             user_id="U1",
             channel_id="ses-1",
@@ -1186,7 +1187,7 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_workbench_duplicate_persistence_receipt_can_settle_the_run(self):
         controller = _StubController(platform="avibe")
         dispatcher = ConsolidatedMessageDispatcher(controller)
-        dispatcher._record_agent_run_terminal_result = mock.Mock()
+        dispatcher._record_agent_run_terminal_result = mock.AsyncMock()
         context = MessageContext(
             user_id="U1",
             channel_id="ses-1",
@@ -1245,7 +1246,7 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_suppressed_history_id_is_not_recorded_as_run_delivery(self):
         controller = _StubController(platform="slack")
         dispatcher = ConsolidatedMessageDispatcher(controller)
-        dispatcher._record_suppressed_agent_run_terminal_result = mock.Mock()
+        dispatcher._record_suppressed_agent_run_terminal_result = mock.AsyncMock()
         context = MessageContext(
             user_id="U1",
             channel_id="C1",
