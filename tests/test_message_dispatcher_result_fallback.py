@@ -264,6 +264,8 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         store.get_run.assert_not_called()
 
     async def test_hfr_472_empty_failed_turn_creates_one_shared_fallback_contract(self):
+        """HFR-472: empty failed Turn owns one fallback across all accepted Runs."""
+
         controller = self._terminal_lifecycle_controller()
         dispatcher = ConsolidatedMessageDispatcher(controller)
         dispatcher._collapse_status_bubble = mock.AsyncMock()

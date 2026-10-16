@@ -47,6 +47,8 @@ def test_request_path_probe_rejects_redirects() -> None:
 
 
 def test_ra_tq_001_parse_cloudflared_metrics_extracts_quality_inputs() -> None:
+    """RA-TQ-001: Cloudflared metrics produce a bounded quality aggregate."""
+
     sample = tunnel_quality.parse_metrics(
         """
 # TYPE cloudflared_tunnel_ha_connections gauge
@@ -102,6 +104,8 @@ def test_packet_loss_rate_requires_timeout_growth_on_two_connections() -> None:
 
 
 def test_ra_tq_002_high_rtt_requires_three_minutes_before_recovery() -> None:
+    """RA-TQ-002: High RTT persists for three minutes before recovery eligibility."""
+
     evaluator = tunnel_quality.QualityEvaluator()
     now = 10_000.0
     for minute in range(15):
@@ -165,6 +169,8 @@ def test_ra_tq_033_unavailable_request_path_is_an_availability_episode() -> None
 
 
 def test_ra_tq_003_metrics_failure_becomes_unknown_after_45_seconds() -> None:
+    """RA-TQ-003: Missing metrics become unknown without causing route churn."""
+
     evaluator = tunnel_quality.QualityEvaluator()
     evaluator.update(_sample(100, (70, 75, 80, 85)))
 
@@ -269,6 +275,8 @@ def test_baseline_state_round_trips_without_raw_samples() -> None:
 
 
 def test_ra_tq_010_request_path_tail_overrides_good_connector_rtt() -> None:
+    """RA-TQ-010: Request-path tails override a healthy connector RTT grade."""
+
     evaluator = tunnel_quality.QualityEvaluator()
     snapshot = None
 
@@ -335,6 +343,8 @@ def test_request_path_degradation_controls_state_when_connector_metrics_are_miss
 
 
 def test_ra_tq_015_sustained_request_failures_trigger_recovery() -> None:
+    """RA-TQ-015: Sustained public request failures degrade the path and trigger recovery."""
+
     evaluator = tunnel_quality.QualityEvaluator()
     snapshot = None
 
@@ -360,6 +370,8 @@ def test_ra_tq_015_sustained_request_failures_trigger_recovery() -> None:
 
 
 def test_ra_tq_027_optimization_profiles_change_only_recovery_sensitivity() -> None:
+    """RA-TQ-027: User optimization policies change recovery sensitivity without changing path measurements."""
+
     evaluator = tunnel_quality.QualityEvaluator()
     request_path = {
         "status": "healthy",
@@ -397,6 +409,8 @@ def test_ra_tq_027_optimization_profiles_change_only_recovery_sensitivity() -> N
 
 
 def test_ra_tq_011_http2_uses_request_path_grade_without_rtt() -> None:
+    """RA-TQ-011: HTTP2 receives a request-path grade without QUIC RTT."""
+
     evaluator = tunnel_quality.QualityEvaluator()
     snapshot = None
 
@@ -448,6 +462,8 @@ def test_request_path_candidate_accepts_tail_improvement_despite_p50_regression(
 
 
 def test_ra_tq_020_request_path_candidate_accepts_material_failure_reduction() -> None:
+    """RA-TQ-020: Material request-failure reduction can accept a healthy candidate."""
+
     active = tunnel_quality.summarize_request_path_samples(
         [
             tunnel_quality.RequestPathSample(

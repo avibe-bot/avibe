@@ -272,6 +272,8 @@ def test_hfr_156_sqlite_commit_bridges_run_update_to_controller(tmp_path, monkey
 
 
 def test_hfr_156_bridge_failure_does_not_rollback_committed_run(tmp_path, monkeypatch):
+    """HFR-156: socket hint failure cannot roll back committed durable work."""
+
     from core import inbox_events
     from storage.background import SQLiteBackgroundTaskStore
 

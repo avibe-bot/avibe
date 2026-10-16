@@ -490,6 +490,8 @@ def test_hfr_172_task_definition_wake_follows_commit_and_not_rollback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """HFR-172: definition hints follow commit and exclude rollback or losing CAS."""
+
     from core import inbox_events
 
     store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
@@ -1593,6 +1595,8 @@ def test_hfr_161_scheduler_only_enqueues_one_successor_behind_active_work(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    """HFR-161: scheduled work admits one queued successor through one request owner."""
+
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store = ScheduledTaskStore()
     task = store.add_task(
@@ -1692,6 +1696,8 @@ def test_hfr_158_request_scan_fills_page_across_recovery_and_queued_work(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    """HFR-158: occupied partitions cannot hide later actionable work."""
+
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     request_store = TaskExecutionStore()
     recovering = request_store.enqueue_hook_send(
@@ -1885,6 +1891,8 @@ def test_hfr_282_task_reload_waits_for_result_stamp_mirror_commit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """HFR-282: scheduled task mirror mutations serialize with reloads through commit."""
+
     store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
     task = store.add_task(
         session_key="slack::channel::C123",
@@ -7102,7 +7110,7 @@ def test_hfr_439_turn_failure_metadata_reaches_every_linked_run(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """The failed transition and its Turn notification evidence commit together."""
+    """HFR-439: The failed transition and its Turn notification evidence commit together."""
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     request_store = TaskExecutionStore()
@@ -7755,6 +7763,8 @@ def test_agent_run_keeps_output_ledger_but_callbacks_only_terminal_result(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    """MESSAGE-DELIVERY-005: One Run retains multiple outputs but callbacks only its terminal result once."""
+
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     caller_session_id = _make_avibe_session(monkeypatch, tmp_path)
     request_store = TaskExecutionStore()
@@ -8233,6 +8243,8 @@ def test_failed_run_records_error_and_enqueues_one_terminal_callback(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    """HFR-008: a repeated terminal record is no second transition, so the failed Run calls back once."""
+
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     caller_session_id = _make_avibe_session(monkeypatch, tmp_path)
     request_store = TaskExecutionStore()
@@ -8953,6 +8965,8 @@ def test_hfr_169_recovered_activity_without_run_reaches_its_session(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """HFR-169: Activity recovery remains visible without a Run projection."""
+
     session_id = _make_avibe_session(monkeypatch, tmp_path)
     request_store = TaskExecutionStore()
     sqlite_store = request_store.sqlite_backend
@@ -11943,6 +11957,11 @@ def test_hfr_164_hfr_165_service_restart_joins_only_its_harness_lane_generations
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    """HFR-164: service restart joins only its own runtime work registrations.
+
+    HFR-165: repeated service cycles leave one current registration generation.
+    """
+
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     class _Supervisor:
@@ -12025,6 +12044,8 @@ def test_hfr_176_legacy_file_probes_wake_only_their_mapped_lanes(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    """HFR-176: legacy file signatures wake only their mapped runtime work lanes."""
+
     notifications: list[tuple[RuntimeWorkLane, ...]] = []
     service = ScheduledTaskService(
         controller=SimpleNamespace(
@@ -12145,6 +12166,8 @@ def test_stale_lane_applies_leaked_lock_cleanup_on_the_controller_loop(
 def test_hfr_286_cancellation_wake_is_not_gated_by_stale_sweep_cadence(
     tmp_path: Path,
 ) -> None:
+    """HFR-286: Run cancellation hints bypass stale sweep eligibility."""
+
     service = ScheduledTaskService(
         controller=SimpleNamespace(platform_settings_managers={}),
         store=ScheduledTaskStore(tmp_path / "tasks.json"),
@@ -12512,6 +12535,8 @@ def test_drain_does_not_block_on_hung_execution(tmp_path: Path) -> None:
 def test_hfr_177_transport_ready_wakes_requests_and_resumes_skipped_run(
     tmp_path: Path,
 ) -> None:
+    """HFR-177: transport readiness directly resumes skipped request admission."""
+
     async def _exercise() -> None:
         store = TaskExecutionStore(tmp_path / "reqs")
         workbench = store.enqueue_hook_send(session_key="avibe::project::proj_test", prompt="local")

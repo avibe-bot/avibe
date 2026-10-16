@@ -4596,6 +4596,8 @@ class ActivityRunAttributionTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_scheduled_turn_attributes_its_activity_to_its_run(self):
+        """HFR-044: a Harness turn attributes its background Activity to that turn's Run."""
+
         agent, _service = _build_agent()
         composite_key = "session-scheduled-activity:/tmp/work"
         agent._pending_requests[composite_key] = [

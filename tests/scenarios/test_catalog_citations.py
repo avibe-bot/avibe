@@ -1,4 +1,4 @@
-"""Every case a scenario catalog cites still exists, in every catalog and every key.
+"""Every case a scenario catalog cites is one pytest collects, and names the row citing it.
 
 A row's citations are how a reader gets from a scenario to the code that runs
 it: ``test`` and ``partial_evidence`` name the evidence, and the pointer keys
@@ -8,34 +8,43 @@ or deleted tests left nine rows across two catalogs reading ``covered`` while
 the case they cited no longer existed. Every catalog's legend defines
 ``covered`` as automated coverage that exists, so a ``covered`` row must cite it.
 
-A pytest citation resolves when its file holds a case pytest collects:
-``file::Class::method``, or ``file::name`` naming a module-level test, a test
-class, or a test method of a class in that file, which is how several catalogs
-cite unittest cases. A helper or a plain class is no case. A parametrized id
-resolves through its function. An evidence key names exactly one case per
-entry (STANDARD.md §4): a bare file or a test class stays collected for
-whatever else cites it, so it evidences no row in particular, and a row whose
-contract several cases prove lists each of them under ``test``;
-``partial_evidence.test`` names one. A cited Python file must be one pytest's
-default discovery collects (``test_*.py`` or ``*_test.py``), and an evidence
-case must not be skipped unconditionally on itself, its class or its module.
-Pointer keys may name a bare file, a test class, a function or a method, which
-must exist.
+Python citations resolve against pytest's own collection of the cited files,
+as UI citations resolve against vitest's
+(``ui/scripts/validate-scenario-catalog.mjs``; here only their file is
+checked). A source read approximated collection and missed what pytest
+decides: a ``Test*`` class with ``__init__`` or ``__test__ = False``, a
+deselecting hook, a test defined in a branch not taken.
 
-This reads source and applies pytest's default naming rules; it does not
-emulate every collection-time exclusion, such as ``__test__ = False``, a class
-with ``__init__``, or deselection in a hook; it matches exact names only; and it
-leaves conditional skips (``skipif``) to the environment. Resolving against
-pytest's own collection, and execution status against CI's results, is #2565.
+- An evidence key (``test``, ``partial_evidence.test``) names exactly one
+  collected case (STANDARD.md §4): ``file::Class::method``, ``file::name`` for a
+  module-level test or the one method of that name, or either with a
+  parametrized id. A parametrized function is one case. A bare file or a test
+  class stays collected for whatever else cites it, so it evidences no row in
+  particular; a row whose contract several cases prove lists each of them
+  under ``test``, and ``partial_evidence.test`` names one. The case must not be
+  skipped unconditionally (``pytest.mark.skip`` on it, its class or its module,
+  or ``unittest.skip``), and its docstring must name the citing row's ID, so the
+  evidence is greppable by ID and an unrelated test cannot quietly stand in for
+  a row (AGENTS.md §7).
+- A pointer key leads to at least one collected case: a bare file with any, or
+  a name contained in a case's node id -- a class, a function, a method -- or a
+  scenario ID that a case's docstring names, which is the group of cases
+  carrying that row.
 
-UI (vitest) citations are resolved against vitest's own collection by
-``ui/scripts/validate-scenario-catalog.mjs``; here only their file is checked.
+A cited Python file must be one pytest's default discovery collects
+(``test_*.py`` or ``*_test.py``). Conditional skips (``skipif``) depend on the
+environment, and whether a case actually ran belongs to CI's results (#2565).
 """
 
 from __future__ import annotations
 
-import ast
+import json
+import os
 import re
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 
@@ -48,109 +57,72 @@ _UI_SUFFIXES = {".ts", ".tsx", ".mts", ".mjs"}
 _POINTER_KEYS = ("related_tests", "supporting_tests")
 # pytest's default ``python_files``, which this repository does not override.
 _DISCOVERED = re.compile(r"(test_.*|.*_test)\.py")
+# One collection of every cited file runs in about 20 s; the bound only stops a hang.
+_COLLECTION_TIMEOUT_SECONDS = 240
 
 
-@cache
-def _collectable_cases(path: Path) -> tuple[frozenset[str], dict[str, frozenset[str]]]:
-    """The test functions pytest collects from ``path``, and each test class's test methods.
+@dataclass(frozen=True)
+class _Case:
+    """One collected item: its path within the file, its parametrized id, and what it declares."""
 
-    pytest's default naming rules, which this repository does not change: a
-    module-level ``test*`` function, and a ``test*`` method of a ``Test*`` class or
-    of a ``unittest.TestCase`` subclass, directly or through another class in the
-    file. Collection-time exclusions are out of its reach (#2565).
+    path: tuple[str, ...]
+    param: str
+    doc: str
+    skipped: bool
+
+
+class _Recorder:
+    """A pytest plugin that writes what a collection-only run collected, as JSON."""
+
+    def __init__(self, out: str) -> None:
+        self.out = out
+
+    def pytest_collection_finish(self, session: pytest.Session) -> None:
+        cases = []
+        for item in session.items:
+            function = getattr(item, "function", None)
+            cases.append(
+                {
+                    "nodeid": item.nodeid,
+                    "doc": (function.__doc__ if function is not None else None) or "",
+                    "skipped": _declares_skip(item),
+                }
+            )
+        Path(self.out).write_text(json.dumps(cases), encoding="utf-8")
+
+
+def _declares_skip(item: pytest.Item) -> bool:
+    """Whether the case, its class, its module or its parameter set declares a skip.
+
+    Only a declared ``skip``: one a hook adds while collecting, such as the
+    e2e suites' opt-in, depends on the run's options as ``skipif`` depends on
+    the environment.
     """
 
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
-
-    def base_names(node: ast.ClassDef) -> list[str]:
-        return [base.attr if isinstance(base, ast.Attribute) else getattr(base, "id", "") for base in node.bases]
-
-    def is_test_case(name: str, seen: frozenset[str] = frozenset()) -> bool:
-        node = classes.get(name)
-        if node is None or name in seen:
-            return False
-        return any(
-            base.endswith("TestCase") or is_test_case(base, seen | {name}) for base in base_names(node)
-        )
-
-    def test_names(body: list[ast.stmt]) -> frozenset[str]:
-        return frozenset(
-            node.name
-            for node in body
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test")
-        )
-
-    test_classes = {
-        name: test_names(node.body)
-        for name, node in classes.items()
-        if name.startswith("Test") or is_test_case(name)
-    }
-    return test_names(tree.body), test_classes
+    function, owner, module = (getattr(item, name, None) for name in ("function", "cls", "module"))
+    marks = list(getattr(getattr(item, "callspec", None), "marks", None) or [])
+    for target in (function, owner, module):
+        declared = getattr(target, "pytestmark", None) or []
+        marks.extend(declared if isinstance(declared, (list, tuple)) else [declared])
+    return any(getattr(mark, "name", None) == "skip" for mark in marks) or any(
+        getattr(target, "__unittest_skip__", False) for target in (function, owner)
+    )
 
 
-def _is_unconditional_skip(marker: ast.expr) -> bool:
-    """``pytest.mark.skip`` or ``unittest.skip``, bare or called; ``skipif`` is a condition and passes."""
+def _collect(out: str, files: list[str]) -> int:
+    """Collect ``files`` as CI does, without running them, and record each case in ``out``."""
 
-    target = marker.func if isinstance(marker, ast.Call) else marker
-    return (target.attr if isinstance(target, ast.Attribute) else getattr(target, "id", "")) == "skip"
-
-
-@cache
-def _unconditionally_skipped(path: Path) -> tuple[bool, frozenset[str]]:
-    """Whether the module's ``pytestmark`` skips it, and the functions and classes a skip decorates."""
-
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    module = False
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and any(getattr(target, "id", "") == "pytestmark" for target in node.targets):
-            marks = node.value.elts if isinstance(node.value, (ast.List, ast.Tuple)) else [node.value]
-            module = module or any(_is_unconditional_skip(mark) for mark in marks)
-    decorated = {
-        f"{owner.name}::{node.name}" if owner is not None else node.name
-        for owner, node in (
-            [(None, node) for node in tree.body]
-            + [(cls, node) for cls in tree.body if isinstance(cls, ast.ClassDef) for node in cls.body]
-        )
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-        and any(_is_unconditional_skip(decorator) for decorator in node.decorator_list)
-    }
-    return module, frozenset(decorated)
+    return int(pytest.main(["--collect-only", "-q", "-p", "no:cacheprovider", "-o", "addopts=", *files], plugins=[_Recorder(out)]))
 
 
-def _never_runs(path: Path, name: str) -> bool:
-    """Whether an unconditional skip on the module, the case's class or the case itself disables it.
-
-    A short ``name`` is a method of the one class holding it, which the caller has
-    already established. Conditional skips (``skipif``) are platform scoping and
-    depend on the environment; deciding them belongs to CI's results (#2565).
-    """
-
-    module, decorated = _unconditionally_skipped(path)
-    if module:
-        return True
-    parts = name.partition("[")[0].split("::")
-    if len(parts) == 2:
-        return parts[0] in decorated or "::".join(parts) in decorated
-    (case,) = parts
-    if case in decorated:
-        return True
-    _, classes = _collectable_cases(path)
-    owner = next((cls for cls, methods in classes.items() if case in methods), None)
-    return owner is not None and (owner in decorated or f"{owner}::{case}" in decorated)
+def _catalogs() -> list[Path]:
+    catalogs = sorted(SCENARIO_ROOT.glob("*/catalog.yaml"))
+    assert catalogs, f"no scenario catalogs under {SCENARIO_ROOT}"
+    return catalogs
 
 
-def _named_cases(path: Path, name: str) -> tuple[int, bool]:
-    """How many collected cases ``name`` names in ``path``, and whether it names a test class."""
-
-    functions, classes = _collectable_cases(path)
-    parts = name.partition("[")[0].split("::")
-    if len(parts) == 2:
-        return int(parts[1] in classes.get(parts[0], frozenset())), False
-    if len(parts) != 1:
-        return 0, False
-    (case,) = parts
-    return int(case in functions) + sum(case in methods for methods in classes.values()), case in classes
+def _rows(catalog: Path) -> list[dict]:
+    return yaml.safe_load(catalog.read_text(encoding="utf-8")).get("scenarios") or []
 
 
 def _citations(row: dict) -> tuple[list[tuple[str, object]], list[str]]:
@@ -189,17 +161,116 @@ def _citations(row: dict) -> tuple[list[tuple[str, object]], list[str]]:
     return cited, malformed
 
 
-def _catalogs() -> list[Path]:
-    catalogs = sorted(SCENARIO_ROOT.glob("*/catalog.yaml"))
-    assert catalogs, f"no scenario catalogs under {SCENARIO_ROOT}"
-    return catalogs
+def _collect_cases(files: list[str], cwd: Path) -> dict[str, list[_Case]]:
+    """Every case pytest collects from ``files``, relative to ``cwd``, by file.
+
+    One collection-only run in a child process, with the conftest files that
+    apply there: a nested ``pytest.main`` would share this session's modules and
+    plugins.
+    """
+
+    with tempfile.TemporaryDirectory() as directory:
+        out = Path(directory) / "collected.json"
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys\nfrom tests.scenarios.test_catalog_citations import _collect\n"
+                "sys.exit(_collect(sys.argv[1], sys.argv[2:]))",
+                str(out),
+                *files,
+            ],
+            cwd=cwd,
+            # Without the caller's PYTEST_ADDOPTS, whose selection would drop cited cases.
+            env={
+                **{name: value for name, value in os.environ.items() if name != "PYTEST_ADDOPTS"},
+                "PYTHONPATH": os.pathsep.join(filter(None, [str(REPO_ROOT), os.environ.get("PYTHONPATH")])),
+            },
+            capture_output=True,
+            text=True,
+            timeout=_COLLECTION_TIMEOUT_SECONDS,
+        )
+        assert result.returncode == 0 and out.is_file(), (
+            f"pytest could not collect the cited files (exit {result.returncode}):\n{result.stdout[-4000:]}{result.stderr[-4000:]}"
+        )
+        recorded = json.loads(out.read_text(encoding="utf-8"))
+    cases: dict[str, list[_Case]] = {file: [] for file in files}
+    for entry in recorded:
+        file, _, rest = entry["nodeid"].partition("::")
+        base, bracket, param = rest.partition("[")
+        cases.setdefault(file, []).append(
+            _Case(tuple(base.split("::")), bracket + param, entry["doc"], entry["skipped"])
+        )
+    return cases
+
+
+@cache
+def _collected() -> dict[str, list[_Case]]:
+    """Every case pytest collects from the Python files any catalog cites, by file."""
+
+    files = {
+        reference.partition("::")[0]
+        for catalog in _catalogs()
+        for row in _rows(catalog)
+        for _key, reference in _citations(row)[0]
+        if isinstance(reference, str)
+    }
+    return _collect_cases(
+        sorted(
+            file
+            for file in files
+            if file.endswith(".py") and _DISCOVERED.fullmatch(Path(file).name) and (REPO_ROOT / file).is_file()
+        ),
+        REPO_ROOT,
+    )
+
+
+def _names_id(doc: str, scenario_id: str) -> bool:
+    return re.search(rf"(?<![\w-]){re.escape(scenario_id)}(?![\w-])", doc) is not None
+
+
+def _evidence_problem(cases: list[_Case], name: str, row_id: str) -> str | None:
+    """Why ``name`` is not the one runnable case that evidences row ``row_id``; None when it is."""
+
+    base, bracket, param = name.partition("[")
+    parts = tuple(base.split("::"))
+    matches = [
+        case
+        for case in cases
+        if (case.path == parts or (len(parts) == 1 and case.path[-1] == parts[0]))
+        and (not bracket or case.param == bracket + param)
+    ]
+    named = {case.path for case in matches}
+    if not named:
+        if len(parts) == 1 and any(len(case.path) > 1 and parts[0] in case.path[:-1] for case in cases):
+            return "names a test class, not one case; cite each case that proves the row"
+        return "names no case pytest collects in the file"
+    if len(named) != 1:
+        return f"names {len(named)} cases, expected exactly one; cite it as Class::method"
+    if all(case.skipped for case in matches):
+        return "is skipped unconditionally, so it never runs"
+    if not _names_id(matches[0].doc, row_id):
+        return f"does not name {row_id} in its docstring; state the row's ID there so the evidence is greppable by it"
+    return None
+
+
+def _pointer_leads_somewhere(cases: list[_Case], name: str, scenario_ids: frozenset[str]) -> bool:
+    if not name:
+        return bool(cases)
+    return any(name in "::".join(case.path) + case.param for case in cases) or (
+        name in scenario_ids and any(_names_id(case.doc, name) for case in cases)
+    )
+
+
+@cache
+def _scenario_ids() -> frozenset[str]:
+    return frozenset(row["id"] for catalog in _catalogs() for row in _rows(catalog) if isinstance(row.get("id"), str))
 
 
 @pytest.mark.parametrize("catalog", _catalogs(), ids=lambda path: path.parent.name)
 def test_every_catalog_citation_resolves_to_a_case(catalog: Path) -> None:
-    rows = yaml.safe_load(catalog.read_text(encoding="utf-8")).get("scenarios") or []
     dead: list[str] = []
-    for row in rows:
+    for row in _rows(catalog):
         cited, malformed = _citations(row)
         dead.extend(f"{row['id']} {problem}" for problem in malformed)
         for key, reference in cited:
@@ -216,20 +287,89 @@ def test_every_catalog_citation_resolves_to_a_case(catalog: Path) -> None:
             if not path.is_file():
                 dead.append(f"{where} (no such file)")
                 continue
+            if path.suffix in _UI_SUFFIXES:
+                continue
             if path.suffix == ".py" and not _DISCOVERED.fullmatch(path.name):
                 dead.append(f"{where} (pytest's default discovery never collects {path.name})")
                 continue
-            if not separator or path.suffix in _UI_SUFFIXES:
-                continue
-            count, names_class = _named_cases(path, name)
+            cases = _collected().get(path_text, [])
             if pointer:
                 # A pointer claims no evidence, so a class or a group of cases is a fine destination.
-                if not count and not names_class:
-                    dead.append(f"{where} (no such case in the file)")
-            elif names_class:
-                dead.append(f"{where} (names a test class, not one case; cite each case that proves the row)")
-            elif count != 1:
-                dead.append(f"{where} (names {count} cases, expected exactly one; cite it as Class::method)")
-            elif _never_runs(path, name):
-                dead.append(f"{where} (is skipped unconditionally, so it never runs)")
-    assert not dead, f"{catalog.relative_to(REPO_ROOT)} has citations that resolve to no case:\n" + "\n".join(dead)
+                if not _pointer_leads_somewhere(cases, name if separator else "", _scenario_ids()):
+                    dead.append(f"{where} (leads to no case pytest collects)")
+                continue
+            problem = _evidence_problem(cases, name, row["id"])
+            if problem:
+                dead.append(f"{where} ({problem})")
+    assert not dead, f"{catalog.relative_to(REPO_ROOT)} has citations that resolve to no case of theirs:\n" + "\n".join(dead)
+
+
+# Cases a source read takes for collected, and pytest does not run (#2565).
+_SHAPES = '''
+import pytest
+
+
+class TestSuppressed:
+    __test__ = False
+
+    def test_hidden(self):
+        """ROW-1"""
+
+
+class TestWithInit:
+    def __init__(self):
+        pass
+
+    def test_also_hidden(self):
+        """ROW-1"""
+
+
+@pytest.mark.skip(reason="never")
+class TestSkipped:
+    def test_never_runs(self):
+        """ROW-1"""
+
+
+def test_deselected():
+    """ROW-1"""
+
+
+@pytest.mark.parametrize("value", [1, 2])
+def test_carries_the_row(value):
+    """ROW-1: a case named for the row that cites it."""
+
+
+def test_carries_another_row():
+    """ROW-2"""
+'''
+
+_DESELECTING_CONFTEST = '''
+def pytest_collection_modifyitems(config, items):
+    deselected = [item for item in items if item.name == "test_deselected"]
+    config.hook.pytest_deselected(items=deselected)
+    items[:] = [item for item in items if item not in deselected]
+'''
+
+
+def test_a_citation_resolves_only_to_a_case_pytest_collects_and_runs(tmp_path: Path) -> None:
+    (tmp_path / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    (tmp_path / "conftest.py").write_text(_DESELECTING_CONFTEST, encoding="utf-8")
+    (tmp_path / "test_shapes.py").write_text(_SHAPES, encoding="utf-8")
+
+    cases = _collect_cases(["test_shapes.py"], tmp_path)["test_shapes.py"]
+
+    def problem(name: str, row_id: str = "ROW-1") -> str | None:
+        return _evidence_problem(cases, name, row_id)
+
+    for hidden in ("TestSuppressed::test_hidden", "test_also_hidden", "test_deselected"):
+        assert problem(hidden) == "names no case pytest collects in the file", hidden
+    assert problem("TestSkipped::test_never_runs") == "is skipped unconditionally, so it never runs"
+    assert problem("test_carries_the_row") is None
+    assert problem("test_carries_the_row[2]") is None
+    assert problem("test_carries_another_row") == (
+        "does not name ROW-1 in its docstring; state the row's ID there so the evidence is greppable by it"
+    )
+    # A pointer may name the group of cases that carry a row.
+    ids = frozenset({"ROW-1", "ROW-2", "ROW-3"})
+    assert _pointer_leads_somewhere(cases, "ROW-1", ids)
+    assert not _pointer_leads_somewhere(cases, "ROW-3", ids)

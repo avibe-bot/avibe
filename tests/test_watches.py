@@ -269,6 +269,8 @@ def test_hfr_174_watch_definition_commit_emits_watch_hint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """HFR-174: task and watch definition commits wake separate reconcile owners."""
+
     from core import inbox_events
 
     monkeypatch.setattr(inbox_events, "_CONTROLLER_PROCESS", True)
@@ -3168,6 +3170,8 @@ def test_hfr_179_watch_store_phases_are_single_flight_and_apply_on_loop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """HFR-179: managed-watch store work stays single-flight and applies on loop."""
+
     service = ManagedWatchService(
         controller=SimpleNamespace(),
         store=ManagedWatchStore(tmp_path / "watches.json"),
@@ -3239,7 +3243,7 @@ def test_hfr_485_watch_reconciles_after_another_reader_consumes_reload(
     backend: str,
     ordering: str,
 ) -> None:
-    """Issue #1995: a refreshed mirror is not an acknowledged scheduling change."""
+    """HFR-485: Issue #1995: a refreshed mirror is not an acknowledged scheduling change."""
     monkeypatch.setattr(watches_module, "_publish_watch_definitions_updated", lambda: None)
     monkeypatch.setattr(watches_module, "WATCH_RECONCILE_INTERVAL_SECONDS", 0.01)
     reader = ManagedWatchStore(tmp_path / "watches.json")
@@ -4760,7 +4764,7 @@ def test_no_teardown_can_commit_between_the_result_stamp_and_its_hook(tmp_path: 
 def test_a_failed_outbox_write_does_not_retire_the_watch_with_its_hook_lost(
     tmp_path: Path, branch: str
 ) -> None:
-    """HFR-269, inverse half — the other thing two commits cost.
+    """HFR-271: HFR-269, inverse half — the other thing two commits cost.
 
     Same scenario id as ``test_no_teardown_can_commit_between_the_result_stamp_and_its_hook``:
     one defect (the stamp and its outbox row are not one transaction) with two failure
@@ -4890,7 +4894,7 @@ _WATCH_FIXTURE_PAYLOAD = {
 
 
 def test_a_hook_queued_after_a_rename_names_an_agent_that_still_exists(tmp_path: Path) -> None:
-    """The watch half of SCT-030 -- the completion hook must be claimable.
+    """HFR-281: The watch half of SCT-030 -- the completion hook must be claimable.
 
     ``_hook_request`` composes the hook from ``watch.agent_name`` when the cycle ends,
     and the row becomes durable inside the stamp's transaction. A rename committed
