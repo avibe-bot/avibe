@@ -567,10 +567,11 @@ def _thinking_first_refusal(body: dict[str, Any]) -> Optional[str]:
         return None
     messages = body["messages"]
     last = next((index for index in range(len(messages) - 1, -1, -1) if messages[index]["role"] == "assistant"), None)
-    if last is None or last == len(messages) - 1 or not all(
-        isinstance(message["content"], list)
-        and any(isinstance(block, dict) and block.get("type") == "tool_result" for block in message["content"])
+    if last is None or not any(
+        isinstance(block, dict) and block.get("type") == "tool_result"
         for message in messages[last + 1 :]
+        if isinstance(message["content"], list)
+        for block in message["content"]
     ):
         return None
     first = messages[last]["content"][0]["type"]
@@ -692,19 +693,21 @@ _MANUAL_MODEL = "claude-sonnet-4-5"
         # ...one whose thinking went as text, or that starts with the call, continues with thinking off...
         (_MANUAL_MODEL, (ThinkingBlock(text="plan the read"), _READ_CALL), "result", "disabled"),
         (_MANUAL_MODEL, (_READ_CALL,), "result", "disabled"),
-        # ...and a new user message, even right after tool results, starts a new turn, which keeps it on.
-        (_MANUAL_MODEL, (_READ_CALL,), "result-then-user", "enabled"),
+        # ...also when a user message follows the results: Anthropic combines consecutive user messages into one turn,
+        # so the tool loop the rule names is still the last one...
+        (_MANUAL_MODEL, (_READ_CALL,), "result-then-user", "disabled"),
+        # ...while a new turn after an answer keeps it on.
         (_MANUAL_MODEL, (TextBlock("done"),), "user", "enabled"),
     ],
     ids=["adaptive-thinking-as-text", "adaptive-call-first", "manual-signed-thinking-first", "manual-thinking-as-text",
-         "manual-call-first", "manual-new-turn-after-results", "manual-new-turn"],
+         "manual-call-first", "manual-user-message-after-results", "manual-new-turn"],
 )
 async def test_a_tool_loop_whose_assistant_message_cannot_start_with_thinking_continues_with_thinking_off(
     model, continued, after, thinking
 ):
     """Under manual thinking a request whose continued assistant message cannot start with thinking (its thinking went
     as text) is sent with thinking off, as Anthropic's refusal advises; adaptive thinking has no such rule and is never
-    turned off, since several adaptive models refuse ``disabled``; a new turn keeps thinking on."""
+    turned off, since several adaptive models refuse ``disabled``; a new turn after an answer keeps thinking on."""
 
     endpoint = replace(_endpoint("anthropic", replay=False, native=False), hosted_tools={}, model_id=model)
     result = ToolResultMessage("toolu_1", "read", (TextBlock("contents"),))

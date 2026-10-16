@@ -941,17 +941,19 @@ class AnthropicAdapter(ProviderAdapter):
 
 
 def _continues_unthought_tool_loop(messages: list[dict[str, Any]]) -> bool:
-    """Whether a request continues a tool loop (everything after its last assistant message is tool results) whose
-    assistant message does not start with a thinking block, which Anthropic refuses under manual thinking."""
+    """Whether a request continues a tool loop (tool results follow its last assistant message) whose assistant message
+    does not start with a thinking block, which Anthropic refuses under manual thinking. Anthropic combines consecutive
+    user messages into one turn, so a user message after the results (a new prompt, a checkpoint's) still follows the
+    tool loop the rule names."""
 
     last = next((index for index in range(len(messages) - 1, -1, -1) if messages[index]["role"] == "assistant"), None)
-    if last is None or last == len(messages) - 1:
+    if last is None:
         return False
-    # A plain user message after the results starts a new turn, which needs no thinking first.
-    continues = all(
-        isinstance(message["content"], list)
-        and any(isinstance(block, Mapping) and block.get("type") == "tool_result" for block in message["content"])
+    continues = any(
+        isinstance(block, Mapping) and block.get("type") == "tool_result"
         for message in messages[last + 1 :]
+        if isinstance(message["content"], list)
+        for block in message["content"]
     )
     content = messages[last]["content"]
     first = content[0] if isinstance(content, list) and content else None
