@@ -1,6 +1,13 @@
 # Model Hub contracts
 
-Status: **contract_version 15**, 2026-10-15: hosted tools design v2 (`../vibey-hosted-tools.md`), passive and
+Status: **contract_version 16**, 2026-10-16: a sixth non-self-healing Source cause, `plan_excludes_product`
+(`models.source.needs_action.plan_excludes_product`), for a plan that does not include the product, joins the
+resolution-event, provenance, Source, agent-chain and probe vocabularies, and the mirror registry pairs it. The
+terminal diagnostic's `upstream_error_code` gains `usage_not_included`, `credit_balance_exhausted`,
+`organization_spend_limit_exceeded`, `project_spend_limit_exceeded` and `organization_usage_limit_exceeded`. Each
+is a closed value a v15 consumer rejects.
+
+It builds on v15 (2026-10-15): hosted tools design v2 (`../vibey-hosted-tools.md`), passive and
 default-on, with no probes. This bump publishes the Model Hub side; the hop-resolution and executor changes join it
 before it ships.
 - Capability evidence is passive (`capability-evidence.schema.json`, version 2): `basis` is `observed` only; a record is
@@ -224,7 +231,7 @@ comparison. A gate may not report success by comparing stale input with itself.
 
 ## Version closure
 
-`contract_version` 15 must coexist in all registered version locations on the same tested head:
+`contract_version` 16 must coexist in all registered version locations on the same tested head:
 
 - `mirror-registry.json`
 - `agent-chain.schema.json`

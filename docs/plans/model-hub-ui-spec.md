@@ -3982,8 +3982,8 @@ enum runs `models.source.needs_action.oauth_expired`,
 `models.source.needs_action.account_banned`,
 `models.source.needs_action.plan_excludes_product` — five causes with five different
 remedies, of which only one is about a credential being wrong. One label reading 凭据失效 was therefore
-false on three of them, and false in the expensive direction: it sends a user whose balance
-ran out to re-enter a key that is fine. So the four have four strings, selected by the key
+false on four of them, and false in the expensive direction: it sends a user whose balance
+ran out to re-enter a key that is fine. So the five have five strings, selected by the key
 the payload already carries. What this does **not** do is enumerate the ways a *request*
 can fail — that set is closed at F1–F5 and stays closed. `detail_key` is a field on the
 source, persisted and read back, and rendering a field the contract requires is not the
