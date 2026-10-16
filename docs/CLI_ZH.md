@@ -124,13 +124,14 @@ Avibe 会直接发现现有 Skill，无需迁移：
   `.codex/skills`、`.claude/skills` 和 `.opencode/skills`。该边界可以位于嵌套 Git
   仓库之上；未绑定项目的独立命令则以遇到的第一个 Git 根目录为边界；
 - 全局：查找 `~/.agents/skills`、Codex 与 Claude 配置的 Skill 目录，以及
-  `XDG_CONFIG_HOME` 下的 OpenCode 目录，以及根据已安装插件注册表、启用设置和各插件
-  manifest 解析出的 Claude 插件 Skill 目录；
+  `XDG_CONFIG_HOME` 下的 OpenCode 目录，以及来自本地 Claude 插件注册表的固定
+  `<installPath>/skills` 目录。注册表记录只应用有界的 deny 元数据，不重建完整的 Claude
+  enablement 解释器；
 - Avibe 内置 Skill，以及 Codex 自带的 system Skill。
 
 同名冲突时，内置 Skill 优先，其次是项目级，再次是全局。项目内更近的目录优先；
 同一层级依次为 `.agents`、`.codex`、`.claude`、`.opencode`。用户 Skill 优先于
-Codex 自带的默认项；已启用的 Claude 插件 Skill 排在四个静态用户目录之后，但同样
+Codex 自带的默认项；来自注册表的 Claude 插件 Skill 排在四个静态用户目录之后，但同样
 优先于这些默认项。新的全局 Skill 默认安装到 `~/.agents/skills/<name>`，项目级 Skill
 安装到 `<project>/.agents/skills/<name>`。
 

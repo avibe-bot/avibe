@@ -8,13 +8,8 @@ import json
 import logging
 import os
 import re
-import shutil
 import stat
-import struct
-import subprocess
 import sys
-import threading
-import time
 import unicodedata
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -61,7 +56,6 @@ CLAUDE_PLUGIN_REGISTRY_MAX_BYTES = 1024 * 1024
 CLAUDE_PLUGIN_REGISTRY_MAX_ENTRIES = 256
 CLAUDE_PLUGIN_SETTINGS_MAX_BYTES = 1024 * 1024
 CLAUDE_PLUGIN_MANIFEST_MAX_BYTES = 256 * 1024
-CLAUDE_PLUGIN_SKILL_PATHS_MAX = 64
 CLAUDE_PLUGIN_MANAGED_SETTINGS_MAX_FILES = 64
 
 _LEGACY_SNAPSHOT_ID_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -951,7 +945,7 @@ def _readable_builtin_catalog(root: Path) -> bool:
 
 @dataclass(frozen=True)
 class _ClaudePluginEnablement:
-    overrides: dict[str, bool]
+    denied_plugins: frozenset[str]
     managed_authority_unknown: bool = False
 
 
@@ -959,7 +953,6 @@ class _ClaudePluginEnablement:
 class _ClaudePluginCandidate:
     plugin_id: str
     plugin_root: Path
-    manifest: dict[str, Any]
     scope_rank: int
     updated_at: float | None
 
@@ -1024,44 +1017,48 @@ def _claude_plugin_managed_settings_sources() -> tuple[Path, Path]:
     return root / "managed-settings.json", root / "managed-settings.d"
 
 
-def _merge_enabled_plugins(payload: Any, overrides: dict[str, bool]) -> bool:
+def _claude_plugin_settings_denies(payload: Any) -> tuple[bool, set[str]]:
     if not isinstance(payload, dict):
-        return False
+        return False, set()
     enabled_plugins = payload.get("enabledPlugins")
     if enabled_plugins is None:
-        return True
+        return True, set()
     if not isinstance(enabled_plugins, dict):
-        return False
+        return False, set()
+    denied: set[str] = set()
     valid = True
     for plugin_id, enabled in enabled_plugins.items():
-        if isinstance(plugin_id, str) and plugin_id and isinstance(enabled, bool):
-            overrides[plugin_id] = enabled
-        else:
+        if not isinstance(plugin_id, str) or not plugin_id or not isinstance(enabled, bool):
             valid = False
-    return valid
+            continue
+        if enabled is False:
+            denied.add(plugin_id)
+    return valid, denied
 
 
-def _claude_plugin_enabled_overrides(
+def _claude_plugin_denied_plugins(
     working_directory: Path,
     claude_home: Path,
     project_base: str | Path | None,
 ) -> _ClaudePluginEnablement:
-    """Read bounded Claude plugin enablement without starting the Claude CLI."""
+    """Read only explicit local deny signals; positive values are not authority."""
 
     directories = _project_directories(working_directory, project_base=project_base)
     settings_paths = [claude_home / "settings.json"]
     settings_paths.extend(directory / ".claude" / "settings.json" for directory in reversed(directories))
     settings_paths.extend(directory / ".claude" / "settings.local.json" for directory in reversed(directories))
 
-    overrides: dict[str, bool] = {}
+    denied: set[str] = set()
     for path in settings_paths:
         present, payload = _read_bounded_json_with_presence(
             path,
             max_bytes=CLAUDE_PLUGIN_SETTINGS_MAX_BYTES,
         )
-        if not present or not isinstance(payload, dict):
+        if not present:
             continue
-        _merge_enabled_plugins(payload, overrides)
+        valid, source_denied = _claude_plugin_settings_denies(payload)
+        if valid:
+            denied.update(source_denied)
 
     managed_authority_unknown = False
     managed_path, managed_dropins = _claude_plugin_managed_settings_sources()
@@ -1069,8 +1066,12 @@ def _claude_plugin_enabled_overrides(
         managed_path,
         max_bytes=CLAUDE_PLUGIN_SETTINGS_MAX_BYTES,
     )
-    if managed_present and not _merge_enabled_plugins(managed_payload, overrides):
-        managed_authority_unknown = True
+    if managed_present:
+        valid, source_denied = _claude_plugin_settings_denies(managed_payload)
+        if not valid:
+            managed_authority_unknown = True
+        else:
+            denied.update(source_denied)
 
     try:
         dropins_present = managed_dropins.lstat()
@@ -1103,10 +1104,16 @@ def _claude_plugin_enabled_overrides(
                 path,
                 max_bytes=CLAUDE_PLUGIN_SETTINGS_MAX_BYTES,
             )
-            if not present or not _merge_enabled_plugins(payload, overrides):
+            if not present:
                 managed_authority_unknown = True
+                continue
+            valid, source_denied = _claude_plugin_settings_denies(payload)
+            if not valid:
+                managed_authority_unknown = True
+            else:
+                denied.update(source_denied)
 
-    return _ClaudePluginEnablement(overrides, managed_authority_unknown)
+    return _ClaudePluginEnablement(frozenset(denied), managed_authority_unknown)
 
 
 def _claude_plugin_scope(record: dict[str, Any]) -> str | None:
@@ -1162,7 +1169,6 @@ def _claude_plugin_project_root(
 
 
 def _claude_plugin_record_applies(
-    plugin_id: str,
     record: dict[str, Any],
     *,
     working_directory: Path,
@@ -1195,67 +1201,18 @@ def _claude_plugin_record_applies(
     return False
 
 
-def _claude_plugin_skill_roots_from_manifest(
-    plugin_root: Path,
-    manifest: dict[str, Any],
-) -> list[Path]:
-    raw_paths = manifest.get("skills")
-    if isinstance(raw_paths, str):
-        raw_paths = [raw_paths]
-    if not isinstance(raw_paths, list):
-        raw_paths = []
-
-    try:
-        resolved_root = plugin_root.resolve()
-    except (OSError, RuntimeError):
-        return []
-    roots: list[Path] = []
-    seen: set[Path] = set()
-    for raw_path in ["skills", *raw_paths][:CLAUDE_PLUGIN_SKILL_PATHS_MAX]:
-        if not isinstance(raw_path, str) or not raw_path.strip():
-            continue
-        relative_path = Path(raw_path.strip())
-        if relative_path.is_absolute():
-            continue
-        try:
-            candidate = (plugin_root / relative_path).resolve()
-            candidate.relative_to(resolved_root)
-        except (OSError, RuntimeError, ValueError):
-            continue
-        if candidate in seen or not _path_is_utf8(candidate):
-            continue
-        seen.add(candidate)
-        roots.append(candidate)
-    return roots
-
-
-def _claude_plugin_manifest_path_is_supported(raw_path: str) -> bool:
-    value = raw_path.strip()
-    if value not in {".", "./"} and not value.startswith("./"):
-        return False
-    path = Path(value)
-    return not path.is_absolute() and ".." not in path.parts
-
-
-def _claude_plugin_manifest_is_supported(manifest: dict[str, Any]) -> bool:
-    name = manifest.get("name")
-    if not isinstance(name, str) or not name.strip():
-        return False
-    if "defaultEnabled" in manifest and not isinstance(manifest["defaultEnabled"], bool):
-        return False
-    if "skills" not in manifest:
-        return True
-    raw_paths = manifest["skills"]
-    if isinstance(raw_paths, str):
-        raw_paths = [raw_paths]
-    if not isinstance(raw_paths, list):
-        return False
-    return all(
-        isinstance(raw_path, str)
-        and raw_path.strip()
-        and _claude_plugin_manifest_path_is_supported(raw_path)
-        for raw_path in raw_paths
+def _claude_plugin_manifest_denies(plugin_root: Path) -> bool:
+    present, manifest = _read_bounded_json_with_presence(
+        plugin_root / ".claude-plugin" / "plugin.json",
+        max_bytes=CLAUDE_PLUGIN_MANIFEST_MAX_BYTES,
     )
+    if not present:
+        return False
+    if not isinstance(manifest, dict):
+        return True
+    if "defaultEnabled" not in manifest:
+        return False
+    return not isinstance(manifest["defaultEnabled"], bool) or manifest["defaultEnabled"] is False
 
 
 def _claude_plugin_registry_path(claude_home: Path) -> Path | None:
@@ -1321,20 +1278,25 @@ def _claude_plugin_skill_roots(
         return []
 
     try:
-        enablement = _claude_plugin_enabled_overrides(
+        policy = _claude_plugin_denied_plugins(
             working_directory,
             claude_home,
             project_base,
         )
     except (OSError, RuntimeError):
         return []
-    if enablement.managed_authority_unknown:
+    if policy.managed_authority_unknown:
         return []
-    overrides = enablement.overrides
+    denied = set(policy.denied_plugins)
 
-    selected: dict[str, _ClaudePluginCandidate] = {}
+    candidates_by_plugin: dict[str, list[_ClaudePluginCandidate]] = {}
     scope_ranks = {"local": 0, "project": 1, "user": 2, "managed": 3}
     for plugin_id, record in records:
+        if record.get("enabled") is False:
+            denied.add(plugin_id)
+            continue
+        if "enabled" in record and not isinstance(record["enabled"], bool):
+            continue
         scope = _claude_plugin_scope(record)
         if scope is None:
             continue
@@ -1353,55 +1315,45 @@ def _claude_plugin_skill_roots(
                 continue
         except (OSError, RuntimeError, ValueError):
             continue
-
-        manifest_present, manifest = _read_bounded_json_with_presence(
-            plugin_root / ".claude-plugin" / "plugin.json",
-            max_bytes=CLAUDE_PLUGIN_MANIFEST_MAX_BYTES,
-        )
-        if manifest_present and (
-            not isinstance(manifest, dict) or not _claude_plugin_manifest_is_supported(manifest)
-        ):
-            continue
-        if not manifest_present:
-            manifest = {}
         try:
-            applies = _claude_plugin_record_applies(
-                plugin_id,
+            if not _claude_plugin_record_applies(
                 record,
                 working_directory=working_directory,
                 project_base=project_base,
-            )
+            ):
+                continue
         except (OSError, RuntimeError, ValueError):
             continue
-        if not applies:
+        if _claude_plugin_manifest_denies(plugin_root):
+            denied.add(plugin_id)
             continue
 
-        enabled = overrides.get(plugin_id)
-        if enabled is None and isinstance(record.get("enabled"), bool):
-            enabled = record["enabled"]
-        if enabled is None:
-            enabled = manifest.get("defaultEnabled") is not False
-        if not enabled:
-            continue
-
-        candidate = _ClaudePluginCandidate(
-            plugin_id=plugin_id,
-            plugin_root=plugin_root,
-            manifest=manifest,
-            scope_rank=scope_ranks[scope],
-            updated_at=_claude_plugin_record_updated_at(record),
+        candidates_by_plugin.setdefault(plugin_id, []).append(
+            _ClaudePluginCandidate(
+                plugin_id=plugin_id,
+                plugin_root=plugin_root,
+                scope_rank=scope_ranks[scope],
+                updated_at=_claude_plugin_record_updated_at(record),
+            )
         )
-        current = selected.get(plugin_id)
-        if current is None or _claude_plugin_candidate_precedes(candidate, current):
-            selected[plugin_id] = candidate
 
-    roots: list[Path] = []
-    for candidate in sorted(
-        selected.values(),
-        key=lambda item: (str(item.plugin_root), item.plugin_id),
-    ):
-        roots.extend(_claude_plugin_skill_roots_from_manifest(candidate.plugin_root, candidate.manifest))
-    return roots
+    selected: list[_ClaudePluginCandidate] = []
+    for plugin_id, candidates in candidates_by_plugin.items():
+        if plugin_id in denied:
+            continue
+        winner = candidates[0]
+        for candidate in candidates[1:]:
+            if _claude_plugin_candidate_precedes(candidate, winner):
+                winner = candidate
+        selected.append(winner)
+
+    return [
+        candidate.plugin_root / "skills"
+        for candidate in sorted(
+            selected,
+            key=lambda item: (str(item.plugin_root), item.plugin_id),
+        )
+    ]
 
 
 def resolve_skills(

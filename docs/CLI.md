@@ -148,15 +148,15 @@ Avibe discovers existing Skills without moving them:
   project base. This boundary can sit above a nested Git checkout. Standalone
   commands without a bound project use the first Git root instead;
 - global Skills under `~/.agents/skills`, the configured Codex and Claude Skill
-  directories, the OpenCode directory under `XDG_CONFIG_HOME`, and Claude plugin
-  Skill directories resolved from the installed-plugin registry, enablement
-  settings, and each plugin manifest; and
+  directories, and fixed `<installPath>/skills` directories from the local Claude
+  plugin registry; registry records are filtered by bounded deny metadata, not
+  by a complete Claude enablement interpreter; and
 - Avibe built-ins plus Codex's bundled system Skills.
 
 Built-ins win name conflicts, then project Skills, then global Skills. Within a
 project the nearer directory wins; at the same depth the order is `.agents`,
 `.codex`, `.claude`, then `.opencode`. User Skills win over Codex bundled
-defaults; enabled Claude plugin Skills follow the four static user directories
+defaults; registry-backed Claude plugin Skills follow the four static user directories
 but also win over those defaults. New global installs should use
 `~/.agents/skills/<name>`; project installs should use
 `<project>/.agents/skills/<name>`.

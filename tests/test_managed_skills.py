@@ -1161,7 +1161,7 @@ def test_distinct_same_name_candidates_keep_precedence_winner(tmp_path: Path) ->
     assert skills[0].description == "Codex"
 
 
-def test_enabled_claude_plugin_skills_are_read_from_registry_and_manifest(
+def test_claude_plugin_skills_use_only_the_fixed_skills_directory(
     tmp_path: Path,
 ) -> None:
     home = tmp_path / "home"
@@ -1221,7 +1221,7 @@ def test_enabled_claude_plugin_skills_are_read_from_registry_and_manifest(
         builtin_catalog_root="",
     )
 
-    assert [skill.name for skill in skills] == ["format-code", "lint-code"]
+    assert [skill.name for skill in skills] == ["format-code"]
 
 
 def test_claude_plugin_same_scope_selects_newest_install_by_time_then_stable_path(
@@ -1271,7 +1271,7 @@ def test_claude_plugin_same_scope_selects_newest_install_by_time_then_stable_pat
         codex_home=home / ".codex",
         claude_home=claude_home,
         xdg_config_home=home / ".config",
-        builtin_snapshot_id="",
+        builtin_catalog_root="",
     )
 
     assert [skill.name for skill in skills] == ["demo-new"]
@@ -1313,7 +1313,7 @@ def test_claude_plugin_same_scope_selects_newest_install_by_time_then_stable_pat
         codex_home=home / ".codex",
         claude_home=claude_home,
         xdg_config_home=home / ".config",
-        builtin_snapshot_id="",
+        builtin_catalog_root="",
     )
 
     assert [skill.name for skill in skills] == ["demo-version-new"]
@@ -1321,20 +1321,24 @@ def test_claude_plugin_same_scope_selects_newest_install_by_time_then_stable_pat
 
 
 @pytest.mark.parametrize(
-    ("scope", "manifest_text"),
+    ("scope", "manifest_text", "expected_names"),
     (
-        ("workspace", None),
-        ("user", "not-json"),
-        ("user", "{}"),
-        ("user", json.dumps({"name": "candidate", "skills": {}})),
-        ("user", json.dumps({"name": "candidate", "skills": ["bare-path"]})),
-        ("user", json.dumps({"name": "candidate", "defaultEnabled": "yes"})),
+        ("workspace", None, []),
+        ("user", "not-json", []),
+        ("user", "[]", []),
+        ("user", json.dumps({}), ["candidate"]),
+        ("user", json.dumps({"name": "candidate", "skills": {}}), ["candidate"]),
+        ("user", json.dumps({"name": "candidate", "skills": ["bare-path"]}), ["candidate"]),
+        ("user", json.dumps({"name": "candidate", "defaultEnabled": "yes"}), []),
+        ("user", json.dumps({"name": "candidate", "defaultEnabled": False}), []),
+        ("user", json.dumps({"name": "candidate", "defaultEnabled": True}), ["candidate"]),
     ),
 )
-def test_claude_plugin_discovery_fails_closed_on_unknown_scope_or_present_invalid_manifest(
+def test_claude_plugin_discovery_uses_manifest_only_as_deny_metadata(
     tmp_path: Path,
     scope: str,
     manifest_text: str | None,
+    expected_names: list[str],
 ) -> None:
     home = tmp_path / "home"
     cwd = tmp_path / "project"
@@ -1361,13 +1365,12 @@ def test_claude_plugin_discovery_fails_closed_on_unknown_scope_or_present_invali
         ),
         encoding="utf-8",
     )
-
-    assert _isolated_resolve(
+    assert [skill.name for skill in _isolated_resolve(
         cwd,
         tmp_path,
         home=home,
         claude_home=claude_home,
-    ) == []
+    )] == expected_names
 
 
 @pytest.mark.parametrize(
@@ -1551,7 +1554,7 @@ def test_claude_plugin_project_symlink_loop_is_omitted_without_aborting(
     ) == []
 
 
-def test_claude_plugin_manifest_skill_directory_can_be_direct_skill_root(
+def test_claude_plugin_ignores_manifest_declared_skill_roots(
     tmp_path: Path,
 ) -> None:
     home = tmp_path / "home"
@@ -1561,6 +1564,7 @@ def test_claude_plugin_manifest_skill_directory_can_be_direct_skill_root(
     registry = claude_home / "plugins" / "installed_plugins.json"
     registry.parent.mkdir(parents=True)
     plugin = tmp_path / "plugin-cache" / "direct"
+    _write_skill(plugin / "skills", "fixed-skill", "fixed-skill", "Fixed")
     _write_skill(plugin / "direct-skill", "direct-skill", "direct-skill", "Direct")
     manifest = plugin / ".claude-plugin" / "plugin.json"
     manifest.parent.mkdir(parents=True)
@@ -1587,7 +1591,7 @@ def test_claude_plugin_manifest_skill_directory_can_be_direct_skill_root(
         tmp_path,
         home=home,
         claude_home=claude_home,
-    )] == ["direct-skill"]
+    )] == ["fixed-skill"]
 
 
 def test_claude_plugin_roots_keep_stable_cross_plugin_precedence(tmp_path: Path) -> None:
@@ -1625,6 +1629,86 @@ def test_claude_plugin_roots_keep_stable_cross_plugin_precedence(tmp_path: Path)
         claude_home=claude_home,
     )
     assert skills[0].description == "A plugin"
+
+
+def test_claude_plugin_record_deny_blocks_duplicate_enabled_record(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    claude_home = home / ".claude"
+    registry = claude_home / "plugins" / "installed_plugins.json"
+    registry.parent.mkdir(parents=True)
+    denied = tmp_path / "plugin-cache" / "denied"
+    enabled = tmp_path / "plugin-cache" / "enabled"
+    _write_skill(denied / "skills", "denied", "denied", "Denied")
+    _write_skill(enabled / "skills", "enabled", "enabled", "Enabled")
+    registry.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "duplicate@example": [
+                        {"scope": "user", "installPath": str(denied), "enabled": False},
+                        {"scope": "user", "installPath": str(enabled), "enabled": True},
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (claude_home / "settings.json").write_text(
+        json.dumps({"enabledPlugins": {"duplicate@example": True}}),
+        encoding="utf-8",
+    )
+
+    assert _isolated_resolve(
+        cwd,
+        tmp_path,
+        home=home,
+        claude_home=claude_home,
+    ) == []
+
+
+def test_malformed_plugin_manifest_does_not_block_static_skills(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    _write_skill(cwd / ".claude" / "skills", "static", "static", "Static")
+    claude_home = home / ".claude"
+    registry = claude_home / "plugins" / "installed_plugins.json"
+    registry.parent.mkdir(parents=True)
+    plugin = tmp_path / "plugin-cache" / "broken"
+    _write_skill(plugin / "skills", "broken", "broken", "Broken")
+    manifest = plugin / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("not-json", encoding="utf-8")
+    registry.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "broken@example": [
+                        {"scope": "user", "installPath": str(plugin), "enabled": True}
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert [
+        skill.name
+        for skill in _isolated_resolve(
+            cwd,
+            tmp_path,
+            home=home,
+            claude_home=claude_home,
+        )
+    ] == ["static"]
 
 
 def test_claude_managed_plugin_deny_overrides_lower_scope_enablement(
@@ -1821,7 +1905,7 @@ def test_bounded_json_rejects_fifo_without_blocking(tmp_path: Path) -> None:
     assert time.monotonic() - started < 1
 
 
-def test_claude_plugin_enablement_obeys_scope_and_defaults(tmp_path: Path) -> None:
+def test_claude_plugin_deny_metadata_cannot_be_overridden_by_positive_settings(tmp_path: Path) -> None:
     home = tmp_path / "home"
     project = tmp_path / "project"
     other_project = tmp_path / "other-project"
@@ -1873,7 +1957,7 @@ def test_claude_plugin_enablement_obeys_scope_and_defaults(tmp_path: Path) -> No
         codex_home=home / ".codex",
         claude_home=claude_home,
         xdg_config_home=home / ".config",
-        builtin_snapshot_id="",
+        builtin_catalog_root="",
     ) == []
 
     (claude_home / "settings.json").write_text(
@@ -1889,12 +1973,12 @@ def test_claude_plugin_enablement_obeys_scope_and_defaults(tmp_path: Path) -> No
             codex_home=home / ".codex",
             claude_home=claude_home,
             xdg_config_home=home / ".config",
-            builtin_snapshot_id="",
+            builtin_catalog_root="",
         )
-    ] == ["default-off"]
+    ] == []
 
 
-def test_claude_plugin_enablement_local_settings_override_user_settings(tmp_path: Path) -> None:
+def test_claude_plugin_deny_settings_override_positive_user_settings(tmp_path: Path) -> None:
     home = tmp_path / "home"
     project = tmp_path / "project"
     project.mkdir()
@@ -1934,7 +2018,7 @@ def test_claude_plugin_enablement_local_settings_override_user_settings(tmp_path
         codex_home=home / ".codex",
         claude_home=claude_home,
         xdg_config_home=home / ".config",
-        builtin_snapshot_id="",
+        builtin_catalog_root="",
     ) == []
 
 
@@ -1958,7 +2042,7 @@ def test_claude_plugin_discovery_fails_closed_on_invalid_registry(tmp_path: Path
     ) == []
 
 
-def test_enabled_claude_plugin_skill_overrides_codex_system_default(tmp_path: Path) -> None:
+def test_registry_backed_claude_plugin_skill_overrides_codex_system_default(tmp_path: Path) -> None:
     home = tmp_path / "home"
     cwd = tmp_path / "project"
     cwd.mkdir()

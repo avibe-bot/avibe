@@ -136,41 +136,34 @@ artifacts and never starts the Claude CLI. The supported local source contract i
   an absolute `CLAUDE_CODE_PLUGIN_CACHE_DIR` overrides that local registry root.
   An invalid or empty override omits optional plugin roots rather than falling
   back to the default. Records must have an absolute `installPath` and a known
-  scope (`local`, `project`, `user`, or `managed`). Unknown scopes are omitted
-  rather than treated as global. Project/local records without an explicit
-  project binding are omitted; a user-scope setting is not a project binding.
-- User, project, and project-local `enabledPlugins` settings are read from the
-  corresponding `settings.json` files. File-based managed settings are also
-  read from the platform system directory, including `managed-settings.json`
-  and `managed-settings.d/*.json` in alphabetical order. A managed deny wins
-  over lower-scope enablement. If a present managed file or drop-in is
-  unreadable or malformed, Avibe omits Claude plugin roots rather than treating
-  lower-scope `enabled: true` as permission; static Skill roots are unaffected.
-- An installed plugin manifest is a JSON object at
-  `.claude-plugin/plugin.json`. A missing manifest retains the registry-only
-  fallback; a present manifest must have a non-empty string `name`, a Boolean
-  `defaultEnabled` when present, and a `skills` string/list with non-empty
-  `.` or `./`-prefixed relative directory entries when present. A present
-  malformed, oversized, or unreadable manifest omits that plugin record. The
-  default `skills/` path and declared paths are bounded and containment-checked.
-  Each declared path may be either a Skill directory containing `SKILL.md` or a
-  collection of Skill directories.
+  scope (`local`, `project`, `user`, or `managed`). Unknown scopes are omitted.
+  Project/local records without an explicit project binding are omitted, so a
+  record cannot broaden a plugin from another project.
+- Each applicable record contributes only its fixed `<installPath>/skills`
+  directory. Manifest-declared roots, root-level `<installPath>/SKILL.md`,
+  marketplace entries, dependency closure, and other plugin source families
+  are not discovered. The normal bounded Skill scanner still applies to the
+  fixed directory and failures affect only optional plugin roots.
+- An explicit `record["enabled"]: false` or bounded local/managed
+  `enabledPlugins[plugin-id]: false` denies that plugin; positive values do not
+  authorize it. Any malformed or unreadable managed settings source makes
+  optional plugin roots fail closed, while static Skill roots remain usable.
+- `.claude-plugin/plugin.json` is optional deny metadata only. A missing
+  manifest is allowed. A present unreadable, malformed, non-object manifest, or
+  manifest with a non-Boolean `defaultEnabled` denies that optional plugin;
+  `defaultEnabled: false` also denies it. Other manifest fields, including
+  `skills`, are ignored for discovery.
 
-Plugin records are selected by scope, valid `lastUpdated`/`installedAt` metadata,
-and a stable absolute-path tie-break; `version` is not treated as recency. The
-selected plugin roots are emitted in stable path order. Path-resolution errors
-omit only the affected optional plugin. A standalone non-Git working directory
-is the project-scope fallback boundary.
-
-This is best-effort local compatibility, not Claude's complete effective-config
-interpreter. Avibe does not execute the Claude CLI, access the network or
-marketplaces, read MDM/registry/server-managed policy, reconstruct the main
-checkout's `settings.local.json` for a Git worktree, discover account-synced
-plugins without an installed registry, or reconstruct plugin dependency
-closure. Marketplace, worktree-local, synced-plugin, and dependency-dependent
-cases remain explicit compatibility limits; Avibe only advertises roots
-supported by the bounded local artifacts above and never lets optional plugin
-discovery break static roots or a Turn.
+Duplicate records are selected deterministically by known scope, valid
+`lastUpdated`/`installedAt` metadata, and a stable absolute-path tie-break;
+`version` is not treated as recency. An explicit deny for a plugin ID applies to
+all duplicate records, so another enabled-looking record cannot evade it. Path
+resolution and malformed optional records never abort static discovery or a
+Turn. This local reader is intentionally incomplete and does not claim Claude's
+complete effective-config behavior: it does not execute the CLI, access the
+network or marketplaces, read MDM/registry/server policy, reconstruct
+worktree-main-checkout settings, discover account-synced or seed plugins, or
+reconstruct dependency closure.
 
 Native locations are read in place. Avibe does not migrate or rename them, and
 the Catalog never annotates their source. A successful load still includes the
