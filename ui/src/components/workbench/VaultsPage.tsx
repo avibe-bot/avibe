@@ -87,17 +87,18 @@ const SecretRow: React.FC<{
   revealField: string | null;
   onRevealFieldChange: (field: string) => void;
   canManage: boolean;
+  canUse: boolean;
   menuOpen: boolean;
   onMenuOpenChange: (open: boolean) => void;
   /** The open menu's reveal context or sandbox client is not ready yet. */
   revealPreparing: boolean;
-}> = ({ secret: s, terms, now, selected, onToggleTag, onEdit, onDelete, onReveal, revealField, onRevealFieldChange, canManage, menuOpen, onMenuOpenChange: setMenuOpen, revealPreparing }) => {
+}> = ({ secret: s, terms, now, selected, onToggleTag, onEdit, onDelete, onReveal, revealField, onRevealFieldChange, canManage, canUse, menuOpen, onMenuOpenChange: setMenuOpen, revealPreparing }) => {
   const { t } = useTranslation();
   const isKeypair = s.kind === 'keypair';
   const isProtected = s.protection === 'protected';
   // Reveal is only meaningful for a protected static secret: its plaintext lives sealed and can be
   // shown in-sandbox. Standard values aren't sandbox-sealed, and a keypair has no plaintext value.
-  const canReveal = isProtected && !isKeypair;
+  const canReveal = canUse && isProtected && !isKeypair;
   const fields = vaultFieldNames(s);
   const selectedField = revealField === null
     ? vaultDefaultField(s)
@@ -105,6 +106,7 @@ const SecretRow: React.FC<{
   const staleRevealField = canReveal && selectedField === null;
   // The sandbox reveal needs its authorization window, which only a browser can pair with.
   const revealInBrowser = canReveal && vaultPasskeyNeedsBrowser();
+  const hasMenu = canManage || canReveal;
   return (
     <li className="flex flex-wrap items-center gap-x-3.5 gap-y-2 rounded-xl border border-border bg-surface px-4 py-3 md:flex-nowrap">
       <div
@@ -154,7 +156,7 @@ const SecretRow: React.FC<{
           </Badge>
         ) : null}
       </div>
-      {canManage ? <div className="shrink-0">
+      {hasMenu ? <div className="shrink-0">
         <Popover open={menuOpen} onOpenChange={setMenuOpen}>
           <PopoverTrigger asChild>
             <Button variant="ghost" size="icon" aria-label={t('vaults.rowActions')} aria-haspopup="menu">
@@ -193,7 +195,6 @@ const SecretRow: React.FC<{
                   <ExternalLink className="size-4 text-muted" />
                   {t('vaults.reveal.showInBrowser')}
                 </button>
-                <div className="my-1 h-px bg-border" />
               </>
             ) : !staleRevealField && canReveal ? (
               <>
@@ -228,9 +229,10 @@ const SecretRow: React.FC<{
                   {revealPreparing ? <Loader2 className="size-4 animate-spin text-muted" /> : <Copy className="size-4 text-muted" />}
                   {t('vaults.reveal.copy')}
                 </button>
-              <div className="my-1 h-px bg-border" />
               </>
             ) : null}
+            {canManage ? <>
+            {canReveal && !staleRevealField ? <div className="my-1 h-px bg-border" /> : null}
             <button
               type="button"
               role="menuitem"
@@ -255,6 +257,7 @@ const SecretRow: React.FC<{
               <Trash2 className="size-4" />
               {t('vaults.delete')}
             </button>
+            </> : null}
           </PopoverContent>
         </Popover>
       </div> : null}
@@ -592,8 +595,9 @@ export const VaultsPage: React.FC = () => {
   const { showToast } = useToast();
   const vault = useProtectedVault();
   const { capabilities } = useInstanceAuthorization();
-  const canManage = capabilities.can_use_vault_secrets;
-  const canReadVaultState = capabilities.can_use_vault_secrets;
+  const canManageVaultSecrets = capabilities.can_manage_instance;
+  const canUseVaultSecrets = capabilities.can_use_vault_secrets;
+  const canReadVaultState = canUseVaultSecrets;
   const [searchParams, setSearchParams] = useSearchParams();
   const [secrets, setSecrets] = useState<VaultSecret[]>([]);
   const [grants, setGrants] = useState<VaultGrant[]>([]);
@@ -641,10 +645,10 @@ export const VaultsPage: React.FC = () => {
   }, [setSearchParams]);
 
   useEffect(() => {
-    if (!canManage || step?.kind !== 'add') return;
+    if (!canUseVaultSecrets || step?.kind !== 'add') return;
     setAdding({ name: step.name, startProtected: true });
     clearStep();
-  }, [canManage, step, clearStep]);
+  }, [canUseVaultSecrets, step, clearStep]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -782,16 +786,17 @@ export const VaultsPage: React.FC = () => {
   }, [secrets, activeTags, activeSkills, quick, sort, terms, t]);
 
   // Explicit row handoffs win over a hiding view. Clear only the view filters,
-  // preserve sort/unrelated params, and consume reveal/edit atomically.
+  // preserve sort/unrelated params, and consume reveal/edit atomically. An Editor's
+  // edit handoff reveals the row, not the manager-only edit dialog.
   useEffect(() => {
-    if (!canManage || (step?.kind !== 'reveal' && step?.kind !== 'edit')) return;
+    if (!canUseVaultSecrets || (step?.kind !== 'reveal' && step?.kind !== 'edit')) return;
     const secret = secrets.find((entry) => entry.name === step.secretName);
     if (!secret) return;
     const hidden = !visibleSecrets.some((entry) => entry.name === secret.name);
     if (step.kind === 'reveal') {
       setMenuSecret(secret.name);
       setMenuField(step.field ?? null);
-    } else {
+    } else if (canManageVaultSecrets) {
       setEditTarget(secret);
     }
     setSearchParams((prev) => {
@@ -799,7 +804,7 @@ export const VaultsPage: React.FC = () => {
       if (hidden) for (const key of ['q', 'tag', 'skill', 'filter']) next.delete(key);
       return next;
     }, { replace: true });
-  }, [canManage, step, secrets, visibleSecrets, setSearchParams]);
+  }, [canManageVaultSecrets, canUseVaultSecrets, step, secrets, visibleSecrets, setSearchParams]);
 
   const toggleTag = (tag: string) => {
     const key = isSkillTag(tag) ? 'skill' : 'tag';
@@ -842,6 +847,7 @@ export const VaultsPage: React.FC = () => {
     [api, t],
   );
   const menuRevealKey = useMemo(() => {
+    if (!canUseVaultSecrets) return null;
     const secret = secrets.find((entry) => entry.name === menuSecret);
     if (secret?.protection !== 'protected' || secret.kind === 'keypair' || vaultPasskeyNeedsBrowser()) return null;
     if (menuField !== null && !vaultFieldNames(secret).includes(menuField)) return null;
@@ -850,7 +856,7 @@ export const VaultsPage: React.FC = () => {
       field: menuField ?? vaultDefaultField(secret),
       version: vaultFieldFingerprint(secret),
     };
-  }, [secrets, menuSecret, menuField]);
+  }, [canUseVaultSecrets, secrets, menuSecret, menuField]);
   const revealContext = usePreparedRequest(menuRevealKey, requestRevealContext, revealContextIssued, PREPARED_REVEAL);
   const revealSandboxReady = useVaultSandboxWarm(menuRevealKey !== null);
   // Show and Copy wait for both, so their click never waits on either.
@@ -922,7 +928,7 @@ export const VaultsPage: React.FC = () => {
         stackActionsOnMobile
         actions={
           <>
-            {canManage ? <VaultLockIndicator className="max-sm:order-last max-sm:w-full max-sm:justify-between" /> : null}
+            {canUseVaultSecrets ? <VaultLockIndicator className="max-sm:order-last max-sm:w-full max-sm:justify-between" /> : null}
             {canReadVaultState ? <Button
               variant={showAudit ? 'secondary' : 'ghost'}
               size="icon"
@@ -932,7 +938,7 @@ export const VaultsPage: React.FC = () => {
             >
               <History className="size-4" />
             </Button> : null}
-            {canManage ? <Button
+            {canManageVaultSecrets ? <Button
               variant={showSettings ? 'secondary' : 'ghost'}
               size="icon"
               className="max-sm:border max-sm:border-border max-sm:bg-surface"
@@ -950,7 +956,7 @@ export const VaultsPage: React.FC = () => {
             >
               <RefreshCw className="size-4" />
             </Button>
-            {canManage ? (
+            {canUseVaultSecrets ? (
               <Button className="max-sm:flex-1" onClick={() => setAdding({ startProtected: false })}>
                 <Plus className="size-4" />
                 {t('vaults.add')}
@@ -967,7 +973,7 @@ export const VaultsPage: React.FC = () => {
       {error && (
         <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive-ink">{error}</div>
       )}
-      {canManage ? (
+      {canUseVaultSecrets ? (
         <PendingRequestsSection
           onResolved={refresh}
           focusRequestId={step?.kind === 'request' ? step.requestId : null}
@@ -985,7 +991,7 @@ export const VaultsPage: React.FC = () => {
           </div>
           <div className="flex flex-wrap gap-2">
             {grants.map((g) => (
-              <GrantChip key={g.id} grant={g} now={now} onRevoke={canManage ? onRevokeGrant : undefined} />
+              <GrantChip key={g.id} grant={g} now={now} onRevoke={canUseVaultSecrets ? onRevokeGrant : undefined} />
             ))}
           </div>
         </div>
@@ -1059,7 +1065,8 @@ export const VaultsPage: React.FC = () => {
               onReveal={revealSecret}
               revealField={s.name === menuSecret ? menuField : null}
               onRevealFieldChange={setMenuField}
-              canManage={canManage}
+              canManage={canManageVaultSecrets}
+              canUse={canUseVaultSecrets}
               menuOpen={s.name === menuSecret}
               revealPreparing={s.name === menuRevealKey?.name && revealPreparing}
               onMenuOpenChange={(open) => {
@@ -1088,8 +1095,8 @@ export const VaultsPage: React.FC = () => {
           )}
         </div>
       )}
-      {canManage ? <VaultSettingsDialog open={showSettings} onOpenChange={setShowSettings} /> : null}
-      {canManage ? <VaultSecretDialog
+      {canManageVaultSecrets ? <VaultSettingsDialog open={showSettings} onOpenChange={setShowSettings} /> : null}
+      {canUseVaultSecrets ? <VaultSecretDialog
         open={adding != null}
         name={adding?.name}
         startProtected={adding?.startProtected}
@@ -1103,7 +1110,7 @@ export const VaultsPage: React.FC = () => {
           refresh();
         }}
       /> : null}
-      {canManage ? <VaultSecretDialog
+      {canManageVaultSecrets ? <VaultSecretDialog
         open={editTarget != null}
         editSecret={activeEditSecret}
         onOpenChange={(o) => {
@@ -1118,7 +1125,7 @@ export const VaultsPage: React.FC = () => {
         }}
       /> : null}
       <ConfirmDialog
-        open={deleteTarget != null}
+        open={canManageVaultSecrets && deleteTarget != null}
         onOpenChange={(open) => {
           if (!open) setDeleteTarget(null);
         }}

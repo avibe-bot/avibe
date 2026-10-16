@@ -440,9 +440,15 @@ def get_vault_settings(conn: Connection) -> dict[str, Any]:
     return _normalize_vault_settings(_loads(raw))
 
 
-def save_vault_settings(conn: Connection, payload: dict[str, Any]) -> dict[str, Any]:
+def save_vault_settings(conn: Connection, payload: dict[str, Any], *, user_context: Any = None) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise VaultServiceError("vault settings payload must be an object")
+    # Instance-wide protection is management-only; approvers may still remember a grant TTL.
+    # Check the whole payload before writing so mixed updates cannot partially succeed.
+    if "unlock_window_seconds" in payload or "strict_approvals" in payload:
+        context = resolve_resource_access_context(user_context)
+        if not context.can_manage_instance:
+            raise VaultSecretAccessError("Vault settings access is not permitted.")
     current = get_vault_settings(conn)
     updates: dict[str, Any] = {}
     if "unlock_window_seconds" in payload:

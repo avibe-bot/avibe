@@ -6,13 +6,15 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation, useNavigate, useNavigationType } from 'react-router-dom';
 import { createInstance } from 'i18next';
+import { initReactI18next } from 'react-i18next';
 import en from '../../i18n/en.json';
 import zh from '../../i18n/zh.json';
-import type { VaultSecret } from '../../context/ApiContext';
+import type { VaultGrant, VaultSecret } from '../../context/ApiContext';
 import { RouteSurfaceActiveContext } from '../../lib/routeSurfaceActivity';
 
-import { InstanceAuthorizationContext } from '../../context/InstanceAuthorizationContext';
+import { InstanceAuthorizationContext, type InstanceAuthorizationValue } from '../../context/InstanceAuthorizationContext';
 import { OWNER_INSTANCE_CAPABILITIES } from '../../lib/sessionInfo';
+import { capabilitiesFor } from '../../lib/testing/instanceRoleCapabilities';
 import { VaultsPage } from './VaultsPage';
 
 type WorkbenchEventHandlers = {
@@ -28,12 +30,15 @@ const api = vi.hoisted(() => ({
   getVaultGrants: vi.fn(),
   getVaultRequests: vi.fn(),
   listVaultSecrets: vi.fn(),
+  listDependencies: vi.fn(),
+  listSkills: vi.fn(),
 }));
 const showToast = vi.hoisted(() => vi.fn());
 const revealProtectedValue = vi.hoisted(() => vi.fn());
 const useVaultSandboxWarm = vi.hoisted(() => vi.fn((_enabled: boolean) => true));
 const remoteOwner = {
   remote: true,
+  instanceKind: 'organization' as const,
   instanceRole: 'owner' as const,
   capabilities: {
     ...OWNER_INSTANCE_CAPABILITIES,
@@ -41,15 +46,18 @@ const remoteOwner = {
   },
 };
 
-const activeOrgMember = {
+const editor: InstanceAuthorizationValue = {
   remote: true,
-  instanceRole: 'editor' as const,
-  capabilities: {
-    ...OWNER_INSTANCE_CAPABILITIES,
-    can_manage_instance: false,
-    can_use_vault_secrets: true,
-    can_use_system: false,
-  },
+  instanceKind: 'organization',
+  instanceRole: 'editor',
+  capabilities: capabilitiesFor('editor'),
+};
+
+const member: InstanceAuthorizationValue = {
+  remote: true,
+  instanceKind: 'organization',
+  instanceRole: 'member',
+  capabilities: capabilitiesFor('member'),
 };
 
 vi.mock('../../context/ApiContext', async (loadOriginal) => {
@@ -62,14 +70,16 @@ vi.mock('../../context/ToastContext', () => ({
 }));
 
 vi.mock('../../lib/useProtectedVault', () => ({
-  useProtectedVault: () => ({ revealProtectedValue }),
+  useProtectedVault: () => ({ revealProtectedValue, status: 'locked', refresh: vi.fn(), hasPasskey: () => false }),
+  webauthnAvailable: () => false,
   useVaultSandboxWarm,
   useVaultLock: () => ({ unlocked: false, remainingMs: 0, lockNow: vi.fn() }),
 }));
 
 const testI18n = createInstance();
-void testI18n.init({ lng: 'en', resources: { en: { translation: en }, zh: { translation: zh } }, initAsync: false });
-vi.mock('react-i18next', () => ({
+void testI18n.use(initReactI18next).init({ lng: 'en', resources: { en: { translation: en }, zh: { translation: zh } }, initAsync: false });
+vi.mock('react-i18next', async (loadOriginal) => ({
+  ...await loadOriginal<typeof import('react-i18next')>(),
   useTranslation: () => ({ t: testI18n.t }),
 }));
 
@@ -97,7 +107,7 @@ function LocationProbe() {
   </>;
 }
 
-function renderPage(context = remoteOwner, entry = '/vaults', active = true) {
+function renderPage(context: InstanceAuthorizationValue = remoteOwner, entry = '/vaults', active = true) {
   return render(
     <InstanceAuthorizationContext.Provider value={context}>
       <MemoryRouter initialEntries={[entry]}>
@@ -118,6 +128,8 @@ beforeEach(async () => {
       if (at >= 0) eventHandlers.splice(at, 1);
     };
   });
+  api.listDependencies.mockResolvedValue({ deps: [] });
+  api.listSkills.mockResolvedValue({ ok: true, skills: [] });
   api.getVaultRequests.mockResolvedValue({ requests: [] });
   api.listVaultSecrets.mockResolvedValue({ secrets: [] });
   api.getVaultGrants.mockResolvedValue({ grants: [] });
@@ -150,11 +162,90 @@ describe('VaultsPage remote audit history', () => {
     expect(await screen.findByText('alpha')).toBeTruthy();
   });
 
-  it('shows Vault management controls to an Editor', async () => {
-    renderPage(activeOrgMember);
+  it('keeps Add secret available to an Editor', async () => {
+    renderPage(editor);
 
     expect(await screen.findByRole('button', { name: 'Add secret' })).toBeTruthy();
     expect(screen.queryByText('Read-only')).toBeNull();
+  });
+});
+
+describe('PERMISSIONS-013 VaultsPage capability-gated management actions', () => {
+  const protectedSecret: VaultSecret = {
+    name: 'protected-secret', description: 'protected deployment', tags: [], kind: 'static', protection: 'protected',
+    signer_kind: null, source: 'user', policy: {}, last_used_at: null, use_count: 0,
+    created_at: '2026-10-01T00:00:00Z', updated_at: '2026-10-01T00:00:00Z',
+  };
+  const standardSecret: VaultSecret = {
+    name: 'standard-secret', description: 'standard deployment', tags: [], kind: 'static', protection: 'standard',
+    signer_kind: null, source: 'user', policy: {}, last_used_at: null, use_count: 0,
+    created_at: '2026-10-02T00:00:00Z', updated_at: '2026-10-02T00:00:00Z',
+  };
+  const keypairSecret: VaultSecret = { ...protectedSecret, name: 'keypair-secret', kind: 'keypair' };
+  const activeGrant: VaultGrant = {
+    id: 'grant-1', source_selector: { env: ['PROD_KEY'] }, session_id: null, purpose: 'run', status: 'active',
+    request_id: null, created_at: '2026-10-01T00:00:00Z', expires_at: '2026-12-31T00:00:00Z', revoked_at: null,
+    member_snapshot: ['protected-secret'], member_count: 1, runtime_member_count: 1,
+  };
+  const cases = [
+    {
+      label: 'Editor', context: editor, canRevoke: true, hasSettings: false,
+      protectedMenu: ['Show value', 'Copy value'], standardMenu: null,
+    },
+    {
+      label: 'Member', context: member, canRevoke: true, hasSettings: true,
+      protectedMenu: ['Show value', 'Copy value', 'Edit secret', 'Delete'], standardMenu: ['Edit secret', 'Delete'],
+    },
+  ] as const;
+
+  const rowFor = (name: string) => {
+    const row = screen.getByText(name, { exact: true }).closest('li');
+    if (!row) throw new Error(`missing row for ${name}`);
+    return row as HTMLElement;
+  };
+
+  it.each(cases)('$label sees only the Vault controls its capability tier permits', async ({ context, canRevoke, hasSettings, protectedMenu, standardMenu }) => {
+    const user = userEvent.setup();
+    api.listVaultSecrets.mockResolvedValue({ secrets: [protectedSecret, standardSecret, keypairSecret] });
+    api.getVaultGrants.mockResolvedValue({ grants: [activeGrant] });
+    renderPage(context);
+
+    expect(await screen.findByRole('button', { name: 'Add secret' })).toBeTruthy();
+    expect(Boolean(screen.queryByRole('button', { name: 'Vault settings' }))).toBe(hasSettings);
+    await screen.findByText('PROD_KEY');
+    // _require_secret_names_access admits Editors before its management branch.
+    expect(Boolean(screen.queryByRole('button', { name: 'Revoke' }))).toBe(canRevoke);
+
+    const protectedRow = rowFor('protected-secret');
+    const protectedTrigger = within(protectedRow).queryByRole('button', { name: 'More actions' });
+    expect(protectedTrigger).toBeTruthy();
+    await user.click(protectedTrigger!);
+    expect(screen.getAllByRole('menuitem').map((item) => item.textContent?.trim())).toEqual(protectedMenu);
+    await user.keyboard('{Escape}');
+
+    for (const name of ['standard-secret', 'keypair-secret']) {
+      const trigger = within(rowFor(name)).queryByRole('button', { name: 'More actions' });
+      if (standardMenu === null) {
+        expect(trigger).toBeNull();
+      } else {
+        expect(trigger).toBeTruthy();
+        await user.click(trigger!);
+        expect(screen.getAllByRole('menuitem').map((item) => item.textContent?.trim())).toEqual(standardMenu);
+        await user.keyboard('{Escape}');
+      }
+    }
+  });
+
+  it('keeps an Editor edit handoff in the list instead of opening a manager-only dialog', async () => {
+    const editorSecret = { ...protectedSecret };
+    api.listVaultSecrets.mockResolvedValue({ secrets: [editorSecret] });
+    renderPage(editor, '/vaults?edit=protected-secret');
+    await screen.findAllByText('protected-secret');
+
+    // Wait for the handoff effect, not the initially absent dialog, before checking its result.
+    await waitFor(() => expect(screen.getByTestId('location').textContent).not.toContain('edit='));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.getByRole('list', { name: 'Vaults' })).toBeTruthy();
   });
 });
 
@@ -396,7 +487,7 @@ describe('VaultsPage list discovery', () => {
 // asserted on the stream stub.
 describe('PERMISSIONS-016 VaultsPage wakes an Editor on the bare vaults.updated frame', () => {
   it('refetches pending requests from the signal alone', async () => {
-    renderPage(activeOrgMember);
+    renderPage(editor);
     await waitFor(() => expect(api.getVaultRequests).toHaveBeenCalled());
     const before = api.getVaultRequests.mock.calls.length;
 
