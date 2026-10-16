@@ -899,9 +899,10 @@ runtime，同时保留 Session、transcript 和 Run 记录；不能和现有的
 `--session-id` 一起使用。
 
 对于现有 `--session-id`，默认投递是 P1：新消息会 steering 进活动 native Turn，
-Session 空闲时立即启动；明确拒绝后，同一个 Delivery 才回退到 P3。`--queue` 会
-直接选择 P3。`--send-now` 显式选择相同的带内容 P1 语义，只针对这条新消息，
-不会提升更早的排队工作。`vibe session send-now` 是无内容 P1 操作，只提升现有的
+Session 空闲时立即启动；明确拒绝后，同一个 Delivery 才回退到 P3。如果活动 Turn
+中包含用户本人发送的消息，Run 会以 P3 排在该 Turn 之后，作为独立 Turn 执行。
+`--queue` 会直接选择 P3。`--send-now` 显式把这条新消息 steering 进活动 Turn，
+包括包含用户消息的 Turn，不会提升更早的排队工作。`vibe session send-now` 是无内容 P1 操作，只提升现有的
 精确 FIFO 队头，不新增消息。命令响应包含 `delivery_intent`，Controller 消费请求后，
 `vibe runs show <run-id>` 会显示持久化的 `metadata.delivery_outcome`。
 

@@ -487,11 +487,14 @@ vibe agent run --close-after --no-callback --agent release-reviewer --message 'R
 With an existing `--session-id`, the default admission is P1: Avibe steers the
 new Run into an active native Turn, starts it immediately when idle, or moves the
 same Delivery to the durable P3 queue after a definitive refusal/not-active
-receipt. It does not interrupt the active Turn.
+receipt. It does not interrupt the active Turn. When a person's message is part
+of the active Turn, the Run is not steered into it: it waits in the P3 queue and
+runs as its own Turn after that Turn ends, so the person's answer stays that
+Turn's result. Watch, Hook, Webhook, and callback deliveries follow the same rule.
 
-`--send-now` is valid only with an existing `--session-id` and explicitly selects
-the normal content-bearing P1 behavior: the new message steers an active native
-Turn, starts immediately when idle, and falls back to P3 after a definitive
+`--send-now` is valid only with an existing `--session-id` and explicitly steers
+the new message into the active native Turn, including one a person's message is
+part of. It starts immediately when idle and falls back to P3 after a definitive
 refusal. It never promotes an older queued message. `vibe session send-now` is
 the content-free P1 operation: it promotes the exact existing FIFO head without
 adding a message. A stale head is refused rather than replaced by the next queued

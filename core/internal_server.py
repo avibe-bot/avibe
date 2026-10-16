@@ -32,6 +32,7 @@ import os
 import re
 import socket
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Optional, TYPE_CHECKING
@@ -264,7 +265,9 @@ def create_app(
 
         The explicit source intent decides whether this content queues or steers.
         Content-bearing P1 targets this Delivery; content-free P1 promotion is
-        exposed separately through ``SessionTurnManager.send_now``.
+        exposed separately through ``SessionTurnManager.send_now``. ``send_now``
+        is P1 that also steers a Turn a person's input is part of, which a
+        default P1 Harness input queues behind (``DeliveryRequest.send_now``).
         The submission remains a Delivery until exact native acceptance materializes
         the harness Message.
         """
@@ -302,7 +305,7 @@ def create_app(
         scope_id: str | None = None
         delivery_owner_transferred = False
         target_was_busy = False
-        legacy_send_now = str(delivery_intent or "").strip().lower() == "send_now"
+        send_now = str(delivery_intent or "").strip().lower() == "send_now"
         delivery_intent = normalize_delivery_intent(delivery_intent)
         effective_delivery_intent = delivery_intent
         execution_id = str(
@@ -380,7 +383,7 @@ def create_app(
                                     delivery_status="canceled",
                                 )
                             if (
-                                legacy_send_now
+                                send_now
                                 and existing_state == "queued"
                                 and existing.get("priority") == "p3"
                                 and message_deliveries.delivery_has_history_event(
@@ -437,7 +440,10 @@ def create_app(
                     raise ValueError("Session is archived")
                 if existing is not None:
                     delivery_id = str(existing["id"])
-                    delivery_request = manager._request_from_delivery(existing)
+                    delivery_request = replace(
+                        manager._request_from_delivery(existing),
+                        send_now=send_now,
+                    )
                     scope_id = delivery_request.scope_id
                     from core.message_priority import delivery_intent_for_priority
 
@@ -555,6 +561,7 @@ def create_app(
                     SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(context)
                 },
                 native_message_id=native_message_id or None,
+                send_now=send_now,
             )
 
         if context.platform_specific is None:
