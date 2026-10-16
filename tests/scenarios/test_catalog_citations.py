@@ -181,7 +181,11 @@ def _collect_cases(files: list[str], cwd: Path) -> dict[str, list[_Case]]:
                 *files,
             ],
             cwd=cwd,
-            env={**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, [str(REPO_ROOT), os.environ.get("PYTHONPATH")]))},
+            # Without the caller's PYTEST_ADDOPTS, whose selection would drop cited cases.
+            env={
+                **{name: value for name, value in os.environ.items() if name != "PYTEST_ADDOPTS"},
+                "PYTHONPATH": os.pathsep.join(filter(None, [str(REPO_ROOT), os.environ.get("PYTHONPATH")])),
+            },
             capture_output=True,
             text=True,
             timeout=_COLLECTION_TIMEOUT_SECONDS,
