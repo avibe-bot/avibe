@@ -696,8 +696,9 @@ class ManagedWatchStore:
             except Exception:
                 self._reload_after_lost_write(watch.id)
                 raise
-            # Published only once the row has landed (#2705).
-            if expected_reference_agent_id is not None:
+            # Published only once the row has landed (#2705); a reference-checked
+            # SQLite write was reloaded above.
+            if self._sqlite is not None and expected_reference_agent_id is not None:
                 result = self._watches[watch.id]
             else:
                 self._publish(watch)
