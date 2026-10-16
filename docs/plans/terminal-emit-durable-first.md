@@ -38,10 +38,14 @@ Both paths leave a Turn whose snapshot disagrees with its Run. The first also pu
 
 **The emit keeps master's rule for which outcomes complete the Turn and changes only the order. Once an emit has passed its durable steps, it ends with one synchronous terminal block after its last IM surface. The block runs from the dispatcher's `finally`, so a cancellation or failure in an IM surface cannot skip it.**
 
-**Durable steps first.** In the delivered branch, the durable steps move up to directly after the primary delivery (the result send and its fallbacks): the Run terminal record and the persist. Those writes read only the send's result. They do not read anything produced by what currently precedes them:
+**Durable steps first.** In the delivered branch, the durable steps move up to directly after the primary delivery (the result send and its fallbacks):
+- `finalize_scheduled_delivery`, which is persistent routing state (the scheduled base's alias to the delivered message, and the thread marked active), not an IM surface;
+- the Run terminal record;
+- the persist.
+
+These read only the send's result, including the anchor its fallbacks set, and `finalize_scheduled_delivery` is synchronous. They read nothing produced by the IM surfaces that currently come between them and the send:
 - the delivery notice;
 - `_upload_file_links`;
-- `finalize_scheduled_delivery`;
 - `_retire_status_bubble`;
 - `_drop_status_keys`.
 
@@ -64,7 +68,9 @@ The dispatcher's existing `finally` runs the processing-indicator cleanup, as to
 
 The controller keeps its call after the dispatcher returns. That call is a no-op once the pending flag is popped (`_SHOW_CHECKPOINT_TERMINAL_PENDING_KEY`), and it still covers dispatchers that do not reach this block.
 
-**If B's own write fails.** `_finish_durable_terminal_result` logs and returns when `_terminalize_durable_turn` raises, for example a busy database. The runner's release would then commit without evidence. So `runner_release` carries the evidence `on_terminal_result` latched on the sink (`sink["terminal_evidence"]`), but only when the sink was released with a terminal-result settlement (`terminal_result` or `turn_only_result`). After this change, that settlement is set by the block, which attempts B in the same step. The one other setter is Claude's direct release after a failed agent-initiated settle, and it latches no evidence. `dispatch_turn` already reads the sink's settlement before popping the sink; it reads the evidence the same way and returns both to the runner. The runner then commits what B would have committed. In every other case, B wins and the runner's write is a no-op.
+`on_terminal_delivery_complete` first ends the Show checkpoint (`_end_show_checkpoint`). For a Session with a Show page, that runs `git` synchronously on the loop through the event bus. Master already makes this call synchronously on the loop, after the dispatcher returns, so the block keeps it where it is, before B's write, and adds no loop cost. Moving that work off the loop is #2734.
+
+**If B's own write fails.** `_finish_durable_terminal_result` logs and returns when `_terminalize_durable_turn` raises, for example a busy database. The runner's release would then commit without evidence. So `runner_release` carries the evidence `on_terminal_result` latched on the sink (`sink["terminal_evidence"]`), but only when the sink was released with a terminal-result settlement (`terminal_result` or `turn_only_result`). After this change, that settlement is set by the block, which attempts B in the same step. The one other setter is Claude's direct release after a failed agent-initiated settle, and it latches no evidence. `dispatch_turn` hands the sink's settlement and evidence to the runner's in-flight Turn in its `finally`, before it pops the sink. So they also survive a cancellation, where `dispatch_turn` returns no outcome. The runner's release uses them on every path, the cancelled one included, whenever the settlement is a terminal-result one. The runner then commits what B would have committed, even when a Stop is already propagating. In every other case, B wins and the runner's write is a no-op.
 
 Not chosen:
 - **Running the block before the IM surfaces** (this note's first version). After the release, a successor can start while the previous Turn's surfaces are still running. Status state is keyed by the thread's latest trigger message, and a successor without its own trigger, such as a quick-reply Turn (`message_id=None`), shares that key. The previous Turn's collapse and clear would then act on the successor's bubble and state. Avoiding that needs status state detached from its key at the release, which is a new mechanism. Leaving the surfaces before the release needs none.
@@ -100,7 +106,7 @@ A cancellation caught during the Run terminal record (A, #2715, the `_store_step
 
 - **Regression, failing on master.** Run the real runner with the real dispatcher terminal emit for an IM context whose processing indicator suspends in `finish`. Assert that the Turn's terminal snapshot is `terminal_result` and carries the evidence. One case per branch: silent, duplicate, suppressed, delivered.
 - **Cancellation.** Cancel the receiver at each suspension after the durable steps, and assert that the snapshot carries the evidence, the cancellation propagates and the runtime is released. The suspensions are:
-  - the delivery notice, the file uploads, the bubble retire and the state drop in the delivered branch;
+  - the delivery notice, the file uploads, the bubble retire and the state drop in the delivered branch, where the scheduled anchor is also already finalized;
   - the collapse and the clear in the other branches;
   - the chunk forward and the indicator cleanup.
 - **Held Activity errors.** For a settlement failure, and for a Run record failure after a delivered Activity output, the emit still raises the same error to its caller, and the Turn ends `terminal_result` with the evidence.
@@ -108,7 +114,8 @@ A cancellation caught during the Run terminal record (A, #2715, the `_store_step
 - **The runner's evidence fallback.** Three cases:
   - make `_terminalize_durable_turn` raise once for B: the runner's release commits the same evidence B would have;
   - let B succeed: the runner's write is a no-op, and the snapshot keeps B's `terminal_result`;
-  - release without a terminal-result settlement: the runner's write commits no evidence.
+  - release without a terminal-result settlement: the runner's write commits no evidence;
+  - a Stop propagating from an IM surface while B's write fails: the runner's cancelled path commits B's evidence.
 - **Existing tests that pin the current order, kept green:**
   - `tests/test_controller_dispatch_loop.py`: the checkpoint ends after delivery, and a delivery failure keeps the Turn owner live;
   - `tests/test_message_dispatcher_result_fallback.py`;
@@ -121,7 +128,7 @@ A cancellation caught during the Run terminal record (A, #2715, the `_store_step
 
 - [ ] Accept this note.
 - [ ] One change across the four terminal branches:
-  - in the delivered branch, the durable steps directly after the primary delivery;
+  - in the delivered branch, the durable steps, `finalize_scheduled_delivery` included, directly after the primary delivery;
   - a synchronous terminal block that takes over master's signal-to-raise sequence and adds the release and B, run from the dispatcher's `finally` once the durable steps have passed;
-  - the runner's release carrying the latched evidence after a terminal-result settlement;
+  - the runner's release carrying the latched evidence after a terminal-result settlement, handed over in `dispatch_turn`'s `finally` so that the cancelled path has it too;
   - the tests above.
