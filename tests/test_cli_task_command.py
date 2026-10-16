@@ -5561,3 +5561,142 @@ def test_task_resume_rejects_orphaned_owner_without_execution_target(
         "owner_session_id": "ses-removed",
     }
     assert cli.ScheduledTaskStore().get_task(task.id).enabled is False
+
+
+# The target Agent's model catalog (``api.agent_model_options``): Vibey's is its Model Hub menu, authoritative; codex's
+# is bundled and may lag behind a new release.
+_CATALOGS = {
+    "vibey": {
+        "ok": True,
+        "source": "model_hub",
+        "models": [{"value": "claude-opus-5-5", "reasoning_efforts": ["high", "xhigh"]}, {"value": "gpt-6-astra", "reasoning_efforts": []}],
+    },
+    "codex": {
+        "ok": True,
+        "source": "bundled",
+        "models": [{"value": "gpt-6-codex", "reasoning_efforts": ["medium", "xhigh"]}],
+    },
+}
+
+
+def _run_on_new_session(tmp_path: Path, capsys, db_path: Path, agent_store, request_store, argv: list[str]):
+    with (
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_request_store", return_value=request_store),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli.api.agent_model_options", side_effect=lambda backend, **_: _CATALOGS[backend]),
+        patch(
+            "storage.sessions_service.paths.get_show_page_dir",
+            side_effect=lambda session_id: tmp_path / "show" / session_id,
+        ),
+    ):
+        result = cli.cmd_agent_run(_parse_agent_run(["--async", "--no-callback", *argv]))
+    captured = capsys.readouterr()
+    return result, json.loads(captured.out if result == 0 else captured.err)
+
+
+@pytest.mark.parametrize(
+    ("backend", "model", "effort", "warned"),
+    [("vibey", "claude-opus-5-5", "xhigh", False), ("codex", "gpt-6-codex-next", "xhigh", True)],
+    ids=["vibey", "codex-model-newer-than-its-catalog"],
+)
+def test_agent_run_starts_a_new_session_on_a_chosen_model_that_its_later_turns_keep(
+    tmp_path: Path, capsys, sqlite_schema_db_factory, backend, model, effort, warned
+) -> None:
+    """A run that creates a Session may choose its model and effort: they are kept on the Session, whose row every turn
+    of it is dispatched with (``resolve_session_id_target``), so a later run into it needs no flags. A codex model its
+    bundled catalog does not list yet is kept with a warning, as `vibe agent create` gives."""
+    db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
+    agent_store = cli.VibeAgentStore(db_path)
+    agent_store.create(name="worker", backend=backend)
+    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+
+    result, payload = _run_on_new_session(
+        tmp_path, capsys, db_path, agent_store, request_store,
+        ["--agent", "worker", "--model", model, "--reasoning-effort", effort, "--message", "first"],
+    )
+
+    assert result == 0, payload
+    session_id = payload["session_id"]
+    assert bool(payload.get("warnings")) is warned
+    queued = json.loads((request_store.pending_dir / f"{payload['run_id']}.json").read_text())
+    assert (queued["model"], queued["reasoning_effort"]) == (model, effort)
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute("select model, reasoning_effort from agent_sessions where id = ?", (session_id,)).fetchone()
+    assert row == (model, effort)
+
+    # The second turn: a run into the Session, with no flags, is dispatched on the model the Session keeps.
+    result, payload = _run_on_new_session(
+        tmp_path, capsys, db_path, agent_store, request_store, ["--session-id", session_id, "--message", "second"]
+    )
+    assert result == 0, payload
+    with patch("core.scheduled_tasks.paths.get_sqlite_state_path", return_value=db_path):
+        target = cli.resolve_session_id_target(session_id)
+    assert (target.model, target.reasoning_effort) == (model, effort)
+
+
+@pytest.mark.parametrize(
+    ("extra", "code", "message"),
+    [
+        (["--model", "claude-opus-9"], "session_model_unavailable", "model 'claude-opus-9' is not in the vibey model catalog"),
+        (
+            ["--model", "claude-opus-5-5", "--reasoning-effort", "medium"],
+            "session_model_unavailable",
+            "reasoning_effort 'medium' is not valid for model 'claude-opus-5-5'",
+        ),
+    ],
+    ids=["unknown-model", "effort-the-model-does-not-take"],
+)
+def test_agent_run_refuses_a_vibey_model_its_menu_does_not_offer_before_any_session_is_reserved(
+    tmp_path: Path, capsys, sqlite_schema_db_factory, extra, code, message
+) -> None:
+    db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
+    agent_store = cli.VibeAgentStore(db_path)
+    agent_store.create(name="worker", backend="vibey")
+    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+
+    result, payload = _run_on_new_session(
+        tmp_path, capsys, db_path, agent_store, request_store, ["--agent", "worker", *extra, "--message", "hi"]
+    )
+
+    assert result == 1
+    assert (payload["code"], payload["error"]) == (code, message)
+    assert payload["hint"] == "Run `vibe agent models worker` to list valid models and reasoning efforts."
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("select count(*) from agent_sessions").fetchone() == (0,)
+    assert not list(request_store.pending_dir.glob("*.json"))
+
+
+def test_agent_run_refuses_a_fork_onto_a_vibey_model_its_menu_does_not_offer(
+    tmp_path: Path, capsys, sqlite_schema_db_factory
+) -> None:
+    """A fork's override is checked by the same rule as a new Session's, against the source Session's Agent."""
+    db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
+    agent_store = cli.VibeAgentStore(db_path)
+    agent_store.create(name="worker", backend="vibey")
+    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+    result, payload = _run_on_new_session(
+        tmp_path, capsys, db_path, agent_store, request_store, ["--agent", "worker", "--message", "source"]
+    )
+    assert result == 0, payload
+
+    with patch("core.scheduled_tasks.paths.get_sqlite_state_path", return_value=db_path):
+        result, payload = _run_on_new_session(
+            tmp_path, capsys, db_path, agent_store, request_store,
+            ["--fork-session", payload["session_id"], "--model", "claude-opus-9", "--message", "branch"],
+        )
+
+    assert result == 1
+    assert payload["code"] == "session_model_unavailable"
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("select count(*) from agent_sessions").fetchone() == (1,)
+
+
+def test_agent_run_refuses_a_model_for_an_existing_session_and_says_how_to_change_it(capsys) -> None:
+    args = _parse_agent_run(["--session-id", "ses_existing1", "--model", "claude-opus-5-5", "--message", "hi"])
+
+    result, payload = _capture_stderr_json(cli.cmd_agent_run, args)
+
+    assert result == 1
+    assert payload["code"] == "model_override_with_existing_session"
+    assert "Web UI's Session model picker" in payload["hint"] and "--fork-session" in payload["hint"]
