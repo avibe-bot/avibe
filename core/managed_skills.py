@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import errno
-import hashlib
 import html
 import json
 import logging
@@ -11,7 +10,6 @@ import os
 import re
 import shutil
 import stat
-import struct
 import subprocess
 import threading
 import time
@@ -35,8 +33,8 @@ logger = logging.getLogger(__name__)
 
 SKILL_WORKING_DIR_ENV = "AVIBE_SKILL_WORKING_DIR"
 SKILL_PROJECT_BASE_ENV = "AVIBE_SKILL_PROJECT_BASE"
-BUILTIN_SKILLS_SNAPSHOT_ENV = "AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID"
 BUILTIN_SKILLS_ROOT_ENV = "AVIBE_BUILTIN_SKILLS_ROOT"
+BUILTIN_SKILLS_SNAPSHOT_ENV = "AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID"
 SKILL_HOME_ENV = "AVIBE_SKILL_HOME"
 SKILL_CODEX_HOME_ENV = "AVIBE_SKILL_CODEX_HOME"
 SKILL_CLAUDE_HOME_ENV = "AVIBE_SKILL_CLAUDE_HOME"
@@ -59,8 +57,7 @@ CLAUDE_PLUGIN_LIST_MAX_BYTES = 1024 * 1024
 CLAUDE_PLUGIN_LIST_MAX_ENTRIES = 256
 CLAUDE_PLUGIN_LIST_TIMEOUT_SECONDS = 1
 
-_SNAPSHOT_DOMAIN = b"avibe-builtin-snapshot-v1\0"
-_SNAPSHOT_ID_RE = re.compile(r"^[0-9a-f]{64}$")
+_LEGACY_SNAPSHOT_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 _PORTABLE_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _TOP_LEVEL_FIELD_RE = re.compile(r"^[^ \t#][^:]*:")
 _BLOCK_SCALAR_RE = re.compile(r"^[|>][+-]?[1-9]?$|^[|>][1-9]?[+-]?$")
@@ -131,6 +128,7 @@ class _SnapshotEntry:
     relative: str
     relative_bytes: bytes
     is_directory: bool
+    token: tuple[int, int, int, int, int]
 
 
 def _strip_yaml_comment(value: str) -> str:
@@ -684,6 +682,7 @@ def _scan_root(
     budget: _DiscoveryBudget,
     seen_directory_identities: set[tuple[int, int]] | None = None,
     ignored_names: frozenset[str] = frozenset(),
+    skip_catalog_noise: bool = False,
 ) -> list[ManagedSkill]:
     children = _root_children(root, ignored_names=ignored_names, budget=budget)
     if children is None:
@@ -691,7 +690,9 @@ def _scan_root(
         return []
 
     skills: list[ManagedSkill] = []
-    for _, child, child_stat in children:
+    for name, child, child_stat in children:
+        if skip_catalog_noise and _is_catalog_noise(name, child):
+            continue
         if budget.parse_exhausted:
             break
         resolved_directory = _resolved_candidate_directory(child, child_stat)
@@ -792,37 +793,95 @@ def _working_directory(cwd: str | Path | None) -> Path:
 def _selected_builtin_root(
     avibe_home: Path,
     *,
-    snapshot_id: str | None = None,
-    snapshot_root: str | Path | None = None,
+    catalog_root: str | Path | None = None,
 ) -> Path | None:
-    selected = snapshot_id if snapshot_id is not None else os.environ.get(BUILTIN_SKILLS_SNAPSHOT_ENV)
-    bound_root = snapshot_root if snapshot_root is not None else os.environ.get(BUILTIN_SKILLS_ROOT_ENV)
+    if catalog_root is not None:
+        bound_root = catalog_root
+        if not bound_root:
+            return None
+    elif BUILTIN_SKILLS_ROOT_ENV in os.environ:
+        bound_root = os.environ.get(BUILTIN_SKILLS_ROOT_ENV)
+        if not bound_root:
+            return None
+    else:
+        bound_root = None
     if bound_root:
         raw_root = Path(bound_root).expanduser()
         if not raw_root.is_absolute():
             return None
-        root = _absolute_path(raw_root)
-        if selected is None:
-            selected = root.name
-        if selected and root.name != selected:
-            return None
-    else:
-        root = None
-    if selected is None:
+        return _existing_directory(_live_or_backup_catalog(_absolute_path(raw_root)))
+    root = avibe_home / "builtin-skills"
+    if not _readable_builtin_catalog(root):
         try:
-            selected = publish_builtin_skills(destination_root=avibe_home / "builtin-skills")
+            publish_builtin_skills(destination_root=root)
         except Exception:
             logger.warning("Failed to publish Avibe built-in Skills", exc_info=True)
             return None
-    if _SNAPSHOT_ID_RE.fullmatch(selected or "") is None:
+    return _existing_directory(root)
+
+
+def _existing_directory(path: Path) -> Path | None:
+    try:
+        value = path.stat(follow_symlinks=False)
+    except OSError:
         return None
-    if root is None:
-        root = avibe_home / "builtin-skills" / selected
+    return path if stat.S_ISDIR(value.st_mode) else None
+
+
+def _catalog_backup_path(destination: Path) -> Path:
+    return destination.parent / ".builtin-skills.previous"
+
+
+def _catalog_staging_path(destination: Path) -> Path:
+    return destination.parent / ".builtin-skills.staging"
+
+
+def _live_or_backup_catalog(root: Path) -> Path:
+    named = root
+    if (
+        _LEGACY_SNAPSHOT_ID_RE.fullmatch(root.name) is not None
+        and root.parent.name == "builtin-skills"
+    ):
+        if _existing_directory(root) is not None:
+            return root
+        named = root.parent
+    if _readable_builtin_catalog(named):
+        return named
+    backup = _catalog_backup_path(named)
+    if _readable_builtin_catalog(backup):
+        return backup
+    return named
+
+
+def _is_catalog_noise(name: str, child: Path) -> bool:
+    return name.startswith(".") or (
+        _LEGACY_SNAPSHOT_ID_RE.fullmatch(name) is not None
+        and not (child / "SKILL.md").is_file()
+    )
+
+
+def _readable_builtin_catalog(root: Path) -> bool:
     try:
         root_stat = root.stat(follow_symlinks=False)
     except OSError:
-        return None
-    return root if stat.S_ISDIR(root_stat.st_mode) else None
+        return False
+    if not stat.S_ISDIR(root_stat.st_mode):
+        return False
+    try:
+        with os.scandir(root) as scanned:
+            for entry in scanned:
+                child = Path(entry.path)
+                if _is_catalog_noise(entry.name, child):
+                    continue
+                try:
+                    child_stat = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if stat.S_ISDIR(child_stat.st_mode) and (child / "SKILL.md").is_file():
+                    return True
+    except OSError:
+        return False
+    return False
 
 
 def _claude_plugin_skill_roots(
@@ -972,8 +1031,7 @@ def resolve_skills(
     claude_home: str | Path | None = None,
     claude_cli_path: str | None = None,
     xdg_config_home: str | Path | None = None,
-    builtin_snapshot_id: str | None = None,
-    builtin_snapshot_root: str | Path | None = None,
+    builtin_catalog_root: str | Path | None = None,
 ) -> list[ManagedSkill]:
     """Resolve the live Skill catalog using Avibe's v1 precedence rules."""
 
@@ -1024,11 +1082,17 @@ def resolve_skills(
     builtin_budget = _DiscoveryBudget()
     builtin_root = _selected_builtin_root(
         resolved_avibe_home,
-        snapshot_id=builtin_snapshot_id,
-        snapshot_root=builtin_snapshot_root,
+        catalog_root=builtin_catalog_root,
     )
     if builtin_root is not None:
-        candidates.extend(_scan_root(builtin_root, priority=(0, 0, 0), budget=builtin_budget))
+        candidates.extend(
+            _scan_root(
+                builtin_root,
+                priority=(0, 0, 0),
+                budget=builtin_budget,
+                skip_catalog_noise=True,
+            )
+        )
 
     compatibility_budget = _DiscoveryBudget()
     compatibility_directory_identities: set[tuple[int, int]] = set()
@@ -1402,8 +1466,11 @@ def _snapshot_entries(root: Path) -> list[_SnapshotEntry]:
             reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
             if reparse_flag and file_attributes & reparse_flag:
                 raise RuntimeError(f"Built-in Skill path is a reparse point: {relative}")
+            token = _stat_token(child_stat)
             if stat.S_ISDIR(child_stat.st_mode):
-                entries.append(_SnapshotEntry(Path(child.path), relative, relative_bytes, True))
+                entries.append(
+                    _SnapshotEntry(Path(child.path), relative, relative_bytes, True, token)
+                )
                 child_directories.append((Path(child.path), child_parts))
             elif stat.S_ISREG(child_stat.st_mode):
                 file_bytes += int(child_stat.st_size)
@@ -1411,7 +1478,9 @@ def _snapshot_entries(root: Path) -> list[_SnapshotEntry]:
                     raise RuntimeError(
                         f"Built-in Skill tree exceeds {BUILTIN_TREE_MAX_BYTES:,} bytes"
                     )
-                entries.append(_SnapshotEntry(Path(child.path), relative, relative_bytes, False))
+                entries.append(
+                    _SnapshotEntry(Path(child.path), relative, relative_bytes, False, token)
+                )
             else:
                 raise RuntimeError(f"Built-in Skill path is not a directory or regular file: {relative}")
         if relative_parts and accepted_children == 0:
@@ -1420,62 +1489,6 @@ def _snapshot_entries(root: Path) -> list[_SnapshotEntry]:
 
     entries.sort(key=lambda entry: entry.relative_bytes)
     return entries
-
-
-def _update_digest_with_file(
-    digest: object,
-    entry: _SnapshotEntry,
-    *,
-    remaining_bytes: int,
-) -> int:
-    fd: int | None = None
-    try:
-        fd, before = _open_regular_file(entry.path)
-        file_size = int(before.st_size)
-        if file_size > remaining_bytes:
-            raise RuntimeError(
-                f"Built-in Skill tree exceeds {BUILTIN_TREE_MAX_BYTES:,} bytes"
-            )
-        digest.update(struct.pack(">Q", file_size))
-        remaining = file_size
-        while remaining:
-            chunk = os.read(fd, min(1024 * 1024, remaining))
-            if not chunk:
-                raise RuntimeError(f"Built-in Skill file changed while hashing: {entry.relative}")
-            digest.update(chunk)
-            remaining -= len(chunk)
-        if os.read(fd, 1):
-            raise RuntimeError(f"Built-in Skill file grew while hashing: {entry.relative}")
-        after = os.fstat(fd)
-        if _stat_token(before) != _stat_token(after):
-            raise RuntimeError(f"Built-in Skill file changed while hashing: {entry.relative}")
-        executable = int(before.st_mode & 0o111) if os.name != "nt" else 0
-        digest.update(bytes((executable,)))
-        return file_size
-    finally:
-        if fd is not None:
-            os.close(fd)
-
-
-def snapshot_tree_digest(root: str | Path) -> str:
-    """Return the frozen snapshot-v1 identifier for a validated tree."""
-
-    source = Path(root).resolve()
-    if not source.is_dir():
-        raise RuntimeError(f"Built-in Skills source does not exist: {source}")
-    digest = hashlib.sha256(_SNAPSHOT_DOMAIN)
-    consumed_bytes = 0
-    for entry in _snapshot_entries(source):
-        digest.update(b"d" if entry.is_directory else b"f")
-        digest.update(struct.pack(">Q", len(entry.relative_bytes)))
-        digest.update(entry.relative_bytes)
-        if not entry.is_directory:
-            consumed_bytes += _update_digest_with_file(
-                digest,
-                entry,
-                remaining_bytes=BUILTIN_TREE_MAX_BYTES - consumed_bytes,
-            )
-    return digest.hexdigest()
 
 
 def _copy_snapshot_entries(entries: Sequence[_SnapshotEntry], destination: Path) -> None:
@@ -1569,95 +1582,111 @@ def _validate_builtin_catalog(root: Path) -> None:
             raise RuntimeError("Built-in Skill frontmatter exceeds the 8 MiB catalog budget")
 
 
+def _source_manifest(entries: Sequence[_SnapshotEntry]) -> tuple[tuple[bytes, bool, tuple[int, int, int, int, int]], ...]:
+    return tuple((entry.relative_bytes, entry.is_directory, entry.token) for entry in entries)
+
+
+def _assert_source_unchanged(source: Path, entries: Sequence[_SnapshotEntry]) -> None:
+    if _source_manifest(_snapshot_entries(source)) != _source_manifest(entries):
+        raise RuntimeError("Built-in Skill source changed during publication")
+
+
 def _remove_snapshot_staging(path: Path) -> None:
     try:
-        value = path.stat(follow_symlinks=False)
+        value = path.lstat()
     except FileNotFoundError:
         return
     except OSError as exc:
         raise RuntimeError(f"Cannot inspect built-in Skill staging path: {path}") from exc
     reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
     file_attributes = int(getattr(value, "st_file_attributes", 0))
-    if stat.S_ISDIR(value.st_mode) and not (reparse_flag and file_attributes & reparse_flag):
-        shutil.rmtree(path)
-    elif stat.S_ISDIR(value.st_mode):
-        path.rmdir()
-    else:
+    if stat.S_ISLNK(value.st_mode) or (reparse_flag and file_attributes & reparse_flag):
+        if stat.S_ISDIR(value.st_mode):
+            path.rmdir()
+        else:
+            path.unlink()
+        return
+    if not stat.S_ISDIR(value.st_mode):
         path.unlink()
+        return
+    try:
+        children = os.listdir(path)
+    except OSError as exc:
+        raise RuntimeError(f"Cannot inspect built-in Skill staging path: {path}") from exc
+    for name in children:
+        _remove_snapshot_staging(path / name)
+    path.rmdir()
 
 
 def publish_builtin_skills(
     *,
     source_root: str | Path | None = None,
     destination_root: str | Path | None = None,
-) -> str:
-    """Publish this artifact's built-ins to one content-addressed snapshot."""
+) -> Path:
+    """Publish this artifact's built-ins by replacing the live named catalog."""
 
     source = Path(source_root).resolve() if source_root is not None else builtin_skills_source()
-    umbrella = (
+    destination = (
         Path(destination_root).expanduser().resolve()
         if destination_root is not None
         else (paths.get_vibe_remote_dir() / "builtin-skills").expanduser().resolve()
     )
-    _snapshot_entries(source)
     _validate_builtin_catalog(source)
-    snapshot_id = snapshot_tree_digest(source)
-    destination = umbrella / snapshot_id
+    entries = _snapshot_entries(source)
 
     from storage.lock import MigrationFileLock
 
-    umbrella.mkdir(parents=True, exist_ok=True)
-    lock_path = umbrella / f".publish-{snapshot_id}.lock"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = destination.parent / ".publish-builtin-skills.lock"
     with MigrationFileLock(lock_path, timeout_seconds=None):
-        staging = umbrella / f".snapshot-{snapshot_id}.staging"
+        staging = _catalog_staging_path(destination)
+        backup = _catalog_backup_path(destination)
         _remove_snapshot_staging(staging)
-        if os.path.lexists(destination):
-            try:
-                destination_stat = destination.stat(follow_symlinks=False)
-            except OSError as exc:
-                raise RuntimeError(f"Built-in Skill snapshot is unavailable: {destination}") from exc
-            if not stat.S_ISDIR(destination_stat.st_mode):
-                raise RuntimeError(f"Built-in Skill snapshot is not a directory: {destination}")
-            try:
-                with os.scandir(destination):
-                    pass
-            except OSError as exc:
-                raise RuntimeError(f"Built-in Skill snapshot is unreadable: {destination}") from exc
-            return snapshot_id
         staging.mkdir(mode=0o700)
         try:
-            _copy_snapshot_entries(_snapshot_entries(source), staging)
+            _copy_snapshot_entries(entries, staging)
             _validate_builtin_catalog(staging)
-            if snapshot_tree_digest(staging) != snapshot_id:
-                raise RuntimeError("Built-in Skill source changed during publication")
+            _assert_source_unchanged(source, entries)
+            if os.path.lexists(destination):
+                try:
+                    destination_stat = destination.stat(follow_symlinks=False)
+                except OSError as exc:
+                    raise RuntimeError(f"Built-in Skill catalog is unavailable: {destination}") from exc
+                if not stat.S_ISDIR(destination_stat.st_mode):
+                    raise RuntimeError(f"Built-in Skill catalog is not a directory: {destination}")
+                _remove_snapshot_staging(backup)
+                os.rename(destination, backup)
             try:
                 os.rename(staging, destination)
-            except OSError as exc:
-                if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
-                    raise
+            except OSError:
+                if os.path.lexists(backup) and not os.path.lexists(destination):
+                    os.rename(backup, destination)
+                raise
         finally:
             if os.path.lexists(staging):
                 _remove_snapshot_staging(staging)
-    return snapshot_id
+    return destination
 
 
-def prepare_builtin_skills() -> str:
-    """Publish and bind the running artifact's built-in snapshot."""
+def prepare_builtin_skills() -> Path:
+    """Publish and bind the running artifact's live built-in catalog."""
 
-    snapshot_id = publish_builtin_skills()
-    os.environ[BUILTIN_SKILLS_SNAPSHOT_ENV] = snapshot_id
-    os.environ[BUILTIN_SKILLS_ROOT_ENV] = str(
-        (paths.get_vibe_remote_dir() / "builtin-skills" / snapshot_id).expanduser().resolve()
-    )
-    return snapshot_id
+    try:
+        catalog = publish_builtin_skills()
+    except Exception:
+        os.environ.pop(BUILTIN_SKILLS_SNAPSHOT_ENV, None)
+        os.environ[BUILTIN_SKILLS_ROOT_ENV] = ""
+        raise
+    os.environ.pop(BUILTIN_SKILLS_SNAPSHOT_ENV, None)
+    os.environ[BUILTIN_SKILLS_ROOT_ENV] = str(catalog.expanduser().resolve())
+    return catalog
 
 
 def managed_skill_environment(
     working_directory: str | Path | None,
     *,
     project_base: str | Path | None = None,
-    builtin_snapshot_id: str | None = None,
-    builtin_snapshot_root: str | Path | None = None,
+    builtin_catalog_root: str | Path | None = None,
     claude_cli_path: str | None = None,
 ) -> dict[str, str]:
     """Return the per-backend shell bindings consumed by ``vibe skill``."""
@@ -1691,28 +1720,23 @@ def managed_skill_environment(
         env[SKILL_CLAUDE_CLI_PATH_ENV] = os.path.expanduser(
             normalized_claude_cli_path
         )
-    explicit_builtin_snapshot = builtin_snapshot_id is not None or builtin_snapshot_root is not None
-    snapshot_id = (
-        builtin_snapshot_id
-        if explicit_builtin_snapshot
-        else os.environ.get(BUILTIN_SKILLS_SNAPSHOT_ENV, "")
-    )
-    if isinstance(snapshot_id, str) and _SNAPSHOT_ID_RE.fullmatch(snapshot_id):
-        snapshot_root = (
-            builtin_snapshot_root
-            if explicit_builtin_snapshot
-            else os.environ.get(BUILTIN_SKILLS_ROOT_ENV)
+    if builtin_catalog_root is not None:
+        bound_root = builtin_catalog_root
+    elif BUILTIN_SKILLS_ROOT_ENV in os.environ:
+        bound_root = os.environ.get(BUILTIN_SKILLS_ROOT_ENV)
+    else:
+        bound_root = None
+    if bound_root:
+        root = Path(bound_root).expanduser()
+        if root.is_absolute():
+            env[BUILTIN_SKILLS_ROOT_ENV] = str(_absolute_path(root))
+        else:
+            logger.warning("Ignoring invalid built-in Skill catalog root: %s", bound_root)
+            env[BUILTIN_SKILLS_ROOT_ENV] = ""
+    elif builtin_catalog_root is not None or BUILTIN_SKILLS_ROOT_ENV in os.environ:
+        env[BUILTIN_SKILLS_ROOT_ENV] = ""
+    else:
+        env[BUILTIN_SKILLS_ROOT_ENV] = str(
+            (paths.get_vibe_remote_dir() / "builtin-skills").expanduser().resolve()
         )
-        if snapshot_root:
-            root = Path(snapshot_root).expanduser()
-            if root.is_absolute() and root.name == snapshot_id:
-                env[BUILTIN_SKILLS_SNAPSHOT_ENV] = snapshot_id
-                env[BUILTIN_SKILLS_ROOT_ENV] = str(_absolute_path(root))
-        elif not explicit_builtin_snapshot:
-            env[BUILTIN_SKILLS_SNAPSHOT_ENV] = snapshot_id
-            env[BUILTIN_SKILLS_ROOT_ENV] = str(
-                (paths.get_vibe_remote_dir() / "builtin-skills" / snapshot_id)
-                .expanduser()
-                .resolve()
-            )
     return env

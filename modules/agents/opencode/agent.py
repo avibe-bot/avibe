@@ -32,7 +32,6 @@ from core.caller_context import (
 from core.message_output import stop_output_for
 from core.managed_skills import (
     BUILTIN_SKILLS_ROOT_ENV,
-    BUILTIN_SKILLS_SNAPSHOT_ENV,
     managed_skill_claude_cli_path,
     managed_skill_environment,
     managed_skill_project_base,
@@ -122,7 +121,7 @@ _CALLER_CONTEXT_ENV_SNAPSHOT_KEY = "opencode_caller_context_env"
 # releases before generations lack it.
 _GENERATION_SNAPSHOT_KEY = "opencode_generation_id"
 _MANAGED_SKILL_PROJECT_BASE_SNAPSHOT_KEY = "opencode_managed_skill_project_base"
-_MANAGED_SKILL_BUILTIN_SNAPSHOT_KEY = "opencode_managed_skill_builtin_snapshot"
+_MANAGED_SKILL_BUILTIN_CATALOG_KEY = "opencode_managed_skill_builtin_catalog"
 _STATUS_RECONCILIATION_FAILURE_LIMIT = 3
 # A successful prompt_async response transfers ownership to a forked worker,
 # but does not prove that worker will publish its first message. Keep this
@@ -1878,9 +1877,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 processing_indicator[_CALLER_CONTEXT_ENV_SNAPSHOT_KEY] = validated_caller_env_snapshot(caller_context_env)
             if project_base:
                 processing_indicator[_MANAGED_SKILL_PROJECT_BASE_SNAPSHOT_KEY] = project_base
-            if BUILTIN_SKILLS_SNAPSHOT_ENV in managed_skills_env:
-                processing_indicator[_MANAGED_SKILL_BUILTIN_SNAPSHOT_KEY] = {
-                    "id": managed_skills_env[BUILTIN_SKILLS_SNAPSHOT_ENV],
+            if BUILTIN_SKILLS_ROOT_ENV in managed_skills_env:
+                processing_indicator[_MANAGED_SKILL_BUILTIN_CATALOG_KEY] = {
                     "root": managed_skills_env[BUILTIN_SKILLS_ROOT_ENV],
                 }
             target_session_id = _target_agent_session_id(request)
@@ -2978,32 +2976,31 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     if isinstance(restored_project_base, str) and restored_project_base
                     else None
                 )
-                restored_snapshot_kwargs: dict[str, str] = {}
-                if _MANAGED_SKILL_BUILTIN_SNAPSHOT_KEY in processing_snapshot:
-                    restored_snapshot = processing_snapshot.get(
-                        _MANAGED_SKILL_BUILTIN_SNAPSHOT_KEY
+                restored_catalog_root = None
+                catalog_present = (
+                    _MANAGED_SKILL_BUILTIN_CATALOG_KEY in processing_snapshot
+                    or "opencode_managed_skill_builtin_snapshot" in processing_snapshot
+                )
+                restored_catalog = processing_snapshot.get(
+                    _MANAGED_SKILL_BUILTIN_CATALOG_KEY
+                )
+                if restored_catalog is None:
+                    restored_catalog = processing_snapshot.get(
+                        "opencode_managed_skill_builtin_snapshot"
                     )
-                    restored_snapshot_kwargs = {
-                        "builtin_snapshot_id": (
-                            restored_snapshot.get("id", "")
-                            if isinstance(restored_snapshot, dict)
-                            and isinstance(restored_snapshot.get("id"), str)
-                            else ""
-                        ),
-                        "builtin_snapshot_root": (
-                            restored_snapshot.get("root", "")
-                            if isinstance(restored_snapshot, dict)
-                            and isinstance(restored_snapshot.get("root"), str)
-                            else ""
-                        ),
-                    }
+                if isinstance(restored_catalog, dict) and isinstance(
+                    restored_catalog.get("root"), str
+                ):
+                    restored_catalog_root = restored_catalog.get("root")
+                elif catalog_present:
+                    restored_catalog_root = ""
                 restored_managed_skills_env = managed_skill_environment(
                     poll_info.working_path,
                     project_base=restored_project_base,
                     claude_cli_path=managed_skill_claude_cli_path(
                         getattr(getattr(self, "controller", None), "config", None)
                     ),
-                    **restored_snapshot_kwargs,
+                    builtin_catalog_root=restored_catalog_root,
                 )
                 restored_bound = False
                 for attempt in range(3):

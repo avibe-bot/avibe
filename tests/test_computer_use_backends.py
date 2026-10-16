@@ -59,7 +59,7 @@ def test_builtin_computer_use_skill_loads_through_the_managed_resolver() -> None
 
     root = Path(__file__).resolve().parents[1] / "skills"
     avibe_home = Path("/tmp/computer-use-test-avibe-home")
-    snapshot_id = publish_builtin_skills(
+    catalog = publish_builtin_skills(
         source_root=root,
         destination_root=avibe_home / "builtin-skills",
     )
@@ -69,8 +69,7 @@ def test_builtin_computer_use_skill_loads_through_the_managed_resolver() -> None
         codex_home=Path("/tmp/computer-use-test-codex-home"),
         claude_home=Path("/tmp/computer-use-test-claude-home"),
         xdg_config_home=Path("/tmp/computer-use-test-xdg-home"),
-        builtin_snapshot_id=snapshot_id,
-        builtin_snapshot_root=avibe_home / "builtin-skills" / snapshot_id,
+        builtin_catalog_root=catalog,
     )
     resolved = next(skill for skill in skills if skill.name == "computer-use")
     loaded = load_skill("computer-use", resolved_skills=skills)

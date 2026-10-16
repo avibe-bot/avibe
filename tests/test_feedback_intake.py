@@ -314,8 +314,8 @@ def test_real_named_vault_cli_stdin_and_detached_child(real_vault):
 
 def test_builtin_publication_preserves_helper(tmp_path):
     from core.managed_skills import publish_builtin_skills
-    snapshot = publish_builtin_skills(source_root=ROOT / "skills", destination_root=tmp_path / "builtin")
-    assert (tmp_path / "builtin" / snapshot / "use-avibe/scripts/feedback_intake.py").read_bytes() == HELPER.read_bytes()
+    catalog = publish_builtin_skills(source_root=ROOT / "skills", destination_root=tmp_path / "builtin")
+    assert (catalog / "use-avibe/scripts/feedback_intake.py").read_bytes() == HELPER.read_bytes()
 
 
 def _parent_clock_stopped_for(seconds):

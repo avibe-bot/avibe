@@ -52,7 +52,8 @@ function applyEnv(output, env) {
   if (!env || typeof env !== "object") return
   output.env = output.env || {}
   for (const [key, value] of Object.entries(env)) {
-    if (typeof value === "string" && value.length > 0) output.env[key] = value
+    if (typeof value !== "string") continue
+    if (value.length > 0 || key === "AVIBE_BUILTIN_SKILLS_ROOT") output.env[key] = value
   }
 }
 
@@ -233,7 +234,11 @@ def bind_session(
     )
     env = caller.to_env() if caller is not None else {}
     if extra_env:
-        env.update((str(key), str(value)) for key, value in extra_env.items() if str(key) and str(value))
+        env.update(
+            (str(key), str(value))
+            for key, value in extra_env.items()
+            if str(key) and (str(value) or str(key) == "AVIBE_BUILTIN_SKILLS_ROOT")
+        )
     prepend_managed_tools_to_path(
         env,
         base_env=base_env,
