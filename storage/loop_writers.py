@@ -22,7 +22,10 @@ module, and its caller, so a write behind a shared transaction helper still name
 who used the helper. The walk is bounded and keyed by ``(filename, line, name)``;
 nothing is formatted until a report. The totals live in memory only. A location is
 logged once when it first appears, a ranked summary at most every
-``SUMMARY_INTERVAL_SECONDS`` while new writes arrive, and a final one at shutdown.
+``SUMMARY_INTERVAL_SECONDS`` while new writes arrive, and a complete one at shutdown.
+
+Not counted: writes SQLite runs outside a transaction, such as DDL and
+``PRAGMA journal_mode`` (#2747).
 
 A write that cannot wait for another writer, because it takes the writer with a
 zero busy timeout (``_try_reserve_write_lock``), is marked with
@@ -106,12 +109,21 @@ class CensusConnection(sqlite3.Connection):
         wrote = self.in_transaction or record[2]
         try:
             finish()
-        finally:
-            now = time.perf_counter()
-            # The next transaction on this checkout starts where this one ended.
-            self._census = [now, False, False]
-            if wrote:
-                _count(_site(sys._getframe(1)), now - record[0], never_waits=record[1])
+        except BaseException:
+            if self.in_transaction:
+                # A commit that failed with the transaction still open (a deferred
+                # constraint, say): the rollback that follows ends it, and counts it once.
+                raise
+            self._close(record, wrote)
+            raise
+        self._close(record, wrote)
+
+    def _close(self, record: list[Any], wrote: bool) -> None:
+        now = time.perf_counter()
+        # The next transaction on this checkout starts where this one ended.
+        self._census = [now, False, False]
+        if wrote:
+            _count(_site(sys._getframe(1)), now - record[0], never_waits=record[1])
 
 
 def watch_engine(engine: Engine) -> None:
@@ -190,8 +202,9 @@ def _count(site: _Site, elapsed: float, *, never_waits: bool) -> None:
 def log_summary(*, final: bool = False) -> None:
     """Log the write sites ranked by total loop time.
 
-    A periodic summary is skipped when nothing was written since the last one; the
-    final one at shutdown always reports the whole run, even a run with no writes.
+    A periodic summary lists the top ``SUMMARY_SITES`` and is skipped when nothing
+    was written since the last one. The final one at shutdown lists every site, so
+    the inventory survives log rotation, and it reports even a run with no writes.
     """
 
     global _changed_since_summary, _last_summary_at
@@ -205,14 +218,14 @@ def log_summary(*, final: bool = False) -> None:
     lines = [
         f"{int(count)} writes, {total * 1000:.0f} ms total, {peak * 1000:.1f} ms max"
         f"{f', {int(never)} never wait' if never else ''}: {_format_site(site)}"
-        for site, (count, total, peak, never) in ranked[:SUMMARY_SITES]
+        for site, (count, total, peak, never) in (ranked if final else ranked[:SUMMARY_SITES])
     ]
     logger.info(
         "Controller-loop SQLite writers%s: %d writes at %d sites, by total loop time%s%s",
         " at shutdown" if final else "",
         writes,
         len(ranked),
-        f" (top {SUMMARY_SITES})" if len(ranked) > SUMMARY_SITES else "",
+        f" (top {SUMMARY_SITES})" if len(lines) < len(ranked) else "",
         "".join(f"\n  {line}" for line in lines),
     )
 

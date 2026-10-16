@@ -15,7 +15,7 @@ import threading
 import pytest
 from sqlalchemy import text
 
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from core.session_turns import _try_reserve_write_lock
 from storage import loop_writers
@@ -182,6 +182,49 @@ def test_the_census_reports_new_sites_once_and_ranks_the_summary(census, caplog)
     assert "3 writes at 2 sites" in summaries[0]
     assert summaries[1].startswith("Controller-loop SQLite writers at shutdown")
     assert "tests/test_loop_writers.py:" in summaries[0]
+
+
+def test_a_commit_that_fails_counts_its_transaction_once(census) -> None:
+    """A commit can fail with the transaction still open, as a deferred constraint
+    does. The rollback that follows ends that transaction, and it is counted once."""
+
+    with census.begin() as conn:
+        conn.execute(text("CREATE TABLE parents (id INTEGER PRIMARY KEY)"))
+        conn.execute(
+            text(
+                "CREATE TABLE children (id INTEGER PRIMARY KEY, parent_id INTEGER "
+                "REFERENCES parents (id) DEFERRABLE INITIALLY DEFERRED)"
+            )
+        )
+    loop_writers._totals.clear()
+
+    def _deferred_violation():
+        with pytest.raises(IntegrityError):
+            with census.begin() as conn:
+                conn.execute(text("INSERT INTO children (parent_id) VALUES (42)"))
+
+    _deferred_violation()
+
+    assert {name: int(totals[0]) for name, totals in _sites().items()} == {"_deferred_violation": 1}
+
+
+def test_the_shutdown_summary_lists_every_site(census, caplog, monkeypatch) -> None:
+    """A periodic summary is capped; the final one keeps every site, so a rotated log
+    cannot lose a rare writer from the inventory."""
+
+    caplog.set_level(logging.INFO, logger=loop_writers.__name__)
+    monkeypatch.setattr(loop_writers, "SUMMARY_SITES", 2)
+    for name in ("writer_a", "writer_b", "writer_c"):
+        namespace: dict = {"_explicit_write": _explicit_write}
+        exec(f"def {name}(engine):\n    _explicit_write(engine)\n", namespace)
+        namespace[name](census)
+
+    loop_writers.log_summary()
+    loop_writers.log_summary(final=True)
+
+    periodic, final = [record.getMessage() for record in caplog.records if "SQLite writers" in record.getMessage()]
+    assert "(top 2)" in periodic and len(periodic.splitlines()) == 3
+    assert "(top" not in final and len(final.splitlines()) == 4
 
 
 def test_the_final_summary_reports_a_run_without_writes(census, caplog) -> None:
