@@ -8503,6 +8503,8 @@ async def backend_runtime(name: str, starlette_request: FastAPIRequest):
     async def handler():
         if name not in NATIVE_CLI_BACKENDS:
             return jsonify({"ok": False, "error": "unsupported_backend"}), 400
+        if _trusted_browser_author_key() is None:
+            return jsonify({"ok": False, "error": "same_origin_required"}), 403
         from vibe import api
 
         response = jsonify(await api.get_backend_runtime_async(name, request.args.get("cli_path")))

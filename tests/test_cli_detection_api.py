@@ -31,7 +31,12 @@ def cli_api(tmp_path, monkeypatch):
 def test_draft_runtime_probes_the_selected_cli_and_does_not_save_it(cli_api, tmp_path):
     client, _ = cli_api
     cli = make_cli(tmp_path, 'print("codex-cli 0.162.1")\n')
-    response = client.get("/api/backend/codex/runtime", params={"cli_path": str(cli)})
+    response = client.get(
+        "/api/backend/codex/runtime",
+        params={"cli_path": str(cli)},
+        headers={"Origin": "http://127.0.0.1:15131"},
+        base_url="http://127.0.0.1:15131",
+    )
     assert response.status_code == 200, response.get_json()
     body = response.get_json()
     assert body["status"] == "ok" and body["current_version"] == "0.162.1"
@@ -54,7 +59,14 @@ def test_crash_version_is_broken_through_both_http_consumers(cli_api, tmp_path):
     )
     assert detection_response.status_code == 200, detection_response.get_json()
     detection = detection_response.get_json()
-    runtime = client.get("/api/backend/codex/runtime", params={"cli_path": str(cli)}).get_json()
+    runtime_response = client.get(
+        "/api/backend/codex/runtime",
+        params={"cli_path": str(cli)},
+        headers={"Origin": "http://127.0.0.1:15131"},
+        base_url="http://127.0.0.1:15131",
+    )
+    assert runtime_response.status_code == 200, runtime_response.get_json()
+    runtime = runtime_response.get_json()
     assert detection["found"] and detection["status"] == "broken" and detection["version"] is None
     assert runtime["installed"] and runtime["status"] == "broken" and runtime["current_version"] is None
     assert not runtime["has_update"]
@@ -123,6 +135,47 @@ def test_cli_detect_allows_same_origin_setup_host_browser_probe(cli_api, tmp_pat
 
     assert response.status_code == 200, response.get_json()
     assert response.get_json()["status"] == "ok"
+
+
+def test_backend_runtime_allows_same_origin_setup_host_browser_probe(cli_api, tmp_path):
+    client, _ = cli_api
+    config = V2Config.load()
+    config.ui.setup_host = "192.168.2.3"
+    config.remote_access.vibe_cloud.enabled = False
+    config.save()
+    cli = make_cli(tmp_path, 'print("codex-cli 0.162.1")\n')
+
+    response = client.get(
+        "/api/backend/codex/runtime",
+        params={"cli_path": str(cli)},
+        headers={"Origin": "http://192.168.2.3:15131"},
+        base_url="http://192.168.2.3:15131",
+    )
+
+    assert response.status_code == 200, response.get_json()
+    assert response.get_json()["status"] == "ok"
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [{}, {"Origin": "http://evil.example"}],
+    ids=["missing-origin", "foreign-origin"],
+)
+def test_backend_runtime_requires_same_origin_browser_evidence_before_probe(cli_api, monkeypatch, headers):
+    client, _ = cli_api
+    runtime = AsyncMock(side_effect=AssertionError("rejected request must not execute a probe"))
+    monkeypatch.setattr(api, "get_backend_runtime_async", runtime)
+
+    response = client.get(
+        "/api/backend/codex/runtime",
+        params={"cli_path": "/fixture/selected"},
+        headers=headers,
+        base_url="http://127.0.0.1:15131",
+    )
+
+    assert response.status_code == 403, response.get_json()
+    assert response.get_json()["error"] == "same_origin_required"
+    runtime.assert_not_awaited()
 
 
 def test_e2e_json_http_client_sends_origin_on_get(monkeypatch):
@@ -199,7 +252,7 @@ gone=Path(GONE);gone.mkdir();os.chdir(gone);gone.rmdir()
 try:os.getcwd();raise AssertionError('cwd was not removed')
 except FileNotFoundError:pass
 health=asyncio.run(probe_cli('codex',CLI,env=dict(os.environ)))
-response=client.get('/api/backend/codex/runtime',params={'cli_path':CLI})
+response=client.get('/api/backend/codex/runtime',params={'cli_path':CLI},headers={'Origin':'http://127.0.0.1:15131'},base_url='http://127.0.0.1:15131')
 body=response.get_json()
 assert health.status=='ok' and health.version=='0.162.1'
 assert response.status_code==200 and body['status']=='ok' and body['current_version']=='0.162.1',body

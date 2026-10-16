@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from vibe import api
+from vibe import api, cli_paths
 from tests.test_cli_health import fixture_env
 from vibe.cli_health import cli_version, probe_cli
 from vibe.cli_repair import identify_repair_source, native_bootstrap_env
@@ -419,6 +419,44 @@ def test_bare_nonexecutable_npm_cli_outside_home_and_path_keeps_its_prefix(nativ
         "@anthropic-ai/claude-code",
     ]
     assert c["persist"] == [("claude", str(launcher))] and not forbidden.exists()
+
+
+def test_cli_path_resolution_defers_npm_prefix_until_standard_candidates_fail(tmp_path, monkeypatch):
+    standard = executable(tmp_path / "standard" / "codex", 'print("codex-cli 0.162.1")\n')
+    npm_candidate = tmp_path / "npm-prefix" / "bin" / "codex"
+    observed_flags = []
+
+    def candidates(name, *, include_npm_global=True):
+        observed_flags.append(include_npm_global)
+        return [standard] if not include_npm_global else [standard, npm_candidate]
+
+    monkeypatch.setattr(cli_paths, "_candidate_cli_paths", candidates)
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-path"))
+
+    assert cli_paths.resolve_cli_path("codex", candidate_paths=candidates, include_desktop=False) == str(standard)
+    assert observed_flags == [False]
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "INFO refreshing models\n1.1.36\n",
+        "INFO loading models\nINFO refreshing models\nopencode 1.1.36\n",
+    ],
+)
+def test_opencode_version_accepts_prefixed_informational_output(output):
+    assert cli_version("opencode", output, "") == "1.1.36"
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "Error: refresh failed 1.1.36\n1.1.36\n",
+        "INFO refreshing models\nError: refresh failed\n1.1.36\n",
+    ],
+)
+def test_opencode_version_rejects_non_informational_prefix(output):
+    assert cli_version("opencode", output, "") is None
 
 
 def test_unknown_installation_is_not_migrated(tmp_path):

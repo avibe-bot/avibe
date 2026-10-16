@@ -61,10 +61,10 @@ def _ordered_cli_candidates(
         for candidate in path_candidates:
             add(candidate)
 
-    if include_npm_global:
-        # Use the same injected candidate source as the standard phase. Besides
-        # keeping tests deterministic, this preserves the resolver's existing
-        # npm-prefix query boundary while placing npm after PATH.
+    if include_npm_global and not any(_is_executable_file(candidate) for candidate in candidates):
+        # Defer the npm-prefix subprocess until standard and PATH candidates
+        # have all failed the executable check. This keeps healthy local CLIs
+        # from paying the npm query timeout on every health probe.
         for candidate in candidate_paths(binary, include_npm_global=True):
             add(candidate)
     return candidates

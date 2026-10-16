@@ -40,13 +40,18 @@ class CliHealth:
 def cli_version(backend: str, stdout: str | None, stderr: str | None) -> str | None:
     """Recognize a complete CLI version response, not a crash's first semver.
 
-    OpenCode deliberately prints a bare version; Claude and Codex identify
-    themselves. Warnings on stderr do not replace a successful stdout version.
+    OpenCode prints a bare version or a final version after informational
+    refresh lines; Claude and Codex identify themselves. Warnings on stderr do
+    not replace a successful stdout version.
     """
     pattern = _VERSION_PATTERNS.get(backend)
     if pattern is None:
         return None
     text = (stdout or "").strip() or (stderr or "").strip()
+    if backend == "opencode":
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if len(lines) > 1 and all(line.startswith("INFO ") for line in lines[:-1]):
+            text = lines[-1]
     match = re.fullmatch(pattern, text, flags=re.IGNORECASE)
     if not match:
         return None
