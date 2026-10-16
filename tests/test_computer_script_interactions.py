@@ -46,18 +46,6 @@ class _FakeController:
         self.config = SimpleNamespace(language=language)
         self.messages: list[tuple[MessageContext, str, str]] = []
 
-    def _t(self, key: str, **kwargs) -> str:
-        if key == "computer.confirm.prompt":
-            return (
-                f"{kwargs['message']}\n\nReply yes or no to continue. "
-                "Only the owner who started this script can answer."
-            )
-        if key == "computer.confirm.ownerOnly":
-            return "Only the owner who started this script can answer this confirmation."
-        if key == "computer.confirm.invalidAnswer":
-            return "Please answer yes or no. The confirmation is still waiting."
-        raise AssertionError(f"unexpected translation key: {key}")
-
     async def emit_agent_message(
         self,
         context: MessageContext,
@@ -109,64 +97,6 @@ def test_notify_reuses_the_launching_surface(platform: str) -> None:
     assert context.platform == platform
     assert message_type == "notify"
     assert text == "A progress update"
-
-
-def test_confirm_accepts_only_the_launching_owner_in_a_shared_surface() -> None:
-    async def exercise() -> tuple[dict, list[tuple[MessageContext, str, str]]]:
-        manager, controller, _turn = _manager(platform="slack")
-        pending = asyncio.create_task(manager.confirm("script-token", "Send it?"))
-        await asyncio.sleep(0)
-        pending_question = manager.pending_for_token("script-token")
-        assert pending_question is not None
-        assert pending_question.expected_approver_id == "owner"
-
-        member_context = _context(user_id="other-member", platform="slack")
-        assert await manager.consume_answer(member_context, "no") is True
-        assert pending.done() is False
-
-        owner_context = _context(user_id="owner", platform="slack")
-        assert await manager.consume_answer(owner_context, "yes") is True
-        return await pending, controller.messages
-
-    result, messages = asyncio.run(exercise())
-    assert result["effect"] == "confirmed"
-    assert messages[0][0].user_id == "owner"
-    assert messages[0][1] == "notify"
-    assert "owner" in messages[0][2].lower()
-    assert messages[1][0].user_id == "other-member"
-    assert "owner" in messages[1][2].lower()
-
-
-def test_confirm_keeps_waiting_after_an_invalid_owner_answer() -> None:
-    async def exercise() -> tuple[dict, list[tuple[MessageContext, str, str]]]:
-        manager, controller, _turn = _manager()
-        pending = asyncio.create_task(manager.confirm("script-token", "Continue?"))
-        await asyncio.sleep(0)
-        assert await manager.consume_answer(_context(), "maybe") is True
-        assert pending.done() is False
-        assert await manager.consume_answer(_context(), "yes") is True
-        return await pending, controller.messages
-
-    result, messages = asyncio.run(exercise())
-    assert result["status"] == "confirmed"
-    assert "yes or no" in messages[1][2].lower()
-
-
-def test_confirm_refusal_is_typed_and_never_ambiguous() -> None:
-    async def exercise() -> tuple[str, bool]:
-        manager, _controller, _turn = _manager()
-        pending = asyncio.create_task(manager.confirm("script-token", "Delete it?"))
-        await asyncio.sleep(0)
-        assert await manager.consume_answer(_context(), "no") is True
-        try:
-            await pending
-        except ComputerScriptInteractionError as exc:
-            return exc.code, False
-        raise AssertionError("refused confirmation succeeded")
-
-    code, ambiguous = asyncio.run(exercise())
-    assert code == "confirm_refused"
-    assert ambiguous is False
 
 
 @pytest.mark.parametrize("invalidation_code", ["script_turn_ended", "script_timeout"])

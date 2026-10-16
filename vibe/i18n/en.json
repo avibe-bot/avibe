@@ -968,9 +968,9 @@
         "windowTargetRequired": "Input must target an exact observed window or element."
       },
       "confirm": {
-        "prompt": "{message}\n\nReply yes or no to continue. Only the Avibe owner who started this script can answer.",
-        "ownerOnly": "Only the Avibe owner who started this script can answer this confirmation.",
-        "invalidAnswer": "Please answer yes or no. The confirmation is still waiting."
+        "prompt": "{message}\n\nReply yes or no. Only the person who started this task can answer.",
+        "approved": "Confirmed. Continuing.",
+        "declined": "Declined. The script will not take this step."
       },
       "status": {
         "off": "off",

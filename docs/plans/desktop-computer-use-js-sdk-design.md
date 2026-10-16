@@ -127,9 +127,19 @@ answer. It is not currently a generic script-facing, Web/IM-neutral primitive.
 The implementation should reuse that existing delivery and wait lifecycle,
 extracting only the smallest Controller-owned `ask-and-wait` boundary needed
 by `confirm`. This is a continuation primitive, not a new approval system.
-Whether the current Web surface can satisfy the same contract is **unverified**
-on `origin/master`; the implementation PR must verify it before claiming Web
-parity. See [`modules/agents/question_ui.py`](../../modules/agents/question_ui.py).
+See [`modules/agents/question_ui.py`](../../modules/agents/question_ui.py).
+
+The answer path runs before Turn admission, inside
+`SessionTurnManager.deliver`, which both Web dispatch and IM ingress reach with
+a reserved human Delivery. The script blocks its own running Turn, so an answer
+that queued or steered behind that Turn could never reach it. When the Session
+has a pending confirm and the sender is the expected approver (the user who
+launched the Turn) replying yes or no, the reservation is retired, the confirm
+resolves, and no Turn starts. Every other input, including another member's
+reply in a shared channel or any reply after the confirm was invalidated by the
+Turn ending or the script deadline, is admitted unchanged. The confirm then
+posts a short approved/declined notice on the launching surface, which is the
+transcript's record of the answer.
 
 ## Execution and runtime
 

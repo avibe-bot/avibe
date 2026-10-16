@@ -38,6 +38,7 @@ _YES_ANSWERS = frozenset(
         "好的",
     }
 )
+_ANSWER_TRAILING_PUNCTUATION = ".!。！"
 _NO_ANSWERS = frozenset(
     {
         "n",
@@ -153,7 +154,7 @@ class ComputerScriptInteractionManager:
         self._pending_by_token[token] = confirm_id
         try:
             prompt = self._translate(
-                "computer.confirm.prompt",
+                "computer.cli.confirm.prompt",
                 message=message,
             )
             await self._controller.emit_agent_message(context, "notify", prompt)
@@ -164,6 +165,14 @@ class ComputerScriptInteractionManager:
         finally:
             self._remove(confirm_id)
 
+        # The answer itself is consumed before Turn admission, so this notice is
+        # the transcript's durable record of how the owner answered.
+        await self._best_effort_notify(
+            context,
+            self._translate(
+                "computer.cli.confirm.approved" if approved else "computer.cli.confirm.declined"
+            ),
+        )
         if not approved:
             raise ComputerScriptInteractionError("confirm_refused")
         return {
@@ -176,51 +185,43 @@ class ComputerScriptInteractionManager:
             },
         }
 
-    async def consume_answer(
+    def match_answer(
         self,
-        context: MessageContext,
+        *,
+        session_id: str,
+        approver_id: str,
         message: str,
-    ) -> bool:
-        """Consume a message addressed to a pending confirm, if any.
+    ) -> tuple[str, bool] | None:
+        """Return the pending confirm this message answers, without resolving it.
 
-        A non-owner message on the same surface is consumed and refused so it
-        cannot start a competing Agent Turn or resolve the pending question.
+        Only the expected approver's yes/no reply to this Session's pending
+        confirm matches. Anything else stays an ordinary message.
         """
 
-        target = routed_delivery_context(context)
-        candidate = next(
-            (
-                (confirm_id, record)
-                for confirm_id, record in self._pending.items()
-                if self._same_surface(record.context, target)
-            ),
-            None,
-        )
-        if candidate is None:
-            return False
-        confirm_id, record = candidate
-        if str(target.user_id or "").strip() != record.question.expected_approver_id:
-            await self._best_effort_notify(
-                target,
-                self._translate("computer.confirm.ownerOnly"),
-            )
-            return True
-
+        normalized_session_id = str(session_id or "").strip()
+        normalized_approver_id = str(approver_id or "").strip()
+        if not normalized_session_id or not normalized_approver_id:
+            return None
         answer = _parse_answer(message)
         if answer is None:
-            await self._best_effort_notify(
-                target,
-                self._translate("computer.confirm.invalidAnswer"),
-            )
-            return True
+            return None
+        for confirm_id, record in self._pending.items():
+            if (
+                record.question.base_session_id == normalized_session_id
+                and record.question.expected_approver_id == normalized_approver_id
+                and not record.future.done()
+            ):
+                return confirm_id, answer
+        return None
+
+    def resolve_answer(self, confirm_id: str, approved: bool) -> bool:
+        """Resolve one matched confirm; ``False`` if it is no longer pending."""
+
+        record = self._pending.get(confirm_id)
         self._remove(confirm_id)
-        if not record.future.done():
-            if answer:
-                record.future.set_result(True)
-            else:
-                record.future.set_exception(
-                    ComputerScriptInteractionError("confirm_refused")
-                )
+        if record is None or record.future.done():
+            return False
+        record.future.set_result(bool(approved))
         return True
 
     def pending_for_token(self, token: str) -> PendingQuestion | None:
@@ -287,17 +288,10 @@ class ComputerScriptInteractionManager:
         language = getattr(getattr(self._controller, "config", None), "language", "en")
         return str(i18n_t(key, language, **kwargs))
 
-    @staticmethod
-    def _same_surface(left: MessageContext, right: MessageContext) -> bool:
-        return (
-            left.platform == right.platform
-            and left.channel_id == right.channel_id
-            and left.thread_id == right.thread_id
-        )
-
 
 def _parse_answer(message: str) -> bool | None:
     normalized = " ".join(str(message or "").strip().lower().split())
+    normalized = normalized.rstrip(_ANSWER_TRAILING_PUNCTUATION)
     if normalized in _YES_ANSWERS:
         return True
     if normalized in _NO_ANSWERS:

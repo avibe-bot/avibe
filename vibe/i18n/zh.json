@@ -968,9 +968,9 @@
         "windowTargetRequired": "输入必须针对已观察的精确窗口或元素。"
       },
       "confirm": {
-        "prompt": "{message}\n\n请回复“是”或“否”继续。只有启动此脚本的 Avibe 所有者可以回答。",
-        "ownerOnly": "只有启动此脚本的 Avibe 所有者可以回答这次确认。",
-        "invalidAnswer": "请回复“是”或“否”。确认仍在等待中。"
+        "prompt": "{message}\n\n请回复“是”或“否”。只有发起这项任务的人可以回答。",
+        "approved": "已确认，继续执行。",
+        "declined": "已拒绝，脚本不会执行这一步。"
       },
       "status": {
         "off": "未开启",
