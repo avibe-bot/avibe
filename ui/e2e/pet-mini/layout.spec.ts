@@ -211,6 +211,44 @@ test('Vibey and its dock are reported as the hover zone, and a shell hover shows
   await expect(dock).toHaveCSS('opacity', '0');
 });
 
+for (const theme of ['light', 'dark']) {
+  test(`open dock buttons share the hover fill (${theme})`, async ({ page }, testInfo) => {
+    // A microphone that never answers keeps dictation in its listening state.
+    await page.addInitScript(() => {
+      Object.defineProperty(MediaDevices.prototype, 'getUserMedia', { configurable: true, value: () => new Promise<MediaStream>(() => {}) });
+    });
+    await page.goto('/e2e/pet-mini/fixture.html?main=true&layers=0&voice=true');
+    await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
+    const mic = page.locator('.pet-mini-dock button').first();
+    const keyboard = page.locator('.pet-mini-dock button').last();
+    await expect(mic).toHaveAttribute('aria-pressed', 'false');
+    await page.evaluate(() => window.dispatchEvent(new CustomEvent('avibe:pet-hover', { detail: { hover: true } })));
+    await expect(page.locator('.pet-mini-dock')).toHaveCSS('opacity', '1');
+    const background = (button: typeof mic) => button.evaluate((el) => getComputedStyle(el).backgroundColor);
+    const color = (button: typeof mic) => button.evaluate((el) => getComputedStyle(el).color);
+    const idleColor = await color(keyboard);
+    await keyboard.hover();
+    const hoverFill = await background(keyboard);
+    expect(hoverFill).not.toBe('rgba(0, 0, 0, 0)');
+
+    await keyboard.click();
+    await expect(keyboard).toHaveAttribute('aria-pressed', 'true');
+    await page.mouse.move(0, 0);
+    expect(await background(keyboard)).toBe(hoverFill);
+    expect(await color(keyboard)).toBe(idleColor);
+    await page.screenshot({ path: testInfo.outputPath(`dock-keyboard-${theme}.png`), scale: 'css', animations: 'disabled' });
+
+    await keyboard.click();
+    await expect(keyboard).toHaveAttribute('aria-pressed', 'false');
+    await mic.click();
+    await expect(mic).toHaveAttribute('aria-pressed', 'true');
+    await page.mouse.move(0, 0);
+    expect(await background(mic)).toBe(hoverFill);
+    expect(await color(mic)).toBe(idleColor);
+    await page.screenshot({ path: testInfo.outputPath(`dock-listening-${theme}.png`), scale: 'css', animations: 'disabled' });
+  });
+}
+
 test('the reply bubble names Vibey as written', async ({ page }) => {
   await page.goto('/e2e/pet-mini/fixture.html?main=true&layers=0');
   const eyebrow = page.locator('.pet-mini-bubble-speaker');

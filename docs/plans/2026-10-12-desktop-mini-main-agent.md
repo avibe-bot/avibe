@@ -241,10 +241,13 @@ Known data limitations for P1:
   - Background `#2a2a2e`, padding 4px, border 1px `white / 8%`, no shadow.
   - Two 32px buttons with a 4px gap and a 1px × 16px `white / 10%` hairline
     between them:
-    - **mic** starts or stops dictation; it turns solid rose with a stop
-      square while dictating;
-    - **keyboard** opens or closes the input bubble; it is filled white while
-      the bubble is open.
+    - **mic** starts or stops dictation and shows a stop square while
+      dictating;
+    - **keyboard** opens or closes the input bubble.
+  - Hover, mic-open (dictating), and keyboard-open (input bubble open) share
+    one fill: `ink / 10%` on the dock, with the icon keeping its idle color.
+    An open button looks exactly like a hovered one in both themes; no rose or
+    white fill.
   - Hidden by default. It fades and rises in (opacity 180ms ease, transform
     220ms settle, from `translateY(-6px) scale(.92)`) on hover over Vibey or
     the dock, or on keyboard focus.

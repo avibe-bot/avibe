@@ -516,14 +516,9 @@ to {
   background:transparent;
   color:color-mix(in srgb,var(--pet-ink) 80%,transparent);
   cursor:pointer}
-.pet-mini-dock button:hover {
+/* Hover, dictating, and an open composer share one fill; the icon keeps its idle color. */
+.pet-mini-dock button:hover,.pet-mini-dock button.is-listening,.pet-mini-dock button.is-typing {
   background:color-mix(in srgb,var(--pet-ink) 10%,transparent)}
-.pet-mini-dock button.is-listening {
-  background:#f43f5e;
-  color:var(--pet-ink)}
-.pet-mini-dock button.is-typing {
-  background:#fff;
-  color:#000}
 .pet-mini-dock-divider {
   width:1px;
   height:16px;
@@ -598,7 +593,7 @@ to {
    background: color-mix(in srgb,var(--pet-ink) 16%,transparent);
    }
 
-.pet-mini-stop.is-confirm, .pet-mini-dock button.is-listening  {
+.pet-mini-stop.is-confirm  {
    color: #fff;
    }
 
@@ -606,7 +601,7 @@ to {
    background: #fb7185;
    }
 
-.pet-mini-send, .pet-mini-dock button.is-typing  {
+.pet-mini-send  {
    color: #000;
    }
 
