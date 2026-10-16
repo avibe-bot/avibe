@@ -251,7 +251,14 @@ def _udp_connect(host):
 @pytest.mark.integration
 @pytest.mark.allow_network(reason="proves the opt-out; a UDP connect sends nothing")
 def test_an_opted_out_integration_test():
-    _udp_connect("203.0.113.14")
+    try:
+        _udp_connect("203.0.113.14")
+    except network_guard.NetworkAccessRefused:
+        raise
+    except OSError:
+        # The guard let it through; the host has no route there, as in the
+        # loopback-only namespace the Linux CI shards run in.
+        pass
 
 
 @pytest.mark.allow_network(reason="not an integration test")
