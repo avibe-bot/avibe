@@ -6790,8 +6790,8 @@ class SessionTurnManager:
         for turn in turns:
             turn_id = str(turn["id"])
             target_session = str(turn["session_id"])
-            with self._sqlite_engine().begin() as conn:
-                reserve_write_lock(conn)
+            # A read: ``_terminalize_durable_turn`` rechecks it under the writer.
+            with self._sqlite_engine().connect() as conn:
                 latest = delivery_store.get_turn(conn, turn_id)
                 terminal_stop_receipt = bool(
                     latest is not None
@@ -7122,7 +7122,7 @@ class SessionTurnManager:
                 if result.state != "reserved":
                     recovered.append(target_session)
         with self._sqlite_engine().connect() as conn:
-            terminal_run_owners = delivery_store.terminal_turn_agent_run_owners(
+            terminal_run_owners = delivery_store.recoverable_terminal_turn_agent_run_owners(
                 conn,
                 session_id,
             )
@@ -7187,8 +7187,7 @@ class SessionTurnManager:
                     recoverable_owners.append((terminal_turn, run_ids))
         for terminal_turn, run_ids in recoverable_owners:
             self._settle_agent_run_ids_from_terminal_turn(run_ids, terminal_turn)
-        with self._sqlite_engine().begin() as conn:
-            reserve_write_lock(conn)
+        with self._sqlite_engine().connect() as conn:
             queued_without_owner = set(
                 delivery_store.queued_session_ids_without_live_turns(conn, session_id)
             )
@@ -7203,17 +7202,24 @@ class SessionTurnManager:
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             live = delivery_store.session_ids_with_live_turns(conn)
-            owned = delivery_store.session_ids_with_turn_history(conn)
-            idle = owned - live
-            if idle:
-                cleared = conn.execute(
-                    update(agent_sessions)
-                    .where(agent_sessions.c.id.in_(idle))
-                    .where(agent_sessions.c.status == "active")
-                    .where(agent_sessions.c.agent_status == "running")
-                    .values(agent_status="idle")
+            # Only the sessions projected ``running`` that have Turn history and no
+            # live Turn, each checked by an indexed lookup -- not every session that
+            # ever ran a Turn, a set that grows with history (#2706).
+            stale_running = (
+                update(agent_sessions)
+                .where(agent_sessions.c.status == "active")
+                .where(agent_sessions.c.agent_status == "running")
+                .where(
+                    exists(
+                        select(session_turn_rows.c.id).where(
+                            session_turn_rows.c.session_id == agent_sessions.c.id
+                        )
+                    )
                 )
-                _ = cleared.rowcount
+            )
+            if live:
+                stale_running = stale_running.where(agent_sessions.c.id.notin_(live))
+            conn.execute(stale_running.values(agent_status="idle"))
             if live:
                 running = conn.execute(
                     update(agent_sessions)
@@ -9579,7 +9585,7 @@ class SessionTurnManager:
             return
         try:
             with self._sqlite_engine().connect() as conn:
-                has_history = session_id in delivery_store.session_ids_with_turn_history(conn)
+                has_history = delivery_store.session_has_turn_history(conn, session_id)
         except Exception:
             logger.debug(
                 "could not inspect durable Turn history for restored poll %s",
