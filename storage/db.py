@@ -48,7 +48,14 @@ def create_sqlite_engine(db_path: Path | None = None, *, read_only: bool = False
         URL.create("sqlite", database=path.as_uri(), query={"mode": "ro", "uri": "true"})
         if read_only else sqlite_url(path)
     )
-    engine = create_engine(url, future=True, hide_parameters=True)
+    # Every connection is a ``CensusConnection`` so the loop-writer census (#2710)
+    # can time a loop transaction to the end of SQLite's own commit.
+    engine = create_engine(
+        url,
+        future=True,
+        hide_parameters=True,
+        connect_args={"factory": loop_writers.CensusConnection},
+    )
 
     @event.listens_for(engine, "connect")
     def _set_sqlite_pragmas(dbapi_connection, _connection_record) -> None:
@@ -59,7 +66,6 @@ def create_sqlite_engine(db_path: Path | None = None, *, read_only: bool = False
         cursor.execute("PRAGMA busy_timeout = 5000")
         cursor.close()
 
-    # Counts the write transactions this engine runs on the controller loop (#2710).
     loop_writers.watch_engine(engine)
     return engine
 

@@ -3,14 +3,19 @@
 A write on the controller loop stalls every Session while it waits for SQLite's
 writer or for its own commit, and the writers are reached through so many
 indirections that no reviewed list of them stays complete. So the engine factory
-counts them instead. ``storage.db.create_sqlite_engine`` attaches two listeners to
-every engine:
+counts them instead. ``storage.db.create_sqlite_engine`` opens every connection
+as a ``CensusConnection`` and listens to the pool, never to the connection: a
+SQLAlchemy connection event would put every statement of every thread on the
+slower event-dispatch path.
 
-- ``begin`` notes the start time of a transaction opened on the controller loop's
-  thread, and does nothing on any other thread;
-- ``commit`` and ``rollback`` keep only the transactions that wrote (the DBAPI
-  connection is in a transaction only after a write or ``BEGIN IMMEDIATE``), and
-  add their loop time to the totals of the code location that ended them.
+- A pool checkout on the controller loop's thread starts a record; a checkout on
+  any other thread does nothing.
+- ``CensusConnection.commit`` and ``rollback`` end it. They keep only the
+  transactions that wrote (the connection is in a transaction only after a write
+  or ``BEGIN IMMEDIATE``) or that tried to take the writer and failed
+  (``mark_write_attempt``). They add the loop time since the record started, up to
+  the end of SQLite's own commit or rollback (``fsync`` included), to the totals of
+  the code location that ended the transaction, and start the next record.
 
 The location is two frames: the first outside SQLAlchemy, ``contextlib`` and this
 module, and its caller, so a write behind a shared transaction helper still names
@@ -30,10 +35,11 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import sqlite3
 import sys
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 import sqlalchemy
 from sqlalchemy import Engine, event
@@ -47,8 +53,6 @@ SUMMARY_SITES = 25
 # internal modules, and locations kept from there.
 _MAX_FRAMES = 16
 _SITE_DEPTH = 2
-
-_OPEN_KEY = "avibe_loop_write"
 
 _Frame = tuple[str, int, str]
 _Site = tuple[_Frame, ...]
@@ -76,34 +80,72 @@ def bind_loop_thread(thread_id: int | None = None) -> None:
     _loop_thread = threading.get_ident() if thread_id is None else thread_id
 
 
+def unbind_loop_thread() -> None:
+    """Stop counting: the loop no longer serves Sessions, so its writes stall none."""
+
+    global _loop_thread
+    _loop_thread = None
+
+
+class CensusConnection(sqlite3.Connection):
+    """A sqlite3 connection that ends the census's record of a loop transaction."""
+
+    _census: list[Any] | None = None
+
+    def commit(self) -> None:
+        self._end(super().commit)
+
+    def rollback(self) -> None:
+        self._end(super().rollback)
+
+    def _end(self, finish: Callable[[], None]) -> None:
+        record = self._census
+        if record is None or threading.get_ident() != _loop_thread:
+            finish()
+            return
+        wrote = self.in_transaction or record[2]
+        try:
+            finish()
+        finally:
+            now = time.perf_counter()
+            # The next transaction on this checkout starts where this one ended.
+            self._census = [now, False, False]
+            if wrote:
+                _count(_site(sys._getframe(1)), now - record[0], never_waits=record[1])
+
+
 def watch_engine(engine: Engine) -> None:
-    event.listen(engine, "begin", _on_begin)
-    event.listen(engine, "commit", _on_end)
-    event.listen(engine, "rollback", _on_end)
+    event.listen(engine, "checkout", _on_checkout)
+
+
+def _record(conn: Any) -> list[Any] | None:
+    return getattr(conn.connection.dbapi_connection, "_census", None)
 
 
 def mark_never_waits(conn: Any) -> None:
     """Mark the loop transaction on ``conn`` as one that never waits for another writer."""
 
-    record = conn.info.get(_OPEN_KEY)
+    record = _record(conn)
     if record is not None:
         record[1] = True
 
 
-def _on_begin(conn: Any) -> None:
-    if threading.get_ident() != _loop_thread:
-        return
-    conn.info[_OPEN_KEY] = [time.perf_counter(), False]
+def mark_write_attempt(conn: Any) -> None:
+    """Count the loop transaction on ``conn`` even if taking the writer fails.
+
+    A ``BEGIN IMMEDIATE`` that times out waiting for another writer leaves no
+    transaction behind, yet the loop waited the whole busy timeout for it.
+    """
+
+    record = _record(conn)
+    if record is not None:
+        record[2] = True
 
 
-def _on_end(conn: Any) -> None:
-    if threading.get_ident() != _loop_thread:
+def _on_checkout(dbapi_connection: Any, _record: Any, _proxy: Any) -> None:
+    if threading.get_ident() != _loop_thread or not isinstance(dbapi_connection, CensusConnection):
         return
-    record = conn.info.pop(_OPEN_KEY, None)
-    if record is None or not conn.connection.dbapi_connection.in_transaction:
-        return
-    elapsed = time.perf_counter() - record[0]
-    _count(_site(sys._getframe(1)), elapsed, never_waits=record[1])
+    dbapi_connection._census = [time.perf_counter(), False, False]
 
 
 def _site(frame: Any) -> _Site:
@@ -149,12 +191,12 @@ def log_summary(*, final: bool = False) -> None:
     """Log the write sites ranked by total loop time.
 
     A periodic summary is skipped when nothing was written since the last one; the
-    final one at shutdown always reports the whole run.
+    final one at shutdown always reports the whole run, even a run with no writes.
     """
 
     global _changed_since_summary, _last_summary_at
     with _lock:
-        if not (_changed_since_summary or (final and _totals)):
+        if not (_changed_since_summary or final):
             return
         _changed_since_summary = False
         _last_summary_at = time.monotonic()
@@ -166,12 +208,12 @@ def log_summary(*, final: bool = False) -> None:
         for site, (count, total, peak, never) in ranked[:SUMMARY_SITES]
     ]
     logger.info(
-        "Controller-loop SQLite writers%s: %d writes at %d sites, by total loop time%s\n  %s",
+        "Controller-loop SQLite writers%s: %d writes at %d sites, by total loop time%s%s",
         " at shutdown" if final else "",
         writes,
         len(ranked),
         f" (top {SUMMARY_SITES})" if len(ranked) > SUMMARY_SITES else "",
-        "\n  ".join(lines),
+        "".join(f"\n  {line}" for line in lines),
     )
 
 

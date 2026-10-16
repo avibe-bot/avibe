@@ -2222,6 +2222,9 @@ class Controller:
         except Exception as e:
             logger.error(f"Error in main run loop: {e}", exc_info=True)
         finally:
+            # The loop no longer serves Sessions; cleanup that reuses its thread is
+            # not a loop writer (#2710).
+            loop_writers.unbind_loop_thread()
             self.cleanup_sync()
             if not getattr(self, "_shutdown_tainted", False):
                 self._service_lock_safe_to_release = True
