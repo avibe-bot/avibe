@@ -2517,7 +2517,7 @@ mod tests {
         for (size, image) in images {
             assert_eq!((image.width(), image.height()), (size, size));
             assert_eq!(image.rgba().len(), (size * size * 4) as usize);
-            let pixels: Vec<_> = image.rgba().chunks_exact(4).collect();
+            let pixels = image.rgba().as_chunks::<4>().0;
             assert!(pixels.iter().all(|pixel| pixel[..3] == [0, 0, 0]));
             assert!(pixels.iter().any(|pixel| pixel[3] > 0), "visible silhouette");
             assert!(pixels.iter().any(|pixel| pixel[3] == 0), "transparent background");
