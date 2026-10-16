@@ -508,7 +508,7 @@ def test_cmd_computer_reports_driver_error_before_writing_screenshot(
                 "result": {
                     "isError": True,
                     "structuredContent": {
-                        "code": "desktop_busy",
+                        "code": "target_busy",
                         "params": {},
                     },
                     "content": [
@@ -518,7 +518,7 @@ def test_cmd_computer_reports_driver_error_before_writing_screenshot(
                                 "Structured content:\n"
                                 + json.dumps(
                                     {
-                                        "code": "desktop_busy",
+                                        "code": "target_busy",
                                         "params": {},
                                     }
                                 )
@@ -536,7 +536,7 @@ def test_cmd_computer_reports_driver_error_before_writing_screenshot(
         assert cli.cmd_computer(args) == 1
 
     output = capsys.readouterr().out
-    assert "桌面正被另一个 Avibe Session 使用" in output
+    assert "请求的 Computer Use 目标正忙" in output
     assert "desktop is held" not in output
     assert not output_path.exists()
 

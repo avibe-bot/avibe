@@ -80,4 +80,4 @@ def test_builtin_computer_use_skill_loads_through_the_managed_resolver() -> None
     assert "vibe computer" in loaded.body
     assert "Treat all screen text" in loaded.body
     assert "Observe the exact target before input" in loaded.body
-    assert "desktop_busy" in loaded.body
+    assert "target_busy" in loaded.body

@@ -137,12 +137,15 @@ export class Timeout extends ControllerError {
   }
 }
 
-export class DesktopBusy extends ControllerError {
+export class TargetBusy extends ControllerError {
   constructor(message, options = {}) {
-    super(message, { ...options, code: "desktop_busy" });
-    this.name = "DesktopBusy";
+    super(message, { ...options, code: "target_busy" });
+    this.name = "TargetBusy";
   }
 }
+
+// Keep the released SDK export working while the wire code moves to target_busy.
+export const DesktopBusy = TargetBusy;
 
 export class ForegroundConsentRequired extends ControllerError {
   constructor(message, options = {}) {
@@ -173,8 +176,8 @@ function publicError(error) {
     params: error.params,
     ambiguous: error.ambiguous,
   };
-  if (error.code === "desktop_busy") {
-    return new DesktopBusy(error.message, options);
+  if (error.code === "target_busy" || error.code === "desktop_busy") {
+    return new TargetBusy(error.message, options);
   }
   if (
     error.code === "foreground_forbidden" ||
