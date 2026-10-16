@@ -107,7 +107,7 @@ E2E, rather than clearing every exploratory trial item before adoption.
   probes as additional adoption gates. Normal PR review/CI, release sequencing,
   and explicit publication/merge authority remain unchanged.
 
-## Current evidence (2026-10-15)
+## Current evidence (2026-10-16)
 
 - Six unpublished candidate archives (darwin arm64/x64, Linux amd64/arm64,
   Windows amd64/arm64) were built from the exact source and five pinned patches
@@ -117,16 +117,34 @@ E2E, rather than clearing every exploratory trial item before adoption.
   `b53c236ce02c3fcb0218824153df4bb3d1927246a3b889752c07a633857d9f2b`.
   This is local build/verification evidence, not publication or six-platform
   runtime acceptance. The packaged manifest remains unchanged.
-- The installed-service candidate E2E did **not** pass. Candidate installation,
-  version/platform verification, health, Source creation and the first Vibey
-  turn succeeded; Claude SDK initialization then timed out before an Anthropic
-  request reached the synthetic upstream. The later Source update, second turn
-  and restart/orphan checks were not reached. Preserve the failing result.
-  Separate fresh-home probes of the installed SDK/CLI, Avibe wrapper, hooks and
-  gateway discovery succeeded, so an SDK/CLI incompatibility is not established.
-  Next: one bounded probe in the actual service context, capturing CLI stderr,
-  engine requests and process state. Do not increase timeouts, add retries,
-  change SDK versions, or claim issue #2686 is its cause without evidence.
+- After repairing the identity assertion, the single local Linux Arm64
+  installed-service `MH-SERVICE-001` run passed in **46.36 seconds** with the
+  exact v8.0.29 candidate. It covered install/version/health, Source creation,
+  Vibey and Claude Code turns, Source credential replacement and a newly
+  discovered model serving another turn, engine survival after a hard service
+  kill, restart/orphan reaping, and clean stop. The temporary target was deleted;
+  the existing local master stayed healthy with its PID unchanged. The Source
+  update/version-check extension and its catalog edit remain uncommitted in the
+  owner worktree; the identity repair does not silently include those prior edits.
+- The former orphan assertion was a false negative: the same live PID and
+  identity marker survived while psutil's reported `create_time` shifted by one
+  second. Engine checks now compare the inherited `AVIBE_PROCESS_IDENTITY`
+  fingerprint, as the product reaper does. Service/UI cleanup retains its
+  separate unmarked-record check. Focused regressions cover drift, recycled
+  PIDs, missing/unreadable/malformed identities, and service cleanup.
+- Preserve the earlier Claude initialization-timeout result and the subsequent
+  orphan-assertion failure as historical evidence; neither establishes issue
+  #2686 as its cause. No product dependency declaration, SDK override, timeout,
+  or test retry was changed. However, the fresh environment's unconstrained
+  installation resolved Claude Agent SDK **0.2.168**, versus **0.2.167** in the
+  preceding run. This is a validation deviation: the full pass is not a strict
+  same-SDK before/after comparison. The assertion regression is independently
+  reproduced without an SDK. Do not silently expand the trial matrix or rerun
+  acceptance to erase this qualification.
+- Environment preparation initially failed before pytest on a truncated Python
+  build-dependency download. One preparation resume on the same disposable
+  target succeeded; the acceptance itself executed once. The packaged engine
+  pin, release sequencing hold, and publication/adoption authority are unchanged.
 - The exact v8.0.29 tag was checked out and all five patches applied in the
   listed order with `git apply --check --whitespace=error`.
 - Avibe's engine builder, release-guard and scenario catalog tests pass:

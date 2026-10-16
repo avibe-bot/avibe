@@ -33,6 +33,8 @@ from typing import Any, Iterator
 import psutil
 import pytest
 
+from core.process_isolation import PROCESS_IDENTITY_ENV, fingerprint_process_marker
+
 pytestmark = pytest.mark.e2e_service
 
 _MOCK_UPSTREAM = Path(__file__).resolve().parent / "drivers" / "mock_llm_upstream.py"
@@ -336,11 +338,30 @@ class _Service:
 
 
 def _process_is(entry: dict[str, Any]) -> bool:
-    """Whether the recorded process is still the one the record names."""
+    """Whether a service/UI pid still belongs to the process recorded for cleanup."""
 
     try:
         return abs(psutil.Process(entry["pid"]).create_time() - float(entry["create_time"])) < 0.01
     except (psutil.NoSuchProcess, psutil.AccessDenied, KeyError, TypeError, ValueError):
+        return False
+
+
+def _engine_is(entry: dict[str, Any]) -> bool:
+    """Whether the recorded process still carries the engine's identity marker.
+
+    The marker is the authoritative identity used by the product reaper. The
+    persisted ``create_time`` remains useful diagnostics, but it can drift by a
+    platform/process-sampling tick while the same process stays alive.
+    """
+
+    try:
+        expected = entry.get("worker_fingerprint")
+        if not isinstance(expected, str):
+            return False
+        process = psutil.Process(entry["pid"])
+        marker = process.environ().get(PROCESS_IDENTITY_ENV)
+        return isinstance(marker, str) and bool(marker) and fingerprint_process_marker(marker) == expected
+    except (psutil.Error, KeyError, TypeError, ValueError):
         return False
 
 
@@ -425,7 +446,7 @@ def test_fresh_install_serves_vibey_and_claude_through_the_hub_and_reaps_an_orph
             # Kill the service outright: its engine is left running.
             first = service.engines()[0]
             service.kill_service()
-            assert _process_is(first), "the engine should outlive a killed service"
+            assert _engine_is(first), "the engine should outlive a killed service"
 
             # The next start reaps that engine before it runs a new one.
             service.vibe("start", "--no-open-browser", timeout=300)
@@ -433,14 +454,14 @@ def test_fresh_install_serves_vibey_and_claude_through_the_hub_and_reaps_an_orph
             service.ok("POST", "/api/models/runtime/start", timeout=_ENGINE_START_SECONDS)
             second = service.healthy_engine()
             started.append(second)
-            assert second["pid"] != first["pid"] or second["create_time"] != first["create_time"]
-            assert not _process_is(first), "the orphaned engine is still running"
+            assert second["worker_fingerprint"] != first["worker_fingerprint"]
+            assert not _engine_is(first), "the orphaned engine is still running"
             log = (service.avibe_home / "logs" / "vibe_remote.log").read_text(encoding="utf-8", errors="replace")
             assert "Reaped a Model Hub engine left running by an earlier service" in log
 
             service.vibe("stop", timeout=120)
             assert service.engines() == []
-            assert not _process_is(second)
+            assert not _engine_is(second)
         except BaseException:
             print(service.diagnostics())
             raise
@@ -448,5 +469,5 @@ def test_fresh_install_serves_vibey_and_claude_through_the_hub_and_reaps_an_orph
             service.stop()
             service.close()
             for entry in started:
-                if _process_is(entry):
+                if _engine_is(entry):
                     psutil.Process(entry["pid"]).kill()
