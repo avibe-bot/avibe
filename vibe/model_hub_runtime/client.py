@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import io
 import json
 import logging
@@ -1395,13 +1396,19 @@ def _project_model_inventory_before_deadline(
     )
 
 
-def engine_refused_gateway_key(outcome: RawCallOutcome) -> bool:
-    """Whether a call ended on the engine refusing Avibe's own gateway key, which the client witnessed."""
+def engine_disowned_call(outcome: RawCallOutcome) -> bool:
+    """Whether a call ended on the engine itself showing it may not run Avibe's config.
 
-    return (
-        outcome.kind is RawOutcomeKind.NETWORK_ERROR
-        and outcome.error_code == "engine_down"
-        and outcome.http_status == 401
+    It refused Avibe's gateway key (a 401 the client witnessed), did not know
+    the routed model Avibe registered (the local registration failure), or
+    refused the connection on the port Avibe gave it. The owner checks the
+    engine before the next call instead of trusting its last health check.
+    """
+
+    if outcome.kind is not RawOutcomeKind.NETWORK_ERROR:
+        return False
+    return (outcome.error_code == "engine_down" and outcome.http_status in (400, 401)) or (
+        outcome.os_errno == errno.ECONNREFUSED
     )
 
 

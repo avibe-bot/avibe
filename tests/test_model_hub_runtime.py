@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import io
 import json
@@ -56,7 +57,13 @@ from vibe.model_hub_runtime import installer as runtime_installer_module
 from vibe.model_hub_runtime import supervisor as supervisor_module
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
 from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_catalog, official_models_dev_provider
-from vibe.model_hub_runtime.client import EngineClient, EngineClientError, EngineConnection, completed_handle
+from vibe.model_hub_runtime.client import (
+    EngineClient,
+    EngineClientError,
+    EngineConnection,
+    completed_handle,
+    engine_disowned_call,
+)
 from vibe.model_hub_runtime.config import expected_model_names, write_engine_config
 from vibe.model_hub_runtime.environment import engine_subprocess_environment
 from vibe.model_hub_runtime.installer import (
@@ -2999,7 +3006,7 @@ def _write_mock_engine(
     exit_before_ready: int | None = None,
     reload_delay: float = 0.0,
     drop_reload_ack: bool = False,
-    lose_config_on_reload: bool = False,
+    lose_config_on_reload: str | None = None,
 ) -> None:
     script = f"""#!{sys.executable}
 import json
@@ -3035,6 +3042,7 @@ if exit_before_ready is not None:
     raise SystemExit(exit_before_ready)
 time.sleep({startup_delay!r})
 health_surfaces = set()
+defaulted = False
 
 def configured_models():
     for section in ('claude-api-key', 'codex-api-key', 'openai-compatibility'):
@@ -3061,6 +3069,14 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if defaulted:
+            # Its defaults hold no api-keys, so it lists to anyone, and no
+            # management secret, so it serves no management routes.
+            if self.path == '/v1/models':
+                self._json(200, {{'object': 'list', 'data': []}})
+            else:
+                self._json(404, {{'error': 'not found'}})
+            return
         if self.path == '/v1/models' and self.headers.get('Authorization') == f'Bearer {{gateway}}':
             mark_health_surface('gateway')
             self._json(200, {{'object': 'list', 'data': [{{'id': model, 'name': name}} for model, name in configured_models()]}})
@@ -3075,22 +3091,31 @@ class Handler(BaseHTTPRequestHandler):
         self._json(401, {{'error': {{'type': 'unauthorized'}}}})
 
     def do_PUT(self):
-        global config
+        global config, defaulted
         length = int(self.headers.get('Content-Length', '0'))
         body = self.rfile.read(length)
+        if defaulted:
+            self._json(404, {{'error': 'not found'}})
+            return
         if self.path != '/v0/management/config.yaml' or self.headers.get('X-Management-Key') != management:
             self._json(401, {{'error': {{'type': 'unauthorized'}}}})
             return
         with open(config_path, 'wb') as handle:
             handle.write(body)
+        loss = {lose_config_on_reload!r}
+        torn = loss is not None and not os.path.exists('config-lost')
+        if torn:
+            open('config-lost', 'w').close()
+        if torn and loss == 'defaults':
+            # The 3.2.2rc2 race (#2686): the watcher read the file this PUT was
+            # still writing and applied it as defaults before the PUT answered.
+            defaulted = True
 
         def apply():
             global config, gateway, management
             config = yaml.safe_load(body)
-            if {lose_config_on_reload!r} and not os.path.exists('config-lost'):
-                # The 3.2.1rc8 race (#2686): the watcher applied a half-written
-                # file, so the engine runs its defaults, not the config written.
-                open('config-lost', 'w').close()
+            if torn and loss == 'refused_keys':
+                # The 3.2.1rc8 race: a later reload kept the port but not the keys.
                 gateway = management = 'engine-default'
             with open('config-reloads', 'a', encoding='utf-8') as handle:
                 handle.write('reload\\n')
@@ -3101,6 +3126,10 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             return
         self._json(200, {{'ok': True, 'changed': ['config']}})
+        if torn and loss == 'listener':
+            # Its defaults name another port: the process lives on, but nothing
+            # answers where Avibe connects.
+            threading.Thread(target=server.shutdown, daemon=True).start()
 
     def do_POST(self):
         length = int(self.headers.get('Content-Length', '0'))
@@ -3175,7 +3204,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json(200, {{'id': 'response-1', 'model': payload['model']}})
 
-HTTPServer((config['host'], config['port']), Handler).serve_forever()
+server = HTTPServer((config['host'], config['port']), Handler)
+server.serve_forever()
+server.server_close()
+while True:
+    time.sleep(1)
 """
     path.write_text(script, encoding="utf-8")
     path.chmod(0o755)
@@ -3230,7 +3263,7 @@ def _fixture_supervisor(
     exit_before_ready: int | None = None,
     reload_delay: float = 0.0,
     drop_reload_ack: bool = False,
-    lose_config_on_reload: bool = False,
+    lose_config_on_reload: str | None = None,
 ) -> tuple[EngineSupervisor, EngineStateStore]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     binary = tmp_path / "mock-engine"
@@ -3291,7 +3324,7 @@ def test_an_engine_that_lost_its_configuration_is_reported_once_and_restarted_by
     no caller restarts it under the streams it still serves, and the restart
     its drainer asks for renders the config again.
     """
-    supervisor, store = _fixture_supervisor(tmp_path, lose_config_on_reload=True)
+    supervisor, store = _fixture_supervisor(tmp_path, lose_config_on_reload="refused_keys")
     credential_ref = store.store_api_key("upstream-secret", base_url="https://api.example.test/v1")
     store.sync_sources([_binding(credential_ref)])
     connection = supervisor.ensure_running()
@@ -3319,6 +3352,99 @@ def test_an_engine_that_lost_its_configuration_is_reported_once_and_restarted_by
         supervisor.restart_lost_engine()
         assert supervisor._process is restarted
     finally:
+        supervisor.stop()
+
+
+@pytest.mark.parametrize(("loss", "reported"), [
+    # The repro on the pinned engine: its defaults keep the port, list models
+    # to anyone, and serve no management routes.
+    ("defaults", "endpoint=/v0/management/config http_status=404"),
+    # The 3.2.2rc2 occurrence: the defaults name another port, so nothing answers.
+    ("listener", f"http_status=None os_errno={errno.ECONNREFUSED}"),
+])
+def test_a_source_save_restores_an_engine_whose_reload_tore_its_config(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, loss: str, reported: str,
+) -> None:
+    """Scenario: MH-RUNTIME-014 -- the engine's own reload race, injected after a PUT, is caught by the save.
+
+    The torn reload proves itself only by the engine answering as no config of
+    Avibe's would: a 404 for its management route, or no listener on its port.
+    The save that wrote the config finds it, the engine restarts from the
+    rendered config, and the save applies on the restarted engine (#2686, #2753).
+    """
+    supervisor, store = _fixture_supervisor(tmp_path, lose_config_on_reload=loss)
+    credential_ref = store.store_api_key("upstream-secret", base_url="https://api.example.test/v1")
+    store.sync_sources([_binding(credential_ref)])
+    supervisor.ensure_running()
+    torn = supervisor._process
+    adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)
+    try:
+        with caplog.at_level(logging.WARNING, logger=supervisor_module.__name__):
+            asyncio.run(adapter.sync_sources([_binding(credential_ref, route_model_ids=("model-b",))]))
+        assert supervisor._process is not torn and torn.poll() is not None
+        prefix = store.get_source("src_fixture123").prefix
+        assert EngineClient(supervisor.ensure_running()).list_model_ids() == {f"{prefix}/model-a", f"{prefix}/model-b"}
+        [report] = [record.getMessage() for record in caplog.records if "lost its configuration" in record.getMessage()]
+        assert reported in report
+    finally:
+        supervisor.stop()
+
+
+@pytest.mark.parametrize(("kind", "fields", "disowned"), [
+    # The engine refused Avibe's key, witnessed on its own listing (#2755).
+    (RawOutcomeKind.NETWORK_ERROR, {"http_status": 401, "error_code": "engine_down"}, True),
+    # The engine did not know the routed model Avibe registered: an engine on its defaults.
+    (RawOutcomeKind.NETWORK_ERROR, {"http_status": 400, "error_code": "engine_down"}, True),
+    # Nothing answers on the engine's port.
+    (RawOutcomeKind.NETWORK_ERROR, {"http_status": None, "os_errno": errno.ECONNREFUSED}, True),
+    # The engine could not reach the upstream: the engine is fine.
+    (RawOutcomeKind.NETWORK_ERROR, {"http_status": 502}, False),
+    # An upstream's own 401, 400 or model-not-found 404.
+    (RawOutcomeKind.HTTP_ERROR, {"http_status": 401, "error_code": "invalid_api_key"}, False),
+    (RawOutcomeKind.HTTP_ERROR, {"http_status": 400, "error_code": "invalid_request_error"}, False),
+    (RawOutcomeKind.HTTP_ERROR, {"http_status": 404, "error_code": "model_not_found"}, False),
+])
+def test_only_a_call_the_engine_itself_disowned_rechecks_the_engine(kind, fields, disowned) -> None:
+    """Scenario: MH-RUNTIME-014 -- a turn that met an engine not running Avibe's config has it checked again."""
+    outcome = RawCallOutcome(
+        kind=kind, error_code=fields.get("error_code"), redacted_message=None, stream_started=False,
+        model_id="model-a", source_id="src_fixture123", http_status=fields.get("http_status"),
+        os_errno=fields.get("os_errno"),
+    )
+    assert engine_disowned_call(outcome) is disowned
+
+
+def test_a_recheck_alone_never_restarts_an_engine_that_answers(tmp_path: Path) -> None:
+    """Scenario: MH-RUNTIME-014 -- a call the engine disowned asks for a check, and only the check decides."""
+    supervisor, _store = _fixture_supervisor(tmp_path)
+    supervisor.ensure_running()
+    running = supervisor._process
+    try:
+        supervisor.recheck_engine()
+        supervisor.ensure_running()
+        assert supervisor._process is running and running.poll() is None
+    finally:
+        supervisor.stop()
+
+
+def test_a_refused_port_is_no_loss_before_the_engine_first_answers(tmp_path: Path) -> None:
+    """Scenario: MH-RUNTIME-014 -- a cold start still binding its port is starting, not lost; once it answered, it is lost."""
+    supervisor, _store = _fixture_supervisor(tmp_path, startup_delay=0.6)
+    started = threading.Thread(target=supervisor.ensure_running)
+    started.start()
+    try:
+        deadline = time.monotonic() + 5
+        while supervisor._process is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        starting = supervisor._process
+        assert starting is not None and starting.poll() is None
+        assert supervisor._disowns_config_locked(None, errno.ECONNREFUSED) is False
+        started.join(timeout=10)
+        # One start: the window did not restart it.
+        assert supervisor._process is starting
+        assert supervisor._disowns_config_locked(None, errno.ECONNREFUSED) is True
+    finally:
+        started.join(timeout=10)
         supervisor.stop()
 
 

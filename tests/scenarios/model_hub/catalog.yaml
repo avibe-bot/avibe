@@ -1186,7 +1186,8 @@ scenarios:
     test: tests/test_model_hub_retry_lifecycle.py::test_a_silent_engine_stream_is_cancelled_and_retried_at_its_idle_bound
   - id: MH-RUNTIME-014
     name: >-
-      An engine that refuses the credentials Avibe launched it with is reported once as having lost its configuration,
+      An engine that no longer runs the config Avibe launched it with (it refuses Avibe's credentials, serves no
+      management route, or refuses connections on its port, as after its own torn reload) is reported once as having lost its configuration,
       admits no new work, and restarts from the rendered config only after its open streams end; the waiting save or
       turn then runs on the restarted engine
     status: covered
@@ -1195,6 +1196,7 @@ scenarios:
     test:
       - tests/test_model_hub_transport_leases.py::test_an_engine_that_lost_its_configuration_restarts_only_once_its_streams_end
       - tests/test_model_hub_runtime.py::test_an_engine_that_lost_its_configuration_is_reported_once_and_restarted_by_its_drainer
+      - tests/test_model_hub_runtime.py::test_a_source_save_restores_an_engine_whose_reload_tore_its_config
   - id: MH-RUNTIME-015
     name: >-
       A pre-output 401 is the engine's own only when its engine-local model listing refuses the same gateway key;
