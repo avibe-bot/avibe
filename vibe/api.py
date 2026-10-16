@@ -490,8 +490,8 @@ def _homebrew_prefix(brew_path: str) -> Path | None:
     if len(lines) != 1:
         return None
     try:
-        prefix = Path(os.path.expanduser(lines[0])).resolve()
-        brew = Path(brew_path).expanduser().resolve()
+        prefix = Path(os.path.expanduser(lines[0])).absolute()
+        brew = Path(brew_path).expanduser().absolute()
     except OSError:
         return None
     if brew != prefix / "bin" / "brew":
@@ -568,13 +568,68 @@ def _homebrew_codex_target(brew_path: str, selected_path: str) -> str | None:
     return str(selected)
 
 
+def _homebrew_codex_path_is_plausible(
+    codex_path: str,
+    *,
+    brew_path: str | None = None,
+    prefix: Path | None = None,
+) -> bool:
+    """Recognize paths that could belong to a Homebrew Codex cask.
+
+    The selected path must stay attributable before a Homebrew upgrade is
+    allowed, but an unrelated custom executable must not be rejected merely
+    because another Homebrew installation exists. Stable Homebrew locations
+    and resolved ``Caskroom/codex`` payloads are the narrow ownership evidence
+    available without running the selected executable.
+    """
+    selected = Path(codex_path).expanduser()
+    if selected.name not in {"codex", "codex.exe"}:
+        return False
+    try:
+        selected_absolute = selected.absolute()
+        resolved = selected.resolve(strict=False)
+    except OSError:
+        return False
+
+    prefixes: list[Path] = []
+    if prefix is not None:
+        prefixes.append(prefix.expanduser().absolute())
+    if brew_path:
+        brew_absolute = Path(brew_path).expanduser().absolute()
+        if brew_absolute.name in {"brew", "brew.exe"} and brew_absolute.parent.name == "bin":
+            prefixes.append(brew_absolute.parent.parent)
+
+    for candidate in prefixes:
+        for parent in (candidate / "bin", candidate / "Caskroom" / "codex"):
+            try:
+                selected_absolute.relative_to(parent.absolute())
+                return True
+            except (OSError, ValueError):
+                continue
+
+    parts = resolved.parts
+    return any(
+        parts[index : index + 2] == ("Caskroom", "codex")
+        for index in range(len(parts) - 1)
+    )
+
+
 def _is_homebrew_codex_install(codex_path: str) -> bool:
     brew_path = resolve_cli_path("brew")
     return bool(brew_path and _homebrew_codex_target(brew_path, codex_path))
 
 
-def _codex_path_is_ambiguous_homebrew_target(codex_path: str, state: str) -> bool:
-    return state in {"installed", "unknown"} and Path(codex_path).name in {"codex", "codex.exe"}
+def _codex_path_is_ambiguous_homebrew_target(
+    codex_path: str,
+    state: str,
+    *,
+    brew_path: str | None = None,
+    prefix: Path | None = None,
+) -> bool:
+    return (
+        state in {"installed", "unknown"}
+        and _homebrew_codex_path_is_plausible(codex_path, brew_path=brew_path, prefix=prefix)
+    )
 
 
 def _codex_cli_supports_update(codex_path: str) -> bool:
@@ -598,11 +653,16 @@ def _codex_upgrade_command(existing_path: str) -> tuple[list[str], dict[str, str
     brew_path = resolve_cli_path("brew")
     npm_install = _is_npm_codex_install(existing_path)
     if brew_path:
-        brew_state, _, _ = _homebrew_codex_probe(brew_path)
+        brew_state, brew_prefix, _ = _homebrew_codex_probe(brew_path)
         homebrew_target = _homebrew_codex_target(brew_path, existing_path)
         if homebrew_target is not None:
             return [brew_path, "upgrade", "--cask", "codex"], None
-        if not npm_install and _codex_path_is_ambiguous_homebrew_target(existing_path, brew_state):
+        if not npm_install and _codex_path_is_ambiguous_homebrew_target(
+            existing_path,
+            brew_state,
+            brew_path=brew_path,
+            prefix=brew_prefix,
+        ):
             return {
                 "ok": False,
                 "code": "cli_target_unknown",

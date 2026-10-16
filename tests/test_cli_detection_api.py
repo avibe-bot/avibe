@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from config.v2_config import V2Config
+from tests.e2e.json_http_client import JsonHttpClient
 from tests.test_cli_health import make_cli, fixture_env
 from vibe import api, ui_server
 
@@ -45,7 +46,14 @@ def test_crash_version_is_broken_through_both_http_consumers(cli_api, tmp_path):
         tmp_path,
         'import sys\nprint("Error: missing platform package; PRIVATE_SENTINEL; Node.js v22.18.0",file=sys.stderr)\nsys.exit(1)\n',
     )
-    detection = client.get("/api/cli/detect", params={"binary": str(cli), "backend": "codex"}).get_json()
+    detection_response = client.get(
+        "/api/cli/detect",
+        params={"binary": str(cli), "backend": "codex"},
+        headers={"Origin": "http://127.0.0.1:15131"},
+        base_url="http://127.0.0.1:15131",
+    )
+    assert detection_response.status_code == 200, detection_response.get_json()
+    detection = detection_response.get_json()
     runtime = client.get("/api/backend/codex/runtime", params={"cli_path": str(cli)}).get_json()
     assert detection["found"] and detection["status"] == "broken" and detection["version"] is None
     assert runtime["installed"] and runtime["status"] == "broken" and runtime["current_version"] is None
@@ -59,6 +67,88 @@ def test_missing_selected_path_never_substitutes_another_installation(cli_api, t
         api, "resolve_cli_path", lambda _: pytest.fail("an explicit missing selection must not discover another CLI")
     )
     assert api.detect_cli(missing, "codex")["status"] == "missing"
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [{}, {"Origin": "http://evil.example"}],
+    ids=["missing-origin", "foreign-origin"],
+)
+def test_cli_detect_requires_same_origin_browser_evidence_before_probe(cli_api, monkeypatch, headers):
+    client, _ = cli_api
+    probe = AsyncMock(side_effect=AssertionError("rejected request must not execute a probe"))
+    monkeypatch.setattr(api, "detect_cli_async", probe)
+
+    response = client.get(
+        "/api/cli/detect",
+        params={"binary": "/fixture/selected", "backend": "codex"},
+        headers=headers,
+        base_url="http://127.0.0.1:15131",
+    )
+
+    assert response.status_code == 403, response.get_json()
+    assert response.get_json()["error"] == "same_origin_required"
+    probe.assert_not_called()
+
+
+def test_cli_detect_allows_same_origin_browser_probe(cli_api, tmp_path):
+    client, _ = cli_api
+    cli = make_cli(tmp_path, 'print("codex-cli 0.162.1")\n')
+
+    response = client.get(
+        "/api/cli/detect",
+        params={"binary": str(cli), "backend": "codex"},
+        headers={"Origin": "http://127.0.0.1:15131"},
+        base_url="http://127.0.0.1:15131",
+    )
+
+    assert response.status_code == 200, response.get_json()
+    assert response.get_json()["status"] == "ok"
+
+
+def test_cli_detect_allows_same_origin_setup_host_browser_probe(cli_api, tmp_path):
+    client, _ = cli_api
+    config = V2Config.load()
+    config.ui.setup_host = "192.168.2.3"
+    config.remote_access.vibe_cloud.enabled = False
+    config.save()
+    cli = make_cli(tmp_path, 'print("codex-cli 0.162.1")\n')
+
+    response = client.get(
+        "/api/cli/detect",
+        params={"binary": str(cli), "backend": "codex"},
+        headers={"Origin": "http://192.168.2.3:15131"},
+        base_url="http://192.168.2.3:15131",
+    )
+
+    assert response.status_code == 200, response.get_json()
+    assert response.get_json()["status"] == "ok"
+
+
+def test_e2e_json_http_client_sends_origin_on_get(monkeypatch):
+    client = JsonHttpClient("http://127.0.0.1:15123")
+    captured = {}
+
+    class Response:
+        status = 200
+
+        @staticmethod
+        def read():
+            return b'{"found": true}'
+
+    def open_request(request, *, timeout):
+        captured["request"] = request
+        captured["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr(client.opener, "open", open_request)
+
+    status, payload = client.get_json("/api/cli/detect?binary=python3")
+
+    assert status == 200
+    assert payload == {"found": True}
+    assert captured["request"].get_method() == "GET"
+    assert captured["request"].get_header("Origin") == client.base_url
 
 
 @pytest.mark.parametrize(

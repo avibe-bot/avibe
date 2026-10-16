@@ -592,7 +592,10 @@ def _fake_homebrew_cask_run(brew: Path, prefix: Path, *, version: str = "1.2.3",
 
 def test_homebrew_symlinked_stable_bin_target_is_attributable(tmp_path, monkeypatch):
     prefix = tmp_path / "homebrew"
-    brew = executable(prefix / "bin/brew", "#!/bin/sh\n")
+    brew_repo = executable(prefix / "Homebrew/bin/brew", "#!/bin/sh\n")
+    brew = prefix / "bin/brew"
+    brew.parent.mkdir(parents=True, exist_ok=True)
+    brew.symlink_to(brew_repo)
     payload = prefix / "Caskroom/codex/1.2.3/libexec"
     target = executable(payload / "codex", 'print("codex-cli 0.162.1")\n')
     launcher = prefix / "bin/codex"
@@ -636,6 +639,47 @@ def test_homebrew_codex_attribution_fails_closed_for_ambiguous_targets(tmp_path,
     monkeypatch.setattr(api, "_is_npm_codex_install", lambda _path: False)
     monkeypatch.setattr(api, "_codex_cli_supports_update", lambda _path: pytest.fail("ambiguous target must not self-update"))
     result = api._codex_upgrade_command(str(regular))
+    assert result["code"] == "cli_target_unknown"
+    assert api._codex_upgrade_command(str(other_launcher))["code"] == "cli_target_unknown"
+    assert api._codex_upgrade_command(str(nested))["code"] == "cli_target_unknown"
+
+
+@pytest.mark.parametrize("query_ok", [True, False], ids=["installed", "metadata-unknown"])
+def test_codex_custom_self_update_ignores_unrelated_homebrew_cask(tmp_path, monkeypatch, query_ok):
+    prefix = tmp_path / "homebrew"
+    brew = executable(prefix / "bin/brew", "#!/bin/sh\n")
+    custom = executable(tmp_path / "custom/bin/codex", 'print("codex-cli 0.162.1")\n')
+
+    monkeypatch.setattr(api.subprocess, "run", _fake_homebrew_cask_run(brew, prefix, query_ok=query_ok))
+    monkeypatch.setattr(api, "resolve_cli_path", lambda name, **_kwargs: str(brew) if name == "brew" else None)
+    monkeypatch.setattr(api, "_is_npm_codex_install", lambda _path: False)
+    monkeypatch.setattr(api, "_codex_cli_supports_update", lambda path: path == str(custom))
+
+    assert api._codex_upgrade_command(str(custom)) == ([str(custom), "update"], None)
+
+
+def test_homebrew_codex_malformed_metadata_refuses_upgrade(tmp_path, monkeypatch):
+    prefix = tmp_path / "homebrew"
+    brew = executable(prefix / "bin/brew", "#!/bin/sh\n")
+    launcher = executable(prefix / "bin/codex", 'print("codex-cli 0.162.1")\n')
+
+    def fake_run(cmd, **_kwargs):
+        if cmd == [str(brew), "--prefix"]:
+            return SimpleNamespace(returncode=0, stdout=str(prefix) + "\n", stderr="")
+        if cmd == [str(brew), "info", "--cask", "--json=v2", "--installed", "codex"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"casks": [{"token": "codex", "installed": "../escape"}]}),
+                stderr="",
+            )
+        raise AssertionError(f"unexpected Homebrew command: {cmd!r}")
+
+    monkeypatch.setattr(api.subprocess, "run", fake_run)
+    monkeypatch.setattr(api, "resolve_cli_path", lambda name, **_kwargs: str(brew) if name == "brew" else None)
+    monkeypatch.setattr(api, "_is_npm_codex_install", lambda _path: False)
+    monkeypatch.setattr(api, "_codex_cli_supports_update", lambda _path: pytest.fail("malformed metadata must not self-update"))
+
+    result = api._codex_upgrade_command(str(launcher))
     assert result["code"] == "cli_target_unknown"
 
 
