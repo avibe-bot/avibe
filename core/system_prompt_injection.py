@@ -200,7 +200,6 @@ def build_system_prompt_blocks(
     enabled_agents: Optional[Iterable[Any]] = None,
     skills_cwd: str | Path | None = None,
     skills_project_base: str | Path | None = None,
-    skills_claude_cli_path: str | None = None,
     skill_catalog_sink: list[dict[str, Any]] | None = None,
 ) -> list[RenderedPromptBlock]:
     """The production composition, also exported by the debug command."""
@@ -212,7 +211,6 @@ def build_system_prompt_blocks(
         skills = resolve_skills(
             skills_cwd,
             project_base=skills_project_base,
-            claude_cli_path=skills_claude_cli_path,
         )
 
     advertisable_skills = [] if skills is None else [skill for skill in skills if not skill.disable_model_invocation]

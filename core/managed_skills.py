@@ -4,15 +4,10 @@ from __future__ import annotations
 
 import errno
 import html
-import json
 import logging
 import os
 import re
-import shutil
 import stat
-import subprocess
-import threading
-import time
 import unicodedata
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -38,7 +33,6 @@ BUILTIN_SKILLS_SNAPSHOT_ENV = "AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID"
 SKILL_HOME_ENV = "AVIBE_SKILL_HOME"
 SKILL_CODEX_HOME_ENV = "AVIBE_SKILL_CODEX_HOME"
 SKILL_CLAUDE_HOME_ENV = "AVIBE_SKILL_CLAUDE_HOME"
-SKILL_CLAUDE_CLI_PATH_ENV = "AVIBE_SKILL_CLAUDE_CLI_PATH"
 SKILL_XDG_CONFIG_HOME_ENV = "AVIBE_SKILL_XDG_CONFIG_HOME"
 
 CATALOG_PAGE_SIZE = 25
@@ -53,9 +47,6 @@ DISCOVERY_CLASS_MAX_CHILDREN = 4096
 PROJECT_ROOT_MAX_DIRECTORIES = 128
 BUILTIN_TREE_MAX_ENTRIES = 4096
 BUILTIN_TREE_MAX_BYTES = 32 * 1024 * 1024
-CLAUDE_PLUGIN_LIST_MAX_BYTES = 1024 * 1024
-CLAUDE_PLUGIN_LIST_MAX_ENTRIES = 256
-CLAUDE_PLUGIN_LIST_TIMEOUT_SECONDS = 1
 
 _LEGACY_SNAPSHOT_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 _PORTABLE_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -757,7 +748,10 @@ def _project_base_for_working_directory(
     raw = Path(project_base).expanduser()
     if not raw.is_absolute():
         return None
-    resolved = raw.resolve()
+    try:
+        resolved = raw.resolve()
+    except (OSError, RuntimeError):
+        return None
     try:
         relative = working_directory.relative_to(resolved)
     except ValueError:
@@ -774,17 +768,6 @@ def managed_skill_project_base(context: Any) -> str | None:
     target = payload.get("agent_run_target") if isinstance(payload, dict) else None
     value = target.get("project_base") if isinstance(target, dict) else None
     return str(value) if isinstance(value, str) and value else None
-
-
-def managed_skill_claude_cli_path(config: Any) -> str | None:
-    """Return the Claude executable selected by the live runtime config."""
-
-    claude = getattr(config, "claude", None)
-    if claude is None:
-        claude = getattr(getattr(config, "agents", None), "claude", None)
-    value = getattr(claude, "cli_path", None)
-    normalized = str(value).strip() if value is not None else ""
-    return os.path.expanduser(normalized) if normalized else None
 
 
 def _working_directory(cwd: str | Path | None) -> Path:
@@ -888,143 +871,6 @@ def _readable_builtin_catalog(root: Path) -> bool:
     return False
 
 
-def _claude_plugin_skill_roots(
-    working_directory: Path,
-    claude_home: Path,
-    claude_cli_path: str | None,
-) -> list[Path]:
-    registry = claude_home / "plugins" / "installed_plugins.json"
-    try:
-        if not registry.is_file():
-            return []
-    except OSError:
-        return []
-
-    command = (
-        claude_cli_path
-        or os.environ.get(SKILL_CLAUDE_CLI_PATH_ENV)
-        or os.environ.get("CLAUDE_CLI_PATH")
-        or shutil.which("claude")
-    )
-    if not command:
-        return []
-    environment = dict(os.environ)
-    environment["CLAUDE_CONFIG_DIR"] = str(claude_home)
-    output = _bounded_subprocess_stdout(
-        [command, "plugin", "list", "--json"],
-        cwd=working_directory,
-        env=environment,
-        timeout=CLAUDE_PLUGIN_LIST_TIMEOUT_SECONDS,
-        max_bytes=CLAUDE_PLUGIN_LIST_MAX_BYTES,
-    )
-    if output is None:
-        return []
-    try:
-        payload = json.loads(output.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return []
-    if not isinstance(payload, list) or len(payload) > CLAUDE_PLUGIN_LIST_MAX_ENTRIES:
-        return []
-
-    roots: list[tuple[str, Path]] = []
-    for item in payload:
-        if not isinstance(item, dict) or item.get("enabled") is not True:
-            continue
-        plugin_id = item.get("id")
-        install_path = item.get("installPath")
-        if not isinstance(plugin_id, str) or not isinstance(install_path, str):
-            continue
-        raw_path = Path(install_path).expanduser()
-        if not raw_path.is_absolute():
-            continue
-        root = _absolute_path(raw_path) / "skills"
-        if not _path_is_utf8(root):
-            continue
-        roots.append((plugin_id, root))
-    return [root for _, root in sorted(roots, key=lambda item: (item[0], str(item[1])))]
-
-
-def _bounded_subprocess_stdout(
-    command: Sequence[str],
-    *,
-    cwd: Path,
-    env: dict[str, str],
-    timeout: float,
-    max_bytes: int,
-) -> bytes | None:
-    """Capture stdout while bounding combined stdout and stderr in memory."""
-
-    try:
-        process = subprocess.Popen(
-            command,
-            cwd=cwd,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-    except OSError:
-        logger.info("Unable to start bounded subprocess", exc_info=True)
-        return None
-
-    stdout = bytearray()
-    total_bytes = 0
-    lock = threading.Lock()
-    limit_exceeded = threading.Event()
-
-    def drain(stream, *, collect: bool) -> None:
-        nonlocal total_bytes
-        try:
-            while chunk := stream.read(64 * 1024):
-                with lock:
-                    total_bytes += len(chunk)
-                    if collect and len(stdout) <= max_bytes:
-                        remaining = max_bytes + 1 - len(stdout)
-                        stdout.extend(chunk[:remaining])
-                    if total_bytes > max_bytes:
-                        limit_exceeded.set()
-        except (OSError, ValueError):
-            return
-
-    assert process.stdout is not None
-    assert process.stderr is not None
-    streams = (process.stdout, process.stderr)
-    threads = (
-        threading.Thread(target=drain, args=(process.stdout,), kwargs={"collect": True}, daemon=True),
-        threading.Thread(target=drain, args=(process.stderr,), kwargs={"collect": False}, daemon=True),
-    )
-    for thread in threads:
-        thread.start()
-
-    deadline = time.monotonic() + timeout
-    timed_out = False
-    while process.poll() is None:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            timed_out = True
-            break
-        if limit_exceeded.wait(min(0.02, remaining)):
-            break
-
-    if (timed_out or limit_exceeded.is_set()) and process.poll() is None:
-        process.kill()
-    try:
-        process.wait(timeout=1)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait()
-
-    for thread in threads:
-        thread.join(timeout=1)
-    if any(thread.is_alive() for thread in threads):
-        for stream in streams:
-            stream.close()
-        return None
-    if timed_out or limit_exceeded.is_set() or process.returncode != 0:
-        return None
-    return bytes(stdout)
-
-
 def resolve_skills(
     cwd: str | Path | None = None,
     *,
@@ -1033,7 +879,6 @@ def resolve_skills(
     avibe_home: str | Path | None = None,
     codex_home: str | Path | None = None,
     claude_home: str | Path | None = None,
-    claude_cli_path: str | None = None,
     xdg_config_home: str | Path | None = None,
     builtin_catalog_root: str | Path | None = None,
 ) -> list[ManagedSkill]:
@@ -1145,27 +990,11 @@ def resolve_skills(
             )
         )
 
-    for root in _claude_plugin_skill_roots(
-        working_directory,
-        resolved_claude_home,
-        claude_cli_path,
-    ):
-        if compatibility_budget.exhausted:
-            break
-        candidates.extend(
-            _scan_root(
-                root,
-                priority=(2, 0, 5),
-                budget=compatibility_budget,
-                seen_directory_identities=compatibility_directory_identities,
-            )
-        )
-
     if not compatibility_budget.exhausted:
         candidates.extend(
             _scan_root(
                 resolved_codex_home / "skills" / ".system",
-                priority=(2, 0, 6),
+                priority=(2, 0, 5),
                 budget=compatibility_budget,
                 seen_directory_identities=compatibility_directory_identities,
             )
@@ -1691,7 +1520,6 @@ def managed_skill_environment(
     *,
     project_base: str | Path | None = None,
     builtin_catalog_root: str | Path | None = None,
-    claude_cli_path: str | None = None,
 ) -> dict[str, str]:
     """Return the per-backend shell bindings consumed by ``vibe skill``."""
 
@@ -1719,11 +1547,6 @@ def managed_skill_environment(
             SKILL_XDG_CONFIG_HOME_ENV: str(resolved_xdg_home),
         }
     )
-    normalized_claude_cli_path = str(claude_cli_path or "").strip()
-    if normalized_claude_cli_path:
-        env[SKILL_CLAUDE_CLI_PATH_ENV] = os.path.expanduser(
-            normalized_claude_cli_path
-        )
     if builtin_catalog_root is not None:
         bound_root = builtin_catalog_root
     elif BUILTIN_SKILLS_ROOT_ENV in os.environ:

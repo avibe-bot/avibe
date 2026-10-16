@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import stat
 import sys
@@ -12,11 +11,11 @@ import pytest
 from core import managed_skills
 from core.managed_skills import (
     BUILTIN_SKILLS_ROOT_ENV,
+    BUILTIN_SKILLS_SNAPSHOT_ENV,
     CATALOG_DESCRIPTION_MAX_CHARS,
     CATALOG_PAGE_MAX_BYTES,
     CATALOG_PAGE_SIZE,
     SKILL_BODY_MAX_BYTES,
-    SKILL_CLAUDE_CLI_PATH_ENV,
     SKILL_CLAUDE_HOME_ENV,
     SKILL_CODEX_HOME_ENV,
     SKILL_HOME_ENV,
@@ -35,6 +34,8 @@ from core.managed_skills import (
 )
 from core.system_prompt_injection import build_system_prompt_injection
 from modules.im import MessageContext
+
+
 
 
 def _write_skill(
@@ -1148,156 +1149,6 @@ def test_distinct_same_name_candidates_keep_precedence_winner(tmp_path: Path) ->
     assert skills[0].description == "Codex"
 
 
-def test_enabled_claude_plugin_skills_join_the_managed_catalog(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    home, cwd = _isolate_live_commands(monkeypatch, tmp_path)
-    claude_home = home / ".claude"
-    registry = claude_home / "plugins" / "installed_plugins.json"
-    registry.parent.mkdir(parents=True)
-    registry.write_text('{"version": 2, "plugins": {}}', encoding="utf-8")
-    plugin = tmp_path / "plugin-cache" / "formatter"
-    _write_skill(plugin / "skills", "format-code", "format-code", "Format code")
-    captured = {}
-
-    def plugin_list(command, **kwargs):
-        captured.update(command=command, **kwargs)
-        return json.dumps(
-            [
-                {
-                    "id": "formatter@example",
-                    "enabled": True,
-                    "installPath": str(plugin),
-                },
-                {
-                    "id": "disabled@example",
-                    "enabled": False,
-                    "installPath": str(tmp_path / "disabled"),
-                },
-            ]
-        ).encode()
-
-    monkeypatch.setattr(managed_skills, "_bounded_subprocess_stdout", plugin_list)
-
-    skills = resolve_skills(
-        cwd,
-        home=home,
-        avibe_home=tmp_path / "avibe",
-        codex_home=home / ".codex",
-        claude_home=claude_home,
-        claude_cli_path="/opt/claude-custom",
-        xdg_config_home=home / ".config",
-        builtin_catalog_root="",
-    )
-
-    assert [skill.name for skill in skills] == ["format-code"]
-    assert captured["command"] == [
-        "/opt/claude-custom",
-        "plugin",
-        "list",
-        "--json",
-    ]
-    assert captured["cwd"] == cwd
-    assert captured["env"]["CLAUDE_CONFIG_DIR"] == str(claude_home)
-    assert captured["timeout"] == managed_skills.CLAUDE_PLUGIN_LIST_TIMEOUT_SECONDS
-    assert captured["max_bytes"] == managed_skills.CLAUDE_PLUGIN_LIST_MAX_BYTES
-
-
-@pytest.mark.parametrize(
-    ("stdout_bytes", "stderr_bytes"),
-    [(4097, 0), (0, 4097), (2049, 2049)],
-)
-def test_bounded_subprocess_capture_rejects_oversized_combined_output(
-    tmp_path: Path,
-    stdout_bytes: int,
-    stderr_bytes: int,
-) -> None:
-    limit = 4096
-
-    assert managed_skills._bounded_subprocess_stdout(
-        [
-            sys.executable,
-            "-c",
-            (
-                "import os; "
-                f"os.write(1, b'x' * {stdout_bytes}); "
-                f"os.write(2, b'x' * {stderr_bytes})"
-            ),
-        ],
-        cwd=tmp_path,
-        env=dict(os.environ),
-        timeout=1,
-        max_bytes=limit,
-    ) is None
-
-
-def test_bounded_subprocess_capture_rejects_timeout(tmp_path: Path) -> None:
-    assert managed_skills._bounded_subprocess_stdout(
-        [sys.executable, "-c", "import time; time.sleep(1)"],
-        cwd=tmp_path,
-        env=dict(os.environ),
-        timeout=0.01,
-        max_bytes=4096,
-    ) is None
-
-
-def test_claude_plugin_discovery_fails_closed_when_capture_fails(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    home, cwd = _isolate_live_commands(monkeypatch, tmp_path)
-    claude_home = home / ".claude"
-    registry = claude_home / "plugins" / "installed_plugins.json"
-    registry.parent.mkdir(parents=True)
-    registry.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(managed_skills.shutil, "which", lambda _: "/usr/bin/claude")
-
-    monkeypatch.setattr(managed_skills, "_bounded_subprocess_stdout", lambda *args, **kwargs: None)
-
-    assert resolve_skills(
-        cwd,
-        home=home,
-        avibe_home=tmp_path / "avibe",
-        codex_home=home / ".codex",
-        claude_home=claude_home,
-        xdg_config_home=home / ".config",
-        builtin_catalog_root="",
-    ) == []
-
-
-def test_enabled_claude_plugin_skill_overrides_codex_system_default(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    home, cwd = _isolate_live_commands(monkeypatch, tmp_path)
-    claude_home = home / ".claude"
-    registry = claude_home / "plugins" / "installed_plugins.json"
-    registry.parent.mkdir(parents=True)
-    registry.write_text("{}", encoding="utf-8")
-    plugin = tmp_path / "plugin-cache" / "formatter"
-    plugin_skill = _write_skill(plugin / "skills", "shared", "shared", "Plugin")
-    _write_skill(home / ".codex" / "skills" / ".system", "shared", "shared", "System")
-    payload = json.dumps(
-        [{"id": "formatter@example", "enabled": True, "installPath": str(plugin)}]
-    ).encode()
-    monkeypatch.setattr(managed_skills, "_bounded_subprocess_stdout", lambda *args, **kwargs: payload)
-
-    skills = resolve_skills(
-        cwd,
-        home=home,
-        avibe_home=tmp_path / "avibe",
-        codex_home=home / ".codex",
-        claude_home=claude_home,
-        claude_cli_path="/opt/claude-custom",
-        xdg_config_home=home / ".config",
-        builtin_catalog_root="",
-    )
-
-    assert len(skills) == 1
-    assert skills[0].directory == plugin_skill.parent.resolve()
-
-
 def test_publication_overwrites_the_named_catalog_and_preserves_executable_modes(
     tmp_path: Path,
 ) -> None:
@@ -1922,19 +1773,6 @@ def test_managed_skill_environment_binds_valid_project_base(tmp_path: Path) -> N
     assert SKILL_PROJECT_BASE_ENV not in managed_skill_environment(
         working_directory,
         project_base=tmp_path / "other",
-    )
-
-
-def test_managed_skill_environment_binds_configured_claude_cli_path(
-    tmp_path: Path,
-) -> None:
-    env = managed_skill_environment(
-        tmp_path,
-        claude_cli_path="~/tools/claude-custom",
-    )
-
-    assert env[SKILL_CLAUDE_CLI_PATH_ENV] == str(
-        Path("~/tools/claude-custom").expanduser()
     )
 
 

@@ -128,10 +128,9 @@ ${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills
 ${CODEX_HOME:-$HOME/.codex}/skills/.system
 ```
 
-When Claude reports enabled plugins through its supported CLI, their standard
-`skills` directories are also best-effort compatibility roots. Plugin lookup
-failure omits only plugin roots; it never prevents static discovery or a
-backend Turn.
+Claude plugin Skills are intentionally not part of this resolver. It reads only the ordinary static project and user
+Skill roots described above; it does not read plugin registries, caches, manifests, settings, or other plugin
+sources, and Skill resolution never starts the Claude CLI.
 
 Native locations are read in place. Avibe does not migrate or rename them, and
 the Catalog never annotates their source. A successful load still includes the
@@ -165,8 +164,8 @@ Within the same project depth or global scope, family order is:
 
 Here `OpenCode` maps to `.opencode/skills` for project discovery and
 `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills` for global discovery. The
-`.avibe` family slot is reserved in v1. Enabled Claude plugin roots follow the
-static user roots, and Codex `.system` defaults are last. A final stable path
+`.avibe` family slot is reserved in v1, and Codex `.system` defaults are last.
+A final stable path
 order breaks any remaining tie. Winners are sorted by name before Catalog
 pagination.
 

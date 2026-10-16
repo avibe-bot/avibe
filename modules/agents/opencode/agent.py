@@ -32,7 +32,6 @@ from core.caller_context import (
 from core.message_output import stop_output_for
 from core.managed_skills import (
     BUILTIN_SKILLS_ROOT_ENV,
-    managed_skill_claude_cli_path,
     managed_skill_environment,
     managed_skill_project_base,
 )
@@ -1802,9 +1801,6 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             managed_skills_env = managed_skill_environment(
                 request.working_path,
                 project_base=project_base,
-                claude_cli_path=managed_skill_claude_cli_path(
-                    getattr(getattr(self, "controller", None), "config", None)
-                ),
             )
             binding_extra_env = {**caller_context_env, **managed_skills_env}
             binding_token = secrets.token_hex(16)
@@ -1859,9 +1855,6 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 enabled_agents=get_enabled_agents_for_prompt(self.controller),
                 skills_cwd=request.working_path if binding_bound else None,
                 skills_project_base=project_base,
-                skills_claude_cli_path=managed_skill_claude_cli_path(
-                    getattr(getattr(self, "controller", None), "config", None)
-                ),
                 skill_catalog_sink=skill_catalog_sink,
             )
             raw_settings_key = _raw_settings_key_from_session_key(request.session_key)
@@ -2997,9 +2990,6 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 restored_managed_skills_env = managed_skill_environment(
                     poll_info.working_path,
                     project_base=restored_project_base,
-                    claude_cli_path=managed_skill_claude_cli_path(
-                        getattr(getattr(self, "controller", None), "config", None)
-                    ),
                     builtin_catalog_root=restored_catalog_root,
                 )
                 restored_bound = False

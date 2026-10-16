@@ -28,7 +28,6 @@ from core.agent_input import AgentInputMetadata
 from core.caller_context import caller_env_for_platform_payload
 from core.message_output import stop_output_for, terminal_output_for
 from core.managed_skills import (
-    managed_skill_claude_cli_path,
     managed_skill_environment,
     managed_skill_project_base,
 )
@@ -3119,9 +3118,6 @@ class CodexAgent(BaseAgent):
             managed_skill_environment(
                 getattr(request, "working_path", None),
                 project_base=managed_skill_project_base(context),
-                claude_cli_path=managed_skill_claude_cli_path(
-                    getattr(getattr(self, "controller", None), "config", None)
-                ),
             )
         )
         return env
@@ -4025,9 +4021,6 @@ class CodexAgent(BaseAgent):
             enabled_agents=get_enabled_agents_for_prompt(self.controller),
             skills_cwd=getattr(request, "working_path", None),
             skills_project_base=managed_skill_project_base(request.context),
-            skills_claude_cli_path=managed_skill_claude_cli_path(
-                getattr(getattr(self, "controller", None), "config", None)
-            ),
             skill_catalog_sink=skill_catalog_sink,
         )
 
