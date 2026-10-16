@@ -36,56 +36,76 @@ Both paths leave a Turn whose snapshot disagrees with its Run. The first also pu
 
 ## Decision
 
-**Every IM surface stays where it is. The signal moves out of the IM work. Once the durable steps have succeeded, the emit ends with one synchronous terminal block, after its last IM surface, and the block runs in a `finally`.** The block, in order:
-1. the signal: `_signal_turn_complete`, or, for a delivered result, the completion half of `_stream_chunk`, with its token check and settlement rule. Its chunk forward stays where it is;
-2. the Activity settlement check, as today. A failure no longer skips the rest of the block: its error is held and raised once the block has run;
-3. `_release_runtime_turn`;
-4. `on_terminal_delivery_complete`, called by the dispatcher here.
+**The emit keeps master's rule for which outcomes complete the Turn and changes only the order. Once an emit has passed its durable steps, it ends with one synchronous terminal block after its last IM surface. The block runs from the dispatcher's `finally`, so a cancellation or failure in an IM surface cannot skip it.**
 
-A local flag records that the durable steps succeeded. The dispatcher's existing `finally` runs the processing-indicator cleanup, as today. Then, in an inner `finally`, it runs the block if the flag is set, or else only the release, as today. So the block runs after a normal ending, and also after a cancellation or failure in any IM surface, before the cancellation propagates. The release keeps its place after every IM surface and before B.
+**Durable steps first.** In the delivered branch, the durable steps move up to directly after the primary delivery (the result send and its fallbacks): the Run terminal record and the persist. Those writes read only the send's result. They do not read anything produced by what currently precedes them:
+- the delivery notice;
+- `_upload_file_links`;
+- `finalize_scheduled_delivery`;
+- `_retire_status_bubble`;
+- `_drop_status_keys`.
+
+So these IM surfaces follow the durable steps, in their current order. In the other three branches the durable steps already precede every IM surface.
+
+**When the block runs.** A local flag is set once the durable steps have passed. It is set in both cases where master goes on to its signal:
+- the steps succeeded;
+- a step failed in a way master converts and raises only after its signal. The live case is a Run record that fails after a delivered Activity output, which becomes a held `ActivityOutputDeliveryError`.
+
+A durable-step failure that master raises before its signal leaves the flag unset. Examples are an undelivered Activity output, a Workbench output that was not persisted, and a Run record failure with nothing delivered. The `finally` then runs only the release, B does not run, and the Turn owner stays live, as today.
+
+**What the block runs.** The block takes over master's sequence from the signal onwards, and adds the release and B before the return or raise:
+1. the signal: `_signal_turn_complete`, or, for a delivered result, the completion half of `_stream_chunk`, with its token check and settlement rule. Its chunk forward stays an IM-side step before the block;
+2. what master runs between its signal and its return: the Activity settlement check, or, when a converted error is held, nothing, since master skips the check then. An error from this step is held;
+3. `_release_runtime_turn`;
+4. `on_terminal_delivery_complete`, called by the dispatcher here;
+5. then the held error, if any, is raised, so the caller sees what it sees on master.
+
+The dispatcher's existing `finally` runs the processing-indicator cleanup, as today. Then, in an inner `finally`, it runs the block if the flag is set, or only the release otherwise. The release keeps its place after every IM surface and before B. Nothing in the block awaits, so neither the runner nor a cancellation can get between the signal and B.
 
 The controller keeps its call after the dispatcher returns. That call is a no-op once the pending flag is popped (`_SHOW_CHECKPOINT_TERMINAL_PENDING_KEY`), and it still covers dispatchers that do not reach this block.
 
-Nothing in the block awaits, so neither the runner nor a cancellation can get between the signal and B.
+**If B's own write fails.** `_finish_durable_terminal_result` logs and returns when `_terminalize_durable_turn` raises, for example a busy database. The runner's release would then commit without evidence. So `runner_release` carries the evidence `on_terminal_result` latched on the sink (`sink["terminal_evidence"]`), but only when the sink was released with a terminal-result settlement (`terminal_result` or `turn_only_result`). After this change, that settlement is set by the block, which attempts B in the same step. The one other setter is Claude's direct release after a failed agent-initiated settle, and it latches no evidence. `dispatch_turn` already reads the sink's settlement before popping the sink; it reads the evidence the same way and returns both to the runner. The runner then commits what B would have committed. In every other case, B wins and the runner's write is a no-op.
 
 Not chosen:
 - **Running the block before the IM surfaces** (this note's first version). After the release, a successor can start while the previous Turn's surfaces are still running. Status state is keyed by the thread's latest trigger message, and a successor without its own trigger, such as a quick-reply Turn (`message_id=None`), shares that key. The previous Turn's collapse and clear would then act on the successor's bubble and state. Avoiding that needs status state detached from its key at the release, which is a new mechanism. Leaving the surfaces before the release needs none.
 - **Running the Activity settlement check before the signal**, and not signalling when it fails. Some failures are swallowed by their caller. For example, the Claude receiver logs a delivered Activity batch that is not durable and keeps it fail-closed; nothing else would then signal the Turn, and its runner would wait forever.
-- **Making `runner_release` carry the latched evidence.** The latch is set before delivery, so it does not prove the result was delivered. The runner would need a second "delivered" marker, which would make it a second owner of a decision the emit already makes.
+- **Making `runner_release` carry the latched evidence unconditionally**, instead of the block. The latch is set before delivery, so on its own it does not prove the emit got that far. It also does not fix the cancellation case: a Stop that lands before the signal takes the runner's cancelled path. The fallback above therefore depends on the block's settlement.
 
 ## What changes, and what does not
 
 - **For IM surfaces and successors: nothing.** The status bubble collapse or retire, the state clear and the processing indicator all run before the runtime release, as on master. A successor still cannot start before them, and nothing new shares state with it.
+- **The delivered branch writes its durable steps earlier.** It writes them before its delivery notice, file uploads and bubble retire instead of after them. A failure or cancellation in those surfaces no longer leaves a delivered result without its message row and Run record.
 - **The signal comes later on IM.** It moves from before the indicator cleanup to after it. The runner, `turn.end` and the queued successor wake after that cleanup's IM calls instead of before them. A successor already waited for them, because the release follows the cleanup on master. Web Turns have no indicator, and their signal does not move in time.
-- **A held Activity settlement failure** now leaves the Turn `terminal_result` with this emit's evidence. On master the runner won the race there and left `runner_release` without it. The emit still raises the same error to its caller, so the Activity's own retry is unchanged: the requeue, the completed-Activity flush and the Registry-owned settlement. A backend's follow-up close for that Turn, such as Claude's silent turn-only emit after an undelivered Activity output, finds the Turn terminal and is a no-op. That is what it already is on master, where the runner wins.
+- **A held Activity error** (a settlement failure, or a Run record failure after a delivered Activity output) now leaves the Turn `terminal_result` with this emit's evidence. On master the runner won the race there and left `runner_release` without it. The emit still raises the same error to its caller, so the Activity's own retry is unchanged: the requeue, the completed-Activity flush and the Registry-owned settlement. A backend's follow-up close for that Turn, such as Claude's silent turn-only emit after an undelivered Activity output, finds the Turn terminal and is a no-op. That is what it already is on master, where the runner wins.
 - **Successor resume, the Model Hub fence and event order.** B runs while `in_flight` still holds the Turn, so it does not spawn the resume. The runner does, after B: exactly once, Path B's ordering 2. The Model Hub fence (ordering 3) and `session.status` before `turn.end` (ordering 4) now hold on IM as well. Web Turns already had them.
 
 ## When an IM step fails or is cancelled
 
 - **A failed IM step** is logged by the step itself, as today: a failed edit, delete or reaction call.
-- **A cancellation** interrupts the surface it lands in. The block still runs from the `finally`, and the cancellation then propagates. The remaining surfaces are skipped, as today, and leave the same things behind:
+- **A cancellation after the durable steps** interrupts the surface it lands in: the notice, a file upload, the bubble retire or collapse, the state clear, the chunk forward or the indicator cleanup. The block still runs from the `finally`, and the cancellation then propagates. The remaining surfaces are skipped, as today, and leave the same things behind:
   - the bubble keeps its last running text, though its heartbeat stops because the gate is released;
   - the 👀 reaction stays;
   - the typing keepalive stops at its next tick (`_typing_turn_is_current`).
 
   The indicator cleanup in the `finally` still runs while the cancellation propagates, as it does on master. The block adds no IM call, and nothing holds a caught cancellation across the network, the rule A follows.
-- **A failure in a durable step** (delivery, persist, the Run record) happens before the flag is set. The `finally` then runs only the release, B does not run, and the Turn owner stays live, as today.
+- **A cancellation during the primary delivery** comes before the durable steps. The flag stays unset and the runner's cancelled path settles the Turn, as on master. A split or fallback send that was cut off part-way may have shown the user part of the result. That is the existing behaviour of a Stop during delivery, and it is not changed here.
 
 ## What stays uncancellable
 
-Only the block, which has no await. Its four steps are synchronous. B's transaction is the existing loop-side write; moving it off the loop is Path B step 2.
+Only the block, which has no await. Its steps are synchronous. B's transaction is the existing loop-side write; moving it off the loop is Path B step 2.
 
-A cancellation caught during the Run terminal record (A, #2715, the `_store_step` rule) is re-armed for the next suspension. That is the first IM surface, or the indicator cleanup, and the `finally` runs the block after it.
+A cancellation caught during the Run terminal record (A, #2715, the `_store_step` rule) is re-armed for the next suspension. The persist is synchronous, so that suspension comes after the flag is set: the first IM surface, or the indicator cleanup. The `finally` then runs the block.
 
 ## Test design
 
 - **Regression, failing on master.** Run the real runner with the real dispatcher terminal emit for an IM context whose processing indicator suspends in `finish`. Assert that the Turn's terminal snapshot is `terminal_result` and carries the evidence. One case per branch: silent, duplicate, suppressed, delivered.
-- **Cancellation.** Cancel the receiver at each suspension after the durable steps: the collapse, the clear, the chunk forward and the indicator cleanup. Assert that:
-  - the snapshot carries the evidence;
-  - the cancellation propagates;
-  - the runtime is released.
-- **Activity settlement failure.** A held settlement failure still raises to the caller, and the Turn ends `terminal_result` with the evidence.
-- **Durable-step failure.** The Turn owner stays live, and B does not run.
+- **Cancellation.** Cancel the receiver at each suspension after the durable steps, and assert that the snapshot carries the evidence, the cancellation propagates and the runtime is released. The suspensions are:
+  - the delivery notice, the file uploads, the bubble retire and the state drop in the delivered branch;
+  - the collapse and the clear in the other branches;
+  - the chunk forward and the indicator cleanup.
+- **Held Activity errors.** For a settlement failure, and for a Run record failure after a delivered Activity output, the emit still raises the same error to its caller, and the Turn ends `terminal_result` with the evidence.
+- **Durable-step failure raised before the signal.** For an undelivered Activity output and for an unpersisted Workbench output, the Turn owner stays live and B does not run.
+- **B's own write fails.** Make `_terminalize_durable_turn` raise once for B. The runner's release then commits the latched evidence, and a release without a terminal-result settlement still commits none.
 - **Existing tests that pin the current order, kept green:**
   - `tests/test_controller_dispatch_loop.py`: the checkpoint ends after delivery, and a delivery failure keeps the Turn owner live;
   - `tests/test_message_dispatcher_result_fallback.py`;
@@ -97,4 +117,8 @@ A cancellation caught during the Run terminal record (A, #2715, the `_store_step
 ## Plan
 
 - [ ] Accept this note.
-- [ ] One change across the four terminal branches: move the signal into a synchronous terminal block that runs after the last IM surface, in the dispatcher's `finally`, once the durable steps have succeeded. Hold the Activity settlement error until the block has run. Add the tests above.
+- [ ] One change across the four terminal branches:
+  - in the delivered branch, the durable steps directly after the primary delivery;
+  - a synchronous terminal block that takes over master's signal-to-raise sequence and adds the release and B, run from the dispatcher's `finally` once the durable steps have passed;
+  - the runner's release carrying the latched evidence after a terminal-result settlement;
+  - the tests above.
