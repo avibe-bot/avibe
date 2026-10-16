@@ -49,7 +49,7 @@ def repo(tmp_path: Path) -> Path:
     return root
 
 
-def push(repo: Path, base: str, **overrides) -> tuple[bool, str, str]:
+def push(repo: Path, base: str, **overrides) -> tuple[bool, str, str, bool]:
     after = git(repo, "rev-parse", "HEAD")
     event = {"before": base, "after": after, "created": False, "deleted": False, "forced": False}
     event.update(overrides)
@@ -209,14 +209,21 @@ def test_cli_keeps_docs_pr_fast_but_master_replaces_full_coverage(
            "GITHUB_STEP_SUMMARY": str(summary)}
     result = subprocess.run([sys.executable, str(SCRIPT)], cwd=repo, env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
-    assert output.read_text() == f"docs_only={expected}\n"
+    assert output.read_text() == (
+        f"docs_only={expected}\nwindows_control_ipc=false\n"
+    )
     assert "Impact shadow: **docs-only**" in summary.read_text()
     if event_name == "push":
         assert "superseded code changes" in result.stdout
     event.unlink()
     result = subprocess.run([sys.executable, str(SCRIPT)], cwd=repo, env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
-    assert output.read_text().splitlines() == [f"docs_only={expected}", "docs_only=false"]
+    assert output.read_text().splitlines() == [
+        f"docs_only={expected}",
+        "windows_control_ipc=false",
+        "docs_only=false",
+        "windows_control_ipc=false",
+    ]
     assert "Impact shadow: **unknown**" in summary.read_text()
     assert "full" in summary.read_text()
 
@@ -246,8 +253,38 @@ def test_impact_shadow_never_authorizes_skipping_code_tests(repo: Path, tmp_path
                                  "GITHUB_EVENT_PATH": str(event), "GITHUB_OUTPUT": str(output),
                                  "GITHUB_STEP_SUMMARY": str(summary)})
     assert result.returncode == 0, result.stderr
-    assert output.read_text() == "docs_only=false\n"  # No impact output for jobs to consume.
+    # Impact stays observational; windows_control_ipc is an explicit extra job, not a skip.
+    assert output.read_text() == "docs_only=false\nwindows_control_ipc=false\n"
     assert f"Impact shadow: **{category}**" in summary.read_text()
+
+
+@pytest.mark.parametrize(("path", "selected"), [
+    ("core/managed_skills.py", True),
+    ("tests/test_managed_skills.py", True),
+    ("core/controller.py", False),
+    ("tests/test_control_ipc.py", False),
+])
+def test_windows_control_ipc_selects_builtin_skill_publication_paths(
+    repo: Path, tmp_path: Path, path: str, selected: bool,
+) -> None:
+    before = git(repo, "rev-parse", "HEAD")
+    write(repo, path, "print('runtime')\n")
+    sha = commit(repo)
+    result = push(repo, before)
+    assert result[0] is False and result[3] is selected
+    event = tmp_path / "event.json"
+    output = tmp_path / "output"
+    event.write_text(json.dumps({"before": before, "after": sha,
+                                 "created": False, "deleted": False, "forced": False}))
+    ran = subprocess.run(
+        [sys.executable, str(SCRIPT)], cwd=repo, capture_output=True, text=True,
+        env={**os.environ, "GITHUB_EVENT_NAME": "push", "GITHUB_SHA": sha,
+             "GITHUB_EVENT_PATH": str(event), "GITHUB_OUTPUT": str(output)},
+    )
+    assert ran.returncode == 0, ran.stderr
+    assert output.read_text() == (
+        f"docs_only=false\nwindows_control_ipc={str(selected).lower()}\n"
+    )
 
 
 def test_guidance_remains_enforced_when_an_agents_only_diff_skips_application_tests(repo: Path) -> None:

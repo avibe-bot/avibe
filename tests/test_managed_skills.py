@@ -77,6 +77,46 @@ def _isolate_live_commands(monkeypatch, tmp_path: Path) -> tuple[Path, Path]:
     return home, cwd
 
 
+def _install_zero_identity_scandir(monkeypatch) -> None:
+    """Make DirEntry.stat() report st_dev/st_ino as zero, as Windows listings do."""
+
+    real_scandir = os.scandir
+    sequence_fields = {"st_mode", "st_ino", "st_dev", "st_nlink", "st_uid", "st_gid", "st_size"}
+
+    class _WindowsLikeEntry:
+        def __init__(self, entry: os.DirEntry) -> None:
+            self.name = entry.name
+            self.path = entry.path
+            self._entry = entry
+
+        def stat(self, *, follow_symlinks: bool = True) -> os.stat_result:
+            real = self._entry.stat(follow_symlinks=follow_symlinks)
+            values = list(real)
+            values[1] = 0  # st_ino
+            values[2] = 0  # st_dev
+            extras = {
+                name: getattr(real, name)
+                for name in dir(real)
+                if name.startswith("st_") and name not in sequence_fields
+            }
+            return os.stat_result(values, extras)
+
+        def __getattr__(self, name: str):
+            return getattr(self._entry, name)
+
+    class _WindowsLikeScandir:
+        def __init__(self, path) -> None:
+            self._iterator = real_scandir(path)
+
+        def __enter__(self):
+            return (_WindowsLikeEntry(entry) for entry in self._iterator)
+
+        def __exit__(self, *exc_info) -> None:
+            self._iterator.close()
+
+    monkeypatch.setattr(managed_skills.os, "scandir", _WindowsLikeScandir)
+
+
 def test_loose_parser_requires_only_portable_name_and_description(tmp_path: Path) -> None:
     skill_file = tmp_path / "skill" / "SKILL.md"
     skill_file.parent.mkdir()
@@ -809,43 +849,7 @@ def test_discovery_ignores_zero_directory_entry_identities(tmp_path: Path, monke
     _write_skill(root, "beta", "beta", "Beta")
     linked = _write_skill(tmp_path / "shared", "formatter", "formatter", "Format")
     (root / "formatter").symlink_to(linked.parent, target_is_directory=True)
-    real_scandir = os.scandir
-    sequence_fields = {"st_mode", "st_ino", "st_dev", "st_nlink", "st_uid", "st_gid", "st_size"}
-
-    class _WindowsLikeEntry:
-        def __init__(self, entry: os.DirEntry) -> None:
-            self.name = entry.name
-            self.path = entry.path
-            self._entry = entry
-
-        def stat(self, *, follow_symlinks: bool = True) -> os.stat_result:
-            real = self._entry.stat(follow_symlinks=follow_symlinks)
-            values = list(real)
-            values[1] = 0  # st_ino
-            values[2] = 0  # st_dev
-            # Only the identity differs from a Windows listing; keep the rest
-            # (st_file_attributes, *_ns, ...) so callers that read it still work.
-            extras = {
-                name: getattr(real, name)
-                for name in dir(real)
-                if name.startswith("st_") and name not in sequence_fields
-            }
-            return os.stat_result(values, extras)
-
-        def __getattr__(self, name: str):
-            return getattr(self._entry, name)
-
-    class _WindowsLikeScandir:
-        def __init__(self, path) -> None:
-            self._iterator = real_scandir(path)
-
-        def __enter__(self):
-            return (_WindowsLikeEntry(entry) for entry in self._iterator)
-
-        def __exit__(self, *exc_info) -> None:
-            self._iterator.close()
-
-    monkeypatch.setattr(managed_skills.os, "scandir", _WindowsLikeScandir)
+    _install_zero_identity_scandir(monkeypatch)
 
     names = {skill.name for skill in resolve_skills(cwd)}
     assert {"use-avibe", "use-avibe-vault", "alpha", "beta", "formatter"} <= names
@@ -1794,6 +1798,45 @@ def test_publication_rejects_source_changes_before_swap(
 
     with pytest.raises(RuntimeError, match="source changed"):
         publish_builtin_skills(source_root=source, destination_root=destination)
+
+
+def test_publication_survives_zero_directory_entry_identities(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Windows DirEntry identities are zero; an unchanged source must still publish."""
+
+    source = tmp_path / "source"
+    destination = tmp_path / "builtin-skills"
+    _write_skill(source, "alpha", "alpha", "Alpha")
+    _install_zero_identity_scandir(monkeypatch)
+
+    assert publish_builtin_skills(source_root=source, destination_root=destination) == destination
+    assert (destination / "alpha" / "SKILL.md").is_file()
+
+
+def test_publication_detects_source_change_with_zero_directory_entry_identities(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "builtin-skills"
+    skill_file = _write_skill(source, "alpha", "alpha", "Alpha", "Old\n")
+    original_copy = managed_skills._copy_snapshot_entries
+    _install_zero_identity_scandir(monkeypatch)
+
+    def copy_then_rewrite(entries, destination_root):
+        original_copy(entries, destination_root)
+        skill_file.write_text(
+            "---\nname: alpha\ndescription: Alpha\n---\nNew\n",
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(managed_skills, "_copy_snapshot_entries", copy_then_rewrite)
+
+    with pytest.raises(RuntimeError, match="source changed"):
+        publish_builtin_skills(source_root=source, destination_root=destination)
+    assert not destination.exists()
 
 
 def test_publication_restores_previous_if_live_swap_fails(

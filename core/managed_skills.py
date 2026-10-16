@@ -613,6 +613,12 @@ def parse_skill_file(
     return skill
 
 
+def _dir_entry_stat(entry: os.DirEntry, *, follow_symlinks: bool = False) -> os.stat_result:
+    # DirEntry.stat() reports st_dev/st_ino as zero on Windows; identity and
+    # publication tokens need the path's real stat, same as discovery (#2270).
+    return os.stat(entry.path, follow_symlinks=follow_symlinks)
+
+
 def _root_children(
     root: Path,
     *,
@@ -637,9 +643,7 @@ def _root_children(
                 if entry.name in ignored_names:
                     continue
                 try:
-                    # DirEntry.stat() reports st_dev/st_ino as zero on Windows;
-                    # identity checks downstream need the path's real stat.
-                    entry_stat = os.stat(entry.path, follow_symlinks=False)
+                    entry_stat = _dir_entry_stat(entry, follow_symlinks=False)
                 except OSError:
                     continue
                 children.append((entry.name, Path(entry.path), entry_stat))
@@ -874,7 +878,7 @@ def _readable_builtin_catalog(root: Path) -> bool:
                 if _is_catalog_noise(entry.name, child):
                     continue
                 try:
-                    child_stat = entry.stat(follow_symlinks=False)
+                    child_stat = _dir_entry_stat(entry, follow_symlinks=False)
                 except OSError:
                     continue
                 if stat.S_ISDIR(child_stat.st_mode) and (child / "SKILL.md").is_file():
@@ -1459,7 +1463,7 @@ def _snapshot_entries(root: Path) -> list[_SnapshotEntry]:
                     f"Built-in Skill tree exceeds {BUILTIN_TREE_MAX_ENTRIES:,} entries"
                 )
             try:
-                child_stat = child.stat(follow_symlinks=False)
+                child_stat = _dir_entry_stat(child, follow_symlinks=False)
             except OSError as exc:
                 raise RuntimeError(f"Cannot inspect built-in Skill path: {relative}") from exc
             file_attributes = int(getattr(child_stat, "st_file_attributes", 0))
