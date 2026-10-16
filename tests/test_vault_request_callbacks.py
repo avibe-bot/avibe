@@ -1006,7 +1006,7 @@ def test_live_waiter_keeps_its_approval_past_its_wall_clock_deadline_and_across_
         delivery = json.loads(_row(conn, req["id"])["delivery"])
     assert delivery["waiter"]["status"] == "completed"
     assert "continuation" not in delivery
-    assert not vs.request_waiter_lock_path(paths.get_sqlite_state_path(), waiter_id).exists()
+    assert vs.probe_lock_holder(vs.request_waiter_lock_path(paths.get_sqlite_state_path(), waiter_id)) in {"free", "missing"}
 
 
 @pytest.mark.parametrize("backend", ["sqlite", "file"])
@@ -1110,6 +1110,10 @@ def test_claim_follows_waiter_owner_evidence(vault, owner, deadline_minutes, exp
     else:
         _, lock = _arm_lock_waiter(vault, req["id"], deadline_at=deadline_at)
         vs.release_request_waiter_lock(lock, discard=owner == "lock_missing")
+        if owner == "lock_missing":
+            # Windows cannot unlink the held handle; make the missing-evidence fixture
+            # explicit after release rather than accidentally testing a free lock.
+            lock.lock_path.unlink(missing_ok=True)
     with vault.begin() as conn:
         _grant_from_request(conn, req)
         claim = vs.claim_request_callback(conn, req["id"])
