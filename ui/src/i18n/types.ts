@@ -1,4 +1,5 @@
 import type { ParseKeys, TFunctionReturn } from 'i18next';
+import type {} from './i18next';
 import type en from './en.json';
 import type { TranslationPaths } from './resourceTypes';
 
