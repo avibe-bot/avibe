@@ -34,6 +34,7 @@ from core.delivery_target import normalize_message_kind
 from core.agent_input import AgentInputMetadata
 from core.backend_failure import backend_failure_notification_output, harness_run_identity
 from core.message_context import (
+    TERMINAL_COMMIT_KEY,
     resolve_turn_sink_key,
 )
 from core.native_dispatch_phase import (
@@ -5332,10 +5333,41 @@ class SessionTurnManager:
         terminal_is_error: bool,
         cancel_defers_queue_resume: bool = False,
         failure_evidence: dict[str, Any] | None = None,
+        terminal_commit: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Contain post-native ownership writes so runner cleanup always finishes."""
+        """Contain post-native ownership writes so runner cleanup always finishes.
+
+        ``terminal_commit`` is the evidence a terminal emit handed to its Turn write
+        (#2714). When that write already landed, the Turn is terminal and this is a
+        no-op; when it failed, the runner commits the same thing it would have.
+        """
 
         try:
+            if terminal_commit is not None:
+                committed_settlement = (
+                    str(terminal_commit.get("settled_by") or "") or settled_by
+                )
+                # The evidence is the emit's, but whether the queue moves on stays
+                # the runner's decision: a cancelled runner keeps the cancellation's
+                # resume rule below, so a shutdown never starts a successor.
+                resume = not cancelled or (
+                    (settled_by or SETTLED_BY_NO_TERMINAL_RESULT) == SETTLED_BY_STOPPED
+                    and not cancel_defers_queue_resume
+                )
+                result = self._terminalize_durable_turn(
+                    turn_id,
+                    self._durable_terminal_outcome(
+                        is_error=terminal_is_error,
+                        settled_by=committed_settlement,
+                    ),
+                    settled_by=committed_settlement or SETTLED_BY_TERMINAL_RESULT,
+                    evidence_kind="terminal_result",
+                    evidence=terminal_commit["evidence"],
+                    resume_successors=resume,
+                )
+                if not resume:
+                    result["defer_queue_resume"] = True
+                return result
             if cancelled:
                 interruption = settled_by or SETTLED_BY_NO_TERMINAL_RESULT
                 resume_after_cancel = bool(
@@ -7788,6 +7820,9 @@ class SessionTurnManager:
                             terminal_is_error=terminal_is_error,
                             cancel_defers_queue_resume=cancel_defers_queue_resume,
                             failure_evidence=prewrite_failure_evidence(context),
+                            terminal_commit=(context.platform_specific or {}).pop(
+                                TERMINAL_COMMIT_KEY, None
+                            ),
                         )
                     # Only definitive pre-write failure may synthesize an empty
                     # terminal result. Once native work may have produced output, a

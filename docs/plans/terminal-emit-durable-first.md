@@ -1,6 +1,6 @@
 # Terminal emit: one synchronous Turn commit after the IM surfaces (#2714)
 
-Status: design note, proposed. No code yet.
+Status: implemented (#2714). The runner's fallback order is #2735.
 
 ## Background
 
@@ -70,12 +70,12 @@ The controller keeps its call after the dispatcher returns. That call is a no-op
 
 `on_terminal_delivery_complete` first ends the Show checkpoint (`_end_show_checkpoint`). For a Session with a Show page, that runs `git` synchronously on the loop through the event bus. Master already makes this call synchronously on the loop, after the dispatcher returns, so the block keeps it where it is, before B's write, and adds no loop cost. Moving that work off the loop is #2734.
 
-**If B's own write fails.** `_finish_durable_terminal_result` logs and returns when `_terminalize_durable_turn` raises, for example a busy database. The runner's release would then commit without evidence. So `runner_release` carries the evidence `on_terminal_result` latched on the sink (`sink["terminal_evidence"]`), but only when the sink was released with a terminal-result settlement (`terminal_result` or `turn_only_result`). After this change, that settlement is set by the block, which attempts B in the same step. The one other setter is Claude's direct release after a failed agent-initiated settle, and it latches no evidence. `dispatch_turn` hands the sink's settlement and evidence to the runner's in-flight Turn in its `finally`, before it pops the sink. So they also survive a cancellation, where `dispatch_turn` returns no outcome. The runner's release uses them on every path, the cancelled one included, whenever the settlement is a terminal-result one. The runner then commits what B would have committed, even when a Stop is already propagating. In every other case, B wins and the runner's write is a no-op.
+**If B's own write fails.** `_finish_durable_terminal_result` logs and returns when `_terminalize_durable_turn` raises, for example a busy database. The runner's release would then commit without evidence. So the block marks the sink beside its B attempt: it copies the evidence `on_terminal_result` latched on the sink (`sink["terminal_evidence"]`) into the sink's `terminal_commit` field (`TERMINAL_COMMIT_KEY`). Only the block sets that field, so a release that never reached B, such as a backend's no-result release, hands over nothing. A bound Stop that won the sink's settlement is covered too (#2735 item 3): if the block ran before `dispatch_turn` pops the sink, the field says so. If the runner got there first, the Stop won outright: the runner commits it, and B then finds the Turn terminal. In its `finally`, before it pops the sink, `dispatch_turn` moves the field, with the sink's settlement, onto the dispatch context the runner holds. So it also survives a cancellation, where `dispatch_turn` returns no outcome. The runner's release commits it on every path, the cancelled one included, exactly as B would have: the same outcome, settlement and `terminal_result` evidence. When B landed, the Turn is already terminal and the runner's write is a no-op.
 
 Not chosen:
 - **Running the block before the IM surfaces** (this note's first version). After the release, a successor can start while the previous Turn's surfaces are still running. Status state is keyed by the thread's latest trigger message, and a successor without its own trigger, such as a quick-reply Turn (`message_id=None`), shares that key. The previous Turn's collapse and clear would then act on the successor's bubble and state. Avoiding that needs status state detached from its key at the release, which is a new mechanism. Leaving the surfaces before the release needs none.
 - **Running the Activity settlement check before the signal**, and not signalling when it fails. Some failures are swallowed by their caller. For example, the Claude receiver logs a delivered Activity batch that is not durable and keeps it fail-closed; nothing else would then signal the Turn, and its runner would wait forever.
-- **Making `runner_release` carry the latched evidence unconditionally**, instead of the block. The latch is set before delivery, so on its own it does not prove the emit got that far. It also does not fix the cancellation case: a Stop that lands before the signal takes the runner's cancelled path. The fallback above therefore depends on the block's settlement.
+- **Making `runner_release` carry the latched evidence unconditionally**, instead of the block. The latch is set before delivery, so on its own it does not prove the emit got that far. It also does not fix the cancellation case: a Stop that lands before the signal takes the runner's cancelled path. The fallback above therefore depends on the block's own mark.
 
 ## What changes, and what does not
 
@@ -114,7 +114,7 @@ A cancellation caught during the Run terminal record (A, #2715, the `_store_step
 - **The runner's evidence fallback.** Three cases:
   - make `_terminalize_durable_turn` raise once for B: the runner's release commits the same evidence B would have;
   - let B succeed: the runner's write is a no-op, and the snapshot keeps B's `terminal_result`;
-  - release without a terminal-result settlement: the runner's write commits no evidence;
+  - a release that never reached the block: the runner's write commits no evidence;
   - a Stop propagating from an IM surface while B's write fails: the runner's cancelled path commits B's evidence.
 - **Existing tests that pin the current order, kept green:**
   - `tests/test_controller_dispatch_loop.py`: the checkpoint ends after delivery, and a delivery failure keeps the Turn owner live;
@@ -126,9 +126,9 @@ A cancellation caught during the Run terminal record (A, #2715, the `_store_step
 
 ## Plan
 
-- [ ] Accept this note.
-- [ ] One change across the four terminal branches:
+- [x] Accept this note.
+- [x] One change across the four terminal branches:
   - in the delivered branch, the durable steps, `finalize_scheduled_delivery` included, directly after the primary delivery;
   - a synchronous terminal block that takes over master's signal-to-raise sequence and adds the release and B, run from the dispatcher's `finally` once the durable steps have passed;
-  - the runner's release carrying the latched evidence after a terminal-result settlement, handed over in `dispatch_turn`'s `finally` so that the cancelled path has it too;
+  - the runner's release carrying the evidence the block marked beside its B attempt, handed over in `dispatch_turn`'s `finally` so that the cancelled path has it too;
   - the tests above.
