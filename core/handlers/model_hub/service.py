@@ -383,8 +383,8 @@ _BACKGROUND_DISCOVERY_RETRY_BASE = timedelta(minutes=15)
 _BACKGROUND_DISCOVERY_RETRY_CAP = timedelta(hours=6)
 # A viewer of Source inventory asks for listings at most this old.
 _VIEWED_DISCOVERY_AGE = timedelta(minutes=30)
-# A Source that refused a model it lists is listed again at most this often.
-_STALE_LISTING_DEBOUNCE = timedelta(minutes=15)
+# A Source marked stale is listed again once its listing is this old.
+_STALE_LISTING_AGE = timedelta(minutes=15)
 # A credential waiting on the user cannot list models until the user acts.
 _UNDISCOVERABLE_SOURCE_DETAILS = frozenset({
     "models.source.needs_action.oauth_expired",
@@ -1020,6 +1020,14 @@ class _DiscoveryRetry:
     delay: timedelta
 
 
+@dataclass(frozen=True)
+class _StaleListing:
+    """A discovered row the Source refused as a model it does not serve, under the identity that refused it."""
+
+    identity: tuple
+    model_id: str
+
+
 def _background_discovery_period(source_id: str) -> timedelta:
     """A stable per-Source period within the jitter window around the interval.
 
@@ -1514,9 +1522,7 @@ class ModelHubService:
         self._background_discovery_caught_up = False
         self._background_discovery_inflight: set[str] = set()
         self._viewed_discovery_task: asyncio.Task[None] | None = None
-        self._stale_listing_asked: dict[str, datetime] = {}
-        self._stale_listing_pending: set[str] = set()
-        self._stale_listing_tasks: set[asyncio.Task[None]] = set()
+        self._stale_listings: dict[str, _StaleListing] = {}
         self._builtin_snapshot_generations: dict[BackendName, str] = {}
         self._builtin_snapshot_cache: dict[BackendName, list[dict[str, Any]]] = {}
         self._pending_builtin_catalog_refresh: set[BackendName] = set()
@@ -2236,14 +2242,13 @@ class ModelHubService:
             await await_owned_task(resume)
         discovery, self._background_discovery_task = self._background_discovery_task, None
         viewed, self._viewed_discovery_task = self._viewed_discovery_task, None
-        stale, self._stale_listing_tasks = self._stale_listing_tasks, set()
         if self._background_discovery_stop is not None:
             self._background_discovery_stop.set()
         # Background listings never start the engine, and an upstream listing
         # is cancelled outright. An engine listing's worker is owned and
         # bounded, so these return only once nothing still uses the engine
         # that `adapter.stop()` retires.
-        retiring = [task for task in (discovery, viewed, *stale) if task is not None and not task.done()]
+        retiring = [task for task in (discovery, viewed) if task is not None and not task.done()]
         for task in retiring:
             task.cancel()
         await asyncio.gather(*retiring, return_exceptions=True)
@@ -4865,6 +4870,22 @@ class ModelHubService:
         shutdown and never starts work for a stopped runtime.
         """
 
+        self._request_discovery_pass(max_age=_VIEWED_DISCOVERY_AGE)
+
+    def mark_stale_listing(self, source: ModelHubSourceConfig, model_id: str) -> None:
+        """A Source refused a model it lists: have the schedule list it again soon (#2682).
+
+        Only a mark: the schedule's own due rule lists the Source once its
+        listing is older than ``_STALE_LISTING_AGE``, under its eligibility,
+        backoff, in-flight exclusion and shutdown, and that listing drops the
+        row if the identity that refused it still holds and the listing no
+        longer names it either.
+        """
+
+        self._stale_listings[source.id] = _StaleListing(source_identity(source), model_id)
+        self._request_discovery_pass(max_age=None)
+
+    def _request_discovery_pass(self, *, max_age: timedelta | None) -> None:
         schedule = self._background_discovery_task
         stopping = self._background_discovery_stop
         if schedule is None or schedule.done() or stopping is None or stopping.is_set():
@@ -4873,52 +4894,9 @@ class ModelHubService:
         if viewed is not None and not viewed.done():
             return
         self._viewed_discovery_task = asyncio.get_running_loop().create_task(
-            self._refresh_due_sources_logged(max_age=_VIEWED_DISCOVERY_AGE),
+            self._refresh_due_sources_logged(max_age=max_age),
             name="model-hub-viewed-discovery",
         )
-
-    def request_stale_listing_refresh(self, source: ModelHubSourceConfig, model_id: str) -> None:
-        """A Source refused a model it lists: list it again, so a row it no longer lists leaves (#2682).
-
-        Fire-and-forget, at most once per Source per ``_STALE_LISTING_DEBOUNCE``,
-        and only while the background schedule runs, so it shares that
-        schedule's shutdown and never starts work for a stopped runtime. A
-        listing that keeps failing keeps the schedule's backoff, whoever asks.
-        """
-
-        schedule = self._background_discovery_task
-        stopping = self._background_discovery_stop
-        if schedule is None or schedule.done() or stopping is None or stopping.is_set():
-            return
-        if source.id in self._stale_listing_pending or source.id in self._background_discovery_inflight:
-            # A listing already running cannot drop the row, and costs nothing
-            # to wait out: a refusal after it asks again.
-            return
-        now = self.now()
-        asked = self._stale_listing_asked.get(source.id)
-        if asked is not None and now - asked < _STALE_LISTING_DEBOUNCE:
-            return
-        retry = self._background_discovery_retry(source)
-        if retry is not None and now < retry.failed_at + retry.delay:
-            return
-        self._stale_listing_pending.add(source.id)
-        task = asyncio.get_running_loop().create_task(
-            self._refresh_stale_listing(source.id, model_id),
-            name="model-hub-stale-listing-refresh",
-        )
-        self._stale_listing_tasks.add(task)
-        task.add_done_callback(self._stale_listing_tasks.discard)
-
-    async def _refresh_stale_listing(self, source_id: str, model_id: str) -> None:
-        try:
-            if source_id in self._background_discovery_inflight:
-                # The schedule started listing it first; a later refusal asks again.
-                return
-            # The debounce is spent only on a listing that can drop the row.
-            self._stale_listing_asked[source_id] = self.now()
-            await self._refresh_source_in_background(source_id, unless_listed=model_id)
-        finally:
-            self._stale_listing_pending.discard(source_id)
 
     async def _refresh_due_sources(self, *, max_age: timedelta | None = None) -> None:
         """Refresh, one at a time, each Hub Source whose background listing is due.
@@ -4936,7 +4914,7 @@ class ModelHubService:
             if self._background_discovery_eligible(source)
         ]
         live_ids = {source.id for source in sources}
-        for table in (self._background_discovery_checked, self._background_discovery_retries):
+        for table in (self._background_discovery_checked, self._background_discovery_retries, self._stale_listings):
             for source_id in [item for item in table if item not in live_ids]:
                 del table[source_id]
         now = self.now()
@@ -5002,17 +4980,19 @@ class ModelHubService:
             period = min(period, _BACKGROUND_DISCOVERY_INTERVAL)
         if max_age is not None:
             period = min(period, max_age)
+        mark = self._stale_listings.get(source.id)
+        if mark is not None and mark.identity == source_identity(source):
+            period = min(period, _STALE_LISTING_AGE)
         return listed_at + period
 
-    async def _refresh_source_in_background(self, source_id: str, *, unless_listed: str | None = None) -> None:
+    async def _refresh_source_in_background(self, source_id: str) -> None:
         """Add newly listed models without touching health or removing anything.
 
         A listing is not inference evidence, and removals move supply, so Source
         state, removals, and their guards stay with a manual `refresh_source`.
-        One row is the exception: ``unless_listed``, a discovered model the
-        Source refused as one it does not serve, leaves if this listing no
-        longer names it either. Two answers then agree, and only when its
-        removal moves no route.
+        One row is the exception: a stale mark's model leaves if this listing no
+        longer names it either, under the identity that refused it, and only
+        when its removal moves no route.
         """
 
         if source_id in self._background_discovery_inflight:
@@ -5020,11 +5000,11 @@ class ModelHubService:
             return
         self._background_discovery_inflight.add(source_id)
         try:
-            await self._refresh_listed_source_in_background(source_id, unless_listed=unless_listed)
+            await self._refresh_listed_source_in_background(source_id)
         finally:
             self._background_discovery_inflight.discard(source_id)
 
-    async def _refresh_listed_source_in_background(self, source_id: str, *, unless_listed: str | None = None) -> None:
+    async def _refresh_listed_source_in_background(self, source_id: str) -> None:
         config = self.store.load()
         if not config.enabled:
             # Re-read per Source: a runtime stopped mid-pass is not listed again.
@@ -5036,6 +5016,7 @@ class ModelHubService:
         if observed is None or not self._background_discovery_eligible(observed):
             return
         basis = (source_identity(observed), observed.last_discovered_at)
+        mark: _StaleListing | None = None
         try:
             discovered = await asyncio.wait_for(
                 self._discover(observed, start_engine=False),
@@ -5043,56 +5024,55 @@ class ModelHubService:
             )
             async with self._mutation_lock:
                 previous = self.store.load()
-                # Cloning and guarding a config that grows with use is CPU work
-                # a per-turn trigger must not do on the controller loop.
-                plan = await asyncio.to_thread(
-                    self._plan_background_listing, previous, source_id, basis, discovered, unless_listed,
+                current = next(
+                    (item for item in previous.sources if item.id == source_id),
+                    None,
                 )
-                if plan is not None:
-                    updated, overrides = plan
-                    await self._commit_synced(previous, updated)
-                    self._record_reasoning_tier_overrides(self._source(updated, source_id), overrides)
+                if current is None or (
+                    source_identity(current), current.last_discovered_at,
+                ) != basis:
+                    # The listing describes a Source another owner has changed
+                    # since; the next tick lists the current one.
+                    return
+                # Read now, not at the start: a refusal that arrived while this
+                # listing ran is answered by it.
+                mark = self._stale_listings.get(source_id)
+                if mark is not None and mark.identity != basis[0]:
+                    # The identity that refused the model is gone, and its refusal with it.
+                    del self._stale_listings[source_id]
+                    mark = None
+                updated = self._clone_config(previous)
+                source = self._source(updated, source_id)
+                overrides = self._merge_discovered_models(source, discovered)
+                disowned = mark is not None and mark.model_id not in {
+                    canonical_model_id(model.id) for model in discovered
+                }
+                if disowned:
+                    _drop_discovered_model(source, mark.model_id)
+                if self._inventory_fingerprint(source) != self._inventory_fingerprint(current):
+                    if not self._moves_supply(previous, updated):
+                        await self._commit_synced(previous, updated)
+                        self._record_reasoning_tier_overrides(source, overrides)
+                    else:
+                        dropped = self._clone_config(previous)
+                        if disowned and _drop_discovered_model(self._source(dropped, source_id), mark.model_id) and (
+                            not self._moves_supply(previous, dropped)
+                        ):
+                            # The disowned row may leave on its own when the
+                            # rest of this listing has to wait.
+                            await self._commit_synced(previous, dropped)
+                        logger.info(
+                            "Model Hub background discovery left a supply change "
+                            "for Source %s to a manual refresh",
+                            source_id,
+                        )
         except Exception as exc:
             self._record_background_discovery_failure(observed, exc)
             return
         self._background_discovery_checked[source_id] = self.now()
-
-    def _plan_background_listing(
-        self,
-        previous: ModelHubConfig,
-        source_id: str,
-        basis: tuple[object, object],
-        discovered: list[DiscoveredModel],
-        unless_listed: str | None,
-    ) -> tuple[ModelHubConfig, list[tuple[str, Literal["upstream", "catalog"]]]] | None:
-        """The config a background listing commits, with its tier overrides, or None for nothing to commit."""
-
-        current = next((item for item in previous.sources if item.id == source_id), None)
-        if current is None or (source_identity(current), current.last_discovered_at) != basis:
-            # The listing describes a Source another owner has changed since;
-            # the next tick lists the current one.
-            return None
-        updated = self._clone_config(previous)
-        source = self._source(updated, source_id)
-        overrides = self._merge_discovered_models(source, discovered)
-        disowned = unless_listed is not None and unless_listed not in {
-            canonical_model_id(model.id) for model in discovered
-        }
-        if disowned:
-            _drop_discovered_model(source, unless_listed)
-        if self._inventory_fingerprint(source) == self._inventory_fingerprint(current):
-            return None
-        if not self._moves_supply(previous, updated):
-            return updated, overrides
-        logger.info("Model Hub background discovery left a supply change for Source %s to a manual refresh", source_id)
-        dropped = self._clone_config(previous)
-        if disowned and _drop_discovered_model(self._source(dropped, source_id), unless_listed) and (
-            not self._moves_supply(previous, dropped)
-        ):
-            # The disowned row may leave on its own when the rest of the
-            # listing has to wait.
-            return dropped, []
-        return None
+        if mark is not None and self._stale_listings.get(source_id) is mark:
+            # This listing answered the mark; a later refusal marks again.
+            del self._stale_listings[source_id]
 
     def _moves_supply(self, previous: ModelHubConfig, updated: ModelHubConfig) -> bool:
         """Whether an inventory change removes a route hop or interrupts supply, which only a manual refresh may."""
@@ -7041,9 +7021,9 @@ class ModelHubService:
         if not outcome.stream_started and names_model_refusal(outcome):
             if any(model.id == model_id and model.provenance == "discovered" for model in source.models):
                 # An executor runs only on a model its Source lists, so the
-                # listing may be stale: list it again, debounced (#2682). A
+                # listing may be stale: mark it for the schedule (#2682). A
                 # manual row is the user's, and only they remove it.
-                self.request_stale_listing_refresh(source, model_id)
+                self.mark_stale_listing(source, model_id)
             return True
         decision = classify_outcome(replace(outcome, stream_started=False))
         return decision.action in {"fallback", "refresh"}

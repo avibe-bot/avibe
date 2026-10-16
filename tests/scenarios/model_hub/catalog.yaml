@@ -2570,9 +2570,9 @@ scenarios:
       - tests/test_model_hub_hosted_evidence.py::test_a_native_success_is_recorded_at_settlement_for_a_tool_the_request_declared
   - id: MH-HOSTED-GATEWAY-008
     name: >-
-      A model-not-found for an executor model its Source lists asks for that Source to be listed again in the
-      background, at most once per Source per debounce; the row leaves only when the fresh listing no longer names it
-      either and its removal moves no route, so the next chain skips the stale model instead of paying its 404 first
+      A model-not-found for an executor model its Source lists marks that Source, and the background schedule's own
+      due rule lists it once its listing is 15 minutes old; the row leaves only when that listing, under the identity
+      that refused it, no longer names it either and its removal moves no route, so the next chain skips it
     status: covered
     kind: recovery
     layer: contract
