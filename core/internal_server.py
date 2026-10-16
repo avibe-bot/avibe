@@ -1078,7 +1078,11 @@ def create_app(
     async def _turn_state(session_id: str) -> Any:
         """HTTP adapter: whether a turn is running, delegated to the turn owner
         (FSM, Phase 1b). A reconnected Chat page asks this to restore working/Stop."""
-        return manager.turn_state(session_id)
+        state = manager.turn_state(session_id)
+        state["recovered_agent_status"] = (
+            False if state["in_flight"] else await manager.repair_ownerless_running_projection(session_id)
+        )
+        return state
 
     @app.get("/internal/running-agents")
     async def _running_agents() -> Any:

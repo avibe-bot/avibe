@@ -2385,7 +2385,7 @@ def test_turn_state_repairs_only_an_exact_ownerless_running_projection(managers)
     state = manager.turn_state("ses_fsm")
 
     assert state["in_flight"] is False
-    assert state["recovered_agent_status"] is True
+    assert asyncio.run(manager.repair_ownerless_running_projection("ses_fsm")) is True
     with engine.connect() as conn:
         assert conn.execute(
             select(agent_sessions.c.agent_status).where(

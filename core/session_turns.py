@@ -7930,13 +7930,28 @@ class SessionTurnManager:
                     recovered.append(queued_session_id)
         return recovered
 
-    def _repair_ownerless_running_projection(self, session_id: str) -> bool:
-        """Clear a legacy running projection only after an exact owner recheck."""
+    async def repair_ownerless_running_projection(self, session_id: str) -> bool:
+        """Clear a legacy running projection only after an exact owner recheck.
 
+        The recheck holds SQLite's writer, which another process may hold for up to
+        the busy timeout, so it runs on a worker thread, never on the controller loop
+        (#2706).
+        """
+
+        return await asyncio.to_thread(self._repair_ownerless_running_projection, session_id)
+
+    def _repair_ownerless_running_projection(self, session_id: str) -> bool:
         engine = self._sqlite_engine()
         if not callable(getattr(engine, "connect", None)):
             return False
         if not self._durable_schema_available():
+            return False
+        # Most sessions are not projected as running: answer those without the writer.
+        with engine.connect() as conn:
+            status = conn.execute(
+                select(agent_sessions.c.agent_status).where(agent_sessions.c.id == session_id)
+            ).scalar_one_or_none()
+        if status != "running":
             return False
         with engine.begin() as conn:
             reserve_write_lock(conn)
@@ -7959,7 +7974,11 @@ class SessionTurnManager:
         return changed
 
     def turn_state(self, session_id: str) -> dict:
-        """Compose orthogonal foreground, inbox, Activity, and connection facts."""
+        """Compose orthogonal foreground, inbox, Activity, and connection facts.
+
+        A read: the internal endpoint adds ``recovered_agent_status`` from
+        ``repair_ownerless_running_projection``, which writes and runs off the loop.
+        """
         entry = self.in_flight.get(session_id)
         active = entry is not None and not entry.task.done()
         native_turn_started = False
@@ -8124,11 +8143,6 @@ class SessionTurnManager:
                 0,
             ),
             "connection": activity_state.get("connection", "unknown"),
-            "recovered_agent_status": (
-                False
-                if active
-                else self._repair_ownerless_running_projection(session_id)
-            ),
         }
         if backend:
             result["backend"] = backend
@@ -8557,7 +8571,7 @@ class SessionTurnManager:
                 "ok": False,
                 "code": "not_in_flight",
                 "session_id": session_id,
-                "recovered_agent_status": self._repair_ownerless_running_projection(
+                "recovered_agent_status": await self.repair_ownerless_running_projection(
                     session_id
                 ),
             }
