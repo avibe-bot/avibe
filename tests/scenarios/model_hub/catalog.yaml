@@ -2535,8 +2535,9 @@ scenarios:
     name: >-
       A fresh install of the installed service, on Windows x64 and Arm64 as on Linux and macOS: the engine installs
       from the packaged manifest and turns healthy, API-key Sources save through the real credential check, a Vibey
-      turn and a Claude Code hub-mode turn get the upstream's reply, a hard-killed service's engine is reaped by the
-      next start, and vibe stop leaves no engine
+      turn and a Claude Code hub-mode turn get the upstream's reply, a credential replacement and newly discovered
+      model serve another Vibey turn, a hard-killed service's engine is reaped by the next start, and vibe stop
+      leaves no engine
     status: assert
     kind: runtime_lifecycle
     layer: e2e-auto
