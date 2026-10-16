@@ -20,19 +20,20 @@ The original 36x36px exports contained only about 24x21px of visible artwork.
 At the tray's 18pt logical image height, the cloud was only about 10.5pt tall.
 The owner requested a size/padding correction while retaining V1's design.
 
-The corrected exports are 20x18px at 1x and 40x36px at 2x. The 2x silhouette
-occupies 38x34px with one transparent guard pixel on each side. This gives
-approximately 17pt of visible height, comparable to neighboring menu items.
-At 1x the half-point margin shares pixels with the antialiased outline.
+After the first size-correction preview, Max requested exactly 16pt of visible
+height. The final exports are 20x18px at 1x and 38x36px at 2x. Visible bounds
+are 18x16px and 36x32px respectively. The top/bottom guards are 1px at 1x and
+2px at 2x; both exports have a fully transparent 1px horizontal guard.
 
 `icons/tray/source/` preserves the original 192x192px V1 source images. Each
 export is resampled directly from its source alpha, never from the old small
 PNGs. Find the nonzero-alpha bounding box, center it, and apply one uniform
-scale that fits within a 19x17pt content box; use Lanczos downsampling. Export
-black RGB with the resampled alpha as RGBA. Keep the 2x outermost pixel fully
-transparent to discard resampling ringing outside the guard. Both sizes use
-the same normalized transform, including eyes and status marks. The outlined
-state has its own source bounds; its stroke and cutouts are not redrawn.
+scale that fits within the target content bounds; use Lanczos downsampling.
+Export black RGB with the resampled alpha as RGBA, clearing only the explicit
+guard pixels to discard resampling ringing. The outlined state's stroke,
+eyes, and all status marks are preserved. The differing logical canvas widths
+at 1x/2x follow the requested one-pixel horizontal guard at each resolution;
+production embeds the 2x export and displays a 19x18pt image with 16pt artwork.
 
 ## Native rendering contract
 
@@ -40,7 +41,8 @@ The pinned `tray-icon` 0.24.1 macOS implementation sets `NSImage` height to
 18pt and width to `source_width / source_height * 18`. It preserves aspect
 ratio instead of forcing a square. A real isolated Tauri probe verified both
 36x36px -> 18x18pt and 40x36px -> 20x18pt, at creation and after image refresh.
-All four corrected status images retained `isTemplate() == true`.
+The final 38x36px exports similarly display at 19x18pt. All four corrected
+status images retained `isTemplate() == true`.
 
 Tauri embeds the 2x files; macOS scales them for 1x displays. The 1x exports
 remain available for inspection and are covered by the asset test. There is
@@ -52,14 +54,17 @@ of plain `set_icon` resets the template flag.
 ## Validation
 
 The existing asset test protects monochrome transparency, dimensions and
-canvas boundaries at both sizes. It now also requires the visible alpha
-bounds to fill the canvas within a one-pixel margin. This regression assertion
-failed on the original assets specifically because of excess padding, then
-passed with the corrected exports. Existing state tests still cover distinct
+canvas boundaries at both sizes. It now also requires exactly 16/32px of visible height and the requested
+transparent guards. The initial occupancy assertion failed on rc9 assets for
+excess padding; the final exact-height assertion also rejects the intermediate
+17pt preview that the owner considered too large. Existing state tests still cover distinct
 states and the shared starting/stopping image.
 
 Native visual acceptance compares all four states alongside other installed
-apps in the real menu bar. The probe is temporary, uses a separate identifier,
+apps in the real menu bar, in light and dark appearance. Verify the system
+appearance is Automatic before and after capture and restore temporary
+transparency changes. Measure the filled cloud and neighboring QQ/WeChat icons
+with the same brightness threshold in the 2x screenshot; target 32px each. The probe is temporary, uses a separate identifier,
 and enables no product plugins, windows, or Runtime. Its source must be removed
 from the worktree after capture. This evidence covers native rendering, not
 the full packaged Runtime lifecycle.

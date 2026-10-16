@@ -352,8 +352,8 @@ impl TrayRuntimeState {
 
     #[cfg(target_os = "macos")]
     fn icon(&self) -> tauri::image::Image<'static> {
-        // tray-icon preserves aspect ratio: 40x36px becomes 20x18pt on macOS.
-        // The V1 artwork fills the canvas; template rendering uses its alpha mask.
+        // tray-icon preserves aspect ratio: 38x36px becomes 19x18pt on macOS.
+        // The V1 artwork is 16pt tall within that canvas; templates use its alpha.
         match self {
             Self::Starting | Self::Stopping => tauri::include_image!("icons/tray/starting@2x.png"),
             Self::Serving(_) => tauri::include_image!("icons/tray/serving@2x.png"),
@@ -2515,7 +2515,8 @@ mod tests {
             (36, TrayRuntimeState::Stopped.icon()),
         ];
         for (size, image) in images {
-            let width = size / 18 * 20;
+            let width = if size == 36 { 38 } else { 20 };
+            let vertical_margin = size / 18;
             assert_eq!((image.width(), image.height()), (width, size));
             assert_eq!(image.rgba().len(), (width * size * 4) as usize);
             let pixels = image.rgba().as_chunks::<4>().0;
@@ -2531,21 +2532,19 @@ mod tests {
                 (image.width(), image.height(), 0, 0),
                 |(left, top, right, bottom), (x, y)| (left.min(x), top.min(y), right.max(x), bottom.max(y)),
             );
-            assert!(
-                right - left + 1 >= image.width() - 2 && bottom - top + 1 >= image.height() - 2,
-                "the visible cloud must fill the canvas within a 1px margin"
+            assert_eq!(
+                (left, top, right, bottom),
+                (1, vertical_margin, width - 2, size - vertical_margin - 1),
+                "the cloud must be 16pt tall, with a 1px horizontal guard"
             );
-            // At 1x the half-point guard shares pixels with the antialiased edge.
-            if size == 36 {
-                assert!(
-                    pixels.iter().enumerate().all(|(index, pixel)| {
-                        let x = index as u32 % width;
-                        let y = index as u32 / width;
-                        (x > 0 && x < width - 1 && y > 0 && y < size - 1) || pixel[3] == 0
-                    }),
-                    "the 2x silhouette must fit inside its transparent guard pixel"
-                );
-            }
+            assert!(
+                pixels.iter().enumerate().all(|(index, pixel)| {
+                    let x = index as u32 % width;
+                    let y = index as u32 / width;
+                    (x > 0 && x < width - 1 && y >= vertical_margin && y < size - vertical_margin) || pixel[3] == 0
+                }),
+                "the guard pixels must be fully transparent at both resolutions"
+            );
         }
     }
 
