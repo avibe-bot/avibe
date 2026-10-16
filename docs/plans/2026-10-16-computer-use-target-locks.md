@@ -22,17 +22,20 @@ dispatched/ambiguous failure rules.
   writes.
 - Wait for a bounded interval, then return `target_busy` with
   `dispatched: false`.
-- Advance a window's in-process mutation version after a successful action so
-  another Session's older observation is rejected before dispatch.
 - Remove the desktop lease record, lock file, heartbeat, lease-loss handling,
   and lease epoch coupling. Remove legacy lease files on startup when possible.
 
 A future foreground operation takes a global exclusive lock only for its own duration.
 
+Actions by another Session, like actions by the owner, can make an observation
+stale. The driver's token and capture validation and the effect result report
+it. Agents re-observe after an unexpected result.
+
 ## Validation
 
 - Hermetic fake-upstream tests cover concurrent observation, independent
   windows, same-target contention, force-quit/process conflicts, clipboard
-  serialization, legacy-file cleanup, and stale cross-Session observations.
+  serialization, legacy-file cleanup, token-only input, pid-less zoom, and
+  driver-reported stale tokens after a cross-Session action.
 - Run the focused Python tests and Ruff checks, then the desktop-shell check
   when desktop files are changed.

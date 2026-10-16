@@ -134,6 +134,8 @@ export class Ambiguous extends ControllerError {}
 export class Timeout extends ControllerError {}
 export class TargetBusy extends ControllerError {}
 /** @deprecated Use TargetBusy. */
+export type DesktopBusy = TargetBusy;
+/** @deprecated Use TargetBusy. */
 export const DesktopBusy: typeof TargetBusy;
 export class ForegroundConsentRequired extends ControllerError {}
 export class Unavailable extends ControllerError {}

@@ -363,7 +363,8 @@ class JsonRpcUpstream:
 class _SessionState:
     active_proxy_serial: int | None = None
     active_daemon_key: tuple[str, int] | None = None
-    observed_windows: dict[tuple[int, int], int] = field(default_factory=dict)
+    observed_windows: set[tuple[int | None, int]] = field(default_factory=set)
+    element_token_windows: dict[str, tuple[int, int]] = field(default_factory=dict)
 
 
 def _load_snapshot(state_path: Path) -> tuple[list[dict[str, Any]], set[str]]:
@@ -581,7 +582,10 @@ def _fold_tool_result(
                 code,
                 detail=detail,
                 dispatched=(
-                    False if code in _UPSTREAM_NOT_DISPATCHED_CODES else None
+                    False
+                    if code in _UPSTREAM_NOT_DISPATCHED_CODES
+                    or structured.get("dispatched") is False
+                    else None
                 ),
                 result_params=_driver_error_params(structured),
             )
@@ -628,22 +632,28 @@ def _window_key(arguments: Mapping[str, Any]) -> tuple[int | None, int] | None:
     return (pid, window_id)
 
 
-def _exact_window_key(arguments: Mapping[str, Any]) -> tuple[int, int]:
-    key = _window_key(arguments)
-    if key is None or key[0] is None:
-        raise ComputerServerError(
-            "window_target_required",
-            "The operation must target an exact window with pid and window_id.",
-        )
-    return key[0], key[1]
-
-
 def _target_lock_keys(
     tool_name: str,
     arguments: Mapping[str, Any],
+    *,
+    element_token_windows: Mapping[str, tuple[int, int]] | None = None,
 ) -> tuple[tuple[str, str], ...]:
     if tool_name in _WINDOW_MUTATION_TOOLS:
-        pid, window_id = _exact_window_key(arguments)
+        key = _window_key(arguments)
+        if key is None or key[0] is None:
+            element_token = arguments.get("element_token")
+            if (
+                isinstance(element_token, str)
+                and element_token.strip()
+                and element_token_windows is not None
+            ):
+                key = element_token_windows.get(element_token.strip())
+        if key is None or key[0] is None:
+            raise ComputerServerError(
+                "window_target_required",
+                "The operation must target an exact window with pid and window_id.",
+            )
+        pid, window_id = key
         return (("window", f"{pid}:{window_id}"),)
     if tool_name == "launch_app":
         identity = arguments.get("bundle_id") or arguments.get("name")
@@ -719,8 +729,14 @@ class _TargetLockManager:
         self,
         tool_name: str,
         arguments: Mapping[str, Any],
+        *,
+        element_token_windows: Mapping[str, tuple[int, int]] | None = None,
     ) -> _TargetLockLease:
-        keys = _target_lock_keys(tool_name, arguments)
+        keys = _target_lock_keys(
+            tool_name,
+            arguments,
+            element_token_windows=element_token_windows,
+        )
         if not keys:
             return _TargetLockLease(self, ())
         deadline = asyncio.get_running_loop().time() + self._wait_seconds
@@ -916,7 +932,6 @@ class ComputerUseServer:
         self._upstream_lock = asyncio.Lock()
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._sessions: dict[str, _SessionState] = {}
-        self._window_versions: dict[tuple[int, int], int] = {}
 
     @property
     def tools(self) -> list[dict[str, Any]]:
@@ -955,6 +970,7 @@ class ComputerUseServer:
                 session_state.active_proxy_serial = None
                 session_state.active_daemon_key = None
                 session_state.observed_windows.clear()
+                session_state.element_token_windows.clear()
             return upstream
 
     async def _discard_upstream(self, upstream: Upstream) -> None:
@@ -969,6 +985,7 @@ class ComputerUseServer:
                     session_state.active_proxy_serial = None
                     session_state.active_daemon_key = None
                     session_state.observed_windows.clear()
+                    session_state.element_token_windows.clear()
         # Close even when another transport has already replaced the shared
         # slot. The failed process still belongs to this request and must not
         # remain alive merely because it lost the race to replacement.
@@ -991,6 +1008,7 @@ class ComputerUseServer:
         session_state.active_proxy_serial = None
         session_state.active_daemon_key = None
         session_state.observed_windows.clear()
+        session_state.element_token_windows.clear()
 
     @staticmethod
     def _commit_session_started(
@@ -1039,53 +1057,71 @@ class ComputerUseServer:
     ) -> None:
         if tool_name not in _INPUT_TOOLS:
             return
+        element_token = arguments.get("element_token")
+        if isinstance(element_token, str) and element_token.strip():
+            if element_token.strip() not in session_state.element_token_windows:
+                raise ComputerServerError(
+                    "observe_first",
+                    "Observe this exact window with get_window_state or zoom before sending input.",
+                )
+            return
         key = _window_key(arguments)
         if key is None:
             return
-        exact_key = (key[0], key[1]) if key[0] is not None else None
-        if (
-            exact_key is None
-            or session_state.observed_windows.get(exact_key)
-            != self._window_versions.get(exact_key, 0)
-        ):
+        wildcard = (None, key[1])
+        if key not in session_state.observed_windows and wildcard not in session_state.observed_windows:
             raise ComputerServerError(
                 "observe_first",
                 "Observe this exact window with get_window_state or zoom before sending input.",
             )
 
+    @staticmethod
+    def _element_tokens(value: Any) -> set[str]:
+        tokens: set[str] = set()
+
+        def visit(current: Any) -> None:
+            if isinstance(current, Mapping):
+                token = current.get("element_token")
+                if isinstance(token, str) and token.strip():
+                    tokens.add(token.strip())
+                for nested in current.values():
+                    visit(nested)
+            elif isinstance(current, list):
+                for nested in current:
+                    visit(nested)
+
+        visit(value)
+        return tokens
+
     def _record_observation(
         self,
         arguments: Mapping[str, Any],
+        result: Mapping[str, Any],
         session_state: _SessionState,
     ) -> None:
         key = _window_key(arguments)
-        if key is None or key[0] is None:
+        if key is not None:
+            session_state.observed_windows.add(key)
+        structured = result.get("structuredContent")
+        if not isinstance(structured, Mapping):
             return
-        exact_key = (key[0], key[1])
-        version = self._window_versions.setdefault(exact_key, 0)
-        session_state.observed_windows[exact_key] = version
 
-    def _record_successful_mutation(
-        self,
-        tool_name: str,
-        arguments: Mapping[str, Any],
-        session_state: _SessionState,
-    ) -> None:
-        if tool_name in _WINDOW_MUTATION_TOOLS:
-            key = _exact_window_key(arguments)
-            version = self._window_versions.get(key, 0) + 1
-            self._window_versions[key] = version
-            # The acting Session's driver snapshot remains valid for the
-            # consecutive calls promised by the Computer Use contract.
-            session_state.observed_windows[key] = version
-            return
-        if tool_name == "kill_app":
-            pid = arguments.get("pid")
-            if not isinstance(pid, int) or isinstance(pid, bool):
-                return
-            for key in tuple(self._window_versions):
-                if key[0] == pid:
-                    self._window_versions[key] += 1
+        observed_pid = structured.get("pid")
+        observed_window_id = structured.get("window_id")
+        if (
+            isinstance(observed_pid, int)
+            and not isinstance(observed_pid, bool)
+            and isinstance(observed_window_id, int)
+            and not isinstance(observed_window_id, bool)
+        ):
+            exact_key = (observed_pid, observed_window_id)
+        elif key is not None and key[0] is not None:
+            exact_key = key
+        else:
+            exact_key = None
+        if exact_key is not None:
+            for token in self._element_tokens(structured):
+                session_state.element_token_windows[token] = exact_key
 
     async def call_tool(
         self,
@@ -1199,27 +1235,18 @@ class ComputerUseServer:
                     target_lock = await self._target_lock_manager.acquire(
                         name,
                         arguments,
+                        element_token_windows=session_state.element_token_windows,
                     )
                     async with target_lock:
-                        # A request can wait while another Session mutates the
-                        # same window. Recheck before the first byte is sent so
-                        # a stale observation is always dispatched=false.
-                        self._require_observation(name, arguments, session_state)
                         pre_forward = False
                         result = await self._upstream_call(
                             upstream,
                             name,
                             forwarded,
                         )
-                        if not result.get("isError"):
-                            self._record_successful_mutation(
-                                name,
-                                arguments,
-                                session_state,
-                            )
 
                     if name in _OBSERVE_TOOLS and not result.get("isError"):
-                        self._record_observation(arguments, session_state)
+                        self._record_observation(arguments, result, session_state)
                     if name == "start_session":
                         if not result.get("isError"):
                             self._commit_session_started(

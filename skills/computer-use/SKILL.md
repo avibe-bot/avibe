@@ -53,7 +53,7 @@ reported as `null`, and any other return must be JSON-serializable.
 
 The runner uses Avibe's shipped Node runtime and injects `@avibe/computer`;
 never install or resolve another package with that name. The SDK keeps element
-tokens private, re-observes once when the Controller explicitly reports a stale
+tokens private, re-observes once when the Controller reports a stale token or
 observation, and stops on ambiguous action outcomes.
 App and window handles are immutable process descriptors; after an app
 relaunches, acquire fresh handles with `computer.app(...)` before continuing.
@@ -157,8 +157,7 @@ retrying automatically:
 - `target_busy`: another Computer Use operation currently holds the requested
   target lock.
 - `observe_first`: the exact target has not been observed in the current
-  Session snapshot, or another Session changed that window after the
-  observation.
+  Session snapshot.
 - `foreground_forbidden` or `focus_shortcut_forbidden`: the safety policy
   rejected the requested input.
 

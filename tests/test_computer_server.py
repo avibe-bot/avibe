@@ -86,6 +86,8 @@ class FakeUpstream:
         self.block: asyncio.Event | None = None
         self.blocked_tools: set[str] = {"list_apps"}
         self.tool_errors: set[str] = set()
+        self.stale_element_tokens: set[str] = set()
+        self.resolved_pid = 7
         self.fail_transport = False
         self.fail_after_unblock = False
         self.close_calls = 0
@@ -99,6 +101,7 @@ class FakeUpstream:
         self.inflight += 1
         self.max_inflight = max(self.max_inflight, self.inflight)
         tool_name = params.get("name")
+        arguments = params.get("arguments") or {}
         if isinstance(tool_name, str):
             self.inflight_by_tool[tool_name] = (
                 self.inflight_by_tool.get(tool_name, 0) + 1
@@ -112,6 +115,23 @@ class FakeUpstream:
                 await self.block.wait()
             if self.fail_after_unblock:
                 raise UpstreamUnavailable("transport failed after replacement")
+            element_token = arguments.get("element_token")
+            if (
+                isinstance(element_token, str)
+                and element_token in self.stale_element_tokens
+            ):
+                return {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "content": [{"type": "text", "text": "stale token"}],
+                        "structuredContent": {
+                            "code": "stale_element_token",
+                            "dispatched": False,
+                        },
+                        "isError": True,
+                    },
+                }
             if tool_name in self.tool_errors:
                 return {
                     "jsonrpc": "2.0",
@@ -121,12 +141,25 @@ class FakeUpstream:
                         "isError": True,
                     },
                 }
+            structured = {"tool": params.get("name")}
+            if tool_name in {"get_window_state", "zoom"}:
+                structured.update(
+                    {
+                        "pid": arguments.get("pid", self.resolved_pid),
+                        "window_id": arguments.get("window_id"),
+                    }
+                )
+            if tool_name == "get_window_state":
+                session = arguments.get("session", "session")
+                structured["elements"] = [
+                    {"element_token": f"{session}-element-token"}
+                ]
             return {
                 "jsonrpc": "2.0",
                 "id": 1,
                 "result": {
                     "content": [{"type": "image", "data": "png", "mimeType": "image/png"}],
-                    "structuredContent": {"tool": params.get("name")},
+                    "structuredContent": structured,
                 },
             }
         finally:
@@ -1326,6 +1359,19 @@ async def test_window_input_requires_observation_and_rejects_focus_routes(
         {"session": "ses-a", "pid": 7, "window_id": 9},
     )
     assert not observed.get("isError")
+    token = observed["structuredContent"]["elements"][0]["element_token"]
+    token_clicked = await server.call_tool(
+        "click",
+        {"session": "ses-a", "element_token": token, "x": 1, "y": 2},
+    )
+    assert not token_clicked.get("isError")
+    unknown_token = await server.call_tool(
+        "click",
+        {"session": "ses-a", "element_token": "unknown-token", "x": 1, "y": 2},
+    )
+    unknown_payload = json.loads(unknown_token["content"][0]["text"])
+    assert unknown_payload["code"] == "observe_first"
+    assert unknown_payload["dispatched"] is False
     clicked = await server.call_tool(
         "click",
         {"session": "ses-a", "pid": 7, "window_id": 9, "x": 1, "y": 2},
@@ -1369,6 +1415,39 @@ async def test_window_input_requires_observation_and_rejects_focus_routes(
         },
     )
     assert "focus_shortcut_forbidden" in shortcut["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_pidless_zoom_preserves_observation_for_exact_window_input(
+    tmp_path: Path,
+) -> None:
+    """A zoom that resolves its pid from the driver keeps the legacy wildcard observation."""
+
+    state_path, state = _state(tmp_path)
+    upstream = FakeUpstream()
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+    )
+
+    zoomed = await server.call_tool(
+        "zoom",
+        {
+            "session": "ses-a",
+            "window_id": 9,
+            "x1": 0,
+            "y1": 0,
+            "x2": 100,
+            "y2": 100,
+        },
+    )
+    assert not zoomed.get("isError")
+    clicked = await server.call_tool(
+        "click",
+        {"session": "ses-a", "pid": 7, "window_id": 9, "x": 1, "y": 2},
+    )
+    assert not clicked.get("isError")
 
 
 def test_raw_click_mode_is_admitted_only_for_exact_background_pixel_click() -> None:
@@ -1942,10 +2021,10 @@ def test_legacy_lease_files_are_removed_on_server_start(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_action_from_stale_observation_is_rejected_before_dispatch(
+async def test_action_after_other_session_action_uses_driver_stale_token_result(
     tmp_path: Path,
 ) -> None:
-    """Another session's action invalidates the first session's element token."""
+    """The driver, rather than the Controller, rejects a token stale after another action."""
 
     state_path, state = _state(tmp_path)
     upstream = FakeUpstream()
@@ -1960,9 +2039,14 @@ async def test_action_from_stale_observation_is_rejected_before_dispatch(
             {"session": session, "pid": 7, "window_id": 9},
         )
         assert not observed.get("isError")
+        if session == "ses-a":
+            token_a = observed["structuredContent"]["elements"][0]["element_token"]
+        else:
+            token_b = observed["structuredContent"]["elements"][0]["element_token"]
 
     upstream.block = asyncio.Event()
     upstream.blocked_tools = {"click"}
+    upstream.stale_element_tokens.add(token_b)
     first_task = asyncio.create_task(
         server.call_tool(
             "click",
@@ -1970,7 +2054,7 @@ async def test_action_from_stale_observation_is_rejected_before_dispatch(
                 "session": "ses-a",
                 "pid": 7,
                 "window_id": 9,
-                "element_token": "token-from-ses-a",
+                "element_token": token_a,
                 "x": 1,
                 "y": 2,
             },
@@ -1987,7 +2071,7 @@ async def test_action_from_stale_observation_is_rejected_before_dispatch(
                 "session": "ses-b",
                 "pid": 7,
                 "window_id": 9,
-                "element_token": "token-from-ses-b-observation",
+                "element_token": token_b,
                 "x": 3,
                 "y": 4,
             },
@@ -1999,12 +2083,12 @@ async def test_action_from_stale_observation_is_rejected_before_dispatch(
     stale = await stale_task
     assert not first.get("isError")
     payload = json.loads(stale["content"][0]["text"])
-    assert payload["code"] == "observe_first"
+    assert payload["code"] == "stale_element_token"
     assert payload["dispatched"] is False
     assert sum(
         params["name"] == "click"
         for _method, params in upstream.calls
-    ) == 1
+    ) == 2
 
 
 @pytest.mark.asyncio
