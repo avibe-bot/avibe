@@ -7910,7 +7910,8 @@ def test_declared_custom_anthropic_relay_verifies_from_its_models_listing(
         probe_bodies: list[dict] = []
 
         def supplied(request: web.Request) -> str:
-            return request.headers.get("x-api-key", "")
+            # The engine sends a custom relay's key as Bearer, so observation does too.
+            return request.headers.get("Authorization", "").removeprefix("Bearer ")
 
         async def relay_messages(request: web.Request) -> web.Response:
             requests.append((request.method, request.path, supplied(request)))

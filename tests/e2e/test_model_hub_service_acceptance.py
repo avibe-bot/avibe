@@ -377,9 +377,11 @@ def test_fresh_install_serves_vibey_and_claude_through_the_hub_and_reaps_an_orph
     service = _Service(home, _free_port())
     service.seed_config()
     started: list[dict[str, Any]] = []
+    # The Anthropic relay takes the key only as Bearer, which is how the engine
+    # sends a custom relay's key, so the Source must also verify with it (#2667).
     with _upstream(protocol="openai_chat", models=[_CHAT_MODEL], required_api_key=_CHAT_KEY) as chat, _upstream(
         protocol="anthropic", models=[_CLAUDE_MODEL], required_api_key=_ANTHROPIC_KEY,
-        required_auth_scheme="protocol",
+        required_auth_scheme="bearer",
     ) as anthropic:
         try:
             service.vibe("start", "--no-open-browser", timeout=300)
@@ -405,10 +407,6 @@ def test_fresh_install_serves_vibey_and_claude_through_the_hub_and_reaps_an_orph
                 "kind": "api_key", "vendor": "custom", "display_name": "Acceptance Anthropic",
                 "base_url": anthropic.url, "key": _ANTHROPIC_KEY, "protocol": "anthropic",
             }, timeout=120)["source"]
-            # Avibe checks an Anthropic key with x-api-key; the engine sends a
-            # custom relay's key as a bearer token, so the turn must carry it so.
-            anthropic.configure(required_auth_scheme="bearer")
-
             # A Vibey turn gets the upstream's reply through the hub.
             _route(service, "vibey", _VIBEY_MODEL, chat_source["id"], _CHAT_MODEL)
             vibey = _turn(service, "vibey")

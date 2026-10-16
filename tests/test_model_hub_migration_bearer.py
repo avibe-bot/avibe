@@ -16,8 +16,7 @@ from core.handlers.model_hub.adapter import SourceBinding
 from core.handlers.model_hub.service import ModelHubError
 from tests.test_model_hub_api import _service
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
-from vibe.model_hub_runtime.api_key_vendors import validate_api_key_auth_scheme
-from vibe.model_hub_runtime.client import probe_models
+from vibe.model_hub_runtime.api_key_vendors import anthropic_api_key_header, validate_api_key_auth_scheme
 from vibe.model_hub_runtime.config import write_engine_config
 from vibe.model_hub_runtime.state import EngineStateError, EngineStateStore, RuntimeSecrets
 
@@ -64,10 +63,9 @@ async def _relay(*, public_models=False, protocol_success=False, scheme="bearer"
     def supplied(request):
         requests.append((request.method, request.path, dict(request.headers)))
         assert request.headers.get("anthropic-version") == "2023-06-01"
+        # The relay reads the key from one header only; a key in the other is no key.
         if scheme == "bearer":
-            assert "x-api-key" not in request.headers
             return request.headers.get("Authorization", "").removeprefix("Bearer ")
-        assert "Authorization" not in request.headers
         return request.headers.get("x-api-key", "")
 
     async def messages(request):
@@ -288,12 +286,47 @@ def test_public_payloads_cannot_select_private_scheme(tmp_path):
     asyncio.run(scenario())
 
 
-def test_legacy_callers_keep_original_header_and_optional_keyword_absence(tmp_path):
+@pytest.mark.parametrize("url,key,header", [
+    ("https://api.anthropic.com", KEY, "x-api-key"),
+    ("https://API.ANTHROPIC.COM:443/v1", KEY, "x-api-key"),
+    # CPA takes any key containing sk-ant-oat as OAuth, which it sends as Bearer.
+    ("https://api.anthropic.com", "fixture-sk-ant-oat-inside", "bearer"),
+    ("https://api.anthropic.com:0443", KEY, "bearer"),
+    ("https://api.anthropic.com:8443", KEY, "bearer"),
+    ("http://api.anthropic.com", KEY, "bearer"),
+    (CUSTOM, KEY, "bearer"),
+])
+def test_an_anthropic_key_is_observed_in_the_header_the_pinned_engine_sends(url, key, header):
+    assert anthropic_api_key_header(url, key) == (
+        {"x-api-key": key} if header == "x-api-key" else {"Authorization": f"Bearer {key}"}
+    )
+
+
+@pytest.mark.parametrize("accepts", ["bearer", "x-api-key"])
+def test_a_custom_origin_key_is_verified_as_the_engine_will_send_it(tmp_path, accepts):
+    """Scenario: MH-PROTOCOL-005 -- the engine sends a custom-origin key as Bearer, so a verdict at add predicts its calls (#2667)."""
     async def scenario():
-        async with _relay(scheme="legacy") as (origin, requests, _):
-            result = await probe_models(vendor="anthropic", protocol="anthropic", base_url=origin, secret=KEY)
-            assert result[0].id == "claude-sonnet-4-6"
-            assert requests[0][2]["x-api-key"] == KEY
+        service, _, _ = _service_with_custody(tmp_path)
+        async with _relay(scheme=accepts) as (origin, requests, _):
+            pending = service._require_proven_source_payload({"vendor": "anthropic", "base_url": origin, "key": KEY})
+            if accepts == "bearer":
+                assert (await pending).authenticated is True
+            else:
+                # The relay refuses the header every engine call would carry.
+                with pytest.raises(ModelHubError) as refused:
+                    await pending
+                assert refused.value.detail == "modelHub.errors.authentication_failed"
+            assert requests[0][2]["Authorization"] == f"Bearer {KEY}"
+            # With the bearer relay this includes the listing that witnesses the key.
+            assert len(requests) == (3 if accepts == "bearer" else 1)
+            for _, _, headers in requests:
+                assert "x-api-key" not in {name.lower() for name in headers}
+
+    asyncio.run(scenario())
+
+
+def test_a_caller_without_a_scheme_passes_no_scheme_keyword(tmp_path):
+    async def scenario():
         service, _, adapter = _service(tmp_path)
         # The existing fake deliberately has no auth_scheme keyword.
         result = await service._require_proven_source_payload({"vendor": "anthropic", "key": KEY})
@@ -307,7 +340,7 @@ def test_legacy_callers_keep_original_header_and_optional_keyword_absence(tmp_pa
 def test_service_replace_preserves_private_scheme_through_actual_discovery(tmp_path, scheme):
     async def scenario():
         service, config, runtime = _service_with_custody(tmp_path)
-        async with _relay(scheme=scheme or "legacy") as (origin, requests, accepted):
+        async with _relay() as (origin, requests, accepted):
             ref = await runtime.provision_credential("anthropic", "anthropic", KEY, origin, auth_scheme=scheme)
             source = ModelHubSourceConfig.from_payload({
                 "id": "src_bearerfixture", "kind": "api_key", "vendor": "anthropic",
@@ -332,9 +365,8 @@ def test_service_replace_preserves_private_scheme_through_actual_discovery(tmp_p
             assert await runtime.credential_auth_scheme(replacement) == scheme
             assert runtime.state_store.credential_metadata_if_present(ref) is None
             assert "auth_scheme" not in answer["source"]
-            assert requests[0][2].get("Authorization" if scheme else "x-api-key") == (
-                "Bearer fixture-replacement" if scheme else "fixture-replacement"
-            )
+            # At a custom origin the engine sends Bearer with or without the scheme.
+            assert requests[0][2]["Authorization"] == "Bearer fixture-replacement"
 
     asyncio.run(scenario())
 

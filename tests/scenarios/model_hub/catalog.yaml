@@ -43,6 +43,7 @@ capability:
     - tests/test_model_hub_request_body_budget.py
     - tests/test_model_hub_declared_tools.py
     - tests/test_model_hub_l3.py
+    - tests/test_model_hub_migration_bearer.py
     - tests/test_model_hub_hosted_executor.py
     - tests/test_model_hub_hosted_evidence.py
     - tests/test_model_hub_hosted_images.py
@@ -1019,6 +1020,16 @@ scenarios:
     kind: observation
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_protocol_003_manual_selection_requires_matching_response_proof
+  - id: MH-PROTOCOL-005
+    name: >-
+      An Anthropic API key is verified in the header the engine sends it in, x-api-key only at the official origin
+      and Bearer at every other, so a Source verified at add is one the engine's calls authenticate to
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/test_model_hub_migration_bearer.py::test_a_custom_origin_key_is_verified_as_the_engine_will_send_it
+    related_tests:
+      - tests/test_model_hub_migration_bearer.py::test_an_anthropic_key_is_observed_in_the_header_the_pinned_engine_sends
   - id: MH-PROTOCOL-004
     name: Codex Model Hub launches use standard Responses provider capabilities
     status: partial

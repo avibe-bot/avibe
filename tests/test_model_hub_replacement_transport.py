@@ -123,7 +123,7 @@ def test_new_bearer_namespace_is_immutable_and_reserved_before_secret(tmp_path):
 ])
 def test_replacement_recovers_without_old_secret_and_retires_namespace(tmp_path, scheme, damage):
     async def scenario():
-        async with _relay(scheme=scheme or "legacy") as (origin, requests, accepted):
+        async with _relay() as (origin, requests, accepted):
             service, config, runtime, source, ref = await _source(tmp_path, origin, scheme)
             _damage(runtime.state_store, ref, damage)
             accepted.add("fixture-replacement")
@@ -133,9 +133,8 @@ def test_replacement_recovers_without_old_secret_and_retires_namespace(tmp_path,
             assert await runtime.credential_auth_scheme(new_ref) == scheme
             assert config.config.sources[0].credential_ref == new_ref
             assert "auth_scheme" not in result["source"]
-            assert requests and requests[0][2].get("Authorization" if scheme else "x-api-key") == (
-                "Bearer fixture-replacement" if scheme else "fixture-replacement"
-            )
+            # At a custom origin the engine sends Bearer with or without the scheme.
+            assert requests and requests[0][2]["Authorization"] == "Bearer fixture-replacement"
             assert not service.revocations.list()
             assert all(not path.exists() for path in runtime.state_store._credential_namespace_paths(ref))
 
@@ -258,7 +257,7 @@ def test_real_consumers_cannot_downgrade_tagged_metadata(tmp_path, consumer):
 @pytest.mark.parametrize("scheme", [None, "bearer"])
 def test_recovered_scheme_does_not_bypass_new_key_authentication(tmp_path, scheme):
     async def scenario():
-        async with _relay(scheme=scheme or "legacy") as (origin, requests, _):
+        async with _relay() as (origin, requests, _):
             service, config, runtime, source, ref = await _source(tmp_path, origin, scheme)
             _damage(runtime.state_store, ref, "bad_json")
             with pytest.raises(ModelHubError):

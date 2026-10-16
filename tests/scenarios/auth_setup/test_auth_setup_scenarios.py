@@ -3830,10 +3830,9 @@ def test_api_key_setup_does_not_schedule_a_model(
             body = await request.json() if request.method == "POST" else None
             requests.append((request.method, request.path, body))
             supplied_key = (
-                request.headers.get("x-api-key")
-                if protocol == "anthropic"
-                else request.headers.get("x-goog-api-key")
+                request.headers.get("x-goog-api-key")
                 if protocol == "google"
+                # At this custom origin the engine sends an Anthropic key as Bearer too.
                 else request.headers.get("Authorization", "").removeprefix("Bearer ")
             ) or ""
             observed_credentials.add(supplied_key)
