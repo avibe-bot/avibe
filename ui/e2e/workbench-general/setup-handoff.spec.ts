@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test';
 import type { Page } from '@playwright/test';
 
 import { DESKTOP, config, open, serveProduct } from './support';
+import { CONTRACT_VERSION } from '../../src/components/settings/models/types';
 
 /**
  * The handoff the wizard makes to the home, driven end to end through the real
@@ -163,7 +164,7 @@ const withSetupApi = async (page: Page) => {
     json: {
       ok: true,
       runtime: {
-        contract_version: 15,
+        contract_version: CONTRACT_VERSION,
         enabled: true,
         host_platform: 'linux',
         manifest: { name: 'cliproxyapi', resolution: 'resolved', version: 'fixture', source_sha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', assets: [] },

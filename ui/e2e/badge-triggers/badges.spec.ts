@@ -15,7 +15,7 @@ for (const locale of ['en', 'zh'] as const) {
       await page.route('**/api/version', (route) => route.fulfill({ json: {
         current: '3.1.4', latest: '3.1.5', has_update: true,
       } }));
-      await page.route('**/api/backend/codex/runtime', (route) => route.fulfill({ json: {
+      await page.route('**/api/backend/codex/runtime*', (route) => route.fulfill({ json: {
         installed: true, version: '1.0.0', latest_version: '1.1.0',
         has_update: new URL(page.url()).searchParams.get('state') === 'update',
       } }));
