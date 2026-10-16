@@ -1,5 +1,5 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
-import { ArrowRight, Check, CodeXml, ListChecks, ScanEye, Split, type LucideIcon } from 'lucide-react';
+import { Check, CodeXml, ListChecks, ScanEye, Split, type LucideIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { getBackendUiMeta } from '@/lib/agentBackends';
 import { BackendIcon } from '../visual';
@@ -76,6 +76,8 @@ const CODE_BARS: [number, number][] = [[24.3, 30.4], [18.1, 43.3], [29.2, 23], [
 /** The review reads a diff: the second line removed, the two after it added. */
 const REVIEW_DIFF: Partial<Record<number, 'removed' | 'added'>> = { 1: 'removed', 2: 'added', 3: 'added' };
 const TEST_BARS = [73.2, 61.6, 82.3, 54.5];
+/** One task line per assistant the coordinator hands a part to, in `ASSISTANT_ORDER`. */
+const HANDOFF_BARS = [68.4, 52.7, 76.1];
 
 function CodeRows({ written, diff }: { written: number; diff?: typeof REVIEW_DIFF }) {
   return (
@@ -96,16 +98,17 @@ function CodeRows({ written, diff }: { written: number; diff?: typeof REVIEW_DIF
 }
 
 function Skeleton({ work, active, done, written }: { work: StoryWork; active: boolean; done: boolean; written: number }) {
-  const { t } = useTranslation();
   if (work === 'handoffs') {
-    // One row per assistant the coordinator hands a part to, revealed as it plans.
+    // One row per assistant the coordinator hands a part to, revealed as it plans: the
+    // assistant's mark — the one its own card wears — beside its task as a skeleton line,
+    // in the same drawn language as the work the other cards show. The step and the name
+    // are already each card's role and title, so the plan does not restate them in type.
     return (
       <div className="onboarding-skeleton onboarding-skeleton-handoffs">
         {ASSISTANT_ORDER.map((backend, index) => (
           <div key={backend} className={`onboarding-handoff-row onboarding-write-line ${written > index * 2 ? 'onboarding-write-visible' : ''}`}>
-            <span className="onboarding-handoff-step">{t(`onboarding.story.${backend}.step`)}</span>
-            <ArrowRight size={12} strokeWidth={1.8} className="onboarding-handoff-arrow" />
-            <span className="onboarding-handoff-name">{getBackendUiMeta(backend).label}</span>
+            <span className="onboarding-handoff-mark"><BackendIcon backend={backend} size={14} variant="brand" aria-hidden="true" /></span>
+            <Bar width={HANDOFF_BARS[index]} />
           </div>
         ))}
       </div>

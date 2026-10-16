@@ -5636,19 +5636,16 @@
       },
       "claude": {
         "role": "Developer",
-        "step": "Build",
         "working": "Writing code",
         "complete": "Implementation ready"
       },
       "codex": {
         "role": "Reviewer",
-        "step": "Review",
         "working": "Reviewing the change",
         "complete": "Review passed"
       },
       "opencode": {
         "role": "Tester",
-        "step": "Test",
         "working": "Running tests",
         "complete": "All tests passed"
       }
