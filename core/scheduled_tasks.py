@@ -54,6 +54,7 @@ from core.runtime_work import (
     RuntimeWorkSupervisor,
     answer_caught_cancellation,
     land_step,
+    rearm_caught_cancellation,
     step_failed,
 )
 from core.run_settlement import (
@@ -4034,22 +4035,6 @@ class _ScheduledRuntimeWorkHandler(RuntimeWorkHandler):
         return True
 
 
-def _rearm_cancellation() -> None:
-    """Deliver a cancellation the current task caught, but did not answer, at its next await.
-
-    ``uncancel`` first (Python 3.11+, absent on 3.10, which counts no requests), so the
-    request is counted once, as an ``asyncio.timeout`` around the caller expects.
-    """
-
-    current = asyncio.current_task()
-    if current is None:
-        return
-    uncancel = getattr(current, "uncancel", None)
-    if uncancel is not None:
-        uncancel()
-    current.cancel()
-
-
 class ScheduledTaskService:
     """Controller-owned runtime that executes persisted scheduled tasks."""
 
@@ -5083,7 +5068,7 @@ class ScheduledTaskService:
         if cancelled:
             if step_failed(step):
                 answer_caught_cancellation(step)
-            _rearm_cancellation()
+            rearm_caught_cancellation()
         return step.result()
 
     async def _land_runtime_step(self, operation, /, *args, **kwargs):  # noqa: ANN001, ANN202
@@ -7674,6 +7659,11 @@ class ScheduledTaskService:
         registry = getattr(getattr(self.controller, "agent_service", None), "activities", None)
         has_blocker = getattr(registry, "has_blocking_run_activity", None)
         has_pending_output = getattr(registry, "has_pending_run_output", None)
+        # A Turn's terminal record for the Run may be off the loop (#2706): this
+        # settlement then waits for it and is replayed once it lands, so the two
+        # merge their terminal intents as they did when both ran on the loop.
+        hold = getattr(getattr(self.controller, "message_dispatcher", None), "hold_activity_settlement", None)
+        replay = partial(self.settle_activity_runs, activity)
         settled: list[str] = []
         # An Activity that failed on its own is the Run's cause even when a
         # sibling still blocks settlement; a later interruption must not
@@ -7689,6 +7679,8 @@ class ScheduledTaskService:
                 terminal_status=terminal_status,
                 **({"error": own_failure} if own_failure else {}),
             )
+            if callable(hold) and hold(run_id, replay) is True:
+                continue
             if callable(has_blocker) and has_blocker(run_id):
                 continue
             if callable(has_pending_output) and has_pending_output(run_id):

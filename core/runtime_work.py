@@ -68,6 +68,24 @@ def answer_caught_cancellation(step: asyncio.Future[Any]) -> NoReturn:
         )
     raise asyncio.CancelledError from error
 
+
+def rearm_caught_cancellation() -> None:
+    """Deliver a cancellation ``land_step`` caught, but the caller did not answer, at
+    the caller's next await -- where it would have landed had the step run on the loop.
+
+    ``uncancel`` first (Python 3.11+, absent on 3.10, which counts no requests), so the
+    request is counted once, as an ``asyncio.timeout`` around the caller expects.
+    """
+
+    current = asyncio.current_task()
+    if current is None:
+        return
+    uncancel = getattr(current, "uncancel", None)
+    if uncancel is not None:
+        uncancel()
+    current.cancel()
+
+
 _DEFAULT_RECONCILE_INTERVAL_SECONDS = 30.0
 _DEFAULT_LANE_CAPACITY = 4
 _DEFAULT_SCAN_PAGE_SIZE = 32
