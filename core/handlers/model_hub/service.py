@@ -4891,6 +4891,11 @@ class ModelHubService:
         """
 
         identity = source_identity(source)
+        current = next((item for item in self.store.load().sources if item.id == source.id), None)
+        if current is None or source_identity(current) != identity:
+            # A turn still running on a replaced key or URL was refused: that
+            # says nothing about what the current one lists (#2777).
+            return
         marked = self._stale_listings.get(source.id)
         # Turns frozen on different executor models of one Source may each be refused.
         earlier = marked.model_ids if marked is not None and marked.identity == identity else frozenset()
@@ -5066,12 +5071,19 @@ class ModelHubService:
                         await self._commit_synced(previous, updated)
                         self._record_reasoning_tier_overrides(source, overrides)
                     else:
+                        # A disowned row may leave on its own when the rest of
+                        # this listing has to wait, each one whose own removal
+                        # moves no route: one that guards a route is no reason
+                        # to keep another that does not (#2777).
                         dropped = self._clone_config(previous)
-                        if disowned and _drop_discovered_models(self._source(dropped, source_id), disowned) and (
-                            not self._moves_supply(previous, dropped)
-                        ):
-                            # The disowned row may leave on its own when the
-                            # rest of this listing has to wait.
+                        leaving = False
+                        for model_id in sorted(disowned):
+                            trial = self._clone_config(dropped)
+                            if _drop_discovered_models(self._source(trial, source_id), {model_id}) and (
+                                not self._moves_supply(previous, trial)
+                            ):
+                                dropped, leaving = trial, True
+                        if leaving:
                             await self._commit_synced(previous, dropped)
                         logger.info(
                             "Model Hub background discovery left a supply change "
