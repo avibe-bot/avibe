@@ -5636,32 +5636,55 @@ def test_agent_run_starts_a_new_session_on_a_chosen_model_that_its_later_turns_k
 
 
 @pytest.mark.parametrize(
-    ("extra", "code", "message"),
+    ("defaults", "extra", "catalog", "language", "message"),
     [
-        (["--model", "claude-opus-9"], "session_model_unavailable", "model 'claude-opus-9' is not in the vibey model catalog"),
+        ({}, ["--model", "claude-opus-9"], None, "en", "model 'claude-opus-9' is not in the vibey model catalog"),
         (
+            {},
             ["--model", "claude-opus-5-5", "--reasoning-effort", "medium"],
-            "session_model_unavailable",
+            None,
+            "en",
             "reasoning_effort 'medium' is not valid for model 'claude-opus-5-5'",
         ),
+        # A model the menu lists with no efforts takes none.
+        ({}, ["--model", "gpt-6-astra", "--reasoning-effort", "high"], None, "en",
+         "reasoning_effort 'high' is not valid for model 'gpt-6-astra'"),
+        # The pair the Session would run on: an effort override over the Agent's default model...
+        ({"model": "claude-opus-5-5"}, ["--reasoning-effort", "medium"], None, "en",
+         "reasoning_effort 'medium' is not valid for model 'claude-opus-5-5'"),
+        # ...and a model override over the Agent's default effort.
+        ({"model": "claude-opus-5-5", "reasoning_effort": "xhigh"}, ["--model", "gpt-6-astra"], None, "en",
+         "reasoning_effort 'xhigh' is not valid for model 'gpt-6-astra'"),
+        # A menu that cannot be loaded vouches for nothing.
+        ({}, ["--model", "claude-opus-5-5"], {"ok": False, "error": "config_unavailable"}, "en",
+         "the vibey model catalog could not be loaded, so the model and reasoning effort cannot be checked"),
+        ({}, ["--model", "claude-opus-9"], None, "zh", "模型 'claude-opus-9' 不在 vibey 的模型目录中"),
     ],
-    ids=["unknown-model", "effort-the-model-does-not-take"],
+    ids=["unknown-model", "effort-the-model-does-not-take", "effort-on-a-model-that-takes-none",
+         "effort-over-the-agents-model", "model-over-the-agents-effort", "menu-unavailable", "zh"],
 )
 def test_agent_run_refuses_a_vibey_model_its_menu_does_not_offer_before_any_session_is_reserved(
-    tmp_path: Path, capsys, sqlite_schema_db_factory, extra, code, message
+    tmp_path: Path, capsys, sqlite_schema_db_factory, defaults, extra, catalog, language, message
 ) -> None:
+    """The effective pair a new Vibey Session would run on (each override over the Agent's default) is checked against
+    the Model Hub menu, which is authoritative: a pair it does not offer, or a menu that cannot load, is refused in the
+    caller's language with the catalog hint, before any Session is reserved or run queued."""
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     agent_store = cli.VibeAgentStore(db_path)
-    agent_store.create(name="worker", backend="vibey")
+    agent_store.create(name="worker", backend="vibey", **defaults)
     request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
 
-    result, payload = _run_on_new_session(
-        tmp_path, capsys, db_path, agent_store, request_store, ["--agent", "worker", *extra, "--message", "hi"]
-    )
+    with (
+        patch("vibe.cli._configured_cli_language", return_value=language),
+        patch.dict(_CATALOGS, {"vibey": catalog} if catalog is not None else {}),
+    ):
+        result, payload = _run_on_new_session(
+            tmp_path, capsys, db_path, agent_store, request_store, ["--agent", "worker", *extra, "--message", "hi"]
+        )
 
     assert result == 1
-    assert (payload["code"], payload["error"]) == (code, message)
-    assert payload["hint"] == "Run `vibe agent models worker` to list valid models and reasoning efforts."
+    assert (payload["code"], payload["error"]) == ("session_model_unavailable", message)
+    assert payload["hint"] == cli.i18n_t("harness.cli.agentRunModel.catalogHint", language, agent="worker")
     with sqlite3.connect(db_path) as conn:
         assert conn.execute("select count(*) from agent_sessions").fetchone() == (0,)
     assert not list(request_store.pending_dir.glob("*.json"))

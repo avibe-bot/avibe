@@ -986,9 +986,11 @@ not change. Do not combine `--fork-session` with `--session-id` or
 `--model` and `--reasoning-effort` set the model of any new Session the run
 creates (a blank new Session, `--create-session`, or a fork); the Session keeps
 it. They are refused with `--session-id` (`model_override_with_existing_session`).
-A Vibey model or effort its Model Hub menu does not offer is refused
-(`session_model_unavailable`); for claude and codex an unknown value is a
-warning. `vibe agent models <agent>` lists valid values.
+The pair the new Session will run on (each override over the default it would
+otherwise keep) is checked: a Vibey model or effort its Model Hub menu does not
+offer, or a menu that cannot be loaded, is refused (`session_model_unavailable`);
+for claude and codex an unknown value is a warning. `vibe agent models <agent>`
+lists valid values.
 
 ## 5.4 `vibe runs`
 

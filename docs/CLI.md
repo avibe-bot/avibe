@@ -507,10 +507,12 @@ stays the same; a cross-backend fork is rejected. Do not combine
 `--model` and `--reasoning-effort` set the model of any new Session the run
 creates (a blank new Session, `--create-session`, or a fork), and the Session
 keeps it for its later turns. They are refused with `--session-id`; an existing
-Session's model is changed in the Web UI's Session model picker. A Vibey model
-or effort its Model Hub menu does not offer is refused; for claude and codex an
-unknown value is a warning, since their bundled catalogs can lag behind a new
-release. `vibe agent models <agent>` lists valid values.
+Session's model is changed in the Web UI's Session model picker. The pair the
+new Session will run on (each override over the default it would otherwise
+keep) is checked against the Agent's catalog. A Vibey model or effort its Model
+Hub menu does not offer, or a menu that cannot be loaded, is refused; for claude
+and codex an unknown value is a warning, since their bundled catalogs can lag
+behind a new release. `vibe agent models <agent>` lists valid values.
 
 Async runs need an explicit callback policy unless the command is running inside
 an Avibe-injected Agent environment. Use `--callback-session-id` when the final

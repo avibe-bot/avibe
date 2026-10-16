@@ -35,7 +35,7 @@ from sqlalchemy import select
 from config import paths
 from config.atomic_io import write_atomic
 from config.v2_config import V2Config
-from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, display_name_for_backend
+from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, display_name_for_backend, is_native_cli_backend
 from core.scheduled_tasks import (
     AGENT_RUN_CLOSE_AFTER_METADATA_KEY,
     AGENT_RUN_DELIVERY_QUEUE,
@@ -2069,12 +2069,6 @@ def _agent_run_examples_text() -> str:
           Forks keep the same backend, scope, and cwd as the source Session. Passing --agent is allowed only when that Agent uses the same backend.
           --agent, --model, and --reasoning-effort may override the forked Session's Agent/model/effort.
           Do not combine fork flags with --session-id or --create-session.
-
-        Model:
-          --model and --reasoning-effort set the model of the new Session this run creates (a blank new Session,
-          --create-session, or a fork); the Session keeps it for later turns. They are refused with --session-id.
-          A Vibey model or effort its Model Hub menu does not offer is refused; for claude and codex an unknown
-          value is a warning. List valid values with `vibe agent models <agent>`.
 
         Avibe Agent shell examples:
           vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
@@ -5811,44 +5805,49 @@ def cmd_agent_models(args):
         return 1
 
 
-def _catalog_mismatches(backend: str, model: Optional[str], reasoning_effort: Optional[str]) -> tuple[list[str], bool]:
+def _catalog_mismatches(
+    backend: str, model: Optional[str], reasoning_effort: Optional[str], *, language: str
+) -> tuple[list[str], bool]:
     """What the backend's model catalog says against ``model`` and ``reasoning_effort``, and whether it is authoritative.
 
     The catalog is ``api.agent_model_options``, the one ``vibe agent models`` and the Web picker read. Vibey's is the
-    Model Hub menu: a model it does not list cannot run, so it is authoritative. claude and codex catalogs are bundled
-    and may lag behind a new release, so a mismatch is advisory. OpenCode's is live (it needs the OpenCode server), so
-    it is not checked here, keeping the commands fast; ``vibe agent models`` is the place for the full OpenCode check.
+    Model Hub menu, authoritative: a model it does not list cannot run, and an effort its model does not list is never
+    sent, so one it cannot load vouches for nothing and is itself a mismatch. claude and codex catalogs are bundled and
+    may lag behind a new release, so a mismatch is advisory. OpenCode's is live (it needs the OpenCode server), so it
+    is not checked here, keeping the commands fast; ``vibe agent models`` is the place for the full OpenCode check.
     """
     if backend == "opencode" or (not model and not reasoning_effort):
         return [], False
+    words = "harness.cli.agentRunModel"
+    authoritative = not is_native_cli_backend(backend)
     try:
         options = api.agent_model_options(backend)
     except Exception:
-        return [], False
+        options = {}
     if not options.get("ok"):
-        return [], False
-    authoritative = options.get("source") == "model_hub"
+        return ([i18n_t(f"{words}.catalogUnavailable", language, backend=backend)] if authoritative else []), authoritative
     by_value = {entry.get("value"): entry for entry in options.get("models") or []}
     model_unknown = bool(model) and model not in by_value
     mismatches: list[str] = []
     if model_unknown:
-        mismatches.append(
-            f"model '{model}' is not in the {backend} model catalog"
-            + ("" if authoritative else "; it may be a typo or newer than the catalog")
-        )
+        key = "modelNotInCatalog" if authoritative else "modelMaybeNewer"
+        mismatches.append(i18n_t(f"{words}.{key}", language, model=model, backend=backend))
     if reasoning_effort:
         if model and not model_unknown:
             allowed = set(by_value[model].get("reasoning_efforts") or [])
-            scope = f"model '{model}'"
+            # An authoritative model that lists no efforts takes none.
+            constrained = bool(allowed) or authoritative
+            message = i18n_t(f"{words}.effortInvalidForModel", language, effort=reasoning_effort, model=model)
         else:
             # model unset or unknown: accept any effort valid for some model of this backend
             # (Codex efforts are backend-wide; Claude's widest set still lives in some model)
             allowed = set()
             for entry in by_value.values():
                 allowed.update(entry.get("reasoning_efforts") or [])
-            scope = f"backend '{backend}'"
-        if allowed and reasoning_effort not in allowed:
-            mismatches.append(f"reasoning_effort '{reasoning_effort}' is not valid for {scope}")
+            constrained = bool(allowed)
+            message = i18n_t(f"{words}.effortInvalidForBackend", language, effort=reasoning_effort, backend=backend)
+        if constrained and reasoning_effort not in allowed:
+            mismatches.append(message)
     return mismatches, authoritative
 
 
@@ -5856,27 +5855,30 @@ def _agent_value_warning_fields(agent) -> dict:
     """Best-effort, non-fatal warnings when an Agent's model/effort is unknown (``_catalog_mismatches``)."""
     if agent.backend not in ("claude", "codex"):
         return {}
-    warnings, _ = _catalog_mismatches(agent.backend, agent.model, agent.reasoning_effort)
+    language = _configured_cli_language()
+    warnings, _ = _catalog_mismatches(agent.backend, agent.model, agent.reasoning_effort, language=language)
     if not warnings:
         return {}
     return {
         "warnings": warnings,
-        "hint": f"Run `vibe agent models {agent.name}` to list valid models and reasoning efforts.",
+        "hint": i18n_t("harness.cli.agentRunModel.catalogHint", language, agent=agent.name),
     }
 
 
 def _session_model_override_fields(
     *, backend: str, agent_label: str, model: Optional[str], reasoning_effort: Optional[str], help_command: str
 ) -> dict:
-    """Check a new Session's --model and --reasoning-effort against the target Agent's catalog.
+    """Check the model and effort a new Session will run on against the target Agent's catalog.
 
-    Where the catalog is authoritative (Vibey's Model Hub menu), a model or effort it does not offer is refused before
-    any Session is reserved; elsewhere a mismatch is a warning on the run, as ``vibe agent create/update`` gives.
+    ``model`` and ``reasoning_effort`` are the effective pair: the run's overrides over the defaults the Session would
+    otherwise keep. Where the catalog is authoritative (Vibey's Model Hub menu), a pair it does not offer is refused
+    before any Session is reserved; elsewhere a mismatch is a warning on the run, as ``vibe agent create/update`` gives.
     """
-    mismatches, authoritative = _catalog_mismatches(backend, model, reasoning_effort)
+    language = _configured_cli_language()
+    mismatches, authoritative = _catalog_mismatches(backend, model, reasoning_effort, language=language)
     if not mismatches:
         return {}
-    hint = f"Run `vibe agent models {agent_label}` to list valid models and reasoning efforts."
+    hint = i18n_t("harness.cli.agentRunModel.catalogHint", language, agent=agent_label)
     if authoritative:
         raise TaskCliError(
             mismatches[0],
@@ -6174,14 +6176,11 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
         (getattr(args, "model", None) or "").strip()
         or (getattr(args, "reasoning_effort", None) or "").strip()
     ):
+        language = _configured_cli_language()
         raise TaskCliError(
-            "--model and --reasoning-effort only apply when the run creates a new Session",
+            i18n_t("harness.cli.agentRunModel.existingSession", language),
             code="model_override_with_existing_session",
-            hint=(
-                "An existing Session keeps its model; change it in the Web UI's Session model picker. "
-                "To run on another model now, start a new Session (--agent <name> --model ...) or fork this one "
-                "(--fork-session <id> --model ...)."
-            ),
+            hint=i18n_t("harness.cli.agentRunModel.existingSessionHint", language),
             help_command=help_command,
         )
     if session_id and (same_scope or scope_id):
@@ -7129,16 +7128,21 @@ def cmd_agent_run(args):
         effort_override = (getattr(args, "reasoning_effort", None) or "").strip() or None
         override_fields: dict = {}
         if model_override or effort_override:
-            if session_policy == "fork" and agent is None:
+            # The pair the Session will run on: each override over the default it would otherwise keep, the source
+            # Session's for a fork (whose Agent may only restate the source's backend), else the Agent's.
+            if session_policy == "fork":
                 source = resolve_session_id_target(source_session_id or "")
-                target_backend, target_label = source.agent_backend, source.agent_name or source.agent_backend
+                base_model, base_effort = source.model, source.reasoning_effort
+                target_backend = agent.backend if agent else source.agent_backend
+                target_label = agent.name if agent else source.agent_name or source.agent_backend
             else:
+                base_model, base_effort = agent.model, agent.reasoning_effort
                 target_backend, target_label = agent.backend, agent.name
             override_fields = _session_model_override_fields(
                 backend=target_backend,
                 agent_label=target_label,
-                model=model_override,
-                reasoning_effort=effort_override,
+                model=model_override or base_model,
+                reasoning_effort=effort_override or base_effort,
                 help_command="vibe agent run --help",
             )
         if session_policy == "create":
@@ -17956,15 +17960,12 @@ def build_parser():
         help="Make the new or forked Session user-facing from the start",
     )
     agent_run_parser.add_argument("--deliver-key", help=argparse.SUPPRESS)
+    agent_run_help_language = _configured_cli_language()
     agent_run_parser.add_argument(
-        "--model",
-        help="Model for the new Session this run creates (a blank new Session, --create-session, or a fork); "
-        "kept on that Session for its later turns. Not valid with --session-id. "
-        "See `vibe agent models <agent>`.",
+        "--model", help=i18n_t("harness.cli.agentRunModel.helpModel", agent_run_help_language)
     )
     agent_run_parser.add_argument(
-        "--reasoning-effort",
-        help="Reasoning effort for the new Session this run creates; kept on that Session. Not valid with --session-id.",
+        "--reasoning-effort", help=i18n_t("harness.cli.agentRunModel.helpEffort", agent_run_help_language)
     )
     agent_run_parser.add_argument(
         "--cwd",
