@@ -105,7 +105,10 @@ A cancellation caught during the Run terminal record (A, #2715, the `_store_step
   - the chunk forward and the indicator cleanup.
 - **Held Activity errors.** For a settlement failure, and for a Run record failure after a delivered Activity output, the emit still raises the same error to its caller, and the Turn ends `terminal_result` with the evidence.
 - **Durable-step failure raised before the signal.** For an undelivered Activity output and for an unpersisted Workbench output, the Turn owner stays live and B does not run.
-- **B's own write fails.** Make `_terminalize_durable_turn` raise once for B. The runner's release then commits the latched evidence, and a release without a terminal-result settlement still commits none.
+- **The runner's evidence fallback.** Three cases:
+  - make `_terminalize_durable_turn` raise once for B: the runner's release commits the same evidence B would have;
+  - let B succeed: the runner's write is a no-op, and the snapshot keeps B's `terminal_result`;
+  - release without a terminal-result settlement: the runner's write commits no evidence.
 - **Existing tests that pin the current order, kept green:**
   - `tests/test_controller_dispatch_loop.py`: the checkpoint ends after delivery, and a delivery failure keeps the Turn owner live;
   - `tests/test_message_dispatcher_result_fallback.py`;
