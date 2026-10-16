@@ -1022,10 +1022,10 @@ class _DiscoveryRetry:
 
 @dataclass(frozen=True)
 class _StaleListing:
-    """A discovered row the Source refused as a model it does not serve, under the identity that refused it."""
+    """The discovered rows a Source refused as models it does not serve, under the identity that refused them."""
 
     identity: tuple
-    model_id: str
+    model_ids: frozenset[str]
 
 
 def _background_discovery_period(source_id: str) -> timedelta:
@@ -1385,10 +1385,18 @@ def runtime_dependency_payload(
 
 
 
-def _drop_discovered_model(source: ModelHubSourceConfig, model_id: str) -> bool:
-    """Remove a discovered row; whether one was there. A manual row is the user's and stays."""
+def _drop_discovered_models(source: ModelHubSourceConfig, model_ids: Iterable[str]) -> bool:
+    """Remove these listed discovered rows; whether one was there.
 
-    kept = [model for model in source.models if not (model.id == model_id and model.provenance == "discovered")]
+    A manual row is the user's, and a retired row is the tombstone that keeps
+    a model the user removed from being listed again, so both stay.
+    """
+
+    dropping = set(model_ids)
+    kept = [
+        model for model in source.models
+        if not (model.id in dropping and model.provenance == "discovered" and not model.retired)
+    ]
     dropped = len(kept) != len(source.models)
     source.models = kept
     return dropped
@@ -4877,12 +4885,16 @@ class ModelHubService:
 
         Only a mark: the schedule's own due rule lists the Source once its
         listing is older than ``_STALE_LISTING_AGE``, under its eligibility,
-        backoff, in-flight exclusion and shutdown, and that listing drops the
-        row if the identity that refused it still holds and the listing no
-        longer names it either.
+        backoff, in-flight exclusion and shutdown, and that listing drops each
+        marked row if the identity that refused it still holds and the listing
+        no longer names it either.
         """
 
-        self._stale_listings[source.id] = _StaleListing(source_identity(source), model_id)
+        identity = source_identity(source)
+        marked = self._stale_listings.get(source.id)
+        # Turns frozen on different executor models of one Source may each be refused.
+        earlier = marked.model_ids if marked is not None and marked.identity == identity else frozenset()
+        self._stale_listings[source.id] = _StaleListing(identity, earlier | {model_id})
         self._request_discovery_pass(max_age=None)
 
     def _request_discovery_pass(self, *, max_age: timedelta | None) -> None:
@@ -4990,7 +5002,7 @@ class ModelHubService:
 
         A listing is not inference evidence, and removals move supply, so Source
         state, removals, and their guards stay with a manual `refresh_source`.
-        One row is the exception: a stale mark's model leaves if this listing no
+        A stale mark's models are the exception: each leaves if this listing no
         longer names it either, under the identity that refused it, and only
         when its removal moves no route.
         """
@@ -5044,18 +5056,18 @@ class ModelHubService:
                 updated = self._clone_config(previous)
                 source = self._source(updated, source_id)
                 overrides = self._merge_discovered_models(source, discovered)
-                disowned = mark is not None and mark.model_id not in {
+                disowned = (mark.model_ids if mark is not None else frozenset()) - {
                     canonical_model_id(model.id) for model in discovered
                 }
                 if disowned:
-                    _drop_discovered_model(source, mark.model_id)
+                    _drop_discovered_models(source, disowned)
                 if self._inventory_fingerprint(source) != self._inventory_fingerprint(current):
                     if not self._moves_supply(previous, updated):
                         await self._commit_synced(previous, updated)
                         self._record_reasoning_tier_overrides(source, overrides)
                     else:
                         dropped = self._clone_config(previous)
-                        if disowned and _drop_discovered_model(self._source(dropped, source_id), mark.model_id) and (
+                        if disowned and _drop_discovered_models(self._source(dropped, source_id), disowned) and (
                             not self._moves_supply(previous, dropped)
                         ):
                             # The disowned row may leave on its own when the

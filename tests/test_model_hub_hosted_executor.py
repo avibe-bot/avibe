@@ -641,6 +641,35 @@ async def test_a_stale_mark_drops_nothing_once_its_source_identity_changed(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_every_refused_row_leaves_but_a_retired_tombstone_stays(tmp_path):
+    """MH-HOSTED-GATEWAY-009: refusals of two executor models both count, and a row the user retired is kept."""
+
+    service = _stale_listing_service(tmp_path)
+    openai = _openai(service)
+    openai.last_discovered_at = None
+    openai.models.append(ModelHubModelConfig(id="gpt-6-luna", provenance="discovered"))
+    openai.models.append(ModelHubModelConfig(id="gpt-6-sol", provenance="discovered"))
+
+    async def discover_models(*_args, **_kwargs):
+        return [DiscoveredModel(id="gpt-6-chat")]
+
+    service.adapter.discover_models = discover_models
+    service.start_background_discovery()
+    try:
+        # Two turns frozen on different executor models are each refused.
+        service.mark_stale_listing(_openai(service), "gpt-6-astra")
+        service.mark_stale_listing(_openai(service), "gpt-6-luna")
+        service.mark_stale_listing(_openai(service), "gpt-6-sol")
+        # The user retires gpt-6-sol before the listing returns.
+        next(model for model in _openai(service).models if model.id == "gpt-6-sol").retired = True
+        await _settled(service)
+    finally:
+        await service.stop()
+    models = {model.id: bool(model.retired) for model in _openai(service).models}
+    assert models == {"gpt-6-chat": False, "gpt-6-sol": True}
+
+
+@pytest.mark.asyncio
 async def test_a_disowned_row_leaves_even_when_the_rest_of_the_listing_must_wait(tmp_path, monkeypatch):
     """MH-HOSTED-GATEWAY-009: a supply change elsewhere in the listing does not hold back the disowned row."""
 
