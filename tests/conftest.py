@@ -59,6 +59,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import traceback
 import unittest
 import urllib.parse
@@ -165,6 +166,8 @@ os.environ.update(_home_env(_SESSION_HOME))
 Path.home = classmethod(lambda cls: _SESSION_HOME)
 
 
+# Before the junitxml plugin reads its report path.
+@pytest.hookimpl(tryfirst=True)
 def pytest_configure(config):
     # A desktop caller is also whoever runs from a private tree's interpreter,
     # which no environment clearing undoes: every stop and restart under test
@@ -175,6 +178,12 @@ def pytest_configure(config):
         raise pytest.UsageError(
             f"{sys.executable} is a desktop Runtime's private interpreter; run the tests with another Python"
         )
+    # In CI every pytest run reports what it ran, one file per run, so that
+    # scripts/ci_scenario_evidence.py can tell which cited cases ran.
+    junit_dir = os.environ.get("AVIBE_CI_JUNIT_DIR")
+    if junit_dir and getattr(config.option, "xmlpath", "") is None:
+        os.makedirs(junit_dir, exist_ok=True)
+        config.option.xmlpath = os.path.join(junit_dir, f"{os.getpid()}-{time.monotonic_ns()}.xml")
 
 
 # Every process a `reap_processes` test starts ends with it (tests/process_reaper.py):

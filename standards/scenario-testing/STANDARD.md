@@ -206,7 +206,11 @@ pytest's for Python, vitest's for UI — so a case the runner would not collect,
 such as one in a suppressed or deselected class, is not evidence. A pytest
 evidence case must also name the citing row's ID in its docstring; a case that
 proves several rows names each of them. Then a case written for something else
-cannot be attached to a row unnoticed.
+cannot be attached to a row unnoticed. Finally, the evidence of a `covered` row
+must run: every case it cites passes in some CI job's run, or a workflow a
+release requires runs it. A case skipped wherever it ran — by a condition that
+always holds in CI, an imperative skip, or a deselecting hook — does not make
+its row `covered`.
 
 ## 5. Harness Design Rules
 
