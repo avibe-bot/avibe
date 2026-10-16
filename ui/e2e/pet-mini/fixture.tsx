@@ -156,7 +156,7 @@ window.setPetLayoutVisible = (visible) => root.render(
         {pinnedPose ? (
           visible ? (
             <PetWindow>
-              <div style={{ position: 'relative', width: 115, height: 115 }}>
+              <div className="pet-mini-avatar-wrap" style={{ position: 'relative', width: 115, height: 115 }}>
                 <PetAvatar pose={pinnedPose} />
               </div>
             </PetWindow>

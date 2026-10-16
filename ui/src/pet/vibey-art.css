@@ -196,10 +196,10 @@
   90%, 100% { opacity: 0; transform: translate(14%, -26%) scale(.9); }
 }
 
-/* Inactive pages pause every animation while retaining the current pixels. */
-.vibey-art[data-active='false'],
+/* Inactive pages pause looping body/accessory motion while allowing the
+   one-shot pose-change squash to reach its final state. */
 .vibey-art[data-active='false'] * {
-  animation-play-state: paused;
+  animation-play-state: paused !important;
 }
 
 /* Still thumbnails and reduced motion show the full static composition. */
