@@ -58,7 +58,11 @@ from vibe.model_hub_runtime.client import (
     probe_models,
     upstream_api_url,
 )
-from vibe.model_hub_runtime.api_key_vendors import pinned_api_key_protocol, validate_api_key_auth_scheme
+from vibe.model_hub_runtime.api_key_vendors import (
+    anthropic_api_key_header,
+    pinned_api_key_protocol,
+    validate_api_key_auth_scheme,
+)
 from vibe.model_hub_runtime.installer import (
     INSTALL_ALREADY_RUNNING_REASON,
     INSTALL_PLATFORM_UNSUPPORTED_REASON,
@@ -759,18 +763,15 @@ async def _probe_protocol_response(
         raise EngineClientError("unsupported source protocol")
     try:
         url = upstream_api_url(root, taxonomy.request_path)
+        credential = anthropic_api_key_header(root, secret) if protocol == "anthropic" else {
+            "Authorization": f"Bearer {secret}",
+        }
     except (TypeError, ValueError):
         raise EngineClientError("source base URL is invalid")
     assert url is not None
-    headers = {
-        "Authorization": f"Bearer {secret}",
-        "Accept": "application/json",
-    }
+    headers = {**credential, "Accept": "application/json"}
     if protocol == "anthropic":
         headers["anthropic-version"] = "2023-06-01"
-        if auth_scheme != "bearer":
-            headers.pop("Authorization")
-            headers["x-api-key"] = secret
     client_timeout = aiohttp.ClientTimeout(total=timeout)
 
     async def observe() -> _ProtocolEvidence:

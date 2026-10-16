@@ -54,6 +54,19 @@ def _validated_cpa_anthropic_origin(base_url: str | None) -> bool:
     )
 
 
+def anthropic_api_key_header(base_url: str, secret: str) -> dict[str, str]:
+    """The header the pinned engine sends a static Anthropic key in.
+
+    Observation authenticates exactly as the engine will, so a verdict at add
+    predicts every later call. CPA (``applyClaudeHeadersWithNativeProfile``)
+    sends ``x-api-key`` only to its official origin, and Bearer to every other
+    origin and for any key its ``sk-ant-oat`` heuristic takes as OAuth.
+    """
+    if _validated_cpa_anthropic_origin(base_url) and "sk-ant-oat" not in secret:
+        return {"x-api-key": secret}
+    return {"Authorization": f"Bearer {secret}"}
+
+
 def validate_api_key_auth_scheme(
     vendor: str,
     protocol: str | None,

@@ -50,6 +50,7 @@ from core.handlers.model_hub.stream_wire import (
     observe_buffered_protocol_response,
 )
 from vibe.model_hub_runtime.api_key_vendors import (
+    anthropic_api_key_header,
     google_api_base_url,
     official_api_key_base_urls,
     validate_api_key_auth_scheme,
@@ -952,19 +953,17 @@ async def probe_models(
         return await _probe_google_models(root, secret=secret, timeout=timeout)
     try:
         url = upstream_api_url(root, "/v1/models")
+        credential = {} if secret is None else (
+            anthropic_api_key_header(root, secret) if protocol == "anthropic" else {"Authorization": f"Bearer {secret}"}
+        )
     except (TypeError, ValueError):
         raise EngineClientError("source base URL is invalid")
     assert url is not None
-    headers = {"Accept": "application/json"}
+    headers = {"Accept": "application/json", **credential}
     if protocol == "anthropic":
         # The version header is part of the interface, not the credential, so it
         # stays on the uncredentialed request: it must differ in exactly one way.
         headers["anthropic-version"] = "2023-06-01"
-    if secret is not None:
-        if protocol == "anthropic" and auth_scheme != "bearer":
-            headers["x-api-key"] = secret
-        else:
-            headers["Authorization"] = f"Bearer {secret}"
     deadline = time.monotonic() + timeout
     client_timeout = aiohttp.ClientTimeout(total=timeout)
     try:

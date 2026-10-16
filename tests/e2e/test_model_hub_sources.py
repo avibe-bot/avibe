@@ -42,8 +42,8 @@ def _require_key(upstream: MockLLMUpstream, key: str) -> None:
 
     A model-free probe never proves a key (#1920): the declared interface's
     model listing does, only where it refuses a request without the key
-    (#1936). The engine sends a custom-origin Anthropic key as Bearer, and
-    observation sends the protocol's header, so the mock takes either.
+    (#1936). The engine and observation both send a custom-origin Anthropic
+    key as Bearer (#2667); the mock takes either header, as most relays do.
     """
 
     upstream.configure(required_api_key=key, required_auth_scheme="either")
