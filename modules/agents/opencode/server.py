@@ -73,7 +73,7 @@ _UNRECORDED_RUNTIME_ID = object()
 # runs; it stops them once their work drains. A started process is owned from
 # its spawn, before its record is written, until a stop proves it gone or its
 # start proves it exited, so this controller's shutdown stops it, recorded or not.
-_OWNED_HERE: dict[str, tuple[int, Optional[float]]] = {}
+_OWNED_HERE: dict[str, "_ProcessIdentity"] = {}
 # The process handle of each owned generation this process spawned. Until the
 # handle reaps it, its pid cannot name another process, so the handle, never
 # the start time the platform reports (which moves with every clock step),
@@ -1545,6 +1545,8 @@ class OpenCodeGeneration(OpenCodeServerClient):
         port: int,
         spec_digest: str,
         process_created_at: float | None,
+        process_start_token: str | None = None,
+        released_identity: bool = False,
         host: str = DEFAULT_OPENCODE_HOST,
         binary: str = "",
         binary_version: Optional[str] = None,
@@ -1568,7 +1570,13 @@ class OpenCodeGeneration(OpenCodeServerClient):
         self.port = port
         self.host = host
         self.spec_digest = spec_digest
+        # The process's identity, judged as ``_ProcessIdentity`` describes: the
+        # start token, which no clock adjustment moves; the wall-clock create
+        # time, the proof of a record whose token could not be read; or, for a
+        # record a released build wrote, the proof that build applied.
+        self.process_start_token = process_start_token
         self.process_created_at = process_created_at
+        self.released_identity = released_identity
         self.binary = binary
         self.binary_version = binary_version
         self.caller_context_path = caller_context_path
@@ -1610,7 +1618,7 @@ class OpenCodeGeneration(OpenCodeServerClient):
             "schema": GENERATION_RECORD_SCHEMA,
             "generation_id": self.generation_id,
             "pid": self.pid,
-            "process_created_at": self.process_created_at,
+            **self.process_identity().record_fields(),
             "host": self.host,
             "port": self.port,
             "started_at": self.started_at,
@@ -1702,16 +1710,24 @@ class OpenCodeGeneration(OpenCodeServerClient):
     def has_requests_in_flight(self) -> bool:
         return self._active_requests > 0
 
+    def process_identity(self) -> "_ProcessIdentity":
+        return _ProcessIdentity(
+            pid=self.pid,
+            port=self.port,
+            start_token=self.process_start_token,
+            created_at=self.process_created_at,
+            released=self.released_identity,
+        )
+
     def process_alive(self) -> bool:
         process = self._process
         if process is not None:
             # This controller's own child: its handle is the authority, and
             # its pid cannot be reused before the handle reaps it.
             return process.returncode is None
-        created_at = runtime.process_create_time(self.pid)
-        if self.process_created_at is None:
-            return created_at is not None or _pid_exists(self.pid)
-        return created_at == self.process_created_at
+        # A process that cannot be proven to be this one counts as gone: it is
+        # never signalled, and nothing waits for it to exit.
+        return self.process_identity().names_live_process() is True
 
     def observed_exit_pid(self) -> int | None:
         """This process's pid once it has exited, never a pid reused since."""
@@ -1841,8 +1857,15 @@ async def start_generation(
                     f"OpenCode CLI not found at '{spec.binary}'. Please install OpenCode or set OPENCODE_CLI_PATH."
                 ) from exc
             # Owned before anything else can fail, the record write included.
+            start_token = runtime.process_start_token(process.pid)
             created_at = runtime.process_create_time(process.pid)
-            _OWNED_HERE[generation_id] = (process.pid, created_at)
+            _OWNED_HERE[generation_id] = _ProcessIdentity(
+                pid=process.pid,
+                port=port,
+                start_token=start_token,
+                created_at=created_at,
+                released=False,
+            )
             _CHILDREN_HERE[generation_id] = process
             generation = OpenCodeGeneration(
                 generation_id=generation_id,
@@ -1850,6 +1873,7 @@ async def start_generation(
                 port=port,
                 spec_digest=spec.digest,
                 process_created_at=created_at,
+                process_start_token=start_token,
                 binary=spec.binary,
                 binary_version=spec.binary_version,
                 caller_context_path=caller_context_path,
@@ -2004,6 +2028,75 @@ def _record_runtime_id(info: Mapping[str, Any]) -> Any:
     return value if value is None or isinstance(value, str) else _UNRECORDED_RUNTIME_ID
 
 
+@dataclass(frozen=True)
+class _ProcessIdentity:
+    """How a record names the process it started, and the proof that applies to it.
+
+    A record this build writes names its process by start token
+    (``vibe.runtime.process_start_token``), which no clock adjustment moves; it
+    keeps the wall-clock ``process_created_at`` beside it, which a record whose
+    token could not be read is judged by instead. A record a released build
+    wrote has no token field and keeps the proof that build applied: its exact
+    create time, or, when it recorded none, the command line and port of the
+    process at its pid. A record of this build with neither proves nothing.
+    """
+
+    pid: int
+    port: Optional[int]
+    start_token: Optional[str]
+    created_at: Optional[float]
+    released: bool
+
+    @classmethod
+    def from_record(cls, info: Mapping[str, Any], pid: int) -> "_ProcessIdentity":
+        token = info.get("process_start_token")
+        return cls(
+            pid=pid,
+            port=_record_port(info),
+            start_token=token if isinstance(token, str) and token else None,
+            created_at=_record_number(info.get("process_created_at")),
+            released="process_start_token" not in info,
+        )
+
+    def record_fields(self) -> Dict[str, Any]:
+        """The fields that carry this identity in a record; a released one is kept as it was."""
+
+        fields: Dict[str, Any] = {"process_created_at": self.created_at}
+        if not self.released:
+            fields["process_start_token"] = self.start_token
+        return fields
+
+    def names_live_process(self) -> Optional[bool]:
+        """True while the pid still runs the recorded process; False once it does not; None when unprovable.
+
+        Unprovable means the record carries no identity this build may act on,
+        or the one it carries cannot be read now. Every caller treats it as
+        not proven: such a process is never signalled, and never waited for.
+        """
+
+        if not _pid_exists(self.pid):
+            return False
+        if self.start_token is not None:
+            current = runtime.process_start_token(self.pid)
+            if current is None:
+                return None if _pid_exists(self.pid) else False
+            return current == self.start_token
+        if self.created_at is not None:
+            current_created = runtime.process_create_time(self.pid)
+            if current_created is None:
+                return None if _pid_exists(self.pid) else False
+            return current_created == self.created_at
+        if not self.released:
+            return None
+        # A released record that recorded no identity: the proof its build applied.
+        command = _get_pid_command(self.pid)
+        if command:
+            if self.port is not None:
+                return _is_opencode_serve_cmd(command, self.port)
+            return "opencode" in command and "serve" in command
+        return self.port is not None and _pid_listens_on(self.pid, self.port)
+
+
 def _record_proves_process(info: Mapping[str, Any], *, require_port: bool = True) -> bool:
     """Whether a record still names the exact ``opencode serve`` it started.
 
@@ -2018,11 +2111,9 @@ def _record_proves_process(info: Mapping[str, Any], *, require_port: bool = True
     has_port = port is not None
     if require_port and not has_port:
         return False
-    created_at = _record_number(info.get("process_created_at"))
-    if created_at is not None:
-        # A command line alone can belong to a reused pid.
-        if runtime.process_create_time(pid) != created_at:
-            return False
+    # A command line alone can belong to a reused pid.
+    if _ProcessIdentity.from_record(info, pid).names_live_process() is not True:
+        return False
     command = _get_pid_command(pid)
     if command:
         if has_port:
@@ -2046,9 +2137,8 @@ def _generation_from_record(
 ) -> OpenCodeGeneration:
     binary = info.get("binary") if isinstance(info.get("binary"), dict) else {}
     pid = int(info["pid"])
-    created_at = _record_number(info.get("process_created_at"))
-    if created_at is None:
-        created_at = runtime.process_create_time(pid)
+    # The identity stays as recorded: a released record keeps its build's proof.
+    identity = _ProcessIdentity.from_record(info, pid)
     started_at = _record_number(info.get("started_at"))
     leases = info.get("leases") if isinstance(info.get("leases"), dict) else {}
     caller_context_path = info.get("caller_context_path")
@@ -2061,7 +2151,9 @@ def _generation_from_record(
         port=int(info["port"]),
         host=host if isinstance(host, str) and host else DEFAULT_OPENCODE_HOST,
         spec_digest=spec_digest,
-        process_created_at=created_at,
+        process_created_at=identity.created_at,
+        process_start_token=identity.start_token,
+        released_identity=identity.released,
         binary=binary_path if isinstance(binary_path, str) else "",
         binary_version=binary.get("version") if isinstance(binary.get("version"), str) else None,
         caller_context_path=caller_context_path if isinstance(caller_context_path, str) else None,
@@ -2075,7 +2167,13 @@ def _generation_from_record(
         },
         # The process's age: a record without a start time, such as the
         # legacy one, started when its process did, never at its adoption.
-        started_at=started_at if started_at is not None else created_at,
+        started_at=(
+            started_at
+            if started_at is not None
+            else identity.created_at
+            if identity.created_at is not None
+            else runtime.process_create_time(pid)
+        ),
         # Rewritten without a malformed id, so every later read judges it alike.
         desktop_runtime_id=_record_runtime_id(info),
         request_timeout_seconds=request_timeout_seconds,
@@ -2186,7 +2284,7 @@ async def adopt_recorded_generations(*, request_timeout_seconds: int = 60) -> li
     """
 
     adopted: list[OpenCodeGeneration] = []
-    adopted_processes: set[tuple[int, Optional[float]]] = set()
+    adopted_processes: list[_ProcessIdentity] = []
     legacy_path = legacy_pid_file()
     for path, info in _recorded_processes():
         is_legacy = path == legacy_path
@@ -2199,7 +2297,7 @@ async def adopt_recorded_generations(*, request_timeout_seconds: int = 60) -> li
             if not is_legacy and isinstance(info.get("generation_id"), str):
                 _remove_quietly(generation_records_dir() / f"{info['generation_id']}.overlay.json")
             continue
-        if is_legacy and (int(info["pid"]), runtime.process_create_time(int(info["pid"]))) in adopted_processes:
+        if is_legacy and _names_one_of(int(info["pid"]), adopted_processes):
             # This pass adopted it from its converted record; a crash or a
             # failed removal after the conversion left this file behind.
             _remove_quietly(path)
@@ -2230,7 +2328,7 @@ async def adopt_recorded_generations(*, request_timeout_seconds: int = 60) -> li
             generation.write_record_or_defer("the record of an adopted pre-generations server")
         logger.info("Adopted OpenCode generation %s pid=%s", generation.generation_id, generation.pid)
         adopted.append(generation)
-        adopted_processes.add((generation.pid, generation.process_created_at))
+        adopted_processes.append(generation.process_identity())
     # No sweep of overlays without a record: another desktop Runtime writes
     # its overlay before it spawns and records the process.
     return adopted
@@ -2248,12 +2346,18 @@ def _owned_here(info: Mapping[str, Any], *, by_id: bool = True) -> bool:
     pid = _record_pid(info)
     if pid is None:
         return False
-    return (pid, runtime.process_create_time(pid)) in _OWNED_HERE.values()
+    return _names_one_of(pid, _OWNED_HERE.values())
+
+
+def _names_one_of(pid: int, identities: Iterable[_ProcessIdentity]) -> bool:
+    """Whether ``pid`` still runs the process one of ``identities`` names, by that identity's proof."""
+
+    return any(identity.pid == pid and identity.names_live_process() is True for identity in identities)
 
 
 def own_generation(generation: OpenCodeGeneration) -> None:
     """Mark an adopted generation as attached to a runtime of this process."""
-    _OWNED_HERE[generation.generation_id] = (generation.pid, generation.process_created_at)
+    _OWNED_HERE[generation.generation_id] = generation.process_identity()
 
 
 def forget_record(path: Path) -> None:
@@ -2349,32 +2453,32 @@ def stop_owned_generations_sync() -> None:
             logger.warning("OpenCode generation %s survived its stop", generation_id)
         if isinstance(generation_id, str):
             recorded.add(generation_id)
-    for generation_id, (pid, created_at) in list(_OWNED_HERE.items()):
+    for generation_id, identity in list(_OWNED_HERE.items()):
         if generation_id not in recorded:
-            _stop_unrecorded_process_sync(generation_id, pid, created_at)
+            _stop_unrecorded_process_sync(generation_id, identity)
 
 
-def _stop_unrecorded_process_sync(generation_id: str, pid: int, created_at: Optional[float]) -> None:
+def _stop_unrecorded_process_sync(generation_id: str, identity: _ProcessIdentity) -> None:
     """Stop an owned process no record names.
 
     This controller's own child is judged by its handle. Any other is proven by
-    its pid and create time: one whose create time is unknown or cannot be
-    read now is never signalled, since its pid may have been reused, and one
-    whose pid is gone, or now names another process, has ended and is no
-    longer owned here.
+    its identity: one that cannot be proven now is never signalled, since its
+    pid may have been reused, and one whose pid is gone, or now names another
+    process, has ended and is no longer owned here.
     """
 
+    pid = identity.pid
     running = _child_running(generation_id)
     if running is not None:
         if running and not terminate_pid_tree_sync(pid):
             logger.warning("OpenCode generation %s pid=%s survived its stop", generation_id, pid)
             return
     elif _pid_exists(pid):
-        current = runtime.process_create_time(pid)
-        if created_at is None or current is None:
+        names_it = identity.names_live_process()
+        if names_it is None:
             logger.warning("Leaving OpenCode generation %s pid=%s: its process cannot be proven", generation_id, pid)
             return
-        if current == created_at and not terminate_pid_tree_sync(pid):
+        if names_it and not terminate_pid_tree_sync(pid):
             logger.warning("OpenCode generation %s pid=%s survived its stop", generation_id, pid)
             return
     _disown(generation_id)

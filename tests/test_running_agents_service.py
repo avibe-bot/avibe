@@ -103,17 +103,15 @@ def _no_db_no_registry(monkeypatch):
         "modules.agents.claude_process_reaper.get_claude_client_pid",
         lambda client: getattr(client, "_fake_pid", None),
     )
-    # Orphan liveness: by default every probed pid is "alive" (batched ages) with
-    # a start time that matches the record (so identity passes). Tests exercising
-    # the dead/reused-pid filter override these per-pid.
+    # Orphan liveness: by default every probed pid is alive, with a start that
+    # matches a released record's ``started_at`` of 1000.0 (so identity passes).
+    # Tests exercising the dead/reused-pid filter override these per-pid.
     monkeypatch.setattr(
         "modules.agents.claude_process_reaper._process_ages",
         lambda pids: {p: 1.0 for p in pids},
     )
-    monkeypatch.setattr(
-        "modules.agents.claude_process_reaper._process_start_time",
-        lambda pid: 1000.0,
-    )
+    monkeypatch.setattr("vibe.runtime.pid_alive", lambda pid: True)
+    monkeypatch.setattr("vibe.runtime.process_start_seconds", lambda pid: 1000.0)
 
 
 def test_safe_items_tolerates_concurrent_mutation():
@@ -554,18 +552,15 @@ def test_orphan_skips_dead_and_reused_pids(monkeypatch):
         lambda *a, **k: [alive, dead, reused],
     )
 
-    # pid 20 is not alive (absent from batched ages → stale); pid 30 is alive but
-    # started far from the recorded time (reused by an unrelated process); pid 10
-    # is a real leak (alive + start matches the record within 1s).
-    monkeypatch.setattr(
-        "modules.agents.claude_process_reaper._process_ages",
-        lambda pids: {p: 1.0 for p in pids if p in {10, 30}},
-    )
+    # pid 20 is not alive (stale); pid 30 is alive but started far from the
+    # recorded time (reused by an unrelated process); pid 10 is a real leak
+    # (alive + start matches the record within 1s).
+    monkeypatch.setattr("vibe.runtime.pid_alive", lambda pid: pid in {10, 30})
 
     def _start(pid):
         return {10: 5000.4, 30: 9999.0}.get(pid)
 
-    monkeypatch.setattr("modules.agents.claude_process_reaper._process_start_time", _start)
+    monkeypatch.setattr("vibe.runtime.process_start_seconds", _start)
 
     snap = running_agents.snapshot_running_agents(_make_controller())
     orphans = [r for r in snap["agents"] if r["state"] == "orphan"]
@@ -585,7 +580,6 @@ def test_end_orphan_kills_verified_owned_pid(monkeypatch):
 
     rec = types.SimpleNamespace(pid=10, owner=reaper.AVIBE_CLAUDE_SESSION_OWNER, started_at=1000.0)
     monkeypatch.setattr(reaper, "_load_owned_process_registry", lambda *a, **k: [rec])
-    monkeypatch.setattr(reaper, "_process_start_time", lambda pid: 1000.0)
     reap = _AsyncFlag(ret=1)
     monkeypatch.setattr(reaper, "_reap_pid_set", reap)
 
@@ -603,7 +597,6 @@ def test_end_orphan_reaps_root_plus_descendants(monkeypatch):
 
     rec = types.SimpleNamespace(pid=100, owner=reaper.AVIBE_CLAUDE_SESSION_OWNER, started_at=1000.0)
     monkeypatch.setattr(reaper, "_load_owned_process_registry", lambda *a, **k: [rec])
-    monkeypatch.setattr(reaper, "_process_start_time", lambda pid: 1000.0)
     # Tree: 100(root) -> 200(child) -> 300(grandchild); 999 is unrelated.
     ps_rows = [
         reaper.ClaudeProcessRow(pid=100, ppid=1, command="claude"),
@@ -611,8 +604,8 @@ def test_end_orphan_reaps_root_plus_descendants(monkeypatch):
         reaper.ClaudeProcessRow(pid=300, ppid=200, command="node helper2"),
         reaper.ClaudeProcessRow(pid=999, ppid=1, command="unrelated"),
     ]
-    monkeypatch.setattr(reaper, "_run_ps", lambda: "ignored")
-    monkeypatch.setattr(reaper, "_parse_ps_rows", lambda _out: ps_rows)
+    monkeypatch.setattr(reaper, "_process_table", lambda: "ignored")
+    monkeypatch.setattr(reaper, "_parse_process_table", lambda _out: ps_rows)
     captured = {}
 
     async def _reap(target_pids, *, terminate_timeout, logger):
@@ -627,18 +620,17 @@ def test_end_orphan_reaps_root_plus_descendants(monkeypatch):
 
 
 def test_end_orphan_falls_back_to_root_when_ps_unreadable(monkeypatch):
-    # If the ps read fails during descendant expansion, still reap the verified
+    # If the process-table read fails during descendant expansion, still reap the verified
     # root pid (better than reaping nothing).
     from modules.agents import claude_process_reaper as reaper
 
     rec = types.SimpleNamespace(pid=55, owner=reaper.AVIBE_CLAUDE_SESSION_OWNER, started_at=1000.0)
     monkeypatch.setattr(reaper, "_load_owned_process_registry", lambda *a, **k: [rec])
-    monkeypatch.setattr(reaper, "_process_start_time", lambda pid: 1000.0)
 
     def _boom():
         raise RuntimeError("ps unavailable")
 
-    monkeypatch.setattr(reaper, "_run_ps", _boom)
+    monkeypatch.setattr(reaper, "_process_table", _boom)
     captured = {}
 
     async def _reap(target_pids, *, terminate_timeout, logger):
@@ -661,15 +653,14 @@ def test_end_orphan_excludes_other_registered_session_pids(monkeypatch):
     root = types.SimpleNamespace(pid=100, owner=reaper.AVIBE_CLAUDE_SESSION_OWNER, started_at=1000.0)
     other = types.SimpleNamespace(pid=200, owner=reaper.AVIBE_CLAUDE_SESSION_OWNER, started_at=1000.0)
     monkeypatch.setattr(reaper, "_load_owned_process_registry", lambda *a, **k: [root, other])
-    monkeypatch.setattr(reaper, "_process_start_time", lambda pid: 1000.0)
     # 100(root) -> 200(other owned) -> 300(other's child)
     ps_rows = [
         reaper.ClaudeProcessRow(pid=100, ppid=1, command="claude"),
         reaper.ClaudeProcessRow(pid=200, ppid=100, command="claude"),
         reaper.ClaudeProcessRow(pid=300, ppid=200, command="node helper"),
     ]
-    monkeypatch.setattr(reaper, "_run_ps", lambda: "ignored")
-    monkeypatch.setattr(reaper, "_parse_ps_rows", lambda _out: ps_rows)
+    monkeypatch.setattr(reaper, "_process_table", lambda: "ignored")
+    monkeypatch.setattr(reaper, "_parse_process_table", lambda _out: ps_rows)
     captured = {}
 
     async def _reap(target_pids, *, terminate_timeout, logger):
@@ -691,15 +682,14 @@ def test_end_orphan_never_reaps_the_service_tree(monkeypatch):
 
     root = types.SimpleNamespace(pid=100, owner=reaper.AVIBE_CLAUDE_SESSION_OWNER, started_at=1000.0)
     monkeypatch.setattr(reaper, "_load_owned_process_registry", lambda *a, **k: [root])
-    monkeypatch.setattr(reaper, "_process_start_time", lambda pid: 1000.0)
     # 100(root) -> 200(== service pid) -> 300(service child)
     ps_rows = [
         reaper.ClaudeProcessRow(pid=100, ppid=1, command="claude"),
         reaper.ClaudeProcessRow(pid=200, ppid=100, command="python avibe"),
         reaper.ClaudeProcessRow(pid=300, ppid=200, command="python worker"),
     ]
-    monkeypatch.setattr(reaper, "_run_ps", lambda: "ignored")
-    monkeypatch.setattr(reaper, "_parse_ps_rows", lambda _out: ps_rows)
+    monkeypatch.setattr(reaper, "_process_table", lambda: "ignored")
+    monkeypatch.setattr(reaper, "_parse_process_table", lambda _out: ps_rows)
     monkeypatch.setattr(running_agents.os, "getpid", lambda: 200)  # avibe service is pid 200
     captured = {}
 
@@ -734,7 +724,6 @@ def test_end_orphan_refuses_when_identity_unprovable(monkeypatch):
 
     rec = types.SimpleNamespace(pid=10, owner=reaper.AVIBE_CLAUDE_SESSION_OWNER, started_at=None)
     monkeypatch.setattr(reaper, "_load_owned_process_registry", lambda *a, **k: [rec])
-    monkeypatch.setattr(reaper, "_process_start_time", lambda pid: 1000.0)
     reap = _AsyncFlag(ret=1)
     monkeypatch.setattr(reaper, "_reap_pid_set", reap)
 
@@ -2090,3 +2079,51 @@ def test_end_rechecks_live_state_active_to_idle():
     )
     assert res["ok"] is True
     assert cleared.get("clr") == "b1" and cleared.get("treg") == "b1"
+
+
+def test_a_released_record_gets_one_verdict_where_no_process_has_a_start_token(monkeypatch):
+    """#2511: on a platform with no start token (FreeBSD, OpenBSD, ...), a released
+    record's ``started_at`` is the only identity. Running's orphan list and "end
+    orphan" judge it alike, so a listed orphan is never refused as not alive."""
+
+    from modules.agents import claude_process_reaper as reaper
+
+    record = reaper.ClaudeOwnedProcess(pid=10, native_session_id="nat-released", started_at=1000.0)
+    monkeypatch.setattr(reaper, "_load_owned_process_registry", lambda *a, **k: [record])
+    monkeypatch.setattr("vibe.runtime.process_start_token", lambda pid: None)
+    monkeypatch.setattr(reaper, "_process_table", lambda: "")
+    reap = _AsyncFlag(ret=1)
+    monkeypatch.setattr(reaper, "_reap_pid_set", reap)
+
+    snap = running_agents.snapshot_running_agents(_make_controller())
+    assert [row["pid"] for row in snap["agents"] if row["state"] == "orphan"] == [10]
+
+    res = asyncio.run(running_agents.end_running_agent(_make_controller(), state="orphan", pid=10))
+    assert res["ok"] is True and reap.called
+
+
+@pytest.mark.parametrize(
+    ("record", "reason"),
+    [
+        ({"pid": 10}, "identity_unprovable"),
+        ({"pid": 10, "start_token": "boot:1"}, "identity_unverifiable"),
+    ],
+)
+def test_end_orphan_refuses_a_record_it_cannot_verify_and_says_why(monkeypatch, record, reason):
+    """A record whose start could not be read at registration, or whose identity
+    cannot be read now, is neither listed nor killed; "end orphan" reports why."""
+
+    from modules.agents import claude_process_reaper as reaper
+
+    owned = reaper.ClaudeOwnedProcess(**record)
+    monkeypatch.setattr(reaper, "_load_owned_process_registry", lambda *a, **k: [owned])
+    monkeypatch.setattr("vibe.runtime.process_start_token", lambda pid: None)
+    reap = _AsyncFlag(ret=1)
+    monkeypatch.setattr(reaper, "_reap_pid_set", reap)
+
+    snap = running_agents.snapshot_running_agents(_make_controller())
+    assert [row for row in snap["agents"] if row["state"] == "orphan"] == []
+
+    res = asyncio.run(running_agents.end_running_agent(_make_controller(), state="orphan", pid=10))
+    assert res == {"ok": False, "error": reason, "pid": 10}
+    assert not reap.called

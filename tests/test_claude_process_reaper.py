@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -9,6 +10,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from modules.agents import claude_process_reaper
 
@@ -47,7 +50,7 @@ def test_find_claude_resume_processes_matches_exact_resume_id(monkeypatch):
             "105 1 /usr/local/bin/node /usr/local/bin/claude --resume sess-1",
         ]
     )
-    monkeypatch.setattr(claude_process_reaper, "_run_ps", lambda: table)
+    monkeypatch.setattr(claude_process_reaper, "_process_table", lambda: table)
 
     rows = claude_process_reaper.find_claude_resume_processes("sess-1")
 
@@ -62,7 +65,7 @@ def test_find_claude_resume_processes_matches_configured_wrapper(monkeypatch):
             "102 1 /usr/local/bin/node /usr/local/bin/claude-proxy --resume=sess-1",
         ]
     )
-    monkeypatch.setattr(claude_process_reaper, "_run_ps", lambda: table)
+    monkeypatch.setattr(claude_process_reaper, "_process_table", lambda: table)
 
     rows = claude_process_reaper.find_claude_resume_processes(
         "sess-1",
@@ -94,7 +97,7 @@ def test_reap_duplicate_claude_resume_processes_kills_matches_and_descendants(mo
         signals.append((pid, sig))
         alive.discard(pid)
 
-    monkeypatch.setattr(claude_process_reaper, "_run_ps", lambda: table)
+    monkeypatch.setattr(claude_process_reaper, "_process_table", lambda: table)
     monkeypatch.setattr(claude_process_reaper.os, "kill", fake_kill)
 
     reaped = asyncio.run(
@@ -115,7 +118,7 @@ def test_reap_duplicate_claude_resume_processes_keeps_single_tracked_pid(monkeyp
     service_pid = os.getpid()
     monkeypatch.setattr(
         claude_process_reaper,
-        "_run_ps",
+        "_process_table",
         lambda: "\n".join(
             [
                 f"{service_pid} 1 python service_main.py",
@@ -158,7 +161,7 @@ def test_reap_duplicate_claude_resume_processes_reaps_scoped_orphan_without_keep
         signals.append((pid, sig))
         alive.discard(pid)
 
-    monkeypatch.setattr(claude_process_reaper, "_run_ps", lambda: table)
+    monkeypatch.setattr(claude_process_reaper, "_process_table", lambda: table)
     monkeypatch.setattr(claude_process_reaper.os, "kill", fake_kill)
 
     reaped = asyncio.run(
@@ -201,7 +204,7 @@ def test_reap_duplicate_claude_resume_processes_spares_owned_replacement(monkeyp
         signals.append((pid, sig))
         alive.discard(pid)
 
-    monkeypatch.setattr(claude_process_reaper, "_run_ps", lambda: table)
+    monkeypatch.setattr(claude_process_reaper, "_process_table", lambda: table)
     monkeypatch.setattr(claude_process_reaper.os, "kill", fake_kill)
 
     reaped = asyncio.run(
@@ -227,7 +230,7 @@ def test_reap_duplicate_claude_resume_processes_skips_when_all_matches_owned(mon
         ]
     )
     signals = []
-    monkeypatch.setattr(claude_process_reaper, "_run_ps", lambda: table)
+    monkeypatch.setattr(claude_process_reaper, "_process_table", lambda: table)
     monkeypatch.setattr(claude_process_reaper.os, "kill", lambda pid, sig: signals.append((pid, sig)))
 
     reaped = asyncio.run(
@@ -270,7 +273,7 @@ def test_reap_duplicate_claude_resume_processes_counts_owned_matches_in_the_guar
         signals.append((pid, sig))
         alive.discard(pid)
 
-    monkeypatch.setattr(claude_process_reaper, "_run_ps", lambda: table)
+    monkeypatch.setattr(claude_process_reaper, "_process_table", lambda: table)
     monkeypatch.setattr(claude_process_reaper.os, "kill", fake_kill)
 
     reaped = asyncio.run(
@@ -291,7 +294,7 @@ def test_reap_duplicate_claude_resume_processes_ignores_unrelated_unique_match(m
     service_pid = os.getpid()
     monkeypatch.setattr(
         claude_process_reaper,
-        "_run_ps",
+        "_process_table",
         lambda: "\n".join(
             [
                 f"{service_pid} 1 python service_main.py",
@@ -322,7 +325,7 @@ def _patch_orphan_env(monkeypatch, table: str, ages: dict[int, float], alive: se
             return
         alive.discard(pid)
 
-    monkeypatch.setattr(claude_process_reaper, "_run_ps", lambda: table)
+    monkeypatch.setattr(claude_process_reaper, "_process_table", lambda: table)
     monkeypatch.setattr(claude_process_reaper, "_process_ages", lambda pids: ages)
     signals: list[tuple[int, int]] = []
     real_kill = fake_kill
@@ -347,7 +350,8 @@ def test_reap_orphaned_reaps_in_tree_no_owner_and_descendants(monkeypatch):
         ]
     )
     signals = _patch_orphan_env(monkeypatch, table, {101: 999.0, 102: 999.0}, {100, 101, 102})
-    monkeypatch.setattr(claude_process_reaper, "_process_start_times", lambda pids: {pid: 123.0 for pid in pids})
+    monkeypatch.setattr("vibe.runtime.pid_alive", lambda pid: True)
+    monkeypatch.setattr("vibe.runtime.process_start_seconds", lambda pid: 123.0)
 
     reaped = asyncio.run(
         claude_process_reaper.reap_orphaned_claude_processes(
@@ -450,7 +454,8 @@ def test_reap_orphaned_respects_min_age_grace_window(monkeypatch):
         ]
     )
     signals = _patch_orphan_env(monkeypatch, table, {101: 5.0}, {101})
-    monkeypatch.setattr(claude_process_reaper, "_process_start_times", lambda pids: {pid: 123.0 for pid in pids})
+    monkeypatch.setattr("vibe.runtime.pid_alive", lambda pid: True)
+    monkeypatch.setattr("vibe.runtime.process_start_seconds", lambda pid: 123.0)
 
     reaped = asyncio.run(
         claude_process_reaper.reap_orphaned_claude_processes(
@@ -474,7 +479,8 @@ def test_reap_orphaned_skips_when_age_unknown(monkeypatch):
         ]
     )
     signals = _patch_orphan_env(monkeypatch, table, {}, {101})
-    monkeypatch.setattr(claude_process_reaper, "_process_start_times", lambda pids: {pid: 123.0 for pid in pids})
+    monkeypatch.setattr("vibe.runtime.pid_alive", lambda pid: True)
+    monkeypatch.setattr("vibe.runtime.process_start_seconds", lambda pid: 123.0)
 
     reaped = asyncio.run(
         claude_process_reaper.reap_orphaned_claude_processes(
@@ -547,7 +553,8 @@ def test_reap_orphaned_skips_in_tree_sweep_when_disabled(monkeypatch):
         ]
     )
     signals = _patch_orphan_env(monkeypatch, table, {101: 999.0}, {101})
-    monkeypatch.setattr(claude_process_reaper, "_process_start_times", lambda pids: {pid: 123.0 for pid in pids})
+    monkeypatch.setattr("vibe.runtime.pid_alive", lambda pid: True)
+    monkeypatch.setattr("vibe.runtime.process_start_seconds", lambda pid: 123.0)
 
     reaped = asyncio.run(
         claude_process_reaper.reap_orphaned_claude_processes(
@@ -648,7 +655,8 @@ def test_reap_orphaned_reaps_registry_owned_out_of_tree_resume_match(monkeypatch
         ]
     )
     signals = _patch_orphan_env(monkeypatch, table, {300: 999.0}, {100, 300})
-    monkeypatch.setattr(claude_process_reaper, "_process_start_times", lambda pids: {pid: 123.0 for pid in pids})
+    monkeypatch.setattr("vibe.runtime.pid_alive", lambda pid: True)
+    monkeypatch.setattr("vibe.runtime.process_start_seconds", lambda pid: 123.0)
 
     reaped = asyncio.run(
         claude_process_reaper.reap_orphaned_claude_processes(
@@ -731,14 +739,14 @@ def _sleeper() -> subprocess.Popen:
 
 
 def test_registering_a_process_reads_and_writes_on_the_registry_thread(tmp_path, monkeypatch):
-    # The service registers on its event loop; the `ps` read and the file rewrite must not run there.
+    # The service registers on its event loop; the start-token read and the file rewrite must not run there.
     threads: list[str] = []
 
-    def start_time(pid):
+    def start_token(pid):
         threads.append(threading.current_thread().name)
-        return 1000.0
+        return "boot:1000"
 
-    monkeypatch.setattr(claude_process_reaper, "_process_start_time", start_time)
+    monkeypatch.setattr("vibe.runtime.process_start_token", start_token)
     child = _sleeper()
     try:
         pending = claude_process_reaper.register_claude_owned_process(
@@ -751,12 +759,12 @@ def test_registering_a_process_reads_and_writes_on_the_registry_thread(tmp_path,
 
     assert threads and all(name.startswith("claude-process-registry") for name in threads)
     assert claude_process_reaper._load_owned_process_registry(tmp_path) == [
-        claude_process_reaper.ClaudeOwnedProcess(pid=child.pid, native_session_id="sess-1", started_at=1000.0)
+        claude_process_reaper.ClaudeOwnedProcess(pid=child.pid, native_session_id="sess-1", start_token="boot:1000")
     ]
 
 
 def test_a_registration_drops_the_records_of_processes_that_have_exited(tmp_path, monkeypatch):
-    monkeypatch.setattr(claude_process_reaper, "_process_start_time", lambda pid: 1000.0)
+    monkeypatch.setattr("vibe.runtime.process_start_token", lambda pid: "boot:1000")
     exited = subprocess.Popen([sys.executable, "-c", "pass"])
     exited.wait(10)
     running, registering = _sleeper(), _sleeper()
@@ -776,7 +784,7 @@ def test_a_registration_drops_the_records_of_processes_that_have_exited(tmp_path
 
 
 def test_concurrent_registrations_keep_every_record(tmp_path, monkeypatch):
-    monkeypatch.setattr(claude_process_reaper, "_process_start_time", lambda pid: 1000.0)
+    monkeypatch.setattr("vibe.runtime.process_start_token", lambda pid: "boot:1000")
     children = [_sleeper() for _ in range(4)]
     try:
         with ThreadPoolExecutor(max_workers=4) as callers:
@@ -814,7 +822,7 @@ with MigrationFileLock(Path(sys.argv[2]), timeout_seconds=None):
 
 def test_a_registration_waits_while_another_process_rewrites_the_registry(tmp_path, monkeypatch):
     # The Web UI's process registers auth and probe clients into the same file.
-    monkeypatch.setattr(claude_process_reaper, "_process_start_time", lambda pid: 1000.0)
+    monkeypatch.setattr("vibe.runtime.process_start_token", lambda pid: "boot:1000")
     lock_path = tmp_path / f"{claude_process_reaper.CLAUDE_PROCESS_REGISTRY_NAME}.lock"
     holder = subprocess.Popen(
         [sys.executable, "-c", _HOLD_REGISTRY_LOCK, str(Path(__file__).resolve().parents[1]), str(lock_path)],
@@ -844,7 +852,7 @@ def test_a_registration_waits_while_another_process_rewrites_the_registry(tmp_pa
 
 
 def test_a_recorded_pid_no_process_can_have_is_dropped(tmp_path, monkeypatch):
-    monkeypatch.setattr(claude_process_reaper, "_process_start_time", lambda pid: 1000.0)
+    monkeypatch.setattr("vibe.runtime.process_start_token", lambda pid: "boot:1000")
     (tmp_path / claude_process_reaper.CLAUDE_PROCESS_REGISTRY_NAME).write_text(
         '{"processes":[{"pid":%d,"native_session_id":null,"owner":"session","started_at":1.0}]}' % 2**63
     )
@@ -863,7 +871,7 @@ def test_a_recorded_pid_no_process_can_have_is_dropped(tmp_path, monkeypatch):
 def test_two_writers_interleaved_by_force_keep_both_records(tmp_path, monkeypatch):
     # Without the registry lock, the second writer would load the file before the first replaced it,
     # and its rewrite would drop the first record.
-    monkeypatch.setattr(claude_process_reaper, "_process_start_time", lambda pid: 1000.0)
+    monkeypatch.setattr("vibe.runtime.process_start_token", lambda pid: "boot:1000")
     first_loaded = threading.Event()
     release_first = threading.Event()
     real_load = claude_process_reaper._load_owned_process_registry
@@ -901,3 +909,125 @@ def test_two_writers_interleaved_by_force_keep_both_records(tmp_path, monkeypatc
             child.wait(10)
 
     assert recorded == {first.pid, second.pid}
+
+
+# ---------------------------------------------------------------------------
+# The registry's process identity (#2511)
+# ---------------------------------------------------------------------------
+
+
+def _released_record(pid: int) -> dict:
+    """The registry entry a released build wrote: the ``ps -o lstart`` text of the
+    process's start, parsed as that build parsed it."""
+
+    from email.utils import parsedate_to_datetime
+
+    import psutil
+
+    lstart = time.strftime("%a %b %e %H:%M:%S %Y", time.localtime(int(psutil.Process(pid).create_time())))
+    started_at = parsedate_to_datetime(lstart).timestamp()
+    return {"pid": pid, "native_session_id": "sess-released", "owner": "session", "started_at": started_at}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the registry is POSIX-only")
+def test_a_registered_process_keeps_its_identity_across_a_clock_adjustment(tmp_path):
+    """A record names its process by start token. The wall-clock start psutil shows
+    moves when the clock is stepped (Linux) or ``kern.boottime`` ticks (macOS); the
+    token does not, so the live process stays the recorded one."""
+
+    from tests.test_process_start_token import _clock_adjusted
+
+    child = _sleeper()
+    try:
+        claude_process_reaper.register_claude_owned_process(_client(child.pid), runtime_dir=tmp_path).result(timeout=10)
+        (record,) = claude_process_reaper._load_owned_process_registry(tmp_path)
+        assert record.start_token is not None and record.started_at is None
+        assert claude_process_reaper.recorded_process_mismatch(record) is None
+
+        with _clock_adjusted():
+            assert claude_process_reaper.recorded_process_mismatch(record) is None
+    finally:
+        child.kill()
+        child.wait(10)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the registry is POSIX-only")
+def test_a_released_record_keeps_the_proof_its_build_applied(tmp_path):
+    """A record a released build wrote carries ``started_at`` from ``ps -o lstart``
+    and no token. It is not migrated: it still names its live process, read now
+    without ``ps``, and a registration keeps it as it was."""
+
+    child, registering = _sleeper(), _sleeper()
+    try:
+        released = _released_record(child.pid)
+        registry = tmp_path / claude_process_reaper.CLAUDE_PROCESS_REGISTRY_NAME
+        registry.write_text(json.dumps({"processes": [released]}), encoding="utf-8")
+
+        (record,) = claude_process_reaper._load_owned_process_registry(tmp_path)
+        assert record.start_token is None and record.started_at == released["started_at"]
+        assert claude_process_reaper.recorded_process_mismatch(record) is None
+
+        claude_process_reaper.register_claude_owned_process(_client(registering.pid), runtime_dir=tmp_path).result(
+            timeout=10
+        )
+        entries = {entry["pid"]: entry for entry in json.loads(registry.read_text(encoding="utf-8"))["processes"]}
+        assert entries[child.pid] == {**released, "native_session_id": "sess-released"}
+    finally:
+        for process in (child, registering):
+            process.kill()
+            process.wait(10)
+
+
+@pytest.fixture
+def new_york_time(monkeypatch):
+    monkeypatch.setenv("TZ", "America/New_York")
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the registry is POSIX-only")
+@pytest.mark.parametrize("occurrence", ["first", "second"])
+def test_a_released_record_written_in_a_dst_fold_keeps_matching(monkeypatch, new_york_time, occurrence):
+    """``ps -o lstart`` prints local time without a zone, and the released parser read
+    a repeated hour as its first occurrence. A process started in the second one was
+    recorded an hour early, and must still match its record."""
+
+    from email.utils import parsedate_to_datetime
+
+    # 01:30 on 2026-11-01 happens twice in New York: at 05:30 and at 06:30 UTC.
+    started = {"first": 1793511000.4, "second": 1793514600.4}[occurrence]
+    recorded = parsedate_to_datetime("Sun Nov  1 01:30:00 2026").timestamp()
+    monkeypatch.setattr("vibe.runtime.pid_alive", lambda pid: True)
+    monkeypatch.setattr("vibe.runtime.process_start_seconds", lambda pid: started)
+    record = claude_process_reaper.ClaudeOwnedProcess(pid=4321, started_at=recorded)
+
+    assert claude_process_reaper.recorded_process_mismatch(record) is None
+    later = claude_process_reaper.ClaudeOwnedProcess(pid=4321, started_at=recorded + 7200)
+    assert claude_process_reaper.recorded_process_mismatch(later) == "pid_reused"
+
+
+@pytest.mark.parametrize(
+    ("record", "alive", "token", "started", "reason"),
+    [
+        (claude_process_reaper.ClaudeOwnedProcess(pid=4321), True, "boot:1", 1000.0, "identity_unprovable"),
+        (claude_process_reaper.ClaudeOwnedProcess(pid=4321, start_token="boot:1"), False, None, None, "process_not_alive"),
+        (claude_process_reaper.ClaudeOwnedProcess(pid=4321, start_token="boot:1"), True, None, None, "identity_unverifiable"),
+        (claude_process_reaper.ClaudeOwnedProcess(pid=4321, start_token="boot:1"), True, "boot:2", None, "pid_reused"),
+        (claude_process_reaper.ClaudeOwnedProcess(pid=4321, start_token="boot:1"), True, "boot:1", None, None),
+        (claude_process_reaper.ClaudeOwnedProcess(pid=4321, started_at=1000.0), True, None, None, "identity_unverifiable"),
+        (claude_process_reaper.ClaudeOwnedProcess(pid=4321, started_at=1000.0), True, None, 5000.0, "pid_reused"),
+        (claude_process_reaper.ClaudeOwnedProcess(pid=4321, started_at=1000.0), True, None, 1000.4, None),
+    ],
+)
+def test_a_record_that_cannot_be_shown_to_name_its_process_says_why(monkeypatch, record, alive, token, started, reason):
+    """Running's orphan list, "end orphan" and the reaper share this verdict. A record
+    with no identity -- none could be read when it was written -- is never acted on;
+    nor is one whose identity cannot be read now. "End orphan" reports which."""
+
+    monkeypatch.setattr("vibe.runtime.pid_alive", lambda pid: alive)
+    monkeypatch.setattr("vibe.runtime.process_start_token", lambda pid: token)
+    monkeypatch.setattr("vibe.runtime.process_start_seconds", lambda pid: started)
+
+    assert claude_process_reaper.recorded_process_mismatch(record) == reason
