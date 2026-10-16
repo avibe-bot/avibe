@@ -976,6 +976,16 @@ scenarios:
     kind: compatibility
     layer: e2e
     test: tests/e2e/test_model_hub_routing.py::test_mh_routing_013_legacy_empty_inherits_matching_and_exact_passthrough_through_real_cpa
+  - id: MH-ROUTING-014
+    name: >-
+      A request-family machine code beside a timeout, rate-limit or server status (408, 429, 5xx) does not make the
+      call non-fallback; the turn moves to the next Source, which is cooled and recorded, while a 4xx keeps the code
+    status: covered
+    kind: recovery
+    layer: contract
+    test:
+      - tests/test_model_hub_resolution.py::test_a_stalled_relay_wrapped_in_a_request_class_code_falls_back_and_cools_its_source
+      - tests/test_model_hub_resolution.py::test_a_status_that_clears_the_request_outranks_a_request_family_code
   - id: MH-REQUEST-BUDGET-001
     name: Large multi-image requests retain exact model input through authenticated HTTP ingress
     status: covered

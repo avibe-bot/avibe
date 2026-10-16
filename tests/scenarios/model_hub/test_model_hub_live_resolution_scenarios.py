@@ -974,7 +974,8 @@ def test_mh_effort_001_unknown_capability_preserves_intent_and_turn_completes(
     ("upstream_status", "upstream_code", "wire_status", "wire_code", "terminal_reason"),
     [
         (429, "rate_limited", 429, "stream_interrupted", "stream_interrupted"),
-        (503, "request_too_large", 400, "upstream_request_invalid", "invalid_parameter"),
+        # A request-family code is believed only beside a status that blames the request (#2260).
+        (413, "request_too_large", 400, "upstream_request_invalid", "invalid_parameter"),
     ],
 )
 def test_turn_gateway_nonstream_buffer_surfaces_terminal_failure(

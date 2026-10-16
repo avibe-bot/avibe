@@ -649,6 +649,107 @@ def test_terminal_outcome_category_authority_has_a_behavior_consumer(
     ) == expected_category
 
 
+_REQUEST_FAMILY_CODES = (
+    "invalid_request_error", "invalid_parameter", "validation_error",
+    "context_length_exceeded", "request_too_large", "model_not_found", "not_found_error",
+)
+
+
+@pytest.mark.parametrize("code", _REQUEST_FAMILY_CODES)
+@pytest.mark.parametrize(
+    ("status", "action", "reason", "cooldown_seconds"),
+    [
+        # The status says the request is at fault: the code is believed.
+        (400, "surface", None, 0),
+        (413, "surface", None, 0),
+        (422, "surface", None, 0),
+        # The status says something other than the request failed the call.
+        (408, "fallback", "server_error", 30),
+        (429, "fallback", "rate_limited", 60),
+        (500, "fallback", "server_error", 30),
+        (502, "fallback", "server_error", 30),
+        (503, "fallback", "server_error", 30),
+        (504, "fallback", "server_error", 30),
+    ],
+)
+def test_a_status_that_clears_the_request_outranks_a_request_family_code(
+    code, status, action, reason, cooldown_seconds,
+) -> None:
+    """Scenario: MH-ROUTING-014 -- relays wrap their own timeouts and stalls in a request-class code (#2260).
+
+    Such a code beside a timeout, limit or server status cannot show that no
+    Source could serve the request, so the call falls back and its Source cools.
+    """
+
+    decision = classify_outcome(
+        RawCallOutcome(
+            kind=RawOutcomeKind.HTTP_ERROR,
+            http_status=status,
+            error_code=None,
+            redacted_message=None,
+            stream_started=False,
+            model_id="upstream-first",
+            source_id="src_route040",
+            error_type=code,
+        )
+    )
+
+    assert (decision.action, decision.reason, decision.cooldown_seconds) == (action, reason, cooldown_seconds)
+    if action == "surface":
+        assert decision.error_code == "upstream_request_invalid"
+
+
+def test_a_stalled_relay_wrapped_in_a_request_class_code_falls_back_and_cools_its_source(tmp_path):
+    """Scenario: MH-ROUTING-014 -- the reported shape: a relay's idle timeout typed ``invalid_request_error`` on a 504 (#2260)."""
+
+    first = _source("src_route041", ("upstream-first",))
+    second = _source("src_route042", ("upstream-second",))
+    config = _config([first, second])
+    config.agents["claude"].routes["claude-opus-4-6"] = ModelHubRouteConfig(
+        hops=(
+            ModelHubRouteHopConfig(first.id, "upstream-first"),
+            ModelHubRouteHopConfig(second.id, "upstream-second"),
+        )
+    )
+    adapter = FakeAdapter()
+    adapter.outcomes.extend(
+        (
+            RawCallOutcome(
+                kind=RawOutcomeKind.HTTP_ERROR,
+                http_status=504,
+                error_code=None,
+                redacted_message=None,
+                stream_started=False,
+                model_id="upstream-first",
+                source_id=first.id,
+                error_type="invalid_request_error",
+                upstream_detail="upstream stream idle for 3m0s",
+            ),
+            RawCallOutcome(
+                kind=RawOutcomeKind.SUCCESS,
+                http_status=200,
+                error_code=None,
+                redacted_message=None,
+                stream_started=False,
+                model_id="upstream-second",
+                source_id=second.id,
+            ),
+        )
+    )
+    service, store, _ = _service(tmp_path, config, adapter)
+
+    resolved = asyncio.run(service.resolve(backend="claude", model_id="claude-opus-4-6", request={}))
+
+    assert resolved.source_id == second.id
+    assert adapter.invocations == [(first.id, "upstream-first"), (second.id, "upstream-second")]
+    cooled = store.load().sources[0].state
+    assert cooled.status == "cooldown" and cooled.retry_at is not None
+    assert sorted((event["kind"], event["from_source"], event["to_source"], event["reason"]) for event in service.events.list()) == [
+        ("cooldown", first.id, None, "server_error"),
+        ("switch", first.id, second.id, "server_error"),
+    ]
+
+
 @pytest.mark.parametrize("status", [401, 402, 403, 429, 500])
 def test_machine_permission_denial_precedes_every_status_heuristic(
     tmp_path,
