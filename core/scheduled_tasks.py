@@ -6068,7 +6068,10 @@ class ScheduledTaskService:
                     reason=SKIP_REASON_SESSION_BUSY,
                 )
                 return False
-            request = await self._run_runtime_sync(self._claim_pending_request, pending)
+            claimable, identity = self._claim_activation(pending)
+            if not claimable:
+                return True
+            request = await self._run_runtime_sync(self._commit_claim, pending, identity)
             if request is None:
                 return True
             if registration is not None and (
@@ -8320,25 +8323,48 @@ class ScheduledTaskService:
             registry = getattr(self.controller, "runtime_activation", None)
         return registry
 
-    def _claim_pending_request(
+    def _claim_activation(
         self,
         pending: TaskExecutionRequest,
-    ) -> TaskExecutionRequest | None:
+    ) -> tuple[bool, RuntimeActivationIdentity | None]:
+        """Whether ``pending`` can be claimed now, and the runtime generation it runs on.
+
+        The generation is read from the adapters' runtime state, which the controller
+        loop owns and mutates, so this runs on the loop (#2664). Only the claim's
+        write goes to the runtime-work door; ``commit_then_confirm`` there still
+        rejects a generation retired in between.
+        """
+
         backend_resolution = self._claimed_request_backend_resolution(pending)
         if not backend_resolution.authoritative:
-            return None
+            return False, None
         backend = backend_resolution.backend
         service = getattr(self.controller, "agent_service", None)
         is_backend_ready = getattr(service, "is_backend_ready", None)
         if backend and callable(is_backend_ready) and not is_backend_ready(backend):
-            return None
+            return False, None
         resolution = self._activation_resolution_for_request(
             pending,
             backend=backend,
         )
         if resolution is not None and not resolution.authoritative:
+            return False, None
+        return True, resolution.identity if resolution is not None else None
+
+    def _claim_pending_request(
+        self,
+        pending: TaskExecutionRequest,
+    ) -> TaskExecutionRequest | None:
+        claimable, identity = self._claim_activation(pending)
+        if not claimable:
             return None
-        identity = resolution.identity if resolution is not None else None
+        return self._commit_claim(pending, identity)
+
+    def _commit_claim(
+        self,
+        pending: TaskExecutionRequest,
+        identity: RuntimeActivationIdentity | None,
+    ) -> TaskExecutionRequest | None:
         registry = self._runtime_activation_registry()
         if registry is None or identity is None:
             return self.request_store.claim(pending.id)
@@ -8359,13 +8385,35 @@ class ScheduledTaskService:
         self,
         request: TaskExecutionRequest,
     ) -> tuple[TaskExecutionRequest, bool]:
+        # A claim that recorded no runtime generation resolves one again here, on the
+        # loop that owns the adapters' state (#2664); the step itself only writes.
+        resolution: RuntimeActivationResolution | None = None
+        resolved_backend = ""
+        if request.observed_activation_identity is None:
+            backend_resolution = self._claimed_request_backend_resolution(request)
+            resolved_backend = backend_resolution.backend
+            resolution = (
+                self._activation_resolution_for_request(
+                    request,
+                    backend=resolved_backend,
+                )
+                if backend_resolution.authoritative
+                else RuntimeActivationResolution(authoritative=False)
+            )
         # One store step, on the door the claim itself runs through: a cancellation that
         # arrives meanwhile is answered once the start (or the requeue) has landed.
-        return await self._store_step(self._start_claimed_execution, request)
+        return await self._store_step(
+            self._start_claimed_execution,
+            request,
+            resolution,
+            resolved_backend,
+        )
 
     def _start_claimed_execution(
         self,
         request: TaskExecutionRequest,
+        resolution: RuntimeActivationResolution | None = None,
+        resolved_backend: str = "",
     ) -> tuple[TaskExecutionRequest, bool]:
         observed_identity = request.observed_activation_identity
         request = self.request_store.refresh_claimed_request(request)
@@ -8379,11 +8427,12 @@ class ScheduledTaskService:
         service = getattr(self.controller, "agent_service", None)
         activation_identity = request.observed_activation_identity
         if activation_identity is None:
-            resolution = self._activation_resolution_for_request(
-                request,
-                backend=backend,
-            )
-            if resolution is not None and not resolution.authoritative:
+            if resolution is not None and (
+                not resolution.authoritative or resolved_backend != backend
+            ):
+                # Inconclusive, or resolved for a backend the refreshed Agent no longer
+                # names (a rename or archive since the claim): the next pass resolves
+                # again on the loop, with the refreshed row.
                 self.request_store.requeue(request.id)
                 return request, False
             activation_identity = (

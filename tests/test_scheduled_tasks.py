@@ -4177,6 +4177,103 @@ def test_execute_claimed_request_skips_retired_runtime_generation(
     assert row.get("pid") is None
 
 
+def test_claim_and_start_read_the_runtime_generation_on_the_loop(tmp_path: Path) -> None:
+    """#2664: an adapter's runtime state (its sessions and generation maps) is owned
+    and mutated by the controller loop. The claim and the execution start resolve
+    the Run's runtime generation from it, so they must read it there, not on the
+    runtime-work door, where a concurrent mutation raised "dictionary changed size
+    during iteration" and logged a traceback."""
+
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    reads: list[int] = []
+
+    def identity_for_request(_backend, _request):
+        reads.append(threading.get_ident())
+        return None
+
+    controller = SimpleNamespace(
+        agent_service=SimpleNamespace(
+            is_backend_ready=Mock(return_value=True),
+            runtime_activation_identity_for_request=identity_for_request,
+            activation_registry=None,
+        )
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    pending = request_store.enqueue_agent_run(
+        message="run",
+        agent_backend="codex",
+        session_id="ses-runtime",
+    )
+    service._transport_ready_for_request = lambda _pending: True  # type: ignore[method-assign]
+    service._spawn_execution = Mock()  # type: ignore[method-assign]
+    service._execute_agent_run = AsyncMock(  # type: ignore[assignment]
+        return_value=scheduled_tasks.AgentRunExecutionResult(error=None, complete_on_return=False)
+    )
+
+    async def run() -> int:
+        assert await service._process_pending_request(pending) is True
+        (claimed, _lock_key), _ = service._spawn_execution.call_args
+        await service._execute_claimed_request(claimed)
+        return threading.get_ident()
+
+    loop_thread = asyncio.run(run())
+
+    assert reads == [loop_thread, loop_thread]
+    service._execute_agent_run.assert_awaited_once()
+
+
+def test_start_requeues_when_the_refreshed_agent_names_another_backend(tmp_path: Path) -> None:
+    """The loop resolves the start's runtime generation from the claimed request
+    before the store step refreshes its Agent reference (#2664). If a rename since
+    the claim makes the refreshed Agent resolve to a backend the loop did not
+    resolve for, the step must not start without the generation fence: it requeues,
+    and the next pass resolves again with the refreshed row."""
+
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    registry = RuntimeActivationRegistry()
+    identity = registry.attach("claude", "/repo")
+    agents = {"pm-renamed": SimpleNamespace(backend="claude")}
+    controller = SimpleNamespace(
+        vibe_agent_store=SimpleNamespace(get=agents.get, get_by_id=lambda _agent_id: None),
+        agent_service=SimpleNamespace(
+            agents={},
+            is_backend_ready=Mock(return_value=True),
+            runtime_activation_identity_for_request=Mock(return_value=identity),
+            activation_registry=registry,
+        ),
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    queued = request_store.enqueue_hook_send(
+        session_key="slack::channel::C123",
+        prompt="continue",
+        agent_name="pm",
+    )
+    claimed = request_store.claim(queued.id)
+    assert claimed is not None
+
+    def refresh_after_rename(item):
+        item.agent_name = "pm-renamed"
+        return item
+
+    request_store.refresh_claimed_request = refresh_after_rename  # type: ignore[method-assign]
+    service._execute_request = AsyncMock()  # type: ignore[method-assign]
+
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    service._execute_request.assert_not_awaited()
+    row = request_store.get_run(claimed.id)
+    assert row["status"] == "queued"
+    assert row.get("pid") is None
+
+
 def test_run_task_uses_tracked_execution_for_lease_loss(tmp_path: Path, monkeypatch) -> None:
     request_store = TaskExecutionStore(tmp_path / "task_requests")
     store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
@@ -4286,7 +4383,7 @@ def test_request_capacity_is_reserved_before_claim(tmp_path: Path) -> None:
     spawned: list[str] = []
 
     async def _run_sync(operation, /, *args, **kwargs):  # noqa: ANN001, ANN202
-        if operation == service._claim_pending_request:
+        if operation == service._commit_claim:
             claims.append(args[0].id)
             claim_started.set()
             await release_claim.wait()
@@ -4332,7 +4429,7 @@ def test_claimed_request_is_requeued_when_its_lane_generation_stops(
     spawned: list[str] = []
 
     async def _run_sync(operation, /, *args, **kwargs):  # noqa: ANN001, ANN202
-        if operation == service._claim_pending_request:
+        if operation == service._commit_claim:
             claim_started.set()
             await release_claim.wait()
         return operation(*args, **kwargs)
