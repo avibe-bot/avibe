@@ -475,6 +475,9 @@ class AgentService:
             # are optional and guarded so a missing hook or a bubble failure can
             # never break the turn.
             await self._begin_turn_status(request.context)
+            # The Turn's PRE_TURN Show checkpoint runs off the loop; the prompt
+            # waits for it so the snapshot precedes the agent's first edit (#2734).
+            await self._wait_for_show_checkpoint(request.context)
             from core.agent_model_selection import require_agent_model
             from modules.agents.catalog import AGENT_BACKENDS, is_builtin_backend
             from modules.agents.model_hub import ModelSupplyRefusal, hold_refused_input, hub_supply_refusal
@@ -1418,6 +1421,18 @@ class AgentService:
                 await begin_status_bubble(context)
             except Exception:
                 logger.debug("begin_status_bubble failed at turn start", exc_info=True)
+
+    async def _wait_for_show_checkpoint(self, context: Any) -> None:
+        """Wait for the Session's PRE_TURN Show checkpoint, if one is queued."""
+
+        service = getattr(self.controller, "show_git_checkpoint_service", None)
+        wait = getattr(service, "wait_for_turn_start", None)
+        session_id_from_context = getattr(self.controller, "_session_id_from_context", None)
+        if not callable(wait) or not callable(session_id_from_context):
+            return
+        session_id = session_id_from_context(context)
+        if session_id:
+            await wait(session_id)
 
     async def _emit_staged_harness_prompt(self, context: Any) -> None:
         """Echo a staged Harness prompt into its IM conversation at turn start.
