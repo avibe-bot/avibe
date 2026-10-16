@@ -127,9 +127,33 @@ answer. It is not currently a generic script-facing, Web/IM-neutral primitive.
 The implementation should reuse that existing delivery and wait lifecycle,
 extracting only the smallest Controller-owned `ask-and-wait` boundary needed
 by `confirm`. This is a continuation primitive, not a new approval system.
-Whether the current Web surface can satisfy the same contract is **unverified**
-on `origin/master`; the implementation PR must verify it before claiming Web
-parity. See [`modules/agents/question_ui.py`](../../modules/agents/question_ui.py).
+See [`modules/agents/question_ui.py`](../../modules/agents/question_ui.py).
+
+The answer path runs before Turn admission, inside
+`SessionTurnManager.deliver`, which both Web dispatch and IM ingress reach with
+a reserved human Delivery. The script blocks its own running Turn, so an answer
+that queued or steered behind that Turn could never reach it. When the Session
+has a pending confirm and the sender is the expected approver (the user who
+launched the Turn) replying yes or no, the reservation is retired, the confirm
+resolves, and no Turn starts. Every other input, including another member's
+reply in a shared channel or any reply after the confirm was invalidated by the
+Turn ending or the script deadline, is admitted unchanged. The confirm then
+posts a short approved/declined notice on the launching surface, which is the
+transcript's record of the answer.
+
+A yes/no reply names no prompt, so a Session has at most one pending confirm;
+a second one fails with `confirm_already_pending`. A confirm becomes answerable
+only after its prompt is delivered; an undelivered prompt fails the confirm with
+`confirm_prompt_failed`, and an undelivered notify fails with
+`computer_script_notify_failed`. Closing the script connection, like the Turn
+ending or the script deadline, invalidates its pending confirm.
+
+Only a direct original text reply answers: a quick reply, a forward, an edit,
+or anything aimed at another prompt stays an ordinary message, and a confirm
+from an unattended (scheduled) Turn fails with `confirm_unattended` before any
+prompt is sent. Because the answer carries no prompt identity, an unrelated
+standalone "yes" from the approver while a confirm is pending is still taken
+as the answer; a prompt-bound answer identity is tracked in #2733.
 
 ## Execution and runtime
 

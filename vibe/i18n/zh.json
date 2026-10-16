@@ -923,6 +923,14 @@
         "scriptConnectionInvalid": "脚本的 Controller 连接已失效。",
         "scriptControllerRejected": "Controller 拒绝了脚本请求。",
         "scriptRequestTooLarge": "Computer Use 脚本请求超过了 Controller 的大小上限。",
+        "scriptMessageTooLarge": "Computer Use 脚本消息超过大小上限。",
+        "scriptNotifyFailed": "Computer Use 通知未能送达。",
+        "scriptInvalidMessage": "Computer Use 脚本消息必须是非空文本。",
+        "confirmRefused": "所有者拒绝了这次确认。",
+        "confirmAlreadyPending": "脚本已经有一个等待回答的确认请求。",
+        "confirmApproverUnavailable": "无法确定这次确认的所有者身份。",
+        "confirmPromptFailed": "确认问题未能送达，因此没有任何操作获得批准。",
+        "confirmUnattended": "此脚本需要所有者确认，无人值守的运行无法给出确认。",
         "scriptControllerUnavailable": "Controller 当前不可用。",
         "scriptDeadlineExpired": "脚本截止时间已到。",
         "scriptElementNotActionable": "匹配到的元素无法执行操作。",
@@ -960,6 +968,11 @@
         "upstreamToolError": "Computer Use driver 返回了错误。",
         "upstreamUnavailable": "Computer Use driver 不可用，请重新观察后再重试。",
         "windowTargetRequired": "输入必须针对已观察的精确窗口或元素。"
+      },
+      "confirm": {
+        "prompt": "{message}\n\n请回复“是”或“否”。只有发起这项任务的人可以回答。",
+        "approved": "已确认，继续执行。",
+        "declined": "已拒绝，脚本不会执行这一步。"
       },
       "status": {
         "off": "未开启",

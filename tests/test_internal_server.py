@@ -150,6 +150,9 @@ def _build_controller_double(handler=None):
     # (a bare MagicMock would blow up ``json.dumps`` in ``_sse_event``).
     controller._t = lambda key, **kwargs: key
     controller.config = SimpleNamespace()
+    # Like ``Controller.__init__``: ``create_app`` installs the real owners.
+    controller.computer_script_sessions = None
+    controller.computer_script_interactions = None
     return controller
 
 
@@ -228,6 +231,7 @@ def _reserve_submission(
     metadata: dict | None = None,
     native_message_id: str | None = None,
     message_kind: str | None = None,
+    author_id: str | None = None,
 ):
     delivery_id = message_deliveries.new_delivery_id()
     row = message_deliveries.insert_delivery(
@@ -246,6 +250,7 @@ def _reserve_submission(
             text=text,
             content=content,
             metadata=metadata,
+            author_id=author_id,
             author_name=author_name,
             native_message_id=native_message_id,
             message_kind=message_kind,
@@ -1381,6 +1386,140 @@ def test_dispatch_async_enqueues_during_busy_turn(monkeypatch, tmp_path):
         assert [q["text"] for q in message_deliveries.list_queued(conn, session_id)] == ["while busy"]
         transcript = messages_service.list_session_messages(conn, session_id=session_id, types=("user",))
     assert transcript["messages"] == []
+
+
+@pytest.mark.parametrize(
+    ("case", "message_kind", "metadata"),
+    [
+        ("answer", "original", None),
+        ("invalidated", "original", None),
+        ("quick_reply", "quick_reply", {"quick_reply_for": "msg_older_prompt"}),
+        ("forwarded", "forwarded", None),
+    ],
+)
+def test_dispatch_async_answers_a_pending_script_confirm_before_queuing(
+    monkeypatch, tmp_path, case, message_kind, metadata
+):
+    """A direct Web reply during the script's own Turn reaches ``avibe.confirm``.
+
+    The script blocks the running Turn, so an answer that queued behind it
+    would deadlock until the script deadline. A "yes" that is not a direct
+    original reply (a quick reply to another prompt, a forward), or any reply
+    after the confirm is gone, is an ordinary send-while-busy message.
+    """
+    from core.computer_script_interactions import ComputerScriptInteractionError
+    from core.services import sessions as sessions_service
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn, platform="avibe", scope_type="project", native_id="proj_confirm", now="2026-05-31T00:00:00Z"
+        )
+        _seed_project_workdir(conn, scope_id, tmp_path)
+        session = sessions_service.create_session(
+            conn, scope_id=scope_id, agent_backend="claude", agent_name="worker"
+        )
+        owner = _reserve_submission(
+            conn, scope_id=scope_id, session_id=session["id"], text="run the script"
+        )
+        owner_turn_id = message_deliveries.new_turn_id()
+        message_deliveries.insert_turn(
+            conn,
+            turn_id=owner_turn_id,
+            session_id=session["id"],
+            initial_delivery_id=owner["id"],
+            state="active",
+            backend="claude",
+        )
+        reply = _reserve_submission(
+            conn,
+            scope_id=scope_id,
+            session_id=session["id"],
+            text="yes",
+            author_id="owner",
+            message_kind=message_kind,
+            metadata=metadata,
+        )
+    session_id = session["id"]
+
+    controller = _build_controller_double()
+    notices: list[str] = []
+
+    async def emit_agent_message(_context, _message_type, text, **_kwargs):
+        notices.append(text)
+        return f"notice-{len(notices)}"
+
+    controller.emit_agent_message = emit_agent_message
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        task = asyncio.create_task(asyncio.sleep(60))
+        controller.session_turns.in_flight[session_id] = session_turns.Turn(
+            task=task,
+            context=MessageContext(
+                user_id="owner",
+                channel_id=session_id,
+                platform="avibe",
+                platform_specific={"agent_session_id": session_id},
+            ),
+            logical_turn_id=owner_turn_id,
+        )
+        token = controller.computer_script_sessions.open(session_id, 30)["connection_token"]
+        confirm = asyncio.create_task(
+            controller.computer_script_interactions.confirm(token, "Send it?")
+        )
+        await asyncio.sleep(0)
+        if case == "invalidated":
+            controller.computer_script_interactions.invalidate_token(token, "script_turn_ended")
+        try:
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                resp = await asyncio.wait_for(
+                    client.post(
+                        "/internal/dispatch_async",
+                        json={"session_id": session_id, "text": "yes", "user_message_id": reply["id"]},
+                    ),
+                    timeout=5,
+                )
+            if case in {"quick_reply", "forwarded"}:
+                await asyncio.sleep(0)
+                assert not confirm.done()
+                confirm.cancel()
+            outcome = await asyncio.wait_for(asyncio.gather(confirm, return_exceptions=True), 5)
+        finally:
+            controller.computer_script_sessions.close_all()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        return resp, outcome[0]
+
+    resp, outcome = asyncio.run(_go())
+    assert resp.status_code == 202
+    controller.message_handler.handle_user_message.assert_not_awaited()
+    with engine.connect() as conn:
+        queued = [q["text"] for q in message_deliveries.list_queued(conn, session_id)]
+        delivery = message_deliveries.get_delivery(conn, reply["id"])
+        transcript = messages_service.list_session_messages(conn, session_id=session_id, types=("user",))
+    assert transcript["messages"] == []
+    if case == "answer":
+        assert outcome["effect"] == "confirmed"
+        assert resp.json()["queued"] is False
+        assert delivery["state"] == "retired"
+        assert queued == []
+        assert notices[-1] == "computer.cli.confirm.approved"
+    else:
+        if case == "invalidated":
+            assert isinstance(outcome, ComputerScriptInteractionError)
+            assert outcome.code == "script_turn_ended"
+        else:
+            assert isinstance(outcome, asyncio.CancelledError)
+        assert resp.json()["queued"] is True
+        assert queued == ["yes"]
 
 
 def test_dispatch_async_replay_of_queued_delivery_is_idempotent(monkeypatch, tmp_path):

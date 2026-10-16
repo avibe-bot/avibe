@@ -569,6 +569,9 @@ class Turn:
     delivery_id: Optional[str] = None
     terminal_is_error: bool = False
     computer_use_admission_closed: bool = False
+    #: ``SOURCE_HUMAN`` or ``SOURCE_SCHEDULED``: whether a person launched this
+    #: Turn, so attended-only capabilities such as script confirms can refuse.
+    source: str = SOURCE_HUMAN
 
 
 @dataclass(frozen=True)
@@ -578,6 +581,12 @@ class ComputerUseAdmission:
     session_id: str
     turn: Turn = field(repr=False, compare=False)
     logical_turn_id: str | None = None
+
+
+# A human reply consumed as the answer to a pending Computer Use script confirm.
+SCRIPT_CONFIRM_ANSWER_REASON = "computer_confirm_answer"
+# Delivery metadata that binds an input to one specific earlier prompt.
+_PROMPT_TARGET_METADATA_KEYS = ("quick_reply_for",)
 
 
 @dataclass(frozen=True)
@@ -2920,6 +2929,9 @@ class SessionTurnManager:
                 and delivery_store.is_vibey_resume_payload(delivery_store.delivery_payload(delivery))
             ):
                 raise ValueError("P3 requires content")
+        confirm_answer = self._consume_script_confirm_answer(request, context)
+        if confirm_answer is not None:
+            return confirm_answer
         backend, resolved_context = self._delivery_backend(
             request.session_id,
             context,
@@ -2929,6 +2941,60 @@ class SessionTurnManager:
         if request.priority == "p1":
             return await self._admit_p1(request, backend, resolved_context)
         return await self._admit_p0(request, backend, resolved_context)
+
+    def _consume_script_confirm_answer(
+        self,
+        request: DeliveryRequest,
+        context: Optional["MessageContext"],
+    ) -> DeliveryResult | None:
+        """Hand the approver's answer to a pending script confirm, before admission.
+
+        Web dispatch and IM ingress both reach here with a reserved human
+        Delivery. The script asking is blocking this Session's running Turn, so
+        a queued or steered answer could never reach it. A matched answer
+        retires its reservation instead of being admitted: it starts no Turn
+        and joins no queue. Every other input continues unchanged.
+        """
+
+        if request.source != "user" or context is None or not request.delivery_id:
+            return None
+        # A plain yes/no names no prompt, so only a direct original text reply
+        # may answer. Quick replies, forwards, edits, and anything aimed at
+        # another prompt stay ordinary messages.
+        if request.message_kind != "original" or getattr(context, "files", None):
+            return None
+        if any(key in (request.metadata or {}) for key in _PROMPT_TARGET_METADATA_KEYS):
+            return None
+        interactions = getattr(self.controller, "computer_script_interactions", None)
+        match_answer = getattr(interactions, "match_answer", None)
+        if not callable(match_answer):
+            return None
+        text = request.display_text if request.display_text is not None else request.content
+        matched = match_answer(
+            session_id=request.session_id,
+            approver_id=str(getattr(context, "user_id", None) or ""),
+            message=str(text or ""),
+        )
+        if matched is None:
+            return None
+        with self._sqlite_engine().begin() as conn:
+            reserve_write_lock(conn)
+            retired = delivery_store.retire_reserved(
+                conn,
+                request.session_id,
+                request.delivery_id,
+                reason=SCRIPT_CONFIRM_ANSWER_REASON,
+            )
+        if not retired:
+            return None
+        confirm_id, approved = matched
+        interactions.resolve_answer(confirm_id, approved)
+        return DeliveryResult(
+            delivery_id=request.delivery_id,
+            message_id=None,
+            state="retired",
+            reason=SCRIPT_CONFIRM_ANSWER_REASON,
+        )
 
     async def _admit_p3(
         self,
@@ -7949,6 +8015,7 @@ class SessionTurnManager:
                 started_at=_utc_now_iso(),
                 logical_turn_id=logical_turn_id,
                 delivery_id=delivery_id,
+                source=source,
             )
             # Make the DB row authoritative at ACCEPTANCE, not at dispatch start:
             # ``update_session``'s backend lock re-checks ``agent_status`` inside

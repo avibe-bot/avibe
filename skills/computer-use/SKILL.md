@@ -31,7 +31,7 @@ vibe computer force-quit --arg pid=123
 For multi-step work, write a normal ESM file and import the shipped SDK:
 
 ```js
-import { computer } from "@avibe/computer";
+import { avibe, computer } from "@avibe/computer";
 
 export default async ({ mailbox, query }) => {
   const mail = await computer.app({ bundleId: "com.apple.mail" });
@@ -63,6 +63,16 @@ must follow verify -> confirm -> re-verify -> act. If the owner-confirmation
 primitive is unavailable, stop before the irreversible action and use an
 interactive flow. Save a proven script as a reusable Skill only after the owner
 explicitly approves saving it.
+
+For example:
+
+```js
+const send = draft.element({ role: "button", label: "Send" });
+await draft.expect({ role: "textbox", label: "To" }).toHaveValue(to);
+await avibe.confirm(`Send this message to ${to}?`);
+await draft.expect({ role: "textbox", label: "To" }).toHaveValue(to);
+await send.click();
+```
 
 Every single-operation leaf accepts `--args-json OBJECT`, `--args-json @FILE`,
 repeatable `--arg NAME=VALUE`, and `--json`. The two screenshot operations also

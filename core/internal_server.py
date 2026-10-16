@@ -199,11 +199,34 @@ def create_app(
         ComputerScriptSessionError,
         ComputerScriptSessionManager,
     )
+    from core.computer_script_interactions import (
+        MAX_INTERACTION_REQUEST_BYTES,
+        MAX_MESSAGE_BYTES,
+        ComputerScriptInteractionError,
+        ComputerScriptInteractionManager,
+    )
 
     computer_script_sessions = getattr(controller, "computer_script_sessions", None)
     if not isinstance(computer_script_sessions, ComputerScriptSessionManager):
         computer_script_sessions = ComputerScriptSessionManager(manager)
         controller.computer_script_sessions = computer_script_sessions
+    computer_script_interactions = getattr(
+        controller,
+        "computer_script_interactions",
+        None,
+    )
+    if not isinstance(
+        computer_script_interactions,
+        ComputerScriptInteractionManager,
+    ):
+        computer_script_interactions = ComputerScriptInteractionManager(
+            controller,
+            computer_script_sessions,
+        )
+        controller.computer_script_interactions = computer_script_interactions
+    computer_script_sessions.add_invalidation_listener(
+        computer_script_interactions.invalidate_token,
+    )
 
     # The turn registry (``session_id -> Turn``) is owned by the manager and tests
     # inspect it via ``app.state``. Flush intents live on each ``Turn`` (set by
@@ -836,6 +859,20 @@ def create_app(
             content=content,
         )
 
+    def _computer_script_interaction_error(
+        exc: ComputerScriptSessionError | ComputerScriptInteractionError,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "ok": False,
+                "error": exc.code,
+                "params": dict(getattr(exc, "params", {})),
+                "ambiguous": False,
+                "dispatched": False,
+            },
+        )
+
     @app.post("/internal/computer-script/open")
     async def _computer_script_open(request: Request) -> Any:
         payload = await _safe_json(request)
@@ -961,6 +998,80 @@ def create_app(
             "session_id": caller_session_id,
             "result": result,
         }
+
+    async def _computer_script_interaction(
+        request: Request,
+        operation: str,
+    ) -> Any:
+        try:
+            payload = await _bounded_json_object(
+                request,
+                limit=MAX_INTERACTION_REQUEST_BYTES,
+            )
+        except _RequestBodyTooLarge:
+            return JSONResponse(
+                status_code=413,
+                content={
+                    "ok": False,
+                    "error": "computer_script_message_too_large",
+                    "params": {
+                        # Only a message over its own limit can exceed this cap.
+                        "limit_bytes": MAX_MESSAGE_BYTES,
+                    },
+                    "ambiguous": False,
+                    "dispatched": False,
+                },
+            )
+        if set(payload) != {"connection_token", "message"}:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "invalid_computer_script_interaction",
+                    "params": {},
+                    "ambiguous": False,
+                    "dispatched": False,
+                },
+            )
+        connection_token = payload.get("connection_token")
+        message = payload.get("message")
+        if (
+            not isinstance(connection_token, str)
+            or not connection_token
+            or not isinstance(message, str)
+        ):
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "invalid_computer_script_interaction",
+                    "params": {},
+                    "ambiguous": False,
+                    "dispatched": False,
+                },
+            )
+        try:
+            if operation == "notify":
+                result = await computer_script_interactions.notify(
+                    connection_token,
+                    message,
+                )
+            else:
+                result = await computer_script_interactions.confirm(
+                    connection_token,
+                    message,
+                )
+        except (ComputerScriptSessionError, ComputerScriptInteractionError) as exc:
+            return _computer_script_interaction_error(exc)
+        return {"ok": True, "result": result}
+
+    @app.post("/internal/computer-script/notify")
+    async def _computer_script_notify(request: Request) -> Any:
+        return await _computer_script_interaction(request, "notify")
+
+    @app.post("/internal/computer-script/confirm")
+    async def _computer_script_confirm(request: Request) -> Any:
+        return await _computer_script_interaction(request, "confirm")
 
     @app.post("/internal/computer-script/close")
     async def _computer_script_close(request: Request) -> Any:

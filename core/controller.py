@@ -266,6 +266,7 @@ class Controller:
         # create a driver process until an active Turn requests it.
         self.computer_use_server = None
         self.computer_script_sessions = None
+        self.computer_script_interactions = None
         self.runtime_ownership = RuntimeOwnershipProvider(
             self.session_turns._sqlite_engine()
         )
@@ -2581,6 +2582,14 @@ class Controller:
             self._internal_server_task = None
 
         async def _close_computer_use_server() -> None:
+            script_interactions = getattr(
+                self,
+                "computer_script_interactions",
+                None,
+            )
+            self.computer_script_interactions = None
+            if script_interactions is not None:
+                script_interactions.close_all()
             script_sessions = getattr(self, "computer_script_sessions", None)
             self.computer_script_sessions = None
             if script_sessions is not None:

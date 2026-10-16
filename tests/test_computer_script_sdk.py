@@ -59,6 +59,11 @@ def _result(payload: dict, *, is_error: bool = False, image: bool = False) -> di
     }
 
 
+# An interaction answer that arrives after the request was sent but cannot be
+# decoded, so the client cannot know whether the Controller acted on it.
+_GARBLED_RESPONSE = "<garbled-response>"
+
+
 @contextmanager
 def _fake_controller(
     *,
@@ -71,6 +76,7 @@ def _fake_controller(
     app_responses: list[list[dict]] | None = None,
     windows: list[dict] | None = None,
     launch_pid: int | None = 41,
+    interaction_errors: dict[str, str] | None = None,
 ) -> Iterator[tuple[ThreadingHTTPServer, list[dict]]]:
     requests: list[dict] = []
     observations = 0
@@ -95,6 +101,39 @@ def _fake_controller(
             )
             if self.path == "/internal/computer-script/close":
                 body = {"ok": True, "closed": True}
+            elif self.path in {
+                "/internal/computer-script/notify",
+                "/internal/computer-script/confirm",
+            }:
+                operation = self.path.rsplit("/", 1)[-1]
+                error = (interaction_errors or {}).get(operation)
+                if error == _GARBLED_RESPONSE:
+                    body = None
+                elif error is not None:
+                    body = {
+                        "ok": False,
+                        "error": error,
+                        "params": {},
+                        "ambiguous": False,
+                        "dispatched": False,
+                    }
+                else:
+                    body = {
+                        "ok": True,
+                        "result": {
+                            "status": "confirmed",
+                            "effect": "confirmed",
+                            "route": (
+                                "owner_confirm"
+                                if operation == "confirm"
+                                else "message_dispatcher"
+                            ),
+                            "delivery": {
+                                "mode": "foreground",
+                                "delivered_count": 1,
+                            },
+                        },
+                    }
             else:
                 tool = payload["tool"]
                 delay = (response_delay_by_tool or {}).get(tool, 0)
@@ -320,7 +359,7 @@ def _fake_controller(
                         {"code": "unknown_tool", "params": {"tool": tool}},
                         is_error=True,
                     )
-            encoded = json.dumps(body).encode()
+            encoded = b"{" if body is None else json.dumps(body).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(encoded)))
@@ -360,6 +399,7 @@ def _run_node_script(
     app_responses: list[list[dict]] | None = None,
     windows: list[dict] | None = None,
     launch_pid: int | None = 41,
+    interaction_errors: dict[str, str] | None = None,
 ) -> tuple[dict, ThreadingHTTPServer, list[dict]]:
     if NODE is None:
         pytest.skip("Node.js is unavailable")
@@ -389,6 +429,7 @@ def _run_node_script(
         app_responses=app_responses,
         windows=windows,
         launch_pid=launch_pid,
+        interaction_errors=interaction_errors,
     ) as (server, requests):
         request = {
             "script_url": script.resolve().as_uri(),
@@ -719,6 +760,119 @@ export default async ({ subject }) => {
         request["authorization"] == "Bearer fixture-token" for request in requests
     )
     assert len(server.connection_ids) == 1  # type: ignore[attr-defined]
+
+
+def test_avibe_notify_and_confirm_return_effects(tmp_path: Path) -> None:
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        """
+import { avibe } from "@avibe/computer";
+
+export default async () => ({
+  notify: await avibe.notify("Progress"),
+  confirm: await avibe.confirm("Continue?"),
+});
+""",
+    )
+
+    assert payload == {
+        "ok": True,
+        "result": {
+            "notify": {
+                "status": "confirmed",
+                "effect": "confirmed",
+                "route": "message_dispatcher",
+                "delivery": {
+                    "mode": "foreground",
+                    "delivered_count": 1,
+                },
+            },
+            "confirm": {
+                "status": "confirmed",
+                "effect": "confirmed",
+                "route": "owner_confirm",
+                "delivery": {
+                    "mode": "foreground",
+                    "delivered_count": 1,
+                },
+            },
+        },
+    }
+    assert [
+        request["path"]
+        for request in requests
+        if request["path"].startswith("/internal/computer-script/")
+    ] == [
+        "/internal/computer-script/notify",
+        "/internal/computer-script/confirm",
+        "/internal/computer-script/close",
+    ]
+
+
+def test_avibe_confirm_refusal_is_typed_and_unambiguous(tmp_path: Path) -> None:
+    payload, _server, _requests = _run_node_script(
+        tmp_path,
+        """
+import { ConfirmRefused, avibe } from "@avibe/computer";
+
+export default async () => {
+  try {
+    await avibe.confirm("Continue?");
+  } catch (error) {
+    return {
+      instance: error instanceof ConfirmRefused,
+      code: error.code,
+      ambiguous: error.ambiguous,
+      step: error.step,
+    };
+  }
+  throw new Error("confirmation unexpectedly succeeded");
+};
+""",
+        interaction_errors={"confirm": "confirm_refused"},
+    )
+
+    assert payload == {
+        "ok": True,
+        "result": {
+            "instance": True,
+            "code": "confirm_refused",
+            "ambiguous": False,
+            "step": "avibe.confirm",
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("operation", "ambiguous"),
+    [("notify", True), ("confirm", False)],
+)
+def test_avibe_interaction_lost_response_ambiguity(
+    tmp_path: Path, operation: str, ambiguous: bool
+) -> None:
+    """A notify may already be delivered; a lost confirm never approved anything."""
+
+    payload, _server, _requests = _run_node_script(
+        tmp_path,
+        f"""
+import {{ avibe }} from "@avibe/computer";
+
+export default async () => {{
+  try {{
+    await avibe.{operation}("Continue?");
+  }} catch (error) {{
+    return {{ code: error.code, ambiguous: error.ambiguous }};
+  }}
+  throw new Error("lost response was not raised");
+}};
+""",
+        interaction_errors={operation: _GARBLED_RESPONSE},
+    )
+
+    assert payload == {
+        "ok": True,
+        "result": {"code": "invalid_computer_use_response", "ambiguous": ambiguous},
+    }
 
 
 def test_sdk_failure_reports_step_and_last_screenshot(tmp_path: Path) -> None:

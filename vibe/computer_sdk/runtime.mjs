@@ -205,6 +205,42 @@ export async function callTool(tool, argumentsValue, options = {}) {
   );
 }
 
+export async function callScriptInteraction(operation, message) {
+  let body;
+  try {
+    body = await postJson(`/internal/computer-script/${operation}`, {
+      connection_token: state.connectionToken,
+      message,
+    });
+  } catch (error) {
+    // Confirm has no desktop side effect, and a lost confirm never approved
+    // anything, so it is never ambiguous. A notify may already be delivered.
+    if (operation === "confirm" && error instanceof ControllerFault) {
+      error.ambiguous = false;
+    }
+    throw error;
+  }
+  if (body?.ok === false) {
+    const code =
+      typeof body.error === "string"
+        ? body.error
+        : "computer_script_request_failed";
+    throw controllerFault(code, controllerMessage(code, body), body.params, {
+      requestWasSent: false,
+      controllerPayload: body,
+    });
+  }
+  if (body?.ok === true && body.result && typeof body.result === "object") {
+    return { structuredContent: body.result };
+  }
+  throw controllerFault(
+    "invalid_computer_use_response",
+    "The Controller returned an invalid Computer Use response.",
+    {},
+    { requestWasSent: false },
+  );
+}
+
 function controllerMessage(code, payload) {
   if (payload && typeof payload.detail === "string" && payload.detail) {
     return payload.detail;

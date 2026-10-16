@@ -959,7 +959,7 @@ class MessageHandler(BaseHandler):
             raise RuntimeError("Could not reserve the Agent Session before delivery")
 
         from core.message_priority import priority_for_delivery_intent
-        from core.session_turns import DeliveryRequest
+        from core.session_turns import SCRIPT_CONFIRM_ANSWER_REASON, DeliveryRequest
         from storage import message_deliveries, media_service, messages_service
         from storage.agent_session_rows import reserve_write_lock
         from storage.db import get_cached_sqlite_engine
@@ -1106,8 +1106,10 @@ class MessageHandler(BaseHandler):
         # This is the only place that knows an input's admission outcome: a
         # Delivery that did not start its own turn returns here and the caller
         # stops, so without a receipt the user sees nothing at all for every
-        # message sent while a turn is running.
-        await self._ack_delivery_admission(context, result)
+        # message sent while a turn is running. A consumed confirm answer was
+        # delivered to its script, which acknowledges it on this surface.
+        if result.reason != SCRIPT_CONFIRM_ANSWER_REASON:
+            await self._ack_delivery_admission(context, result)
         return True
 
     @staticmethod

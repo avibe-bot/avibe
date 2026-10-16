@@ -139,5 +139,13 @@ export type DesktopBusy = TargetBusy;
 export const DesktopBusy: typeof TargetBusy;
 export class ForegroundConsentRequired extends ControllerError {}
 export class Unavailable extends ControllerError {}
+export class ConfirmRefused extends ControllerError {}
 
 export const computer: Computer;
+
+export interface Avibe {
+  notify(message: string): Promise<Effect>;
+  confirm(message: string): Promise<Effect>;
+}
+
+export const avibe: Avibe;
