@@ -352,8 +352,8 @@ impl TrayRuntimeState {
 
     #[cfg(target_os = "macos")]
     fn icon(&self) -> tauri::image::Image<'static> {
-        // tray-icon displays these 36px images at 18pt, preserving Retina detail.
-        // Keep the approved V1 pixels: template rendering uses their alpha mask.
+        // tray-icon preserves aspect ratio: 38x36px becomes 19x18pt on macOS.
+        // The V1 artwork is 16pt tall within that canvas; templates use its alpha.
         match self {
             Self::Starting | Self::Stopping => tauri::include_image!("icons/tray/starting@2x.png"),
             Self::Serving(_) => tauri::include_image!("icons/tray/serving@2x.png"),
@@ -2501,8 +2501,8 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn tray_templates_have_transparent_monochrome_pixels_at_both_export_sizes() {
-        // Protect the shipped image boundary: opaque canvases or colored pixels
-        // break native template appearance even if the state mapping is correct.
+        // Protect the shipped image boundary, including visible size: excessive
+        // transparent padding made the original cloud much smaller than its peers.
         let origin = LoopbackOrigin::parse("http://127.0.0.1:6123").expect("test listener");
         let images = [
             (18, tauri::include_image!("icons/tray/serving.png")),
@@ -2515,19 +2515,35 @@ mod tests {
             (36, TrayRuntimeState::Stopped.icon()),
         ];
         for (size, image) in images {
-            assert_eq!((image.width(), image.height()), (size, size));
-            assert_eq!(image.rgba().len(), (size * size * 4) as usize);
+            let width = if size == 36 { 38 } else { 20 };
+            let vertical_margin = size / 18;
+            assert_eq!((image.width(), image.height()), (width, size));
+            assert_eq!(image.rgba().len(), (width * size * 4) as usize);
             let pixels = image.rgba().as_chunks::<4>().0;
             assert!(pixels.iter().all(|pixel| pixel[..3] == [0, 0, 0]));
             assert!(pixels.iter().any(|pixel| pixel[3] > 0), "visible silhouette");
             assert!(pixels.iter().any(|pixel| pixel[3] == 0), "transparent background");
+            let visible = pixels
+                .iter()
+                .enumerate()
+                .filter(|(_, pixel)| pixel[3] >= 16)
+                .map(|(index, _)| (index as u32 % image.width(), index as u32 / image.width()));
+            let (left, top, right, bottom) = visible.fold(
+                (image.width(), image.height(), 0, 0),
+                |(left, top, right, bottom), (x, y)| (left.min(x), top.min(y), right.max(x), bottom.max(y)),
+            );
+            assert_eq!(
+                (left, top, right, bottom),
+                (1, vertical_margin, width - 2, size - vertical_margin - 1),
+                "the cloud must be 16pt tall, with a 1px horizontal guard"
+            );
             assert!(
                 pixels.iter().enumerate().all(|(index, pixel)| {
-                    let x = index as u32 % size;
-                    let y = index as u32 / size;
-                    (x > 0 && x < size - 1 && y > 0 && y < size - 1) || pixel[3] == 0
+                    let x = index as u32 % width;
+                    let y = index as u32 / width;
+                    (x > 0 && x < width - 1 && y >= vertical_margin && y < size - vertical_margin) || pixel[3] == 0
                 }),
-                "the silhouette must fit inside the canvas"
+                "the guard pixels must be fully transparent at both resolutions"
             );
         }
     }
