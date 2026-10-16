@@ -228,6 +228,8 @@ agent_sessions = Table(
     Index("ix_agent_sessions_scope_anchor_workdir", "scope_id", "session_anchor", "workdir"),
     Index("ix_agent_sessions_backend_variant", "agent_backend", "agent_variant"),
     Index("ix_agent_sessions_status_activity", "status", "last_active_at"),
+    # The Sessions projected running, for the startup projection repair (migration 0068).
+    Index("ix_agent_sessions_agent_status", "agent_status", "status"),
     Index("ix_agent_sessions_visibility", "visibility"),
     Index("ix_agent_sessions_scope_status_activity", "scope_id", "status", "last_active_at", "created_at", "id"),
     Index(
