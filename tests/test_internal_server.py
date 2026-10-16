@@ -32,7 +32,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, call
 
 import httpx
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -2834,6 +2834,66 @@ def test_turn_state_reflects_in_flight():
     assert busy["in_flight"] is True
     assert busy["native_turn_started"] is True
     assert busy["backend"] == "opencode"
+
+
+def test_turn_state_repairs_a_stale_running_projection_without_waiting_for_the_writer(tmp_path, monkeypatch):
+    """#2706: ``/internal/turn-state`` clears a stale ``running`` projection only after rechecking, under SQLite's
+    writer, that no turn owns the session. The endpoint runs on the controller loop, and another process may hold that
+    writer for the whole busy timeout, so the repair never waits for it: while the writer is held the read answers at
+    once and leaves the projection for the next read, which repairs it."""
+    import sqlite3
+    import threading
+    import time
+
+    from storage.models import agent_sessions
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(tmp_path, native_id="proj_turn_state_repair")
+    session_id = session["id"]
+    with engine.begin() as conn:
+        conn.execute(
+            update(agent_sessions).where(agent_sessions.c.id == session_id).values(agent_status="running")
+        )
+    app = internal_server.create_app(_build_controller_double())
+    transport = httpx.ASGITransport(app=app)
+    held, release = threading.Event(), threading.Event()
+
+    def another_process_holds_the_writer() -> None:
+        holder = sqlite3.connect(engine.url.database, timeout=10)
+        try:
+            holder.execute("BEGIN IMMEDIATE")
+            held.set()
+            release.wait(2.0)
+            holder.rollback()
+        finally:
+            holder.close()
+
+    def stored_status() -> str:
+        with engine.connect() as conn:
+            return conn.execute(
+                select(agent_sessions.c.agent_status).where(agent_sessions.c.id == session_id)
+            ).scalar_one()
+
+    async def _go():
+        holder = threading.Thread(target=another_process_holds_the_writer)
+        holder.start()
+        assert await asyncio.to_thread(held.wait, 5)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            started = time.monotonic()
+            contended = (await client.get(f"/internal/turn-state/{session_id}")).json()
+            answered_in = time.monotonic() - started
+            status_while_held = stored_status()
+            release.set()
+            await asyncio.to_thread(holder.join, 5)
+            repaired = (await client.get(f"/internal/turn-state/{session_id}")).json()
+        return answered_in, contended, status_while_held, repaired
+
+    answered_in, contended, status_while_held, repaired = asyncio.run(_go())
+    assert answered_in < 0.5, f"the turn-state read waited {answered_in:.2f}s for SQLite's writer on the loop"
+    assert contended["in_flight"] is False and contended["recovered_agent_status"] is False
+    assert status_while_held == "running"
+    assert repaired["recovered_agent_status"] is True
+    assert stored_status() == "idle"
 
 
 def test_turn_state_projects_a_restored_durable_owner_without_in_flight(

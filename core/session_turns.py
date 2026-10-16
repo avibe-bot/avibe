@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, ContextManager, Iter
 
 from sqlalchemy import and_, exists, literal, or_, select, update
 from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.exc import OperationalError
 
 from core.delivery_target import normalize_message_kind
 from core.agent_input import AgentInputMetadata
@@ -630,6 +631,23 @@ class _RuntimeStartOwner:
     admitted: bool
     identity: RuntimeActivationIdentity | None = None
 
+
+
+def _try_reserve_write_lock(conn: Connection) -> bool:
+    """``reserve_write_lock`` without waiting: ``False`` when another connection holds
+    SQLite's writer, instead of blocking the caller for the busy timeout."""
+
+    previous = conn.exec_driver_sql("PRAGMA busy_timeout").scalar()
+    conn.exec_driver_sql("PRAGMA busy_timeout = 0")
+    try:
+        reserve_write_lock(conn)
+    except OperationalError as exc:
+        if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+            raise
+        return False
+    finally:
+        conn.exec_driver_sql(f"PRAGMA busy_timeout = {int(previous)}")
+    return True
 
 class SessionTurnManager:
     """Owns the live per-session turn state + lifecycle for avibe sessions.
@@ -7931,15 +7949,31 @@ class SessionTurnManager:
         return recovered
 
     def _repair_ownerless_running_projection(self, session_id: str) -> bool:
-        """Clear a legacy running projection only after an exact owner recheck."""
+        """Clear a legacy running projection only after an exact owner recheck.
+
+        Runs on the controller loop, so no loop-side section that writes the running
+        projection before it creates the owner (an agent-initiated Turn's ``on_running``,
+        then ``register_agent_initiated_turn``) can interleave with the recheck. It
+        therefore never WAITS for SQLite's writer, which another process may hold for
+        the whole busy timeout (#2706): a busy writer skips the repair, and the next
+        turn-state read retries it.
+        """
 
         engine = self._sqlite_engine()
         if not callable(getattr(engine, "connect", None)):
             return False
         if not self._durable_schema_available():
             return False
+        # Most sessions are not projected running: answer them without the writer.
+        with engine.connect() as conn:
+            status = conn.execute(
+                select(agent_sessions.c.agent_status).where(agent_sessions.c.id == session_id)
+            ).scalar_one_or_none()
+        if status != "running":
+            return False
         with engine.begin() as conn:
-            reserve_write_lock(conn)
+            if not _try_reserve_write_lock(conn):
+                return False
             if delivery_store.active_turn(conn, session_id) is not None:
                 return False
             repaired = conn.execute(
