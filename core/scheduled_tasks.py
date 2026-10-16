@@ -8388,24 +8388,32 @@ class ScheduledTaskService:
         # A claim that recorded no runtime generation resolves one again here, on the
         # loop that owns the adapters' state (#2664); the step itself only writes.
         resolution: RuntimeActivationResolution | None = None
+        resolved_backend = ""
         if request.observed_activation_identity is None:
             backend_resolution = self._claimed_request_backend_resolution(request)
+            resolved_backend = backend_resolution.backend
             resolution = (
                 self._activation_resolution_for_request(
                     request,
-                    backend=backend_resolution.backend,
+                    backend=resolved_backend,
                 )
                 if backend_resolution.authoritative
                 else RuntimeActivationResolution(authoritative=False)
             )
         # One store step, on the door the claim itself runs through: a cancellation that
         # arrives meanwhile is answered once the start (or the requeue) has landed.
-        return await self._store_step(self._start_claimed_execution, request, resolution)
+        return await self._store_step(
+            self._start_claimed_execution,
+            request,
+            resolution,
+            resolved_backend,
+        )
 
     def _start_claimed_execution(
         self,
         request: TaskExecutionRequest,
         resolution: RuntimeActivationResolution | None = None,
+        resolved_backend: str = "",
     ) -> tuple[TaskExecutionRequest, bool]:
         observed_identity = request.observed_activation_identity
         request = self.request_store.refresh_claimed_request(request)
@@ -8419,7 +8427,12 @@ class ScheduledTaskService:
         service = getattr(self.controller, "agent_service", None)
         activation_identity = request.observed_activation_identity
         if activation_identity is None:
-            if resolution is not None and not resolution.authoritative:
+            if resolution is not None and (
+                not resolution.authoritative or resolved_backend != backend
+            ):
+                # Inconclusive, or resolved for a backend the refreshed Agent no longer
+                # names (a rename or archive since the claim): the next pass resolves
+                # again on the loop, with the refreshed row.
                 self.request_store.requeue(request.id)
                 return request, False
             activation_identity = (

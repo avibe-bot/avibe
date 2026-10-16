@@ -4226,6 +4226,54 @@ def test_claim_and_start_read_the_runtime_generation_on_the_loop(tmp_path: Path)
     service._execute_agent_run.assert_awaited_once()
 
 
+def test_start_requeues_when_the_refreshed_agent_names_another_backend(tmp_path: Path) -> None:
+    """The loop resolves the start's runtime generation from the claimed request
+    before the store step refreshes its Agent reference (#2664). If a rename since
+    the claim makes the refreshed Agent resolve to a backend the loop did not
+    resolve for, the step must not start without the generation fence: it requeues,
+    and the next pass resolves again with the refreshed row."""
+
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    registry = RuntimeActivationRegistry()
+    identity = registry.attach("claude", "/repo")
+    agents = {"pm-renamed": SimpleNamespace(backend="claude")}
+    controller = SimpleNamespace(
+        vibe_agent_store=SimpleNamespace(get=agents.get, get_by_id=lambda _agent_id: None),
+        agent_service=SimpleNamespace(
+            agents={},
+            is_backend_ready=Mock(return_value=True),
+            runtime_activation_identity_for_request=Mock(return_value=identity),
+            activation_registry=registry,
+        ),
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    queued = request_store.enqueue_hook_send(
+        session_key="slack::channel::C123",
+        prompt="continue",
+        agent_name="pm",
+    )
+    claimed = request_store.claim(queued.id)
+    assert claimed is not None
+
+    def refresh_after_rename(item):
+        item.agent_name = "pm-renamed"
+        return item
+
+    request_store.refresh_claimed_request = refresh_after_rename  # type: ignore[method-assign]
+    service._execute_request = AsyncMock()  # type: ignore[method-assign]
+
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    service._execute_request.assert_not_awaited()
+    row = request_store.get_run(claimed.id)
+    assert row["status"] == "queued"
+    assert row.get("pid") is None
+
+
 def test_run_task_uses_tracked_execution_for_lease_loss(tmp_path: Path, monkeypatch) -> None:
     request_store = TaskExecutionStore(tmp_path / "task_requests")
     store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
