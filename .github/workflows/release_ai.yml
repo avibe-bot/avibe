@@ -201,7 +201,7 @@ jobs:
           npm run build
 
       - name: Download Show Runtime bundles
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         with:
           pattern: show-runtime-*
           path: runtime-artifacts
@@ -644,14 +644,14 @@ jobs:
 
       - name: Download release artifacts
         if: startsWith(steps.tag.outputs.tag, 'gh-v')
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         with:
           name: release-dist
           path: dist/
 
       - name: Download desktop TEST artifacts
         if: needs.resolve-desktop-release.outputs.enabled == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         with:
           pattern: avibe-desktop-${{ needs.resolve-desktop-release.outputs.version }}-*
           path: desktop-dist/
