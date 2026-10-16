@@ -77,8 +77,9 @@ cover dependency-sensitive behavior that those cases do not exercise:
 
 - Stored and Deflate payloads with non-ASCII names, full installation and reuse.
 - Nested traversal and test-owned absolute paths; no outside file written.
-- Symlink central metadata, CRC failure, truncated archive, incorrect entry
-  count and unpacked-size budget; no staged/published files remain on failure.
+- Symlink central metadata on Unix, CRC failure, truncated archive, incorrect
+  entry count and unpacked-size budget; no staged/published files remain on
+  failure.
 - Unix SUID/SGID/sticky flags are stripped while executable bits survive.
 
 Negative fixtures refresh archive identity after mutation so they reach the

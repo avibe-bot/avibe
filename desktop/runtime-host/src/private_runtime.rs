@@ -1568,7 +1568,11 @@ mod tests {
 
     #[test]
     fn rejects_invalid_zip_metadata_and_cleans_partial_extraction() {
-        for case in ["symlink", "crc", "entry-count", "unpacked-size", "truncated"] {
+        #[cfg(not(unix))]
+        let cases: &[&str] = &["crc", "entry-count", "unpacked-size", "truncated"];
+        #[cfg(unix)]
+        let cases: &[&str] = &["symlink", "crc", "entry-count", "unpacked-size", "truncated"];
+        for &case in cases {
             let root = scratch(case);
             let mut manifest = write_bundle(&root, Some("last-entry"));
             let archive_path = root.join("bundle/runtime.zip");
