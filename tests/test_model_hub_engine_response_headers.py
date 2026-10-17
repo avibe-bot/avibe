@@ -1,0 +1,110 @@
+"""Upstream response headers the engine passes through stop at Avibe's gateway (#2780, #2666).
+
+The engine renders ``passthrough-headers: true``, so it forwards an upstream's
+response headers to Avibe: on success with hop-by-hop ones removed, on an error
+with nothing filtered. Avibe reads only ``ENGINE_RESPONSE_HEADER_ALLOW_LIST`` and
+builds every response it sends from its own headers. Each case drives the real
+gateway and engine adapter against a loopback engine that answers with injected
+upstream headers, and checks what reaches the caller.
+"""
+
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+
+import aiohttp
+import pytest
+from aiohttp import web
+
+from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
+from tests.test_model_hub_declared_tools import COMPLETED, INPUT, _wire
+from tests.test_model_hub_l3 import _canonicalize_fixed_test_routes, _service, _source
+from vibe.model_hub_runtime.client import ENGINE_RESPONSE_HEADER_ALLOW_LIST, _allowed_engine_header
+
+# What an upstream may send and the engine forwards: none of it belongs to Avibe's callers.
+INJECTED = {
+    "Set-Cookie": "upstream-session=secret; Path=/; HttpOnly",
+    "Request-Id": "req_upstream_1",
+    "Anthropic-Organization-Id": "org-upstream",
+    "Retry-After-Ms": "1500",
+    "Anthropic-Ratelimit-Unified-5h-Reset": "1797000000",
+    "X-Upstream-Injected": "1",
+}
+JSON_BODY = {
+    "/v1/responses": b'{"id":"resp_1","object":"response","status":"completed","output":[],'
+                     b'"usage":{"input_tokens":2,"output_tokens":1}}',
+    "/v1/messages": b'{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],'
+                    b'"stop_reason":"end_turn","usage":{"input_tokens":2,"output_tokens":1}}',
+}
+RATE_LIMITED = {
+    "/v1/responses": b'{"error":{"type":"rate_limit_exceeded","code":"rate_limit_exceeded","message":"slow down"}}',
+    "/v1/messages": b'{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}',
+}
+
+
+@asynccontextmanager
+async def _engine(status: int, stream: bool):
+    async def respond(request: web.Request) -> web.Response:
+        await request.read()
+        if status != 200:
+            return web.Response(
+                status=status, body=RATE_LIMITED[request.path], content_type="application/json",
+                headers={**INJECTED, "Retry-After": "120"},
+            )
+        if stream:
+            return web.Response(body=COMPLETED[request.path], content_type="text/event-stream", headers=INJECTED)
+        return web.Response(body=JSON_BODY[request.path], content_type="application/json", headers=INJECTED)
+
+    app = web.Application()
+    app.router.add_post("/{path:.*}", respond)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "127.0.0.1", 0).start()
+    try:
+        yield f"http://127.0.0.1:{runner.addresses[0][1]}"
+    finally:
+        await runner.cleanup()
+
+
+def test_only_the_retry_advice_avibe_uses_is_read_from_an_engine_response():
+    assert ENGINE_RESPONSE_HEADER_ALLOW_LIST == {"retry-after"}
+    headers = {**INJECTED, "Retry-After": "120"}
+    assert _allowed_engine_header(headers, "Retry-After") == "120"
+    assert {name: _allowed_engine_header(headers, name) for name in INJECTED} == dict.fromkeys(INJECTED)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("status", "stream"), [(200, True), (200, False), (429, True), (429, False)],
+                         ids=["stream", "buffered", "stream-error", "buffered-error"])
+@pytest.mark.parametrize(("backend", "path"), [("claude", "messages"), ("codex", "responses")])
+async def test_no_upstream_header_the_engine_forwards_reaches_the_caller(tmp_path, backend, path, status, stream):
+    configured = _source("src_headers01", "Responses key", model_id="shared-model")
+    if backend == "claude":
+        configured.vendor, configured.protocol = "anthropic", "anthropic"
+    async with _engine(status, stream) as root:
+        service = _service(tmp_path, sources=[configured])
+        _canonicalize_fixed_test_routes(service)
+        _wire(service, tmp_path, root, {})
+        gateway = ModelHubTurnGateway(service)
+        try:
+            base_url, token = await gateway.endpoint(
+                backend, process_scope="/repo", turn_id="turn_headers",
+                requested_model_id=service.store.requested_models[backend],
+                resolved_model_id="shared-model", source_id=configured.id,
+            )
+            body = {"model": "shared-model", "stream": stream, "max_tokens": 16}
+            body |= {"messages": [{"role": "user", "content": "hi"}]} if path == "messages" else {"input": INPUT}
+            async with aiohttp.ClientSession() as downstream:
+                async with downstream.post(
+                    f"{base_url}/v1/{path}", json=body, headers={"Authorization": f"Bearer {token}"},
+                ) as response:
+                    await response.read()
+                    received = {name.lower(): value for name, value in response.headers.items()}
+                    served = response.status
+        finally:
+            await gateway.close()
+    assert (served == 200) == (status == 200), (served, received)
+    leaked = {name for name in received if name in {key.lower() for key in INJECTED}}
+    assert leaked == set(), received
+    # Retry advice reaches a caller only as the gateway's own whole-second header.
+    assert received.get("retry-after", "120").isdigit(), received

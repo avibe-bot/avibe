@@ -99,6 +99,19 @@ _OFFICIAL_BASE_URLS = official_api_key_base_urls()
 logger = logging.getLogger(__name__)
 _ProjectedJSON = TypeVar("_ProjectedJSON")
 
+# The engine forwards an upstream's response headers (``passthrough-headers``),
+# minus hop-by-hop ones, and on errors it filters nothing. Avibe reads only these
+# and builds every gateway response from its own headers, so no other upstream
+# header (``set-cookie``, ``request-id``, an organization id) reaches Vibey, the
+# Web UI or a gateway client. A header joins this list with the code that uses it.
+ENGINE_RESPONSE_HEADER_ALLOW_LIST: frozenset[str] = frozenset({"retry-after"})
+
+
+def _allowed_engine_header(headers: Mapping[str, str], name: str) -> str | None:
+    """An engine response header Avibe reads; one off the allow-list reads as absent."""
+
+    return headers.get(name) if name.lower() in ENGINE_RESPONSE_HEADER_ALLOW_LIST else None
+
 
 def upstream_api_url(root: str, path: str) -> str:
     """Resolve a standard v1 endpoint from either an origin or an API root."""
@@ -587,7 +600,7 @@ class EngineClient:
             )
             if response.status >= 300:
                 response_received_at = datetime.now(timezone.utc)
-                retry_after = response.headers.get("Retry-After")
+                retry_after = _allowed_engine_header(response.headers, "Retry-After")
                 if retry_after is not None and (len(retry_after) > 128 or not retry_after.isascii()):
                     retry_after = None
                 error_body = _StreamPrelude()
