@@ -246,9 +246,11 @@ Preparation:
    (and the candidate normal wheel) against synthetic loopback upstreams. That
    variable is the acceptance's only engine input: the service installs from the
    manifest it names (else the packaged one), and the acceptance asserts that the
-   installed engine's version is that manifest's `version`. So an ignored
-   override, or a packaged engine installed by accident, fails the run instead of
-   passing as candidate acceptance. Record the real result and prepare the PR
+   engine it installed and verified is that manifest's build: its `version`,
+   `source_sha`, and the host platform asset's `sha256` and `size_bytes`. So an
+   ignored override, or a packaged engine installed by accident, fails the run
+   instead of passing as candidate acceptance, even when both name the same
+   upstream version. Record the real result and prepare the PR
    with the candidate manifest/patch metadata. The existing release workflow remains the publication/recovery
    authority; do not change the packaged pin or publish from candidate mode.
 
