@@ -1011,3 +1011,48 @@ async def test_a_head_held_for_explicit_retry_is_left_to_its_owner(tmp_path: Pat
     with engine.connect() as conn:
         assert delivery_store.get_delivery(conn, "delivery-held")["state"] == "queued"
     engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_a_held_head_on_the_last_page_leaves_the_next_wake_a_full_scan(tmp_path: Path) -> None:
+    """A wake for a Session that sorts before a held head still finds its recovery work."""
+
+    engine = _engine(tmp_path)
+    with engine.begin() as conn:
+        _session(conn, "ses-z-held")
+        _delivery(conn, "delivery-held", "ses-z-held")
+        _held_for_explicit_retry(conn, "delivery-held")
+    manager = SessionTurnManager(SimpleNamespace())
+    manager._engine = engine
+    scanned = asyncio.Event()
+    processed: list[str] = []
+    recovered = asyncio.Event()
+
+    class _ObservedHandler(SessionDeliveryRecoveryHandler):
+        def scan(self, **kwargs):
+            result = super().scan(**kwargs)
+            scanned.set()
+            return result
+
+        async def process(self, item):
+            processed.append(item.partition_key)
+            recovered.set()
+            return True
+
+    # Only a wake can scan: reconciliation is too far away to help.
+    supervisor = RuntimeWorkSupervisor(reconcile_interval=3600, lane_capacity=1)
+    supervisor.register(RuntimeWorkLane.SESSION_DELIVERIES, _ObservedHandler(manager))
+    await supervisor.activate()
+    await asyncio.wait_for(scanned.wait(), timeout=1)
+    await asyncio.sleep(0.05)
+    with engine.begin() as conn:
+        _session(conn, "ses-a")
+        _delivery(conn, "delivery-a", "ses-a")
+    supervisor.notify(RuntimeWorkLane.SESSION_DELIVERIES)
+    try:
+        await asyncio.wait_for(recovered.wait(), timeout=1)
+    finally:
+        await supervisor.stop()
+        engine.dispose()
+
+    assert processed == ["ses-a"]

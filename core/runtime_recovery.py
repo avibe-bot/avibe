@@ -29,7 +29,7 @@ class SessionDeliveryRecoveryHandler:
             occupied=occupied,
             cursor=cursor,
         )
-        return [
+        items = [
             # A head held for its owner's explicit retry only moves the cursor:
             # re-entering it would find nothing to start, back off and rescan
             # it every second until that retry.
@@ -39,7 +39,14 @@ class SessionDeliveryRecoveryHandler:
                 cursor_only=observation.awaits_explicit_retry,
             )
             for observation in observations
-        ], has_more
+        ]
+        if not has_more:
+            # On the last page a held head must not leave the cursor behind it:
+            # no worker re-arms the lane for it, so the next wake would scan
+            # only the Sessions after it and miss earlier ones.
+            while items and items[-1].cursor_only:
+                items.pop()
+        return items, has_more
 
     async def process(self, item: RuntimeWorkItem) -> bool:
         return await self.manager.recover_runtime_delivery_observation(
