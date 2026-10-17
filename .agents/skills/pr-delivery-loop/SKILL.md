@@ -1,109 +1,109 @@
 ---
 name: pr-delivery-loop
-description: 交付 Avibe、avibe-bot-backend、avibe-docs、avault、vault-sandbox 的 PR：从 worktree、实现、Codex review、CI 一路推进到 Merge。所有 Agent backend 上的实现任务都使用。
+description: Deliver Avibe, avibe-bot-backend, avibe-docs, avault, and vault-sandbox PRs from worktree and implementation through Codex review, CI, and Merge. Use it for implementation work on every Agent backend.
 ---
 
-# PR 交付
+# PR Delivery
 
-你的任务是把一个改动真正交付出去：通过 review 和 CI，最终 Merge，或者推进到只差用户点头的 Merge-ready。中间没有可以停下来的"状态"。每次被唤醒，先看 live 情况，回答两个问题：离 Merge 还差什么？我现在能做的最有用的一步是什么？然后去做。
+Your job is to deliver a change for real: pass review and CI, then Merge it, or drive it to Merge-ready so that only the user's approval remains. There is no intermediate "state" where you can stop. Whenever you are resumed, inspect the live situation first and answer two questions: what is still between this PR and Merge, and what is the most useful thing I can do now? Then do it.
 
-## 一直往前推
+## Keep moving
 
-- **有问题就修。** finding、CI 失败、冲突，查清根因，做最小但完整的修复，验证后推送。
-- **等待要有对象。** 能说清在等哪个信号、由谁产生、你怎么知道它到了，才叫等待。Watch 负责盯，你利用这段时间补测试、复核消费方、准备收尾报告；信号一到就接着干。说不清在等什么，那不是在等，是停了。
-- **blocker 是要解决的问题，不是停下的理由。** 先自己诊断、拆解、换条路、补证据。只有需要用户做重大取舍、超出授权、或继续会带来不可逆风险时才停，并说清需要对方决定什么。
-- **只信 live 状态。** 每轮重新拉当前 head、全部 review / comment / thread（含 outdated）、当前 head 的 CI。旧快照、上一轮的绿灯、lane 的口头结论都只是线索。
-- **反复出现就往下挖一层。** 同一类根因在两个 reviewed head 上重现，或者架构重写后连续三个 head 仍有 finding，说明你在修症状。停下 patch，基于完整 inventory 找到真正原因，定下最小完整范围再继续。这改变的是做法，不是让工作停下。
+- **Fix problems.** Investigate findings, CI failures, and conflicts to their root cause; make the smallest complete fix, verify it, and push.
+- **Wait for a named signal.** Waiting is real only when you can say which signal you need, who produces it, and how you will know it arrived. Let the Watch monitor it. Use the time to add tests, check consumers, and prepare the close-out report; continue as soon as the signal arrives. If you cannot say what you are waiting for, you are not waiting—you are stopped.
+- **A blocker is a problem to solve, not a reason to stop.** Diagnose it yourself, break it down, try another path, and gather evidence. Stop only when a major trade-off, an authorization outside your scope, or an irreversible risk requires the user's decision; state exactly what decision is needed.
+- **Trust live state only.** Each round, fetch the current head, all reviews, comments, and threads (including outdated ones), and CI for the current head. Old snapshots, previous green results, and lane conclusions are clues only.
+- **Dig deeper when a pattern repeats.** If the same root cause appears on two reviewed heads, or three consecutive heads still have findings after an architectural rewrite, you are treating symptoms. Stop patching, build a complete inventory, find the real cause, define the smallest complete scope, and continue. This changes the method; it does not stop the work.
 
-## 开工与实现
+## Start and implement
 
-- 先读仓库的 `AGENTS.md`。接手已有分支时先核对 head 和作者，来路不明的新提交可能属于另一个还在工作的人；新任务从最新默认分支开独立 worktree（多仓工作区放在 `.worktrees/<repo>/<branch>`）。一个分支只有一个 writer。不做 stacked PR：依赖未合并的 PR 就在正文写明，代码只依赖默认分支上已有的契约。
-- 动手前搞清楚这个 diff 会影响谁：调用方、数据、迁移、其他 lane。把验收写成不变量，覆盖这一类情况而不只是眼前的例子；迁移要验证升级和降级。
-- 本地跑聚焦测试、改动文件的 lint 和仓库要求的本地检查（UI 改动要 `npm run build`）。全量测试交给 CI，不在本地重跑整套当推送门槛；CI 覆盖不到的流程（E2E、手工验证）仍要另行验证。
-- 推送前自审 `git diff origin/<default>...HEAD`：有没有越界、遗漏、密钥、临时文件。最后一次 rebase 时，对照最新默认分支检查迁移 revision 这类分配出来的 ID 是否撞号，Git 不报冲突不代表没撞。
-- 开 PR：非 draft，标题 `type(scope): summary`，显式 `--base <默认分支>`，多行正文用 `--body-file`。正文写清范围、验证方式、剩余的手工 / E2E 检查、依赖，以及有意不改的事项（Known-by-design），以后 review 重复提到时直接引用。创建后读回标题、正文和 base。
+- Read the repository's `AGENTS.md` first. When taking over an existing branch, verify its head and author; unexplained new commits may belong to someone still working. For a new task, create an independent worktree from the latest default branch (`.worktrees/<repo>/<branch>` in the multi-repo workspace). One branch has one writer. Do not use stacked PRs: declare unmerged dependencies in the PR body and make the code depend only on contracts already on the default branch.
+- Before editing, understand who this diff affects: callers, data, migrations, and other lanes. State acceptance as invariants that cover the class of behavior, not only the immediate example; verify both upgrade and downgrade paths for migrations.
+- Run focused tests, changed-file lint, and required repository checks locally (`npm run build` for UI changes). Leave the full suite to CI instead of making it a local push gate; separately verify flows CI does not cover, such as E2E or manual checks.
+- Before pushing, review `git diff origin/<default>...HEAD`: scope drift, omissions, secrets, and temporary files. At the final rebase, compare allocated IDs such as migration revisions with the latest default branch; Git can miss semantic collisions.
+- Open a non-draft PR with a `type(scope): summary` title and explicit `--base <default branch>`. Use `--body-file` for multiline text. State the scope, validation, remaining manual/E2E checks, dependencies, and intentional non-changes (Known-by-design), so later findings can refer to them. Read back the title, body, and base after creation.
 
-## 用一个 Watch 盯住 PR
+## Keep one Watch on the PR
 
-Watch 的机制（脚本、cursor、过滤、重试）归 `background-watch-hook` 管，开始等待前先加载它。这里只讲原则：每个 PR、每个 owner 一个持久 Watch（委派时 orchestrator 和 lane 各算一个 owner，各有一个）；PR 一建好、在第一次 push 或触发 review 之前就装上；整个交付过程保持存活；收尾时移除。不要在轮次之间重建 Watch 或重置它的 cursor，那会把已经到达的 review 结论当旧事件吞掉，让一个已完成的 review 看起来毫无动静。Watch 真坏了，按那个 skill 的恢复流程处理，并保留证据。
+The `background-watch-hook` skill owns Watch mechanics: scripts, cursors, filters, retries, and delivery acknowledgements. Load it before a managed wait. This skill defines only the principle: one persistent Watch per PR and owner (the orchestrator and each delegated lane are separate owners); arm it after creating the PR and before the first watched push or review trigger; keep it alive throughout delivery; remove it at close-out. Do not rebuild it or reset its cursor between rounds: doing so can consume already-arrived reviews as old events and make a completed review look silent. If the Watch actually fails, follow that skill's recovery procedure and preserve the evidence.
 
 ## Codex review
 
-Codex 的信号有几处容易误读：
+Codex signals are easy to misread:
 
-- push 后几分钟内通常会自动开始，表现为 PR 正文上出现 Codex 的 `eyes`。没有迹象就评论 `@codex review`，记下你这条评论的 ID，看它有没有得到 Codex 的 `eyes`。`eyes` 在 review 结束后会消失，之后看不到不代表没接单。
-- 只认 `chatgpt-codex-connector`（常显示为 `[bot]`）给出的结论。通过有两种形态：一条写着 `Codex Review: Didn't find any major issues` 并指明当前 SHA 的评论；或者 PR 正文上的 `+1`，但只有 Watch 确实在这个 head 推送之后看到它新出现才算数。绑不到当前 head，就再触发一次，拿一个带 SHA 的结论。有 finding 的 review 里也有 `Reviewed commit`，单凭它不算通过。
-- review 进行中不要 push 新 head：这一轮会白跑，结论也会绑到错的 head 上。这段时间拿来做验收和准备收尾。
+- Review usually starts within a few minutes after a push, shown by Codex `eyes` on the PR. If there is no sign, comment `@codex review`, record the ID of that comment, and check whether that exact comment receives Codex `eyes`. The `eyes` disappear after review; their later absence does not mean Codex never accepted the job.
+- Accept conclusions only from `chatgpt-codex-connector` (often displayed as `[bot]`). A pass has one of two forms: a comment saying `Codex Review: Didn't find any major issues` and naming the current SHA; or a `+1` reaction on the PR body that the Watch definitely observed as new after this head was pushed. If it cannot be bound to the current head, trigger another review and require a SHA-bearing conclusion. A finding review also contains `Reviewed commit`; that alone is not a pass.
+- Do not push a new head while review is running: that wastes the round and binds the conclusion to the wrong head. Use the time for acceptance checks and close-out preparation.
 
-## Finding 与 review thread
+## Findings and review threads
 
-finding 属于它被提出时的那个 head，先对照当前代码判断它是否仍然成立，再决定改不改。修复推送并自己确认之后，就在 thread 里说明改了什么并 resolve，不必等 CI。不修的给出理由；反复出现的有意设计，引用 Known-by-design。别人有未提交的 pending review 挡住回复时，不要删除或 dismiss 它，保留对方的草稿，先做别的，之后再回。PR 上只回复具体 thread，不发每轮总结评论。
+A finding belongs to the head on which it was raised. Compare it with the current code before deciding whether it still applies. After fixing and verifying it, explain the change in the thread and resolve it; do not wait for CI. If you do not fix it, explain why. For an intentional design that keeps recurring, cite the Known-by-design ledger. If another person's pending review prevents a reply, do not delete or dismiss it; preserve the draft, do other safe work, and retry after it is submitted or discarded. Reply to concrete threads only; do not post round summaries on the PR.
 
 ## CI
 
-适用的 CI，是这个仓库对这次改动要求的检查。当前 head 上每个必需 workflow 的每一次 run 都要成功或明确 skipped；同一个 workflow 只要还有一个 run 在 pending 或失败，就不算过。缺失、排队、取消、超时、等待人工批准、读不到，都不是通过。
+Applicable CI is whatever this repository requires for this change. Every required workflow run for the current head must succeed or be explicitly skipped; if the same workflow still has any pending or failed run, it has not passed. Missing, queued, cancelled, timed out, awaiting approval, or unreadable results do not pass.
 
-和本仓库无关的第三方集成（比如客户端仓库上的 Vercel 检查）不该挡住交付：确认它不在必需检查里、和这次改动无关，在汇报里说一句，然后继续推进，不要等它出终态；它让 GitHub 显示 `UNSTABLE` 而不是 `CLEAN` 时也一样。
+Unrelated third-party integrations (for example, Vercel checks from a client repository) should not block delivery: confirm they are not required checks and are unrelated to this change, mention that in the report, and continue instead of waiting for a terminal result. The same applies when they leave GitHub `UNSTABLE` rather than `CLEAN`.
 
-CI 失败时，先在本地复现失败的那条命令或那个文件，再缩小范围。PR 是 `DIRTY` 而 CI 迟迟不来，通常是有冲突，去解决冲突，而不是继续等。
+When CI fails, reproduce the failing command or file locally first, then narrow the fix. If the PR is `DIRTY` and CI does not arrive, diagnose a conflict instead of continuing to wait.
 
 ## Merge-ready
 
-同时满足下面几条，PR 就是 Merge-ready：
+The PR is Merge-ready only when all of these are true:
 
-- 当前 head 有有效的 Codex 通过结论，没有未处理的真实 finding；
-- 适用 CI 在当前 head 上全部通过；
-- 整个 PR 没有 unresolved thread，包括旧 head 和 outdated 的；
-- PR 是 open、非 draft、无冲突，GitHub 显示 `CLEAN`。
+- The current head has a valid Codex pass and no unhandled real finding;
+- All applicable CI for the current head has passed;
+- The entire PR has no unresolved thread, including old and outdated heads;
+- The PR is open, non-draft, conflict-free, and GitHub shows `CLEAN`.
 
-这些都必须是当前 head 上的事实。哪一项拿不准，就当它没通过，然后去把它弄清楚。
+These must all be facts about the current head. If any item is uncertain, treat it as not passed and go establish it.
 
 ## Merge
 
-合不合并看意愿，不看有没有一句固定格式的授权：
+Merge follows intent, not a fixed authorization phrase:
 
-- 用户（或委派你的 orchestrator）表达了要合并的意思，就合并。"可以 merge 了""合了吧""直接合并"说的都是合并，不要理解成"告诉我一下状态"。用户如果说的是"给我个 Merge 按钮"，那是想自己点，就给按钮。
-- 没人明说，但你对这个 PR 有十足把握，而且不合并会卡住已经确定要做的后续工作，可以自己合并，并在汇报里说明原因。
-- 用户说过先别合、要自己确认，就以用户最新的说法为准。
-- 拿不准就继续验证，同时把 Merge 按钮交给用户。不要抢跑，也不要干等一句授权。
+- If the user (or the orchestrator who delegated to you) expresses the intent to merge, merge it. "It can merge now", "merge it", and "just merge" all mean merge; do not interpret them as a status request. If the user asks for a "Merge button", they want to click it themselves—offer the button.
+- If nobody says so explicitly, you may merge only when you are fully confident in the PR **and** not merging it would block a specific, already-authorized follow-up that is definitely going to happen. State the reason in the report.
+- If the user said to wait or to confirm personally, follow the user's latest instruction.
+- If uncertain, keep verifying and offer the Merge button to the user. Do not race ahead, and do not wait passively for a magic authorization phrase.
 
-合并前用 live 状态把 Merge-ready 的几条再确认一遍；有依赖关系的 PR 按顺序合；委派出去的 lane 不能还有在跑或排队的工作。然后：
+Before merging, recheck the Merge-ready conditions live; merge dependent PRs in order; and make sure no delegated lane still has running or queued work. Then:
 
 ```bash
-gh pr merge <PR-URL> --squash --match-head-commit <已验证的-head-SHA>
+gh pr merge <PR-URL> --squash --match-head-commit <verified-head-SHA>
 ```
 
-`--match-head-commit` 保证合进去的正是你验证过的那个 head。合并后读回 `MERGED` 和 merge commit，清理本任务的 Watch、worktree 和分支，不碰其他工作。
+`--match-head-commit` ensures that the exact verified head is merged. Afterward, read back `MERGED` and the merge commit, then clean up this task's Watch, worktree, and branch without touching other work.
 
-Merge 不等于同意部署、重启服务、更新本地回归环境或改凭据，这些各自需要用户点头。
+Merge does not authorize deployment, service restarts, local regression updates, or credential changes. Each needs the user's approval.
 
-## 跟用户说话
+## Talk to the user
 
-用中文，先说结果。用户关心的是：改了什么、有什么用、还剩什么风险、下一步是什么。SHA、run 数、thread 数是你的内部证据，只在解释 blocker 或用户问起时拿出来，不要把 gate 清单当汇报。
+Use the conversation's language and lead with the result. The user cares about what changed, why it matters, remaining risks, and the next step. SHAs, run counts, and thread counts are internal evidence; mention them only to explain a blocker or when asked. Do not turn the report into a gate checklist.
 
-- **还在推进时**：说你正在做什么、在等什么信号、下一步是什么、需不需要用户决定。有 finding 或失败要及时说；没有实质变化就不发消息；review 和 CI 只过了一半，不用专门报。
-- **Merge-ready、等用户确认时**：在同一条回复里明确说「可以 Merge 了」，附可点击的 PR 链接，结尾直接放快捷按钮，不要等用户来要：
+- **While progressing:** say what you are doing, what signal you are waiting for, what happens next, and whether you need a decision. Report findings and failures promptly; do not report half-success, and do not interrupt the user when review and CI are only partly complete.
+- **When Merge-ready and waiting for approval:** say clearly that the PR can be merged, include a clickable PR link, and offer the Merge quick reply in the same response:
 
   ```text
   ---
-  [合并 PR]
+  [Merge PR]
   ```
 
-  对话不支持按钮时，用正文说清同样的下一步，并附链接。
-- **决定直接合并时**：不必再问，也不再给 Merge 按钮。合并、读回结果，然后告诉用户已合并（附链接），以及为什么由你直接合。
-- **合并之后**：仓库有本地回归流程时（Avibe 有），给出 `[更新回归]` 和 `[更新并验证]`：两者都把本地 master 环境更新到最新，后者还会验证受影响的流程。用户选了之后，先读 [Local regression](references/local-regression.md) 再动手。
+  If buttons are unavailable, say the same next step visibly and include the link.
+- **When merging directly:** do not ask again or offer a stale Merge button. Merge, read back the result, and tell the user it is merged with the reason you merged directly.
+- **After Merge:** when the repository has a local regression workflow (Avibe does), offer `[Update regression]` and `[Update and verify]`. Both update the local master environment; the latter also verifies the affected flows. After the user chooses one, read `references/local-regression.md` before acting.
 
-按钮只出现在给用户的回复里，不出现在 lane 报告或 GitHub 评论中。给按钮时，在内部记下它对应的 PR 和 head。用户点击后，按点击来源对应的 PR 重新拉 live 状态；head 变了或不再 ready，就说明情况并重新给出，不沿用旧的确认。不确定点的是哪个 PR 就问，不要猜。
+Buttons belong only in user-facing replies, not lane reports or GitHub comments. When offering one, record the target PR and head internally. After a click, re-fetch live state for that PR; if the head changed or readiness was lost, explain it and offer again instead of using stale approval. If the target PR is unclear, ask rather than guess.
 
-## 委派与 lane
+## Delegation and lanes
 
-- 用户发起的会话是 orchestrator，对最终判断、合并和与用户的沟通负责；被委派的 lane，其 orchestrator 是派它出来的会话。优先级：用户 > orchestrator > 本 skill。最终 review 和合并决定不交给新派出去的 agent。
-- orchestrator 自行决定清晰、可逆、不破坏契约的范围调整；只有重大取舍、不可逆风险或方向真正不明时才问用户。lane 发现越出自己范围的问题就上报，不去改别人的部分。并行 lane 共享的接口契约先合进 base 再分叉。
-- orchestrator 每轮自己拉 inventory，抽查 lane 声称修好的根因和对应的测试；lane 的报告和绿色测试代替不了这一步。
-- lane 完成或需要决定时，用 `vibe agent run --session-id <orchestrator> --message-file <report> --no-callback` 把报告送到 orchestrator 并确认送达，由 Watch 唤醒的 lane 不能指望 callback。orchestrator 的决定也要显式发回 lane，GitHub Watch 看不到会话里的决定。lane 的 Watch 等报告送达后再移除。
-- 取消是异步的。换人接手前先确认原来的 lane 已经停下，或明确通知双方交接，避免出现两个 writer。
-- 在用户发起的会话里，验证 gate、移除 Watch、发最终报告在同一轮完成，不为收尾另开后续任务。
+- The user-started session is the orchestrator and owns final judgments, merging, and user communication. A delegated lane belongs to the session that dispatched it. Authority is user > orchestrator > this skill. Do not delegate final review or merge decisions to a new agent.
+- The orchestrator may make clear, reversible, contract-preserving scope changes. A lane reports work outside its scope instead of editing another lane's area. Merge shared interface contracts into the base before forking parallel lanes.
+- Each round, the orchestrator fetches its own inventory and spot-checks the claimed root-cause fix and a consuming test; a lane report and green tests are not a substitute.
+- When a lane finishes or needs a decision, send its report to the orchestrator with `vibe agent run --session-id <orchestrator> --message-file <report> --no-callback` and verify delivery. A Watch-triggered lane must not rely on callbacks. Send orchestrator decisions back to the lane explicitly; GitHub Watch cannot observe session decisions. Keep the lane's Watch until the report is delivered, then remove it.
+- Cancellation is asynchronous. Before handing work to someone else, confirm the original lane stopped or explicitly notify both sides of the handoff; do not create two writers.
+- In a user-started session, verify gates, remove the Watch, and send the final report in the same round; do not open a follow-up task only to sequence close-out.
 
-## 维护本 skill
+## Maintain this skill
 
-Avibe 仓库的 `.agents/skills/pr-delivery-loop/` 是唯一源头。改动 review 通过后，把整个目录（含 `references/`）逐字节同步到其他仓库的镜像，保留镜像仓库里无关的文件。
+Avibe's `.agents/skills/pr-delivery-loop/` is the sole source of truth. After the change passes review, synchronize the entire maintained package, including `references/`, byte-for-byte to the mirrors in other repositories, preserving unrelated files in those repositories.
