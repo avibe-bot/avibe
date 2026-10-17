@@ -40,11 +40,12 @@ def test_pr_delivery_loop_delegates_waiters_to_background_watch_skill() -> None:
     assert "you may merge on your own judgment only when all of these hold" in flat
     assert "touches no release or tag, database migration, or security boundary" in flat
 
-    # A Codex pass binds to the current head: a comment naming its SHA, or a PR-body
-    # `+1` the Watch saw arrive after it was pushed while no earlier head's review was
-    # still running (that review's late `+1` looks the same). `Reviewed commit` is on findings too.
+    # A Codex pass names the current head's SHA: the summary comment's review state, or a
+    # pass comment naming it. A PR-body `+1` names no commit, so it is never a pass alone.
+    # `Reviewed commit` is on findings too.
+    assert "A pass must name the current head's SHA" in flat
+    assert '`"status":"completed"` and `"has_any_findings":false`' in flat
     assert "`Codex Review: Didn't find any major issues` and naming the current SHA" in flat
-    assert "a `+1` reaction on the PR body that the Watch definitely observed as new after this head was pushed" in flat
-    assert "only if no earlier head's review was still running when this head was pushed" in flat
-    assert "require a SHA-bearing conclusion" in flat
+    assert "never as a pass on its own" in flat
+    assert "If no SHA-bearing conclusion exists for the current head, trigger another review." in flat
     assert "also contains `Reviewed commit`; that alone is not a pass" in flat

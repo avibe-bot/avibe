@@ -31,12 +31,15 @@ can quietly become a stale deployment source.
   never picked up.
 - A `+1` carries no commit. Suppose head A is under review and you push head B.
   When A's review finishes with no findings, its `+1` arrives after B was pushed
-  and looks exactly like a pass for B. That is why a `+1` counts only when no
-  earlier head's review was still running at the push. Otherwise, require a
-  SHA-bearing conclusion for the current head.
-- The Watch can bind a new `+1` to a head only through its original cursor and
-  the head timeline. Rebuilding the Watch or resetting its cursor after a push
-  can consume evidence that already arrived, so a finished review looks silent.
+  and looks exactly like a pass for B. The bot's review summary comment does
+  name the commit: its `codex-review-state` line records the full `commit_sha`,
+  the status and whether there were findings. So the pass is read from that
+  state, matched to the current head, and the `+1` only says it is worth reading.
+- The summary comment is edited in place as each review starts and finishes.
+  Read its current body, not a copy seen earlier.
+- Rebuilding the Watch or resetting its cursor after a push can consume events
+  that already arrived, so a finished review looks silent until you read the
+  live state.
 - A lane Run marked `succeeded` proves only that the invocation ended. It does
   not prove that the current head's review started, that the Watch is alive, or
   that the orchestrator received the report.
