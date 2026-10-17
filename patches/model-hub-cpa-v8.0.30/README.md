@@ -162,7 +162,10 @@ router-for-me/CLIProxyAPI#6535, was closed unmerged. Avibe therefore carries
 this patch by design as its client-side transport bound for this connection.
 No drop is planned; re-evaluate only if upstream changes its post-connect
 timeout policy. The cost is that every CPA upgrade must rebase this patch and
-`fallback-transport-h2-ping-health-check.patch`.
+`fallback-transport-h2-ping-health-check.patch`. A dead path is this patch's
+case; a live relay whose own upstream is stuck answers PINGs, so Avibe's
+gateway bounds that case instead (the 120 s stream idle bound,
+`docs/plans/model-hub-inference-deadlines.md`, "Stream idle bound", #2538).
 
 ## `fallback-transport-h2-ping-health-check.patch`
 
@@ -238,7 +241,10 @@ under the same policy (see `codex-utls-h2-ping-health-check.patch`), so no
 upstream follow-up is pending. Avibe carries this patch by design as its
 client-side transport bound for these transports. No drop is planned;
 re-evaluate only if upstream changes its post-connect timeout policy. Every
-CPA upgrade must rebase it together with that patch.
+CPA upgrade must rebase it together with that patch. A live relay that answers
+PINGs while its own upstream is stuck is bounded by Avibe's gateway instead
+(the 120 s stream idle bound, `docs/plans/model-hub-inference-deadlines.md`,
+"Stream idle bound", #2538).
 
 ## `codex-compat-upstream-item-ids.patch`
 
