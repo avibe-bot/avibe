@@ -23,6 +23,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -32,6 +33,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 
 from storage import vault_crypto, vault_webauthn
+from storage.lock import LockHolderState, MigrationFileLock, probe_lock_holder, remove_unheld_lock
 from storage.models import (
     agent_sessions,
     scopes,
@@ -1453,16 +1455,124 @@ def _request_waiter(delivery: Any) -> dict[str, Any]:
     return waiter if isinstance(waiter, dict) else {}
 
 
-def _request_waiter_active(row: dict[str, Any]) -> bool:
-    _, delivery = _request_json_payloads(row)
-    waiter = _request_waiter(delivery)
+# --- Approval continuation ownership ---------------------------------------------------------
+#
+# An approved request continues exactly one way: a synchronous CLI waiter consumes it in the
+# command that asked, or the daemon resumes the requesting Session with a callback turn. Both
+# sides decide inside a write-reserved transaction on the CURRENT row and land their decision
+# with an update conditional on the ``delivery`` text they read, so neither can act on a
+# decision the other has already made. A new waiter proves it is alive by holding an OS lock
+# beside the database it waits in; the OS drops that lock when the process ends, however it
+# ends. See docs/plans/2026-10-17-vault-continuation-ownership.md for the state shape.
+
+#: ``waiter.liveness`` for a waiter whose owner holds its lock at ``request_waiter_lock_path``.
+WAITER_LIVENESS_LOCK = "lock"
+_WAITER_ID_PATTERN = re.compile(r"vw_[0-9a-f]{12}")
+
+
+class ContinuationClaimedError(InvalidRequestError):
+    """The request's continuation already belongs to someone else; the caller must not deliver."""
+
+
+def new_request_waiter_id() -> str:
+    return _id("vw")
+
+
+def request_waiter_lock_path(db_path: str | Path, waiter_id: str) -> Path:
+    """The waiter's ownership lock, beside the database whose request it waits on."""
+
+    if not _WAITER_ID_PATTERN.fullmatch(str(waiter_id or "")):
+        raise InvalidRequestError("invalid request waiter id")
+    return Path(db_path).expanduser().resolve().parent / "vault-waiters" / f"{waiter_id}.lock"
+
+
+def _database_file(connectable: Any) -> Path | None:
+    database = connectable.engine.url.database
+    if not database or database == ":memory:" or str(database).startswith("file:"):
+        return None
+    return Path(database)
+
+
+def acquire_request_waiter_lock(engine: Any, waiter_id: str) -> MigrationFileLock:
+    """Take a new waiter's ownership lock; raises ``OSError`` when it cannot be held."""
+
+    db_path = _database_file(engine)
+    if db_path is None:
+        raise OSError("the vault database has no file to anchor a waiter lock beside")
+    lock = MigrationFileLock(request_waiter_lock_path(db_path, waiter_id), timeout_seconds=0)
+    lock.acquire()
+    return lock
+
+
+def release_request_waiter_lock(lock: MigrationFileLock, *, discard: bool) -> None:
+    """Release a waiter's lock; ``discard`` once the waiter is terminal in the database.
+
+    A waiter that leaves without a terminal commit must not discard: its row still says
+    ``active``, and only a lock that can now be taken tells the daemon its owner is gone.
+    """
+
+    try:
+        if discard:
+            try:
+                lock.lock_path.unlink()
+            except OSError:
+                pass
+    finally:
+        lock.release()
+
+
+def discard_request_waiter_lock(connectable: Any, waiter_id: str) -> bool:
+    """Remove a terminal waiter's lock file if no live process holds it."""
+
+    db_path = _database_file(connectable)
+    if db_path is None:
+        return False
+    try:
+        path = request_waiter_lock_path(db_path, waiter_id)
+    except InvalidRequestError:
+        return False
+    return remove_unheld_lock(path)
+
+
+def _waiter_lock_state(conn: Connection | None, waiter: dict[str, Any]) -> LockHolderState:
+    db_path = _database_file(conn) if conn is not None else None
+    if db_path is None:
+        return "unknown"
+    try:
+        path = request_waiter_lock_path(db_path, str(waiter.get("id") or ""))
+    except InvalidRequestError:
+        return "unknown"
+    return probe_lock_holder(path)
+
+
+def _waiter_presumed_live(conn: Connection | None, waiter: dict[str, Any]) -> bool:
+    """Whether an armed waiter must still be treated as owning its request's continuation.
+
+    A lock waiter is live while its lock is held and gone once the lock is free. A missing
+    lock or a failed look proves nothing, so the waiter keeps its own declared wait bound.
+    A waiter without ``liveness`` is a released row shape and keeps its recorded deadline.
+    """
+
     if waiter.get("status") != "active":
         return False
     deadline = _parse_iso_datetime(waiter.get("deadline_at"))
-    return deadline is not None and deadline > datetime.now(timezone.utc)
+    within_declared_wait = deadline is not None and deadline > datetime.now(timezone.utc)
+    if waiter.get("liveness") != WAITER_LIVENESS_LOCK:
+        return within_declared_wait
+    state = _waiter_lock_state(conn, waiter)
+    if state == "held":
+        return True
+    if state == "free":
+        return False
+    return within_declared_wait
 
 
-def _grant_owner_waiter_active(conn: Connection, grants: list[dict[str, Any]]) -> bool:
+def _request_waiter_live(conn: Connection | None, row: dict[str, Any]) -> bool:
+    _, delivery = _request_json_payloads(row)
+    return _waiter_presumed_live(conn, _request_waiter(delivery))
+
+
+def _grant_owner_waiter_live(conn: Connection, grants: list[dict[str, Any]]) -> bool:
     request_ids = [
         str(grant.get("request_id") or "")
         for grant in grants
@@ -1471,7 +1581,12 @@ def _grant_owner_waiter_active(conn: Connection, grants: list[dict[str, Any]]) -
     if not request_ids:
         return False
     rows = conn.execute(select(vault_requests).where(vault_requests.c.id.in_(request_ids))).mappings()
-    return any(_request_waiter_active(dict(row)) for row in rows)
+    return any(_request_waiter_live(conn, dict(row)) for row in rows)
+
+
+def _request_continuation_claimed(delivery: dict[str, Any]) -> bool:
+    continuation = delivery.get("continuation")
+    return isinstance(continuation, dict) and continuation.get("owner") == "callback"
 
 
 def _skip_sibling_callbacks_for_completed_waiter(conn: Connection, request_id: str) -> None:
@@ -1498,6 +1613,10 @@ def _skip_sibling_callbacks_for_completed_waiter(conn: Connection, request_id: s
         ).mappings()
         for row in rows:
             row_dict = dict(row)
+            _, sibling_delivery = _request_json_payloads(row_dict)
+            if isinstance(sibling_delivery, dict) and _request_continuation_claimed(sibling_delivery):
+                # Its callback already owns its continuation; skipping now would drop that turn.
+                continue
             try:
                 option = _request_grant_option(row_dict)
             except InvalidRequestError:
@@ -1516,78 +1635,108 @@ def _skip_sibling_callbacks_for_completed_waiter(conn: Connection, request_id: s
         )
 
 
-def _update_request_waiter(
-    conn: Connection,
-    request_id: str,
-    *,
-    waiter_id: str,
-    status: str,
-    deadline_at: str | None = None,
-    completed_at: str | None = None,
-    timed_out_at: str | None = None,
-) -> dict[str, Any]:
+def _reserve_request_row(conn: Connection, request_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Take SQLite's write lock, then read the request this transaction will decide on."""
+
+    from storage.agent_session_rows import reserve_write_lock
+
+    reserve_write_lock(conn)
     row = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().first()
     if row is None:
         raise RequestNotFoundError(request_id)
     row_dict = dict(row)
     _, delivery = _request_json_payloads(row_dict)
-    delivery_payload = dict(delivery) if isinstance(delivery, dict) else {}
-    current = _request_waiter(delivery_payload)
-    if current and current.get("id") and current.get("id") != waiter_id:
-        raise InvalidRequestError("request waiter id does not match")
-    waiter = {
-        "id": waiter_id,
-        "status": status,
-        "updated_at": _now(),
-    }
-    if deadline_at:
-        waiter["deadline_at"] = deadline_at
-    elif current.get("deadline_at"):
-        waiter["deadline_at"] = current["deadline_at"]
-    if completed_at:
-        waiter["completed_at"] = completed_at
-    if timed_out_at:
-        waiter["timed_out_at"] = timed_out_at
-    delivery_payload["waiter"] = waiter
+    return row_dict, dict(delivery) if isinstance(delivery, dict) else {}
 
-    conn.execute(
+
+def _land_request_delivery(conn: Connection, row: dict[str, Any], delivery: dict[str, Any], *conditions: Any) -> bool:
+    """Write ``delivery`` only over the text this decision read; True when it landed."""
+
+    read = row.get("delivery")
+    unchanged = vault_requests.c.delivery.is_(None) if read is None else vault_requests.c.delivery == read
+    result = conn.execute(
         vault_requests.update()
-        .where(vault_requests.c.id == request_id)
-        .values(delivery=json.dumps(delivery_payload))
+        .where(vault_requests.c.id == row["id"], unchanged, *conditions)
+        .values(delivery=json.dumps(delivery))
     )
-    if status == "completed":
-        _skip_sibling_callbacks_for_completed_waiter(conn, request_id)
+    return result.rowcount == 1
+
+
+def _callback_not_sent() -> Any:
+    # A released daemon records a delivered callback only as ``sent``; never continue past it.
+    return or_(vault_requests.c.callback_status.is_(None), vault_requests.c.callback_status != "sent")
+
+
+def _transition_own_waiter(
+    conn: Connection,
+    request_id: str,
+    *,
+    waiter_id: str,
+    status: str,
+    stamp: str,
+    exclusive: bool,
+) -> dict[str, Any]:
+    row, delivery = _reserve_request_row(conn, request_id)
+    current = _request_waiter(delivery)
+    if current.get("id") != waiter_id:
+        raise InvalidRequestError("request waiter id does not match")
+    if current.get("status") != "active" or (
+        exclusive and (_request_continuation_claimed(delivery) or row.get("callback_status") == "sent")
+    ):
+        raise ContinuationClaimedError(f"vault request {request_id} continues through its callback")
+    now = _now()
+    delivery["waiter"] = {**current, "status": status, "updated_at": now, stamp: now}
+    conditions = (_callback_not_sent(),) if exclusive else ()
+    if not _land_request_delivery(conn, row, delivery, *conditions):
+        raise ContinuationClaimedError(f"vault request {request_id} continues through its callback")
     updated = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().one()
     return _request_row_payload(dict(updated), conn=conn, audience=REQUEST_AUDIENCE_AGENT)
 
 
-def arm_request_waiter(conn: Connection, request_id: str, *, waiter_id: str, deadline_at: str) -> dict[str, Any]:
-    return _update_request_waiter(
-        conn,
-        request_id,
-        waiter_id=waiter_id,
-        status="active",
-        deadline_at=deadline_at,
-    )
+def arm_request_waiter(
+    conn: Connection,
+    request_id: str,
+    *,
+    waiter_id: str,
+    deadline_at: str,
+    liveness: str | None = None,
+) -> dict[str, Any]:
+    """Make a synchronous CLI waiter the request's continuation owner.
+
+    Raises ``ContinuationClaimedError`` once the callback owns the request (the caller must
+    not wait or deliver) and ``InvalidRequestError`` when the request already has a waiter.
+    """
+
+    row, delivery = _reserve_request_row(conn, request_id)
+    if _request_waiter(delivery):
+        raise InvalidRequestError("request waiter id does not match")
+    if _request_continuation_claimed(delivery) or row.get("callback_status") == "sent":
+        raise ContinuationClaimedError(f"vault request {request_id} continues through its callback")
+    waiter = {"id": waiter_id, "status": "active", "deadline_at": deadline_at, "updated_at": _now()}
+    if liveness:
+        waiter["liveness"] = liveness
+    delivery["waiter"] = waiter
+    if not _land_request_delivery(conn, row, delivery, _callback_not_sent()):
+        raise ContinuationClaimedError(f"vault request {request_id} continues through its callback")
+    updated = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().one()
+    return _request_row_payload(dict(updated), conn=conn, audience=REQUEST_AUDIENCE_AGENT)
 
 
 def complete_request_waiter(conn: Connection, request_id: str, *, waiter_id: str) -> dict[str, Any]:
-    return _update_request_waiter(
-        conn,
-        request_id,
-        waiter_id=waiter_id,
-        status="completed",
-        completed_at=_now(),
+    """Consume the request's outcome in the waiting command; only then may it deliver."""
+
+    payload = _transition_own_waiter(
+        conn, request_id, waiter_id=waiter_id, status="completed", stamp="completed_at", exclusive=True
     )
+    _skip_sibling_callbacks_for_completed_waiter(conn, request_id)
+    return payload
 
 
 def timeout_request_waiter(conn: Connection, request_id: str, *, waiter_id: str) -> dict[str, Any]:
-    return _update_request_waiter(
-        conn,
-        request_id,
-        waiter_id=waiter_id,
-        status="timed_out",
-        timed_out_at=_now(),
+    """Hand an unconsumed request back to its callback when the waiter stops waiting."""
+
+    return _transition_own_waiter(
+        conn, request_id, waiter_id=waiter_id, status="timed_out", stamp="timed_out_at", exclusive=False
     )
 
 
@@ -1684,11 +1833,12 @@ def _payload_session_id(payload: Any) -> str | None:
 # --- Auto-resume callbacks (P4) -------------------------------------------------------------
 #
 # When a request reaches a terminal state its transition also sets ``callback_status="pending"``.
-# The daemon sweep (``core.scheduled_tasks``) drains these: for each it resolves a callback plan
-# and enqueues exactly one callback turn to the requesting session — the same entry Agent Run /
-# watch / scheduled tasks use — then marks the row ``sent`` / ``skipped``. The atomic
-# ``WHERE status='pending'`` claim on every transition makes this exactly-once (a re-resolve
-# updates zero rows, so ``callback_status`` is never re-armed).
+# The daemon sweep (``core.scheduled_tasks``) drains these: ``claim_request_callback`` decides on
+# the current row whether a synchronous waiter or the callback owns the continuation, the sweep
+# enqueues one callback turn to the requesting session — the same entry Agent Run / watch /
+# scheduled tasks use — or mirrors a waiter-consumed outcome, then marks the row ``sent`` /
+# ``skipped``. The atomic ``WHERE status='pending'`` claim on every transition keeps a re-resolve
+# from re-arming ``callback_status``.
 
 
 @dataclass(frozen=True)
@@ -1837,12 +1987,13 @@ def request_callback_ready(conn: Connection, row: dict[str, Any]) -> bool:
     the active grant for the request's session/purpose whose member snapshot covers the request's
     members. Every other terminal state (provision/sign/deny/expire, and standard grants which are
     ready on approval) is deliverable immediately; no active covering grant does not block forever.
+    A live synchronous waiter, on this request or on the covering grant's request, also defers it.
     """
-    if _request_waiter_active(row):
+    if _request_waiter_live(conn, row):
         return False
     if str(row.get("request_type") or "") == "access" and str(row.get("status") or "") == "approved":
         grants = _request_covering_grant_payloads(conn, row)
-        if grants and _grant_owner_waiter_active(conn, grants):
+        if grants and _grant_owner_waiter_live(conn, grants):
             return False
         if grants and not any(grant.get("delivery_ready") for grant in grants):
             return False
@@ -1902,29 +2053,94 @@ def list_pending_request_callbacks(
         query = query.limit(limit)
     rows = [dict(row) for row in conn.execute(query).mappings()]
     for row in rows:
-        if row.get("request_type") != "provision" or row.get("status") != "fulfilled":
-            continue
-        # Transient callback projection: use the user's actual current fields,
-        # never the requested hints and never any envelope/value material.
-        secret = conn.execute(
-            select(vault_secrets.c.name, vault_secrets.c.kind, vault_secrets.c.id,
-                   vault_secrets.c.public_meta, vault_secrets.c.fields, vault_secrets.c.updated_at)
-            .where(vault_secrets.c.name == row.get("secret_name"))
-        ).mappings().first()
-        if secret is not None:
-            current = _field_metadata(dict(secret))
-            if has_named_field_shape(current):
-                row["provision_secret"] = current
+        _attach_provision_projection(conn, row)
     return rows
 
 
-def mark_request_callback(conn: Connection, request_id: str, *, status: str) -> None:
-    """Record the outcome of an auto-resume callback (``sent`` / ``skipped`` / ``failed``)."""
-    conn.execute(
+def _attach_provision_projection(conn: Connection, row: dict[str, Any]) -> None:
+    if row.get("request_type") != "provision" or row.get("status") != "fulfilled":
+        return
+    # Transient callback projection: use the user's actual current fields,
+    # never the requested hints and never any envelope/value material.
+    secret = conn.execute(
+        select(vault_secrets.c.name, vault_secrets.c.kind, vault_secrets.c.id,
+               vault_secrets.c.public_meta, vault_secrets.c.fields, vault_secrets.c.updated_at)
+        .where(vault_secrets.c.name == row.get("secret_name"))
+    ).mappings().first()
+    if secret is not None:
+        current = _field_metadata(dict(secret))
+        if has_named_field_shape(current):
+            row["provision_secret"] = current
+
+
+@dataclass(frozen=True)
+class RequestCallbackClaim:
+    """What one callback pass may do for a request, decided on its current row.
+
+    ``defer`` leaves it for a later pass, ``settled`` means it needs nothing more, ``mirror``
+    records a waiter-consumed outcome in the transcript, and ``deliver`` enqueues the callback
+    Run ``run_id``. ``released_waiter_id`` names a dead owner's lock that is now safe to remove.
+    """
+
+    action: str
+    row: dict[str, Any] | None = None
+    plan: PendingRequestCallback | None = None
+    run_id: str | None = None
+    released_waiter_id: str | None = None
+
+
+def claim_request_callback(conn: Connection, request_id: str) -> RequestCallbackClaim:
+    """Decide, on the current row, whether the Session callback owns this request's continuation.
+
+    The callback claims the request before anything is enqueued, recording the Run id it will
+    use, so a waiter arriving later is refused and a pass interrupted between enqueue and the
+    ``sent`` mark resumes with the same Run instead of choosing again.
+    """
+
+    try:
+        row, delivery = _reserve_request_row(conn, request_id)
+    except RequestNotFoundError:
+        return RequestCallbackClaim("settled")
+    if row.get("callback_status") != "pending":
+        return RequestCallbackClaim("settled", row)
+    _attach_provision_projection(conn, row)
+    plan = resolve_request_callback(row)
+    if plan is None:
+        mark_request_callback(conn, request_id, status="skipped")
+        return RequestCallbackClaim("settled", row)
+    if _request_continuation_claimed(delivery):
+        run_id = str(delivery["continuation"].get("run_id") or "") or None
+        return RequestCallbackClaim("deliver", row, plan, run_id=run_id)
+    if request_callback_consumed_by_waiter(row):
+        return RequestCallbackClaim("mirror", row, plan)
+    if not request_callback_ready(conn, row):
+        return RequestCallbackClaim("defer", row)
+    waiter = _request_waiter(delivery)
+    waiter_armed = waiter.get("status") == "active"
+    now = _now()
+    if waiter_armed:
+        # Gone, or past its declared wait with no proof either way: abandoning it in this same
+        # write is what refuses that waiter's completion.
+        delivery["waiter"] = {**waiter, "status": "abandoned", "updated_at": now, "abandoned_at": now}
+    run_id = uuid.uuid4().hex[:12]
+    delivery["continuation"] = {"owner": "callback", "run_id": run_id, "claimed_at": now}
+    if not _land_request_delivery(conn, row, delivery, vault_requests.c.callback_status == "pending"):
+        return RequestCallbackClaim("defer", row)
+    released = str(waiter.get("id") or "") if waiter_armed and waiter.get("liveness") == WAITER_LIVENESS_LOCK else None
+    return RequestCallbackClaim("deliver", row, plan, run_id=run_id, released_waiter_id=released or None)
+
+
+def mark_request_callback(conn: Connection, request_id: str, *, status: str) -> bool:
+    """Record the outcome of an owed auto-resume callback (``sent`` / ``skipped`` / ``failed``).
+
+    Only a still-pending callback is marked, so a skip decided elsewhere is never overwritten.
+    """
+    result = conn.execute(
         vault_requests.update()
-        .where(vault_requests.c.id == request_id)
+        .where(vault_requests.c.id == request_id, vault_requests.c.callback_status == "pending")
         .values(callback_status=status)
     )
+    return result.rowcount == 1
 
 
 def _request_card(row: dict[str, Any]) -> dict[str, Any]:
