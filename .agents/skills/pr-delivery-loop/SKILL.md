@@ -63,7 +63,7 @@ These must all be facts about the current head. If any item is uncertain, treat 
 Merge follows intent, not a fixed authorization phrase:
 
 - If the user (or the orchestrator who delegated to you) expresses the intent to merge, merge it. "It can merge now", "merge it", and "just merge" all mean merge; do not interpret them as a status request. If the user asks for a "Merge button", they want to click it themselves—offer the button.
-- If nobody says so explicitly, you may merge only when you are fully confident in the PR **and** not merging it would block a specific, already-authorized follow-up that is definitely going to happen. State the reason in the report.
+- If nobody says so explicitly, but you are fully confident in the PR and not merging it would block a determined follow-up, you may merge it, and state the reason in the report.
 - If the user said to wait or to confirm personally, follow the user's latest instruction.
 - If uncertain, keep verifying and offer the Merge button to the user. Do not race ahead, and do not wait passively for a magic authorization phrase.
 
@@ -79,7 +79,7 @@ Merge does not authorize deployment, service restarts, local regression updates,
 
 ## Talk to the user
 
-Use the conversation's language and lead with the result. The user cares about what changed, why it matters, remaining risks, and the next step. SHAs, run counts, and thread counts are internal evidence; mention them only to explain a blocker or when asked. Do not turn the report into a gate checklist.
+Use Chinese and lead with the result. The user cares about what changed, why it matters, remaining risks, and the next step. SHAs, run counts, and thread counts are internal evidence; mention them only to explain a blocker or when asked. Do not turn the report into a gate checklist.
 
 - **While progressing:** say what you are doing, what signal you are waiting for, what happens next, and whether you need a decision. Report findings and failures promptly; do not report half-success, and do not interrupt the user when review and CI are only partly complete.
 - **When Merge-ready and waiting for approval:** say clearly that the PR can be merged, include a clickable PR link, and offer the Merge quick reply in the same response:
