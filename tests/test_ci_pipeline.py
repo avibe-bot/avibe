@@ -500,6 +500,65 @@ def test_distribution_contract_command_fails_on_errors_and_skips(tmp_path, pytes
     assert (result.returncode == 0) == (pytest_exit == 0 and "skipped" not in summary), result.stdout + result.stderr
 
 
+def test_hosted_wire_gate_judges_a_pull_requests_engine_change_and_blocks_merge(tmp_path: Path) -> None:
+    workflow = yaml.safe_load((ROOT / ".github/workflows/lint.yml").read_text())
+    jobs = workflow["jobs"]
+    job = jobs["model-hub-hosted-wire"]
+    # A failure reaches branch protection through the required aggregate.
+    assert "model-hub-hosted-wire" in jobs["unit-tests"]["needs"]
+    # Labeling re-runs the gate, which reads the labels as they are when it runs.
+    assert {"labeled", "unlabeled"} <= set(workflow[True]["pull_request"]["types"])
+    assert job["permissions"] == {"contents": "read", "pull-requests": "read"}
+    assert job["env"]["BASE_SHA"] == "${{ github.event.pull_request.base.sha }}"
+    steps = job["steps"]
+    detect = next(index for index, step in enumerate(steps) if step.get("id") == "manifest")
+    for step in steps[detect + 1:]:
+        assert "steps.manifest.outputs.changed == 'true'" in step["if"], step
+    gate, = [step for step in steps if "scripts/model_hub_hosted_wire_gate.py" in step.get("run", "")]
+    assert '--base "$BASE_SHA"' in gate["run"] and '--pull-request "$PR_NUMBER"' in gate["run"]
+    assert gate["env"] == {"GH_TOKEN": "${{ github.token }}", "PR_NUMBER": "${{ github.event.pull_request.number }}"}
+
+    repo = tmp_path / "repo"
+    manifest = repo / "vibe/model_hub_runtime/cliproxyapi_manifest.json"
+    manifest.parent.mkdir(parents=True)
+
+    def git(*args: str) -> str:
+        return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True).stdout.strip()
+
+    def commit() -> str:
+        git("add", "-A")
+        git("-c", "user.name=CI Fixture", "-c", "user.email=ci@example.invalid", "commit", "-qm", "fixture")
+        return git("rev-parse", "HEAD")
+
+    def changed(base: str, head: str, event: str = "pull_request") -> tuple[int, str]:
+        git("checkout", "-q", head)
+        output = tmp_path / "output"
+        output.write_text("")
+        result = subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", steps[detect]["run"]], cwd=repo,
+            env={**os.environ, "BASE_SHA": base, "GITHUB_EVENT_NAME": event, "GITHUB_OUTPUT": str(output)},
+            capture_output=True, text=True,
+        )
+        return result.returncode, output.read_text()
+
+    git("init", "-q")
+    manifest.write_text('{"asset_release_tag": "model-hub-engine-v8.0.23-3"}\n')
+    base = commit()
+    (repo / "README.md").write_text("unrelated\n")
+    unrelated = commit()
+    manifest.write_text('{"asset_release_tag": "model-hub-engine-v8.0.28-1"}\n')
+    engine = commit()
+
+    assert changed(base, unrelated) == (0, "changed=false\n")
+    assert changed(base, engine) == (0, "changed=true\n")
+    # The label lives on the pull request, so a push is not judged again.
+    assert changed("", engine, event="push") == (0, "changed=false\n")
+    # An unreachable or missing base fails the job; it never reads as "unchanged".
+    for missing in ("0" * 40, ""):
+        status, output = changed(missing, engine)
+        assert status != 0 and output == ""
+
+
 @pytest.mark.parametrize("gate_name", ["unit-tests", "install-upgrade-regression", "windows-install-smoke"])
 def test_required_gates_accept_skips_only_for_proven_docs_and_fail_closed(tmp_path: Path, gate_name: str) -> None:
     gate = _jobs()[gate_name]
@@ -550,7 +609,8 @@ def test_lint_replaces_only_the_same_pr_or_branch_and_runs_no_release_listener()
 def test_docs_scope_gates_all_work_without_filtering_away_required_checks() -> None:
     workflow = yaml.safe_load((ROOT / ".github/workflows/lint.yml").read_text())
     events = workflow[True]  # PyYAML YAML 1.1 reads the Actions `on` key as True.
-    assert events["pull_request"] is None
+    # Default activity types plus the labeling that re-runs the hosted wire gate.
+    assert events["pull_request"] == {"types": ["opened", "synchronize", "reopened", "labeled", "unlabeled"]}
     assert not any(key.startswith("paths") for key in events["push"])
     jobs = workflow["jobs"]
     required = {"ruff", "unit-tests", "show-router-integration", "memory-insight-contract",

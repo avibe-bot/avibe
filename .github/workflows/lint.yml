@@ -2,6 +2,8 @@ name: lint
 
 on:
   pull_request:
+    # Labeling re-runs the hosted wire gate, which reads the labels it runs with.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   push:
     branches:
       - master
@@ -332,14 +334,89 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  model-hub-hosted-wire:
+    needs: changes
+    if: needs.changes.outputs.docs_only == 'false'
+    # A pull request that replaces the engine must not change how it passes
+    # hosted tools through, unless labeled engine-hosted-wire-change
+    # (docs/plans/model-hub-cpa-dependency.md). Any other change passes after
+    # one diff, without installing anything.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          # The synthetic PR merge and both parents, base included.
+          fetch-depth: 2
+      - name: Detect an engine manifest change
+        id: manifest
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+            # The label that may accept a difference lives on the pull request.
+            echo "Judged on the pull request; nothing to do on $GITHUB_EVENT_NAME."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          if git diff --quiet "$BASE_SHA" HEAD -- vibe/model_hub_runtime/cliproxyapi_manifest.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Prepare hermetic UI asset placeholder
+        if: steps.manifest.outputs.changed == 'true'
+        run: |
+          mkdir -p ui/dist
+          printf '%s\n' '<!doctype html><html><body></body></html>' > ui/dist/index.html
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        if: steps.manifest.outputs.changed == 'true'
+        with:
+          python-version: "3.12"
+      - name: Install pinned uv
+        if: steps.manifest.outputs.changed == 'true'
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.12.10
+      - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25  # v5
+        if: steps.manifest.outputs.changed == 'true'
+        with:
+          path: ~/.cache/uv
+          key: ${{ runner.os }}-${{ runner.arch }}-ci-uv-0.12.10-py3.12-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+      - name: Install package and test dependencies
+        if: steps.manifest.outputs.changed == 'true'
+        run: uv pip install --system -e . --group dev
+      - name: Compare the hosted passthrough of both engines
+        if: steps.manifest.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: >-
+          python scripts/model_hub_hosted_wire_gate.py --base "$BASE_SHA"
+          --pull-request "$PR_NUMBER" --work-dir "$RUNNER_TEMP/hosted-wire"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        if: always() && steps.manifest.outputs.changed == 'true'
+        with:
+          name: model-hub-hosted-wire-${{ github.sha }}-${{ github.run_attempt }}
+          # Synthetic fixtures on loopback only: per-case wire records and reports.
+          path: |
+            ${{ runner.temp }}/hosted-wire/*/evidence
+            ${{ runner.temp }}/hosted-wire/*/cases.xml
+          if-no-files-found: ignore
+          retention-days: 14
+
   unit-tests:
     runs-on: ubuntu-latest
     # Keep UI validation in the existing required gate while allowing artifact
-    # consumers to start as soon as their production bundle is built.
-    needs: [changes, unit-test-shards, scenario-evidence, ui-checks, ui-browser-checks]
+    # consumers to start as soon as their production bundle is built. The
+    # hosted wire gate reports through it too, under no new required context.
+    needs: [changes, unit-test-shards, scenario-evidence, ui-checks, ui-browser-checks, model-hub-hosted-wire]
     if: always()
     steps:
-      - name: Verify unit test shards and UI checks
+      - name: Verify unit test shards, UI checks and the hosted_wire gate
         env:
           SCOPE_RESULT: ${{ needs.changes.result }}
           DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
@@ -347,6 +424,7 @@ jobs:
           EVIDENCE_RESULT: ${{ needs['scenario-evidence'].result }}
           UI_RESULT: ${{ needs['ui-checks'].result }}
           BROWSER_RESULT: ${{ needs['ui-browser-checks'].result }}
+          HOSTED_WIRE_RESULT: ${{ needs['model-hub-hosted-wire'].result }}
         run: |
           if [ "$SCOPE_RESULT" != "success" ]; then
             echo "Change classification did not succeed."
@@ -357,13 +435,13 @@ jobs:
             false) expected="success" ;;
             *) echo "Missing or invalid change classification."; exit 1 ;;
           esac
-          for result in "$UNIT_RESULT" "$EVIDENCE_RESULT" "$UI_RESULT" "$BROWSER_RESULT"; do
+          for result in "$UNIT_RESULT" "$EVIDENCE_RESULT" "$UI_RESULT" "$BROWSER_RESULT" "$HOSTED_WIRE_RESULT"; do
             if [ "$result" != "$expected" ]; then
-              echo "Unit/UI checks finished with result: $result"
+              echo "Unit/UI/hosted_wire checks finished with result: $result"
               exit 1
             fi
           done
-          echo "Unit/UI results match the classified scope (docs_only=$DOCS_ONLY)."
+          echo "Unit/UI/hosted_wire results match the classified scope (docs_only=$DOCS_ONLY)."
 
   # Every case a covered scenario row cites as evidence ran and passed in some
   # job, or a release workflow runs it (scripts/ci_scenario_evidence.py). It

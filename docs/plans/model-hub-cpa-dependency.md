@@ -73,6 +73,47 @@ manifest's `build.patches` records; the packaged manifest records the resulting
 archive and binary digests. Rolling back means reverting the whole adoption
 change, which restores the previous patch directory and manifest together.
 
+### Hosted passthrough
+
+Hosted tools rely on the engine passing them through unchanged, and they are
+assumed rather than probed, so a passthrough regression in an engine release
+would reach users unnoticed. `lint` guards it as `model-hub-hosted-wire`, which
+reports through the required `unit-tests` check, on every pull request that
+replaces the engine (changes the manifest's `asset_release_tag`):
+
+- `scripts/model_hub_hosted_wire_gate.py` downloads both engines' assets for the
+  runner's platform from their published releases and verifies them against
+  each manifest. It then runs the cases in
+  `tests/e2e/test_model_hub_engine_hosted_passthrough.py` against both and
+  compares each case's upstream request path, query, header set and bytes, and
+  its downstream status and bytes. Only per-run values are masked: the engine's
+  `prompt_cache_key` and `session-id`, and the port in the capturing upstream's
+  `Host`. The new engine must pass every case, where a case marked
+  `xfail(strict=True)` passes by failing as its marker says. The base engine
+  only has to record each case, so a case it fails is compared as recorded.
+  An engine that fixes a known defect turns its strict expected failure into a
+  failure, so that change flips the marker and carries the label below.
+- A byte-identical passthrough passes. A difference fails and names the cases
+  and parts that differ, unless the pull request is labeled
+  `engine-hosted-wire-change`. An intended change, a rollback included, needs
+  that label and a note in the pull request body saying what changed and why.
+  The gate reads the labels when it runs, adding or removing one re-runs
+  `lint`, and labels that cannot be read count as none.
+
+The gate judges pull requests, where the label lives; a push to master does not
+repeat it.
+
+Before dispatching an engine build, run the gate on the local candidate build
+and include its output in the dispatch request; engine sign-off requires it.
+Without a pull request no label applies, so the output shows any difference as
+a failure for review:
+
+```sh
+python scripts/model_hub_hosted_wire_gate.py --base origin/master --head-assets <build output dir>
+```
+
+The pull request's gate stays the enforcement of record.
+
 ## Acceptance Criteria
 
 - A user who never enables Model Hub receives the CPA target during normal Avibe
