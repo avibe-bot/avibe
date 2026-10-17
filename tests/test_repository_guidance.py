@@ -31,6 +31,9 @@ def test_pr_delivery_loop_delegates_waiters_to_background_watch_skill() -> None:
     assert "use the `background-watch-hook` skill" in agents
     assert "one durable `--forever` combined PR/CI Watch" in agents
     assert "disable the Watch's per-cycle timeout" in agents
+    # The skill owns the procedure but cannot weaken the root baseline, merge authority included.
+    assert "cannot weaken the baseline below" in " ".join(agents.split())
+    assert "never merge without explicit owner instruction" in " ".join(agents.split())
 
     # A Codex pass binds to the current head: a comment naming its SHA, or a PR-body
     # `+1` the Watch saw arrive after it was pushed. `Reviewed commit` is on findings too.

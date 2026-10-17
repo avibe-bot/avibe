@@ -248,7 +248,8 @@ def test_pr_delivery_loop_keeps_optional_references_out_of_routine_loading() -> 
 
     # A reference is read only at the step that names it: local regression after the
     # user picks a regression update, never in the routine delivery loop.
-    assert named and all((directory / path).is_file() for path in named)
+    assert named == ["references/local-regression.md"]
+    assert (directory / named[0]).is_file()
     assert "After the user chooses one, read `references/local-regression.md` before acting." in flat
     assert "synchronize the entire maintained package, including `references/`, byte-for-byte" in flat
 
