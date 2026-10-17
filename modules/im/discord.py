@@ -1094,6 +1094,8 @@ class DiscordBot(BaseIMClient):
         is_dm = isinstance(channel, discord.DMChannel)
         referenced_anchor_base = None if is_dm else self._get_reply_anchor_base(channel_id, self._get_reference_message_id(message))
 
+        mentioned_bot = bool(self.client.user and message.mentions and self.client.user in message.mentions)
+
         auth_result = self.check_authorization(
             user_id=str(message.author.id),
             channel_id=channel_id,
@@ -1102,7 +1104,12 @@ class DiscordBot(BaseIMClient):
             settings_manager=self.settings_manager,
         )
         if not auth_result.allowed:
-            await self._send_auth_denial(channel_id, str(message.author.id), auth_result)
+            # Every message in a guild channel reaches this gate, so the denial
+            # answers only someone who addressed the bot -- a mention, a reply to
+            # its message, or a command -- as on Slack, Lark and Telegram. The
+            # rest of an unenabled channel's conversation gets no reply.
+            if is_dm or mentioned_bot or referenced_anchor_base or self.parse_text_command(content):
+                await self._send_auth_denial(channel_id, str(message.author.id), auth_result)
             return
 
         # Mention logic for guild channels
@@ -1111,8 +1118,6 @@ class DiscordBot(BaseIMClient):
             effective_require_mention = self.settings_manager.get_require_mention(
                 channel_id, global_default=self.config.require_mention
             )
-
-        mentioned_bot = bool(self.client.user and message.mentions and self.client.user in message.mentions)
 
         if effective_require_mention and not is_dm:
             if isinstance(channel, discord.Thread):

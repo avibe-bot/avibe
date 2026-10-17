@@ -242,3 +242,56 @@ class DiscordReplyAnchorTests(unittest.IsolatedAsyncioTestCase):
         )
 
         interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+
+
+class DiscordUnenabledChannelHintTests(unittest.IsolatedAsyncioTestCase):
+    """Every message in a guild channel reaches auth; the 'not enabled' hint answers only one that addressed the bot."""
+
+    async def _deliver(self, *, content: str, mentions: list, is_dm: bool = False):
+        import modules.im.discord as discord_module
+
+        bot = object.__new__(DiscordBot)
+        bot.config = DiscordConfig(require_mention=True)
+        bot._controller = None
+        bot.client = SimpleNamespace(user=SimpleNamespace(id=42))
+        bot.sessions = None
+        bot.settings_manager = None
+        bot.on_message_callback = AsyncMock()
+        bot._send_auth_denial = AsyncMock()
+        denial = "unbound_dm" if is_dm else "unauthorized_channel"
+        bot.check_authorization = lambda **kwargs: AuthResult(allowed=False, denial=denial, is_dm=is_dm)
+
+        original_dm_channel = discord_module.discord.DMChannel
+
+        class _FakeDMChannel:
+            id = 321
+
+        try:
+            discord_module.discord.DMChannel = _FakeDMChannel
+            message = SimpleNamespace(
+                author=SimpleNamespace(id=456, bot=False),
+                content=content,
+                channel=_FakeDMChannel() if is_dm else SimpleNamespace(id=123),
+                guild=None if is_dm else SimpleNamespace(id=999),
+                attachments=[],
+                mentions=mentions,
+                reference=None,
+                id=888,
+            )
+            await DiscordBot._on_message_event(bot, message)
+        finally:
+            discord_module.discord.DMChannel = original_dm_channel
+
+        bot.on_message_callback.assert_not_awaited()
+        return bot._send_auth_denial.await_count
+
+    async def test_the_rest_of_an_unenabled_channels_conversation_gets_no_reply(self):
+        self.assertEqual(await self._deliver(content="lunch at noon?", mentions=[]), 0)
+        self.assertEqual(await self._deliver(content="ping <@7>", mentions=[SimpleNamespace(id=7)]), 0)
+
+    async def test_a_mention_or_a_command_gets_the_hint(self):
+        self.assertEqual(await self._deliver(content="<@42> help", mentions=[SimpleNamespace(id=42)]), 1)
+        self.assertEqual(await self._deliver(content="/settings", mentions=[]), 1)
+
+    async def test_a_direct_message_still_gets_its_hint(self):
+        self.assertEqual(await self._deliver(content="hello", mentions=[], is_dm=True), 1)
