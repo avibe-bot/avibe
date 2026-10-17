@@ -516,6 +516,8 @@ def test_hosted_wire_gate_judges_a_pull_requests_engine_change_and_blocks_merge(
         assert "steps.manifest.outputs.changed == 'true'" in step["if"], step
     gate, = [step for step in steps if "scripts/model_hub_hosted_wire_gate.py" in step.get("run", "")]
     assert '--base "$BASE_SHA"' in gate["run"] and '--pull-request "$PR_NUMBER"' in gate["run"]
+    # The downloaded engines and the cases run where only loopback answers.
+    assert gate["run"].split().count("--loopback-only") == 1
     assert gate["env"] == {"GH_TOKEN": "${{ github.token }}", "PR_NUMBER": "${{ github.event.pull_request.number }}"}
 
     repo = tmp_path / "repo"

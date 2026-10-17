@@ -32,6 +32,8 @@ from scripts import model_hub_engine_release_guard as release_guard  # noqa: E40
 
 MANIFEST = "vibe/model_hub_runtime/cliproxyapi_manifest.json"
 CASES = "tests/e2e/test_model_hub_engine_hosted_passthrough.py"
+# Runs a command where only loopback answers; Linux CI only (needs passwordless sudo).
+LOOPBACK_ONLY = "scripts/ci_loopback_only.sh"
 EVIDENCE_DIR_ENV = "AVIBE_HOSTED_WIRE_EVIDENCE_DIR"
 CHANGE_LABEL = "engine-hosted-wire-change"
 # What each case records, in the order a difference is reported.
@@ -111,7 +113,7 @@ def _met_its_expectation(testcase: ElementTree.Element) -> bool:
 
 def _run_cases(
     side: str, manifest_bytes: bytes, platform: str, work: Path, asset_dir: Path | None = None,
-    *, must_pass: bool,
+    *, must_pass: bool, loopback_only: bool = False,
 ) -> dict[str, dict]:
     """Run the case set against one side's engine; return each case's recorded wire.
 
@@ -152,9 +154,14 @@ def _run_cases(
     evidence.mkdir()
     print(f"hosted_wire gate: running the hosted passthrough cases against the {side} engine "
           f"{manifest['asset_release_tag']} ({platform})", flush=True)
+    command = [sys.executable, "-m", "pytest", "-m", "e2e_model_hub", "-p", "no:cacheprovider",
+               "-q", "-ra", f"--junitxml={report}", CASES]
+    if loopback_only:
+        # The engine was downloaded above; the cases and the engine they start need only loopback,
+        # so one that ignores its loopback Source fails at once instead of reaching the network.
+        command = ["bash", LOOPBACK_ONLY, *command]
     result = subprocess.run(
-        [sys.executable, "-m", "pytest", "-m", "e2e_model_hub", "-p", "no:cacheprovider",
-         "-q", "-ra", f"--junitxml={report}", CASES],
+        command,
         cwd=REPO_ROOT,
         env={**os.environ, "VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH": str(offline_manifest),
              EVIDENCE_DIR_ENV: str(evidence)},
@@ -176,12 +183,15 @@ def _run_cases(
 
 def hosted_wire_differences(
     base_bytes: bytes, head_bytes: bytes, work: Path, head_assets: Path | None = None,
+    *, loopback_only: bool = False,
 ) -> dict[str, list[str]]:
     from vibe.model_hub_runtime.installer import EngineRuntimeManager
 
     platform = EngineRuntimeManager(runtime_dir=work / "probe", offline=True).host_platform()
-    base_cases = _run_cases("base", base_bytes, platform, work / "base", must_pass=False)
-    head_cases = _run_cases("PR", head_bytes, platform, work / "head", head_assets, must_pass=True)
+    base_cases = _run_cases("base", base_bytes, platform, work / "base",
+                            must_pass=False, loopback_only=loopback_only)
+    head_cases = _run_cases("PR", head_bytes, platform, work / "head", head_assets,
+                            must_pass=True, loopback_only=loopback_only)
     return wire_differences(base_cases, head_cases)
 
 
@@ -195,6 +205,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pull-request", help="number of the pull request whose labels may accept a difference")
     parser.add_argument("--repository", default=os.environ.get("GITHUB_REPOSITORY", "avibe-bot/avibe"))
     parser.add_argument("--work-dir", type=Path, help="keep downloads and per-case evidence here")
+    parser.add_argument(
+        "--loopback-only", action="store_true",
+        help=f"run the cases in a network namespace with only loopback ({LOOPBACK_ONLY}; Linux CI)",
+    )
     return parser
 
 
@@ -213,7 +227,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         with tempfile.TemporaryDirectory(prefix="hosted-wire-") as scratch:
             differences = hosted_wire_differences(base_bytes, head_bytes, args.work_dir or Path(scratch),
-                                                  args.head_assets)
+                                                  args.head_assets, loopback_only=args.loopback_only)
     except GateError as exc:
         print(f"::error::hosted_wire gate: {exc}")
         return 1

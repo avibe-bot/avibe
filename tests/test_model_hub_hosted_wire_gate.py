@@ -173,10 +173,10 @@ def _verdicts(monkeypatch, differences: dict | None, labels: frozenset[str] | No
     """Record the A/B and label reads ``main`` makes; ``differences`` None means it must not compare."""
     seen = {"ab": [], "labels": []}
 
-    def compare(base, pr, work, assets):
+    def compare(base, pr, work, assets, *, loopback_only):
         if differences is None:
             pytest.fail("ran the A/B")
-        seen["ab"].append((json.loads(base), json.loads(pr), assets))
+        seen["ab"].append((json.loads(base), json.loads(pr), assets, loopback_only))
         return differences
 
     def read_labels(repository, number, token):
@@ -212,9 +212,17 @@ def test_an_identical_passthrough_passes_without_reading_labels(tmp_path, monkey
     seen = _verdicts(monkeypatch, {})
 
     assert gate.main(["--base", "base", "--pull-request", "7", "--head-assets", str(tmp_path / "build")]) == 0
-    assert seen == {"ab": [({"asset_release_tag": BASE_TAG}, {"asset_release_tag": PR_TAG}, tmp_path / "build")],
+    assert seen == {"ab": [({"asset_release_tag": BASE_TAG}, {"asset_release_tag": PR_TAG}, tmp_path / "build", False)],
                     "labels": []}
     assert "hosted passthrough byte-identical" in capsys.readouterr().out
+
+
+def test_the_loopback_only_flag_reaches_the_ab(tmp_path, monkeypatch) -> None:
+    _repository(tmp_path, monkeypatch, {"asset_release_tag": BASE_TAG}, {"asset_release_tag": PR_TAG})
+    seen = _verdicts(monkeypatch, {})
+
+    assert gate.main(["--base", "base", "--loopback-only"]) == 0
+    assert seen["ab"] == [({"asset_release_tag": BASE_TAG}, {"asset_release_tag": PR_TAG}, None, True)]
 
 
 @pytest.mark.parametrize(
@@ -253,7 +261,7 @@ def test_without_a_pull_request_no_label_can_accept_a_difference(tmp_path, monke
 def test_a_gate_that_cannot_reach_a_verdict_fails(tmp_path, monkeypatch, capsys) -> None:
     _repository(tmp_path, monkeypatch, {"asset_release_tag": BASE_TAG}, {"asset_release_tag": PR_TAG})
 
-    def unreachable(*_args):
+    def unreachable(*_args, **_kwargs):
         raise gate.GateError("the PR engine is not the asset its manifest pins")
 
     monkeypatch.setattr(gate, "hosted_wire_differences", unreachable)
@@ -266,8 +274,8 @@ def test_a_gate_that_cannot_reach_a_verdict_fails(tmp_path, monkeypatch, capsys)
 def test_the_ab_takes_base_from_its_release_and_the_pr_engine_from_the_given_build(tmp_path, monkeypatch) -> None:
     runs = []
 
-    def run_cases(side, manifest_bytes, platform, work, asset_dir=None, *, must_pass):
-        runs.append((side, manifest_bytes, work, asset_dir, must_pass))
+    def run_cases(side, manifest_bytes, platform, work, asset_dir=None, *, must_pass, loopback_only):
+        runs.append((side, manifest_bytes, work, asset_dir, must_pass, loopback_only))
         changed = _recorded()
         if side == "PR":
             changed["downstream"]["body"] = "changed"
@@ -275,12 +283,12 @@ def test_the_ab_takes_base_from_its_release_and_the_pr_engine_from_the_given_bui
 
     monkeypatch.setattr(gate, "_run_cases", run_cases)
 
-    differences = gate.hosted_wire_differences(b"base", b"pr", tmp_path, tmp_path / "build")
+    differences = gate.hosted_wire_differences(b"base", b"pr", tmp_path, tmp_path / "build", loopback_only=True)
 
     assert differences == {"case_a": ["downstream bytes"]}
-    # Only the engine being adopted must pass; base must record every case.
-    assert runs == [("base", b"base", tmp_path / "base", None, False),
-                    ("PR", b"pr", tmp_path / "head", tmp_path / "build", True)]
+    # Only the engine being adopted must pass; base must record every case. Both run without network.
+    assert runs == [("base", b"base", tmp_path / "base", None, False, True),
+                    ("PR", b"pr", tmp_path / "head", tmp_path / "build", True, True)]
 
 
 CASE_NAMES = ("test_one", "test_two")
@@ -311,6 +319,20 @@ def _release(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[bytes, di
     manifest_path, owned, built = _manifest(tmp_path)
     monkeypatch.setattr(gate.release_guard, "_download", _fake_download(owned))
     return manifest_path.read_bytes(), owned, built
+
+
+@pytest.mark.parametrize("loopback_only", [False, True])
+def test_the_cases_run_in_the_loopback_only_namespace_when_asked(tmp_path, monkeypatch, loopback_only) -> None:
+    manifest_bytes, _owned, _built = _release(tmp_path, monkeypatch)
+    fake, runs = _fake_pytest()
+    monkeypatch.setattr(gate, "subprocess", fake)
+
+    gate._run_cases("PR", manifest_bytes, "linux-amd64", tmp_path / "head", must_pass=True, loopback_only=loopback_only)
+
+    [args] = runs
+    pytest_at = args.index("pytest") - 2
+    assert args[:pytest_at] == (["bash", gate.LOOPBACK_ONLY] if loopback_only else [])
+    assert (gate.REPO_ROOT / gate.LOOPBACK_ONLY).is_file()
 
 
 def test_a_published_engine_runs_the_cases_from_its_verified_archive(tmp_path, monkeypatch) -> None:

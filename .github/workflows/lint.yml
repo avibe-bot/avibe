@@ -396,7 +396,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: >-
           python scripts/model_hub_hosted_wire_gate.py --base "$BASE_SHA"
-          --pull-request "$PR_NUMBER" --work-dir "$RUNNER_TEMP/hosted-wire"
+          --pull-request "$PR_NUMBER" --work-dir "$RUNNER_TEMP/hosted-wire" --loopback-only
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         if: always() && steps.manifest.outputs.changed == 'true'
         with:
