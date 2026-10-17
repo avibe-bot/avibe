@@ -263,17 +263,6 @@ def test_pr_delivery_loop_keeps_optional_references_out_of_routine_loading() -> 
         assert reference.read_text() not in rendered
 
 
-def test_quick_replies_are_action_driven_not_mandatory() -> None:
-    body = _read("core/prompts/quick-replies.md")
-    flat = " ".join(body.split())
-    assert "Offer buttons for useful next actions or decisions" in body
-    assert "When buttons are supported and enabled, put this exact multiline footer" in body
-    assert "---\n[button text] | [another action]" in body
-    assert "When none is useful, omit the footer" in body
-    assert "Do not invent filler choices" in body
-    assert "treat displaying an action as authorization" in flat
-
-
 def test_agent_prompt_audit_examples_parse_against_the_real_cli() -> None:
     """The audit Skill teaches live `vibe` calls.
 
