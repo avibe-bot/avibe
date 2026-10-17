@@ -130,6 +130,18 @@ What it shows:
 - **One queued head took 82% of all loop writes.** It had failed to start three times and was held until its owner retried it explicitly. No automatic start can claim such a head. Even so, every runtime-work scan reported it as an open head, and the drain's read-only precheck counted it as claimable. Each scan therefore took SQLite's writer on the loop, the claim refused the head, and the lane backed off for a second and scanned it again, at about 0.9 writes a second. A held head now only moves the scan's cursor, and the drain's precheck no longer counts it as claimable.
 - **Every other site averaged under 30 ms per write.** Single writes reached 400–600 ms on the host's disk. `persist_agent_message` (#2725) is the largest of them, at 5.3 s over 1540 writes.
 
+**Soak 3** (2026-10-17, the same host, gh-v3.2.2rc2 from 05:40 to 11:31). The 11:31 summary counted 24199 writes at 30 sites, with no `database is locked`. Two loop stalls, attributed from the watchdog's stack of the event-loop thread:
+
+| Stall | Event-loop thread | Census site |
+| --- | --- | --- |
+| 10:16:52, 3.5 s | `drain_delivery_queue` -> `reserve_write_lock` (`BEGIN IMMEDIATE`) | 18066 writes, 140 s total, 2981 ms max |
+| 10:55:19, 4.2 s | `emit_agent_message` -> `is_message_type_hidden` -> `get_user_settings` -> `SettingsStore.save` | `settings_service.save_state`: 4 writes, 6.5 s total, 3530 ms max |
+
+What it shows:
+- **The first stall is the held head** of Soak 2. #2781 fixed it after this build.
+- **The second stall is a settings read that saved.** `get_user_settings` persisted a default for every key it had never seen, and every emit reads it (`is_message_type_hidden`), as do the routing reads. On the Avibe platform the key is the Session id, so the first emit of each new Web Session saved the whole settings state on the loop. The host holds 923 such Session rows. An Avibe read now returns the defaults and saves nothing. On IM platforms the same save persists an enabled channel row, which is what authorizes the channel. That is left as it is until the owner decides the rule for channels nobody enabled explicitly.
+- **Everything else stayed under 700 ms per write:** `upsert_activity` (610 writes), `upsert_connection` (140), `bind_agent_session_by_id`, and `persist_agent_message` (about 3,500 writes).
+
 The per-Turn admissions all hold the boundary inside the transaction, so they are loop-side boundary holders and fall under B's split analysis:
 - `_admit_p0`, `_admit_p1`, `_admit_p3`, `_promote_fifo_head`;
 - `drain_delivery_queue`, `_resume_linked_control_successor`.
