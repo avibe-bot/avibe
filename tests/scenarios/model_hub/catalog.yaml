@@ -103,6 +103,7 @@ capability:
     - tests/e2e/test_codex_request_metadata.py
     - tests/e2e/test_codex_request_gateway.py
     - tests/e2e/test_model_hub_runtime.py
+    - tests/e2e/test_model_hub_engine_hosted_passthrough.py
     - tests/e2e/test_model_hub_sources.py
     - tests/e2e/test_model_hub_usage_events.py
     - tests/e2e/test_model_hub_engine_wire.py
@@ -2609,6 +2610,48 @@ scenarios:
     test: tests/e2e/test_model_hub_engine_wire.py::test_responses_stream_with_reasoning_and_tool_call
     related_tests:
       - tests/test_model_hub_runtime.py::test_only_an_xai_responses_entry_marks_its_models_is_compat
+  - id: MH-ENGINE-HOSTED-001
+    name: The real CPA Responses path preserves complete tool declarations, include cardinality and the complete decoded response event sequence
+    status: covered
+    kind: compatibility
+    layer: e2e
+    test: tests/e2e/test_model_hub_engine_hosted_passthrough.py::test_responses_hosted_declarations_and_items_pass_through
+  - id: MH-ENGINE-HOSTED-002
+    name: The real CPA Responses path preserves hosted history content, order and cardinality relative to user and assistant messages
+    status: covered
+    kind: compatibility
+    layer: e2e
+    test: tests/e2e/test_model_hub_engine_hosted_passthrough.py::test_responses_hosted_history_replays_verbatim
+  - id: MH-ENGINE-HOSTED-003
+    name: CPA image passthrough mode never injects an image tool absent from the caller request
+    status: covered
+    kind: compatibility
+    layer: e2e
+    test: tests/e2e/test_model_hub_engine_hosted_passthrough.py::test_image_generation_is_never_injected_or_answered_by_the_engine
+  - id: MH-ENGINE-HOSTED-004
+    name: The real CPA Anthropic path preserves complete hosted search declarations and the decoded response event sequence including tool inputs, results, citations and usage
+    status: covered
+    kind: compatibility
+    layer: e2e
+    test: tests/e2e/test_model_hub_engine_hosted_passthrough.py::test_anthropic_web_search_and_its_results_pass_through
+  - id: MH-ENGINE-HOSTED-005
+    name: The real CPA Anthropic path preserves the complete ordered replay message sequence and its tool, result and citation contents
+    status: covered
+    kind: compatibility
+    layer: e2e
+    test: tests/e2e/test_model_hub_engine_hosted_passthrough.py::test_anthropic_hosted_history_replays_verbatim
+  - id: MH-ENGINE-HOSTED-006
+    name: The real CPA Responses path replays an xAI X-search turn in xAI's real 39- and 84-rune id and envelope-less ciphertext shapes, keeping the ordered non-reasoning sequence, the call's own fields and the decoded response
+    status: covered
+    kind: compatibility
+    layer: e2e
+    test: tests/e2e/test_model_hub_engine_hosted_passthrough.py::test_responses_xai_history_replays_in_real_shapes
+  - id: MH-ENGINE-HOSTED-007
+    name: The real CPA Responses path replays xAI's 84-rune tool-call reasoning with its id and ciphertext, and the 84-rune call id, as xAI issued them (expected to fail until the engine keeps over-limit upstream ids under is-compat)
+    status: xfail
+    kind: compatibility
+    layer: e2e
+    test: tests/e2e/test_model_hub_engine_hosted_passthrough.py::test_responses_xai_over_limit_ids_replay_verbatim
 next_priority:
   - MH-PROTOCOL-004
   - MH-RUNTIME-001
@@ -2619,3 +2662,4 @@ next_priority:
   - B9
   - D6
   - G3
+  - MH-ENGINE-HOSTED-007

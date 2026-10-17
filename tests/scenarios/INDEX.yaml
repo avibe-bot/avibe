@@ -42,6 +42,7 @@ capabilities:
       - tests/e2e/test_codex_request_metadata.py
       - tests/e2e/test_codex_request_gateway.py
       - tests/e2e/test_model_hub_runtime.py
+      - tests/e2e/test_model_hub_engine_hosted_passthrough.py
       - tests/e2e/test_model_hub_sources.py
       - tests/e2e/test_model_hub_usage_events.py
       - tests/e2e/test_model_hub_engine_wire.py
