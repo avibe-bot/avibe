@@ -1113,11 +1113,22 @@ class EngineStateStore:
         return matches[0] if matches else None
 
     def delete_oauth_auth_file(self, auth_name: str) -> None:
-        """Delete one managed OAuth file without requiring a running engine."""
+        """Delete one managed OAuth file without requiring a running engine.
+
+        Its engine lock sidecar goes with it, best effort: since CPA v8.0.28 the
+        engine locks a Codex grant through ``<name>.lock`` beside it and never
+        removes that file. The engine may hold it during a refresh, which on
+        Windows blocks the delete; a leftover sidecar locks nothing and passes
+        the auth audit, so it is not worth failing the grant's removal over.
+        """
         normalized = _validated_oauth_auth_name(auth_name)
         with self._lock:
             self.audit_auth_permissions(enforce=True)
             self._remove_private_file_if_present(self.auth_dir / normalized)
+            try:
+                self._remove_private_file_if_present(self.auth_dir / f"{normalized}.lock")
+            except EngineStateError:
+                logger.warning("Could not remove the engine lock beside a deleted OAuth grant", exc_info=True)
 
     def audit_auth_permissions(self, *, enforce: bool = False) -> None:
         self._ensure_private_dir(self.root)

@@ -42,12 +42,16 @@ def test_windows_engine_start_and_api_key_source_keep_secrets_private(root):
     reference = store.store_api_key("sk-synthetic-windows", base_url="https://example.invalid/v1")
     assert store.read_api_key(reference) == "sk-synthetic-windows"
 
-    # The engine writes its grants into the auth directory without asking for
-    # any access rule; they must pass the audit every engine start runs.
+    # The engine writes its grants, and since CPA v8.0.28 a Codex grant's lock
+    # sidecar, into the auth directory without asking for any access rule; they
+    # must pass the audit every engine start runs.
     (store.auth_dir / "codex-synthetic.json").write_text("{}", encoding="utf-8")
+    (store.auth_dir / "codex-synthetic.json.lock").write_text("", encoding="utf-8")
     store.audit_auth_permissions()
     for path in (store.root, instance_dir, instance_dir / "runtime-secrets.json", instance_dir / "logs", store.auth_dir):
         assert _private(path), path
+    store.delete_oauth_auth_file("codex-synthetic.json")
+    assert list(store.auth_dir.iterdir()) == []
 
 
 @windows_only
