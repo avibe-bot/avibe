@@ -1271,54 +1271,96 @@ def test_sqlite_filters_deprecated_system_message_type(tmp_path: Path) -> None:
     assert legacy.users["slack::U1"].show_message_types == ["toolcall"]
 
 
-def test_an_avibe_session_read_returns_defaults_and_saves_nothing(tmp_path: Path, monkeypatch) -> None:
-    """#2706: the first emit of each new Web Session read its settings and saved them on the loop."""
-
-    monkeypatch.setattr(paths, "ensure_data_dirs", lambda: None)
-    manager = SettingsManager(settings_file=str(tmp_path / "settings.json"), platform="avibe")
-    try:
-        saves: list[str] = []
-        monkeypatch.setattr(manager.store, "save", lambda **_kwargs: saves.append("save"))
-
-        hidden = manager.is_message_type_hidden("ses-new", "toolcall")
-        routing = manager.get_channel_routing("ses-new")
-
-        assert hidden is ("toolcall" not in UserSettings().show_message_types)
-        assert routing is None
-        assert saves == []
-        assert manager.store.find_channel("ses-new", platform="avibe") is None
-    finally:
-        manager.store.close()
+_PLATFORMS = ["avibe", "slack", "discord", "lark", "telegram", "wechat"]
 
 
-@pytest.mark.parametrize("platform", ["slack", "discord", "lark"])
-def test_a_new_im_channel_keeps_todays_authorization_outcomes(tmp_path: Path, monkeypatch, platform) -> None:
-    """Its first inbound message is denied, and a settings read still authorizes it, as on master.
+@pytest.fixture
+def isolated_settings_home(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    SettingsStore.reset_instance()
+    yield
+    SettingsStore.reset_instance()
 
-    Whether a channel nobody enabled explicitly should be authorized by such a
-    read is the owner's decision; until then the read keeps its effect.
-    """
 
+def _outbound_touch(manager: SettingsManager, key: str) -> None:
+    """The settings reads an outbound path makes: an emit's visibility check, routing, a working directory."""
+
+    manager.is_message_type_hidden(key, "toolcall")
+    manager.get_channel_routing(key)
+    manager.get_custom_cwd(key)
+
+
+@pytest.mark.parametrize("platform", _PLATFORMS)
+def test_a_settings_read_returns_defaults_and_saves_nothing(isolated_settings_home, monkeypatch, platform) -> None:
+    """#2706: every emit reads settings, and the first read of each new key saved them on the loop."""
+
+    manager = SettingsManager(platform=platform)
+    saves: list[str] = []
+    monkeypatch.setattr(manager.store, "save", lambda **_kwargs: saves.append("save"))
+
+    _outbound_touch(manager, "key-new")
+
+    assert manager.is_message_type_hidden("key-new", "toolcall") is ("toolcall" not in UserSettings().show_message_types)
+    assert manager.get_channel_routing("key-new") is None
+    assert saves == []
+    assert manager.store.find_channel("key-new", platform=platform) is None
+
+
+def _inbound(manager: SettingsManager, platform: str, *, channel_id: str, user_id: str = "U-1"):
     from core.auth import check_auth
 
-    monkeypatch.setattr(paths, "ensure_data_dirs", lambda: None)
-    manager = SettingsManager(settings_file=str(tmp_path / "settings.json"), platform=platform)
-    try:
-        def first_inbound():
-            return check_auth(
-                user_id="U-1",
-                channel_id="C-new",
-                is_dm=False,
-                platform=platform,
-                action="",
-                settings_manager=manager,
-            )
+    # WeChat has no channels: every chat is a direct message, gated by binding.
+    return check_auth(
+        user_id=user_id if platform != "wechat" else channel_id,
+        channel_id=channel_id,
+        is_dm=platform == "wechat",
+        platform=platform,
+        action="",
+        settings_manager=manager,
+    )
 
-        denied = first_inbound()
-        assert (denied.allowed, denied.denial) == (False, "unauthorized_channel")
 
-        manager.get_channel_routing("C-new")
+@pytest.mark.parametrize("platform", ["slack", "discord", "lark", "telegram", "wechat"])
+def test_only_an_explicit_enable_authorizes_a_chat_an_outbound_path_touched(isolated_settings_home, platform) -> None:
+    """Default-deny (owner decision, 2026-10-17): posting into a chat never lets people there drive the bot.
 
-        assert first_inbound().allowed is True
-    finally:
-        manager.store.close()
+    A Run or scheduled task may post into a chat nobody enabled; its settings
+    reads used to persist an enabled row, which authorized the chat by side
+    effect. Only the settings UI enables a channel; WeChat chats are enabled by
+    binding the contact.
+    """
+
+    from vibe import api
+
+    manager = SettingsManager(platform=platform)
+    _outbound_touch(manager, "chat-new")
+
+    denied = _inbound(manager, platform, channel_id="chat-new")
+    assert denied.allowed is False
+    assert denied.denial == ("unbound_dm" if platform == "wechat" else "unauthorized_channel")
+
+    if platform == "wechat":
+        api.save_users({"platform": platform, "users": {"chat-new": {"display_name": "Contact", "enabled": True}}})
+    else:
+        api.save_settings({"platform": platform, "channels": {"chat-new": {"enabled": True}}})
+
+    assert _inbound(manager, platform, channel_id="chat-new").allowed is True
+
+
+@pytest.mark.parametrize("platform", ["slack", "discord", "lark", "telegram"])
+def test_existing_channel_rows_keep_their_authorization(isolated_settings_home, platform) -> None:
+    """Rows persisted before default-deny, enabled explicitly or by the old read, stay as they are."""
+
+    store = SettingsStore.get_instance()
+    store.update_channel("C-on", ChannelSettings(enabled=True), platform=platform)
+    store.update_channel("C-off", ChannelSettings(enabled=False), platform=platform)
+    store.save()
+    manager = SettingsManager(platform=platform)
+
+    for key in ("C-on", "C-off"):
+        _outbound_touch(manager, key)
+
+    assert _inbound(manager, platform, channel_id="C-on").allowed is True
+    assert _inbound(manager, platform, channel_id="C-off").denial == "unauthorized_channel"
+    assert manager.store.find_channel("C-on", platform=platform).enabled is True
+    assert manager.store.find_channel("C-off", platform=platform).enabled is False

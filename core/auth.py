@@ -139,9 +139,9 @@ def check_auth(
                 ch = store.find_channel(channel_id)
         else:
             ch = getattr(getattr(store, "settings", None), "channels", {}).get(channel_id)
-        # A channel with no row is not authorized, so a brand-new channel's
-        # first inbound message is denied: no settings read runs before this
-        # gate on any IM entry point.
+        # Default-deny: a channel is authorized only when someone enabled it
+        # explicitly (the settings UI, or a settings submit from the channel).
+        # A channel with no row is not, and no settings read creates one.
         if ch is None or not ch.enabled:
             return AuthResult(allowed=False, denial="unauthorized_channel", is_dm=False)
 

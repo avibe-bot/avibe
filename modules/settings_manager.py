@@ -315,8 +315,7 @@ class SettingsManager:
         """Get settings for a specific user/channel context.
 
         Checks dm_user_settings first, then channel_settings, then falls back
-        to the store. A key with no settings gets the defaults; see below for
-        when that default is persisted.
+        to the store. A key with no settings gets the defaults, unsaved.
         """
         normalized_id = self._normalize_user_id(user_id)
 
@@ -348,22 +347,12 @@ class SettingsManager:
             self.channel_settings[normalized_id] = settings
             return settings
 
-        # Truly new.
-        settings = UserSettings()
-        if self.platform == "avibe":
-            # An Avibe Session's key gates nothing, so its read returns the
-            # defaults and saves nothing: a read is on every emit, and the first
-            # one of each new Session saved the whole settings state on the
-            # controller loop (#2706). Its settings persist when updated.
-            return settings
-        # On an IM platform this persists an enabled channel row, and that row
-        # is what authorizes the channel (core/auth.py): a channel an outbound
-        # path reads before anyone enabled it becomes authorized. The read
-        # keeps that effect until the owner decides the rule for channels
-        # nobody enabled explicitly.
-        self.channel_settings[normalized_id] = settings
-        self._save_settings()
-        return settings
+        # Truly new: the defaults, persisted only when updated. A read never
+        # saves. It is on every emit, so a save here ran on the controller loop
+        # (#2706), and the row it saved was enabled, which authorized an IM
+        # channel nobody enabled (core/auth.py). A channel is authorized only
+        # when someone enables it explicitly.
+        return UserSettings()
 
     def update_user_settings(self, user_id: Union[int, str], settings: UserSettings):
         """Update settings for a specific user"""
