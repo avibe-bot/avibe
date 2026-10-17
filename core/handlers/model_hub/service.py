@@ -1020,14 +1020,6 @@ class _DiscoveryRetry:
     delay: timedelta
 
 
-@dataclass(frozen=True)
-class _StaleListing:
-    """The discovered rows a Source refused as models it does not serve, under the identity that refused them."""
-
-    identity: tuple
-    model_ids: frozenset[str]
-
-
 def _background_discovery_period(source_id: str) -> timedelta:
     """A stable per-Source period within the jitter window around the interval.
 
@@ -1530,7 +1522,9 @@ class ModelHubService:
         self._background_discovery_caught_up = False
         self._background_discovery_inflight: set[str] = set()
         self._viewed_discovery_task: asyncio.Task[None] | None = None
-        self._stale_listings: dict[str, _StaleListing] = {}
+        # Per Source, the discovered rows it refused as models it does not serve,
+        # filed under the identity (key, base URL, protocol) that refused them.
+        self._stale_listings: dict[str, dict[tuple, frozenset[str]]] = {}
         self._builtin_snapshot_generations: dict[BackendName, str] = {}
         self._builtin_snapshot_cache: dict[BackendName, list[dict[str, Any]]] = {}
         self._pending_builtin_catalog_refresh: set[BackendName] = set()
@@ -4887,14 +4881,15 @@ class ModelHubService:
         listing is older than ``_STALE_LISTING_AGE``, under its eligibility,
         backoff, in-flight exclusion and shutdown, and that listing drops each
         marked row if the identity that refused it still holds and the listing
-        no longer names it either.
+        no longer names it either. A refusal is filed under the identity that
+        gave it, so a turn still running on a replaced key or URL never
+        displaces the current identity's refusals (#2777).
         """
 
+        marks = self._stale_listings.setdefault(source.id, {})
         identity = source_identity(source)
-        marked = self._stale_listings.get(source.id)
         # Turns frozen on different executor models of one Source may each be refused.
-        earlier = marked.model_ids if marked is not None and marked.identity == identity else frozenset()
-        self._stale_listings[source.id] = _StaleListing(identity, earlier | {model_id})
+        marks[identity] = marks.get(identity, frozenset()) | {model_id}
         self._request_discovery_pass(max_age=None)
 
     def _request_discovery_pass(self, *, max_age: timedelta | None) -> None:
@@ -4992,8 +4987,7 @@ class ModelHubService:
             period = min(period, _BACKGROUND_DISCOVERY_INTERVAL)
         if max_age is not None:
             period = min(period, max_age)
-        mark = self._stale_listings.get(source.id)
-        if mark is not None and mark.identity == source_identity(source):
+        if source_identity(source) in self._stale_listings.get(source.id, {}):
             period = min(period, _STALE_LISTING_AGE)
         return listed_at + period
 
@@ -5028,7 +5022,7 @@ class ModelHubService:
         if observed is None or not self._background_discovery_eligible(observed):
             return
         basis = (source_identity(observed), observed.last_discovered_at)
-        mark: _StaleListing | None = None
+        marked: frozenset[str] | None = None
         try:
             discovered = await asyncio.wait_for(
                 self._discover(observed, start_engine=False),
@@ -5048,15 +5042,15 @@ class ModelHubService:
                     return
                 # Read now, not at the start: a refusal that arrived while this
                 # listing ran is answered by it.
-                mark = self._stale_listings.get(source_id)
-                if mark is not None and mark.identity != basis[0]:
-                    # The identity that refused the model is gone, and its refusal with it.
-                    del self._stale_listings[source_id]
-                    mark = None
+                marks = self._stale_listings.get(source_id, {})
+                for identity in [identity for identity in marks if identity != basis[0]]:
+                    # The identity that refused these models is gone, and its refusals with it.
+                    del marks[identity]
+                marked = marks.get(basis[0])
                 updated = self._clone_config(previous)
                 source = self._source(updated, source_id)
                 overrides = self._merge_discovered_models(source, discovered)
-                disowned = (mark.model_ids if mark is not None else frozenset()) - {
+                disowned = (marked or frozenset()) - {
                     canonical_model_id(model.id) for model in discovered
                 }
                 if disowned:
@@ -5066,12 +5060,19 @@ class ModelHubService:
                         await self._commit_synced(previous, updated)
                         self._record_reasoning_tier_overrides(source, overrides)
                     else:
+                        # A disowned row may leave on its own when the rest of
+                        # this listing has to wait, each one whose own removal
+                        # moves no route: one that guards a route is no reason
+                        # to keep another that does not (#2777).
                         dropped = self._clone_config(previous)
-                        if disowned and _drop_discovered_models(self._source(dropped, source_id), disowned) and (
-                            not self._moves_supply(previous, dropped)
-                        ):
-                            # The disowned row may leave on its own when the
-                            # rest of this listing has to wait.
+                        leaving = False
+                        for model_id in sorted(disowned):
+                            trial = self._clone_config(dropped)
+                            if _drop_discovered_models(self._source(trial, source_id), {model_id}) and (
+                                not self._moves_supply(previous, trial)
+                            ):
+                                dropped, leaving = trial, True
+                        if leaving:
                             await self._commit_synced(previous, dropped)
                         logger.info(
                             "Model Hub background discovery left a supply change "
@@ -5082,8 +5083,13 @@ class ModelHubService:
             self._record_background_discovery_failure(observed, exc)
             return
         self._background_discovery_checked[source_id] = self.now()
-        if mark is not None and self._stale_listings.get(source_id) is mark:
+        marks = self._stale_listings.get(source_id)
+        if marks is None:
+            return
+        if marked is not None and marks.get(basis[0]) is marked:
             # This listing answered the mark; a later refusal marks again.
+            del marks[basis[0]]
+        if not marks:
             del self._stale_listings[source_id]
 
     def _moves_supply(self, previous: ModelHubConfig, updated: ModelHubConfig) -> bool:

@@ -19,7 +19,7 @@ from datetime import timedelta
 import aiohttp
 import pytest
 
-from config.v2_config import ModelHubModelConfig, ModelHubHostedToolConfig
+from config.v2_config import ModelHubBackendModelConfig, ModelHubHostedToolConfig, ModelHubModelConfig
 from core.agent_core.messages import HostedCost, message_from_dict
 from core.handlers.model_hub import service as service_module
 from core.handlers.model_hub.adapter import DiscoveredModel, InvokeCancelledError, RawOutcomeKind, UpstreamRejection
@@ -687,6 +687,58 @@ async def test_a_disowned_row_leaves_even_when_the_rest_of_the_listing_must_wait
     service.start_background_discovery()
     try:
         service.mark_stale_listing(_openai(service), "gpt-6-astra")
+        await _settled(service)
+    finally:
+        await service.stop()
+    assert [model.id for model in _openai(service).models] == ["gpt-6-chat"]
+
+
+@pytest.mark.asyncio
+async def test_a_disowned_row_on_a_route_does_not_hold_back_one_on_none(tmp_path):
+    """MH-HOSTED-GATEWAY-009: each disowned row leaves unless its own removal moves a route (#2777)."""
+
+    service = _stale_listing_service(tmp_path)
+    openai = _openai(service)
+    openai.last_discovered_at = None
+    openai.models.append(ModelHubModelConfig(id="gpt-6-luna", provenance="discovered"))
+    # xAI lists gpt-6-luna too, so Vibey's gpt-6-luna routes to both Sources:
+    # dropping OpenAI's row would remove OpenAI's hop.
+    xai = next(item for item in service.store.config.sources if item.id == XAI)
+    xai.models.append(ModelHubModelConfig(id="gpt-6-luna", provenance="discovered"))
+    service.store.config.agents["vibey"].models.append(ModelHubBackendModelConfig(id="gpt-6-luna"))
+
+    async def discover_models(*_args, **_kwargs):
+        return [DiscoveredModel(id="gpt-6-chat")]
+
+    service.adapter.discover_models = discover_models
+    service.start_background_discovery()
+    try:
+        service.mark_stale_listing(_openai(service), "gpt-6-astra")
+        service.mark_stale_listing(_openai(service), "gpt-6-luna")
+        await _settled(service)
+    finally:
+        await service.stop()
+    # Only a manual refresh removes OpenAI's gpt-6-luna.
+    assert [model.id for model in _openai(service).models] == ["gpt-6-chat", "gpt-6-luna"]
+
+
+@pytest.mark.asyncio
+async def test_a_late_refusal_under_a_replaced_identity_keeps_the_current_mark(tmp_path):
+    """MH-HOSTED-GATEWAY-009: a turn still running on a replaced key or URL never evicts the current mark (#2777)."""
+
+    service = _stale_listing_service(tmp_path)
+    _openai(service).last_discovered_at = None
+    replaced = replace(_openai(service))
+    _openai(service).base_url = "https://replaced.example/v1"
+
+    async def discover_models(*_args, **_kwargs):
+        return [DiscoveredModel(id="gpt-6-chat")]
+
+    service.adapter.discover_models = discover_models
+    service.start_background_discovery()
+    try:
+        service.mark_stale_listing(_openai(service), "gpt-6-astra")
+        service.mark_stale_listing(replaced, "gpt-6-astra")
         await _settled(service)
     finally:
         await service.stop()
