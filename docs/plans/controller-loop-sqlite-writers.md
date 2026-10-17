@@ -112,6 +112,24 @@ What it shows:
 - **Every other site stayed under 135 ms per write**, on the same disk and under the same load. That includes `persist_agent_message` (#2725, parked until evidence shows a need) and path B's terminal write.
 - **Coverage.** The soak exercised the Vibey and Model Hub paths. It did not exercise IM transports, the Claude or Codex receivers, or Harness Runs. Sites that review found and that this soak did not reach stay listed below until a soak measures them.
 
+**Soak 2** (2026-10-17, the owner's host on gh-v3.2.2rc2, about 3 h 10 min of everyday use: Claude, Codex and Vibey Turns, Harness and IM). The 08:50 summary counted 12221 writes at 23 sites. There were no loop stalls of 2 s or more and no `database is locked`. The leading sites, by total loop time:
+
+| Site (caller) | Writes | Total | Max |
+| --- | --- | --- | --- |
+| `drain_delivery_queue` (`recover_runtime_delivery_observation`) | 9967 | 91.5 s | 506 ms |
+| `persist_agent_message` (`emit_agent_message` `:3934`) | 841 | 2.7 s | 403 ms |
+| `persist_agent_message` (`emit_agent_message` `:3286`) | 699 | 2.6 s | 482 ms |
+| `on_native_start` (`commit_native_start`) | 72 | 1.7 s | 475 ms |
+| `upsert_activity` (`_persist_activity`) | 78 | 1.3 s | 489 ms |
+| `bind_agent_session_by_id` (`v2_sessions.bind_agent_session_by_id`) | 74 | 1.3 s | 598 ms |
+| `_admit_p1` (`deliver`) | 112 | 1.0 s | 396 ms |
+
+The other sixteen sites each took under 1 s of loop time in total.
+
+What it shows:
+- **One queued head took 82% of all loop writes.** It had failed to start three times and was held until its owner retried it explicitly. No automatic start can claim such a head. Even so, every runtime-work scan reported it as an open head, and the drain's read-only precheck counted it as claimable. Each scan therefore took SQLite's writer on the loop, the claim refused the head, and the lane backed off for a second and scanned it again, at about 0.9 writes a second. A held head now only moves the scan's cursor, and the drain's precheck no longer counts it as claimable.
+- **Every other site averaged under 30 ms per write.** Single writes reached 400–600 ms on the host's disk. `persist_agent_message` (#2725) is the largest of them, at 5.3 s over 1540 writes.
+
 The per-Turn admissions all hold the boundary inside the transaction, so they are loop-side boundary holders and fall under B's split analysis:
 - `_admit_p0`, `_admit_p1`, `_admit_p3`, `_promote_fifo_head`;
 - `drain_delivery_queue`, `_resume_linked_control_successor`.

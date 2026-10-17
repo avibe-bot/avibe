@@ -30,7 +30,14 @@ class SessionDeliveryRecoveryHandler:
             cursor=cursor,
         )
         return [
-            RuntimeWorkItem(observation.session_id, observation)
+            # A head held for its owner's explicit retry only moves the cursor:
+            # re-entering it would find nothing to start, back off and rescan
+            # it every second until that retry.
+            RuntimeWorkItem(
+                observation.session_id,
+                observation,
+                cursor_only=observation.awaits_explicit_retry,
+            )
             for observation in observations
         ], has_more
 
