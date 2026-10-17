@@ -78,9 +78,12 @@ jobs:
           EOF
           echo "VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH=$RUNNER_TEMP/model-hub-engine/offline-manifest.json" >> "$GITHUB_ENV"
 
+      # Every scenario is hermetic, so it runs where only loopback answers: an
+      # engine or CLI that ignores its loopback upstream fails at once instead
+      # of reaching a real provider. The downloads above stay outside.
       - name: Run the Model Hub E2E
         run: |
-          python -m pytest -m e2e_model_hub tests/e2e -p no:cacheprovider -ra \
+          bash scripts/ci_loopback_only.sh python -m pytest -m e2e_model_hub tests/e2e -p no:cacheprovider -ra \
             --basetemp="$RUNNER_TEMP/e2e" 2>&1 | tee model-hub-e2e.log
           exit "${PIPESTATUS[0]}"
 

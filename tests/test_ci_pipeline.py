@@ -561,6 +561,18 @@ def test_hosted_wire_gate_judges_a_pull_requests_engine_change_and_blocks_merge(
         assert status != 0 and output == ""
 
 
+def test_every_linux_engine_e2e_runner_has_only_loopback() -> None:
+    """Hosted and engine E2E cases start a real engine; on Linux only the namespace keeps it off the network."""
+    release = yaml.safe_load((ROOT / ".github/workflows/model-hub-e2e.yml").read_text())
+    runs = [step["run"] for job in release["jobs"].values() for step in job["steps"] if "e2e_model_hub" in step.get("run", "")]
+    assert runs, "the release E2E runs no engine scenarios"
+    for run in runs:
+        assert run.lstrip().startswith("bash scripts/ci_loopback_only.sh python -m pytest -m e2e_model_hub"), run
+    gate, = [step for step in _jobs()["model-hub-hosted-wire"]["steps"]
+             if "scripts/model_hub_hosted_wire_gate.py" in step.get("run", "")]
+    assert "--loopback-only" in gate["run"].split()
+
+
 @pytest.mark.parametrize("gate_name", ["unit-tests", "install-upgrade-regression", "windows-install-smoke"])
 def test_required_gates_accept_skips_only_for_proven_docs_and_fail_closed(tmp_path: Path, gate_name: str) -> None:
     gate = _jobs()[gate_name]
