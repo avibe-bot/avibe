@@ -65,8 +65,19 @@ class AuthSetupScenarioHarness(BaseScenarioHarness):
 
     def cli_setup_snapshot(self, client, backend: str, path: str):
         """The actual HTTP consumers used by native setup, with no UI simulation."""
-        runtime = client.get(f"/api/backend/{backend}/runtime", params={"cli_path": path})
-        connection = client.get(f"/api/backend/{backend}/connection")
+        base_url = "http://127.0.0.1"
+        headers = {"Origin": base_url}
+        runtime = client.get(
+            f"/api/backend/{backend}/runtime",
+            params={"cli_path": path},
+            base_url=base_url,
+            headers=headers,
+        )
+        connection = client.get(
+            f"/api/backend/{backend}/connection",
+            base_url=base_url,
+            headers=headers,
+        )
         assert runtime.status_code == 200 and connection.status_code == 200
         return runtime.get_json(), connection.get_json()
 
