@@ -46,6 +46,7 @@ _VIBEY_MODEL = "acceptance-chat"
 _REPLY = "mock response"
 _ENGINE_START_SECONDS = 600
 _ENGINE_MANIFEST_ENV = "VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH"
+_ENGINE_MANIFEST_URL_ENV = "VIBE_MODEL_HUB_ENGINE_MANIFEST_URL"
 _TURN_SECONDS = 300
 
 
@@ -147,6 +148,10 @@ class _Service:
             "VIBE_TMUX_OFFLINE": "1",
             "VIBE_GIT_OFFLINE": "1",
         }
+        # The manifest path is the acceptance's one engine control, as in the Model
+        # Hub E2E harness: an inherited manifest URL would outrank the packaged
+        # manifest the acceptance falls back to.
+        self.env.pop(_ENGINE_MANIFEST_URL_ENV, None)
         if self.env.get(_ENGINE_MANIFEST_ENV):
             # The service resolves a relative path from its own working directory,
             # which is not this one; give it, and the acceptance, the same file.
@@ -363,7 +368,7 @@ def _selected_engine_manifest(env: Mapping[str, str], packaged_manifest: Path) -
     """The manifest the service selects: the one ``VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH`` names, else the packaged one.
 
     ``_Service`` makes the override absolute before the service starts, so both
-    read the same file. One that is missing, unreadable or names no version
+    read the same file, and leaves the service no other selector. One that is missing, unreadable or names no version
     fails the run: an acceptance must never pass without knowing what it accepted.
     """
 

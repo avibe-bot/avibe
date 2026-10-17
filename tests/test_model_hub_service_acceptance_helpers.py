@@ -130,6 +130,19 @@ def test_a_relative_override_reaches_the_service_and_the_acceptance_as_one_absol
         service.close()
 
 
+def test_an_inherited_manifest_url_never_selects_the_engine_the_acceptance_checks(tmp_path, monkeypatch):
+    """The service's only other selector, a manifest URL, would outrank the packaged fallback; it never reaches it."""
+
+    monkeypatch.delenv(_ENV, raising=False)
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENGINE_MANIFEST_URL", "https://inherited.example/manifest.json")
+
+    service = acceptance._Service(tmp_path / "home", 0)
+    try:
+        assert not [name for name in service.env if name.startswith("VIBE_MODEL_HUB_ENGINE_MANIFEST")]
+    finally:
+        service.close()
+
+
 def _write(path: Path, text: str) -> Path:
     path.write_text(text, encoding="utf-8")
     return path
