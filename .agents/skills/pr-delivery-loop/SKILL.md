@@ -32,7 +32,7 @@ Watch 的机制（脚本、cursor、过滤、重试）归 `background-watch-hook
 Codex 的信号有几处容易误读：
 
 - push 后几分钟内通常会自动开始，表现为 PR 正文上出现 Codex 的 `eyes`。没有迹象就评论 `@codex review`，记下你这条评论的 ID，看它有没有得到 Codex 的 `eyes`。`eyes` 在 review 结束后会消失，之后看不到不代表没接单。
-- 只认 `chatgpt-codex-connector`（常显示为 `[bot]`）给出的结论。通过有两种形态：一条写着 `Codex Review: Didn't find any major issues` 并指明当前 SHA 的评论；或者 PR 正文上的 `+1`，但只有 Watch 确实在这个 head 推送之后看到它新出现才算数。绑不到当前 head，就再触发一次，拿一个带 SHA 的结论。有 finding 的 review 里也有 `Reviewed commit`，单凭它不算通过。
+- 只认 `chatgpt-codex-connector`（常显示为 `[bot]`）给出的结论。通过有两种形态：一条写着 `Codex Review: Didn't find any major issues` 并指明当前 SHA 的评论；或者 PR 正文上的 `+1`，但只有 Watch 确实在这个 head 推送之后看到它新出现，且前一个 head 的 review 已经结束，才算数。若 head 切换时旧 review 仍在进行，不能用后来出现的无 SHA 反应证明新 head 已经 review；绑不到当前 head，就再触发一次，拿一个带 SHA 的结论。有 finding 的 review 里也有 `Reviewed commit`，单凭它不算通过。
 - review 进行中不要 push 新 head：这一轮会白跑，结论也会绑到错的 head 上。这段时间拿来做验收和准备收尾。
 
 ## Finding 与 review thread
@@ -41,9 +41,9 @@ finding 属于它被提出时的那个 head，先对照当前代码判断它是�
 
 ## CI
 
-适用的 CI，是这个仓库对这次改动要求的检查。当前 head 上每个必需 workflow 的每一次 run 都要成功或明确 skipped；同一个 workflow 只要还有一个 run 在 pending 或失败，就不算过。缺失、排队、取消、超时、等待人工批准、读不到，都不是通过。
+适用的 CI，是这个仓库对这次改动要求的检查。当前 head 上每个适用的必需 workflow 的每一次 run 都要成功；只有先确认该 workflow 对这次改动不适用，才能把明确的 skipped 作为通过。同一个 workflow 只要还有一个 run 在 pending 或失败，就不算过。缺失、排队、取消、超时、等待人工批准、读不到，都不是通过。
 
-和本仓库无关的第三方集成（比如客户端仓库上的 Vercel 检查）不该挡住交付：确认它不在必需检查里、和这次改动无关，在汇报里说一句，然后继续推进，不要等它出终态；它让 GitHub 显示 `UNSTABLE` 而不是 `CLEAN` 时也一样。
+和本仓库无关的第三方集成（比如客户端仓库上的 Vercel 检查）不该挡住交付：确认它不在必需检查里、和这次改动无关，在汇报里说一句，然后继续推进，不要等它出终态；如果它只是让 GitHub 显示 `UNSTABLE` 而不是 `CLEAN`，按这个已确认的例外处理，不把它作为 blocker，但其余 Merge-ready 条件仍必须满足。
 
 CI 失败时，先在本地复现失败的那条命令或那个文件，再缩小范围。PR 是 `DIRTY` 而 CI 迟迟不来，通常是有冲突，去解决冲突，而不是继续等。
 
@@ -54,7 +54,7 @@ CI 失败时，先在本地复现失败的那条命令或那个文件，再缩�
 - 当前 head 有有效的 Codex 通过结论，没有未处理的真实 finding；
 - 适用 CI 在当前 head 上全部通过；
 - 整个 PR 没有 unresolved thread，包括旧 head 和 outdated 的；
-- PR 是 open、非 draft、无冲突，GitHub 显示 `CLEAN`。
+- PR 是 open、非 draft、无冲突，GitHub 显示 `CLEAN`；如果唯一导致 `UNSTABLE` 的是上面已确认无关且非必需的第三方集成，则按该例外处理。
 
 这些都必须是当前 head 上的事实。哪一项拿不准，就当它没通过，然后去把它弄清楚。
 
@@ -63,7 +63,7 @@ CI 失败时，先在本地复现失败的那条命令或那个文件，再缩�
 合不合并看意愿，不看有没有一句固定格式的授权：
 
 - 用户（或委派你的 orchestrator）表达了要合并的意思，就合并。"可以 merge 了""合了吧""直接合并"说的都是合并，不要理解成"告诉我一下状态"。用户如果说的是"给我个 Merge 按钮"，那是想自己点，就给按钮。
-- 没人明说，但你对这个 PR 有十足把握，而且不合并会卡住已经确定要做的后续工作，可以自己合并，并在汇报里说明原因。
+- 没人明说，但只有两个条件同时满足才可以自己合并：你对这个 PR 有十足把握，而且不合并会卡住已经明确授权、且确定要做的后续工作。这里不是泛化的“看起来可以”，必须把被阻塞的后续动作说清楚。
 - 用户说过先别合、要自己确认，就以用户最新的说法为准。
 - 拿不准就继续验证，同时把 Merge 按钮交给用户。不要抢跑，也不要干等一句授权。
 
@@ -73,13 +73,13 @@ CI 失败时，先在本地复现失败的那条命令或那个文件，再缩�
 gh pr merge <PR-URL> --squash --match-head-commit <已验证的-head-SHA>
 ```
 
-`--match-head-commit` 保证合进去的正是你验证过的那个 head。合并后读回 `MERGED` 和 merge commit，清理本任务的 Watch、worktree 和分支，不碰其他工作。
+`--match-head-commit` 保证合进去的正是你验证过的那个 head。合并后仅清理本任务的 Watch、干净的 worktree 和分支，不碰其他工作；若 worktree 有未提交或未跟踪内容，保留它并说明，不强制删除。
 
 Merge 不等于同意部署、重启服务、更新本地回归环境或改凭据，这些各自需要用户点头。
 
 ## 跟用户说话
 
-用中文，先说结果。用户关心的是：改了什么、有什么用、还剩什么风险、下一步是什么。SHA、run 数、thread 数是你的内部证据，只在解释 blocker 或用户问起时拿出来，不要把 gate 清单当汇报。
+用当前对话的语言，先说结果。默认延续用户正在使用的语言；当前会话没有明确语言信号时，再用中文。用户关心的是：改了什么、有什么用、还剩什么风险、下一步是什么。SHA、run 数、thread 数是你的内部证据，只在解释 blocker 或用户问起时拿出来，不要把 gate 清单当汇报。
 
 - **还在推进时**：说你正在做什么、在等什么信号、下一步是什么、需不需要用户决定。有 finding 或失败要及时说；没有实质变化就不发消息；review 和 CI 只过了一半，不用专门报。
 - **Merge-ready、等用户确认时**：在同一条回复里明确说「可以 Merge 了」，附可点击的 PR 链接，结尾直接放快捷按钮，不要等用户来要：
@@ -93,7 +93,7 @@ Merge 不等于同意部署、重启服务、更新本地回归环境或改凭�
 - **决定直接合并时**：不必再问，也不再给 Merge 按钮。合并、读回结果，然后告诉用户已合并（附链接），以及为什么由你直接合。
 - **合并之后**：仓库有本地回归流程时（Avibe 有），给出 `[更新回归]` 和 `[更新并验证]`：两者都把本地 master 环境更新到最新，后者还会验证受影响的流程。用户选了之后，先读 [Local regression](references/local-regression.md) 再动手。
 
-按钮只出现在给用户的回复里，不出现在 lane 报告或 GitHub 评论中。给按钮时，在内部记下它对应的 PR 和 head。用户点击后，按点击来源对应的 PR 重新拉 live 状态；head 变了或不再 ready，就说明情况并重新给出，不沿用旧的确认。不确定点的是哪个 PR 就问，不要猜。
+按钮只出现在给用户的回复里，不出现在 lane 报告或 GitHub 评论中。给按钮前，必须有可持久化的来源绑定：平台能保留来源消息 metadata，或用户在当前请求中明确点名 PR。平台只支持 label-only quick reply、无法绑定来源时，不要假装它带有 PR/head；不要提供可能误指向的 mutation button，在正文给出 PR link 并要求用户明确目标。用户点击后，按绑定的 PR 重新拉 live 状态；head 变了或不再 ready，就说明情况并重新给出，不沿用旧的确认。不确定点的是哪个 PR 就问，不要猜。
 
 ## 委派与 lane
 
