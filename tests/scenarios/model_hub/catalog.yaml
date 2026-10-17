@@ -2533,13 +2533,17 @@ scenarios:
   - id: MH-SERVICE-001
     name: >-
       A fresh install of the installed service, on Windows x64 and Arm64 as on Linux and macOS: the engine installs
-      from the packaged manifest and turns healthy, API-key Sources save through the real credential check, a Vibey
+      from the selected manifest (a candidate's, else the packaged one) at that manifest's version and turns healthy,
+      API-key Sources save through the real credential check, a Vibey
       turn and a Claude Code hub-mode turn get the upstream's reply, a hard-killed service's engine is reaped by the
       next start, and vibe stop leaves no engine
     status: assert
     kind: runtime_lifecycle
     layer: e2e-auto
     test: tests/e2e/test_model_hub_service_acceptance.py::test_fresh_install_serves_vibey_and_claude_through_the_hub_and_reaps_an_orphaned_engine
+    related_tests:
+      - tests/test_model_hub_service_acceptance_helpers.py::test_an_engine_installed_from_another_manifest_fails_the_run
+      - tests/test_model_hub_service_acceptance_helpers.py::test_a_selected_manifest_without_a_usable_version_fails_the_run
   - id: MH-HOSTED-GATEWAY-004
     name: A proxied search runs one native request on the turn's first admitted executor, without an effort, and answers its canonical record and execution with the pricing module's cost and the same positive evidence a native call writes
     status: covered
