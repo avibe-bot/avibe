@@ -139,8 +139,22 @@ What it shows:
 
 What it shows:
 - **The first stall is the held head** of Soak 2. #2781 fixed it after this build.
-- **The second stall is a settings read that saved.** `get_user_settings` persisted a default for every key it had never seen, and every emit reads it (`is_message_type_hidden`), as do the routing reads. On the Avibe platform the key is the Session id, so the first emit of each new Web Session saved the whole settings state on the loop. The host holds 923 such Session rows. An Avibe read now returns the defaults and saves nothing. On IM platforms the same save persists an enabled channel row, which is what authorizes the channel. That is left as it is until the owner decides the rule for channels nobody enabled explicitly.
+- **The second stall is a settings read that saved.** `get_user_settings` persisted a default for every key it had never seen, and every emit reads it (`is_message_type_hidden`), as do the routing reads. On the Avibe platform the key is the Session id, so the first emit of each new Web Session saved the whole settings state on the loop. The host holds 923 such Session rows. A read now returns the defaults and saves nothing, on every platform (#2789, #2791). On IM platforms that save used to persist an enabled channel row, which authorized the channel. The owner chose default-deny: only an explicit enable authorizes a channel.
 - **Everything else stayed under 700 ms per write:** `upsert_activity` (610 writes), `upsert_connection` (140), `bind_agent_session_by_id`, and `persist_agent_message` (about 3,500 writes).
+
+**Before and after the fixes** (the same host). The rc2 shutdown summary closes Soak 3. It covers about 12 h, from 05:40 to 17:51, and counted 45926 writes at 33 sites. Both sites the fixes target were still there:
+
+| Site | rc2, about 12 h | gh-v3.2.2rc4, from 17:52 |
+| --- | --- | --- |
+| `drain_delivery_queue <- recover_runtime_delivery_observation` (#2781) | 37551 writes, 220 s total, 2981 ms max | not seen |
+| `settings_service.save_state <- v2_settings.save` (#2789, #2791) | 4 writes, 6.5 s total, 3530 ms max | not seen |
+
+Without those two sites, rc2's loop writes come to about 60 s over 12 h, and no single write took a second. The largest were:
+- `on_native_start`: 334 writes, 10 s, 505 ms max;
+- `persist_agent_message`: about 4,100 writes, 14 s;
+- `upsert_activity`: 887 writes, 7.2 s.
+
+None of these calls for action unless a stall points at it. The rc4 column so far rests on the census's first-seen lines from its first minutes; a longer rc4 reading will replace it.
 
 The per-Turn admissions all hold the boundary inside the transaction, so they are loop-side boundary holders and fall under B's split analysis:
 - `_admit_p0`, `_admit_p1`, `_admit_p3`, `_promote_fifo_head`;
