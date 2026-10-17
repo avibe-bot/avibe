@@ -2157,6 +2157,54 @@ def test_state_rejects_unsafe_inputs_and_auth_permissions(tmp_path: Path) -> Non
     assert stat.S_IMODE(auth_file.stat().st_mode) == 0o600
 
 
+def _codex_grant_with_engine_lock(store: EngineStateStore) -> tuple[Path, Path]:
+    """A Codex grant and the ``<name>.lock`` CPA v8.0.28+ keeps beside it (0600, never removed)."""
+
+    store.audit_auth_permissions()
+    grant = store.auth_dir / "codex-synthetic.json"
+    lock = store.auth_dir / "codex-synthetic.json.lock"
+    for path in (grant, lock):
+        path.write_text("{}" if path is grant else "", encoding="utf-8")
+        path.chmod(0o600)
+    return grant, lock
+
+
+def test_deleting_an_oauth_grant_removes_the_engine_lock_beside_it(tmp_path: Path) -> None:
+    store = EngineStateStore(tmp_path / "state")
+    grant, lock = _codex_grant_with_engine_lock(store)
+    # The sidecar is a regular private file: every auth-dir consumer accepts it.
+    store.audit_auth_permissions()
+
+    store.delete_oauth_auth_file(grant.name)
+
+    assert not grant.exists() and not lock.exists()
+    assert list(store.auth_dir.iterdir()) == []
+
+
+def test_a_lock_the_engine_holds_never_fails_the_grants_removal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """On Windows the engine may hold its lock during a refresh; the grant still goes."""
+
+    store = EngineStateStore(tmp_path / "state")
+    grant, lock = _codex_grant_with_engine_lock(store)
+    remove = EngineStateStore._remove_private_file_if_present.__func__
+
+    def held(cls, path: Path) -> bool:
+        if path == lock:
+            raise EngineStateError("unable to remove engine state file")
+        return remove(cls, path)
+
+    monkeypatch.setattr(EngineStateStore, "_remove_private_file_if_present", classmethod(held))
+
+    store.delete_oauth_auth_file(grant.name)
+
+    assert not grant.exists() and lock.exists()
+    assert "Could not remove the engine lock" in caplog.text
+    # A leftover sidecar keeps passing the audit every engine start runs.
+    store.audit_auth_permissions()
+
+
 def test_a_persisted_key_source_survives_a_repin_of_its_vendor(tmp_path: Path) -> None:
     """A stored api-key Source is judged by its upstream, not by today's pin.
 
