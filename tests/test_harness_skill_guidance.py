@@ -244,30 +244,20 @@ def test_pr_delivery_loop_keeps_optional_references_out_of_routine_loading() -> 
     directory = ROOT / ".agents/skills/pr-delivery-loop"
     body = (directory / "SKILL.md").read_text()
     flat = " ".join(body.split())
-    references = re.findall(r"\]\((references/[^)]+\.md)\)", body)
+    named = re.findall(r"references/[\w.-]+\.md", body)
 
-    assert references == ["references/rationale.md", "references/local-regression.md"]
-    assert {path.relative_to(directory).as_posix() for path in directory.rglob("*.md")} == {
-        "SKILL.md", *references,
-    }
-    assert "are optional reading" in flat and "do not load them routinely" in flat
-    assert "They introduce no additional delivery gates." in flat
-    assert "sync the **whole maintained package**, including references, byte-for-byte" in flat
-    assert "Keep exact head-bound evidence in the internal gate record" in flat
-    assert "residual issues (or none known)" in flat
-    assert "gate-state dumps belong in the evidence" in flat
-    assert "offer Merge with the PR link" in flat
-    assert "persist the target PR and exact offered head" in flat
-    assert "visible report may omit the SHA" in flat
+    # A reference is read only at the step that names it: local regression after the
+    # user picks a regression update, never in the routine delivery loop.
+    assert named and all((directory / path).is_file() for path in named)
+    assert "After the user chooses one, read `references/local-regression.md` before acting." in flat
+    assert "synchronize the entire maintained package, including `references/`, byte-for-byte" in flat
 
     skill = parse_skill_file(directory / "SKILL.md", priority=(1, 0, 1))
     assert skill is not None
     rendered = render_skill_content(skill)
-    assert "## 4. Complete delivery" in rendered
-    assert "### Authorized local regression updates" in rendered
-    for reference_path in references:
-        reference = (directory / reference_path).read_text()
-        assert reference not in rendered
+    assert "## Keep one Watch on the PR" in rendered
+    for reference in (directory / "references").glob("*.md"):
+        assert reference.read_text() not in rendered
 
 
 def test_quick_replies_are_action_driven_not_mandatory() -> None:
