@@ -1,86 +1,102 @@
-# Delivery Rationale and Examples
+# Why the PR Delivery Rules Exist
 
-Optional context for [SKILL.md](../SKILL.md), not a second checklist. Read the
-relevant section when diagnosing an unfamiliar failure or reviewing the policy;
-routine delivery needs only the main file and its named operational dependency.
+Background for [SKILL.md](../SKILL.md), not a second checklist. Each section
+explains one rule through the failure that produced it. Read a section when the
+rule seems wrong for your situation or a failure looks unfamiliar.
 
-## Git success does not prove integration correctness
+## A clean Git merge can still be a broken integration
 
-Two lanes can allocate the same migration revision under different filenames.
-Git merges both files, while a shared head declaration has the same value and
-appears harmless. The database then sees duplicate revisions or a forked chain.
-The same problem applies to route names, fixture IDs, and other shared namespaces.
-This explains why the main rule compares allocated identities against the latest
-default branch even after a conflict-free Git merge.
+Two lanes can each add a migration with the same revision ID under different
+filenames. Git merges both files without a conflict, but the database now sees
+two heads or a duplicate revision. Route names, fixture IDs, scenario IDs and
+other shared namespaces fail the same way. That is why the final rebase compares
+allocated identities with the latest default branch, even when Git reports no
+conflict.
 
-An untracked contract creates a related failure: another lane cannot obtain it
-from the base branch, and the file may later block the primary checkout's
-fast-forward. Since regression synchronizes the invoking checkout, a blocked
-checkout can also become a stale deployment source.
+A contract file left untracked causes a related failure. Other lanes cannot get
+it from the base branch, and it can later block the primary checkout's
+fast-forward. Regression syncs the checkout that runs it, so a blocked checkout
+can quietly become a stale deployment source.
 
 ## Review activity is not a verdict
 
-A findings review contains `Reviewed commit` too. An owner replying to a thread
-can create an empty `COMMENTED` review stamped with the current head. Neither
-means that Codex approved that head; author, verdict shape, and revision binding
-are independent evidence.
+- A finding review also says `Reviewed commit`. An owner's thread reply can
+  create an empty `COMMENTED` review stamped with the current head. Neither means
+  Codex passed that head. Who wrote it, what it concluded, and which commit it
+  names are separate facts.
+- The bot's reaction on the PR body is one mutable slot, not a log. It shows
+  `eyes` while a review runs and `+1` after a pass, replacing the previous
+  reaction each time. The `eyes` on a trigger comment also disappear when the
+  review finishes, so an empty reaction list later does not mean the trigger was
+  never picked up.
+- A `+1` carries no commit. Suppose head A is under review and you push head B.
+  When A's review finishes with no findings, its `+1` arrives after B was pushed
+  and looks exactly like a pass for B. That is why a `+1` counts only when no
+  earlier head's review was still running at the push. Otherwise, require a
+  SHA-bearing conclusion for the current head.
+- The Watch can bind a new `+1` to a head only through its original cursor and
+  the head timeline. Rebuilding the Watch or resetting its cursor after a push
+  can consume evidence that already arrived, so a finished review looks silent.
+- A lane Run marked `succeeded` proves only that the invocation ended. It does
+  not prove that the current head's review started, that the Watch is alive, or
+  that the orchestrator received the report.
 
-The bot's PR-body reaction is a mutable slot, not a review log. It can show
-`eyes` during review and `+1` after a pass, withdrawing the old reaction each
-time. Auto-review may pass only through that reaction; an explicit trigger can
-produce a SHA-bearing pass comment. Trigger-comment `eyes` also disappears when
-review completes, so a later empty reaction list cannot establish failed pickup.
+## Repeated findings call for diagnosis, not more patches
 
-The bundled waiter filters PR reactions to `content=+1`; it cannot establish an
-`eyes` to `+1` transition. Its original cursor and the head timeline are what
-allow the main policy to bind a new pass. Replacing the baseline after a push
-can consume already-arrived evidence and make a completed review look silent.
+Suppose a reviewer flags that a search result's title is not searchable. Other
+displayed fields probably share the omission, and fixing them one per round
+invites the next finding. The useful step is to state the invariant (every
+displayed searchable value matches the search predicate) and fix it at the
+shared boundary, for example by normalizing text where the renderer also
+normalizes it.
 
-A lane Run marked `succeeded` proves only that invocation ended successfully.
-It does not prove that the current-head review started, the Watch remains live,
-or the orchestrator received a report. Those are separate observations.
+The circuit breaker exists to force that step. It does not mean the architecture
+must change. It means: build the full inventory, find the cause, and choose the
+smallest complete scope. Sometimes that scope is smaller than the PR, and the
+right move is to split or drop the part that keeps generating findings.
+
+## Self-merge is bounded
+
+An agent that is sure of its PR and blocked on it may merge without asking,
+because waiting adds delay and no information. The bounds keep that judgment
+where it is cheap to be wrong:
+
+- **Merge-ready on the exact head.** Confidence never replaces the gates.
+- **Within your own task.** Another lane's area, or a shared contract, needs its
+  owner.
+- **No release or tag, migration, or security boundary.** These are hard to
+  reverse or reach every user, so they need the user's or orchestrator's intent.
 
 ## Gate evidence and user reports are different surfaces
 
-Exact head, run, thread, and Watch evidence protects the delivery gate, but it is
-not the user-facing result. Keep that evidence in the internal record; the final
-report should state residual issues, the change and its benefit, the next action,
-and merge readiness. Expose identifiers only when they explain a blocker or the
-user asks for evidence.
+Exact heads, run IDs, thread counts and Watch state protect the gate. They are
+not what the user asked for. The report states what changed and why it matters,
+what risk remains, what happens next, and whether the PR can merge. Identifiers
+appear only when they explain a blocker or the user asks for evidence.
 
-## A repeated finding calls for diagnosis, not automatic expansion
+## Quick replies need a bound target
 
-If a reviewer flags a searchable row's projected title, similar fields may
-share the same omission. One useful test property is that every displayed
-searchable value can be found through the search predicate. Where rendering
-normalizes text, such as HTML whitespace collapsing, matching may need equivalent
-normalization at its existing shared boundary rather than per-field patches.
+Two reports can both offer a Merge button. A label-only click cannot tell them
+apart: Workbench source metadata may recover the clicked report, but the label
+and nearby prose cannot. So each offer records its PR and head, and a click
+re-checks live state before acting. A button block may also be stripped on a
+destination that cannot render buttons, which is why the same next step is
+always stated in prose.
 
-This illustrates the main rule to state an invariant and cover the relevant
-shapes. It does not prescribe a new abstraction for every repeated finding.
-The circuit breaker asks the orchestrator to establish the cause and smallest
-complete scope from the full inventory; it is not evidence by itself that the
-architecture must change.
+## Why the regression command looks the way it does
 
-## Why quick-reply and regression guards stay in the main file
+`references/local-regression.md` uses explicit switches, each guarding a
+different boundary:
 
-Two reports can both offer `合并PR`. A label-only reply cannot distinguish them.
-Workbench source metadata may recover the clicked report, but the label or
-nearby prose alone cannot. Similarly, an explicit button block may be removed
-from text even on a destination that cannot render buttons; ordinary prose is
-the capability fallback.
-
-The regression command's switches protect different boundaries:
-
-- `--target master` selects a target; it does not select the sender's checkout.
-- Git ignores do not govern rsync exclusions. Ignored local source can be copied
-  even when Git status and the deployment receipt say the checkout is clean.
-- A normal rsync size/mtime check can retain different receiver bytes. A commit
-  receipt then identifies the sender, not necessarily all bytes in service.
+- `--target master` selects the environment, not the checkout that sends the
+  source.
+- Git ignores do not govern rsync. Ignored local files can be copied even when
+  Git status and the deployment receipt say the checkout is clean.
+- A normal rsync size and mtime check can keep different bytes on the receiver.
+  A commit receipt then identifies the sender, not every byte in service.
 - `--reset-mode none` preserves product state, but automatic `.env.regression`
-  discovery can still rewrite the runtime environment. An empty regular env
-  file also takes the rewrite path; `/dev/null` is a different selector.
+  discovery can still rewrite the runtime environment. An empty regular env file
+  takes the same rewrite path; `--env-file /dev/null` does not.
 
-These examples explain the input verification, clean source reconciliation, and
-runtime-state guards in the main procedure. They add no permission to provision,
-change credentials, or operate an unrelated environment.
+None of this grants permission to provision environments, change credentials or
+operate anything other than the local regression environment.

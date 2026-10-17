@@ -7,6 +7,8 @@ description: Deliver Avibe, avibe-bot-backend, avibe-docs, avault, and vault-san
 
 Your job is to deliver a change for real: pass review and CI, then Merge it, or drive it to Merge-ready so that only the user's approval remains. There is no intermediate "state" where you can stop. Whenever you are resumed, inspect the live situation first and answer two questions: what is still between this PR and Merge, and what is the most useful thing I can do now? Then do it.
 
+The reasons behind these rules, with the failures that produced them, are in `references/rationale.md`. Read the relevant section when a rule seems wrong for your situation or a failure is unfamiliar; routine delivery does not need it.
+
 ## Keep moving
 
 - **Fix problems.** Investigate findings, CI failures, and conflicts to their root cause; make the smallest complete fix, verify it, and push.
@@ -32,7 +34,7 @@ The `background-watch-hook` skill owns Watch mechanics: scripts, cursors, filter
 Codex signals are easy to misread:
 
 - Review usually starts within a few minutes after a push, shown by Codex `eyes` on the PR. If there is no sign, comment `@codex review`, record the ID of that comment, and check whether that exact comment receives Codex `eyes`. The `eyes` disappear after review; their later absence does not mean Codex never accepted the job.
-- Accept conclusions only from `chatgpt-codex-connector` (often displayed as `[bot]`). A pass has one of two forms: a comment saying `Codex Review: Didn't find any major issues` and naming the current SHA; or a `+1` reaction on the PR body that the Watch definitely observed as new after this head was pushed. If it cannot be bound to the current head, trigger another review and require a SHA-bearing conclusion. A finding review also contains `Reviewed commit`; that alone is not a pass.
+- Accept conclusions only from `chatgpt-codex-connector` (often displayed as `[bot]`). A pass has one of two forms: a comment saying `Codex Review: Didn't find any major issues` and naming the current SHA; or a `+1` reaction on the PR body that the Watch definitely observed as new after this head was pushed, and only if no earlier head's review was still running when this head was pushed (otherwise the earlier review's late `+1` looks the same). If it cannot be bound to the current head, trigger another review and require a SHA-bearing conclusion. A finding review also contains `Reviewed commit`; that alone is not a pass.
 - Do not push a new head while review is running: that wastes the round and binds the conclusion to the wrong head. Use the time for acceptance checks and close-out preparation.
 
 ## Findings and review threads
@@ -63,7 +65,7 @@ These must all be facts about the current head. If any item is uncertain, treat 
 Merge follows intent, not a fixed authorization phrase:
 
 - If the user (or the orchestrator who delegated to you) expresses the intent to merge, merge it. "It can merge now", "merge it", and "just merge" all mean merge; do not interpret them as a status request. If the user asks for a "Merge button", they want to click it themselves—offer the button.
-- If nobody says so explicitly, but you are fully confident in the PR and not merging it would block a determined follow-up, you may merge it, and state the reason in the report.
+- If nobody says so explicitly, you may merge on your own judgment only when all of these hold: the PR is Merge-ready on its exact head; the change stays within your own task; it touches no release or tag, database migration, or security boundary (authentication, credentials, Vault, sandboxing); and leaving it unmerged would block determined follow-up work. State the reason in the report. Anything else waits for the user's or orchestrator's intent.
 - If the user said to wait or to confirm personally, follow the user's latest instruction.
 - If uncertain, keep verifying and offer the Merge button to the user. Do not race ahead, and do not wait passively for a magic authorization phrase.
 

@@ -33,11 +33,18 @@ def test_pr_delivery_loop_delegates_waiters_to_background_watch_skill() -> None:
     assert "disable the Watch's per-cycle timeout" in agents
     # The skill owns the procedure but cannot weaken the root baseline, merge authority included.
     assert "cannot weaken the baseline below" in " ".join(agents.split())
-    assert "never merge without explicit owner instruction" in " ".join(agents.split())
+    # An agent merges on instruction, or on its own judgment only inside these bounds.
+    flat_agents = " ".join(agents.split())
+    assert "merge on the owner's or orchestrator's instruction, or on your own judgment only when" in flat_agents
+    assert "touches no release or tag, database migration, or security boundary" in flat_agents
+    assert "you may merge on your own judgment only when all of these hold" in flat
+    assert "touches no release or tag, database migration, or security boundary" in flat
 
     # A Codex pass binds to the current head: a comment naming its SHA, or a PR-body
-    # `+1` the Watch saw arrive after it was pushed. `Reviewed commit` is on findings too.
+    # `+1` the Watch saw arrive after it was pushed while no earlier head's review was
+    # still running (that review's late `+1` looks the same). `Reviewed commit` is on findings too.
     assert "`Codex Review: Didn't find any major issues` and naming the current SHA" in flat
     assert "a `+1` reaction on the PR body that the Watch definitely observed as new after this head was pushed" in flat
+    assert "only if no earlier head's review was still running when this head was pushed" in flat
     assert "require a SHA-bearing conclusion" in flat
     assert "also contains `Reviewed commit`; that alone is not a pass" in flat

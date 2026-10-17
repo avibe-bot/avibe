@@ -246,10 +246,12 @@ def test_pr_delivery_loop_keeps_optional_references_out_of_routine_loading() -> 
     flat = " ".join(body.split())
     named = re.findall(r"references/[\w.-]+\.md", body)
 
-    # A reference is read only at the step that names it: local regression after the
-    # user picks a regression update, never in the routine delivery loop.
-    assert named == ["references/local-regression.md"]
-    assert (directory / named[0]).is_file()
+    # A reference is read only when its step calls for it, never in the routine delivery
+    # loop: the rationale when a rule seems wrong or a failure is unfamiliar, and local
+    # regression after the user picks a regression update.
+    assert named == ["references/rationale.md", "references/local-regression.md"]
+    assert all((directory / name).is_file() for name in named)
+    assert "routine delivery does not need it" in flat
     assert "After the user chooses one, read `references/local-regression.md` before acting." in flat
     assert "synchronize the entire maintained package, including `references/`, byte-for-byte" in flat
 
