@@ -732,7 +732,7 @@ def test_a2_offline_engine_install_start_stop_and_hardened_config(
         assert config["disable-cooling"] is True
         assert config["usage-statistics-enabled"] is False
         assert config["force-model-prefix"] is True
-        assert config["passthrough-headers"] is False
+        assert config["passthrough-headers"] is True
 
         stopped = app.client.post("/api/models/runtime/stop", {})
         stopped_body = stopped.json()

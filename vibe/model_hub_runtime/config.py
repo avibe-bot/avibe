@@ -92,7 +92,10 @@ def render_engine_config(
         "redis-usage-queue-retention-seconds": 60,
         "proxy-url": "",
         "force-model-prefix": True,
-        "passthrough-headers": False,
+        # Upstream response headers reach Avibe, which is how an upstream's Retry-After on an
+        # error arrives at all (#2666). They stop at Avibe: the gateway builds every response
+        # it sends from its own headers, and reads only ENGINE_RESPONSE_HEADER_ALLOW_LIST.
+        "passthrough-headers": True,
         "request-retry": 0,
         "max-retry-credentials": 1,
         "max-retry-interval": 0,
