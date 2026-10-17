@@ -375,7 +375,7 @@ export function Wizard() {
     agentReads: setupAgentReads,
     getRuntimeStatus: () => modelsApi.getRuntimeStatus(),
     getVibeAgent: (name, params) => api.getVibeAgent(name, { ...params, cache: false }),
-    detectCli: (binary) => api.detectCli(binary),
+    detectCli: (binary, backend) => api.detectCli(binary, backend),
   }), [api, setupAgentReads]);
   const retrySetup = useCallback(() => {
     // Order matters only in what it means: re-read the configuration, and let the

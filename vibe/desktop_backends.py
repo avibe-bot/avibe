@@ -24,6 +24,7 @@ import psutil
 
 from config import paths
 from config.atomic_io import write_atomic
+from vibe.cli_health import cli_version
 from core.process_isolation import (
     KILL_SIGNAL,
     PROCESS_IDENTITY_ENV,
@@ -1218,7 +1219,7 @@ def _verify_backend_executable(
             f"Installed {backend} executable could not be started.",
             code="executable_probe_failed",
         ) from exc
-    if result.returncode != 0 or not _version_from_output(result.stdout, result.stderr):
+    if result.returncode != 0 or not cli_version(backend, result.stdout, result.stderr):
         raise DesktopBackendError(
             f"Installed {backend} executable did not report a valid version.",
             code="executable_probe_failed",
@@ -1381,13 +1382,6 @@ def _remove_internal_directory(path: Path, root: Path) -> None:
         path.unlink(missing_ok=True)
     elif path.exists():
         shutil.rmtree(path)
-
-
-def _version_from_output(stdout: str | None, stderr: str | None) -> str | None:
-    import re
-
-    match = re.search(r"\d+(?:\.\d+){1,3}(?:[-+][\w.-]+)?", f"{stdout or ''} {stderr or ''}")
-    return match.group(0) if match else None
 
 
 def _bounded_output(stdout: str | None, stderr: str | None) -> str | None:

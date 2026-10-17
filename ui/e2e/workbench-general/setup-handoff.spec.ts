@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test';
 import type { Page } from '@playwright/test';
 
 import { DESKTOP, config, open, serveProduct } from './support';
+import { CONTRACT_VERSION } from '../../src/components/settings/models/types';
 
 /**
  * The handoff the wizard makes to the home, driven end to end through the real
@@ -22,23 +23,22 @@ import { DESKTOP, config, open, serveProduct } from './support';
  * waved off.
  *
  * Hermetic like the rest of the suite: every request is answered or refused by
- * `serveProduct`, nothing reaches a running service, and the one write the flow
- * makes (setup completion) is answered from the same fixture instance the reads
- * come from. Each test asserts nothing was refused.
+ * `serveProduct`, nothing reaches a running service, and the two config writes
+ * the flow makes (the provider bootstrap seed and setup completion) are answered
+ * from the same stateful fixture instance. Each test asserts nothing was refused.
  */
 
 const COMPOSER = 'Tell the agent what you want…';
 const DRAFT = '整理一下这周的发布说明';
 
 /**
- * One installed, connected assistant and two that are neither. The home's
- * default Agent runs on Codex, so Codex is the only backend that can
- * corroborate anything here — and a fixture where all three were ready could
- * not tell "asked about the right one" from "asked about any of them".
+ * One installed, connected assistant and one applied bootstrap assistant. The home's
+ * default Agent runs on Codex, so Codex is the only backend that can corroborate
+ * anything here — and the Hub supply fixture below still makes its route explicit.
  */
 const CONNECTIONS: Record<string, Record<string, unknown>> = {
   codex: { installed: true, enabled: true, auth: 'api_key', application: 'applied', ready: true, entry_eligible: true },
-  claude: { installed: false, enabled: false, auth: 'none', application: 'stopped', ready: false, entry_eligible: false },
+  claude: { installed: true, enabled: true, auth: 'api_key', application: 'applied', ready: true, entry_eligible: true },
   opencode: { installed: false, enabled: false, auth: 'none', application: 'stopped', ready: false, entry_eligible: false },
 };
 
@@ -52,6 +52,66 @@ const CONNECTIONS: Record<string, Record<string, unknown>> = {
  */
 const AGENT_MODEL = 'gpt-5';
 const PICKED_MODEL = 'gpt-5-codex';
+const HUB_SOURCE_ID = 'source-openai-fixture';
+
+const HUB_SOURCE = {
+  id: HUB_SOURCE_ID,
+  vendor: 'openai',
+  kind: 'api_key',
+  display_name: 'OpenAI',
+  protocol: 'openai_chat',
+  base_url: null,
+  supply_channel: 'hub',
+  billing: 'metered',
+  state: { status: 'active', retry_at: null, detail_key: null },
+  models: [{
+    id: AGENT_MODEL,
+    display_name: 'GPT-5',
+    origin: 'discovered',
+    reasoning_efforts: [],
+    reasoning_efforts_source: null,
+  }],
+  last_discovered_at: '2026-01-01T00:00:00Z',
+};
+
+const HUB_CODEX_SUPPLY = {
+  backend: 'codex',
+  cli_present: true,
+  mode: 'hub',
+  menu_kind: 'fixed',
+  sources: {
+    order: [HUB_SOURCE_ID],
+    eligibility: [{
+      source_id: HUB_SOURCE_ID,
+      eligible: true,
+      reason_key: null,
+      in_current_model_chain: true,
+      process_availability_reason: null,
+    }],
+  },
+  routes: {},
+  builtin_models: [],
+  catalog_models: [],
+  menu: null,
+  model_supply: [{ model_id: AGENT_MODEL, route_origin: 'automatic', chain_length: 1, has_runnable_hop: true }],
+  named_agents: [{ name: 'codex', effective_model_id: AGENT_MODEL, supply_status: 'ok', route_reason: null }],
+  supply_status: 'ok',
+};
+
+const FULL_AGENTS = {
+  codex: {
+    id: 'agent-codex', name: 'codex', display_name: 'Codex', description: null,
+    backend: 'codex', model: AGENT_MODEL, reasoning_effort: null, enabled: true,
+    archived: false, archived_at: null, source: 'builtin', updated_at: '2026-01-01T00:00:00Z',
+    system_prompt: null, metadata: { builtin_default: true }, created_at: '2026-01-01T00:00:00Z',
+  },
+  claude: {
+    id: 'agent-claude', name: 'claude', display_name: 'Claude Code', description: null,
+    backend: 'claude', model: null, reasoning_effort: null, enabled: true,
+    archived: false, archived_at: null, source: 'builtin', updated_at: '2026-01-01T00:00:00Z',
+    system_prompt: null, metadata: { builtin_default: true }, created_at: '2026-01-01T00:00:00Z',
+  },
+} as const;
 
 const backendOf = (url: string) => new URL(url).pathname.split('/').at(-2) ?? '';
 
@@ -61,7 +121,7 @@ const backendOf = (url: string) => new URL(url).pathname.split('/').at(-2) ?? ''
  * Connection reads answer at once until setup is persisted; every read AFTER
  * that is the home's own — the wizard is gone by then — and is held until the
  * test lets it answer. That boundary is the product's, not the harness's: the
- * completion write is exactly what separates the two.
+ * completion write is what separates the setup-owned reads from the home's post-handoff reads.
  */
 const withSetupApi = async (page: Page) => {
   const homeReads: string[] = [];
@@ -78,11 +138,12 @@ const withSetupApi = async (page: Page) => {
     }
     await route.fulfill({ json: { ok: true, backend, ...CONNECTIONS[backend] } });
   });
-  await page.route('**/api/backend/*/runtime', (route) => {
+  await page.route('**/api/backend/*/runtime*', (route) => {
     const backend = backendOf(route.request().url());
     return route.fulfill({
       json: {
         ok: true,
+        status: CONNECTIONS[backend]?.installed ? 'ok' : 'missing',
         name: backend,
         enabled: Boolean(CONNECTIONS[backend]?.enabled),
         cli_path: backend,
@@ -97,20 +158,43 @@ const withSetupApi = async (page: Page) => {
     });
   });
   await page.route('**/api/opencode/permission-status', (route) => route.fulfill({ json: { ok: true, permission_allowed: true } }));
-  // The Agent catalog with a model on the default Agent, and the model list its
-  // backend answers with — the product's own two reads for this, not a new
-  // contract. Stated here rather than in the shared harness: the capture specs
-  // assert against that fixture, and this is the one test about the model field.
-  await page.route('**/api/agents**', (route) => route.fulfill({
+  await page.route('**/api/models/sources', (route) => route.fulfill({ json: { ok: true, sources: [HUB_SOURCE] } }));
+  await page.route('**/api/models/migration/scan', (route) => route.fulfill({ json: { ok: true, scan: { items: [] } } }));
+  await page.route('**/api/models/runtime/status', (route) => route.fulfill({
     json: {
       ok: true,
-      agents: [
-        { id: 'agent-codex', name: 'codex', backend: 'codex', enabled: true, model: AGENT_MODEL },
-        { id: 'agent-claude', name: 'claude', backend: 'claude', enabled: true },
-      ],
-      default_agent_name: 'codex',
+      runtime: {
+        contract_version: CONTRACT_VERSION,
+        enabled: true,
+        host_platform: 'linux',
+        manifest: { name: 'cliproxyapi', resolution: 'resolved', version: 'fixture', source_sha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', assets: [] },
+        status: { installed_version: 'fixture', verified: true, health: 'ok' },
+      },
     },
   }));
+  await page.route('**/api/models/agents**', (route) => route.fulfill({ json: { ok: true, agents: [HUB_CODEX_SUPPLY] } }));
+  // Preserve the existing brief catalog response while answering the uncached full
+  // records that setup reads to identify its builtin targets.
+  await page.route('**/api/agents**', (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.startsWith('/api/agents/')) {
+      const name = path.split('/').at(-1) ?? '';
+      const agent = FULL_AGENTS[name as keyof typeof FULL_AGENTS];
+      return route.fulfill({ json: agent
+        ? { ok: true, default_agent_name: 'codex', agent }
+        : { ok: false, agent: null, default_agent_name: 'codex' } });
+    }
+    return route.fulfill({
+      json: {
+        ok: true,
+        agents: [
+          { id: 'agent-codex', name: 'codex', backend: 'codex', enabled: true, model: AGENT_MODEL },
+          { id: 'agent-claude', name: 'claude', backend: 'claude', enabled: true },
+        ],
+        default_agent_name: 'codex',
+      },
+    });
+  });
   await page.route('**/api/codex/models', (route) => route.fulfill({
     json: { ok: true, models: [AGENT_MODEL, PICKED_MODEL] },
   }));
@@ -121,15 +205,16 @@ const withSetupApi = async (page: Page) => {
       json: CONNECTIONS[name]?.installed ? { found: true, path: `/fixture/bin/${name}` } : { found: false },
     });
   });
-  // The ONE write this flow makes. Answering it here rather than letting the
-  // harness refuse it is what makes the completion real — and what it answers
-  // with is the same instance every read comes from.
+  // The two config writes this flow makes: the provider bootstrap seed is not
+  // completion, and only the actual completion write changes the readback state.
   await page.route('**/api/config', async (route) => {
     const request = route.request();
+    if (request.method() === 'GET') return route.fulfill({ json: { ...config('en'), setup_completed: completed } });
     if (request.method() !== 'POST') return route.fallback();
-    writes.push(request.postDataJSON());
-    completed = true;
-    return route.fulfill({ json: { ...config('en'), setup_completed: true } });
+    const payload = request.postDataJSON();
+    writes.push(payload);
+    if (payload?.setup_completed === true) completed = true;
+    return route.fulfill({ json: { ...config('en'), setup_completed: completed } });
   });
 
   return { homeReads, writes, release: () => release() };
@@ -154,9 +239,11 @@ const expectDefaultModel = async (page: Page) => {
 /** Walks the real wizard to the point where entering is the user's to do. */
 async function reachEntry(page: Page) {
   await open(page, '/setup');
-  await page.getByRole('button', { name: 'Get started' }).click();
-  await expect(page.getByRole('heading', { name: 'Connect AI. Get to work' })).toBeVisible();
-  const enter = page.getByRole('button', { name: 'Enter workspace' });
+  await page.getByRole('button', { name: 'Get started', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Add model providers', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Continue to assistants', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Choose your AI assistants', exact: true })).toBeVisible();
+  const enter = page.getByRole('button', { name: 'Enter workspace', exact: true });
   await expect(enter).toBeEnabled();
   return enter;
 }
@@ -174,7 +261,7 @@ test.describe('Setup handoff to the Workbench home', () => {
     // The home, reached by the wizard's own navigation.
     await expect(page).toHaveURL(/127\.0\.0\.1:5213\/$/);
     await expect(heroTitle(page)).toBeVisible();
-    expect(setup.writes).toEqual([{ setup_completed: true }]);
+    expect(setup.writes).toEqual([{}, { setup_completed: true }]);
 
     // The home asked the backend its Agent route actually runs — and nothing
     // else. While that read is open there is nothing corroborated, so the
@@ -200,12 +287,12 @@ test.describe('Setup handoff to the Workbench home', () => {
 
     // The Agent the setup left selected is the one the home offers, the model
     // the user picked is untouched by the announcement arriving over it, and
-    // setup completion did not rewrite either: the completion write is still
-    // the only one this flow has made.
+    // setup completion did not rewrite either: the bootstrap seed and completion
+    // remain the only two config writes this flow has made.
     await expect(agentTrigger(page)).toHaveText(/codex/);
     await expect(agentTrigger(page)).toContainText(PICKED_MODEL);
     await expect(projectChip(page)).toHaveClass(/bg-mint-soft/);
-    expect(setup.writes).toEqual([{ setup_completed: true }]);
+    expect(setup.writes).toEqual([{}, { setup_completed: true }]);
 
     // Dismissing is about the banner and nothing else: the home the user has
     // already started using is untouched.
@@ -229,9 +316,9 @@ test.describe('Setup handoff to the Workbench home', () => {
     expect(setup.homeReads).toHaveLength(readsBeforeReload);
     // And the model pick was a pick for this composer, never a write: the new
     // page inherits the Agent's own default again, which is the same reason the
-    // completion write is still the only request this flow has sent.
+    // The bootstrap seed and completion remain the only two config writes this flow has sent.
     await expectDefaultModel(page);
-    expect(setup.writes).toEqual([{ setup_completed: true }]);
+    expect(setup.writes).toEqual([{}, { setup_completed: true }]);
 
     expect(denied).toEqual([]);
   });

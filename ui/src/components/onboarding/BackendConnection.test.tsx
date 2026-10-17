@@ -55,8 +55,8 @@ beforeEach(() => {
   mock.api.saveClaudeAuth.mockResolvedValue({ ok: true, restart: { ok: true } });
   mock.api.cancelOAuthWeb.mockResolvedValue({ ok: true });
   mock.api.getConfig.mockResolvedValue({ agents: { claude: { enabled: false, cli_path: 'claude' }, codex: { enabled: false, cli_path: 'codex' } } });
-  mock.api.detectCli.mockImplementation(async (binary) => ({ found: true, path: binary }));
-  mock.api.getBackendRuntime.mockImplementation(async (backend) => ({ ok: true, name: backend, enabled: true, installed: true, process_status: 'running' }));
+  mock.api.detectCli.mockImplementation(async (binary) => ({ found: true, status: 'ok' as const, path: binary }));
+  mock.api.getBackendRuntime.mockImplementation(async (backend, path) => ({ ok: true, name: backend, cli_path: path, resolved_path: path, status: 'ok', enabled: true, installed: true, process_status: 'running' }));
   mock.api.claudeModels.mockResolvedValue({ ok: true, models: [] });
   mock.api.codexModels.mockResolvedValue({ ok: true, models: [] });
 });
@@ -266,7 +266,7 @@ describe('shared Settings and onboarding connection owner', () => {
       expect(mock.api.getBackendConnection).toHaveBeenCalledWith(backend);
     });
     it.each(['applied', 'failed', 'unreadable'] as const)(`${backend} Settings restart settlement reads fresh auth/application (%s)`, async (outcome) => {
-      mock.api.getBackendRuntime.mockResolvedValue({ ok: true, name: backend, enabled: true, installed: true, supports_restart: true, process_status: 'running' });
+      mock.api.getBackendRuntime.mockImplementation(async (_backend, path) => ({ ok: true, name: backend, cli_path: path, resolved_path: path, status: 'ok', enabled: true, installed: true, supports_restart: true, process_status: 'running' }));
       await mountParent();
       const form = within(document.querySelector('.backend-connection-form') as HTMLElement);
       fireEvent.change(form.getByLabelText(en.onboarding.connection.baseUrl), { target: { value: 'https://draft.invalid' } });
@@ -440,12 +440,12 @@ describe('shared Settings and onboarding connection owner', () => {
     mock.api.getConfig.mockResolvedValue({ agents: { codex: { enabled: true, cli_path: 'codex' } } });
     render(wrap(<CodexProviderConfig />));
     await screen.findByText(en.onboarding.connection.connected);
-    const detected = deferred<{ found: boolean; path: string }>();
+    const detected = deferred<{ found: boolean; path: string; status: 'ok' }>();
     mock.api.detectCli.mockReturnValue(detected.promise);
     fireEvent.click(screen.getByRole('button', { name: en.common.detect }));
     const input = screen.getByLabelText(en.agentDetection.cliPath) as HTMLInputElement;
     fireEvent.change(input, { target: { value: '/fixture/newer-path' } });
-    await act(async () => detected.resolve({ found: true, path: '/fixture/older-probe' }));
+    await act(async () => detected.resolve({ found: true, status: 'ok' as const, path: '/fixture/older-probe' }));
     expect(input.value).toBe('/fixture/newer-path');
     expect(mock.api.mutateConfig).not.toHaveBeenCalled();
   });
@@ -1378,8 +1378,14 @@ describe('connection dialog frame', () => {
     expect(rows()).toEqual([{ title: 'OpenAI', id: 'openai' }, { title: 'Qwen', id: 'alibaba-cn' }]);
 
     fireEvent.click(screen.getByRole('button', { name: /More providers \(2\)/ }));
-    // Both stay reachable under More, under what they were configured as.
-    expect(rows().slice(2)).toEqual([{ title: 'gemini', id: 'gemini' }, { title: '内部中转', id: 'dashscope' }]);
+    // Both stay reachable under More, under what they were configured as. Their
+    // display order follows the user's locale, so the identity contract is order-free.
+    const moreRows = rows().slice(2);
+    expect(moreRows).toHaveLength(2);
+    expect(moreRows).toEqual(expect.arrayContaining([
+      { title: 'gemini', id: 'gemini' },
+      { title: '内部中转', id: 'dashscope' },
+    ]));
     // And they are drawn as what they are — an address you supply, the same
     // mark the custom vendor has always used — not as the brand they sit next to.
     const mark = (id: string) => nodes().find((node) => node.querySelector('small')?.textContent === id)

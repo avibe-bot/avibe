@@ -860,7 +860,7 @@ def test_doctor_surfaces_configuration_recovery_warnings(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "_managed_dependencies_doctor_items", lambda **_kwargs: [])
     monkeypatch.setattr(cli, "_show_runtime_doctor_items", lambda **_kwargs: [])
     monkeypatch.setattr(cli, "_local_cli_installation_items", lambda: [])
-    monkeypatch.setattr(cli.api, "detect_cli", lambda _path: {})
+    monkeypatch.setattr(cli.api, "detect_cli", lambda _path, _backend: {"found": False, "path": None, "status": "missing"})
 
     result = cli._doctor()
 

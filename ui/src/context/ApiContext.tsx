@@ -606,12 +606,12 @@ export type ApiContextType = {
   createBindCode: (type: string, expiresAt?: string) => Promise<any>;
   deleteBindCode: (code: string) => Promise<any>;
   getFirstBindCode: () => Promise<any>;
-  detectCli: (binary: string) => Promise<any>;
+  detectCli: (binary: string, backend?: string) => Promise<CliDetectionResult>;
   installAgent: (name: string) => Promise<InstallResult>;
   listDependencies: (options?: DependencyReadOptions) => Promise<DependenciesResult>;
   installDependency: (dep: string) => Promise<InstallResult>;
   getBackendConnection: (name: AgentBackendId) => Promise<BackendConnectionState>;
-  getBackendRuntime: (name: string) => Promise<BackendRuntimeInfo>;
+  getBackendRuntime: (name: string, cliPath?: string) => Promise<BackendRuntimeInfo>;
   restartBackend: (name: string) => Promise<BackendRestartResult>;
   getCodexAuth: () => Promise<CodexAuthState>;
   saveCodexAuth: (payload: CodexAuthPayload) => Promise<CodexAuthSaveResult>;
@@ -1987,6 +1987,8 @@ export type BackendConnectionState = {
   ok: boolean;
   backend: AgentBackendId;
   installed: boolean;
+  /** Independent executable evidence; built-in backends do not have a CLI. */
+  cli_status?: CliStatus | null;
   enabled: boolean;
   // external: launch capability only; the native backend owns authentication.
   auth: 'subscription' | 'api_key' | 'external' | 'none' | 'unknown';
@@ -1999,6 +2001,17 @@ export type BackendConnectionState = {
   message?: string;
 };
 
+export type CliStatus = 'unknown' | 'ok' | 'missing' | 'broken';
+export type CliDetectionResult = {
+  found: boolean;
+  path: string | null;
+  status: CliStatus;
+  version?: string | null;
+  reason?: string | null;
+  /** The lifecycle projection shares this exact health observation. */
+  runtime?: BackendRuntimeInfo;
+};
+
 export type BackendRuntimeInfo = {
   ok: boolean;
   name?: string;
@@ -2007,6 +2020,8 @@ export type BackendRuntimeInfo = {
   cli_path?: string;
   resolved_path?: string | null;
   installed?: boolean;
+  status?: CliStatus;
+  reason?: string | null;
   current_version?: string | null;
   latest_version?: string | null;
   has_update?: boolean;
@@ -3568,7 +3583,15 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     createBindCode: (type, expiresAt) => postJson('/api/bind-codes', { type, expires_at: expiresAt }),
     deleteBindCode: (code) => deleteJson(`/api/bind-codes/${encodeURIComponent(code)}`),
     getFirstBindCode: () => getJson('/api/setup/first-bind-code'),
-    detectCli: (binary) => getJson(`/api/cli/detect?binary=${encodeURIComponent(binary)}`),
+    detectCli: async (binary, backend) => {
+      if (!backend) return getJson(`/api/cli/detect?binary=${encodeURIComponent(binary)}`);
+      // One owner observation supplies both the host status and its lifecycle
+      // chip; do not immediately launch a second independent version probe.
+      const runtime: BackendRuntimeInfo = await getJson(`/api/backend/${encodeURIComponent(backend)}/runtime?cli_path=${encodeURIComponent(binary)}`);
+      return { found: runtime.installed === true, path: runtime.resolved_path ?? null,
+        status: runtime.status ?? 'unknown', version: runtime.current_version,
+        reason: runtime.reason, runtime };
+    },
     installAgent: (name) => startAndPollAgentInstall(name),
     listDependencies: ({ ids, signal } = {}) => {
       const params = new URLSearchParams();
@@ -3579,7 +3602,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     },
     installDependency: (dep) => startAndPollDependencyInstall(dep),
     getBackendConnection: (name) => getJson(`/api/backend/${encodeURIComponent(name)}/connection`),
-    getBackendRuntime: (name) => getJson(`/api/backend/${encodeURIComponent(name)}/runtime`),
+    getBackendRuntime: (name, cliPath) => getJson(`/api/backend/${encodeURIComponent(name)}/runtime${cliPath === undefined ? '' : `?cli_path=${encodeURIComponent(cliPath)}`}`),
     restartBackend: (name) => postJson(`/api/backend/${encodeURIComponent(name)}/restart`, {}),
     getCodexAuth: () => getJson('/api/backend/codex/auth'),
     saveCodexAuth: (payload) => postJson('/api/backend/codex/auth', payload),

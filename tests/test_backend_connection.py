@@ -50,6 +50,15 @@ def native_safety(monkeypatch, _isolate_vibe_remote_home):
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(native_oauth_store, "_KEYCHAIN_STORE", native_oauth_store._FixtureKeychainStore())
+    # These tests isolate credential/application ownership. Native CLI execution
+    # is forbidden here; the detection owner supplies its independent evidence.
+    def observation(binary, backend=None):
+        path = api.resolve_cli_path(binary)
+        return api.CliHealth(bool(path), path, "ok" if path else "missing", "1.0.0" if path else None).payload()
+    async def async_observation(binary, backend=None):
+        return observation(binary, backend)
+    monkeypatch.setattr(api, "detect_cli", observation)
+    monkeypatch.setattr(api, "detect_cli_async", async_observation)
 
 
 @pytest.fixture
@@ -71,6 +80,16 @@ def connection(monkeypatch, tmp_path):
     monkeypatch.setattr(internal_client, "backend_application", probe)
     monkeypatch.setattr(runtime, "service_process_running", lambda: True)
     return SimpleNamespace(config=config, probe=probe, claude_auth_read=claude_auth_read)
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+def test_broken_cli_is_present_but_cannot_admit_even_with_applied_configuration(connection, monkeypatch, backend):
+    monkeypatch.setattr(api, "detect_cli_async", AsyncMock(return_value=api.CliHealth(True, "/fixture/broken", "broken", reason="probe_failed").payload()))
+    observed = asyncio.run(api.get_backend_connection(backend))
+    assert observed["installed"] is True and observed["cli_status"] == "broken"
+    assert observed["application"] == "applied"
+    assert not observed["ready"] and not observed["entry_eligible"]
+    assert observed["auth"] == "unknown"  # not mislabeled as a credential rejection
 
 
 @pytest.mark.parametrize("state,ready", [("applied", True), ("draining", False), ("failed", False), ("unavailable", False)])
@@ -167,7 +186,6 @@ def test_install_job_applies_persisted_path_before_admitting_connection(monkeypa
     assert not V2Config.load().load_warnings
     installed_path = str(tmp_path / "安装 后端/bin" / backend)
     monkeypatch.setattr(api, "resolve_cli_path", lambda _: installed_path)
-    monkeypatch.setattr(api, "_probe_cli_version", lambda _: "1.0.0")
     monkeypatch.setattr(api.subprocess, "Popen", lambda *a, **kw: SimpleNamespace(
         communicate=lambda **_: ("fixture installed", ""), returncode=0,
     ))

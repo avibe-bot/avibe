@@ -8,6 +8,7 @@ import os
 import platform
 import re
 import shutil
+import shlex
 import socket
 import ssl
 import stat
@@ -21,7 +22,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from http.client import HTTPSConnection
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 
 import yaml
 from sqlalchemy import select
@@ -70,10 +71,13 @@ from vibe.desktop_backends import (
     is_desktop_backend_path,
 )
 from vibe.desktop_runtime import is_private_desktop_runtime_path
+from vibe.cli_health import CliHealth, probe_cli, probe_cli_sync
+from vibe.cli_repair import REPAIR_PATH_CONFLICT, identify_repair_source, native_bootstrap_env
 from vibe.cli_paths import (
     _candidate_cli_paths,
     _command_env_for,
     _is_executable_file,
+    _ordered_cli_candidates,
     _npm_binary_candidates_for_prefix,
     _npm_global_binary_candidates,
     _npm_global_prefixes,
@@ -355,18 +359,40 @@ def resolve_cli_paths(
 
 
 
-def _codex_npm_install_env(npm_path: str, *, prefix: str | Path | None = None) -> dict[str, str]:
+def _codex_npm_install_env(npm_path: str, *, prefix: str | Path | None = None) -> dict[str, str] | None:
     env = _command_env_for(npm_path)
+    if prefix is None:
+        if os.name == "nt":
+            # Windows npm's active global prefix is the install command's
+            # destination. Do not let post-install PATH discovery stand in for
+            # an explicit target when this query cannot be completed.
+            prefix = _npm_prefix_for(npm_path)
+            if prefix is None:
+                return None
+        else:
+            prefix = Path.home() / ".local"
+
+    install_prefix = Path(os.path.expanduser(str(prefix)))
+    prefix_text = str(install_prefix)
+    env["NPM_CONFIG_PREFIX"] = prefix_text
     if os.name == "nt":
+        path_entries = [entry for entry in env.get("PATH", "").split(os.pathsep) if entry and entry != prefix_text]
+        env["PATH"] = os.pathsep.join([prefix_text, *path_entries])
         return env
 
-    install_prefix = Path(os.path.expanduser(str(prefix))) if prefix is not None else Path.home() / ".local"
-    prefix = str(install_prefix)
     prefix_bin = str(install_prefix / "bin")
     path_entries = [entry for entry in env.get("PATH", "").split(os.pathsep) if entry and entry != prefix_bin]
     env["PATH"] = os.pathsep.join([prefix_bin, *path_entries])
-    env["NPM_CONFIG_PREFIX"] = prefix
     return env
+
+
+def _declared_codex_npm_target(env: dict[str, str] | None) -> str | None:
+    """The destination the existing npm command policy explicitly declares."""
+    prefix = (env or {}).get("NPM_CONFIG_PREFIX")
+    if not prefix:
+        return None
+    root = Path(prefix).expanduser().absolute()
+    return str(root / ("codex.cmd" if os.name == "nt" else "bin/codex"))
 
 
 def _npm_prefix_from_node_modules_path(codex_path: str) -> Path | None:
@@ -446,49 +472,164 @@ def _is_npm_codex_install(codex_path: str) -> bool:
     return False
 
 
-def _is_homebrew_codex_install(codex_path: str) -> bool:
-    brew_path = resolve_cli_path("brew")
-    if not brew_path:
-        return False
-
+def _homebrew_prefix(brew_path: str) -> Path | None:
+    """Return the active Homebrew prefix reported by the selected brew binary."""
     try:
         result = subprocess.run(
-            [brew_path, "list", "--cask", "codex"],
+            [brew_path, "--prefix"],
             capture_output=True,
             text=True,
             timeout=10,
             env=_command_env_for(brew_path),
         )
     except Exception:
-        return False
+        return None
     if result.returncode != 0:
-        return False
-
+        return None
+    lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+    if len(lines) != 1:
+        return None
     try:
-        resolved = Path(codex_path).expanduser().resolve()
+        prefix = Path(os.path.expanduser(lines[0])).absolute()
+        brew = Path(brew_path).expanduser().absolute()
+    except OSError:
+        return None
+    if brew != prefix / "bin" / "brew":
+        return None
+    return prefix
+
+
+def _homebrew_codex_probe(brew_path: str) -> tuple[str, Path | None, Path | None]:
+    """Inspect the active installed Codex cask without guessing from paths.
+
+    Returns ``(state, prefix, payload)`` where state is ``installed``,
+    ``not_installed``, or ``unknown``.  The JSON ``--installed`` query is
+    supported by Homebrew and distinguishes an absent cask from a failed or
+    malformed metadata query without using the unsupported ``--prefix --cask``
+    command shape.
+    """
+    prefix = _homebrew_prefix(brew_path)
+    if prefix is None:
+        return "unknown", None, None
+    try:
+        result = subprocess.run(
+            [brew_path, "info", "--cask", "--json=v2", "--installed", "codex"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=_command_env_for(brew_path),
+        )
+    except Exception:
+        return "unknown", prefix, None
+    if result.returncode != 0:
+        return "unknown", prefix, None
+    try:
+        payload = json.loads(result.stdout or "")
+        if not isinstance(payload, dict):
+            return "unknown", prefix, None
+        casks = payload.get("casks")
+        if not isinstance(casks, list):
+            return "unknown", prefix, None
+        codex_casks = [cask for cask in casks if isinstance(cask, dict) and cask.get("token") == "codex"]
+        if not codex_casks:
+            return "not_installed", prefix, None
+        if len(codex_casks) != 1:
+            return "unknown", prefix, None
+        installed = codex_casks[0].get("installed")
+        if not isinstance(installed, str):
+            return "unknown", prefix, None
+        version = installed
+        version_path = Path(version)
+        if version_path.is_absolute() or len(version_path.parts) != 1 or version_path.name != version:
+            return "unknown", prefix, None
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return "unknown", prefix, None
+    return "installed", prefix, prefix / "Caskroom" / "codex" / version
+
+
+def _homebrew_codex_target(brew_path: str, selected_path: str) -> str | None:
+    """Return a selected Codex launcher attributable to the active cask payload."""
+    selected = Path(selected_path).expanduser()
+    if selected.name not in {"codex", "codex.exe"}:
+        return None
+    state, prefix, payload = _homebrew_codex_probe(brew_path)
+    if state != "installed" or prefix is None or payload is None:
+        return None
+    try:
+        selected_absolute = selected.absolute()
+        expected = (prefix / "bin" / selected.name).absolute()
+        if selected_absolute != expected or not selected.is_symlink():
+            return None
+        resolved = selected.resolve(strict=True)
+    except OSError:
+        return None
+    if not _path_is_relative_to(resolved, payload):
+        return None
+    return str(selected)
+
+
+def _homebrew_codex_path_is_plausible(
+    codex_path: str,
+    *,
+    brew_path: str | None = None,
+    prefix: Path | None = None,
+) -> bool:
+    """Recognize paths that could belong to a Homebrew Codex cask.
+
+    The selected path must stay attributable before a Homebrew upgrade is
+    allowed, but an unrelated custom executable must not be rejected merely
+    because another Homebrew installation exists. Stable Homebrew locations
+    and resolved ``Caskroom/codex`` payloads are the narrow ownership evidence
+    available without running the selected executable.
+    """
+    selected = Path(codex_path).expanduser()
+    if selected.name not in {"codex", "codex.exe"}:
+        return False
+    try:
+        selected_absolute = selected.absolute()
+        resolved = selected.resolve(strict=False)
     except OSError:
         return False
 
-    brew_prefixes: list[Path] = []
-    for command in ([brew_path, "--prefix"], [brew_path, "--prefix", "--cask"]):
-        try:
-            prefix_result = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=10,
-                env=_command_env_for(brew_path),
-            )
-        except Exception:
-            continue
-        if prefix_result.returncode != 0:
-            continue
-        prefix = (prefix_result.stdout or "").strip().splitlines()
-        if prefix:
-            brew_prefixes.append(Path(os.path.expanduser(prefix[-1])))
+    prefixes: list[Path] = []
+    if prefix is not None:
+        prefixes.append(prefix.expanduser().absolute())
+    if brew_path:
+        brew_absolute = Path(brew_path).expanduser().absolute()
+        if brew_absolute.name in {"brew", "brew.exe"} and brew_absolute.parent.name == "bin":
+            prefixes.append(brew_absolute.parent.parent)
 
-    brew_prefixes.extend([Path("/opt/homebrew"), Path("/usr/local"), Path("/home/linuxbrew/.linuxbrew")])
-    return any(_path_is_relative_to(resolved, prefix) for prefix in brew_prefixes)
+    for candidate in prefixes:
+        for parent in (candidate / "bin", candidate / "Caskroom" / "codex"):
+            try:
+                selected_absolute.relative_to(parent.absolute())
+                return True
+            except (OSError, ValueError):
+                continue
+
+    parts = resolved.parts
+    return any(
+        parts[index : index + 2] == ("Caskroom", "codex")
+        for index in range(len(parts) - 1)
+    )
+
+
+def _is_homebrew_codex_install(codex_path: str) -> bool:
+    brew_path = resolve_cli_path("brew")
+    return bool(brew_path and _homebrew_codex_target(brew_path, codex_path))
+
+
+def _codex_path_is_ambiguous_homebrew_target(
+    codex_path: str,
+    state: str,
+    *,
+    brew_path: str | None = None,
+    prefix: Path | None = None,
+) -> bool:
+    return (
+        state in {"installed", "unknown"}
+        and _homebrew_codex_path_is_plausible(codex_path, brew_path=brew_path, prefix=prefix)
+    )
 
 
 def _codex_cli_supports_update(codex_path: str) -> bool:
@@ -509,17 +650,27 @@ def _codex_cli_supports_update(codex_path: str) -> bool:
 
 
 def _codex_upgrade_command(existing_path: str) -> tuple[list[str], dict[str, str] | None] | dict:
-    if _is_homebrew_codex_install(existing_path):
-        brew_path = resolve_cli_path("brew")
-        if not brew_path:
+    brew_path = resolve_cli_path("brew")
+    npm_install = _is_npm_codex_install(existing_path)
+    if brew_path:
+        brew_state, brew_prefix, _ = _homebrew_codex_probe(brew_path)
+        homebrew_target = _homebrew_codex_target(brew_path, existing_path)
+        if homebrew_target is not None:
+            return [brew_path, "upgrade", "--cask", "codex"], None
+        if not npm_install and _codex_path_is_ambiguous_homebrew_target(
+            existing_path,
+            brew_state,
+            brew_path=brew_path,
+            prefix=brew_prefix,
+        ):
             return {
                 "ok": False,
-                "message": "Codex appears to be installed via Homebrew, but brew was not found. Please upgrade Codex manually.",
+                "code": "cli_target_unknown",
+                "message": "Codex Homebrew installation target could not be attributed to the selected executable; no upgrade was started.",
                 "output": None,
             }
-        return [brew_path, "upgrade", "--cask", "codex"], None
 
-    if _is_npm_codex_install(existing_path):
+    if npm_install:
         npm_path = resolve_cli_path("npm")
         if not npm_path:
             return {
@@ -528,7 +679,15 @@ def _codex_upgrade_command(existing_path: str) -> tuple[list[str], dict[str, str
                 "output": None,
             }
         prefix = _npm_prefix_for_existing_codex_install(npm_path, existing_path)
-        return [npm_path, "install", "-g", "@openai/codex"], _codex_npm_install_env(npm_path, prefix=prefix)
+        command_env = _codex_npm_install_env(npm_path, prefix=prefix)
+        if command_env is None:
+            return {
+                "ok": False,
+                "code": "cli_target_unknown",
+                "message": "Codex npm global prefix could not be determined; no upgrade was started.",
+                "output": None,
+            }
+        return [npm_path, "install", "-g", "@openai/codex"], command_env
 
     if _codex_cli_supports_update(existing_path):
         return [existing_path, "update"], None
@@ -5841,11 +6000,50 @@ def init_sessions() -> None:
     store.save()
 
 
-def detect_cli(binary: str) -> dict:
+def _cli_detection_target(binary: str, backend: str | None) -> tuple[str | None, str | None]:
+    if backend is None and binary in NATIVE_CLI_BACKENDS:
+        backend = binary
+    if backend is not None and not is_native_cli_backend(backend):
+        raise ValueError("Unknown native CLI backend")
+    # An explicit existing file that lacks execute permission is broken, not
+    # missing. Do not let discovery silently test a different installation.
+    expanded = Path(binary).expanduser() if binary else None
+    explicit = bool(binary) and (os.path.isabs(binary) or os.sep in binary or (os.altsep and os.altsep in binary))
+    if explicit and expanded is not None:
+        if expanded.is_file():
+            return backend, str(expanded.absolute())
+        if backend is not None:
+            return backend, None
     path = resolve_cli_path(binary)
-    if not path:
-        return {"found": False, "path": None}
-    return {"found": True, "path": path}
+    if path is None and backend is not None and not explicit:
+        # Discovery normally skips non-executable files. If no runnable candidate
+        # resolved, retain a present candidate so its failed launch is 'broken'.
+        candidates = _ordered_cli_candidates(
+            binary,
+            include_npm_global=True,
+            candidate_paths=_candidate_cli_paths,
+        )
+        path = next((str(p.absolute()) for p in candidates if p.is_file()), None)
+    return backend, path
+
+
+def detect_cli(binary: str, backend: str | None = None) -> dict:
+    """Synchronous CLI/installer entry; HTTP uses detect_cli_async directly."""
+    backend, path = _cli_detection_target(binary, backend)
+    if path is None:
+        return CliHealth(False, None, "missing", reason="not_found").payload()
+    if backend is None:
+        return CliHealth(True, path, "unknown").payload()
+    return probe_cli_sync(backend, path, env=_command_env_for(path)).payload()
+
+
+async def detect_cli_async(binary: str, backend: str | None = None) -> dict:
+    backend, path = await asyncio.to_thread(_cli_detection_target, binary, backend)
+    if path is None:
+        return CliHealth(False, None, "missing", reason="not_found").payload()
+    if backend is None:
+        return CliHealth(True, path, "unknown").payload()
+    return (await probe_cli(backend, path, env=_command_env_for(path))).payload()
 
 
 def check_cli_exec(path: str) -> dict:
@@ -7602,7 +7800,7 @@ def _agent_install_job_succeeded(result: dict, name: str) -> bool:
     return isinstance(restart, dict) and bool(restart.get("ok"))
 
 
-def _agent_runtime_fingerprint(name: str) -> tuple[str, str, str] | None:
+def _agent_runtime_fingerprint(name: str, detection: dict | None = None) -> tuple[str, str, str] | None:
     """Measure the configured CLI, not another installation found by name.
 
     Include the persisted launch path as well as its resolved target: changing
@@ -7614,13 +7812,14 @@ def _agent_runtime_fingerprint(name: str) -> tuple[str, str, str] | None:
         if config.load_warnings:
             return None
         configured_path = getattr(config.agents, name).cli_path or name
+        if detection is None:
+            detection = detect_cli(configured_path, name)
+        if detection.get("status") != "ok" or not detection.get("version") or not detection.get("path"):
+            return None
         resolved_path = resolve_cli_path(configured_path)
-        if not resolved_path:
+        if not resolved_path or os.path.abspath(resolved_path) != os.path.abspath(detection["path"]):
             return None
-        version = _probe_cli_version(resolved_path)
-        if not version:
-            return None
-        return configured_path, os.path.realpath(resolved_path), version
+        return configured_path, os.path.realpath(resolved_path), detection["version"]
     except Exception as exc:  # noqa: BLE001
         logger.debug("Agent runtime fingerprint probe failed for %s: %s", name, exc)
         return None
@@ -7666,9 +7865,14 @@ def start_agent_install_job(name: str) -> dict:
             refresh_supported = supports_runtime_refresh(name)
             runtime_before = _agent_runtime_fingerprint(name) if refresh_supported else None
             result = install_agent(name)
+            verified = result.get("detection")
+            if result.get("ok") and (not isinstance(verified, dict) or verified.get("status") != "ok"
+                                     or not verified.get("version") or verified.get("path") != result.get("path")):
+                result = {**result, "ok": False, "code": "cli_readback_failed",
+                          "message": backend_t("cliHealth.installReadbackFailed", _configured_backend_language())}
             if result.get("ok") and refresh_supported:
                 try:
-                    runtime_after = _agent_runtime_fingerprint(name)
+                    runtime_after = _agent_runtime_fingerprint(name, result.get("detection"))
                     if runtime_before is None or runtime_before != runtime_after:
                         result["restart"] = restart_backend(
                             name,
@@ -7833,7 +8037,13 @@ def _run_desktop_backend_install(name: str, truncate_output) -> dict:
             "message": _desktop_backend_install_message(name, exc.code),
             "output": truncate_output(exc.output) if exc.output else None,
         }
-    _invalidate_version_cache(name)
+    health = detect_cli(result.path, name)
+    if health["status"] != "ok":
+        # Publication/activation already committed. Report failed verification,
+        # but never remove the now-active generation as diagnostic cleanup.
+        return {"ok": False, "code": "cli_readback_failed",
+                "message": backend_t("cliHealth.installReadbackFailed", _configured_backend_language()),
+                "path": result.path, "output": None, "detection": health}
     return {
         "ok": True,
         "message": backend_t(
@@ -7842,7 +8052,8 @@ def _run_desktop_backend_install(name: str, truncate_output) -> dict:
             backend=_DESKTOP_BACKEND_LABELS.get(name, name),
         ),
         "path": result.path,
-        "version": result.version,
+        "version": health["version"],
+        "detection": health,
         "managed_by": "desktop",
         "output": truncate_output(result.output) if result.output else None,
     }
@@ -7873,17 +8084,83 @@ def install_agent(name: str) -> dict:
         lock.release()
 
 
+def _cli_repair_refusal(name: str, *, conflict: bool = False) -> dict:
+    return {
+        "ok": False,
+        "code": "repair_path_conflict" if conflict else "repair_source_unknown",
+        "message": backend_t("cliHealth.repairPathConflict" if conflict else "cliHealth.repairUnavailable", _configured_backend_language(), backend=display_name_for_backend(name)),
+        "output": None,
+        "path": None,
+    }
+
+
+def _repair_broken_cli(name: str, selected: str, truncate_output) -> dict:
+    source = identify_repair_source(name, selected)
+    if source is None:
+        return _cli_repair_refusal(name)
+    command_env = _command_env_for(selected)
+    if source.kind == "npm":
+        npm = resolve_cli_path("npm")
+        if not npm:
+            return _cli_repair_refusal(name)
+        cmd = [npm, "install", "--global", "--prefix", str(source.prefix), source.package]
+        command_env = _command_env_for(npm)
+    elif source.kind == "brew":
+        brew = source.prefix / "bin" / "brew"
+        if not _is_executable_file(brew):
+            return _cli_repair_refusal(name)
+        cmd = [str(brew), "reinstall", *(["--cask"] if source.cask else []), source.package]
+        command_env = _command_env_for(str(brew))
+    elif name == "opencode":
+        if os.name == "nt":
+            return _cli_repair_refusal(name)
+        bash, curl = resolve_cli_path("bash"), resolve_cli_path("curl")
+        if not bash or not curl:
+            return _cli_repair_refusal(name)
+        command_env = native_bootstrap_env(command_env, hide_directory=Path(source.destination).parent)
+        guard = f"if command -v opencode >/dev/null 2>&1; then printf '%s\\n' {shlex.quote(REPAIR_PATH_CONFLICT)} >&2; exit 73; fi; "
+        # Check before network activity, then in the actual non-login bootstrap
+        # shell. No startup hook/imported function can restore the old PATH.
+        consumer = [bash, "--noprofile", "--norc", "-s", "--", "--no-modify-path"]
+        download = shlex.join([curl, "-fsSL", *shlex.split(_CURL_INSTALL_RETRY_FLAGS), "https://opencode.ai/install"])
+        # Prefix the guard to the streamed script rather than sourcing a pipe
+        # through /dev/stdin (macOS bash may see an empty source before data arrives).
+        script = "set -euo pipefail; " + guard + "{ printf '%s\\n' " + shlex.quote(guard) + "; " + download + "; } | " + shlex.join(consumer)
+        cmd = [bash, "--noprofile", "--norc", "-c", script]
+    elif name == "claude":
+        command_env = native_bootstrap_env(command_env)
+        if os.name == "nt":
+            powershell = resolve_cli_path("powershell")
+            if not powershell:
+                return _cli_repair_refusal(name)
+            cmd = [powershell, "-NoProfile", "-Command", "irm https://claude.ai/install.ps1 -ErrorAction Stop | iex"]
+        else:
+            bash, curl = resolve_cli_path("bash"), resolve_cli_path("curl")
+            if not bash or not curl:
+                return _cli_repair_refusal(name)
+            cmd = [bash, "--noprofile", "--norc", "-c", "set -euo pipefail; " + shlex.join([curl, "-fsSL", *shlex.split(_CURL_INSTALL_RETRY_FLAGS), "https://claude.ai/install.sh"]) + " | " + shlex.join([bash, "--noprofile", "--norc"])]
+    else:
+        return _cli_repair_refusal(name)
+    return _run_install_command(name, cmd, truncate_output, mode="repair", env=command_env, expected_path=source.destination)
+
+
+def _native_vendor_install_target(name: str) -> str | None:
+    home = Path.home()
+    if name == "opencode":
+        return str(home / ".opencode" / "bin" / ("opencode.exe" if os.name == "nt" else "opencode"))
+    if name == "claude":
+        return str(home / ".local" / "bin" / ("claude.exe" if os.name == "nt" else "claude"))
+    return None
+
+
 def _install_agent(name: str) -> dict:
     """Install (or upgrade) an agent CLI tool.
 
-    Upgrade path (binary already on disk): keep the user's install method
-    stable. Without this, our previous flow bricked Claude installs whenever
-    the user's bootstrap method differed from our hard-coded installer URL —
-    e.g. the Dockerfile bootstraps via ``npm install -g
-    @anthropic-ai/claude-code`` but our upgrade ran ``curl
-    https://claude.ai/install.sh | bash``, which migrated the binary to
-    ``~/.local/bin/claude`` and left V2Config pointing at the now-empty
-    ``/usr/local/bin/claude``.
+    Existing installations keep their install method and their selected
+    executable. Post-upgrade verification is bound before invoking the updater;
+    a missing launcher cannot be replaced by an unrelated same-name discovery.
+    An unattributed relocation fails verification rather than silently changing
+    the configured selection.
 
     Upgrade commands:
       - ``claude update``   — auto-detects npm-global vs native install
@@ -7960,7 +8237,25 @@ def _install_agent(name: str) -> dict:
                 # its place -- the message is about that backend.
                 "path": private_runtime_path,
             }
+    # Preserve the app-private ownership boundary before any global probe or
+    # repair planner can discover a non-executable user installation.
+    if existing_path is None and is_desktop_managed_runtime():
+        return _run_desktop_backend_install(name, _truncate_output)
+    health = detect_cli(configured_path, name)
+    if health["status"] in {"broken", "unknown"} or (health["status"] == "missing" and configured_path != name):
+        if health["status"] == "unknown":
+            return _cli_repair_refusal(name)
+        return _repair_broken_cli(name, health["path"] or configured_path, _truncate_output)
+    existing_path = health["path"]
     if existing_path:
+        readback_validator = None
+        if name == "codex":
+            brew_path = resolve_cli_path("brew")
+            homebrew_target = _homebrew_codex_target(brew_path, existing_path) if brew_path else None
+            if homebrew_target is not None:
+                readback_validator = lambda path, brew=brew_path, expected=homebrew_target: (
+                    path == expected and _homebrew_codex_target(brew, path) == expected
+                )
         if name == "claude":
             cmd = [existing_path, "update"]
             command_env = None
@@ -7978,13 +8273,18 @@ def _install_agent(name: str) -> dict:
         else:
             cmd = None
         if cmd is not None:
+            # Codex's existing npm policy may explicitly select a user prefix.
+            # Only that command-declared destination can certify a relocation.
+            declared_target = _declared_codex_npm_target(command_env) if name == "codex" else None
             return _run_install_command(
                 name,
                 cmd,
                 _truncate_output,
                 mode="upgrade",
                 env=command_env,
-                resolve_from=configured_path,
+                expected_path=declared_target or existing_path,
+                preserve_selected_path=existing_path if declared_target else None,
+                readback_validator=readback_validator,
             )
 
     # A damaged private toolchain must fail closed. Falling through here would
@@ -7994,6 +8294,7 @@ def _install_agent(name: str) -> dict:
         return _run_desktop_backend_install(name, _truncate_output)
 
     command_env: dict[str, str] | None = None
+    expected_path: str | None = None
 
     if name == "opencode":
         # OpenCode: use curl installer (not supported on Windows)
@@ -8010,6 +8311,7 @@ def _install_agent(name: str) -> dict:
                 return {"ok": False, "message": error, "output": None}
         # Use pipefail to ensure curl failures are detected
         cmd = _curl_installer_command("https://opencode.ai/install", "bash")
+        expected_path = _native_vendor_install_target(name)
     elif name == "claude":
         # Claude Code: platform-specific installer
         if system == "windows":
@@ -8018,6 +8320,7 @@ def _install_agent(name: str) -> dict:
             if error:
                 return {"ok": False, "message": error, "output": None}
             cmd = ["powershell", "-NoProfile", "-Command", "irm https://claude.ai/install.ps1 -ErrorAction Stop | iex"]
+            expected_path = _native_vendor_install_target(name)
         else:
             # macOS/Linux: use bash with pipefail
             for binary in ["curl", "bash"]:
@@ -8025,6 +8328,7 @@ def _install_agent(name: str) -> dict:
                 if error:
                     return {"ok": False, "message": error, "output": None}
             cmd = _curl_installer_command("https://claude.ai/install.sh", "bash")
+            expected_path = _native_vendor_install_target(name)
     elif name == "codex":
         # Fresh installs use npm because it is the documented cross-platform
         # package source that does not require OS package-manager privileges.
@@ -8032,6 +8336,14 @@ def _install_agent(name: str) -> dict:
         if npm_path:
             cmd = [npm_path, "install", "-g", "@openai/codex"]
             command_env = _codex_npm_install_env(npm_path)
+            if command_env is None:
+                return {
+                    "ok": False,
+                    "code": "cli_target_unknown",
+                    "message": "Codex npm global prefix could not be determined; no installation was started.",
+                    "output": None,
+                }
+            expected_path = _declared_codex_npm_target(command_env)
         else:
             return {
                 "ok": False,
@@ -8041,7 +8353,10 @@ def _install_agent(name: str) -> dict:
     else:
         return {"ok": False, "message": f"Unknown agent: {name}", "output": None}
 
-    return _run_install_command(name, cmd, _truncate_output, mode="install", env=command_env)
+    return _run_install_command(
+        name, cmd, _truncate_output, mode="install", env=command_env,
+        expected_path=expected_path,
+    )
 
 
 def _curl_installer_command(url: str, consumer: str) -> list[str]:
@@ -8199,13 +8514,16 @@ def _run_install_command(
     mode: str = "install",
     env: dict[str, str] | None = None,
     resolve_from: str | None = None,
+    expected_path: str | None = None,
+    preserve_selected_path: str | None = None,
+    readback_validator: Callable[[str], bool] | None = None,
 ) -> dict:
     """Shared subprocess + post-success bookkeeping for install / upgrade.
 
     Factored out so the self-update branch (existing binary) and the
     fresh-install branch (curl/npm bootstrap) share identical post-run
-    handling: log the result, invalidate the version cache, capture the
-    new install path, and persist it to V2Config when it changed.
+    handling: log the result, verify a fresh executable observation, capture
+    its path, and persist it to V2Config only after verification.
     """
     label = "Upgrading" if mode == "upgrade" else "Installing"
     try:
@@ -8226,8 +8544,8 @@ def _run_install_command(
             signal_process_tree(process, KILL_SIGNAL, logger, f"{name} {mode}")
             stdout, stderr = process.communicate(timeout=10)
             output = (stdout or "") + ("\n" + stderr if stderr else "")
-            # A killed installer can leave the CLI half-replaced; re-probe it.
-            _invalidate_version_cache(name)
+            # A killed installer can leave the CLI half-replaced; the next
+            # detection observes it afresh rather than using an old version.
             return _install_failure_result(
                 name,
                 mode,
@@ -8240,20 +8558,47 @@ def _run_install_command(
         result = subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
         raw_output = (result.stdout + ("\n" + result.stderr if result.stderr else "")).strip()
         output = truncate_output(raw_output)
-        # Success or failure, the command may have replaced the CLI: the chip
-        # refreshes runtime right after this, and must read the new
-        # ``--version``, not the 30s-cached value.
-        _invalidate_version_cache(name)
+        # Exit zero alone does not certify the executable it left behind.
         if result.returncode == 0:
-            installed_path = resolve_cli_path(resolve_from or name)
-            if installed_path:
-                logger.info("Agent %s %s succeeded at %s", name, mode, installed_path)
-            else:
-                logger.warning(
-                    "Agent %s %s command succeeded but CLI path was not detected",
-                    name,
-                    mode,
-                )
+            selected = expected_path if expected_path is not None else resolve_cli_path(resolve_from or name)
+            if expected_path and preserve_selected_path and _is_executable_file(Path(expected_path)):
+                try:
+                    # Keep a configured alias only while it still names the
+                    # exact artifact at this operation's declared destination.
+                    if os.path.samefile(expected_path, preserve_selected_path):
+                        selected = preserve_selected_path
+                except OSError:
+                    pass
+            # An install must certify its exact destination, never a different
+            # healthy installation found by missing-path fallback.
+            health = None
+            if is_native_cli_backend(name):
+                health = detect_cli(selected, name) if selected else CliHealth(False, None, "missing", reason="not_found").payload()
+            installed_path = health["path"] if health is not None else selected
+            if health is not None and health["status"] != "ok":
+                return {
+                    "ok": False,
+                    "code": "cli_readback_failed",
+                    "message": backend_t("cliHealth.installReadbackFailed", _configured_backend_language()),
+                    "path": installed_path,
+                    "output": None,
+                    "detection": health,
+                }
+            if readback_validator is not None:
+                try:
+                    identity_ok = bool(readback_validator(installed_path))
+                except Exception:
+                    identity_ok = False
+                if not identity_ok:
+                    return {
+                        "ok": False,
+                        "code": "cli_readback_failed",
+                        "message": backend_t("cliHealth.installReadbackFailed", _configured_backend_language()),
+                        "path": installed_path,
+                        "output": None,
+                        "detection": health,
+                    }
+            logger.info("Agent %s %s succeeded at %s", name, mode, installed_path)
 
             # Persist real Agent backend CLI paths to V2Config so the next
             # ``get_backend_runtime`` reads them directly instead of relying
@@ -8267,7 +8612,10 @@ def _run_install_command(
                 "message": f"{name} {mode}d successfully" if mode == "install" else f"{name} upgraded successfully",
                 "path": installed_path,
                 "output": output,
+                "detection": health,
             }
+        if mode == "repair" and result.returncode == 73 and REPAIR_PATH_CONFLICT in raw_output:
+            return _cli_repair_refusal(name, conflict=True)
         logger.warning("Agent %s %s failed: %s", name, mode, output)
         return _install_failure_result(
             name,
@@ -10313,59 +10661,13 @@ def start_dependency_install_job(dep: str) -> dict:
 # Backend lifecycle (version probe, latest check, restart)
 # =============================================================================
 
-# The *locally installed* version, keyed by (backend, cli_path) so answers stay
-# tied to the binary they came from. Trade freshness for fewer probes during
-# rapid popover opens. Tuned for human pacing (seconds), not bots.
-#
-# In memory only, deliberately: this answers "what did the binary at this path
-# just print", which a new process can re-measure in milliseconds and which a
-# stale file could get wrong after an install. The *published* version is the
-# expensive one, and :mod:`core.latest_version_cache` persists that instead.
-#
-# The UI server handles requests on multiple threads, so reads, writes, and
-# invalidation can race. A single lock serializes mutation — fast in practice
-# (the cache holds at most a handful of entries), and avoids
-# ``RuntimeError: dictionary changed size during iteration`` during the
-# scan in ``_invalidate_version_cache``.
-_BACKEND_CACHE_LOCK = __import__("threading").Lock()
-_BACKEND_VERSION_CACHE: dict[tuple[str, str], tuple[float, str | None]] = {}
-_BACKEND_VERSION_TTL_SECONDS = 30.0
+# Published registry versions retain their cache; local health/version is one
+# fresh observation because dependencies may change without touching the CLI.
 _BACKEND_RUNTIME_USER_AGENT = "avibe/backend-runtime"
 _ASKILL_AUTO_UPDATE_ENV = "VIBE_ASKILL_AUTO_UPDATE"
 _ASKILL_SKIP_ENV = "VIBE_INSTALL_SKIP_ASKILL"
 _TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 _FALSY_ENV_VALUES = {"0", "false", "no", "off"}
-
-def _parse_semver(text: str) -> str | None:
-    """Extract the first dotted-numeric version token from *text*.
-
-    Handles outputs like ``opencode 1.2.3``, ``codex-cli 0.77.1 (build ...)``
-    and ``v1.0.0`` uniformly. Returns ``None`` if no version is found.
-    """
-    if not text:
-        return None
-    match = re.search(r"\d+(?:\.\d+){1,3}(?:[-+][\w.\-]+)?", text)
-    return match.group(0) if match else None
-
-
-def _probe_cli_version(cli_path: str | None) -> str | None:
-    """Run ``<cli> --version`` with a short timeout and return the parsed version."""
-    if not cli_path:
-        return None
-    try:
-        result = subprocess.run(
-            [cli_path, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            env=_command_env_for(cli_path if os.path.isabs(cli_path) else None),
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
-        logger.debug("CLI version probe failed for %s: %s", cli_path, exc)
-        return None
-    output = (result.stdout or "") + " " + (result.stderr or "")
-    return _parse_semver(output.strip())
-
 
 def _http_opener_for_best_effort_probe():
     try:
@@ -10423,30 +10725,6 @@ def _fetch_latest_version(name: str) -> str | None:
     if not isinstance(raw, str):
         return None
     return raw.lstrip("v").strip() or None
-
-
-def _cached_version(name: str, cli_path: str | None) -> str | None:
-    key = (name, cli_path or "")
-    with _BACKEND_CACHE_LOCK:
-        cached = _BACKEND_VERSION_CACHE.get(key)
-    if cached and time.time() - cached[0] < _BACKEND_VERSION_TTL_SECONDS:
-        return cached[1]
-    # Probe outside the lock — CLI invocation can block on subprocess for
-    # seconds, and we don't want unrelated lookups stuck behind it.
-    version = _probe_cli_version(cli_path)
-    with _BACKEND_CACHE_LOCK:
-        _BACKEND_VERSION_CACHE[key] = (time.time(), version)
-    return version
-
-
-def _invalidate_version_cache(name: str) -> None:
-    """Drop all cached version entries for *name* across cli paths."""
-    with _BACKEND_CACHE_LOCK:
-        # Snapshot keys under the lock so the subsequent ``pop`` calls can
-        # never observe a partially mutated dict from a concurrent writer.
-        stale = [k for k in _BACKEND_VERSION_CACHE if k[0] == name]
-        for key in stale:
-            _BACKEND_VERSION_CACHE.pop(key, None)
 
 
 def _cached_latest(name: str) -> str | None:
@@ -10720,12 +10998,11 @@ async def get_backend_connection(name: str) -> dict:
     enabled = builtin or bool(backend_config.enabled)
     supply_mode = config.model_hub.agents[name].mode
     native = is_native_cli_backend(name)
-    installed = (
-        await asyncio.to_thread(resolve_cli_path, backend_config.cli_path or name) is not None
-        if native else True
-    )
+    cli_health = await detect_cli_async(backend_config.cli_path or name, name) if native else None
+    installed = cli_health["found"] if cli_health is not None else True
     result = {
         "ok": True, "backend": name, "installed": installed, "enabled": enabled,
+        "cli_status": cli_health["status"] if cli_health is not None else None,
         "supply_mode": supply_mode,
         "auth": "unknown", "application": "unknown", "ready": False,
         "entry_eligible": False,
@@ -10756,7 +11033,7 @@ async def get_backend_connection(name: str) -> dict:
     if receipt and not receipt.get("ok") and result["application"] != "stopped":
         result["application"] = "failed"
         result["message"] = receipt.get("message") or receipt.get("error")
-    if not installed or config.load_warnings:
+    if not installed or config.load_warnings or (cli_health is not None and cli_health["status"] != "ok"):
         return result
     if native and name in await asyncio.to_thread(pending_native_backends, paths.get_state_dir() / "native-takeover"):
         return result
@@ -10811,27 +11088,33 @@ async def get_backend_connection(name: str) -> dict:
     return result
 
 
-def get_backend_runtime(name: str) -> dict:
-    """Return live lifecycle info for one backend.
+def get_backend_runtime(name: str, cli_path: str | None = None) -> dict:
+    """Synchronous non-HTTP entry; the HTTP route awaits the same owner."""
+    return asyncio.run(get_backend_runtime_async(name, cli_path))
 
-    Versions are cached for short windows so popovers and re-renders do not
-    fan out into many CLI invocations or registry HTTP calls.
+
+async def get_backend_runtime_async(name: str, cli_path: str | None = None) -> dict:
+    """Lifecycle projection bound to the selected path's fresh CLI observation.
+
+    Registry lookups retain their cache. Health is not cached by launcher stat:
+    replacing an npm platform package can leave that stat entirely unchanged.
     """
     if not is_native_cli_backend(name):
         return {"ok": False, "error": f"Unknown backend: {name}"}
 
     try:
-        config = V2Config.load()
+        config = await asyncio.to_thread(V2Config.load)
     except Exception as exc:
         logger.debug("Failed to load config for backend runtime: %s", exc)
         config = None
 
     backend_cfg = getattr(getattr(config, "agents", None), name, None) if config else None
     enabled = bool(getattr(backend_cfg, "enabled", False))
-    configured_path = getattr(backend_cfg, "cli_path", "") or name
+    configured_path = (cli_path or name) if cli_path is not None else (getattr(backend_cfg, "cli_path", "") or name)
 
-    resolved_path = resolve_cli_path(configured_path)
-    installed = resolved_path is not None
+    health = await detect_cli_async(configured_path, name)
+    resolved_path = health["path"]
+    installed = health["found"]
     private_backend = resolved_path is not None and is_desktop_backend_path(resolved_path)
     legacy_bundled_codex = (
         name == "codex"
@@ -10844,14 +11127,14 @@ def get_backend_runtime(name: str) -> dict:
         else None
     )
 
-    current_version = _cached_version(name, resolved_path) if installed else None
-    latest_version = None if legacy_bundled_codex else _cached_latest(name)
+    current_version = health["version"]
+    latest_version = None if legacy_bundled_codex else await asyncio.to_thread(_cached_latest, name)
     has_update = _compare_versions(current_version, latest_version)
 
     if name == "opencode":
-        process_status = _opencode_process_status() if installed else "stopped"
+        process_status = await asyncio.to_thread(_opencode_process_status) if installed else "stopped"
     elif name == "codex":
-        process_status = _codex_process_status(resolved_path) if installed else "stopped"
+        process_status = await asyncio.to_thread(_codex_process_status, resolved_path) if installed else "stopped"
     elif name == "claude":
         process_status = "unknown"
     else:
@@ -10865,6 +11148,8 @@ def get_backend_runtime(name: str) -> dict:
         "cli_path": configured_path,
         "resolved_path": resolved_path,
         "installed": installed,
+        "status": health["status"],
+        "reason": health["reason"],
         "current_version": current_version,
         "latest_version": latest_version,
         "has_update": has_update,
@@ -11029,7 +11314,6 @@ def _restart_backend(name: str, *, metadata: Optional[dict[str, Any]] = None) ->
         return {"ok": True, "apply_on_next_start": True, "message": backend_t("backendConnection.applyOnStart", lang=language)}
 
     controller_handled, controller_error = _request_controller_restart(name, metadata=metadata)
-    _invalidate_version_cache(name)
 
     if controller_handled:
         if controller_error:

@@ -22,8 +22,8 @@ class JsonHttpClient:
             data = json.dumps(body).encode()
             headers["Content-Type"] = "application/json"
 
+        headers["Origin"] = self.base_url
         if method in {"POST", "PUT", "PATCH", "DELETE"}:
-            headers["Origin"] = self.base_url
             headers["X-Vibe-CSRF-Token"] = self.csrf_token(timeout=timeout)
 
         request = urllib.request.Request(f"{self.base_url}{path}", data=data, headers=headers, method=method)

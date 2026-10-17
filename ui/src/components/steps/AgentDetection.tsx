@@ -23,7 +23,7 @@ import type { BackendId } from '../visual';
 import { BackendLifecycleChip, type BackendLifecycleVisual } from '../settings/BackendLifecycleChip';
 import { ToggleSwitch } from '../settings/SettingsPrimitives';
 import { BackendConnectionDialog } from '../onboarding/BackendConnectionDialog';
-import type { BackendConnectionState } from '@/context/ApiContext';
+import type { BackendConnectionState, BackendRuntimeInfo, CliStatus } from '@/context/ApiContext';
 import { setConfigField } from '@/lib/configMutations';
 import { OpencodePermissionSetup } from '../settings/shared/OpencodePermissionSetup';
 import { hubSupplyBlocks, modelHubEnabledFromConfig } from '../settings/models/featureFlags';
@@ -66,7 +66,8 @@ interface AgentDetectionProps {
 type AgentState = {
   enabled: boolean;
   cli_path: string;
-  status?: 'unknown' | 'ok' | 'missing';
+  status?: CliStatus;
+  detectedRuntime?: BackendRuntimeInfo;
 };
 
 /** Choosing a built-in assistant's model, a model its list already holds is as much a
@@ -313,7 +314,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const [chipRefresh, setChipRefresh] = useState<Record<string, number>>({});
   const pendingInstalls = useRef(new Set<string>());
   const detectionTokens = useRef<Record<string, number>>({});
-  const isMissing = (agent: AgentState) => agent.status === 'missing';
+  const needsInstall = (agent: AgentState) => agent.status === 'missing' || agent.status === 'broken';
 
   const refreshConnection = useCallback(async (name: AgentBackendId, { acknowledge = false }: ConnectionRefresh = {}) => {
     if (!activeRef.current || pendingEnable.current[name] !== undefined) return;
@@ -409,11 +410,12 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     const token = (detectionTokens.current[name] || 0) + 1;
     detectionTokens.current[name] = token;
     setDetectingAgents((prev) => ({ ...prev, [name]: true }));
+    setAgents((prev) => ({ ...prev, [name]: { ...prev[name], status: 'unknown', detectedRuntime: undefined } }));
     setDetectionErrors((prev) => ({ ...prev, [name]: '' }));
     try {
-      const result = await api.detectCli(binary || name);
+      const result = await api.detectCli(binary || name, name);
       if (epoch !== activation.current || detectionTokens.current[name] !== token) return;
-      if (result.found) {
+      if (result.status === 'ok') {
         setInstallResults((prev) => {
           if (!prev[name] || prev[name].ok) return prev;
           const next = { ...prev };
@@ -427,7 +429,8 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
         [name]: {
           ...prev[name],
           cli_path: result.path || prev[name].cli_path,
-          status: result.found ? 'ok' : 'missing',
+          status: result.status,
+          detectedRuntime: result.runtime,
         },
       }));
     } catch (error) {
@@ -437,6 +440,15 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     } finally {
       if (detectionTokens.current[name] === token) setDetectingAgents((prev) => ({ ...prev, [name]: false }));
     }
+  };
+
+  const adoptObservation = (name: string, observation: BackendRuntimeInfo) => {
+    if (!activeRef.current) return;
+    setAgents((prev) => {
+      if (observation.cli_path !== (prev[name].cli_path || name)) return prev;
+      return { ...prev, [name]: { ...prev[name], cli_path: observation.resolved_path || prev[name].cli_path,
+        status: observation.status || 'unknown', detectedRuntime: observation } };
+    });
   };
 
   const detectAll = async () => {
@@ -817,7 +829,9 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
                     enabled={agent.enabled}
                     cliStatus={active ? agent.status || 'unknown' : 'unknown'}
                     cliPath={agent.cli_path}
+                    detectedRuntime={active ? agent.detectedRuntime : undefined}
                     onChanged={async (info) => {
+                      if (info?.observation) { adoptObservation(name, info.observation); return; }
                       // After a successful (re)install the chip hands back the
                       // path the installer landed at — adopt it before
                       // detecting, otherwise a stale ``agent.cli_path`` from
@@ -874,7 +888,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
                     />
                   )}
 
-                  {isMissing(agent) && (
+                  {needsInstall(agent) && (
                     <>
                       <Button
                         type="button"
@@ -890,13 +904,13 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
                         )}
                         {installingAgents[name]
                           ? t('agentDetection.installing')
-                          : t('agentDetection.installAgentNamed', { name: meta.label })}
+                          : t(agent.status === 'broken' ? 'backendLifecycle.reinstall' : 'agentDetection.installAgentNamed', { name: meta.label })}
                       </Button>
                     </>
                   )}
                 </div>
 
-                {isMissing(agent) && installResults[name] && (
+                {needsInstall(agent) && installResults[name] && (
                   <InstallOutcome result={installResults[name]} className="text-[11px]" />
                 )}
               </div>
@@ -987,7 +1001,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           const hubRoute = mode === 'hub';
           return <AssistantRow key={name} backend={name} status={agent.status || 'unknown'}
             installing={!!installingAgents[name]} detecting={!!detectingAgents[name]} error={error}
-            onInstall={() => void installAgent(name, mode === 'hub')} onDetect={() => void detect(name, agent.cli_path)}
+            onInstall={() => void installAgent(name, mode === 'hub' && agent.status === 'missing')} onDetect={() => void detect(name, agent.cli_path)}
             onConfigure={() => {
               if (!mode) return;
               if (hubRoute) {
@@ -1032,6 +1046,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
               onClick={() => toggle(name, !agent.enabled)} />}
             lifecycle={<BackendLifecycleChip name={name} enabled={agent.enabled} cliStatus={active ? agent.status || 'unknown' : 'unknown'}
               cliPath={agent.cli_path}
+                    detectedRuntime={active ? agent.detectedRuntime : undefined}
               readyLabel={t('onboarding.setup.enabled')}
               disabledLabel={t('onboarding.setup.notEnabled')}
               refreshKey={chipRefresh[name]}
@@ -1042,6 +1057,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
                 if (!pending) void refreshConnection(name);
               }}
               onChanged={async (info) => {
+                if (info?.observation) { adoptObservation(name, info.observation); return; }
                 clearInstallResult(name);
                 const installedPath = info?.installedPath || agent.cli_path;
                 setAgents((previous) => ({ ...previous, [name]: { ...previous[name], cli_path: installedPath } }));

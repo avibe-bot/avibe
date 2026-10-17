@@ -1394,6 +1394,11 @@ def _is_direct_loopback_connection() -> bool:
     return not _has_forwarded_metadata() and _is_loopback_peer() and _is_loopback_host(request.host)
 
 
+def _same_origin_browser_request() -> bool:
+    source = _request_origin(request.headers.get("Origin")) or _request_origin(request.headers.get("Referer"))
+    return bool(source and _same_origin(source, request.host_url.rstrip("/")))
+
+
 def _is_direct_loopback_browser_request() -> bool:
     """Strict same-origin browser admission for local author attribution.
 
@@ -1402,25 +1407,25 @@ def _is_direct_loopback_browser_request() -> bool:
     directly connected over loopback and present a same-origin header.
     """
 
-    if not _is_direct_loopback_connection():
-        return False
-    origin = _request_origin(request.headers.get("Origin")) or _request_origin(request.headers.get("Referer"))
-    return bool(origin and _same_origin(origin, request.host_url.rstrip("/")))
+    return _is_direct_loopback_connection() and _same_origin_browser_request()
 
 
 def _trusted_browser_author_key() -> str | None:
     """Resolve the authenticated browser author for local or remote requests.
 
-    Direct loopback keeps the install-local identity. Remote browser access is
-    admitted only through the configured Avibe Cloud origin with a valid signed
-    session cookie; LAN and arbitrary proxy routes remain closed. Reads require
-    the same origin evidence as mutations so a remote session cookie cannot be
-    used as a cross-origin data oracle.
+    Direct loopback and configured private setup-host browser access keep the
+    install-local identity when same-origin evidence is present. Remote browser
+    access is admitted only through the configured Avibe Cloud origin with a
+    valid signed session cookie; arbitrary proxy routes remain closed. Reads
+    require the same origin evidence as mutations so a remote session cookie
+    cannot be used as a cross-origin data oracle.
     """
 
     if _is_direct_loopback_browser_request():
         return "avibe:local"
     config = _load_remote_access_config()
+    if config is not None and _is_setup_host_request(config) and _same_origin_browser_request():
+        return "avibe:local"
     if config is None or not _is_remote_access_request(config):
         return None
     source = _request_origin(request.headers.get("Origin")) or _request_origin(
@@ -7031,12 +7036,21 @@ def web_push_test():
     )
 
 
-@app.route("/api/cli/detect")
-def cli_detect():
-    from vibe import api
+@app.get("/api/cli/detect", include_in_schema=False)
+async def cli_detect(starlette_request: FastAPIRequest):
+    async def handler():
+        from vibe import api
 
-    binary = request.args.get("binary", "")
-    return jsonify(api.detect_cli(binary))
+        backend = request.args.get("backend")
+        if backend is not None and backend not in NATIVE_CLI_BACKENDS:
+            return jsonify({"ok": False, "error": "unsupported_backend"}), 400
+        if _trusted_browser_author_key() is None:
+            return jsonify({"ok": False, "error": "same_origin_required"}), 403
+        response = jsonify(await api.detect_cli_async(request.args.get("binary", ""), backend))
+        response.headers["Cache-Control"] = "private, no-store"
+        return response
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
 
 
 @app.route("/api/slack/manifest")
@@ -8481,15 +8495,20 @@ async def backend_connection(name: str, starlette_request: FastAPIRequest):
     return await _dispatch_native_ui_request(starlette_request, handler)
 
 
-@app.route("/api/backend/<name>/runtime")
-def backend_runtime(name):
-    """Return lifecycle info (version, update, process status) for a backend."""
-    if name not in NATIVE_CLI_BACKENDS:
-        return jsonify({"ok": False, "error": f"Unknown backend: {name}"}), 400
+@app.get("/api/backend/{name}/runtime", include_in_schema=False)
+async def backend_runtime(name: str, starlette_request: FastAPIRequest):
+    async def handler():
+        if name not in NATIVE_CLI_BACKENDS:
+            return jsonify({"ok": False, "error": "unsupported_backend"}), 400
+        if _trusted_browser_author_key() is None:
+            return jsonify({"ok": False, "error": "same_origin_required"}), 403
+        from vibe import api
 
-    from vibe import api
+        response = jsonify(await api.get_backend_runtime_async(name, request.args.get("cli_path")))
+        response.headers["Cache-Control"] = "private, no-store"
+        return response
 
-    return jsonify(api.get_backend_runtime(name))
+    return await _dispatch_native_ui_request(starlette_request, handler)
 
 
 @app.route("/api/backend/<name>/restart", methods=["POST"])

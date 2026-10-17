@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { useState } from 'react';
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -38,6 +38,7 @@ const updateAvailable = {
   cli_path: codexPath,
   resolved_path: codexPath,
   installed: true,
+  status: 'ok' as const,
   current_version: '1.0.0',
   latest_version: '1.1.0',
   has_update: true,
@@ -83,6 +84,62 @@ afterEach(() => {
 });
 
 describe('BackendLifecycleChip', () => {
+  it('shares the host observation and offers repair for present-but-broken CLI', async () => {
+    const broken = { ...updateAvailable, status: 'broken' as const, current_version: null, has_update: false };
+    api.getBackendRuntime.mockResolvedValue(broken);
+    api.installAgent.mockResolvedValue({ ok: false, message: 'Repair did not verify', code: 'cli_readback_failed' });
+    const changed = vi.fn(); const user = userEvent.setup();
+    render(<BackendLifecycleChip name="codex" enabled cliStatus="broken" cliPath={codexPath} detectedRuntime={broken} onChanged={changed} />);
+    const chip = await screen.findByRole('button', { name: 'backendLifecycle.statusBroken' });
+    expect(api.getBackendRuntime).not.toHaveBeenCalled();
+    await user.click(chip);
+    await waitFor(() => expect(api.getBackendRuntime).toHaveBeenCalledWith('codex', codexPath));
+    await user.click(screen.getByRole('button', { name: 'backendLifecycle.reinstall' }));
+    await waitFor(() => expect(showToast).toHaveBeenCalledWith('Repair did not verify', 'error'));
+    expect(showToast).not.toHaveBeenCalledWith('backendLifecycle.upgradeSuccess', 'success');
+    expect(screen.queryByText('backendLifecycle.readyHint')).toBeNull();
+  });
+
+  it('probes the draft path but cannot mutate the saved installation until the draft is saved', async () => {
+    const draft = '/draft/不同的 codex';
+    const info = { ...updateAvailable, cli_path: draft, resolved_path: draft, current_version: '2.0.0' };
+    api.getBackendRuntime.mockResolvedValue(info);
+    const user = userEvent.setup();
+    render(<BackendLifecycleChip name="codex" enabled cliStatus="ok" cliPath={draft} selectionUnsaved />);
+    await user.click(await screen.findByRole('button', { name: 'backendLifecycle.statusUpdateAvailable' }));
+    expect(api.getBackendRuntime).toHaveBeenCalledWith('codex', draft);
+    expect(screen.getByText('2.0.0')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'backendLifecycle.upgradeNow' }).hasAttribute('disabled')).toBe(true);
+    expect(screen.getByText('backendLifecycle.savePathFirst')).toBeTruthy();
+    expect(api.installAgent).not.toHaveBeenCalled();
+  });
+
+  it('does not retain a green verdict after the latest runtime observation fails', async () => {
+    const healthy = { ...updateAvailable, has_update: false };
+    const changed = vi.fn(); const user = userEvent.setup();
+    api.getBackendRuntime.mockRejectedValue(new Error('fixture offline'));
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    render(<BackendLifecycleChip name="codex" enabled cliStatus="ok" cliPath={codexPath} detectedRuntime={healthy} onChanged={changed} />);
+    await user.click(await screen.findByRole('button', { name: 'backendLifecycle.statusReady' }));
+    await waitFor(() => expect(changed).toHaveBeenCalledWith({ observation: expect.objectContaining({ cli_path: codexPath, status: 'unknown' }) }));
+    expect(screen.queryByRole('button', { name: 'backendLifecycle.statusReady' })).toBeNull();
+    log.mockRestore();
+  });
+
+  it('discards an old-path completion after a newer selected path was observed', async () => {
+    const old = deferred<typeof updateAvailable>(); const nextPath = '/new/codex';
+    const next = { ...updateAvailable, cli_path: nextPath, resolved_path: nextPath, has_update: false, current_version: '2.0.0' };
+    api.getBackendRuntime.mockImplementation((_name, path) => path === codexPath ? old.promise : Promise.resolve(next));
+    const user = userEvent.setup();
+    const view = render(<BackendLifecycleChip name="codex" enabled cliStatus="ok" cliPath={codexPath} />);
+    view.rerender(<BackendLifecycleChip name="codex" enabled cliStatus="ok" cliPath={nextPath} />);
+    await screen.findByRole('button', { name: 'backendLifecycle.statusReady' });
+    await act(async () => old.resolve(updateAvailable));
+    await user.click(screen.getByRole('button', { name: 'backendLifecycle.statusReady' }));
+    expect(await screen.findByText('2.0.0')).toBeTruthy();
+    expect(screen.queryByText('1.0.0')).toBeNull();
+  });
+
   it('saves the backend auto-update switch to its own agent config', async () => {
     api.getBackendRuntime.mockResolvedValue({ ...updateAvailable, auto_update: true });
     api.mutateConfig.mockResolvedValue({ ok: true });

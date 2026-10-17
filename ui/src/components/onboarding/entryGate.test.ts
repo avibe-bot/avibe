@@ -48,7 +48,7 @@ const evidence = (overrides: Partial<EntryEvidence> = {}): EntryEvidence => ({
   suppliesRead: true,
   supplies: [claudeSupply()],
   runtime: RUNTIME_OK,
-  cliFound: { claude: true, codex: false, opencode: false },
+  cliHealthy: { claude: true, codex: false, opencode: false },
   ...overrides,
 });
 
@@ -60,8 +60,19 @@ const deps = (overrides: Partial<EntryGateDeps> = {}): EntryGateDeps => ({
   getBackendConnection: vi.fn(async (backend) => connection(backend, { application: 'applied', ready: true, entry_eligible: true })),
   listAgents: vi.fn(async () => ({ ok: true, agents: [CLAUDE], default_agent_name: null })),
   getVibeAgent: vi.fn(async () => ({ ok: false, agent: null as never, default_agent_name: null })),
-  detectCli: vi.fn(async (binary: string) => ({ found: true, path: binary })),
+  detectCli: vi.fn(async (binary: string) => ({ found: true, status: 'ok' as const, path: binary })),
   ...overrides,
+});
+
+describe('CLI health admission', () => {
+  it('does not admit a present but broken CLI even when other owners report ready', async () => {
+    const gate = deps({ detectCli: vi.fn(async () => ({ found: true, path: '/fixture/claude', status: 'broken' as const })) });
+    const read = await readEntryEvidence(gate, { config: { agents: { claude: { cli_path: '/fixture/claude' } } } });
+    expect(read!.cliHealthy.claude).toBe(false);
+    expect(entryCandidates(read!)).toEqual([]);
+    expect(admitEntry(read!).kind).toBe('refused');
+    expect(gate.detectCli).toHaveBeenCalledWith('/fixture/claude', 'claude');
+  });
 });
 
 describe('B2 stopped recovery independent of IPC', () => {
@@ -132,21 +143,21 @@ describe('C4 configured-path CLI evidence', () => {
   });
 
   it('detects the configured path from the already-fresh prerequisite', async () => {
-    const detectCli = vi.fn(async (binary: string) => ({ found: binary === '/opt/custom/claude', path: binary }));
+    const detectCli = vi.fn(async (binary: string) => ({ found: binary === '/opt/custom/claude', status: binary === '/opt/custom/claude' ? 'ok' as const : 'missing' as const, path: binary }));
     const gate = deps({ detectCli });
     const read = await readEntryEvidence(gate, {
       config: { agents: { claude: { enabled: true, cli_path: '/opt/custom/claude' }, codex: { enabled: true } } },
     });
-    expect(detectCli).toHaveBeenCalledWith('/opt/custom/claude');
-    expect(detectCli).toHaveBeenCalledWith('codex');
-    expect(detectCli).toHaveBeenCalledWith('opencode');
-    expect(read!.cliFound).toEqual({ claude: true, codex: false, opencode: false });
+    expect(detectCli).toHaveBeenCalledWith('/opt/custom/claude', 'claude');
+    expect(detectCli).toHaveBeenCalledWith('codex', 'codex');
+    expect(detectCli).toHaveBeenCalledWith('opencode', 'opencode');
+    expect(read!.cliHealthy).toEqual({ claude: true, codex: false, opencode: false });
   });
 
   it('does not admit when detectCli is not found even if installed and cli_present', () => {
     const read = evidence({
       connections: [connection('claude', { installed: true, ready: true, entry_eligible: true, application: 'applied' })],
-      cliFound: { claude: false, codex: false, opencode: false },
+      cliHealthy: { claude: false, codex: false, opencode: false },
     });
     expect(entryCandidates(read)).toEqual([]);
     expect(admitEntry(read)).toMatchObject({ kind: 'refused', startable: false });
@@ -157,14 +168,14 @@ describe('C4 configured-path CLI evidence', () => {
       detectCli: vi.fn(async () => { throw new Error('detector unread'); }),
     });
     const read = await readEntryEvidence(gate);
-    expect(read!.cliFound).toEqual({ claude: false, codex: false, opencode: false });
+    expect(read!.cliHealthy).toEqual({ claude: false, codex: false, opencode: false });
     expect(admitEntry(read!)).toMatchObject({ kind: 'refused', startable: false });
   });
 
   it('does not treat connection.installed as the detector', () => {
     const read = evidence({
       connections: [connection('claude', { installed: false, ready: true, entry_eligible: true, application: 'applied' })],
-      cliFound: { claude: true, codex: false, opencode: false },
+      cliHealthy: { claude: true, codex: false, opencode: false },
     });
     expect(entryCandidates(read)).toEqual([{ agent: CLAUDE, backend: 'claude', modelId: 'openai/gpt-5.6-sol' }]);
   });
@@ -172,7 +183,7 @@ describe('C4 configured-path CLI evidence', () => {
   it('cannot release entry on a stale refresh even with a found CLI', async () => {
     const gate = deps({
       agentReads: { refresh: vi.fn(async () => ({ kind: 'stale' as const })), read: vi.fn(), readValue: vi.fn(), invalidate: vi.fn() },
-      detectCli: vi.fn(async () => ({ found: true, path: '/opt/custom/claude' })),
+      detectCli: vi.fn(async () => ({ found: true, status: 'ok' as const, path: '/opt/custom/claude' })),
     });
     expect(await readEntryEvidence(gate, { config: { agents: { claude: { cli_path: '/opt/custom/claude' } } } })).toBeNull();
   });
@@ -190,7 +201,7 @@ describe('D3 a built-in assistant completes setup on its own', () => {
     agents: [CLAUDE, VIBEY],
     connections: [applied('vibey')],
     supplies: [vibeySupply()],
-    cliFound: { claude: false, codex: false, opencode: false },
+    cliHealthy: { claude: false, codex: false, opencode: false },
     ...overrides,
   });
 
@@ -207,7 +218,7 @@ describe('D3 a built-in assistant completes setup on its own', () => {
 
   it('reads the built-in connection with the others and detects only CLIs', async () => {
     const getBackendConnection = vi.fn(async (backend: AgentBackendId) => applied(backend));
-    const detectCli = vi.fn(async (binary: string) => ({ found: true, path: binary }));
+    const detectCli = vi.fn(async (binary: string) => ({ found: true, status: 'ok' as const, path: binary }));
     await readEntryEvidence(deps({ getBackendConnection, detectCli }));
     expect(getBackendConnection.mock.calls.map(([backend]) => backend).sort()).toEqual([...SETUP_LINEUP].sort());
     expect(detectCli.mock.calls.map(([binary]) => binary)).not.toContain('vibey');

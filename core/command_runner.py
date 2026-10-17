@@ -298,6 +298,7 @@ async def run_supervised_command(
     extra_env: Optional[Mapping[str, str]] = None,
     remove_env: Collection[str] = (),
     discard_stderr: bool = False,
+    hide_console: bool = False,
 ) -> SupervisedCommandResult:
     """Run one command under the stable supervisor and return its outcome.
 
@@ -320,6 +321,11 @@ async def run_supervised_command(
     for key in remove_env:
         spawn_env.pop(key, None)
     spawn_env[watch_worker.PROCESS_IDENTITY_ENV] = worker_marker
+    # A GUI's short metadata probes must hide both the supervisor and its
+    # command on Windows; the worker consumes this private launch instruction.
+    spawn_env.pop(watch_worker.HIDE_CONSOLE_ENV, None)
+    if hide_console:
+        spawn_env[watch_worker.HIDE_CONSOLE_ENV] = "1"
     process = await asyncio.create_subprocess_exec(
         os.path.abspath(sys.executable),
         supervisor_path(),
@@ -328,7 +334,7 @@ async def run_supervised_command(
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=(asyncio.subprocess.DEVNULL if discard_stderr else asyncio.subprocess.PIPE),
-        **isolated_subprocess_kwargs(),
+        **isolated_subprocess_kwargs(console=not hide_console),
     )
     identity = capture_spawned_process_identity(process.pid, worker_marker)
 

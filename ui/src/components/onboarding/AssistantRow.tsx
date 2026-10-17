@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import type { CliStatus } from '@/context/ApiContext';
 import { Check, ChevronRight, Download, KeyRound, RefreshCw, Settings, SlidersHorizontal } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { BackendIcon } from '../visual';
@@ -16,7 +17,7 @@ export type AssistantRouteView =
 
 export interface AssistantRowProps {
   backend: AssistantId;
-  status: 'unknown' | 'ok' | 'missing';
+  status: CliStatus;
   installing: boolean;
   detecting: boolean;
   error?: { message: string; hint?: string | null; output?: string | null; exit_code?: number };
@@ -147,6 +148,10 @@ export function AssistantRow({ backend, status, installing, detecting, error, li
           <Badge variant="secondary"><RefreshCw size={12} className={installing || detecting ? 'motion-safe:animate-spin' : ''} />
             {t(installing ? 'agentDetection.installing' : detecting ? 'onboarding.welcome.detecting' : 'common.notChecked')}
           </Badge>
+        ) : status === 'broken' ? (
+          <Badge variant="destructive"><span className="size-2 rounded-full bg-current" />
+            {t('backendLifecycle.statusBroken')}
+          </Badge>
         ) : status === 'ok' ? lifecycle : (
           <Badge variant={error ? 'destructive' : 'secondary'}><span className="size-2 rounded-full bg-current" />
             {t(error ? 'onboarding.setup.installFailed' : 'onboarding.setup.notInstalled')}
@@ -180,7 +185,8 @@ export function AssistantRow({ backend, status, installing, detecting, error, li
             <summary>{t('onboarding.setup.permissionFailed')}</summary>{permission.error}
           </details>
         ) : <p className="onboarding-assistant-note">
-          {permissionNeeded ? t('onboarding.setup.notePermission', { name: label }) : hubState
+          {status === 'broken' ? t('backendLifecycle.brokenHint', { name: label })
+            : permissionNeeded ? t('onboarding.setup.notePermission', { name: label }) : hubState
             ? t(hubState === 'missing' ? 'onboarding.setup.noteNotInstalled'
               : hubState === 'enabled' || hubState === 'idle'
                 ? (route?.kind === 'no-agent-model' ? 'onboarding.setup.noteModelUnset'
@@ -203,7 +209,11 @@ export function AssistantRow({ backend, status, installing, detecting, error, li
               {t('onboarding.setup.allowToolCalls')}
             </Button>
           )}
-          {hubState === 'checking' ? null : hubState === 'missing' ? (
+          {status === 'broken' ? (
+            <Button type="button" variant="secondary" className="onboarding-method-row" onClick={onInstall} disabled={installing || detecting}>
+              <Download size={16} />{t('backendLifecycle.reinstall')}
+            </Button>
+          ) : hubState === 'checking' ? null : hubState === 'missing' ? (
             <Button type="button" variant="secondary" className="onboarding-method-row" onClick={onInstall} disabled={installing || detecting}>
               {installing ? <RefreshCw size={16} className="motion-safe:animate-spin" /> : <Download size={16} />}
               {t(installing ? 'agentDetection.installing' : error ? 'common.retry' : 'onboarding.setup.installAndEnable')}

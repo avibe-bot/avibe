@@ -100,7 +100,7 @@ export async function serveProduct(page: Page) {
   // The setup step reads each assistant's runtime and OpenCode's permission flag. They
   // are answered as an installed, permitted runtime so the screen renders the state the
   // design describes rather than the error state a missing backend would produce.
-  await page.route('**/api/backend/*/runtime', (route) => {
+  await page.route('**/api/backend/*/runtime*', (route) => {
     const name = new URL(route.request().url()).pathname.split('/').at(-2);
     return route.fulfill({
       json: {
@@ -110,6 +110,7 @@ export async function serveProduct(page: Page) {
         cli_path: name,
         resolved_path: `/fixture/bin/${name}`,
         installed: true,
+        status: 'ok',
         current_version: '1.0.0',
         latest_version: '1.0.0',
         has_update: false,

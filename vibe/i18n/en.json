@@ -1074,6 +1074,11 @@
     "stopRefused": "Nothing was stopped: this command runs from a desktop-managed Avibe Runtime, and the running {part} is not that Runtime's ({reason}). Stop it from the Avibe that started it.",
     "restartRefused": "Nothing was restarted: this command runs from a desktop-managed Avibe Runtime, and the running {part} is not that Runtime's ({reason}). Restart it from the Avibe that started it."
   },
+  "cliHealth": {
+    "installReadbackFailed": "The installer finished, but the selected CLI is missing or cannot run. Installation was not verified; repair it and try again.",
+    "repairUnavailable": "Avibe could not safely identify a supported repair source for {backend}. Reinstall it with its original installer or select the correct CLI path; no installation was changed.",
+    "repairPathConflict": "Another OpenCode command is still visible in the repair environment. Repair was not started. Remove the conflicting PATH entry or reinstall OpenCode with its original installer."
+  },
   "agentInstall": {
     "installFailed": "Could not install {backend}.",
     "upgradeFailed": "Could not upgrade {backend}.",
@@ -1518,6 +1523,7 @@
       "slackConfigMissing": "Cannot check Slack: configuration not loaded",
       "agentCliFound": "{agent} CLI found: {path}",
       "agentCliMissing": "{agent} CLI not found: {path}",
+      "agentCliUnhealthy": "{agent} CLI is present but could not be verified as runnable: {path}",
       "agentDisabled": "{agent}: disabled",
       "defaultAgent": "Default Agent: {agent}",
       "agentConfigMissing": "Cannot check agents: configuration not loaded",

@@ -27,9 +27,14 @@ const SESSION = {
  *  answers a WRITE to `/api/config` can answer with the same instance it reads,
  *  rather than describing a second one. */
 export const config = (language: Lang) => ({
+  version: 'v2',
+  setup_completed: false,
+  capabilities: { model_hub: { enabled: true } },
+  model_hub: { enabled: true },
   mode: 'local',
   setup_state: { needs_setup: false },
-  platforms: { enabled: [] },
+  platforms: { primary: 'slack', enabled: [] },
+  runtime: {},
   agents: {
     codex: { enabled: true, cli_path: 'codex' },
     claude: { enabled: true, cli_path: 'claude' },

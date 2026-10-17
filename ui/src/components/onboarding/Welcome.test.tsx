@@ -74,7 +74,7 @@ afterEach(() => {
 
 describe('Welcome', () => {
   it('checks saved paths before advancing without persisting configuration', async () => {
-    mocks.api.detectCli.mockImplementation(async (binary: string) => ({ found: binary !== 'codex', path: `/test/${binary}` }));
+    mocks.api.detectCli.mockImplementation(async (binary: string) => ({ found: binary !== 'codex', status: binary !== 'codex' ? 'ok' as const : 'missing' as const, path: `/test/${binary}` }));
     const next = vi.fn();
     render(wrap(<Intro data={{ agents: { claude: { cli_path: '/custom/claude' } } }} onNext={next} />));
     fireEvent.click(screen.getByRole('button', { name: 'Get started' }));
@@ -83,7 +83,7 @@ describe('Welcome', () => {
     expect(next.mock.calls[0][0]).toMatchObject({ __onboardingDetected: true, agents: { claude: { status: 'ok' }, codex: { status: 'missing' }, opencode: { status: 'ok' } } });
   });
   it('retains a failed detection on Welcome and permits retry', async () => {
-    mocks.api.detectCli.mockRejectedValueOnce(new Error('Probe unavailable')).mockResolvedValue({ found: false });
+    mocks.api.detectCli.mockRejectedValueOnce(new Error('Probe unavailable')).mockResolvedValue({ found: false, status: 'missing' as const });
     const next = vi.fn();
     render(wrap(<Intro onNext={next} />));
     fireEvent.click(screen.getByRole('button', { name: 'Get started' }));
@@ -126,7 +126,7 @@ describe('Welcome', () => {
   it('refuses a detection that settles after the route went quiet, then moves when it returns', async () => {
     vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false, addEventListener() {}, removeEventListener() {} })));
     vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
-    const probes: ((result: { found: boolean; path: string }) => void)[] = [];
+    const probes: ((result: { found: boolean; path: string; status: 'ok' }) => void)[] = [];
     mocks.api.detectCli.mockImplementation(() => new Promise((resolve) => { probes.push(resolve); }));
     const onward = SETUP_REGISTERED_SCREENS[1];
     const shell = (routeActive: boolean) => wrap(
@@ -139,7 +139,7 @@ describe('Welcome', () => {
       </RouteSurfaceActiveContext.Provider>);
     const { container, rerender } = render(shell(true));
     const current = () => container.querySelector('[data-setup-screen]')?.getAttribute('data-setup-screen');
-    const answer = async () => act(async () => { for (const resolve of probes.splice(0)) resolve({ found: true, path: '/test/bin' }); });
+    const answer = async () => act(async () => { for (const resolve of probes.splice(0)) resolve({ found: true, status: 'ok' as const, path: '/test/bin' }); });
 
     fireEvent.click(screen.getByRole('button', { name: 'Get started' }));
     await waitFor(() => expect(probes).toHaveLength(ASSISTANT_ORDER.length));
