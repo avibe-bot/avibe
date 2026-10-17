@@ -210,8 +210,12 @@ there rather than expanding this index.
   it owns the detailed procedure, but cannot weaken the baseline below
 - regardless of Skill resolution, use a task branch/worktree, record the change
   contract, require an exact-head Codex review, zero unresolved review threads,
-  and passing CI before close-out, apply the review-loop circuit breaker, and
-  never merge without explicit owner instruction
+  and passing CI before close-out, and apply the review-loop circuit breaker
+- merge on the owner's or orchestrator's instruction, or on your own judgment
+  only when the PR is Merge-ready on its exact head, the change stays within
+  your own task, and it touches no release or tag, database migration, or
+  security boundary (authentication, credentials, Vault, sandboxing); say why
+  when you merge on your own judgment
 - use the `background-watch-hook` skill for managed review and CI waits
 - keep one durable `--forever` combined PR/CI Watch and disable the Watch's per-cycle timeout
 - the change contract names intended behavior, affected boundaries, and
