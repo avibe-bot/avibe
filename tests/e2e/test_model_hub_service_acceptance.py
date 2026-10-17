@@ -6,7 +6,8 @@ the same way on Linux and macOS. It drives ``vibe`` exactly as a user's install
 does -- the CLI starts the background service, the Web UI API configures it --
 against two loopback upstreams, and proves:
 
-- the engine installs from the packaged manifest and becomes healthy;
+- the engine installs from the selected manifest (``VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH``,
+  else the packaged one), as that manifest's verified build, and becomes healthy;
 - an API-key Source saves through the real credential check;
 - a Vibey turn and a Claude Code hub-mode turn each get the upstream's reply;
 - after the service is killed outright, the next start reaps the engine it
@@ -28,7 +29,7 @@ import urllib.error
 import urllib.request
 from http.cookiejar import CookieJar
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping
 
 import psutil
 import pytest
@@ -44,6 +45,8 @@ _CLAUDE_MODEL = "claude-sonnet-4-6"
 _VIBEY_MODEL = "acceptance-chat"
 _REPLY = "mock response"
 _ENGINE_START_SECONDS = 600
+_ENGINE_MANIFEST_ENV = "VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH"
+_ENGINE_MANIFEST_URL_ENV = "VIBE_MODEL_HUB_ENGINE_MANIFEST_URL"
 _TURN_SECONDS = 300
 
 
@@ -145,6 +148,14 @@ class _Service:
             "VIBE_TMUX_OFFLINE": "1",
             "VIBE_GIT_OFFLINE": "1",
         }
+        # The manifest path is the acceptance's one engine control, as in the Model
+        # Hub E2E harness: an inherited manifest URL would outrank the packaged
+        # manifest the acceptance falls back to.
+        self.env.pop(_ENGINE_MANIFEST_URL_ENV, None)
+        if self.env.get(_ENGINE_MANIFEST_ENV):
+            # The service resolves a relative path from its own working directory,
+            # which is not this one; give it, and the acceptance, the same file.
+            self.env[_ENGINE_MANIFEST_ENV] = str(Path(self.env[_ENGINE_MANIFEST_ENV]).expanduser().resolve())
         self._socket_dir: str | None = None
         if os.name != "nt":
             # A Unix socket path is capped near 104 bytes; a test home is deeper.
@@ -175,6 +186,15 @@ class _Service:
         if check:
             assert result.returncode == 0, (args, result.returncode, result.stdout[-4000:], result.stderr[-4000:])
         return result
+
+    def packaged_engine_manifest(self) -> Path:
+        """The engine manifest the installed package ships, which the service selects without an override."""
+
+        result = self.python("-c", (
+            "from importlib import resources; "
+            "print(resources.files('vibe').joinpath('model_hub_runtime/cliproxyapi_manifest.json'))"
+        ))
+        return Path(result.stdout.strip())
 
     def vibe(self, *args: str, timeout: float = 300, check: bool = True) -> subprocess.CompletedProcess[str]:
         return self.python("-m", "vibe", *args, timeout=timeout, check=check)
@@ -344,6 +364,58 @@ def _process_is(entry: dict[str, Any]) -> bool:
         return False
 
 
+def _selected_engine_manifest(env: Mapping[str, str], packaged_manifest: Path) -> dict[str, Any]:
+    """The manifest the service selects: the one ``VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH`` names, else the packaged one.
+
+    ``_Service`` makes the override absolute before the service starts, so both
+    read the same file, and leaves the service no other selector. One that is missing, unreadable or names no version
+    fails the run: an acceptance must never pass without knowing what it accepted.
+    """
+
+    override = env.get(_ENGINE_MANIFEST_ENV)
+    path = Path(override) if override else packaged_manifest
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        pytest.fail(f"the selected engine manifest {path} is unreadable: {exc}")
+    version = payload.get("version") if isinstance(payload, dict) else None
+    if not isinstance(version, str) or not version.strip():
+        pytest.fail(f"the selected engine manifest {path} names no version")
+    return payload
+
+
+def _asset(manifest: dict[str, Any], platform: str) -> dict[str, Any] | None:
+    assets = manifest.get("assets")
+    return next(
+        (asset for asset in assets if isinstance(asset, dict) and asset.get("platform") == platform),
+        None,
+    ) if isinstance(assets, list) else None
+
+
+def _assert_installed_engine(runtime: dict[str, Any], selected: dict[str, Any]) -> None:
+    """The running engine is the selected manifest's build, not merely its upstream version.
+
+    The service reports the manifest it loaded and verifies the installed
+    binary against that manifest's asset, so the loaded asset must be the
+    selected one, byte identity included. An ignored override installs the
+    packaged engine and fails here even when both name the same upstream version.
+    """
+
+    platform = runtime["host_platform"]
+    wanted = _asset(selected, platform)
+    if wanted is None or not isinstance(wanted.get("sha256"), str):
+        pytest.fail(f"the selected engine manifest has no asset for {platform}")
+    loaded = runtime["manifest"]
+    identity = ("version", "source_sha")
+    assert {key: loaded.get(key) for key in identity} == {key: selected.get(key) for key in identity}, runtime
+    got = _asset(loaded, platform) or {}
+    assert (got.get("sha256"), got.get("size_bytes")) == (wanted["sha256"], wanted.get("size_bytes")), runtime
+    status = runtime["status"]
+    assert status["verified"] is True and status["installed_version"] == selected["version"], (
+        f"installed engine {status['installed_version']}, selected manifest {selected['version']}: {runtime}"
+    )
+
+
 def _add_model(service: _Service, backend: str, model_id: str) -> None:
     baseline = service.ok("GET", f"/api/models/agents/{backend}/models")["agent"].get("catalog_models") or []
     if any(model.get("id") == model_id for model in baseline):
@@ -387,10 +459,16 @@ def test_fresh_install_serves_vibey_and_claude_through_the_hub_and_reaps_an_orph
             service.vibe("start", "--no-open-browser", timeout=300)
             service.wait_ready()
 
-            # The engine installs from the packaged manifest and becomes healthy.
+            # The engine installs from the selected manifest (a candidate's, else the
+            # packaged one) and becomes healthy.
             runtime = service.ok("POST", "/api/models/runtime/start", timeout=_ENGINE_START_SECONDS)["runtime"]
             first = service.healthy_engine()
             started.append(first)
+            # Read once healthy: while it installs, no version is reported yet.
+            _assert_installed_engine(
+                service.ok("GET", "/api/models/runtime/status")["runtime"],
+                _selected_engine_manifest(service.env, service.packaged_engine_manifest()),
+            )
             # CI names the asset each runner must get, which is not always
             # Python's architecture: Windows on Arm runs x64 Python.
             expected_platform = os.environ.get("AVIBE_EXPECT_ENGINE_PLATFORM")

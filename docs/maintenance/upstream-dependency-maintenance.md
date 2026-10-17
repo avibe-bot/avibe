@@ -243,9 +243,15 @@ Preparation:
 6. Run the focused builder/guard tests, then run the existing installed-service
    acceptance once with
    `VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH=/tmp/avibe-candidate-assets/model-hub-engine-offline-manifest.json`
-   (and the candidate normal wheel) against synthetic loopback upstreams. Record
-   the real result and prepare the PR with the candidate manifest/patch
-   metadata. The existing release workflow remains the publication/recovery
+   (and the candidate normal wheel) against synthetic loopback upstreams. That
+   variable is the acceptance's only engine input: the service installs from the
+   manifest it names (else the packaged one), and the acceptance asserts that the
+   engine it installed and verified is that manifest's build: its `version`,
+   `source_sha`, and the host platform asset's `sha256` and `size_bytes`. So an
+   ignored override, or a packaged engine installed by accident, fails the run
+   instead of passing as candidate acceptance, even when both name the same
+   upstream version. Record the real result and prepare the PR
+   with the candidate manifest/patch metadata. The existing release workflow remains the publication/recovery
    authority; do not change the packaged pin or publish from candidate mode.
 
 Strict pinned mode remains the recovery and publication path: it must verify
