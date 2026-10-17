@@ -1087,11 +1087,6 @@ def test_d5_nonrefreshable_401_marks_the_key_for_repair(
             assert next_probe.json()["probe"]["source_id"] == second["id"]
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "D-4 gap: the managed engine never forwards an upstream error's headers (its status errors "
-    "carry none, whatever passthrough-headers says), so Retry-After never reaches Avibe and a "
-    "5xx cools for the local 30-36 s backoff only (#2666)"
-))
 def test_d6_server_error_preserves_later_retry_after_through_real_engine(
     model_hub_app_factory,
     mock_llm_upstream,
