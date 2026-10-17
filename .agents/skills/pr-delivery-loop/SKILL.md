@@ -79,7 +79,7 @@ Merge does not authorize deployment, service restarts, local regression updates,
 
 ## Talk to the user
 
-Use Chinese and lead with the result. The user cares about what changed, why it matters, remaining risks, and the next step. SHAs, run counts, and thread counts are internal evidence; mention them only to explain a blocker or when asked. Do not turn the report into a gate checklist.
+Use the conversation's language and lead with the result. The user cares about what changed, why it matters, remaining risks, and the next step. SHAs, run counts, and thread counts are internal evidence; mention them only to explain a blocker or when asked. Do not turn the report into a gate checklist.
 
 - **While progressing:** say what you are doing, what signal you are waiting for, what happens next, and whether you need a decision. Report findings and failures promptly; do not report half-success, and do not interrupt the user when review and CI are only partly complete.
 - **When Merge-ready and waiting for approval:** say clearly that the PR can be merged, include a clickable PR link, and offer the Merge quick reply in the same response:
