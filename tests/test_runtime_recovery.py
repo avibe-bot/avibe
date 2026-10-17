@@ -936,3 +936,123 @@ async def test_cancel_abandons_unknown_start_without_replaying(
     assert turn["terminal_evidence_kind"] == "runtime_gone"
     assert delivery["state"] == "retired"
     assert successors == []
+
+
+def _held_for_explicit_retry(conn, delivery_id: str) -> None:
+    """The durable hold a third pre-write start failure leaves: queued until its owner retries it."""
+
+    history = {
+        "events": [
+            {"kind": "start", "outcome": "claimed", "attempt_id": "atm-held", "position": 0, "turn_id": "turn-held"},
+            {
+                "kind": "start",
+                "outcome": "not_written",
+                "attempt_id": None,
+                "turn_id": None,
+                "receipt": {
+                    "kind": "definitive_prewrite_failure",
+                    "reason": "no_terminal_result",
+                    "requires_explicit_retry": True,
+                },
+            },
+        ]
+    }
+    conn.execute(
+        update(delivery_store.message_deliveries)
+        .where(delivery_store.message_deliveries.c.id == delivery_id)
+        .values(delivery_history_json=json.dumps(history))
+    )
+
+
+@pytest.mark.anyio
+async def test_a_head_held_for_explicit_retry_is_left_to_its_owner(tmp_path: Path, monkeypatch) -> None:
+    """A queued head that only its owner's explicit retry can start is not recovery work.
+
+    On a real host one such head was re-entered about once a second for hours:
+    each scan reported it as an open head, the drain took SQLite's writer on the
+    controller loop, the claim refused it, and the lane backed off one second
+    and scanned it again -- 9967 writes in 3h10m.
+    """
+
+    import core.session_turns as session_turns_module
+
+    engine = _engine(tmp_path)
+    with engine.begin() as conn:
+        _session(conn, "ses-held")
+        _delivery(conn, "delivery-held", "ses-held")
+        _held_for_explicit_retry(conn, "delivery-held")
+    manager = SessionTurnManager(SimpleNamespace())
+    manager._engine = engine
+    writer_reservations: list[str] = []
+    real_reserve = session_turns_module.reserve_write_lock
+    monkeypatch.setattr(
+        session_turns_module,
+        "reserve_write_lock",
+        lambda conn: writer_reservations.append("drain") or real_reserve(conn),
+    )
+    processed: list[str] = []
+
+    class _ObservedHandler(SessionDeliveryRecoveryHandler):
+        async def process(self, item):
+            processed.append(item.partition_key)
+            return await super().process(item)
+
+    supervisor = RuntimeWorkSupervisor(reconcile_interval=0.01, lane_capacity=1, retry_backoff=0.01)
+    supervisor.register(RuntimeWorkLane.SESSION_DELIVERIES, _ObservedHandler(manager))
+    await supervisor.activate()
+    await asyncio.sleep(0.5)
+    await supervisor.stop()
+
+    assert processed == []
+    assert writer_reservations == []
+    # A drain asked directly, as at a Turn end, answers from a read too.
+    assert await manager.drain_delivery_queue("ses-held") is False
+    assert writer_reservations == []
+    with engine.connect() as conn:
+        assert delivery_store.get_delivery(conn, "delivery-held")["state"] == "queued"
+    engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_a_held_head_on_the_last_page_leaves_the_next_wake_a_full_scan(tmp_path: Path) -> None:
+    """A wake for a Session that sorts before a held head still finds its recovery work."""
+
+    engine = _engine(tmp_path)
+    with engine.begin() as conn:
+        _session(conn, "ses-z-held")
+        _delivery(conn, "delivery-held", "ses-z-held")
+        _held_for_explicit_retry(conn, "delivery-held")
+    manager = SessionTurnManager(SimpleNamespace())
+    manager._engine = engine
+    scanned = asyncio.Event()
+    processed: list[str] = []
+    recovered = asyncio.Event()
+
+    class _ObservedHandler(SessionDeliveryRecoveryHandler):
+        def scan(self, **kwargs):
+            result = super().scan(**kwargs)
+            scanned.set()
+            return result
+
+        async def process(self, item):
+            processed.append(item.partition_key)
+            recovered.set()
+            return True
+
+    # Only a wake can scan: reconciliation is too far away to help.
+    supervisor = RuntimeWorkSupervisor(reconcile_interval=3600, lane_capacity=1)
+    supervisor.register(RuntimeWorkLane.SESSION_DELIVERIES, _ObservedHandler(manager))
+    await supervisor.activate()
+    await asyncio.wait_for(scanned.wait(), timeout=1)
+    await asyncio.sleep(0.05)
+    with engine.begin() as conn:
+        _session(conn, "ses-a")
+        _delivery(conn, "delivery-a", "ses-a")
+    supervisor.notify(RuntimeWorkLane.SESSION_DELIVERIES)
+    try:
+        await asyncio.wait_for(recovered.wait(), timeout=1)
+    finally:
+        await supervisor.stop()
+        engine.dispose()
+
+    assert processed == ["ses-a"]

@@ -265,6 +265,8 @@ class RuntimeDeliveryObservation:
     predecessor_terminal_evidence_kind: str | None = None
     predecessor_terminal_evidence_json: str | None = None
     predecessor_terminal_at: str | None = None
+    # An open head held for its owner's explicit retry: no recovery can start it.
+    awaits_explicit_retry: bool = False
 
 
 def _start_replay_count(deliveries: list[dict[str, Any]]) -> int:
@@ -4829,10 +4831,14 @@ class SessionTurnManager:
         with self._sqlite_engine().connect() as conn:
             # Most drains find nothing to claim -- every Turn end asks. Those answer
             # from a read, as the claim below would, without taking the writer (#2706).
-            claimable = (
-                delivery_store.active_turn(conn, session_id) is None
-                and delivery_store.claimable_fifo_head(conn, session_id) is not None
+            # A head held for its owner's explicit retry is no claim either: only
+            # that retry starts it.
+            head = (
+                delivery_store.claimable_fifo_head(conn, session_id)
+                if delivery_store.active_turn(conn, session_id) is None
+                else None
             )
+            claimable = head is not None and not delivery_store.requires_explicit_start_retry(head)
         if not claimable:
             return False
         with self._sqlite_engine().begin() as conn:
@@ -6107,6 +6113,7 @@ class SessionTurnManager:
                     delivery_rows.c.current_expected_native_turn_id.label(
                         "delivery_expected_native_turn_id"
                     ),
+                    delivery_rows.c.delivery_history_json,
                     literal(None).label("turn_id"),
                     literal(None).label("turn_state"),
                     literal(None).label("turn_version"),
@@ -6381,6 +6388,10 @@ class SessionTurnManager:
                 ),
                 predecessor_terminal_at=(
                     str(row.get("predecessor_terminal_at") or "") or None
+                ),
+                awaits_explicit_retry=(
+                    row["kind"] == "open_head"
+                    and delivery_store.requires_explicit_start_retry(row)
                 ),
             )
             for row in selected
