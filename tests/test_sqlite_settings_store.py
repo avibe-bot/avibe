@@ -1269,3 +1269,56 @@ def test_sqlite_filters_deprecated_system_message_type(tmp_path: Path) -> None:
         reader.close()
     assert legacy.channels["slack::C1"].show_message_types == ["assistant"]
     assert legacy.users["slack::U1"].show_message_types == ["toolcall"]
+
+
+def test_an_avibe_session_read_returns_defaults_and_saves_nothing(tmp_path: Path, monkeypatch) -> None:
+    """#2706: the first emit of each new Web Session read its settings and saved them on the loop."""
+
+    monkeypatch.setattr(paths, "ensure_data_dirs", lambda: None)
+    manager = SettingsManager(settings_file=str(tmp_path / "settings.json"), platform="avibe")
+    try:
+        saves: list[str] = []
+        monkeypatch.setattr(manager.store, "save", lambda **_kwargs: saves.append("save"))
+
+        hidden = manager.is_message_type_hidden("ses-new", "toolcall")
+        routing = manager.get_channel_routing("ses-new")
+
+        assert hidden is ("toolcall" not in UserSettings().show_message_types)
+        assert routing is None
+        assert saves == []
+        assert manager.store.find_channel("ses-new", platform="avibe") is None
+    finally:
+        manager.store.close()
+
+
+@pytest.mark.parametrize("platform", ["slack", "discord", "lark"])
+def test_a_new_im_channel_keeps_todays_authorization_outcomes(tmp_path: Path, monkeypatch, platform) -> None:
+    """Its first inbound message is denied, and a settings read still authorizes it, as on master.
+
+    Whether a channel nobody enabled explicitly should be authorized by such a
+    read is the owner's decision; until then the read keeps its effect.
+    """
+
+    from core.auth import check_auth
+
+    monkeypatch.setattr(paths, "ensure_data_dirs", lambda: None)
+    manager = SettingsManager(settings_file=str(tmp_path / "settings.json"), platform=platform)
+    try:
+        def first_inbound():
+            return check_auth(
+                user_id="U-1",
+                channel_id="C-new",
+                is_dm=False,
+                platform=platform,
+                action="",
+                settings_manager=manager,
+            )
+
+        denied = first_inbound()
+        assert (denied.allowed, denied.denial) == (False, "unauthorized_channel")
+
+        manager.get_channel_routing("C-new")
+
+        assert first_inbound().allowed is True
+    finally:
+        manager.store.close()
