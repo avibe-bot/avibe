@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -215,11 +216,14 @@ def test_harness_notice_keeps_retry_boundary_guards(isolated_state, tmp_path, ch
     dispatch.assert_not_awaited()
 
 
-@pytest.mark.parametrize("step", ["tool", "steered", "final"])
-def test_a_vibey_agent_run_cut_by_a_restart_settles_from_the_continued_work(isolated_state, tmp_path, step):
+@pytest.mark.parametrize("step", ["tool", "steered", "steer_retried", "final"])
+def test_a_vibey_agent_run_cut_by_a_restart_settles_from_the_continued_work(
+    isolated_state, tmp_path, monkeypatch, step
+):
     """MESSAGE-DELIVERY-328: shutdown leaves the Run with its Turn, startup moves it to the
     continuation, and it settles once, from the continued Turn's result, owing no notice. A
-    Run whose steer the dead run accepted, its receipt not yet materialized, moves too."""
+    Run whose steer the dead run accepted, its receipt not yet materialized, moves too; when
+    the receipt cannot be materialized at startup, the Turn waits open for the retry."""
     from core.session_turns import Turn
 
     _scope_id, session_id = _make_session(tmp_path, agent_backend="vibey")
@@ -283,7 +287,7 @@ def test_a_vibey_agent_run_cut_by_a_restart_settles_from_the_continued_work(isol
             assert attach_agent_run_delivery_in_connection(
                 conn, run.id, session_id=session_id, delivery_id=original.delivery_id,
             )
-            if step == "steered":
+            if step in {"steered", "steer_retried"}:
                 # A second Run steered into the Turn: the run accepted it, then the process
                 # died after the receipt and before the Delivery was materialized.
                 steer_id = message_deliveries.new_delivery_id()
@@ -322,9 +326,35 @@ def test_a_vibey_agent_run_cut_by_a_restart_settles_from_the_continued_work(isol
 
     original = asyncio.run(scenario())
     # The next start: T2 settled the cut call, then Turn recovery.
-    _previous_process(step)(engine, session_id, original.turn_id)
+    _previous_process("final" if step == "final" else "tool")(engine, session_id, original.turn_id)
     manager._active_identity = lambda *_args: None
-    asyncio.run(manager.recover_durable_delivery_state(session_id, service_restart=True))
+    if step == "steer_retried":
+        # Startup cannot materialize the receipt (its CAS is lost); the retry can.
+        finish = manager._finish_steer
+        lost = []
+
+        async def lost_once(*args, **kwargs):
+            if not lost:
+                lost.append(args[0])
+                return SimpleNamespace(state="reconciling_steer")
+            return await finish(*args, **kwargs)
+
+        manager._finish_steer = lost_once
+        monkeypatch.setattr(SessionTurnManager, "RESTART_FALLBACK_RETRY_DELAYS", (0.05,))
+
+    async def startup():
+        await manager.recover_durable_delivery_state(session_id, service_restart=True)
+        if step == "steer_retried":
+            # Nothing completed or moved without the steer: the Turn stays open.
+            with engine.connect() as conn:
+                assert message_deliveries.get_turn(conn, original.turn_id)["state"] == "active"
+            assert len(started) == 1 and lost
+            for _ in range(100):
+                if len(started) > 1:
+                    break
+                await asyncio.sleep(0.02)
+
+    asyncio.run(startup())
 
     stored = request_store.get_run(run.id)
     with engine.connect() as conn:
@@ -344,14 +374,14 @@ def test_a_vibey_agent_run_cut_by_a_restart_settles_from_the_continued_work(isol
         assert stored["status"] == "running" and callbacks() == []
         assert stored["delivery_id"] == continued.platform_specific["delivery_id"]
         assert run.id in manager.accepted_agent_run_ids_for_turn(continued.platform_specific["turn_token"])
-        if step == "steered":
+        if step != "tool":
             assert steered.id in manager.accepted_agent_run_ids_for_turn(continued.platform_specific["turn_token"])
         # The continued Turn's own result settles the Run, exactly once.
         asyncio.run(controller.emit_agent_message(continued, "result", "日志已整理完毕"))
         stored = request_store.get_run(run.id)
         assert stored["status"] == "succeeded"
         assert stored["result_text"] == "日志已整理完毕"
-        if step == "steered":
+        if step != "tool":
             assert request_store.get_run(steered.id)["status"] == "succeeded"
     # The caller's callback reports the work's own result, once.
     assert callbacks() == [("succeeded", stored["result_text"])]

@@ -327,6 +327,9 @@ def restart_resume_plan(
 ) -> tuple[str, agent_transcript.CommittedResponse | None]:
     """How startup recovery settles an accepted Vibey Turn a restart cut.
 
+    ``("wait", None)``: a steer into it is still unsettled (its receipt could not be
+    materialized yet); recovery keeps the Turn open and retries, so the steer and its
+    Run join the Turn before it completes or moves to a continuation.
     ``("final", response)``: its final response was committed; it completed, whatever
     arrived after it: a Stop then loses the race, as it does in a live Turn.
     ``("continue", None)``: a hidden continuation resumes its transcript.
@@ -340,6 +343,8 @@ def restart_resume_plan(
         or turn.get("start_receipt_outcome") != "accepted"
     ):
         return "unavailable", None
+    if deliveries.turn_has_unresolved_steer(conn, str(turn["id"])):
+        return "wait", None
     final = agent_transcript.committed_final(conn, str(turn["session_id"]), str(turn["id"]))
     if final is not None:
         return "final", final

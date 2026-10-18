@@ -60,7 +60,10 @@ This replaces recovery invariant T4 for Vibey (`agent-core-contracts/recovery.md
    Accepted steers of the cut Turn and its retry ancestry are pinned as for
    Retry. A steer whose acceptance receipt the dead process recorded but did
    not materialize is reconciled into the cut Turn first, so it joins the Turn
-   and its Run moves with the rest (item 4).
+   and its Run moves with the rest (item 4). While any steer into the Turn is
+   still unsettled (its receipt could not be materialized yet), the Turn stays
+   open and its owner retries, as for item 3's handover, before it completes
+   or continues.
 3. **Tool calls.** A continued Turn treats a job that survived the restart as
    its live call would. Startup's T2 pass leaves a running job of a Turn still
    unsettled to the Turn owner; the continuation's own T2, before its first
@@ -168,7 +171,8 @@ Scenario IDs in `tests/scenarios/message_delivery/catalog.yaml`:
 - `MESSAGE-DELIVERY-328`: cut Harness Turn: shutdown leaves the Turn and its Run;
   the Run is not failed, its Delivery moves to the continuation, the continued
   Turn's result settles it, no owed restart notice; a Run steered into the
-  Turn whose receipt was never materialized moves and settles the same way.
+  Turn whose receipt was never materialized moves and settles the same way,
+  after a retry when startup could not materialize it.
 - `MESSAGE-DELIVERY-329`: ineligible cases each fall back to today's settlement
   and notice: Stop requested, archived Session, Agent switched off Vibey, the
   fourth restart in a row without a model response. A start never accepted

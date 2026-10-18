@@ -431,7 +431,7 @@ scenarios:
       - tests/test_backend_failure_retry.py::test_restart_completes_a_cut_vibey_turn_whose_final_reply_was_committed
       - tests/test_agent_transcript.py::test_the_restart_reads_of_a_turns_context_tail_stay_bounded
   - id: MESSAGE-DELIVERY-328
-    name: A Vibey Agent Run cut by a restart, steered-in Runs included, is left at shutdown, moves to the continuation, and settles once from the continued result, the answer after its command
+    name: A Vibey Agent Run cut by a restart, steered-in Runs included (the Turn waiting open until their receipts materialize), is left at shutdown, moves to the continuation, and settles once from the continued result, the answer after its command
     status: covered
     kind: recovery
     layer: contract

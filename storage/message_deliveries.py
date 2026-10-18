@@ -2584,6 +2584,19 @@ def pending_control_for_turn(conn: Connection, turn_id: str) -> dict[str, Any] |
     )
 
 
+def turn_has_unresolved_steer(conn: Connection, turn_id: str) -> bool:
+    """Whether a steer into the Turn still waits for its receipt to be settled."""
+    return (
+        conn.execute(
+            select(message_deliveries.c.id)
+            .where(message_deliveries.c.current_target_turn_id == turn_id)
+            .where(message_deliveries.c.state.in_(("steering", "reconciling_steer")))
+            .limit(1)
+        ).first()
+        is not None
+    )
+
+
 def pending_steer_for_turn(conn: Connection, turn_id: str) -> dict[str, Any] | None:
     return _one(
         conn,

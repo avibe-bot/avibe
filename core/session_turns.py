@@ -6872,7 +6872,12 @@ class SessionTurnManager:
             return False
 
     def _retry_restart_fallback(self, session_id: str) -> None:
-        """Retry a cut Vibey Turn's T2, then recover the Session again once it settled."""
+        """Recover a cut Vibey Turn startup had to leave open, until it is settled.
+
+        What it waits on (T2 handing its running command to a Watch, or a steer
+        receipt still to be materialized) is retried by recovering the Session again,
+        for as long as the same Turn stays open; a Stop or another owner ends it.
+        """
 
         existing = self._restart_fallback_retries.get(session_id)
         if existing is not None and not existing.done():
@@ -6895,7 +6900,10 @@ class SessionTurnManager:
                         return  # a Stop or another owner settled it meanwhile
                     if await self._settle_vibey_session(session_id):
                         await self.recover_durable_delivery_state(session_id, service_restart=True)
-                        return
+                        with self._sqlite_engine().connect() as conn:
+                            after = delivery_store.active_turn(conn, session_id)
+                        if after is None or after["id"] != live["id"]:
+                            return
             finally:
                 if self._restart_fallback_retries.get(session_id) is asyncio.current_task():
                     self._restart_fallback_retries.pop(session_id, None)
@@ -7233,7 +7241,8 @@ class SessionTurnManager:
         T2 has already given every open call a result. A Turn whose final response
         was committed completed: its Runs settle from that response. Any other
         qualifying Turn hands its work and its Runs to a hidden continuation that
-        resumes the transcript (``docs/plans/vibey-restart-auto-resume.md``).
+        resumes the transcript (``docs/plans/vibey-restart-auto-resume.md``). A Turn
+        with a steer still unsettled stays open (``restart_wait``) for a retry.
         """
 
         from core.backend_failure_retry import RestartResumeLost, restart_resume_plan
@@ -7293,6 +7302,8 @@ class SessionTurnManager:
                 if settled is not None:
                     self._settle_agent_run_ids_from_terminal_turn(run_ids, settled)
             return {**terminal, "restart_final": True}
+        if plan == "wait":
+            return {"changed": False, "successor_turn_id": None, "restart_wait": True}
         if plan != "continue":
             return None
         try:
@@ -7499,6 +7510,11 @@ class SessionTurnManager:
                     await self._recover_steer_attempts(target_session, target_turn_id=turn_id)
                 )
                 continued = self._settle_restart_cut_vibey_turn(turn_id, attempt_id)
+                if continued is not None and continued.get("restart_wait"):
+                    # A steer the dead run may have accepted is not settled yet: its Run
+                    # must join the Turn before the Turn completes or moves on.
+                    self._retry_restart_fallback(target_session)
+                    continue
                 if continued is not None:
                     if continued.get("changed"):
                         recovered.append(target_session)
