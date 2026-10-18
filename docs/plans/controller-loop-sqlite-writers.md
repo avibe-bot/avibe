@@ -162,7 +162,7 @@ The rc4 column is the summary of 2026-10-18 10:07, after about 16 h on the host 
 - `_terminalize_durable_turn`: 79 writes, 1.7 s, 211 ms max;
 - `persist_agent_message` across its call sites: about 650 writes, 2.9 s, 378 ms max.
 
-In the same window the watchdog reported one 2.3 s stall, at 22:54. Its stack of the event-loop thread sat in `selectors.select`, so the loop was idle and no loop code was running; nothing in the log precedes it. There was no `database is locked`.
+In the same window the watchdog reported one 2.3 s stall, at 22:54. Its stack of the event-loop thread sat in `selectors.select`, so the loop was idle and no loop code was running. It coincides with the moment the service's processes lost DNS and user lookups on the host, which lasted until a restart at 11:03 the next day. There was no `database is locked`.
 
 The per-Turn admissions all hold the boundary inside the transaction, so they are loop-side boundary holders and fall under B's split analysis:
 - `_admit_p0`, `_admit_p1`, `_admit_p3`, `_promote_fifo_head`;
