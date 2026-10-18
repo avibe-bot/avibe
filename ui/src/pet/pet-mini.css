@@ -869,6 +869,33 @@ to {
   background:color-mix(in srgb,var(--pet-ink) 8%,var(--pet-card))}
 .pet-mini-history-open:hover {
   background:color-mix(in srgb,var(--pet-ink) 14%,var(--pet-card))}
+/* Pet-styled tooltip for the Open in Avibe buttons (PetOpenButton), placed in
+   viewport coordinates by the component. No shadow: the transparent window
+   would clip it (§3.2), so the ink border defines the edge. */
+.pet-mini-tooltip {
+  position:fixed;
+  z-index:50;
+  max-width:calc(100vw - 8px);
+  overflow:hidden;
+  padding:4px 8px;
+  border:1px solid color-mix(in srgb,var(--pet-ink) 14%,transparent);
+  border-radius:8px;
+  color:var(--pet-ink);
+  background:var(--pet-card);
+  font-size:12px;
+  line-height:16px;
+  white-space:nowrap;
+  text-overflow:ellipsis;
+  pointer-events:none;
+  animation:pet-mini-tooltip-in 120ms ease both}
+@keyframes pet-mini-tooltip-in {
+  from {
+  opacity:0}
+}
+@media (prefers-reduced-motion: reduce) {
+  .pet-mini-tooltip {
+  animation:none}
+}
 .pet-mini-history-open:focus-visible {
   outline:2px solid var(--mint);
   outline-offset:2px}

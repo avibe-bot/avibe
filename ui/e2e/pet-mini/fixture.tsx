@@ -38,6 +38,7 @@ declare global {
     petFixtureMainReads: number;
     setPetMainAvailable: (available: boolean) => void;
     petFixtureConnection: (connected: boolean) => void;
+    petFixtureMessage: (message: Record<string, unknown>) => void;
   }
 }
 window.petLayoutHitRegions = [];
@@ -51,8 +52,11 @@ const hasMain = params.get('main') !== 'false';
 const layers = Number(params.get('layers') ?? 3);
 const personal = params.get('scenario') === 'personal';
 const historyActions = params.get('history') === 'actions';
-// Earlier turns that overflow the history box, with the latest reply unread.
+// Earlier turns that overflow the history box, with the latest reply unread
+// unless `unread=0`.
 const historyLong = params.get('history') === 'long';
+// A latest reply too tall for the history box on its own.
+const replyLong = params.get('reply') === 'long';
 const title = personal ? '检查桌宠 mini 的交互' : 'A long unbroken title '.repeat(40);
 const session = {
   id: 'ses_main', scope_id: 'fixture', title, agent_backend: 'codex',
@@ -72,8 +76,8 @@ const messages = hasMain ? [...earlier, {
 }, {
   id: 'result', session_id: session.id, scope_id: session.scope_id,
   author: 'agent', type: 'result',
-  text: personal ? '我会帮你跟进各个项目。需要授权的事已经排在前面。' : 'Ready to help with your next task.',
-  metadata: {}, content: historyActions ? { quick_replies: ['继续', '稍后'] } : {}, read_at: historyLong ? null : '2026-10-12T00:00:01Z',
+  text: replyLong ? '这是一条很长的回复。'.repeat(60) : personal ? '我会帮你跟进各个项目。需要授权的事已经排在前面。' : 'Ready to help with your next task.',
+  metadata: {}, content: historyActions ? { quick_replies: ['继续', '稍后'] } : {}, read_at: historyLong && params.get('unread') !== '0' ? null : '2026-10-12T00:00:01Z',
   created_at: '2026-10-12T00:00:01Z', updated_at: '2026-10-12T00:00:01Z',
 }] : [];
 const agents = Array.from({ length: Number(params.get('activities') ?? layers + 1) }, (_, i) => ({
@@ -158,6 +162,17 @@ window.petFixtureConnection = (connected) => {
     stream.dispatchEvent(new MessageEvent('workbench.events.bridge.status', {
       data: JSON.stringify({ type: 'workbench.events.bridge.status', data: { connected } }),
     }));
+  }
+};
+// Deliver a live `message.new` for the main session, as the event stream would.
+window.petFixtureMessage = (message) => {
+  const data = {
+    session_id: session.id, scope_id: session.scope_id, metadata: {}, content: {},
+    created_at: '2026-10-12T00:00:02Z', updated_at: '2026-10-12T00:00:02Z', read_at: '2026-10-12T00:00:03Z',
+    ...message,
+  };
+  for (const stream of streams) {
+    stream.dispatchEvent(new MessageEvent('message.new', { data: JSON.stringify({ type: 'message.new', data }) }));
   }
 };
 
