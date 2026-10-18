@@ -272,10 +272,11 @@ def x_cited_sources(citations: Iterable[Citation]) -> tuple[HostedSource, ...]:
     return tuple(seen.values())
 
 
-def reported_counts(*sections: Any) -> dict[str, int]:
+def reported_counts(*sections: Any, bound: Optional[int] = MAX_HOSTED_COUNT) -> dict[str, int]:
     """Provider-reported hosted counters (xAI ``server_side_tool_usage_details``, Anthropic ``server_tool_use``),
-    keeping the ones that counted something. A count past ``MAX_HOSTED_COUNT`` is refused here, where counters enter,
-    so it reads as absent to everything that prices or keeps them."""
+    keeping the ones that counted something. A count past ``bound`` is refused here, where counters enter, so it reads
+    as absent to everything that prices or keeps them. A caller that adds responses together reads them unbounded and
+    bounds the total, so a counter past the bound in one response stays past it."""
 
     counts: dict[str, int] = {}
     for section in sections:
@@ -285,7 +286,9 @@ def reported_counts(*sections: Any) -> dict[str, int]:
         for scanned, (name, value) in enumerate(section.items()):
             if len(counts) >= MAX_HOSTED_COUNTERS or scanned >= _COUNTERS_SCANNED:
                 break
-            counted = isinstance(value, int) and not isinstance(value, bool) and 0 < value <= MAX_HOSTED_COUNT
+            counted = isinstance(value, int) and not isinstance(value, bool) and value > 0
+            if counted and bound is not None:
+                counted = value <= bound
             if counted and isinstance(name, str) and _COUNTER_NAME.fullmatch(name):
                 counts[name] = value
     return counts
