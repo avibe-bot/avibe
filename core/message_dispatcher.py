@@ -3028,16 +3028,21 @@ class ConsolidatedMessageDispatcher:
                 # result, rendered and notified as one. ``level="silent"`` is not a
                 # reply but a settlement (a stop, a failure already shown, a
                 # teardown), and a failed or stopped Turn has no result to promote.
+                # The promotion waits for SQLite's write lock, so it runs off the
+                # controller loop.
                 if (
                     turn_text_row_id is not None
                     and level != "silent"
                     and terminal_reason == "done"
                 ):
-                    promote_turn_text_to_result(
-                        turn_text_row_id,
-                        suppress_delivery=bool(
-                            (context.platform_specific or {}).get("suppress_delivery")
-                        ),
+                    suppress_promoted_delivery = bool(
+                        (context.platform_specific or {}).get("suppress_delivery")
+                    )
+                    await self._run_off_loop(
+                        lambda: promote_turn_text_to_result(
+                            turn_text_row_id,
+                            suppress_delivery=suppress_promoted_delivery,
+                        )
                     )
                 # This row is the IM turn's ONLY terminal boundary — an IM turn has
                 # no durable execution owner, and ``list_turn_groups`` /
