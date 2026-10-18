@@ -341,7 +341,16 @@ class VibeyAgent(BaseAgent):
             request.vibe_agent_model = execution.get("model")
             request.vibe_agent_reasoning_effort = execution.get("reasoning_effort")
             request.vibe_agent_system_prompt = execution.get("system_prompt")
-        await self._resume(runtime, stop=turn.stop_event if resuming else None)
+        try:
+            await self._resume(runtime, stop=turn.stop_event if resuming else None)
+        except asyncio.CancelledError:
+            if resuming and getattr(self.controller, "shutdown_requested", False) is not True:
+                # Cancelled outside a shutdown (the backend disabled or refreshed): the work
+                # stops, so the command the wait was for ends with it instead of running on
+                # unowned. A shutdown leaves it for the next start's rerun.
+                turn.stop_event.set()
+                await self._settle_open_calls(runtime, stop=turn.stop_event)
+            raise
         if turn.stop_requested:
             return await self._settle_stopped(turn)
         cwd = request.working_path or runtime.cwd

@@ -70,7 +70,8 @@ exists; "handled" names where the in-place design still owns it.
    accepted work a restart cut, whichever writer recorded the cut, when all of
    these hold:
    - the Session is active and not system-visibility, and its Agent still runs
-     on the `vibey` backend;
+     on the `vibey` backend, as does the Agent that ran the Turn (another
+     Agent never continues its work);
    - the Turn's start was accepted (`start_receipt_outcome = accepted`), and no
      Stop or replacement control was requested for it;
    - the Turn's transcript has work left: its last committed response has tool
@@ -112,7 +113,9 @@ exists; "handled" names where the in-place design still owns it.
    it until it exits, until the call's foreground window (`bash`'s, 120 s by
    default) passes, counted from the job's launch (`meta.created_at`), or until
    a Stop, which ends the command as in a live Turn: the Turn is durably
-   active, so a Stop reaches the adapter's own Stop during the wait. An exited
+   active, so a Stop reaches the adapter's own Stop during the wait. A
+   cancellation outside a shutdown (the backend disabled or refreshed) ends the
+   command too; a shutdown leaves it for the next start's rerun. An exited
    job gives its real output; only a job still running then is
    handed to a Watch, with the ordinary handover result; a window the downtime
    already spent hands over at once. A handover that fails is retried once,

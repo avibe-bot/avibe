@@ -2682,7 +2682,10 @@ async def test_a_run_the_service_stop_cut_leaves_its_turn_open_for_its_restart_r
         await running
 
 
-@pytest.mark.parametrize("case", ["exits", "window_passed", "watch_unavailable", "stop", "stopped_left_open"])
+@pytest.mark.parametrize(
+    "case",
+    ["exits", "window_passed", "watch_unavailable", "stop", "cancelled", "cancelled_at_shutdown", "stopped_left_open"],
+)
 async def test_a_restart_rerun_waits_for_its_surviving_command_as_the_live_call_would(
     engine, session, tmp_path, published, monkeypatch, case
 ) -> None:
@@ -2691,8 +2694,9 @@ async def test_a_restart_rerun_waits_for_its_surviving_command_as_the_live_call_
     window, counted from its launch, before it binds its native start, so its real output is the
     result the reply (and a Run, MESSAGE-DELIVERY-328) settles from. A window the downtime spent
     hands it over; with no Watch to take it, it stays in the foreground until it ends; a Stop ends
-    the wait and the command, as does one that settles the Turn while it is left open. It never
-    starts again."""
+    the wait and the command, as does one that settles the Turn while it is left open, and so does
+    a cancellation outside a shutdown (the backend disabled or refreshed); a shutdown leaves the
+    command for the next start. It never starts again."""
     import core.watches as watches_module
     from core.scheduled_tasks import TaskExecutionStore
     from core.watches import ManagedWatchStore
@@ -2777,6 +2781,22 @@ async def test_a_restart_rerun_waits_for_its_surviving_command_as_the_live_call_
         )
 
         resumed = asyncio.create_task(harness.agent.handle_message(resume))
+        if case in {"cancelled", "cancelled_at_shutdown"}:
+            await _until(lambda: harness.agent._run_for(SESSION, cut_turn) is not None, "the rerun never ran")
+            await asyncio.sleep(0.3)
+            harness.controller.shutdown_requested = case == "cancelled_at_shutdown"
+            # The Turn task is cancelled directly, without ``handle_stop``.
+            resumed.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(resumed, timeout=20)
+            results = [entry for entry in await harness.context_rows() if entry.kind == "tool_result"]
+            if case == "cancelled":
+                assert "Stopped by the user" in results[0].message.content[0].text
+                assert suite.jobs.status(job_id).state != "running"
+            else:
+                assert results == [] and suite.jobs.status(job_id).state == "running"
+            assert ManagedWatchStore().find_job_watch(job_id) is None and harness.provider.requests == []
+            return
         if case == "stop":
             await _until(lambda: harness.agent._run_for(SESSION, cut_turn) is not None, "the rerun never ran")
             await asyncio.sleep(0.3)
