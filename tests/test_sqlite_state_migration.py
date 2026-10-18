@@ -38,7 +38,9 @@ from vibe.message_types import build_partial_index_predicate
 pytestmark = pytest.mark.no_sqlite_template
 
 
-HEAD_REVISION = "20261016_0068"
+HEAD_REVISION = "20261016_0069"
+PREVIOUS_HEAD_REVISION = "20261016_0068"
+_SCOPE_ID_DRIFT_TABLES = ("messages", "agent_events", "media_objects")
 # ``storage.models`` builds a bare ``MetaData()``, so its foreign keys are unnamed and
 # Alembic cannot re-emit them when batch mode recreates a table. Every migration that
 # rebuilds one therefore passes this convention; the rebuild simulated below has to pass
@@ -3424,6 +3426,400 @@ def test_session_visibility_migration_reparents_legacy_runs_and_self_anchors(tmp
     promoted = resolve_session_id_target("ses_legacy_a", db_path=db_path)
     assert promoted.scope_id == "scope_real"
     assert promoted.session_key.thread_id is None
+
+
+def _restore_scope_id_not_null_drift(conn: sqlite3.Connection) -> None:
+    """Recreate the released head-shaped drift without copying any table."""
+
+    schema_version = conn.execute("pragma schema_version").fetchone()[0]
+    conn.execute("pragma writable_schema = on")
+    try:
+        for table in _SCOPE_ID_DRIFT_TABLES:
+            sql = conn.execute(
+                "select sql from sqlite_schema where type = 'table' and name = ?",
+                (table,),
+            ).fetchone()[0]
+            drifted_sql = sql.replace(
+                "scope_id VARCHAR,",
+                "scope_id VARCHAR NOT NULL,",
+                1,
+            )
+            assert drifted_sql != sql, f"{table} fixture did not find scope_id"
+            conn.execute(
+                "update sqlite_schema set sql = ? where type = 'table' and name = ?",
+                (drifted_sql, table),
+            )
+        conn.execute(f"pragma schema_version = {schema_version + 1}")
+    finally:
+        conn.execute("pragma writable_schema = off")
+    conn.execute("drop index if exists ix_agent_sessions_visibility")
+    conn.commit()
+    assert all(
+        {
+            row[1]: row[3]
+            for row in conn.execute(f'pragma table_info("{table}")')
+        }["scope_id"]
+        for table in _SCOPE_ID_DRIFT_TABLES
+    )
+
+
+def _insert_current_session(
+    conn,
+    *,
+    session_id: str,
+    scope_id: str | None,
+    now: str,
+) -> None:
+    conn.exec_driver_sql(
+        """
+        insert into agent_sessions (
+            id, scope_id, agent_name, agent_backend, agent_variant,
+            session_anchor, workdir, native_session_id, status, visibility,
+            pinned, agent_status, metadata_json, created_at, updated_at,
+            last_active_at
+        ) values (
+            ?, ?, 'codex', 'codex', 'codex', ?, '/tmp', '', 'active',
+            'foreground', 0, 'idle', '{}', ?, ?, ?
+        )
+        """,
+        (session_id, scope_id, session_id, now, now, now),
+    )
+
+
+def _materialize_test_message(
+    conn,
+    *,
+    session_id: str,
+    scope_id: str | None,
+    message_id: str,
+    now: str,
+) -> None:
+    delivery = message_deliveries.insert_delivery(
+        conn,
+        delivery_id=message_id,
+        session_id=session_id,
+        priority="p3",
+        state="reserved",
+        snapshot=message_deliveries.message_snapshot(
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="avibe",
+            author="user",
+            source="user",
+            message_type="user",
+            text=message_id,
+        ),
+        dispatch_text=message_id,
+        now=now,
+    )
+    claimed = message_deliveries.claim_start_batch(
+        conn,
+        turn_id=f"turn_{message_id}",
+        session_id=session_id,
+        backend="codex",
+        deliveries=[delivery],
+        dispatch_text=message_id,
+    )
+    turn = message_deliveries.bind_native_start(
+        conn,
+        f"turn_{message_id}",
+        expected_version=int(claimed["turn"]["version"]),
+        runtime_key=f"runtime_{message_id}",
+        runtime_turn_id=f"runtime_turn_{message_id}",
+        native_turn_id=f"native_turn_{message_id}",
+    )
+    assert turn is not None
+    assert message_deliveries.materialize_start_acceptance(
+        conn,
+        turn_id=f"turn_{message_id}",
+        evidence={"kind": "migration_test"},
+    )
+
+
+def _inbound_foreign_key_tables(target: str) -> set[str]:
+    return {
+        table.name
+        for table in metadata.tables.values()
+        for constraint in table.foreign_key_constraints
+        if constraint.referred_table.name == target
+    }
+
+
+def test_scope_id_nullability_repair_preserves_rows_and_references(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision=PREVIOUS_HEAD_REVISION)
+    engine = create_sqlite_engine(db_path)
+    now = "2026-10-16T00:00:00Z"
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="scope-repair",
+            now=now,
+        )
+        _insert_current_session(
+            conn,
+            session_id="ses_scope_repair",
+            scope_id=scope_id,
+            now=now,
+        )
+        _materialize_test_message(
+            conn,
+            session_id="ses_scope_repair",
+            scope_id=scope_id,
+            message_id="msg_scope_repair",
+            now=now,
+        )
+        conn.exec_driver_sql(
+            """
+            insert into agent_events (
+                id, scope_id, session_id, platform, event_type, content_json,
+                metadata_json, created_at, updated_at
+            ) values (
+                'evt_scope_repair', ?, 'ses_scope_repair', 'avibe', 'tool_call',
+                '{}', '{}', ?, ?
+            )
+            """,
+            (scope_id, now, now),
+        )
+        conn.exec_driver_sql(
+            """
+            insert into media_objects (
+                token, scope_id, session_id, message_id, kind, source,
+                local_path, created_at
+            ) values (
+                'media_scope_repair', ?, 'ses_scope_repair', 'msg_scope_repair',
+                'file', 'user_upload', '/tmp/scope-repair.txt', ?
+            )
+            """,
+            (scope_id, now),
+        )
+        conn.exec_driver_sql(
+            """
+            insert into media_object_references (token, session_id, created_at)
+            values ('media_scope_repair', 'ses_scope_repair', ?)
+            """,
+            (now,),
+        )
+        conn.exec_driver_sql(
+            """
+            insert into show_session_events (
+                id, session_id, event_type, actor, scope, anchor_json,
+                payload_json, message_id, delivery_id, created_at
+            ) values (
+                'show_scope_repair', 'ses_scope_repair', 'input', 'user',
+                'session', '{}', '{}', 'msg_scope_repair',
+                'msg_scope_repair', ?
+            )
+            """,
+            (now,),
+        )
+    engine.dispose()
+
+    assert _inbound_foreign_key_tables("messages") == {
+        "message_deliveries",
+        "media_objects",
+        "show_session_events",
+    }
+    assert _inbound_foreign_key_tables("media_objects") == {
+        "media_object_references"
+    }
+    assert _inbound_foreign_key_tables("agent_events") == set()
+
+    with sqlite3.connect(db_path) as conn:
+        _restore_scope_id_not_null_drift(conn)
+        before_counts = {
+            table: conn.execute(f'select count(*) from "{table}"').fetchone()[0]
+            for table in (
+                *_SCOPE_ID_DRIFT_TABLES,
+                "message_deliveries",
+                "show_session_events",
+                "media_object_references",
+            )
+        }
+        before_rootpages = {
+            row[0]: row[1]
+            for row in conn.execute(
+                "select name, rootpage from sqlite_schema "
+                "where type = 'table' and name in (?, ?, ?)",
+                _SCOPE_ID_DRIFT_TABLES,
+            )
+        }
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        nullable = {
+            table: {
+                row[1]: row[3]
+                for row in conn.execute(f'pragma table_info("{table}")')
+            }["scope_id"]
+            for table in _SCOPE_ID_DRIFT_TABLES
+        }
+        after_counts = {
+            table: conn.execute(f'select count(*) from "{table}"').fetchone()[0]
+            for table in before_counts
+        }
+        after_rootpages = {
+            row[0]: row[1]
+            for row in conn.execute(
+                "select name, rootpage from sqlite_schema "
+                "where type = 'table' and name in (?, ?, ?)",
+                _SCOPE_ID_DRIFT_TABLES,
+            )
+        }
+        refs = (
+            conn.execute(
+                "select message_id from message_deliveries "
+                "where id = 'msg_scope_repair'"
+            ).fetchone(),
+            conn.execute(
+                "select message_id from media_objects "
+                "where token = 'media_scope_repair'"
+            ).fetchone(),
+            conn.execute(
+                "select message_id from show_session_events "
+                "where id = 'show_scope_repair'"
+            ).fetchone(),
+            conn.execute(
+                "select token from media_object_references "
+                "where token = 'media_scope_repair'"
+            ).fetchone(),
+        )
+        indexes = {
+            row[1] for row in conn.execute("pragma index_list(agent_sessions)")
+        }
+        foreign_key_errors = conn.execute("pragma foreign_key_check").fetchall()
+        integrity = conn.execute("pragma integrity_check").fetchall()
+
+    assert nullable == {table: 0 for table in _SCOPE_ID_DRIFT_TABLES}
+    assert after_counts == before_counts
+    assert after_rootpages == before_rootpages
+    assert refs == (
+        ("msg_scope_repair",),
+        ("msg_scope_repair",),
+        ("msg_scope_repair",),
+        ("media_scope_repair",),
+    )
+    assert "ix_agent_sessions_visibility" in indexes
+    assert foreign_key_errors == []
+    assert integrity == [("ok",)]
+
+    engine = create_sqlite_engine(db_path)
+    with engine.begin() as conn:
+        _insert_current_session(
+            conn,
+            session_id="ses_scope_less",
+            scope_id=None,
+            now=now,
+        )
+        _materialize_test_message(
+            conn,
+            session_id="ses_scope_less",
+            scope_id=None,
+            message_id="msg_scope_less",
+            now=now,
+        )
+        scope_id = conn.exec_driver_sql(
+            "select scope_id from messages where id = 'msg_scope_less'"
+        ).scalar_one()
+    engine.dispose()
+    assert scope_id is None
+
+    command.downgrade(
+        migrations.alembic_config(db_path),
+        PREVIOUS_HEAD_REVISION,
+    )
+    with sqlite3.connect(db_path) as conn:
+        assert {
+            table: {
+                row[1]: row[3]
+                for row in conn.execute(f'pragma table_info("{table}")')
+            }["scope_id"]
+            for table in _SCOPE_ID_DRIFT_TABLES
+        } == {table: 0 for table in _SCOPE_ID_DRIFT_TABLES}
+        assert conn.execute(
+            "select scope_id from messages where id = 'msg_scope_less'"
+        ).fetchone() == (None,)
+        assert "ix_agent_sessions_visibility" in {
+            row[1] for row in conn.execute("pragma index_list(agent_sessions)")
+        }
+        assert conn.execute("pragma foreign_key_check").fetchall() == []
+
+    run_migrations(db_path)
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute(
+            "select version_num from alembic_version"
+        ).fetchone() == (HEAD_REVISION,)
+
+
+def test_scope_id_nullability_repair_is_noop_on_correct_schema(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision=PREVIOUS_HEAD_REVISION)
+    with sqlite3.connect(db_path) as conn:
+        before = conn.execute(
+            "select type, name, tbl_name, sql, rootpage from sqlite_schema "
+            "where name <> 'alembic_version' order by type, name"
+        ).fetchall()
+        before_schema_version = conn.execute(
+            "pragma schema_version"
+        ).fetchone()[0]
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        after = conn.execute(
+            "select type, name, tbl_name, sql, rootpage from sqlite_schema "
+            "where name <> 'alembic_version' order by type, name"
+        ).fetchall()
+        after_schema_version = conn.execute(
+            "pragma schema_version"
+        ).fetchone()[0]
+        version = conn.execute(
+            "select version_num from alembic_version"
+        ).fetchone()
+
+    assert after == before
+    assert after_schema_version == before_schema_version
+    assert version == (HEAD_REVISION,)
+
+
+def test_scope_id_nullability_repair_replays_after_head_shape_stamp(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    engine = create_sqlite_engine(db_path)
+    try:
+        metadata.create_all(engine)
+    finally:
+        engine.dispose()
+    with sqlite3.connect(db_path) as conn:
+        _restore_scope_id_not_null_drift(conn)
+        assert conn.execute(
+            "select name from sqlite_schema where name = 'alembic_version'"
+        ).fetchone() is None
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        assert {
+            table: {
+                row[1]: row[3]
+                for row in conn.execute(f'pragma table_info("{table}")')
+            }["scope_id"]
+            for table in _SCOPE_ID_DRIFT_TABLES
+        } == {table: 0 for table in _SCOPE_ID_DRIFT_TABLES}
+        assert "ix_agent_sessions_visibility" in {
+            row[1] for row in conn.execute("pragma index_list(agent_sessions)")
+        }
+        assert conn.execute(
+            "select version_num from alembic_version"
+        ).fetchone() == (HEAD_REVISION,)
 
 
 def test_run_migrations_serializes_alembic_context(monkeypatch, tmp_path: Path) -> None:
