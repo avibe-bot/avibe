@@ -587,7 +587,7 @@ for (const theme of ['light', 'dark']) {
     await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).toHaveClass(/is-open/);
     await settle();
     await expect(icon).toBeVisible();
-    expect(await icon.getAttribute('title')).toBeNull();
+    expect(await icon.getAttribute('title')).toBe('');
     expect((await icon.innerText()).trim()).toBe('');
     // Only the pinned icon remains: no text link inside the scrolling history.
     await expect(history.getByRole('button', { name: '在 Avibe 中打开', exact: true })).toHaveCount(0);
@@ -735,7 +735,9 @@ for (const theme of ['light', 'dark']) {
     await page.locator('.pet-mini-reply-toggle').click();
     const icon = page.locator('.pet-mini-history-open');
     await expect(icon).toBeVisible();
-    expect(await icon.getAttribute('title')).toBeNull();
+    // No native tooltip applies: the nearest title on its ancestor chain, which
+    // the browser would show, is its own empty one.
+    expect(await icon.evaluate((node) => node.closest('[title]')?.getAttribute('title'))).toBe('');
     await expect(tooltip).toHaveCount(0);
     await icon.hover();
     await expect(tooltip).toHaveText('在 Avibe 中打开');
@@ -766,7 +768,10 @@ for (const theme of ['light', 'dark']) {
     await page.locator('.pet-mini-collapsed').click();
     const cardOpen = page.locator('.pet-mini-card .pet-mini-open').first();
     await expect(cardOpen).toBeVisible();
-    expect(await cardOpen.getAttribute('title')).toBeNull();
+    // The card carries its title, which a descendant inherits unless it sets
+    // its own: an empty one suppresses that native tooltip.
+    expect(await cardOpen.evaluate((node) => node.parentElement?.closest('[title]:not([title=""])') != null)).toBe(true);
+    expect(await cardOpen.getAttribute('title')).toBe('');
     await cardOpen.hover();
     await expect(tooltip).toHaveText('在 Avibe 中打开');
     const left = await unclipped();

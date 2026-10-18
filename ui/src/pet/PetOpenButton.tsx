@@ -84,6 +84,9 @@ export function PetOpenButton({ link, placement, className }: { link: string; pl
         ref={buttonRef}
         type="button"
         className={clsx('pet-mini-open', className)}
+        // An empty title stops the native tooltip of an ancestor's `title`
+        // (an activity card's) from showing over the pet tooltip.
+        title=""
         aria-label={label}
         aria-describedby={tip ? tooltipId : undefined}
         onClick={() => void petBridge.open(link)}
