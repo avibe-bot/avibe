@@ -52,6 +52,14 @@ SETTLED_BY_REFUSED_CONCURRENT_TURN: Final = "refused_concurrent_turn"
 #: ``SETTLED_BY_TERMINAL_RESULT``.
 SETTLED_BY_TURN_ONLY_RESULT: Final = "turn_only_result"
 
+#: Startup recovery handed a Vibey Turn an Avibe restart cut to its hidden
+#: continuation (``docs/plans/vibey-restart-auto-resume.md``). The work did not
+#: end: the Turn's Runs moved to the continuation's Delivery in the same writer
+#: transaction and settle from the continued Turn. Like
+#: ``SETTLED_BY_TERMINAL_RESULT`` it is not in ``SETTLEMENTS_WITHOUT_RESULT``, so it
+#: fails no Run and owes no notice.
+SETTLED_BY_RESTART_RESUMED: Final = "restart_resumed"
+
 #: An agent-runtime refresh retired the turn: ``release_for_backend_refresh``
 #: cancels in-flight turns of a backend whose cached process state is about to
 #: disappear (an ``agents.*`` save's rolling reconciliation, a Codex runtime

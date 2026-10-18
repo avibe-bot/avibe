@@ -32,8 +32,8 @@ function mount(props: Partial<Parameters<typeof FailureRetry>[0]> = {}) {
 
 describe('failed-turn retry action', () => {
   it.each([
-    '⚠️ 本轮执行被中断——Avibe 服务在它运行期间重启。如果这项工作仍然需要完成，请重新发送请求。',
-    '[Avibe Harness] 一项后台任务已随 Avibe 重启停止。如需继续，请发送“继续”给 Agent。',
+    '⚠️ 本轮执行被中断——Avibe 服务在它运行期间重启。如需继续，请在 Web 端点击“重试”，或发送“继续”。',
+    '[Avibe Harness] 一项后台任务已随 Avibe 重启停止。如需继续，请在 Web 端点击“重试”，或发送“继续”给 Agent。',
   ])('MESSAGE-DELIVERY-320: offers retry for a linked restart notice: %s', async (text) => {
     const onRetry = mount({
       message: {
@@ -127,7 +127,7 @@ describe('failed-turn retry action', () => {
     {
       message: {
         ...notice,
-        text: '[Avibe Harness] 一项后台任务已随 Avibe 重启停止。如需继续，请发送“继续”给 Agent。',
+        text: '[Avibe Harness] 一项后台任务已随 Avibe 重启停止。如需继续，请在 Web 端点击“重试”，或发送“继续”给 Agent。',
         metadata: { event: 'backend_failure', failure_id: 'turn:unbound', replayed: true },
       },
     },

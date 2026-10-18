@@ -1343,8 +1343,9 @@ class Controller:
                     coordinator.restore_migration_blocks()
 
         # recovery.md: T2 before T4. Vibey hands the commands a restart left running
-        # to their Watches first, so the interruption notice of their Turn can say so instead
-        # of asking for a resend. Best effort: its single owner retries what it could not settle.
+        # to their Watches first, so the continuation of their Turn reads the handover
+        # result (or a fallback notice names the Watches) and nothing runs twice. Best
+        # effort: its single owner retries what it could not settle.
         try:
             await self._recover_vibey_agent_runtime_state()
         except Exception:

@@ -37,6 +37,8 @@ TURN_OWNER_STATES = ("starting", "active")
 POSSIBLY_WRITTEN_DELIVERY_STATES = frozenset({"accepted", "steering", "reconciling_steer"})
 UNWRITTEN_STEER_STATES = frozenset({"queued", "pending_steer"})
 FAILURE_RETRY_HISTORY_KIND = "backend_failure_retry"
+# The hidden continuation of a Vibey Turn an Avibe restart cut (startup recovery).
+RESTART_RESUME_HISTORY_KIND = "restart_resume"
 WEB_PUSH_USER_KEY_METADATA = "_web_push_user_key"
 WEB_PUSH_USER_KEYS_METADATA = "_web_push_user_keys"
 WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA = "_web_push_authorization_contexts"
@@ -312,16 +314,29 @@ def delivery_has_history_event(delivery: dict[str, Any], *, kind: str) -> bool:
     )
 
 
+def _history_binding(
+    delivery: dict[str, Any], kind: str, *, unclaimed_only: bool
+) -> dict[str, Any] | None:
+    for event in reversed(_history(delivery.get("delivery_history_json"))["events"]):
+        if unclaimed_only and event.get("kind") == "start" and event.get("outcome") in {"claimed", "opened"}:
+            return None
+        if event.get("kind") == kind:
+            return event
+    return None
+
+
 def failure_retry_binding(
     delivery: dict[str, Any], *, unclaimed_only: bool = False
 ) -> dict[str, Any] | None:
     """Server-written action provenance, never caller Message metadata."""
-    for event in reversed(_history(delivery.get("delivery_history_json"))["events"]):
-        if unclaimed_only and event.get("kind") == "start" and event.get("outcome") in {"claimed", "opened"}:
-            return None
-        if event.get("kind") == FAILURE_RETRY_HISTORY_KIND:
-            return event
-    return None
+    return _history_binding(delivery, FAILURE_RETRY_HISTORY_KIND, unclaimed_only=unclaimed_only)
+
+
+def restart_resume_binding(
+    delivery: dict[str, Any], *, unclaimed_only: bool = False
+) -> dict[str, Any] | None:
+    """Startup recovery's binding of a hidden continuation to the Turn a restart cut."""
+    return _history_binding(delivery, RESTART_RESUME_HISTORY_KIND, unclaimed_only=unclaimed_only)
 
 
 def failure_retry_state(delivery: dict[str, Any]) -> str:

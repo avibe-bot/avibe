@@ -26,7 +26,7 @@ at-least-once, and that is stated where it applies.
 | T1 | `project()` reads only committed rows; the same rows always produce the same request. | projection before and after job state changes |
 | T2 | At resume, before the first projection, and when a run ends without completing (a Stop), every tool call without a committed `tool_result` gets exactly one, chosen from the state of the job its call instance started (exited: the output; running: handover; stopped with a recorded reason: the output so far and that reason, `tools.md` §5; never ran: the interrupted result). A call without job state (`write`, `edit`) gets `[tool call interrupted; it may or may not have completed; re-read the file before continuing]`. Retries settle nothing twice, and neither do concurrent writers: the store's `append_tool_result` returns the result already committed for the call instance instead of writing a second. | crash between settlement steps, then resume twice; a Stop while several calls of one group (C-3 §2) run |
 | T3 | Inputs accepted by `steer` or `follow_up` are never dropped: they enter the context, including after a crash. They belong to the Turn that accepted them and are never re-queued as a new P3 Turn. A run that ended by design runs again for them within its Turn; after a stop, an error, or a crash they are admitted into the context (at the end of the run, or at the Session's resume) and share the Turn's outcome. | a terminating tool while a steer is queued; a crash before consumption |
-| T4 | An unsettled Turn found at startup is settled as interrupted after T2; the agent never continues it on its own (a hook `end`, an abort, or a crash all leave the same safe state). The user's next message starts a new Turn with the full context. When T2 handed the Turn's running commands to Watches, its notice names them and offers no Retry, because a resend would run them twice. | crash after an `end` hook and after a mid-turn commit |
+| T4 | An accepted Turn found unsettled at startup is continued after T2, whatever stopped the process (`vibey-restart-auto-resume.md`): a Turn whose final response was committed settles from it; any other Turn hands its work, and its Runs, to a hidden continuation that resumes the committed transcript, with no notice and no replayed tool call. A command T2 handed to a Watch is not run again: the continuation reads the handover result. A Turn that no longer qualifies (Stop or replacement requested, Session archived, Agent off Vibey, or the third consecutive continuation without a model response) settles as interrupted with the restart notice; when T2 handed its running commands to Watches, that notice names them and offers no Retry, because a resend would run them twice. A run that fails while the service is stopping leaves its Turn open for this. | crash after an `end` hook and after a mid-turn commit; a restart during a tool call, during a model call, and after the final commit |
 
 ## Delivery (adapter wave)
 
@@ -35,8 +35,8 @@ through the same emit path as the other backends: splitting, file upload, failur
 are the dispatcher's. The one difference is persistence: the response row already exists, so the dispatcher writes
 its display columns instead of inserting a second row (`transcript.md` §2). A crash or send failure between commit
 and send loses that delivery, as it does for the other backends; the transcript, and so the context, is unaffected.
-A Turn interrupted after its final commit is settled by T4 like any other, so the user sees the interruption
-notice, and the committed reply stays in the Workbench transcript with its commit-time display.
+A Turn interrupted after its final commit is settled by T4 from that reply, without a notice, and the committed
+reply stays in the Workbench transcript with its commit-time display.
 
 ## Shared fields
 

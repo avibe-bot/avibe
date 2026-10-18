@@ -67,8 +67,9 @@ This replaces recovery invariant T4 for Vibey (`agent-core-contracts/recovery.md
    the continuation Delivery in the same writer transaction, so the continued
    Turn settles them with its own outcome and output, and callbacks fire once,
    from that outcome. At shutdown, `release_for_service_shutdown` and the
-   scheduled-task teardown leave a Vibey Turn and its Runs unsettled, so startup
-   finds them as lost active Turns like a conversation Turn.
+   scheduled-task teardown leave a Vibey Turn and its Runs unsettled, and a
+   Vibey run that fails because the service is stopping leaves its Turn open, so
+   startup finds them as lost active Turns like a conversation Turn.
 5. **Ordering.** The continuation is admitted before any input queued while the
    service was down; that input waits behind it, as behind any active Turn, and
    may be steered into it by the existing steer path.
@@ -82,34 +83,68 @@ This replaces recovery invariant T4 for Vibey (`agent-core-contracts/recovery.md
 
 ## Ownership and touch points
 
-- `core/session_turns.py`: `recover_durable_delivery_state` (lost active Turns,
-  eligibility, continuation instead of `_report_interrupted_turn`);
-  `release_for_service_shutdown` (leave Vibey Turns and Runs unsettled).
-- `core/scheduled_tasks.py`: service-teardown settlement and
-  `recover_processing_requests` must not settle Runs of a Turn startup will
-  continue; `settle_agent_runs_from_terminal_turn` must ignore
-  `restart_resumed`.
-- `core/backend_failure_retry.py`: a notice-free reservation for
-  `restart_resume`, sharing the Vibey resume snapshot and boundary checks with
-  `reserve_retry`; `admission_denial` honors the new binding kind.
-- `core/run_settlement.py`: `SETTLED_BY_RESTART_RESUMED`.
-- `modules/agents/vibey/agent.py`: none expected beyond what Retry uses; the
-  resume path already settles T2 and pins inputs.
+- `core/session_turns.py`: `recover_durable_delivery_state` asks
+  `_settle_restart_cut_vibey_turn` before today's settlement of a lost Vibey
+  Turn. `_terminalize_durable_turn(restart_resume=True)` reserves the
+  continuation, moves the Runs, writes the cut Turn's terminal row
+  (`completed` / `restart_resumed`, so its Activity group carries no failure),
+  and claims the continuation as the successor ahead of the FIFO, all in one
+  writer transaction; any failure rolls the transaction back and the Turn
+  keeps today's notice. `release_for_service_shutdown` skips a Vibey Turn
+  nobody asked to stop.
+- `core/backend_failure_retry.py`: `restart_resume_plan` (eligibility, item 1
+  and the bound of item 6), `reserve_restart_resume` (the notice-free
+  reservation, sharing `_vibey_resume_snapshot` with `reserve_retry`), and the
+  `restart_resume` branch of `admission_denial` (the cut Turn must still be the
+  Session's latest Turn; input queued behind it does not deny it).
+- `storage/agent_transcript.py`: `last_response` and `committed_final`, bounded
+  reads of the context tail. `storage/background.py`:
+  `move_agent_run_deliveries_in_connection`. `storage/message_deliveries.py`:
+  `restart_resume_binding`.
+- `core/run_settlement.py`: `SETTLED_BY_RESTART_RESUMED`, outside
+  `SETTLEMENTS_WITHOUT_RESULT`.
+- `modules/agents/vibey/agent.py`: none on the resume path, which is Retry's.
+  One addition the code required: stopping the service stops the Model Hub
+  gateway before Turns end, so a run in a model call fails during shutdown. A
+  run that ends without completing while the service is stopping leaves its
+  Turn open instead of settling it, so startup continues it like any other cut
+  Turn.
+- `core/scheduled_tasks.py`: no change needed. Its shutdown cancellation only
+  covers executions still in flight, and a Turn-owned Run has already handed
+  its execution to the Turn; `recover_processing` skips Delivery-linked Runs;
+  `settle_agent_runs_from_terminal_turn` settles nothing for `restart_resumed`,
+  which is neither a settlement without result nor carries `settles_run`.
+- The continuation keeps the cut Turn's routing: platform, scope, author,
+  metadata (Harness provenance included), admission context (with the IM
+  message the indicator belongs on), and FIFO position (`submitted_at`), so a
+  deferred start still runs before input queued behind the cut Turn.
 - Docs: `agent-core-contracts/recovery.md` T4, `backend-failure-retry.md`.
+  Public docs (`avibe-docs` `agents/vibey.mdx` Restart bullet, both languages)
+  change in a follow-up in that repository.
 
 ## Validation
 
-- Startup recovery with a cut conversation Turn: one continuation Delivery, no
-  notice, Vibey resumes from the transcript; with the final response already
-  committed: settled completed, no continuation.
-- Cut Harness Turn: the Run is not failed, its Delivery moves to the
-  continuation, the continued Turn's outcome settles it, the callback carries
-  that outcome, no owed restart notice.
-- Ineligible cases each fall back to today's notice: Stop requested, archived
-  Session, Agent switched off Vibey, start not accepted, loop bound reached.
-- Running command at shutdown: T2 hands it to a Watch, the continuation still
-  starts, the command is not started again.
-- Input queued during downtime runs after the continuation.
+Scenario IDs in `tests/scenarios/message_delivery/catalog.yaml`:
+
+- `MESSAGE-DELIVERY-326`: startup recovery with a cut conversation Turn: one
+  continuation Delivery, no notice, a transcript resume of the cut Turn; with
+  the final response already committed: settled completed, no continuation.
+- `MESSAGE-DELIVERY-327`: cut Harness Turn: shutdown leaves the Turn and its Run;
+  the Run is not failed, its Delivery moves to the continuation, the continued
+  Turn's result settles it, no owed restart notice.
+- `MESSAGE-DELIVERY-328`: ineligible cases each fall back to today's settlement
+  and notice: Stop requested, archived Session, Agent switched off Vibey, the
+  fourth restart in a row without a model response. A start never accepted
+  stays on the unknown-start path it takes today.
+- `MESSAGE-DELIVERY-329`: running command at shutdown: T2 hands it to a Watch,
+  the continuation still starts, resumes past the handover result, and the
+  command is not started again.
+- `MESSAGE-DELIVERY-330`: input queued during downtime runs after the
+  continuation.
+- `MESSAGE-DELIVERY-331`: a run that fails because the service is stopping
+  leaves its Turn open.
+- `MESSAGE-DELIVERY-322` keeps the Watch-naming notice without Retry for the
+  fallback.
 - Local Incus: restart the master environment during a long Vibey conversation
   Turn and during a Vibey Agent Run with a callback; both continue without a
   notice, and the callback reports the continued result.
@@ -120,4 +155,7 @@ This replaces recovery invariant T4 for Vibey (`agent-core-contracts/recovery.md
   output was never committed.
 - A `write` or `edit` cut mid-call gets the interrupted result and the model is
   told to re-read the file, as after any interruption.
+- A final reply committed but not yet delivered when the process died is in the
+  Workbench transcript; its IM delivery is not retried (agent-core recovery,
+  Delivery section). The Turn settles from it as completed.
 - Native backends (Claude Code, Codex, OpenCode) keep today's behavior.

@@ -12,12 +12,12 @@ from sqlalchemy import select
 from core import internal_server
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.scheduled_tasks import ScheduledTaskService, TaskExecutionStore
-from core.session_turns import DeliveryRequest, SessionTurnManager
+from core.session_turns import DeliveryRequest, SessionTurnManager, capture_scheduled_provenance
 from storage import message_deliveries, messages_service
 from storage.background import attach_agent_run_delivery_in_connection
 from storage.db import create_sqlite_engine
 from storage.models import agent_runs
-from tests.backend_failure_retry_helpers import seed_failed_notice
+from tests.backend_failure_retry_helpers import previous_process as _previous_process, seed_failed_notice
 from tests.scenario_harness.message_delivery import MessageDeliveryController
 from tests.test_harness_failure_visibility import _drain_service
 from tests.test_internal_server import _bind_test_native_start, _build_controller_double
@@ -213,3 +213,114 @@ def test_harness_notice_keeps_retry_boundary_guards(isolated_state, tmp_path, ch
         )
     assert response.status_code == 409
     dispatch.assert_not_awaited()
+
+
+@pytest.mark.parametrize("step", ["tool", "final"])
+def test_a_vibey_agent_run_cut_by_a_restart_settles_from_the_continued_work(isolated_state, tmp_path, step):
+    """MESSAGE-DELIVERY-327: shutdown leaves the Run with its Turn, startup moves it to the
+    continuation, and it settles once, from the continued Turn's result, owing no notice."""
+    from core.session_turns import Turn
+
+    _scope_id, session_id = _make_session(tmp_path, agent_backend="vibey")
+    engine = create_sqlite_engine()
+    controller = MessageDeliveryController(platform="avibe")
+    controller.config.language = "zh"
+    request_store = TaskExecutionStore()
+    service = _drain_service(tmp_path, controller, request_store.sqlite_backend, request_store)
+    service._t = ScheduledTaskService._t.__get__(service, ScheduledTaskService)
+    controller.scheduled_task_service = service
+    controller.emit_agent_message = ConsolidatedMessageDispatcher(controller).emit_agent_message
+
+    def context(sid):
+        value = _context(sid)
+        value.platform_specific["agent_session_target"]["agent_backend"] = "vibey"
+        return value
+
+    manager = SessionTurnManager(controller, build_context=context)
+    manager._engine = engine
+    controller.session_turns = manager
+    controller._session_id_from_context = lambda ctx: str(
+        (ctx.platform_specific or {}).get("agent_session_id") or ""
+    )
+    run = request_store.enqueue_agent_run(
+        message="整理日志并汇报", session_id=session_id, agent_name="worker", agent_backend="vibey",
+        callback_session_id="ses_caller",
+    )
+
+    def callbacks():
+        return [(row["status"], row["result_text"]) for row in request_store.list_pending_callbacks() if row["id"] == run.id]
+
+    assert request_store.claim(run.id) is not None
+    started = []
+
+    async def accept(_sid, ctx, _text, **_kwargs):
+        started.append(ctx)
+        _bind_test_native_start(engine, ctx)
+
+    manager._run = accept
+
+    harness_context = context(session_id)
+    harness_context.platform_specific.update(
+        {"task_execution_id": run.id, "task_trigger_kind": "agent_run", "callback_session_id": "ses_caller"}
+    )
+
+    async def scenario():
+        original = await manager.deliver(
+            DeliveryRequest(
+                session_id=session_id, priority="p3", content=run.prompt,
+                source="harness", author="harness", message_type="harness",
+                metadata={"scheduled_provenance": capture_scheduled_provenance(harness_context)},
+            ),
+            context=context(session_id),
+        )
+        with engine.begin() as conn:
+            assert attach_agent_run_delivery_in_connection(
+                conn, run.id, session_id=session_id, delivery_id=original.delivery_id,
+            )
+        # Service shutdown while the Turn runs: nobody asked it to stop.
+        running = asyncio.create_task(asyncio.Event().wait())
+        manager.in_flight[session_id] = Turn(
+            task=running, context=started[-1], logical_turn_id=original.turn_id,
+        )
+        assert await manager.release_for_service_shutdown() == 0
+        assert not running.cancelled()
+        with engine.connect() as conn:
+            assert message_deliveries.get_turn(conn, original.turn_id)["state"] == "active"
+        assert request_store.get_run(run.id)["status"] == "running"
+        running.cancel()
+        manager.in_flight.clear()
+        return original
+
+    original = asyncio.run(scenario())
+    # The next start: T2 settled the cut call, then Turn recovery.
+    _previous_process(step)(engine, session_id, original.turn_id)
+    manager._active_identity = lambda *_args: None
+    asyncio.run(manager.recover_durable_delivery_state(session_id, service_restart=True))
+
+    stored = request_store.get_run(run.id)
+    with engine.connect() as conn:
+        source = message_deliveries.get_turn(conn, original.turn_id)
+    if step == "final":
+        assert len(started) == 1
+        assert (source["terminal_outcome"], source["settled_by"]) == ("completed", "terminal_result")
+        assert stored["status"] == "succeeded"
+        assert stored["result_text"] == "全部完成"
+    else:
+        assert source["settled_by"] == "restart_resumed"
+        continued = started[-1]
+        # A transcript resume of the cut Turn that keeps the Run's Harness provenance.
+        assert continued.platform_specific["vibey_resume"] is True
+        assert continued.platform_specific["vibey_source_turn_id"] == original.turn_id
+        assert continued.platform_specific["task_execution_id"] == run.id
+        assert stored["status"] == "running" and callbacks() == []
+        assert stored["delivery_id"] == continued.platform_specific["delivery_id"]
+        assert run.id in manager.accepted_agent_run_ids_for_turn(continued.platform_specific["turn_token"])
+        # The continued Turn's own result settles the Run, exactly once.
+        asyncio.run(controller.emit_agent_message(continued, "result", "日志已整理完毕"))
+        stored = request_store.get_run(run.id)
+        assert stored["status"] == "succeeded"
+        assert stored["result_text"] == "日志已整理完毕"
+    # The caller's callback reports the work's own result, once.
+    assert callbacks() == [("succeeded", stored["result_text"])]
+    assert request_store.sqlite_backend.owed_failure_notice(run.id) is None
+    assert "interrupt_reason" not in (stored.get("metadata") or {})

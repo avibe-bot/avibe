@@ -3,29 +3,27 @@ from __future__ import annotations
 import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from core.session_turns import DeliveryRequest
 from modules.agents.catalog import AGENT_BACKENDS
 from storage import message_deliveries, messages_service
 from storage.agent_session_rows import reserve_write_lock
 from storage.db import create_sqlite_engine
-from storage.models import agent_sessions, messages, session_turns
+from storage.models import agent_sessions, message_deliveries as message_deliveries_table, messages, session_turns
+from tests.backend_failure_retry_helpers import previous_process as _previous_process
 from tests.backend_failure_retry_helpers import reserve_failure_retry, seed_failed_notice
 from tests.test_session_delivery_fsm import _context, _fsm_schema_template, managers  # noqa: F401
 from tests.test_ui_session_stream import _accepted_dispatch, _make_session, isolated_state  # noqa: F401
 from tests.ui_server_test_helpers import csrf_headers
 
 
-def _restart_failure_notice(tmp_path, *, backend, delivery="ready", before_restart=None):
-    """Recover an accepted Turn through the real notice dispatcher and storage.
-
-    ``before_restart(engine, session_id, turn_id)`` writes what the previous process
-    and the startup steps before Turn recovery left behind.
-    """
+def _accepted_turn(tmp_path, *, backend, delivery="ready"):
+    """One accepted Turn through the real Delivery owner, notice dispatcher, and storage."""
     from core.message_dispatcher import ConsolidatedMessageDispatcher
     from core.session_turns import SessionTurnManager
     from tests.scenario_harness.message_delivery import MessageDeliveryController
@@ -48,10 +46,11 @@ def _restart_failure_notice(tmp_path, *, backend, delivery="ready", before_resta
     controller.emit_agent_message = dispatcher.emit_agent_message
     if delivery == "send_failed":
         controller.im_client.send_message = AsyncMock(side_effect=[OSError("transport offline"), "msg-recovered"])
-    starts = []
+    starts, contexts = [], []
 
     async def accepted(sid, ctx, text, **_kwargs):
         starts.append((sid, text))
+        contexts.append(ctx)
         _bind_test_native_start(engine, ctx)
 
     manager._run = accepted
@@ -60,25 +59,43 @@ def _restart_failure_notice(tmp_path, *, backend, delivery="ready", before_resta
         context=context(session_id),
     ))
     starts.clear()
+    contexts.clear()
+    return SimpleNamespace(
+        manager=manager, engine=engine, session_id=session_id, turn_id=str(original.turn_id),
+        context=context, starts=starts, contexts=contexts, delivery=delivery,
+    )
+
+
+def _restart(turn, before_restart=None):
+    """``before_restart(engine, session_id, turn_id)`` writes what the previous process
+    and the startup steps before Turn recovery left behind."""
     if before_restart is not None:
-        before_restart(engine, session_id, str(original.turn_id))
-    manager._active_identity = lambda *_args: None
-    manager._transport_can_deliver = lambda _platform: delivery != "unready"
-    asyncio.run(manager.recover_durable_delivery_state(session_id, service_restart=True))
-    assert starts == []
-    if delivery != "ready":
-        with engine.connect() as conn:
-            assert not any(
-                row["type"] == "notify"
-                for row in messages_service.list_session_messages(conn, session_id=session_id)["messages"]
-            )
-        assert asyncio.run(manager.notify_transport_ready("avibe")) == 1
+        before_restart(turn.engine, turn.session_id, turn.turn_id)
+    turn.manager._active_identity = lambda *_args: None
+    turn.manager._transport_can_deliver = lambda _platform: turn.delivery != "unready"
+    asyncio.run(turn.manager.recover_durable_delivery_state(turn.session_id, service_restart=True))
+
+
+def _notices(engine, session_id):
     with engine.connect() as conn:
-        turn = message_deliveries.get_turn(conn, str(original.turn_id))
-        notices = [
+        return [
             row for row in messages_service.list_session_messages(conn, session_id=session_id)["messages"]
             if row["type"] == "notify"
         ]
+
+
+def _restart_failure_notice(tmp_path, *, backend, delivery="ready", before_restart=None):
+    """Recover an accepted Turn through the real notice dispatcher and storage."""
+    cut = _accepted_turn(tmp_path, backend=backend, delivery=delivery)
+    manager, engine, session_id = cut.manager, cut.engine, cut.session_id
+    _restart(cut, before_restart)
+    assert cut.starts == []
+    if delivery != "ready":
+        assert _notices(engine, session_id) == []
+        assert asyncio.run(manager.notify_transport_ready("avibe")) == 1
+    with engine.connect() as conn:
+        turn = message_deliveries.get_turn(conn, cut.turn_id)
+    notices = _notices(engine, session_id)
     assert turn["terminal_evidence_kind"] == "restart_runtime_missing"
     assert turn["start_receipt_outcome"] == "accepted"
     assert len(notices) == 1
@@ -149,33 +166,148 @@ def test_restart_notice_retries_through_web_and_controller(isolated_state, tmp_p
     assert reloaded["content"]["failure_retry"]["state"] == "accepted"
 
 
-def _hand_over_the_open_command(engine, session_id, turn_id):
-    """The restart left the Turn's bash command running; startup recovery made it a Watch (T2)."""
-    from core.agent_core.agent.recovery import settle_open_calls
-    from core.agent_core.messages import ToolCallBlock, UserMessage, text
-    from core.agent_core.tools.base import CallInstance, JobStatus, ToolResult
-    from storage.agent_transcript import SQLiteTranscriptStore
-    from tests.agent_core.fakes import FakeJobHost, assistant
-
-    with engine.connect() as conn:
-        input_id = message_deliveries.delivery_for_turn(conn, turn_id)["message_id"]
-    store, jobs = SQLiteTranscriptStore(engine), FakeJobHost()
-    jobs.states["job_1"] = JobStatus("running")
-    call = ToolCallBlock(id="call_bash", name="bash", arguments={"command": "sleep 60; echo done >> s6.txt"})
-
-    async def handed_over(_call, _job_id, _status, watch_id):
-        return ToolResult((text(f"Command is still running and is now Watch {watch_id}."),))
-
-    async def previous_process_then_t2():
-        await store.consume_input(session_id, input_id, UserMessage((text("run it"),)))
-        response = await store.append_response(session_id, assistant("", calls=(call,)), final=False)
-        instance = CallInstance(session_id, response.row_id, response.context_seq, "call_bash")
-        await settle_open_calls(
-            session_id=session_id, store=store, jobs=jobs, job_ids={instance: "job_1"}, render_result=handed_over
+def _request_stop(engine, _session_id, turn_id):
+    """The user pressed Stop as the service went down."""
+    with engine.begin() as conn:
+        turn = message_deliveries.get_turn(conn, turn_id)
+        assert message_deliveries.cas_turn(
+            conn, turn_id, expected_version=int(turn["version"]), expected_states=("active",),
+            values={"control_mode": "stop_only"},
         )
 
-    asyncio.run(previous_process_then_t2())
-    assert jobs.watches == {"job_1": "watch_job_1"}
+
+def _then(*steps):
+    def run(engine, session_id, turn_id):
+        for step in steps:
+            step(engine, session_id, turn_id)
+
+    return run
+
+
+def _continuations(engine, session_id):
+    """The Session's restart continuations, by the binding their durable history carries."""
+    with engine.connect() as conn:
+        return [
+            dict(row) for row in conn.execute(
+                select(message_deliveries_table).where(message_deliveries_table.c.session_id == session_id)
+            ).mappings()
+            if any(
+                event.get("kind") == "restart_resume"
+                for event in json.loads(row["delivery_history_json"])["events"]
+            )
+        ]
+
+
+@pytest.mark.parametrize("step", ["tool", "handover"])
+def test_restart_continues_a_cut_vibey_turn_from_its_transcript_without_a_notice(isolated_state, tmp_path, step):
+    """MESSAGE-DELIVERY-326 / MESSAGE-DELIVERY-329: one hidden continuation, no notice;
+    a command T2 handed to a Watch does not stop it."""
+    cut = _accepted_turn(tmp_path, backend="vibey")
+
+    _restart(cut, _previous_process(step))
+
+    [continuation] = _continuations(cut.engine, cut.session_id)
+    with cut.engine.connect() as conn:
+        payload = message_deliveries.execution_delivery_payload(conn, continuation)
+    assert message_deliveries.is_vibey_resume_payload(payload)
+    assert payload["metadata"]["vibey_source_turn_id"] == cut.turn_id
+    assert payload["text"] == ""
+    # Started once, as a transcript resume of the cut Turn: no input, nothing replayed.
+    assert cut.starts == [(cut.session_id, "")]
+    [started] = cut.contexts
+    assert started.platform_specific["vibey_resume"] is True
+    assert started.platform_specific["vibey_source_turn_id"] == cut.turn_id
+    assert started.platform_specific["delivery_id"] == continuation["id"]
+    with cut.engine.connect() as conn:
+        source = message_deliveries.get_turn(conn, cut.turn_id)
+        resumed = message_deliveries.get_turn(conn, started.platform_specific["turn_token"])
+        users = [
+            row for row in messages_service.list_session_messages(conn, session_id=cut.session_id)["messages"]
+            if row["type"] == "user"
+        ]
+    assert source["settled_by"] == "restart_resumed"
+    assert source["terminal_outcome"] == "completed"
+    assert resumed["state"] == "active" and resumed["initial_delivery_id"] == continuation["id"]
+    assert _notices(cut.engine, cut.session_id) == []
+    assert [row["text"] for row in users] == ["完成剩余工作，不要重复提交"]
+
+
+def test_restart_completes_a_cut_vibey_turn_whose_final_reply_was_committed(isolated_state, tmp_path):
+    """MESSAGE-DELIVERY-326: nothing is left to continue, and nothing failed."""
+    cut = _accepted_turn(tmp_path, backend="vibey")
+
+    _restart(cut, _previous_process("final"))
+
+    with cut.engine.connect() as conn:
+        turn = message_deliveries.get_turn(conn, cut.turn_id)
+    assert (turn["terminal_outcome"], turn["settled_by"]) == ("completed", "terminal_result")
+    assert cut.starts == []
+    assert _continuations(cut.engine, cut.session_id) == []
+    assert _notices(cut.engine, cut.session_id) == []
+
+
+def _switch_off_vibey(engine, session_id, _turn_id):
+    with engine.begin() as conn:
+        conn.execute(update(agent_sessions).where(agent_sessions.c.id == session_id).values(agent_backend="claude"))
+
+
+def _archive(engine, session_id, _turn_id):
+    with engine.begin() as conn:
+        conn.execute(update(agent_sessions).where(agent_sessions.c.id == session_id).values(status="archived"))
+
+
+@pytest.mark.parametrize("case", ["qualifies", "stop", "switched", "archived", "bound"])
+def test_a_cut_vibey_turn_that_no_longer_qualifies_keeps_the_restart_notice(isolated_state, tmp_path, case):
+    """MESSAGE-DELIVERY-328: Stop, an Agent off Vibey, an archived Session, or a third
+    restart in a row without a model response keep today's settlement and notice."""
+    cut = _accepted_turn(tmp_path, backend="vibey")
+    restarts = 1
+    before = {
+        "stop": _then(_previous_process("tool"), _request_stop),
+        "switched": _then(_previous_process("tool"), _switch_off_vibey),
+        "archived": _then(_previous_process("tool"), _archive),
+    }.get(case, _previous_process("tool"))
+    if case == "bound":
+        # Each continuation dies before the model answers: three are allowed.
+        restarts = 4
+    _restart(cut, before)
+    for _ in range(restarts - 1):
+        cut.turn_id = cut.contexts[-1].platform_specific["turn_token"]
+        _restart(cut)
+
+    continued = case in {"qualifies", "bound"}
+    assert len(_continuations(cut.engine, cut.session_id)) == (3 if case == "bound" else int(continued))
+    with cut.engine.connect() as conn:
+        last = message_deliveries.get_turn(conn, cut.turn_id)
+    if case == "qualifies":
+        assert last["settled_by"] == "restart_resumed"
+        assert _notices(cut.engine, cut.session_id) == []
+        return
+    assert (last["terminal_outcome"], last["settled_by"]) == ("failed", "no_terminal_result")
+    assert last["terminal_evidence_kind"] == "restart_runtime_missing"
+    if case != "archived":
+        [notice] = _notices(cut.engine, cut.session_id)
+        assert notice["metadata"]["turn_id"] == cut.turn_id
+
+
+def test_restart_continuation_runs_before_input_queued_while_the_service_was_down(isolated_state, tmp_path):
+    """MESSAGE-DELIVERY-330: the queued input waits behind the continuation, then runs."""
+    cut = _accepted_turn(tmp_path, backend="vibey")
+
+    def queue_input(engine, session_id, _turn_id):
+        with engine.begin() as conn:
+            message_deliveries.enqueue_queued(
+                conn, scope_id=None, session_id=session_id, text="然后再看看日志",
+            )
+
+    _restart(cut, _then(_previous_process("tool"), queue_input))
+
+    assert cut.starts == [(cut.session_id, "")]
+    resumed = cut.contexts[0].platform_specific["turn_token"]
+    with cut.engine.connect() as conn:
+        assert [row["text"] for row in message_deliveries.list_queued(conn, cut.session_id)] == ["然后再看看日志"]
+    assert asyncio.run(cut.manager.terminalize_turn(resumed))
+    assert cut.starts == [(cut.session_id, ""), (cut.session_id, "然后再看看日志")]
 
 
 def test_restart_notice_names_the_watch_running_the_command_and_offers_no_retry(isolated_state, tmp_path):
@@ -183,7 +315,7 @@ def test_restart_notice_names_the_watch_running_the_command_and_offers_no_retry(
     from vibe.ui_server import app
 
     session_id, notice = _restart_failure_notice(
-        tmp_path, backend="vibey", before_restart=_hand_over_the_open_command
+        tmp_path, backend="vibey", before_restart=_then(_previous_process("handover"), _request_stop)
     )
 
     assert "watch_job_1" in notice["text"] and "重新发送" not in notice["text"]

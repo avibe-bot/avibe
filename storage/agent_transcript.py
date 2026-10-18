@@ -757,6 +757,95 @@ def recovered_watch_ids(conn: Connection, session_id: str, turn_id: str) -> list
     return [str(json.loads(raw)["details"]["watch_id"]) for raw in rows]
 
 
+@dataclass(frozen=True)
+class CommittedResponse:
+    """A response row in a Session's own context: the facts restart recovery reads."""
+
+    row_id: str
+    context_seq: int
+    message_type: str
+    turn_id: Optional[str]
+    text: str
+    has_tool_calls: bool
+
+
+def last_response(conn: Connection, session_id: str) -> Optional[CommittedResponse]:
+    """The last model response the Session's own rows committed, by one bounded index read."""
+    row = conn.execute(
+        select(
+            messages.c.id,
+            messages.c.context_seq,
+            messages.c.type,
+            messages.c.content_text,
+            messages.c.content_json,
+            messages.c.metadata_json,
+        )
+        .where(
+            messages.c.session_id == session_id,
+            messages.c.context_seq.is_not(None),
+            messages.c.type.in_(RESPONSE_TYPES),
+        )
+        .order_by(messages.c.context_seq.desc())
+        .limit(1)
+    ).mappings().first()
+    if row is None:
+        return None
+    try:
+        content = json.loads(row["content_json"] or "{}")
+        blocks = content["model"]["message"]["content"]
+    except (TypeError, ValueError, KeyError):
+        blocks = []
+    try:
+        metadata = json.loads(row["metadata_json"] or "{}")
+    except (TypeError, ValueError):
+        metadata = {}
+    turn_id = metadata.get("turn_id") if isinstance(metadata, dict) else None
+    return CommittedResponse(
+        row_id=str(row["id"]),
+        context_seq=int(row["context_seq"]),
+        message_type=str(row["type"]),
+        turn_id=str(turn_id) if turn_id else None,
+        text=str(row["content_text"] or ""),
+        has_tool_calls=any(
+            isinstance(block, dict) and block.get("type") == "tool_call" for block in blocks or ()
+        ),
+    )
+
+
+def committed_final(conn: Connection, session_id: str, turn_id: str) -> Optional[CommittedResponse]:
+    """The final response ``turn_id`` committed, when the Turn's work ended with it.
+
+    Read after T2 and T3: a Turn has work left unless its last committed response has
+    no tool calls and no input follows it, in the context or still waiting to enter it
+    (an accepted steer no run consumed). Every read is bounded by the Session's context
+    tail or by the Turn's own Deliveries.
+    """
+    response = last_response(conn, session_id)
+    if response is None or response.turn_id != turn_id or response.has_tool_calls:
+        return None
+    later_input = conn.execute(
+        select(messages.c.id)
+        .where(
+            messages.c.session_id == session_id,
+            messages.c.context_seq > response.context_seq,
+            messages.c.type.in_(INPUT_TYPES),
+        )
+        .limit(1)
+    ).first()
+    if later_input is not None:
+        return None
+    unconsumed = conn.execute(
+        text(
+            "select messages.id from message_deliveries "
+            "cross join messages on messages.id = message_deliveries.message_id "
+            "where message_deliveries.turn_id = :turn_id and message_deliveries.state = 'accepted' "
+            f"and {VIBEY_RECOVERY_INPUT_PREDICATE} limit 1"
+        ),
+        {"turn_id": turn_id},
+    ).first()
+    return None if unconsumed is not None else response
+
+
 def fork_link(conn: Connection, session_id: str) -> Optional[tuple[str, int]]:
     """``(source_session_id, anchor_seq)`` when the Session inherits a context."""
     raw = conn.execute(

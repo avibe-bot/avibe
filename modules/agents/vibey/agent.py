@@ -16,8 +16,9 @@ One Turn is one ``Agent.run`` (plan section 4). The adapter
 * before any run of a Session in this process, under the Session writer lock,
   settles open tool calls (T2) and admits accepted inputs that were never
   consumed (T3); at startup it settles every Session's open calls eagerly. The
-  Turn a restart interrupted is settled by the Turn owner (T4; ``vibey`` is a
-  process-bound runtime).
+  Turn owner then continues the Turn a restart interrupted through a hidden
+  transcript resume (T4; ``vibey`` is a process-bound runtime), and a run the
+  service stop cut leaves its Turn open for that.
 """
 
 from __future__ import annotations
@@ -405,10 +406,24 @@ class VibeyAgent(BaseAgent):
                     transcript_resume = True
                     continue
             agent_input = await self._continuing_input(turn)
+        if self._cut_by_service_stop(turn):
+            # Stopping the service (its Model Hub gateway first) ended this run, not
+            # anything the Turn did. Leave the Turn open: startup recovery runs T2 and
+            # continues it from the committed transcript (vibey-restart-auto-resume.md).
+            await asyncio.Event().wait()
         if turn.reason not in _COMPLETED:
             await self._settle_left_open(runtime)
         await self._settle(turn)
         self._maybe_backfill_session_title(request, session_id)
+
+    def _cut_by_service_stop(self, run: _Run) -> bool:
+        """Whether a run that did not complete ended while the service was stopping."""
+        return bool(
+            run.reason not in _COMPLETED
+            and not run.final_row
+            and not run.stop_requested
+            and getattr(self.controller, "shutdown_requested", False) is True
+        )
 
     def _resume_turn_inputs(self, session_id: str, source_turn_id: Any) -> tuple[int, ...]:
         """Committed inputs of the failed task, including steers across its retry ancestry."""

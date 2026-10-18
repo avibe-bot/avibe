@@ -43,10 +43,10 @@ async def settle_open_calls(
     Store writes remain under the caller's single-writer ownership. A concurrent
     second recovery or Agent.run for that Session is not permitted.
     Without job state, the result explicitly leaves the effect uncertain.
-    The adapter settles the interrupted Turn after this step; no tool or model
-    is invoked and only a new user input starts another Turn (T4). The adapter
-    also runs it when a run ends without completing (a Stop), so the calls that
-    run left open carry their jobs' recorded reason at once.
+    No tool or model is invoked here; after this step the Turn owner continues
+    the interrupted Turn from the committed transcript or settles it (T4). The
+    adapter also runs it when a run ends without completing (a Stop), so the
+    calls that run left open carry their jobs' recorded reason at once.
     """
     committed: list[ContextEntry] = []
     rows = list(await store.load(session_id))

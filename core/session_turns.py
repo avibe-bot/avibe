@@ -50,6 +50,7 @@ from core.run_settlement import (
     SETTLED_BY_BACKEND_REFRESH,
     SETTLED_BY_NO_TERMINAL_RESULT,
     SETTLED_BY_REFUSED_CONCURRENT_TURN,
+    SETTLED_BY_RESTART_RESUMED,
     SETTLED_BY_RESTARTED,
     SETTLED_BY_STOPPED,
     SETTLED_BY_TERMINAL_RESULT,
@@ -4912,7 +4913,16 @@ class SessionTurnManager:
         retire_unwritten_delivery_ids: set[str] | None = None,
         retire_unwritten_attempt_outcome: str = "invalid_input",
         resume_successors: bool = True,
+        restart_resume: bool = False,
     ) -> dict[str, Any]:
+        """Settle one durable Turn and start what follows it.
+
+        ``restart_resume`` is startup recovery continuing a Vibey Turn a restart cut:
+        in this writer transaction it reserves the hidden continuation, moves the
+        Turn's Runs to it, and claims it as the successor ahead of the FIFO. When the
+        Turn no longer qualifies, nothing is written and the result carries
+        ``reason="restart_resume_unavailable"``.
+        """
         if not self._durable_schema_available():
             return {
                 "changed": False,
@@ -4971,6 +4981,19 @@ class SessionTurnManager:
                 session_status = conn.execute(
                     select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)
                 ).scalar_one_or_none()
+                continuation: dict[str, Any] | None = None
+                if restart_resume:
+                    from core.backend_failure_retry import reserve_restart_resume
+
+                    continuation = reserve_restart_resume(conn, turn)
+                    if continuation is None:
+                        return {
+                            "changed": False,
+                            "successor_turn_id": None,
+                            "delivery_id": None,
+                            "defer_queue_resume": False,
+                            "reason": "restart_resume_unavailable",
+                        }
                 initial_batch = delivery_store.initial_deliveries_for_turn(conn, turn_id)
                 unknown_start_reconciliation = bool(
                     replay_unknown_start
@@ -5153,6 +5176,10 @@ class SessionTurnManager:
                     evidence_kind=evidence_kind,
                     evidence=evidence,
                 )
+                if not settled.get("changed") and continuation is not None:
+                    from core.backend_failure_retry import RestartResumeLost
+
+                    raise RestartResumeLost("restart continuation lost its terminal write")
                 if not settled.get("changed"):
                     result = {
                         "changed": False,
@@ -5270,6 +5297,28 @@ class SessionTurnManager:
                                     raise RuntimeError(
                                         "service shutdown lost its deferred successor"
                                     )
+                    if claimed_successor is None and continuation is not None:
+                        # The continuation carries the cut Turn's place, so it starts
+                        # before anything queued while the service was down.
+                        from core.backend_failure_retry import RestartResumeLost
+
+                        claimed_successor = delivery_store.new_turn_id()
+                        claimed = self._claim_start_batch(
+                            conn,
+                            owner=start_owner,
+                            turn_id=claimed_successor,
+                            session_id=session_id,
+                            backend=str(turn["backend"]),
+                            deliveries=[continuation],
+                            dispatch_text="",
+                        )
+                        if claimed is None:
+                            claimed_successor = None
+                            held = delivery_store.get_delivery(conn, str(continuation["id"]))
+                            if held is None or held["state"] != "queued":
+                                # Retired by a start check: keep the Turn for the notice.
+                                raise RestartResumeLost("restart continuation was refused")
+                            start_deferred = True
                     if (
                         claimed_successor is None
                         and resume_successors
@@ -6997,6 +7046,78 @@ class SessionTurnManager:
             )
         return True
 
+    def _settle_restart_cut_vibey_turn(
+        self,
+        turn_id: str,
+        attempt_id: str,
+    ) -> dict[str, Any] | None:
+        """Continue, or complete, a Vibey Turn a restart cut; ``None`` keeps the notice.
+
+        T2 has already given every open call a result. A Turn whose final response
+        was committed completed: its Runs settle from that response. Any other
+        qualifying Turn hands its work and its Runs to a hidden continuation that
+        resumes the transcript (``docs/plans/vibey-restart-auto-resume.md``).
+        """
+
+        from core.backend_failure_retry import RestartResumeLost, restart_resume_plan
+
+        with self._sqlite_engine().connect() as conn:
+            turn = delivery_store.get_turn(conn, turn_id)
+            plan, final = (
+                restart_resume_plan(conn, turn) if turn is not None else ("unavailable", None)
+            )
+        if plan == "final" and final is not None:
+            failed = final.message_type == "error"
+            run_ids = self.accepted_agent_run_ids_for_turn(turn_id)
+            terminal = self._terminalize_durable_turn(
+                turn_id,
+                "failed" if failed else "completed",
+                settled_by=SETTLED_BY_TERMINAL_RESULT,
+                evidence_kind="restart_final_committed",
+                evidence={
+                    "settles_run": True,
+                    "result_text": final.text,
+                    "terminal_error": final.text if failed else None,
+                    "message_id": final.row_id,
+                },
+                expected_start_attempt_id=attempt_id,
+            )
+            if terminal.get("changed") and run_ids:
+                with self._sqlite_engine().connect() as conn:
+                    settled = delivery_store.get_turn(conn, turn_id)
+                if settled is not None:
+                    self._settle_agent_run_ids_from_terminal_turn(run_ids, settled)
+            return terminal
+        if plan != "continue":
+            return None
+        try:
+            terminal = self._terminalize_durable_turn(
+                turn_id,
+                "completed",
+                settled_by=SETTLED_BY_RESTART_RESUMED,
+                evidence_kind="restart_resume",
+                evidence={"reason": "accepted_turn_runtime_not_restorable"},
+                expected_start_attempt_id=attempt_id,
+                restart_resume=True,
+            )
+        except Exception as error:
+            # Every continuation write shares one transaction, so a failure leaves
+            # the Turn as it was and it keeps today's restart notice.
+            logger.warning(
+                "restart continuation unavailable for Turn=%s: %s",
+                turn_id,
+                error,
+                exc_info=not isinstance(error, RestartResumeLost),
+            )
+            with self._sqlite_engine().connect() as conn:
+                latest = delivery_store.get_turn(conn, turn_id)
+            if latest is not None and latest["state"] in delivery_store.TURN_OWNER_STATES:
+                return None
+            return {"changed": False, "successor_turn_id": None}
+        if terminal.get("reason") == "restart_resume_unavailable":
+            return None
+        return terminal
+
     async def recover_durable_delivery_state(
         self,
         session_id: str | None = None,
@@ -7165,6 +7286,17 @@ class SessionTurnManager:
                     )
 
         for target_session, turn_id, attempt_id, backend in lost_active_turns:
+            if backend == "vibey":
+                # Vibey continues its own work from the committed transcript; only a
+                # Turn that no longer qualifies falls through to the notice below.
+                continued = self._settle_restart_cut_vibey_turn(turn_id, attempt_id)
+                if continued is not None:
+                    if continued.get("changed"):
+                        recovered.append(target_session)
+                    successor_turn_id = str(continued.get("successor_turn_id") or "")
+                    if successor_turn_id:
+                        await self._start_persisted_turn(successor_turn_id)
+                    continue
             # Read Run attribution BEFORE terminalizing: the notice below is owed
             # only to a turn that has none, and terminalization retires the
             # deliveries the attribution is derived from.
@@ -8476,7 +8608,12 @@ class SessionTurnManager:
         return str((row or {}).get("native_turn_id") or "").strip() or None
 
     async def release_for_service_shutdown(self) -> int:
-        """Fail exact accepted Run owners without draining replacement work."""
+        """Fail exact accepted Run owners without draining replacement work.
+
+        A Vibey Turn nobody asked to stop is left as it is, Runs included: startup
+        recovery continues it from its committed transcript and its Runs settle
+        from the continued work (``docs/plans/vibey-restart-auto-resume.md``).
+        """
 
         if not self._durable_schema_available():
             return 0
@@ -8487,6 +8624,7 @@ class SessionTurnManager:
                     select(
                         session_turn_rows.c.id.label("turn_id"),
                         session_turn_rows.c.session_id,
+                        session_turn_rows.c.backend,
                         session_turn_rows.c.control_mode,
                         agent_runs.c.cancel_requested,
                     )
@@ -8518,6 +8656,7 @@ class SessionTurnManager:
                         {
                             "turn_id": turn_id,
                             "session_id": str(row["session_id"]),
+                            "backend": str(row["backend"] or ""),
                             "control_mode": row["control_mode"],
                             "cancel_requested": False,
                         },
@@ -8554,6 +8693,8 @@ class SessionTurnManager:
                 or owner["cancel_requested"]
                 or projected.cancel_settled_by == SETTLED_BY_STOPPED
             )
+            if not user_stopped and owner["backend"] == "vibey":
+                continue
             settled_by = SETTLED_BY_STOPPED if user_stopped else SETTLED_BY_RESTARTED
             terminal = self._terminalize_durable_turn(
                 turn_id,

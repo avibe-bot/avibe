@@ -2627,6 +2627,90 @@ async def test_startup_hands_an_orphaned_foreground_job_to_its_watch(engine, ses
     assert harness.provider.requests == []
 
 
+async def test_a_run_the_service_stop_cut_leaves_its_turn_open_for_the_restart_continuation(
+    engine, session, tmp_path, published
+) -> None:
+    """MESSAGE-DELIVERY-331: stopping the service (its gateway first) fails the run; the Turn
+    is the restart's to continue, so it neither fails nor shows a notice."""
+    from core.agent_core.ai.provider import ProviderError
+
+    harness = _Harness(engine, tmp_path, "telegram", [[ProviderError("server", "gateway closed", False)]])
+    harness.controller.shutdown_requested = True
+    request = harness.request("keep working")
+
+    running = asyncio.create_task(harness.agent.handle_message(request))
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+        if harness.provider.requests and not running.done():
+            break
+    await asyncio.sleep(0.05)
+
+    assert not running.done()
+    assert harness.controller.terminals == [] and harness.rows("notify") == []
+    assert harness.controller.im_client.sent == []
+    with engine.connect() as conn:
+        assert message_deliveries.get_turn(conn, _turn(request.context))["state"] == "active"
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+
+async def test_a_restart_continuation_resumes_past_the_watch_handover_without_rerunning_the_command(
+    engine, session, tmp_path, published
+) -> None:
+    """MESSAGE-DELIVERY-329: the hidden continuation recovery reserves resumes the transcript;
+    the command T2 handed to a Watch is not started again."""
+    from core.backend_failure_retry import reserve_restart_resume
+
+    jobs = FakeJobHost()
+    bash = FakeTool("bash")
+
+    async def render(call, job_id, status, watch_id):
+        return ToolResult((text(f"Command is still running and is now Watch {watch_id}."),))
+
+    suite = ToolSuite(
+        jobs=jobs,
+        create_tools=lambda jobs_, sink: [bash],
+        render_recovered=render,
+        find_job=lambda call: "job_1" if (call.session_id, call.tool_call_id) == (SESSION, "call_bash") else None,
+    )
+    harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant("The suite runs on as watch_job_1."))]], suite=suite)
+    # The previous process: an accepted Turn whose foreground command the restart cut.
+    request = harness.request("run the slow suite")
+    cut_turn = _turn(request.context)
+    harness.controller._native_start(request.context)
+    await harness.agent.store.consume_input(
+        SESSION, request.context.platform_specific["delivery_id"], UserMessage((text("run the slow suite"),))
+    )
+    call = ToolCallBlock(id="call_bash", name="bash", arguments={"command": "pytest -q"})
+    await harness.agent.store.append_response(SESSION, assistant("", calls=(call,)), final=False)
+    jobs.states["job_1"] = JobStatus("running")
+    # The next start: T2 hands the command to its Watch, then Turn recovery continues the Turn.
+    harness.new_agent()
+    assert await harness.agent.recover_runtime_state() == []
+    with engine.begin() as conn:
+        continuation = reserve_restart_resume(conn, message_deliveries.get_turn(conn, cut_turn))
+        assert continuation is not None
+        message_deliveries.terminalize_turn(
+            conn, cut_turn, outcome="completed", settled_by="restart_resumed", evidence_kind="restart_resume"
+        )
+        resumed_turn = message_deliveries.new_turn_id()
+        message_deliveries.claim_start_batch(
+            conn, turn_id=resumed_turn, session_id=SESSION, backend="vibey", deliveries=[continuation], dispatch_text=""
+        )
+    context = _context("avibe", SESSION, turn_id=resumed_turn, delivery_id=continuation["id"])
+    context.platform_specific.update({"vibey_resume": True, "vibey_source_turn_id": cut_turn})
+    resume = AgentRequest(**{**request.__dict__, "context": context, "message": "", "user_message": ""})
+
+    await harness.agent.handle_message(resume)
+
+    assert bash.calls == [] and jobs.watches == {"job_1": "watch_job_1"}
+    [model_request] = harness.provider.requests
+    assert "now Watch watch_job_1" in json.dumps(message_to_dict(model_request.messages[-1]))
+    assert harness.controller.im_client.sent[-1] == "The suite runs on as watch_job_1."
+    assert len(harness.rows("user")) == 1 and harness.rows("agent_initiated")[0]["context_seq"] is None
+
+
 async def test_startup_recovers_a_session_routed_to_another_agent_since(engine, session, tmp_path, published) -> None:
     jobs = FakeJobHost()
 

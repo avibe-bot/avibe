@@ -2953,6 +2953,43 @@ def attach_agent_run_delivery_in_connection(
     return True
 
 
+def move_agent_run_deliveries_in_connection(
+    conn: Any,
+    run_ids: list[str],
+    *,
+    from_delivery_ids: set[str],
+    to_delivery_id: str,
+) -> bool:
+    """Move live Runs to the Delivery that now carries their work, all or none.
+
+    A Run's outcome follows the Turn its Delivery belongs to. When startup
+    recovery continues a Turn a restart cut, its Runs move to the continuation's
+    Delivery in the same writer transaction, so the continued Turn settles them.
+    """
+
+    normalized = list(dict.fromkeys(str(run_id or "").strip() for run_id in run_ids))
+    normalized = [run_id for run_id in normalized if run_id]
+    if not normalized:
+        return True
+    now = _utc_now_iso()
+    result = conn.execute(
+        update(agent_runs)
+        .where(agent_runs.c.id.in_(normalized))
+        .where(agent_runs.c.delivery_id.in_(sorted(from_delivery_ids)))
+        .where(
+            agent_runs.c.status.in_(
+                _status_query_values("running") + _status_query_values("queued")
+            )
+        )
+        .where(agent_runs.c.cancel_requested == 0)
+        .values(delivery_id=to_delivery_id, updated_at=now)
+    )
+    if result.rowcount != len(normalized):
+        return False
+    _defer_run_ids_updated_from_connection(conn, normalized)
+    return True
+
+
 def apply_live_agent_run_cancellation_in_connection(
     conn: Any,
     run_id: str,
