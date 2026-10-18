@@ -477,7 +477,17 @@ class SlackBot(BaseIMClient):
             # them. A placeholder left inside a wrapper would come back as a
             # raw character with nothing able to encode it any more.
             converted_text = restore_held(converted_text, links)
-            return restore_held(converted_text, escaped)
+            # Outside a link, an escaped character comes back the way mrkdwn
+            # shows it: ``&``, ``<`` and ``>`` spelled, since a bare one is
+            # markup (``<!channel>`` is a mention). Measured on Slack, mrkdwn
+            # has no spelling that shows a paired ``*``, ``_``, ``~`` or
+            # backtick as written, not even with a zero-width space beside it,
+            # so those come back as they are; the ``markdown`` block a status
+            # bubble uses reads the escapes itself.
+            return restore_held(
+                converted_text,
+                {token: encode_slack_delimiters(character) for token, character in escaped.items()},
+            )
         except Exception as e:
             logger.warning(f"Error converting markdown to mrkdwn: {e}, using original text")
             # Fallback to original text if conversion fails

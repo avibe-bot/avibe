@@ -1029,7 +1029,8 @@ class FormatToolcallLabelTests(unittest.TestCase):
     def test_bash_uses_command(self):
         self.assertEqual(
             self.fmt.format_toolcall_label("Bash", {"command": "pytest tests/test_x.py"}),
-            "🔧 Bash: pytest tests/test_x.py",
+            # Written as Markdown that shows each character as typed (``escape_special_chars``).
+            "🔧 Bash: pytest tests/test\\_x.py",
         )
 
     def test_read_file_path_strips_workspace_prefix(self):
@@ -1038,7 +1039,7 @@ class FormatToolcallLabelTests(unittest.TestCase):
             {"file_path": "/workspace/repo/core/message_dispatcher.py"},
             get_relative_path=lambda p: p.replace("/workspace/repo/", ""),
         )
-        self.assertEqual(out, "🔧 Read: core/message_dispatcher.py")
+        self.assertEqual(out, "🔧 Read: core/message\\_dispatcher.py")
 
     def test_grep_pattern_strips_surrounding_quotes(self):
         self.assertEqual(
@@ -1077,7 +1078,7 @@ class FormatToolcallLabelTests(unittest.TestCase):
 
     def test_preserves_underscores_in_file_name(self):
         out = self.fmt.format_toolcall_label("Read", {"file_path": "message_dispatcher.py"})
-        self.assertEqual(out, "🔧 Read: message_dispatcher.py")
+        self.assertEqual(out, "🔧 Read: message\\_dispatcher.py")
 
 
 if __name__ == "__main__":
