@@ -326,8 +326,14 @@ export const SelectionQuoteToolbar: React.FC<{
   const bottomEdge = Math.max(EDGE, window.innerHeight - toolbarHeight - EDGE);
   const clampTop = (rawTop: number) => Math.min(Math.max(rawTop, topEdge), bottomEdge);
   const preferBelow = (sel.top + sel.bottom) / 2 >= window.innerHeight / 2;
-  const preferredAboveTop = clampTop(sel.first.top - toolbarHeight - placementGap);
-  const preferredBelowTop = clampTop(sel.last.bottom + placementGap);
+  // Anchor above/below the vertical extent of BOTH endpoint lines. On a single
+  // line, the first and last rects can differ by a fraction of a pixel (bold vs
+  // regular text); anchoring on one alone left each slot overlapping the other
+  // endpoint's handle region, dropping the toolbar to the viewport edge.
+  const anchorTop = Math.min(sel.first.top, sel.last.top);
+  const anchorBottom = Math.max(sel.first.bottom, sel.last.bottom);
+  const preferredAboveTop = clampTop(anchorTop - toolbarHeight - placementGap);
+  const preferredBelowTop = clampTop(anchorBottom + placementGap);
   // Clamp by the on-screen (capped) width so a toolbar wider than the viewport
   // centers + scrolls internally instead of pushing an edge off-screen.
   const leftHalf = Math.min(width, window.innerWidth - 2 * EDGE) / 2;
@@ -339,7 +345,7 @@ export const SelectionQuoteToolbar: React.FC<{
   let top: number;
   if (!isTouch) {
     // Desktop has no OS selection menu — just prefer above, flip if no room.
-    top = sel.first.top >= toolbarHeight + GAP + EDGE
+    top = anchorTop >= toolbarHeight + GAP + EDGE
       ? preferredAboveTop
       : preferredBelowTop;
   } else {
