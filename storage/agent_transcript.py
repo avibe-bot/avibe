@@ -91,6 +91,7 @@ from storage.agent_session_rows import reserve_write_lock
 from storage.message_deliveries import TURN_OWNER_STATES
 from storage.models import agent_events, agent_sessions, message_deliveries, messages, scopes, session_turns
 from storage.vibey_recovery import VIBEY_RECOVERY_INPUT_PREDICATE
+from vibe.message_types import PROMOTED_FROM_TYPES
 
 INPUT_TYPES = ("user", "harness", "agent_initiated", "annotation")
 # A final response is ``result``, or ``error`` when ``final_outcome`` says it failed:
@@ -865,10 +866,6 @@ def committed_final(conn: Connection, session_id: str, turn_id: str) -> Optional
     return None if unconsumed is not None else response
 
 
-# The rows the dispatcher remembers as a Turn's visible text (``_remember_turn_text``).
-_TURN_TEXT_TYPES = ("interim", "output")
-
-
 def last_turn_text(conn: Connection, session_id: str, *, since: str) -> Optional[tuple[str, str]]:
     """``(row_id, text)`` of the last visible text the Session's agent wrote since ``since``.
 
@@ -879,7 +876,7 @@ def last_turn_text(conn: Connection, session_id: str, *, since: str) -> Optional
     ``SEARCH`` bounded by that window.
     """
     latest: Optional[tuple[str, str, str]] = None
-    for message_type in _TURN_TEXT_TYPES:
+    for message_type in PROMOTED_FROM_TYPES:
         row = conn.execute(
             select(messages.c.created_at, messages.c.id, messages.c.content_text)
             .where(
