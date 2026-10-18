@@ -84,6 +84,29 @@ const hubCatalogModels = (agent: PickerAgentCatalog | null, backend: string): Ba
 export const supersedesHubAnswer = (result: BackendModels, knownHub: boolean): boolean =>
   !knownHub || result.effortMenus !== undefined || result.hubUnread !== true;
 
+/**
+ * Model Hub's catalog answer for a backend: null when Hub does not serve it,
+ * `'unread'` when Hub gave no answer. It starts no CLI.
+ *
+ * A Hub effort menu follows capability evidence that any turn can change
+ * (#2606). The route picker and the Agents page read it again as their menu
+ * opens or the effort field is approached, and while that read is in flight the
+ * controls that can write an effort (an effort, or a model that keeps or clears
+ * one) are held. The New Agent dialog writes on Create, so Create reads this
+ * answer again and creates only an effort it still offers, and nothing when Hub
+ * cannot answer. A write made outside those (a model changed before any read
+ * started, or after a read that came back unread) uses the last answer; a stale
+ * effort then fails at the turn as `effort_unsupported`, which records the
+ * evidence the next read uses.
+ */
+export async function readHubBackendModels(
+  api: ApiContextType,
+  backend: string,
+): Promise<BackendModels | null | 'unread'> {
+  const agent = await api.readModelHubAgentCatalogForModelPicker(backend);
+  return agent === null ? 'unread' : hubCatalogModels(agent, backend);
+}
+
 // Single source of truth for "list the selectable models for a backend",
 // shared by ChatPage, the Agents detail panel, and the New Agent dialog so a
 // new backend (or a fix like OpenCode's provider-prefixing) lands in one place.
