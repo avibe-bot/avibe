@@ -402,6 +402,7 @@ scenarios:
     test:
       - tests/test_message_dispatcher_silent_final.py::SilentFinalTurnResultTests::test_a_silent_final_makes_the_last_visible_text_the_result
       - tests/test_message_dispatcher_silent_final.py::SilentFinalTurnResultTests::test_concurrent_turns_in_one_channel_each_promote_their_own_text
+      - tests/test_message_dispatcher_silent_final.py::SilentFinalTurnResultTests::test_a_cancellation_during_the_promotion_still_commits_the_turn
       - tests/test_message_dispatcher_silent_final.py::SilentFinalTurnResultTests::test_nothing_else_promotes_earlier_text
       - tests/test_vibey_agent.py::test_a_silent_final_leaves_the_visible_reply_before_it_as_the_result
 next_priority:

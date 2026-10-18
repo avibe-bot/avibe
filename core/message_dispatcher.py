@@ -3029,7 +3029,9 @@ class ConsolidatedMessageDispatcher:
                 # reply but a settlement (a stop, a failure already shown, a
                 # teardown), and a failed or stopped Turn has no result to promote.
                 # The promotion waits for SQLite's write lock, so it runs off the
-                # controller loop.
+                # controller loop. It adds no cancellation point: a cancellation
+                # that arrives meanwhile waits for it and is delivered at the next
+                # await, as the Run terminal record below does.
                 if (
                     turn_text_row_id is not None
                     and level != "silent"
@@ -3038,12 +3040,22 @@ class ConsolidatedMessageDispatcher:
                     suppress_promoted_delivery = bool(
                         (context.platform_specific or {}).get("suppress_delivery")
                     )
-                    await self._run_off_loop(
-                        lambda: promote_turn_text_to_result(
-                            turn_text_row_id,
-                            suppress_delivery=suppress_promoted_delivery,
+                    step, cancelled = await land_step(
+                        self._run_off_loop(
+                            lambda: promote_turn_text_to_result(
+                                turn_text_row_id,
+                                suppress_delivery=suppress_promoted_delivery,
+                            )
                         )
                     )
+                    if step_failed(step):
+                        logger.warning(
+                            "Failed to promote Turn text %s to its result",
+                            turn_text_row_id,
+                            exc_info=None if step.cancelled() else step.exception(),
+                        )
+                    if cancelled:
+                        rearm_caught_cancellation()
                 # This row is the IM turn's ONLY terminal boundary — an IM turn has
                 # no durable execution owner, and ``list_turn_groups`` /
                 # ``_latest_source_message_anchor`` both close a turn on it. So a

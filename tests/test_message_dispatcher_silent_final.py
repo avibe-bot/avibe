@@ -8,10 +8,12 @@ is the Turn's result: typed, rendered, and notified as one, exactly once.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
@@ -44,6 +46,12 @@ class _Controller(_StubController):
         super().__init__(platform)
         self.settings_manager = SimpleNamespace(sessions=None)
         self.dispatcher = ConsolidatedMessageDispatcher(self)
+        # The Turn commit's last step: called only once the terminal emit armed it.
+        self.committed_turns: list[MessageContext] = []
+        self.session_turns = SimpleNamespace(
+            on_terminal_result=lambda *_args, **_kwargs: None,
+            on_terminal_delivery_complete=self.committed_turns.append,
+        )
 
     async def emit_agent_message(self, *args, **kwargs):
         return await self.dispatcher.emit_agent_message(*args, **kwargs)
@@ -211,6 +219,41 @@ class SilentFinalTurnResultTests(unittest.IsolatedAsyncioTestCase):
 
             for thread in threads:
                 self.assertEqual(self.agent_rows(f"ses_{thread}"), [("result", f"Report from {thread}.")])
+
+    async def test_a_cancellation_during_the_promotion_still_commits_the_turn(self):
+        """Scenario: MESSAGE-DELIVERY-325.
+
+        A Stop or shutdown that cancels the final while the promotion runs off the
+        loop waits for it: the row is promoted, the Turn commit runs, and the
+        cancellation is delivered after it.
+        """
+        from core import message_mirror
+
+        with self.state():
+            controller = _Controller("avibe")
+            await controller.emit_agent_message(self.context(), "output", REPORT, output=PHASE)
+            promoting, release = threading.Event(), threading.Event()
+
+            def held_promotion(*args, **kwargs):
+                promoting.set()
+                release.wait(5)
+                return message_mirror.promote_turn_text_to_result(*args, **kwargs)
+
+            with mock.patch(
+                "core.message_dispatcher.promote_turn_text_to_result", side_effect=held_promotion
+            ):
+                final = asyncio.create_task(
+                    _Agent(controller).emit_result_message(self.context(), "<silent>noted</silent>")
+                )
+                self.assertTrue(await asyncio.to_thread(promoting.wait, 5))
+                final.cancel()
+                await asyncio.sleep(0.05)
+                release.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await final
+
+            self.assertEqual(self.agent_rows(), [("result", REPORT)])
+            self.assertEqual(len(controller.committed_turns), 1)
 
     async def test_nothing_else_promotes_earlier_text(self):
         """Scenario: MESSAGE-DELIVERY-325."""
