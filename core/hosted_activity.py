@@ -31,6 +31,7 @@ from core.agent_core.messages import (
     ProxyExecution,
     ToolCallBlock,
 )
+from core.citations import safe_url
 from core.message_output import plain_untrusted_text
 from vibe.i18n import t as i18n_t
 
@@ -148,11 +149,16 @@ class HostedActivity:
 
 
 def _source_payload(source: HostedSource) -> dict[str, Any]:
-    out: dict[str, Any] = {"url": source.url}
+    """A source as the card links it: only a URL a browser should open, held to the rule citation links are
+    (``safe_url``). Any other string a provider gave stays readable as the source's title, never a link."""
+    url = safe_url(source.url)
+    out: dict[str, Any] = {"url": url} if url else {}
     for name in ("title", "snippet", "page_age"):
         value = getattr(source, name)
         if value:
             out[name] = value
+    if not url and not source.title:
+        out["title"] = source.url
     return out
 
 

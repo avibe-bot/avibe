@@ -252,6 +252,7 @@ scenarios:
       - 'ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-008: shows a direct image call by its model and Source, with its size, file and prompt, and no cost when none is known'
       - 'ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-008: shows a total an unpriced attempt left only as a lower bound'
       - 'ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-008: says why a search ran by proxy when the turn''s Source refused it, and how to undo that'
+      - 'ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-008: names a source without a web URL but links nothing'
   - id: MH-HOSTED-UI-009
     name: A hosted call's card payload is projected from the canonical C-1 records in the shape the Web renders
     status: covered
@@ -260,8 +261,10 @@ scenarios:
     test: tests/test_hosted_activity.py::test_payloads_match_the_shape_the_web_card_renders
     related_tests:
       - tests/test_hosted_activity.py::test_a_response_scoped_summary_is_shown_once
+      - tests/test_hosted_activity.py::test_a_source_no_browser_should_open_is_named_but_not_linked
       - tests/test_agent_activity_service.py::test_a_hosted_tool_row_carries_its_card
       - tests/test_message_mirror.py::test_a_hosted_card_rides_on_its_toolcall_row_and_its_image_joins_the_answer
+      - tests/test_message_mirror.py::test_a_hosted_image_without_an_image_suffix_is_served_as_its_recorded_type
   - id: MH-HOSTED-UI-010
     name: IM shows one line per hosted call with tool, query, mode, count and a cost only when known
     status: covered
@@ -280,6 +283,7 @@ scenarios:
     related_tests:
       - tests/test_agent_transcript.py::test_a_final_commits_as_the_loops_reply_decision_says
       - tests/agent_core/agent/test_loop.py::test_a_reply_counts_the_images_of_the_tool_result_that_committed_not_the_writer_that_lost
+      - tests/agent_core/agent/test_loop.py::test_only_an_image_a_surface_can_deliver_makes_a_silent_final_a_reply
   - id: MH-HOSTED-UI-011
     name: Vibey delivers a native hosted call as its IM line and Web card, and its answer with provider citations as links, an answer split into adjacent text blocks reading as written
     status: covered

@@ -1118,7 +1118,16 @@ def register_text_citations(
     if not sources:
         return joined, None
     registered, bundle = register_citations(joined, sources, unresolved_label=unresolved_label)
-    return CITATION_MARKER_RE.sub("", registered or ""), bundle
+    # Only the markers inserted here for annotations whose place was left out (in code, or removed by the
+    # display rules) go. A marker the text itself carries, such as a literal one in a code example that
+    # registration deliberately left alone, stays as written.
+    synthetic = set(sources)
+
+    def drop_synthetic(match: re.Match[str]) -> str:
+        refs = [ref for ref in match.group(1).split(_SEP) if ref]
+        return "" if refs and all(ref in synthetic for ref in refs) else match.group(0)
+
+    return CITATION_MARKER_RE.sub(drop_synthetic, registered or ""), bundle
 
 
 def materialize_citations(

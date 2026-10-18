@@ -233,6 +233,7 @@ def _hosted_card(conn, context: MessageContext, hosted: dict, *, scope_id, sessi
     images = hosted.get("images") if isinstance(hosted.get("images"), list) else []
     if context.platform != "avibe" or not session_id or not images:
         return hosted
+    from core.agent_core.messages import IMAGE_MIME_TYPES
     from core.workbench_media import register_agent_reply_media
     from storage import media_service
 
@@ -245,6 +246,7 @@ def _hosted_card(conn, context: MessageContext, hosted: dict, *, scope_id, sessi
         try:
             # Canonical, as the transcript's rewrite registers it, so both share one token.
             canonical = str(Path(path).resolve())
+            mime = image.get("mime")
             token = register_agent_reply_media(
                 conn,
                 scope_id=scope_id,
@@ -252,6 +254,8 @@ def _hosted_card(conn, context: MessageContext, hosted: dict, *, scope_id, sessi
                 kind="image",
                 local_path=canonical,
                 file_name=os.path.basename(canonical),
+                # The record names the image's type; a path need not carry a suffix that says it.
+                content_type=mime if mime in IMAGE_MIME_TYPES else None,
             )
             row = media_service.get_by_token(conn, token) or {}
         except Exception:

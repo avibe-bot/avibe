@@ -70,6 +70,7 @@ from core.agent_core.messages import (
     ToolResultMessage,
     UserMessage,
     has_reply,
+    image_deliverable,
     message_from_dict,
     text as text_block,
 )
@@ -1457,7 +1458,9 @@ class VibeyAgent(BaseAgent):
         """One hosted call: its line for IM and its card for the Web (``core.hosted_activity``)."""
         # Only a completed call delivers what it produced, as only its image counts as a reply (``has_reply``).
         if activity.completed:
-            run.hosted_images.extend((image.path, Path(image.path).name) for image in activity.images)
+            run.hosted_images.extend(
+                (image.path, Path(image.path).name) for image in activity.images if image_deliverable(image)
+            )
         formatter = self._get_formatter(run.request.context)
         line = hosted_line(activity, self._language(), escape=formatter.escape_special_chars)
         try:

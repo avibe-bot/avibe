@@ -186,6 +186,35 @@ async def test_resume_preserves_images_committed_by_an_earlier_tool_call():
     assert agent._generated_images == [HostedImage(path="/media/winner.png", mime="image/png")]
 
 
+@pytest.mark.parametrize(
+    ("path", "reason"),
+    [("/media/winner.png", "completed"), ("media/winner.png", "error")],
+    ids=["deliverable", "relative-path"],
+)
+async def test_only_an_image_a_surface_can_deliver_makes_a_silent_final_a_reply(path, reason):
+    """MH-HOSTED-UI-012: a final that says nothing after an image call is a reply only if the image can be delivered.
+    A relative path names no file a surface can attach, so counting it would end the turn as a success with nothing
+    delivered; it is the empty-reply error instead (``image_deliverable``, shared with delivery)."""
+    from core.agent_core.messages import HostedResult, ProxyExecution
+
+    hosted = HostedResult(
+        HostedRecord(status="completed", images=(HostedImage(path=path, mime="image/png"),)),
+        ProxyExecution(ORIGIN, "src_executor01", "metered", mode="direct"),
+    )
+    tool = FakeTool("image_generate", result=ToolResult((text("saved"),), hosted=hosted))
+    provider = ScriptedProvider(
+        [
+            [Done(assistant("", calls=[ToolCallBlock("call_img", "image_generate", {})]))],
+            [Done(assistant(""))],
+        ]
+    )
+    agent = make_agent(provider, tools=[tool])
+
+    events = await collect(agent, value="make an image")
+
+    assert events[-1].reason == reason
+
+
 async def test_C1_tool_set_is_captured_per_request_and_unavailable_calls_are_errors():
     old, new = FakeTool("old"), FakeTool("new")
     entered, release = asyncio.Event(), asyncio.Event()

@@ -136,6 +136,7 @@ from core.agent_core.messages import (
     Usage,
     UserMessage,
     has_reply,
+    image_deliverable,
     message_to_dict,
     text,
     usage_to_dict,
@@ -1295,7 +1296,8 @@ class Agent:
         # The committed result, which a settlement race may have taken from another writer, not this execution's.
         committed = row.message.hosted if isinstance(row.message, ToolResultMessage) else None
         if committed is not None and committed.record.status == "completed":
-            self._generated_images.extend(committed.record.images or ())
+            # Only an image a surface can deliver counts toward the reply, and is carried with it.
+            self._generated_images.extend(image for image in committed.record.images or () if image_deliverable(image))
         await emit(
             ToolFinished,
             tool_call_id=call.id,

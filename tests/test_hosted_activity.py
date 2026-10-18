@@ -216,6 +216,33 @@ def test_payloads_match_the_shape_the_web_card_renders(build):
     assert build().to_payload() == FIXTURE[build.__name__]
 
 
+def test_a_source_no_browser_should_open_is_named_but_not_linked():
+    """MH-HOSTED-UI-009: a source URL is linked only if a citation could link it (``safe_url``); any other string a
+    provider gave is kept as the source's name, so the count still matches the IM line."""
+
+    activity = proxy_activity(
+        ToolCallBlock(id="call_w8", name="web_search", arguments={"query": "devday"}),
+        HostedResult(
+            record=HostedRecord(
+                status="completed",
+                sources=(
+                    DEVDAY,
+                    HostedSource(url="/docs/changelog", title="Responses API changelog"),
+                    HostedSource(url="openai.com/index/devday-2026"),
+                ),
+            ),
+            execution=XAI,
+        ),
+        source_names=NAMES,
+    )
+
+    assert activity.to_payload()["sources"] == [
+        {"url": DEVDAY.url, "title": DEVDAY.title, "page_age": DEVDAY.page_age},
+        {"title": "Responses API changelog"},
+        {"title": "openai.com/index/devday-2026"},
+    ]
+
+
 def test_a_response_scoped_summary_is_shown_once():
     """The response's cost covers all its calls, and xAI's cited posts belong to its X search."""
 

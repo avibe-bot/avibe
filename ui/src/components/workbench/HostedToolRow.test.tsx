@@ -77,6 +77,18 @@ describe('hosted tool cards', () => {
     within(proxy).getByText('x.com · 2 days ago');
   });
 
+  it('MH-HOSTED-UI-008: names a source without a web URL but links nothing', () => {
+    // As the producer sends a source whose URL failed `safe_url`, and as a row stored before it did holds one.
+    renderGroup([{ ...fixture.native_web_search, sources: [{ title: 'openai.com/index/devday-2026' }, { url: '/docs/changelog', title: 'Responses API changelog' }] }]);
+
+    const native = row('srvtoolu_01');
+    within(native).getByText('2 sources');
+    fireEvent.click(within(native).getByRole('button'));
+    within(native).getByText('openai.com/index/devday-2026');
+    within(native).getByText('Responses API changelog');
+    expect(within(native).queryAllByRole('link')).toEqual([]);
+  });
+
   it('says why a call failed instead of counting results it never had', () => {
     renderGroup(['proxy_failed']);
     const failed = row('call_x2');

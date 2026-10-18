@@ -1585,6 +1585,20 @@ class TestTextBlockCitations:
         assert body == "Visible.\n\nRun `vibe status` now."
         assert citations == []
 
+    def test_a_literal_marker_in_code_survives_beside_a_provider_citation(self):
+        """A code example quoting the marker grammar is the reply's own text: only the markers inserted for
+        annotations go, never one the text itself carries."""
+        literal = "\ue200cite\ue202turn0search0\ue201"
+        text = f"Codex writes `{literal}` for a citation. Filters shipped."
+        registered, bundle = register_text_citations(
+            [("", text, [self.cite(self.FILTERS, "Changelog", len(text) - 1, len(text))])],
+            unresolved_label=UNRESOLVED,
+        )
+        body, citations = finalize_citations(registered, bundle)
+
+        assert f"`{literal}`" in body
+        assert [row["url"] for row in citations] == [self.FILTERS]
+
     def test_a_block_the_display_rules_remove_takes_its_citations_with_it(self):
         """An unranged citation sits after its block; when the whole block is silent, nothing is left to cite."""
         registered, bundle = register_text_citations(
