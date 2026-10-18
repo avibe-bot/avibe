@@ -42,6 +42,19 @@ from core.agent_core.ai.provider import Done, ModelEndpoint, ProviderError, Text
 from core.agent_core.agent.models import ModelSelection
 from core.agent_core.cancel import CancelToken
 from core.agent_core.harness.context import (
+    MEMO_FILE,
+    MEMO_HEADING,
+    MIND_CUT,
+    MIND_FILE,
+    MIND_FILE_CUT,
+    MIND_FILE_FIRST,
+    MIND_FILE_PREVIOUS,
+    MIND_REVERT,
+    MIND_TEMPLATE,
+    SKILLS_LEAD_CARRIED,
+    TRUNCATED_LEAD,
+    text_tokens,
+    CHECKPOINT_FRAMING,
     CHECKPOINT_REQUEST,
     CHECKPOINT_TRUNCATED,
     CACHE_TTL_UNKNOWN_S,
@@ -170,9 +183,25 @@ class Model:
 
 
 class Host:
-    def __init__(self) -> None:
+    """The engine tests' host: every input is a person's message, typed as its row says, unless ``typed`` names the
+    ones that are; ``skills`` are the skills it can render, by name."""
+
+    def __init__(self, typed=None, skills=None) -> None:
         self.states: list[StateRequest] = []
         self.records: list[tuple[str, int]] = []
+        self.typed = typed
+        self.skills = dict(skills or {})
+        self.asked: list[list[str]] = []
+
+    def user_messages(self, row_ids):
+        self.asked.append(list(row_ids))
+        if self.typed is None:
+            return {row_id: f"typed {row_id}" for row_id in row_ids}
+        return {row_id: self.typed[row_id] for row_id in row_ids if row_id in self.typed}
+
+    def skill_content(self, session_id, name):
+        body = self.skills.get(name)
+        return None if body is None else (f"rev-{name}", body)
 
     def earlier_record(self, session_id, through_seq):
         self.records.append((session_id, through_seq))
@@ -269,7 +298,7 @@ async def test_a_threshold_checkpoint_forks_the_exact_prefix_and_leaves_checkpoi
     assert [is_checkpoint(request) for request in model.requests] == [False] * 4 + [True, False]
     # Cache safety: the fork is the previous request extended, with every cache-relevant setting unchanged.
     assert fork.messages[: len(previous.messages)] == previous.messages
-    assert fork.messages[-1].content[0].text.startswith(CHECKPOINT_REQUEST)
+    assert fork.messages[-1].content[0].text.startswith(CHECKPOINT_REQUEST.split("{mind_file}")[0])
     for field in ("endpoint", "system", "tools", "reasoning_effort", "supports_images", "cache", "max_tokens"):
         assert getattr(fork, field) == getattr(previous, field)
 
@@ -514,7 +543,7 @@ async def test_a_threshold_checkpoint_may_read_while_the_window_has_room_and_nev
     # A response that leaves under 1,000 tokens of room still gets the policy's fixed text, never a cut of it:
     # a truncation note would tell the model to read again, and another call fails the turn.
     long = AssistantMessage(
-        (ThinkingBlock(tokens(6_500)), ToolCallBlock("peek", "read", {"path": "f"})), assistant().origin, "tool_use"
+        (ThinkingBlock(tokens(6_000)), ToolCallBlock("peek", "read", {"path": "f"})), assistant().origin, "tool_use"
     )
     model = Model(reads(4), [[Done(long)], [Done(assistant(CHECKPOINT))]])
     tool = sized_reader(6_000, 6_000, 6_000, 2_000)
@@ -902,7 +931,7 @@ async def test_the_request_right_after_a_checkpoint_is_measured_and_rolls_when_i
 
 
 async def test_two_ineffective_checkpoints_stop_compaction_for_the_run():
-    bloated = [[Done(assistant(bulky(15_000)))] for _ in range(2)]
+    bloated = [[Done(assistant(bulky(13_000)))] for _ in range(2)]
     model = Model(reads(7), bloated)
     agent = make_agent(model, tools=[sized_reader(6_000, 6_000, 6_000, 6_000, 5_000, 5_000, 5_000)])
     events = await run(agent)
@@ -1205,7 +1234,7 @@ async def test_the_ladder_drops_mechanically_once_a_checkpoint_request_fails():
         assert dropped.payload["mode"] == "dropped" and dropped.payload["summarizer"] is None
         # The older checkpoint is kept, with its framing; only the earliest verbatim part moved out.
         assert dropped.payload["checkpoint"] == CHECKPOINT_BODY
-        assert dropped.payload["summary"].startswith("<context-checkpoint>\nThis is a record")
+        assert dropped.payload["summary"].startswith(f"<context-checkpoint>\n{CHECKPOINT_FRAMING}")
         assert dropped.payload["first_kept_seq"] > first_row.payload["first_kept_seq"]
     assert checkpoint_message(model.conversation_requests[-1]) == drops[-1].payload["summary"]
     assert events[-1].reason == "completed"
@@ -1378,7 +1407,7 @@ async def test_the_stop_check_budgets_exactly_the_request_the_drop_leaves(monkey
         return composed, plan
 
     monkeypatch.setattr(Agent, "_minimal", spy)
-    host = Host()
+    host = Host(typed={})  # no message a person typed: the drop carries nothing the minimal request leaves out
     failing = [Done(assistant(CHECKPOINT, stop_reason="length"))]  # the rolling checkpoint fails: the ladder drops
     model = Model([[Done(assistant("ok"))], call("read", "big", path="f"), [Done(assistant("done"))]], [failing])
     agent = make_agent(model, tools=[reader(tokens(16_000))], context=ContextConfig(host=host))
@@ -1642,9 +1671,11 @@ async def test_a_long_session_keeps_every_conversation_request_under_T():
     rows = await agent.store.load("session")
     compactions = [row for row in rows if row.kind == "compaction"]
     assert len(compactions) >= 3
-    # Iterative: each later fork's prefix leads with the previous checkpoint, and file lists accumulate.
+    # Iterative: each later fork's prefix leads with the previous checkpoint, and file lists accumulate, the five
+    # most recently read kept (section 7).
     assert all(checkpoint_message(request) for request in model.checkpoint_requests[1:])
-    assert compactions[-1].payload["files_read"] == [f"f{index}" for index in range(6, -1, -1)]  # most recent first
+    assert compactions[-1].payload["files_read"] == [f"f{index}" for index in range(6, 1, -1)]  # most recent first
+    assert compactions[-1].payload["files_read_omitted"]
     assert all(row.payload["previous_compaction_id"] == prior.row_id for prior, row in zip(compactions, compactions[1:]))
     # A fork anchored before the first checkpoint projects the original context.
     original = project(rows, fork_point=compactions[0].context_seq - 1).messages
@@ -1804,7 +1835,8 @@ async def test_an_abort_waits_for_a_scratch_worker_before_closing_the_root(tmp_p
     assert events[-1].reason == "aborted"
     assert seen == ["open"]
     assert (scratch / "plan.md").read_text() == "plan"
-    assert sorted(os.listdir(scratch)) == ["escape", "plan.md"] and not os.listdir(outside)  # no temp file left
+    # The turn's own files beside the plan (section 6), and no temp file left.
+    assert sorted(os.listdir(scratch)) == ["escape", "memo.md", "mind.md", "plan.md"] and not os.listdir(outside)
 
 
 async def _drain(stream):
@@ -1867,3 +1899,348 @@ async def test_without_descriptor_relative_rename_scratch_writes_are_denied_and_
     results = await _scratch_checkpoint(tmp_path, scratch, calls, [])
     assert results["w"].content[0].text == DENIED and not (scratch / "plan.md").exists()
     assert not results["r"].is_error
+
+
+# --- checkpoint-v5: the mind, the memo, and the now (context.md sections 6, 7, and 10) ---------------------------
+
+
+def _edit(call_id: str, path, *pairs) -> ToolCallBlock:
+    return ToolCallBlock(call_id, "edit", {"path": str(path), "edits": [{"oldText": o, "newText": n} for o, n in pairs]})
+
+
+def _batch(*calls) -> list:
+    return [Done(AssistantMessage(tuple(calls), assistant().origin, "tool_use"))]
+
+
+def _v5(tmp_path, host=None, **options) -> ContextConfig:
+    return ContextConfig(
+        host=host or Host(),
+        scratch_dir=str(tmp_path / "scratch"),
+        checkpoint_dir=str(tmp_path / "checkpoints"),
+        **options,
+    )
+
+
+MISSION = "- fix the parser without changing its API (in progress)"
+FIRST_MIND = MIND_TEMPLATE.replace("## Mission\n(none)", f"## Mission\n{MISSION}")
+
+
+def _fill_mind(tmp_path) -> list:
+    """A checkpoint turn that writes the mission into the template, checks memo message #1, then replies."""
+    scratch = tmp_path / "scratch"
+    return [
+        _batch(
+            _edit("m", scratch / MIND_FILE, ("## Mission\n(none)", f"## Mission\n{MISSION}")),
+            _edit("n", scratch / MEMO_FILE, ("- [ ] (#1)", "- [x] (#1)")),
+        ),
+        [Done(assistant(CHECKPOINT))],
+    ]
+
+
+async def _consolidate(tmp_path, scripts, *, host=None, store=None, crossings=1):
+    """``history()``, then ``crossings`` Turns that each cross T on ``ROOMY`` and run the next checkpoint script."""
+    store = store or InMemoryTranscriptStore()
+    context = _v5(tmp_path, host)
+    await run(make_agent(Model(history()), store=store, tools=[reader(tokens(3_000))], selection=ROOMY, context=context))
+    models = []
+    for index, script in enumerate(scripts):
+        model = Model([[Done(assistant("after"))]], script)
+        agent = make_agent(model, store=store, tools=[reader(tokens(3_000))], selection=ROOMY, context=context)
+        await cross(agent, row=f"cross{index}")
+        models.append(model)
+    rows = await store.load("session")
+    return models, [row for row in rows if row.kind == "compaction"], store
+
+
+def _request(model) -> str:
+    return model.checkpoint_requests[0].messages[-1].content[0].text
+
+
+async def test_a_checkpoint_consolidates_into_a_mind_it_edits_a_memo_it_checks_and_a_now(tmp_path):
+    host = Host()
+    (model,), (row,), store = await _consolidate(tmp_path, [_fill_mind(tmp_path)], host=host)
+    # The turn starts with the template and the memo list in its scratch root, and the request says so (section 6).
+    request = _request(model)
+    assert MIND_FILE_FIRST in request
+    assert request.endswith("Current memo.md:\n- [ ] (#1) typed input\n</context-checkpoint-request>")
+    assert host.asked == [["input"]]  # the inputs the cut moves out; the crossing Turn's own input stays as it was
+    payload = row.payload
+    assert (payload["mind"], payload["mind_truncated"]) == (FIRST_MIND, False)
+    assert payload["memo"] == [{"seq": 1, "text": "typed input", "truncated": False}]
+    assert payload["checkpoint"] == CHECKPOINT_BODY
+    assert payload["summarizer"]["prompt_version"] == "checkpoint-v5" and payload["summarizer"]["rounds"] == 1
+    summary = payload["summary"]
+    assert summary.startswith(f"<context-checkpoint>\n{CHECKPOINT_FRAMING}\n\n{FIRST_MIND}\n\n{MEMO_HEADING}\n- (#1) typed input\n\n{CHECKPOINT_BODY}\n")
+    (audit,) = [audit for _, _, audit in store.audits]
+    assert audit["outcome"] == "completed" and "repair" not in audit
+    edits = [message for message in audit["messages"] if message["role"] == "tool_result"]
+    assert [message["is_error"] for message in edits] == [False, False]
+
+
+async def test_a_later_checkpoint_starts_from_the_mind_and_memo_it_left_and_needs_one_request_when_nothing_changed(
+    tmp_path,
+):
+    models, (first, second), store = await _consolidate(tmp_path, [_fill_mind(tmp_path), [[Done(assistant(CHECKPOINT))]]])
+
+    async def _store_rows(_):
+        return await store.load("session")
+
+    request = _request(models[1])
+    assert MIND_FILE_PREVIOUS in request
+    # The first crossing's input: in the first checkpoint's tail, moved out by the second.
+    seq = next(row.context_seq for row in await _store_rows(models) if row.row_id == "cross0")
+    assert request.endswith(f"Current memo.md:\n- [x] (#1) typed input\n- [ ] (#{seq}) typed cross0\n"
+                            "</context-checkpoint-request>")
+    assert len(models[1].checkpoint_requests) == 1  # no tool, no repair: one request
+    # What the turn left alone stays word for word: the mind, and the message it carried; one left unchecked goes.
+    assert second.payload["mind"] == FIRST_MIND
+    assert second.payload["memo"] == first.payload["memo"]
+    assert second.payload["summary"].count(MISSION) == 1
+
+
+async def test_a_mind_that_lost_its_structure_gets_one_repair_and_then_the_previous_mind_stays(tmp_path):
+    scratch = tmp_path / "scratch"
+    broken = [
+        _batch(_edit("m", scratch / MIND_FILE, (f"## Mission\n{MISSION}\n", ""))),
+        [Done(assistant(CHECKPOINT))],
+        [Done(assistant(CHECKPOINT))],  # after the repair, still broken
+    ]
+    models, (first, second), store = await _consolidate(tmp_path, [_fill_mind(tmp_path), broken])
+    repair = models[1].checkpoint_requests[-1].messages[-1].content[0].text
+    assert 'mind.md lost its structure: the heading line "## Mission" is missing' in repair
+    assert len(models[1].checkpoint_requests) == 3
+    assert second.payload["mind"] == FIRST_MIND  # the previous mind, as it was
+    audit = [audit for _, _, audit in store.audits][-1]
+    assert audit["outcome"] == "completed" and audit["repair"].startswith("mind.md lost its structure")
+
+
+async def test_a_mind_past_a_section_limit_is_kept_whole_shown_cut_and_given_whole_to_the_next_checkpoint(tmp_path):
+    scratch = tmp_path / "scratch"
+    workstreams = "\n".join(f"- workstream {index}: " + "w" * 200 for index in range(60))
+    grown = [
+        _batch(_edit("m", scratch / MIND_FILE, ("## Workstreams\n(none)", f"## Workstreams\n{workstreams}"))),
+        [Done(assistant(CHECKPOINT))],
+        [Done(assistant(CHECKPOINT))],  # the repair asked to condense it; it did not
+    ]
+    # The third turn leaves it as it is: the whole mind is still past the limit, so it is asked to condense once more.
+    again = [[Done(assistant(CHECKPOINT))], [Done(assistant(CHECKPOINT))]]
+    models, (_, second, third), _ = await _consolidate(tmp_path, [_fill_mind(tmp_path), grown, again])
+    repair = models[1].checkpoint_requests[-1].messages[-1].content[0].text
+    assert "mind.md is over its length limits: Goals is about" in repair
+    whole = FIRST_MIND.replace("## Workstreams\n(none)", f"## Workstreams\n{workstreams}")
+    assert (second.payload["mind"], second.payload["mind_truncated"]) == (whole, True)
+    copies = list((tmp_path / "checkpoints").iterdir())
+    assert len(copies) == 1 and copies[0].read_text() == whole and not os.access(copies[0], os.W_OK)
+    summary = second.payload["summary"]
+    assert MIND_CUT.format(path=str(copies[0])) in summary and "- workstream 59" not in summary and MISSION in summary
+    # The next turn starts from the whole mind, and its request gives the cut section whole.
+    request = _request(models[2])
+    assert MIND_FILE_CUT in request and f"{TRUNCATED_LEAD}\n# 2. Goals\n## Mission\n{MISSION}" in request
+    assert "- workstream 59: " in request and third.payload["mind"] == whole
+
+
+async def test_a_mind_piled_past_twice_its_budget_is_not_kept(tmp_path):
+    scratch = tmp_path / "scratch"
+    lessons = "\n".join(f"- lesson {index}: " + "l" * 400 for index in range(130))  # ~13,000 tokens
+    assert text_tokens(lessons) > MIND_REVERT
+    piled = [
+        _batch(_edit("m", scratch / MIND_FILE, ("# 4. Lessons\n(none)", f"# 4. Lessons\n{lessons}"))),
+        [Done(assistant(CHECKPOINT))],
+        [Done(assistant(CHECKPOINT))],
+    ]
+    _, (_, second), _ = await _consolidate(tmp_path, [_fill_mind(tmp_path), piled])
+    assert (second.payload["mind"], second.payload["mind_truncated"]) == (FIRST_MIND, False)
+    assert not (tmp_path / "checkpoints").exists()
+
+
+async def test_a_memo_changed_beyond_its_checkboxes_keeps_every_candidate(tmp_path):
+    scratch = tmp_path / "scratch"
+    garbled = [
+        _batch(_edit("n", scratch / MEMO_FILE, ("typed input", "the user said to fix it"))),
+        [Done(assistant(CHECKPOINT))],
+        [Done(assistant(CHECKPOINT))],
+    ]
+    (model,), (row,), _ = await _consolidate(tmp_path, [garbled])
+    repair = model.checkpoint_requests[-1].messages[-1].content[0].text
+    assert "memo.md was changed beyond its checkboxes" in repair
+    assert row.payload["memo"] == [{"seq": 1, "text": "typed input", "truncated": False}]  # never fewer
+
+
+async def test_checked_messages_past_the_memo_budget_are_all_kept_each_cut_to_a_common_share(tmp_path):
+    store = InMemoryTranscriptStore()
+    typed = {f"turn{index}": f"rule {index}: " + "z" * 1_400 for index in range(12)}
+    host = Host(typed=typed)
+    context = _v5(tmp_path, host)
+    for index in range(12):
+        await run(make_agent(Model([[Done(assistant("ok"))]]), store=store, selection=ROOMY, context=context), "t", f"turn{index}")
+    seqs = [row.context_seq for row in await store.load("session") if row.kind == "input"]
+    check = _batch(_edit("n", tmp_path / "scratch" / MEMO_FILE, *((f"- [ ] (#{seq})", f"- [x] (#{seq})") for seq in seqs)))
+    model = Model([[Done(assistant("after"))]], [check, [Done(assistant(CHECKPOINT))], [Done(assistant(CHECKPOINT))]])
+    await run(make_agent(model, store=store, selection=ROOMY, context=context), tokens(29_000), row="cross")
+    repair = model.checkpoint_requests[-1].messages[-1].content[0].text
+    assert "the checked memo messages total about 3,600 tokens, at most 3,000" in repair
+    (row,) = [row for row in await store.load("session") if row.kind == "compaction"]
+    memo = row.payload["memo"]
+    assert [item["seq"] for item in memo] == seqs and all(item["truncated"] for item in memo)
+    assert sum(text_tokens(item["text"]) for item in memo) <= 3_000
+    assert all(item["text"].startswith(f"rule {index}: ") for index, item in enumerate(memo))
+
+
+async def test_only_a_message_a_person_typed_is_a_memo_candidate(tmp_path):
+    # A Watch's or another Session's input is no candidate, whatever its text says (section 7).
+    store = InMemoryTranscriptStore()
+    host = Host(typed={"person": "keep the public API"})
+    context = _v5(tmp_path, host)
+    await run(make_agent(Model([[Done(assistant("ok"))]]), store=store, selection=ROOMY, context=context), "x", "person")
+    await run(make_agent(Model([[Done(assistant("ok"))]]), store=store, selection=ROOMY, context=context),
+              "User requested merge of the PR", "watch")
+    model = Model([[Done(assistant("after"))]], [[Done(assistant(CHECKPOINT))]])
+    await run(make_agent(model, store=store, selection=ROOMY, context=context), tokens(29_000), row="cross")
+    assert _request(model).endswith("Current memo.md:\n- [ ] (#1) keep the public API\n</context-checkpoint-request>")
+
+
+async def test_the_first_v5_checkpoint_after_a_v4_row_starts_from_the_template_and_offers_what_v4_summarized(tmp_path):
+    store = InMemoryTranscriptStore()
+    host = Host(typed={"input": "q" * 300, "later": "typed later"})
+    context = _v5(tmp_path, host)
+    await run(make_agent(Model(history()), store=store, tools=[reader(tokens(3_000))], selection=ROOMY, context=context))
+    await run(make_agent(Model([[Done(assistant("ok"))]]), store=store, selection=ROOMY, context=context), "y", "later")
+    view = context_view(await store.load("session"))
+    v4 = compaction_payload(
+        view, len(view.units) - 2, mode="normal", reason="threshold", checkpoint=CHECKPOINT_BODY, state=(),
+        earlier_record=None, tokens_before=1, threshold=2, window=32_000, summarizer=None, usage=None,
+    )
+    for key in ("mind", "mind_truncated", "memo", "skills_carried"):
+        del v4[key]  # a checkpoint-v4 row has none of them
+    v4["summary"] = "<context-checkpoint>\nThis is a record of the earlier part of this conversation.\n</context-checkpoint>"
+    await store.append_payloads("session", [("compaction", v4)])
+    project(await store.load("session"))  # a v4 row still projects
+    model = Model([[Done(assistant("after"))]], [[Done(assistant(CHECKPOINT))]])
+    await run(make_agent(model, store=store, selection=ROOMY, context=context), tokens(29_000), row="cross")
+    request = _request(model)
+    assert MIND_FILE_FIRST in request
+    # #1 was summarized by the v4 row: offered once, previewed longer; the later input is still visible, previewed short.
+    later = next(row.context_seq for row in await store.load("session") if row.row_id == "later")
+    assert f"- [ ] (#1) {'q' * 200}…\n- [ ] (#{later}) typed later\n" in request
+    rows = await store.load("session")
+    assert [row.kind for row in rows].count("compaction") == 2
+    project(rows)
+
+
+async def test_a_host_that_cannot_say_who_typed_what_fails_the_checkpoint_before_any_model_call(tmp_path):
+    class Blind(Host):
+        def user_messages(self, row_ids):
+            raise RuntimeError("messages table locked")
+
+    store = InMemoryTranscriptStore()
+    context = _v5(tmp_path, Blind())
+    await run(make_agent(Model(history()), store=store, tools=[reader(tokens(3_000))], selection=ROOMY, context=context))
+    model = Model([[Done(assistant("after"))]], [])
+    events = await cross(make_agent(model, store=store, tools=[reader(tokens(3_000))], selection=ROOMY, context=context))
+    assert not model.checkpoint_requests and events[-1].reason == "completed"
+    (failed,) = [event for event in events if isinstance(event, CompactionFailed)]
+    assert "the host failed: RuntimeError: messages table locked" in failed.error
+    assert [audit["outcome"] for _, _, audit in store.audits] == ["failed"]
+
+
+async def test_the_skills_a_checkpoint_takes_out_come_back_as_they_read_now(tmp_path):
+    store = InMemoryTranscriptStore()
+    body = '<skill_content name="review">\nRead the whole diff first.\n</skill_content>'
+    host = Host(skills={"review": body})
+    context = _v5(tmp_path, host)
+    loader = FakeTool("bash", result=ToolResult((text(body),), details={"skills": [{"name": "review"}]}))
+    model = Model([call("bash", "load", command="vibe skill load review"), *history()])
+    await run(make_agent(model, store=store, tools=[loader, reader(tokens(3_000))], selection=ROOMY, context=context))
+    model = Model([[Done(assistant("after"))]], [[Done(assistant(CHECKPOINT))]])
+    await cross(make_agent(model, store=store, tools=[reader(tokens(3_000))], selection=ROOMY, context=context))
+    (row,) = [row for row in await store.load("session") if row.kind == "compaction"]
+    assert row.payload["skills"] == [{"name": "review"}]
+    (carried,) = row.payload["skills_carried"]
+    assert (carried["name"], carried["revision"], carried["content"]) == ("review", "rev-review", body)
+    assert f"<skills>\n{SKILLS_LEAD_CARRIED}\n{body}\n</skills>" in row.payload["summary"]
+
+
+async def test_the_turn_s_own_files_are_revised_only_with_edit(tmp_path):
+    scratch = tmp_path / "scratch"
+    rewrite = ToolCallBlock("w", "write", {"path": str(scratch / MIND_FILE), "content": "# my own mind"})
+    other = ToolCallBlock("o", "write", {"path": str(scratch / "notes.md"), "content": "free"})
+    script = [_batch(rewrite, other), [Done(assistant(CHECKPOINT))]]
+    (model,), (row,), _ = await _consolidate(tmp_path, [script])
+    results = [m for m in model.checkpoint_requests[-1].messages if isinstance(m, ToolResultMessage)][-2:]
+    assert results[0].is_error and results[0].content == (text(DREAMING.rewrite_denied.format(name=MIND_FILE)),)
+    assert not results[1].is_error and (scratch / "notes.md").read_text() == "free"
+    assert row.payload["mind"] == ""  # the template untouched: no mind
+
+
+async def test_without_a_scratch_root_the_previous_mind_stays_and_every_message_is_kept(tmp_path):
+    store = InMemoryTranscriptStore()
+    context = ContextConfig(host=Host())  # no scratch directory: no files (section 6)
+    await run(make_agent(Model(history()), store=store, tools=[reader(tokens(3_000))], selection=ROOMY, context=context))
+    model = Model([[Done(assistant("after"))]], [[Done(assistant(CHECKPOINT))]])
+    await cross(make_agent(model, store=store, tools=[reader(tokens(3_000))], selection=ROOMY, context=context))
+    (row,) = [row for row in await store.load("session") if row.kind == "compaction"]
+    assert row.payload["mind"] == "" and row.payload["memo"] == [{"seq": 1, "text": "typed input", "truncated": False}]
+    assert len(model.checkpoint_requests) == 1
+
+
+async def test_a_drop_carries_the_mind_skills_and_every_message(tmp_path):
+    store = InMemoryTranscriptStore()
+    host = Host()
+    # Room for the edits at the first checkpoint (section 6): its input limit is past the window's 0.9.
+    medium = ModelSelection(ENDPOINT, replace(SELECTION.capabilities, context_window=70_000, input_limit=100_000))
+    await _history_on_a_large_window(store, [5_000] * 13)
+    scratch = tmp_path / "scratch"
+    fill = [
+        _batch(
+            _edit("m", scratch / MIND_FILE, ("## Mission\n(none)", f"## Mission\n{MISSION}")),
+            _edit("n", scratch / MEMO_FILE, ("- [ ] (#1)", "- [x] (#1)")),
+        ),
+        [Done(assistant(CHECKPOINT))],
+    ]
+    first = make_agent(Model([[Done(assistant("noted"))]], fill), store=store, selection=medium, context=_v5(tmp_path, host))
+    assert (await run(first, row="first"))[-1].reason == "completed"
+    await _history_on_a_large_window(store, [5_000] * 4, row="more")
+    model = Model([[Done(assistant("done"))]], [[ProviderError("server", "down", False)]])
+    events = await run(make_agent(model, store=store, context=_v5(tmp_path, host)))
+    first_row, *drops = [row for row in await store.load("session") if row.kind == "compaction"]
+    assert drops and events[-1].reason == "completed"
+    for dropped in drops:
+        assert dropped.payload["mind"] == FIRST_MIND and dropped.payload["checkpoint"] == CHECKPOINT_BODY
+        seqs = [item["seq"] for item in dropped.payload["memo"]]
+        assert seqs[0] == 1 and set(seqs) > {1}  # the carried message, and every one the drop moved out
+        assert MISSION in dropped.payload["summary"]
+
+
+async def test_a_memo_the_turn_had_no_room_to_check_keeps_every_candidate(tmp_path):
+    # The turn's five rounds go to reads (section 6): its edit of memo.md gets the used-up budget's text, so its
+    # untouched memo.md says nothing about what to drop.
+    store = InMemoryTranscriptStore()
+    context = _v5(tmp_path)
+    await run(make_agent(Model(history()), store=store, tools=[reader(tokens(3_000))], selection=ROOMY, context=context))
+    check = _batch(_edit("n", tmp_path / "scratch" / MEMO_FILE, ("- [ ] (#1)", "- [x] (#1)")))
+    script = [*(call("read", f"peek{index}", path="f") for index in range(5)), check, [Done(assistant(CHECKPOINT))]]
+    model = Model([[Done(assistant("after"))]], script)
+    await cross(make_agent(model, store=store, tools=[reader("short")], selection=ROOMY, context=context))
+    assert model.checkpoint_requests[-1].messages[-1].content == (text(BUDGET_USED),)
+    (row,) = [row for row in await store.load("session") if row.kind == "compaction"]
+    assert row.payload["memo"] == [{"seq": 1, "text": "typed input", "truncated": False}]
+
+
+async def test_a_scratch_edit_runs_with_less_room_than_a_read_needs(tmp_path):
+    # Crossing T at ~24,000 tokens of a 32,000-token limit leaves under the 4,000-token floor of a read, not under a
+    # scratch edit's: its result is one short line, never cut (section 6). A first mind can be filled there.
+    store = InMemoryTranscriptStore()
+    context = _v5(tmp_path)
+    await run(make_agent(Model([[Done(assistant("ok"))]]), store=store, context=context), "keep the API", "person")
+    scratch = tmp_path / "scratch"
+    batch = _batch(
+        _edit("m", scratch / MIND_FILE, ("## Mission\n(none)", f"## Mission\n{MISSION}")),
+        ToolCallBlock("r", "read", {"path": "f"}),
+    )
+    model = Model(reads(4), [batch, [Done(assistant(CHECKPOINT))]])
+    await run(make_agent(model, store=store, tools=[reader(tokens(6_000))], context=context))
+    edited, read = [m for m in model.checkpoint_requests[-1].messages if isinstance(m, ToolResultMessage)][-2:]
+    assert not edited.is_error and edited.content[0].text.startswith("Successfully replaced 1 block(s)")
+    assert read.content == (text(BUDGET_USED),)
+    (row,) = [row for row in await store.load("session") if row.kind == "compaction"]
+    assert row.payload["mind"] == FIRST_MIND

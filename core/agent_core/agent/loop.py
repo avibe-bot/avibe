@@ -11,8 +11,10 @@ clearing, the checkpoint turn, and the overflow ladder
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import os
 import time
 from collections import deque
 from contextlib import asynccontextmanager, suppress
@@ -56,6 +58,7 @@ from core.agent_core.agent.fork import (
     DREAMING,
     CheckpointDetail,
     Decision,
+    Files,
     Folded,
     PolicyGate,
     SideReply,
@@ -86,9 +89,18 @@ from core.agent_core.harness.context import (
     MAX_OVERFLOWS,
     MAX_ROLLS,
     PROMPT_VERSION,
+    MEMO_FILE,
+    MIND_CUT,
+    MIND_CUT_UNSTORED,
+    MIND_FILE,
+    MIND_REVERT,
+    MIND_TEMPLATE,
     Anchor,
     Budget,
+    CarriedSkill,
     ContextConfig,
+    MemoItem,
+    MemoList,
     StateRequest,
     add_usage,
     budget,
@@ -99,13 +111,18 @@ from core.agent_core.harness.context import (
     checkpoint_request,
     checkpoint_text,
     clear_edit,
+    carry_skills,
     clearable_results,
     compaction_payload,
     fit_batch,
     fit_edit,
+    fit_memo,
+    fit_mind,
     fit_result,
     half_cut,
     last_anchor,
+    memo_item,
+    memo_problems,
     message_tokens,
     messages_tokens,
     normal_cut,
@@ -113,7 +130,9 @@ from core.agent_core.harness.context import (
     output_tokens,
     request_facts,
     request_tokens,
+    review_mind,
     rolling_cut,
+    skill_candidates,
     summarized_to_seq,
     text_tokens,
     unit_tokens,
@@ -174,10 +193,6 @@ class _Exhausted(Exception):
         self.limit, self.parts, self.kind = limit, parts, kind
         sizes = ", ".join(f"{part.name} ~{part.tokens}" for part in parts)
         super().__init__(f"The context does not fit the model's input limit of {limit} tokens: {sizes}.")
-
-
-#: The checkpoint request (C-9 section 11); every checkpoint turn and the fit checks send exactly this.
-_CHECKPOINT_REQUEST = checkpoint_request()
 
 
 def _cache_of(origin: Origin) -> tuple[str, str]:
@@ -351,6 +366,9 @@ class Agent:
         # The ``context_seq`` of each input this run consumed, its first and every steer: a checkpoint inside the Turn
         # keeps them as they were (C-9 section 5).
         self._turn_inputs: set[int] = set()
+        # What a person typed, by input row id, as the host answered (None: not a person's message); a message never
+        # changes, so the answer holds for the Agent's life (C-9 section 7, the memo).
+        self._typed: dict[str, Optional[str]] = {}
         # The run's attempt ledger (C-9): every model attempt, in order.
         self._attempts: list[_Attempt] = []
         self._refusals = _Refusals()
@@ -1508,7 +1526,7 @@ class Agent:
             return request, plan  # nothing can move out
         cut = len(view.units) - 1
         hosted = await self._hosted(view, cut)
-        dropped = self._dropped(view, carry=carry)
+        dropped = self._dropped(view, cut, carry=carry)
         payload, after = await self._compaction(request, view, plan, cut, **dropped, hosted=hosted)
         minimal, _ = self._built(system, selected, messages=self._carried(after))
         return minimal, budget(minimal, selected.capabilities, transcript=after.messages)
@@ -1517,27 +1535,44 @@ class Agent:
         """What a conversation request carries for ``view``: the rehydrated state, then the projected context."""
         return (*self._rehydrated(), *view.messages)
 
-    @staticmethod
-    def _dropped(view: ContextView, *, carry: bool) -> dict[str, Any]:
-        """A dropped row's fields (section 8 c): no model call; the previous checkpoint's text kept when ``carry``,
-        else left out and said so."""
-        previous = view.compaction.payload.get("checkpoint", "") if view.compaction is not None else ""
-        return {
+    def _dropped(self, view: ContextView, cut: int, *, carry: bool) -> dict[str, Any]:
+        """A dropped row's fields (section 8 c): no model call. When ``carry``, the previous checkpoint as it was (its
+        now, mind, and skills) and a memo that keeps every message, the new ones included, no one choosing among
+        them; otherwise all of it left out, and said so."""
+        previous = view.compaction.payload if view.compaction is not None else {}
+        text = previous.get("checkpoint", "")
+        fields: dict[str, Any] = {
             "mode": "dropped",
             "reason": "overflow",
-            "checkpoint": previous if carry else "",
-            "checkpoint_omitted": bool(previous) and not carry,
+            "checkpoint": text if carry else "",
+            "checkpoint_omitted": self._carryable(view) and not carry,
             "summarizer": None,
             "usage": None,
         }
+        if carry:
+            mind = previous.get("mind") or ""
+            fields.update(
+                mind=mind,
+                mind_shown=self._mind_shown(mind),
+                memo=fit_memo(self._memo_list(view, cut).select(None)),
+                skills=tuple(CarriedSkill(**skill) for skill in previous.get("skills_carried", ())),
+            )
+        return fields
+
+    @staticmethod
+    def _carryable(view: ContextView) -> bool:
+        """Whether the latest checkpoint has anything a drop could carry: its now, mind, memo, or skills."""
+        previous = view.compaction.payload if view.compaction is not None else {}
+        return any(previous.get(key) for key in ("checkpoint", "mind", "memo", "skills_carried"))
 
     async def _carries(
         self, system: str, selected: ModelSelection, request: ModelRequest, view: ContextView, plan: Budget
     ) -> bool:
-        """Whether a drop keeps the previous checkpoint's text (section 8 c): only when the request the drop would
-        leave, carrying it, can fit this route. A checkpoint written on a larger route may not."""
-        if view.compaction is None or not view.compaction.payload.get("checkpoint"):
-            return True  # nothing to carry
+        """Whether a drop keeps the previous checkpoint and the user's messages it moves out (section 8 c): only when
+        the request the drop would leave, carrying them, can fit this route. A checkpoint written on a larger route
+        may not."""
+        if len(view.units) < 2:
+            return True  # nothing moves out
         return (await self._minimal(system, selected, request, view, plan, carry=True))[1].can_fit
 
     async def _shrink(
@@ -1724,14 +1759,41 @@ class Agent:
         self, request: ModelRequest, view: ContextView, plan: Budget, cut: int, *, mode: str, reason: str
     ) -> SideTurn:
         """The checkpoint turn for ``cut`` as a side turn (C-10 section 12): the whole view, or for a rolling one its
-        prefix, then the checkpoint request, under ``DREAMING``. Its check accepts a final reply holding one checkpoint
-        block above the floor of the route it was planned on (section 6); its fold commits the checkpoint row."""
+        prefix, then the checkpoint request, under ``DREAMING``. It starts with the previous mind (the template at a
+        first v5 checkpoint) and this cut's memo list in its scratch root (section 6). Its check accepts a final reply
+        holding one checkpoint block above the floor of the route it was planned on, and asks one repair for a mind or
+        memo the validators reject (section 10); its fold commits the checkpoint row."""
+        previous = view.compaction.payload if view.compaction is not None else {}
+        prior: str = previous.get("mind") or ""
+        start = prior or MIND_TEMPLATE
+        cut_sections = fit_mind(prior, MIND_CUT_UNSTORED)[1] if prior and previous.get("mind_truncated") else []
+        refused = None
+        try:
+            memo = self._memo_list(view, cut)
+        except (_Aborted, asyncio.CancelledError):
+            raise
+        except Exception as failure:
+            # A host that cannot say which inputs a person typed fails the checkpoint before any model call.
+            memo = MemoList()
+            refused = f"The checkpoint could not be prepared: the host failed: {type(failure).__name__}: {failure}"
+        lines = memo.lines()
+        listed = "".join(f"{line}\n" for line in lines)  # memo.md as the turn starts
+        prompt = checkpoint_request(
+            lines, mind="first" if not prior else ("cut" if cut_sections else "previous"), cut_sections=cut_sections
+        )
 
-        def check(message: AssistantMessage) -> Optional[str]:
-            return checkpoint_block(checkpoint_text(message), plan.window)[1]
+        def check(message: AssistantMessage, files: Files, final: bool) -> Optional[str]:
+            problem = checkpoint_block(checkpoint_text(message), plan.window)[1]
+            found = [problem] if problem is not None else []
+            if final or files is None:
+                # With no repair left, only a reply without a checkpoint fails the turn; the files fall back (fold).
+                return found[0] if found else None
+            found += review_mind(files.get(MIND_FILE), start).problems()
+            found += memo_problems(memo, files.get(MEMO_FILE))
+            return "; ".join(found) or None
 
         async def fold(reply: SideReply) -> Folded:
-            # The side turn folds only a reply its check accepted: the block's text is the checkpoint.
+            # The side turn folds only a reply its check accepted: the block's text is the now.
             checkpoint = checkpoint_block(checkpoint_text(reply.message), plan.window)[0]
             origin = reply.message.origin
             summarizer = {
@@ -1739,16 +1801,23 @@ class Agent:
                 "prompt_version": PROMPT_VERSION,
                 "rounds": reply.rounds,
             }
+            left = reply.files
             try:
                 hosted = await self._hosted(view, cut)
+                mind, shown = await self._settled_mind(left, start, prior)
+                skills = self._carried_skills(view, cut, plan.window)
             except (_Aborted, asyncio.CancelledError):
                 raise
             except Exception as failure:
-                # Only the host's part after the model answered (state, lookup) is a failed checkpoint, counted; an
-                # error building the row itself ends the run, like any engine error.
+                # Only the host's part after the model answered (state, lookup, skills, the mind's copy) is a failed
+                # checkpoint, counted; an error building the row itself ends the run, like any engine error.
                 return Folded(
                     None, f"The checkpoint row could not be built: the host failed: {type(failure).__name__}: {failure}"
                 )
+            # A memo.md that cannot be read keeps every item: more of the user's words, never fewer (section 10). So
+            # does one the turn left as written after its tool budget closed: it may never have had room to check it.
+            untouched = left is not None and left.get(MEMO_FILE) == listed
+            checked = None if left is None or (reply.closed and untouched) else memo.read(left.get(MEMO_FILE))
             payload, _ = await self._compaction(
                 request,
                 view,
@@ -1760,6 +1829,10 @@ class Agent:
                 summarizer=summarizer,
                 usage=reply.usage,
                 hosted=hosted,
+                mind=mind,
+                mind_shown=shown,
+                memo=fit_memo(memo.select(checked)),
+                skills=skills,
             )
             (row,) = await self._commit_context([("compaction", payload)])
             return Folded(row)
@@ -1768,12 +1841,120 @@ class Agent:
             purpose="checkpoint",
             detail=CheckpointDetail(reason=reason, mode=mode),
             units=None if mode == "normal" else cut,
-            prompt=_CHECKPOINT_REQUEST,
+            prompt=prompt,
             policy=DREAMING,
             max_tokens=lambda capabilities: checkpoint_max_tokens(capabilities, self.max_tokens),
             fold=fold,
             check=check,
             repair=checkpoint_repair,
+            files={MIND_FILE: start, MEMO_FILE: listed},
+            refused=refused,
+        )
+
+    def _memo_list(self, view: ContextView, cut: int) -> MemoList:
+        """memo.md for a checkpoint at ``cut`` (C-9 section 7): what the previous checkpoint's memo carries, checked,
+        then every input a person typed that this cut takes out of the context and no memo offered before,
+        unchecked. The in-flight Turn's inputs the cut keeps are not offered: they stay as they were. A
+        ``checkpoint-v4`` row has no memo, so the inputs it summarized are offered too, previewed longer: the
+        conversation the turn reads no longer shows them."""
+        row = view.compaction
+        previous = row.payload if row is not None else {}
+        carried = tuple(MemoItem(**item) for item in previous.get("memo", ()))
+        upgrading = row is not None and "memo" not in previous
+        summarized = previous.get("summarized_to_seq", 0) if row is not None else 0
+        boundary = 0 if upgrading else summarized
+        released = set(previous.get("kept_inputs", ()))  # kept as they were by the previous checkpoint, until now
+        through = summarized_to_seq(view, cut)
+        kept = {unit.seq for unit in view.units[:cut] if unit.lead.kind == "input" and unit.seq in self._turn_inputs}
+        known = {item.seq for item in carried}
+        offered = [
+            entry
+            for entry in self._rows
+            if entry.kind == "input"
+            and (boundary < entry.context_seq <= through or entry.context_seq in released)
+            and entry.context_seq not in kept
+            and entry.context_seq not in known
+        ]
+        typed = self._typed_by(offered)
+        new = tuple(memo_item(entry.context_seq, typed[entry.row_id]) for entry in offered if entry.row_id in typed)
+        hidden = frozenset(item.seq for item in new if item.seq <= summarized and item.seq not in released)
+        return MemoList(tuple(sorted((*carried, *new), key=lambda item: item.seq)), frozenset(known), hidden)
+
+    def _typed_by(self, entries: Sequence[ContextEntry]) -> dict[str, str]:
+        """What a person typed for each of ``entries`` that is a person's message, by row id (the host's answer)."""
+        host = self.context.host if self.context is not None else None
+        if host is None:
+            return {}
+        missing = [entry.row_id for entry in entries if entry.row_id not in self._typed]
+        if missing:
+            found = host.user_messages(missing)
+            for row_id in missing:
+                value = found.get(row_id)
+                self._typed[row_id] = value if isinstance(value, str) else None
+        return {entry.row_id: typed for entry in entries if (typed := self._typed.get(entry.row_id)) is not None}
+
+    async def _settled_mind(self, files: Files, start: str, prior: str) -> tuple[str, str]:
+        """The mind a checkpoint keeps, and what it shows of it (section 10), from the mind.md the turn left: with
+        its structure lost, or past ``MIND_REVERT``, the previous mind; still the template, none; past a section's
+        limit, the whole kept and the section shown cut to it, pointing to a read-only copy of the whole. With no
+        scratch root, the mind could not be revised: the previous one stays."""
+        if files is None:
+            return prior, self._mind_shown(prior)
+        left = files.get(MIND_FILE)
+        review = review_mind(left, start)
+        if left is None or review.structure is not None or review.tokens > MIND_REVERT:
+            return prior, self._mind_shown(prior)
+        if review.empty:
+            return "", ""
+        if not review.over:
+            return left, left
+        marker = await self._mind_copy(left)
+        return left, fit_mind(left, marker)[0]
+
+    def _mind_shown(self, mind: str) -> str:
+        """What a checkpoint shows of a kept mind: cut to its sections' limits, as when it was first written."""
+        if not mind or not review_mind(mind, mind).over:
+            return mind
+        return fit_mind(mind, self._mind_marker(mind))[0]
+
+    def _mind_path(self, mind: str) -> Optional[str]:
+        """Where the read-only copy of ``mind`` is, named by the SHA-256 of its text; None without ``checkpoint_dir``."""
+        directory = self.context.checkpoint_dir if self.context is not None else None
+        if directory is None:
+            return None
+        digest = hashlib.sha256(mind.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+        return os.path.join(directory, f"mind-{digest}.md")
+
+    def _mind_marker(self, mind: str) -> str:
+        """The note a cut mind section ends with: where the read-only copy of the whole mind is (section 10)."""
+        path = self._mind_path(mind)
+        return MIND_CUT_UNSTORED if path is None else MIND_CUT.format(path=path)
+
+    async def _mind_copy(self, mind: str) -> str:
+        """Write the read-only copy of ``mind`` a cut section points to, once per content; its marker."""
+        path = self._mind_path(mind)
+        if path is None:
+            return MIND_CUT_UNSTORED
+
+        def write() -> None:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            try:
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o444)
+            except FileExistsError:
+                return  # the same content, by its name
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(mind.encode("utf-8", "surrogatepass"))
+
+        await self._scope.call(lambda: asyncio.to_thread(write), interruptible=False)
+        return MIND_CUT.format(path=path)
+
+    def _carried_skills(self, view: ContextView, cut: int, window: int) -> tuple[CarriedSkill, ...]:
+        """The skills a checkpoint at ``cut`` carries back (section 7), rendered by the host as they read now."""
+        host = self.context.host if self.context is not None else None
+        if host is None:
+            return ()
+        return carry_skills(
+            skill_candidates(view, cut), lambda name: host.skill_content(self.session_id, name), window
         )
 
     # --- C-10 side turn (agent-core-contracts/fork.md section 7) ----------------
@@ -1809,6 +1990,7 @@ class Agent:
         overflow = False
         reply: Optional[SideReply] = None
         repaired: Optional[str] = None  # the problem the one corrective follow-up named
+        closed = False  # a call the turn made got the used-up budget's text instead of running
         selection: Optional[ModelSelection] = route
 
         async def compose(selected: ModelSelection) -> tuple[ModelRequest, dict[str, Tool]]:
@@ -1820,9 +2002,15 @@ class Agent:
 
         finished: dict[str, Any] = {"outcome": "failed", "error": None, "folded_event_id": None}
         aborted = False
+        # The purpose's files, written before the first call; read back whenever a reply is checked (C-9 section 6).
+        seeded = bool(turn.files) and turn.refused is None and gate.seed(turn.files)
+
+        def files() -> Files:
+            return gate.read(list(turn.files)) if seeded else None
+
         try:
             try:
-                while True:
+                while turn.refused is None:
                     try:
                         async with self._model(
                             system, _silent, selection, compose=compose, purpose="side_turn", after=(turn.prompt, *so_far)
@@ -1847,9 +2035,11 @@ class Agent:
                     self._scope.check()
                     so_far.append(message)
                     if message.stop_reason == "stop" and not message.tool_calls:
-                        problem = turn.check(message) if turn.check is not None else None
+                        left = files()
+                        final = repaired is not None or turn.repair is None
+                        problem = turn.check(message, left, final) if turn.check is not None else None
                         if problem is None:
-                            reply = SideReply(message, rounds, self._turn_usage(start))
+                            reply = SideReply(message, rounds, self._turn_usage(start), left, closed)
                             break
                         if repaired is not None or turn.repair is None:
                             # Its text stays in the audit only; the caller's context is untouched.
@@ -1881,13 +2071,20 @@ class Agent:
                         # need are reserved (C-9 section 6).
                         reserved = (len(calls) - index - 1) * fixed
                         room = sent.input_limit - grown - sent.output - reserved
-                        gate.open = gate.open and rounds <= policy.max_rounds and room >= policy.room_floor
-                        result = await self._side_tool(call, tools, gate, limit=room - policy.room_slack)
+                        # A scratch write or edit answers with one short line: it runs above its own floor, uncut.
+                        scratch = policy.scratch_floor > 0 and gate.scratch_call(call)
+                        floor = policy.scratch_floor if scratch else policy.room_floor
+                        gate.open = gate.open and rounds <= policy.max_rounds and room >= floor
+                        closed = closed or not gate.open
+                        limit = room if scratch else room - policy.room_slack
+                        result = await self._side_tool(call, tools, gate, limit=limit)
                         so_far.append(result)
                         produced.append(result)
                         grown += message_tokens(result)
             finally:
                 gate.close()  # the scratch root's descriptor lives for this turn only
+            if turn.refused is not None:
+                error = turn.refused
             folded = None
             if reply is not None:
                 outcome = await turn.fold(reply)
@@ -2010,7 +2207,7 @@ class Agent:
         fit (``_carries``)."""
         await emit(CompactionStarted, reason="overflow")
         hosted = await self._hosted(view, cut)
-        payload, _ = await self._compaction(request, view, plan, cut, **self._dropped(view, carry=carry), hosted=hosted)
+        payload, _ = await self._compaction(request, view, plan, cut, **self._dropped(view, cut, carry=carry), hosted=hosted)
         (row,) = await self._commit_context([("compaction", payload)])
         await emit(
             CompactionFinished,
@@ -2035,6 +2232,10 @@ class Agent:
         usage: Optional[Usage],
         hosted: tuple[tuple[str, ...], Optional[str]],
         checkpoint_omitted: bool = False,
+        mind: str = "",
+        mind_shown: Optional[str] = None,
+        memo: Sequence[MemoItem] = (),
+        skills: Sequence[CarriedSkill] = (),
     ) -> tuple[dict[str, Any], ContextView]:
         """The checkpoint row for ``cut`` (section 7), uncommitted, and the context it would leave.
 
@@ -2057,6 +2258,10 @@ class Agent:
             usage=usage,
             checkpoint_omitted=checkpoint_omitted,
             turn_inputs=self._turn_inputs,
+            mind=mind,
+            mind_shown=mind_shown,
+            memo=memo,
+            skills=skills,
         )
         seq = max((row.context_seq for row in self._rows), default=0) + 1
         candidate = ContextEntry(self.session_id, seq, "compaction", "uncommitted-compaction", payload=payload)

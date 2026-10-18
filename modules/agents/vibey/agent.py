@@ -749,7 +749,11 @@ class VibeyAgent(BaseAgent):
             reasoning_effort=request.subagent_reasoning_effort or request.vibe_agent_reasoning_effort,
             # The route decides the output (``budgeted``): no Agent-wide cap below it.
             max_tokens=_NO_OUTPUT_CAP,
-            context=ContextConfig(host=self.context_host, scratch_dir=str(self._state_dir / "scratch" / session_id)),
+            context=ContextConfig(
+                host=self.context_host,
+                scratch_dir=str(self._state_dir / "scratch" / session_id),
+                checkpoint_dir=str(self._state_dir / "checkpoints" / session_id),
+            ),
         )
         # Job-backed tools receive the loop's tracking wrapper, so Stop kills foreground commands.
         tools = mark_skill_loads(

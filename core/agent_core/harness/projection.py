@@ -232,6 +232,23 @@ _PAYLOAD_SHAPES: dict[str, Check] = {
                 _object({"origin": _reads(origin_from_dict), "prompt_version": _string, "rounds": _count})
             ),
             "usage": _reads(usage_from_dict),
+            # checkpoint-v5 (context.md section 7): a checkpoint-v4 row has none of them.
+            "mind": _string,
+            "mind_truncated": _boolean,
+            "memo": _list(
+                _object({"seq": lambda value: _integer(value) and value > 0, "text": _string, "truncated": _boolean})
+            ),
+            "skills_carried": _list(
+                _object(
+                    {
+                        "name": _string,
+                        "revision": _string,
+                        "loaded_at": lambda value: type(value) in (int, float) and not isinstance(value, bool),
+                        "content": _string,
+                        "truncated": _boolean,
+                    }
+                )
+            ),
         },
     ),
     "context_edit": _object(

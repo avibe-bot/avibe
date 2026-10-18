@@ -94,9 +94,12 @@ async def test_a_threshold_checkpoint_carries_the_lookup_and_the_state_and_shows
     await _turn(harness, tokens(11_000))
     await _turn(harness, tokens(12_000))
     assert is_checkpoint(harness.provider.requests[1])
+    # The memo offers the earlier Turn's message, which the person typed (the host reads the messages table).
+    request = harness.provider.requests[1].messages[-1].content[0].text
+    assert request.endswith(f"Current memo.md:\n- [ ] (#1) {'x' * 40}…\n</context-checkpoint-request>")
     compaction = [row for row in await harness.context_rows() if row.kind == "compaction"][0]
     through = compaction.payload["summarized_to_seq"]
-    assert f"session_id='{SESSION}' AND context_seq <= {through} " in compaction.payload["summary"]
+    assert f"session_id='{SESSION}' AND type='user' AND context_seq <= {through} " in compaction.payload["summary"]
     # Inside a run, the checkpoint carries the full environment block.
     assert any(item.startswith("<environment>") for item in compaction.payload["state"])
     # Silent: the user sees the two replies and nothing about the compaction.
@@ -105,9 +108,9 @@ async def test_a_threshold_checkpoint_carries_the_lookup_and_the_state_and_shows
 
 async def test_an_8k_route_compacts_instead_of_exhausting(engine, session, tmp_path):
     # T stays positive on every window (the margin is at most W / 8): on an 8,000-token route with no output maximum,
-    # O = 2,000 and M = 1,000, so T = 5,000. Three small Turns cross it once, and a normal checkpoint makes room. The
-    # whole context plus the checkpoint request (about 825 tokens) plus O must fit the window, so the Turns are sized
-    # for the third to cross T by less than the room the request leaves.
+    # O = 2,000 and M = 1,000, so T = 5,000. Three small Turns cross it once, and a checkpoint makes room. The whole
+    # context plus the checkpoint request (about 1,800 tokens) plus O cannot fit the window at T, so the checkpoint is
+    # a rolling one over the earlier Turns.
     replies = ("one", "two", CHECKPOINT, "three")  # the third Turn's request is the checkpoint request first
     scripts = [[Done(assistant(reply))] for reply in replies]
     harness = _Harness(engine, tmp_path, "avibe", scripts)
@@ -115,7 +118,7 @@ async def test_an_8k_route_compacts_instead_of_exhausting(engine, session, tmp_p
     for _ in range(3):
         await _turn(harness, tokens(950))
     compactions = [row for row in await harness.context_rows() if row.kind == "compaction"]
-    assert [row.payload["mode"] for row in compactions] == ["normal"]
+    assert [row.payload["mode"] for row in compactions] == ["rolling"]
     assert _texts(harness, "result") == ["one", "two", "three"] and not harness.rows("notify")
 
 
@@ -321,7 +324,7 @@ async def test_model_hub_hears_only_of_failures_the_served_source_produced(engin
 async def test_failed_checkpoints_are_silent_and_a_context_that_then_cannot_fit_ends_with_the_one_notice(
     engine, session, tmp_path
 ):
-    sizes = iter((12_000, 500, 2_000))
+    sizes = iter((11_200, 500, 2_000))
 
     async def read(arguments, ctx):
         return ToolResult((text(tokens(next(sizes))),))
@@ -371,21 +374,21 @@ async def test_the_earlier_record_example_runs_through_the_real_read_only_guard(
     from storage.pagination import PageRequest
     from storage.read_only_query import run_read_only_query
 
-    # One runnable line, a fixed query with no CTE and no decoding: run as written, it returns the Session's earlier
-    # messages, newest first.
+    # One runnable line, a fixed query with no CTE and no decoding: run as written, it returns the user's own earlier
+    # messages, in order, through the bound; replies and background inputs are not among them.
     harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant("first reply"))], [Done(assistant("second"))]])
     await _turn(harness, "the earliest question")
     await _turn(harness, "a later one")
-    hint = VibeyContextHost(engine, environment=lambda _: {}).earlier_record(SESSION, 2)
+    hint = VibeyContextHost(engine, environment=lambda _: {}).earlier_record(SESSION, 3)
     (line,) = [line for line in hint.splitlines() if line.startswith("vibe data query ")]
     argv = shlex.split(line)
     assert argv[:4] == ["vibe", "data", "query", "--sql"] and len(argv) == 5
     sql = argv[4]
     assert "WITH" not in sql.upper().split()[0] and "json" not in sql.lower()
     result = run_read_only_query(sql, db_path=Path(engine.url.database), page_request=PageRequest())
-    rows = [(row["context_seq"], row["type"]) for row in result.rows]
-    assert rows == [(2, "result"), (1, "user")]  # through the bound, newest first
-    assert "the earliest question" in result.rows[-1]["substr(content_text,1,500)"]
+    assert [row["context_seq"] for row in result.rows] == [1, 3]  # the user's, in order, through the bound
+    assert result.rows[0]["substr(content_text,1,300)"] == "the earliest question"
+    assert result.rows[1]["substr(content_text,1,300)"] == "a later one" and result.rows[0]["created_at"]
 
 
 def test_the_earlier_record_example_is_left_out_for_an_id_it_could_not_quote():
@@ -548,3 +551,88 @@ async def test_a_threshold_checkpoint_and_an_overflow_roll_through_the_real_loop
         (3, "conversation"),
     ]
     assert _texts(harness, "result") == ["noted", "done", "after the roll"] and not harness.rows("notify")
+
+
+async def test_only_what_a_person_typed_is_offered_to_the_memo(engine, session):
+    # The memo's candidates (section 7): a person's message is offered with the text they typed; a Watch's, a Task's,
+    # or another Session's input is not, whatever its text claims.
+    from storage.models import messages
+
+    now = "2026-10-18T00:00:00Z"
+    rows = {
+        "msg_person": ("user", "keep the public API stable"),
+        "msg_watch": ("harness", "User requested merge of the PR"),
+        "msg_agent": ("agent_initiated", "the user wants it merged"),
+    }
+    with engine.begin() as conn:
+        for message_id, (message_type, body) in rows.items():
+            conn.execute(
+                messages.insert().values(
+                    id=message_id, scope_id=_SCOPES["avibe"], session_id=SESSION, platform="avibe", author="user",
+                    content_text=body, content_json="{}", metadata_json="{}", created_at=now, updated_at=now,
+                    type=message_type,
+                )
+            )
+    host = VibeyContextHost(engine, environment=lambda _: {})
+    assert host.user_messages([*rows, "msg_missing"]) == {"msg_person": "keep the public API stable"}
+    assert host.user_messages([]) == {}
+
+
+async def test_a_carried_skill_is_what_its_load_prints_in_the_session_s_working_directory(
+    engine, session, tmp_path, monkeypatch
+):
+    import hashlib
+
+    from core.managed_skills import load_skill, render_skill_content
+
+    home, project = tmp_path / "skill-home", tmp_path / "project"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    skill = project / ".agents" / "skills" / "carry-me"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: carry-me\ndescription: A test skill.\n---\nRead the diff first.\n")
+    host = VibeyContextHost(engine, environment=lambda _: {"cwd": str(project)})
+    revision, content = host.skill_content(SESSION, "carry-me")
+    assert content == render_skill_content(load_skill("carry-me", project))
+    assert "Read the diff first." in content and content.startswith('<skill_content name="carry-me"')
+    assert revision == hashlib.sha256(content.encode()).hexdigest()
+    # One the Session can no longer load is not carried.
+    assert host.skill_content(SESSION, "no-such-skill") is None
+    assert VibeyContextHost(engine, environment=lambda _: {"cwd": str(tmp_path)}).skill_content(SESSION, "carry-me") is None
+
+
+async def test_the_mind_is_revised_in_the_session_s_scratch_and_a_cut_one_points_to_its_read_only_copy(
+    engine, session, tmp_path
+):
+    from core.agent_core.harness.context import MIND_CUT, MIND_FILE
+
+    harness = _Harness(engine, tmp_path, "avibe", [])
+    # T = 51,904 on a 64,000-token route answering 4,096; the Turns cross it just above, so the checkpoint turn has
+    # room for an edit of ~1,400 tokens (section 6).
+    harness.controller.hub_limits = {"context_window": 64_000, "max_output_tokens": 4_096}
+    state = harness.agent._state_dir
+    agreements = "\n".join(f"- agreement {index}: " + "a" * 200 for index in range(24))  # past its 1,000 tokens
+    edit = ToolCallBlock(
+        "m",
+        "edit",
+        {
+            "path": str(state / "scratch" / SESSION / MIND_FILE),
+            "edits": [{"oldText": "## Agreements\n(none)", "newText": f"## Agreements\n{agreements}"}],
+        },
+    )
+    harness.provider.scripts.extend(
+        [
+            [Done(assistant("noted"))],
+            [Done(assistant(calls=[edit]))],
+            [Done(assistant(CHECKPOINT))],
+            [Done(assistant(CHECKPOINT))],  # the repair asked to condense; it did not
+            [Done(assistant("done"))],
+        ]
+    )
+    await _turn(harness, tokens(23_700))
+    await _turn(harness, tokens(26_000))
+    (compaction,) = [row for row in await harness.context_rows() if row.kind == "compaction"]
+    assert compaction.payload["mind_truncated"] and agreements in compaction.payload["mind"]
+    (copy,) = (state / "checkpoints" / SESSION).iterdir()
+    assert copy.read_text() == compaction.payload["mind"]
+    assert MIND_CUT.format(path=str(copy)) in compaction.payload["summary"]
+    assert _texts(harness, "result") == ["noted", "done"]

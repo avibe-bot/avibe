@@ -278,7 +278,8 @@ Any tool the policy does not name is denied with the policy's text and never run
   and anything that asks the user, since a side turn has nowhere to ask.
 - Policies are code. The contract that consumes a policy owns it, and this file lists it.
 - v1 has one policy, `dreaming` (C-9 §6, `DREAMING` in `agent/fork.py`): `read` is allowed, and `write` and `edit` go
-  to scratch.
+  to scratch. A policy may name scratch files only `edit` may change (`edit_only`), with the denial a `write` to one
+  gets; `dreaming` names the checkpoint turn's `mind.md` and `memo.md`.
 - A tool missing from the caller's request cannot be granted, because the request is the caller's.
 
 **Fork Session.** Its tools are its Agent's, which `--agent` may override (`vibe/cli.py:1857`). The reservation
@@ -324,24 +325,30 @@ turn runs inside the caller's run, in these steps:
 
    Its emit is silent.
 3. **Tools.** Each call goes through one pipeline, in this order:
-   1. **The budget.** Rounds must be at most `max_rounds`, and `room` at least `room_floor`. `room` is derived from
-      the latest request's budget, as C-9 §6 states.
+   1. **The budget.** Rounds must be at most `max_rounds`, and `room` at least `room_floor` (a scratch `write` or
+      `edit`, at least `scratch_floor` when the policy sets one). `room` is derived from the latest request's budget,
+      as C-9 §6 states.
    2. **The policy.**
    3. **Execution.** A scratch write goes through the root's descriptor, as joined work that an abort waits for.
-   4. **The bound.** The result is cut to `room - room_slack`.
+   4. **The bound.** The result is cut to `room - room_slack` (a scratch call's to `room`).
 
    The policy's fixed texts are never cut. A response's calls take this pipeline one at a time, in call order, never
    in the run's concurrent groups (C-3 §2): each call's `room` depends on the results before it.
 4. **End.** A response that stops with `stop` and calls no tool is the reply. Anything else fails the turn: an
    overflow, an error, a response refused at admission, a length stop, or calls after the budget closed.
-   - **Check and repair.** A purpose may supply `check(reply)`, which accepts the reply or names its problem, with
-     `repair(problem)`, the corrective follow-up (they come together). A rejected reply gets that follow-up once, as a
-     user message after it, and the turn continues: the next request carries both, under the same budget, policy,
-     and admission. Its reply is checked again; a second rejection fails the turn. C-9's check is its validator
-     (C-9 §6).
+   - **Files.** A purpose may supply `files`, scratch files the turn starts with: written through the root's
+     descriptor when it opens, before the first call, and read back the same way whenever a reply is checked. Without
+     a scratch root none are written, and the check and the reply see none (`None`).
+   - **Check and repair.** A purpose may supply `check(reply, files, final)`, which accepts the reply or names its
+     problem, with `repair(problem)`, the corrective follow-up (they come together). A rejected reply gets that
+     follow-up once, as a user message after it, and the turn continues: the next request carries both, under the
+     same budget, policy, and admission. Its reply is checked again with `final` set, so only a problem that fails
+     the turn counts; a second rejection fails it. C-9's check is its validator (C-9 §6, §10).
+   - **Refused.** A purpose that could not prepare the turn names why (`refused`): the turn fails at once, with no
+     model call, and its audit says so.
 5. **Fold.** The caller's `fold(reply)` decides what enters the caller's context, if anything, and commits it; it
-   sees only a reply the check accepted. For C-9 that means building the `Compaction` row from the reply's
-   checkpoint and committing it. If the fold fails, the turn fails.
+   sees only a reply the check accepted, with its files. For C-9 that means building the `Compaction` row from the
+   reply's now and the turn's mind and memo, and committing it. If the fold fails, the turn fails.
 6. **Audit (F7).** The side turn writes one `fork_turn` audit row (`visibility = 'audit'`, no `context_seq`) on every
    exit except an abort. The row holds:
    - its purpose, policy, point, and `detail` (required: the purpose's own fields, checked when the side turn is
@@ -600,14 +607,20 @@ class ForkPolicy:
     max_rounds: int
     room_floor: int
     room_slack: int
+    edit_only: frozenset[str] = frozenset()   # scratch names only edit may change
+    rewrite_denied: str = ""      # the result text of a write to one of them ({name})
+    scratch_floor: int = 0        # a scratch write's or edit's floor instead of room_floor (0: the same)
 
-DREAMING: ForkPolicy              # C-9 section 6: read allowed; write and edit to scratch; 5 rounds; 4,000 / 1,000
+DREAMING: ForkPolicy              # C-9 section 6: read allowed; write and edit to scratch, mind.md and memo.md by
+                                  # edit only; 5 rounds; 4,000 / 1,000
 
 @dataclass(frozen=True)
 class SideReply:
     message: AssistantMessage     # stop_reason "stop", no tool calls
     rounds: int
     usage: Optional[Usage]
+    files: Files = None           # the purpose's files as the turn left them; None without files or a scratch root
+    closed: bool = False          # a call the turn made got the used-up budget's text instead of running
 
 @dataclass(frozen=True)
 class Folded:
@@ -630,8 +643,11 @@ class SideTurn:
     policy: ForkPolicy
     max_tokens: Callable[[ModelCapabilities], int]         # per route; C-9: min(64,000, O)
     fold: Callable[[SideReply], Awaitable[Folded]]         # sees only a reply the check accepted
-    check: Optional[Callable[[AssistantMessage], Optional[str]]] = None   # None accepts; else the problem
+    check: Optional[Callable[[AssistantMessage, Files, bool], Optional[str]]] = None  # None accepts; else the
+                                                           # problem; the bool: no repair is left
     repair: Optional[Callable[[str], UserMessage]] = None  # the one corrective follow-up; comes with check
+    files: Mapping[str, str] = {}                          # scratch files the turn starts with
+    refused: Optional[str] = None                          # why the purpose could not prepare it: fails at once
 
 @dataclass(frozen=True)
 class SideTurnResult:

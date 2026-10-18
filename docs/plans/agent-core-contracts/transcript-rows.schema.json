@@ -163,11 +163,11 @@
         },
         "summary": {
           "type": "string",
-          "description": "The rendered `<context-checkpoint>` message: framing, checkpoint, `<artifacts>`, `<skills-loaded>`, and `<earlier-record>`. Model-facing. The in-flight Turn's inputs before the cut (`kept_inputs`) stay in the projected context as they were, right before this message (context.md section 5)."
+          "description": "The rendered `<context-checkpoint>` message: framing, the mind (sections past their limits cut), the memo, the now, `<artifacts>`, `<skills>`, and `<earlier-record>` (a `checkpoint-v4` row: framing, checkpoint, `<artifacts>`, `<skills-loaded>`, `<earlier-record>`). Model-facing. The in-flight Turn's inputs before the cut (`kept_inputs`) stay in the projected context as they were, right before this message (context.md section 5)."
         },
         "checkpoint": {
           "type": "string",
-          "description": "The model-written checkpoint. For `dropped`, the previous checkpoint's text, or empty when there was none or it was too large for the route (context.md section 8 c)."
+          "description": "The model-written now: the text of the turn's one checkpoint block (a `checkpoint-v4` row: the whole model-written checkpoint). For `dropped`, the previous checkpoint's, or empty when there was none or it was too large for the route (context.md section 8 c)."
         },
         "state": {
           "type": "array",
@@ -206,7 +206,7 @@
             "type": "string"
           },
           "maxItems": 50,
-          "description": "Paths given to `read` and never to `write` or `edit`, cumulative, most recently touched first as the calls gave them, at most 50; only the summary's display is cut."
+          "description": "Paths given to `read` and never to `write` or `edit`, cumulative, most recently touched first as the calls gave them: at most 5 (a `checkpoint-v4` row: 50); only the summary's display is cut."
         },
         "files_read_omitted": {
           "type": "boolean",
@@ -218,7 +218,7 @@
             "type": "string"
           },
           "maxItems": 50,
-          "description": "Paths given to `write` or `edit`, cumulative, most recently touched first as the calls gave them, at most 50; only the summary's display is cut."
+          "description": "Paths given to `write` or `edit`, cumulative, most recently touched first as the calls gave them: at most 10 (a `checkpoint-v4` row: 50); only the summary's display is cut."
         },
         "files_modified_omitted": {
           "type": "boolean",
@@ -226,7 +226,7 @@
         },
         "skills": {
           "type": "array",
-          "description": "Names of the skills the summarized rows loaded, cumulative, minus those whose load result is still in the context: the most recently loaded first, at most 20, as loaded. Listed by name in `summary` (`<skills-loaded>`, each displayed as one line of plain text); never their bodies.",
+          "description": "Names of the skills the row carries back (`skills_carried`), the most recently loaded first, at most 20. A `checkpoint-v4` row: the skills the summarized rows loaded, cumulative, minus those whose load result was still in the context, listed by name only in `<skills-loaded>`.",
           "items": {
             "type": "object",
             "required": [
@@ -243,7 +243,78 @@
         },
         "skills_omitted": {
           "type": "boolean",
-          "description": "Whether a skill name was ever pushed out of `skills`; once set, it stays set."
+          "description": "Whether a skill name was ever pushed out of `skills` (`checkpoint-v4` only; false from `checkpoint-v5` on)."
+        },
+        "mind": {
+          "type": "string",
+          "description": "The whole mind the checkpoint turn left in `mind.md` (context.md section 7), or the previous checkpoint's when the turn's was rejected (section 10); empty when there is none. `checkpoint-v5`; absent from a `checkpoint-v4` row."
+        },
+        "mind_truncated": {
+          "type": "boolean",
+          "description": "Whether `summary` shows the mind with sections cut to their limits; the cut sections point to a read-only copy of the whole (section 10)."
+        },
+        "memo": {
+          "type": "array",
+          "description": "The messages a person typed that the next context carries verbatim, in `context_seq` order (section 7).",
+          "items": {
+            "type": "object",
+            "required": [
+              "seq",
+              "text",
+              "truncated"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "seq": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "The message's `context_seq`."
+              },
+              "text": {
+                "type": "string",
+                "description": "What the person typed, cut to 300 tokens or to the memo's common share (section 10)."
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        "skills_carried": {
+          "type": "array",
+          "maxItems": 20,
+          "description": "The skills the checkpoint carries back, as they read when it was written, the most recently loaded first (section 7).",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "revision",
+              "loaded_at",
+              "content",
+              "truncated"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "revision": {
+                "type": "string",
+                "description": "The host's revision of the text (Vibey: its SHA-256)."
+              },
+              "loaded_at": {
+                "type": "number",
+                "description": "Epoch seconds of the result that last really loaded it; a carry is not a load."
+              },
+              "content": {
+                "type": "string",
+                "description": "Its text as its load prints it, cut to 5,000 tokens."
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            }
+          }
         },
         "tokens_before": {
           "type": "integer",
@@ -489,8 +560,8 @@
       "version": 1,
       "mode": "normal",
       "reason": "threshold",
-      "summary": "<context-checkpoint>\nThis is a record of the earlier part of this conversation, written for you so you can continue. ...\n\n# 1. Self and method\n...\n\n<artifacts>\nRead:\n- tests/test_paths.py\nModified:\n- core/paths.py\n</artifacts>\n<earlier-record>\n...\n</earlier-record>\n</context-checkpoint>",
-      "checkpoint": "# 1. Self and method\n...",
+      "summary": "<context-checkpoint>\nThis is your own consolidated memory of the earlier part of this conversation, written for you so you can continue. ...\n\n# 1. Where I stand\n...\n\n# 5. The user's words\n- (#3) ...\n\n# 6. Now\n...\n\n<artifacts>\nRead:\n- tests/test_paths.py\nModified:\n- core/paths.py\n</artifacts>\n<earlier-record>\n...\n</earlier-record>\n</context-checkpoint>",
+      "checkpoint": "# 6. Now\n...",
       "state": [
         "<loaded-skills>\n...\n</loaded-skills>"
       ],
@@ -508,6 +579,16 @@
       "files_modified_omitted": false,
       "skills": [],
       "skills_omitted": false,
+      "mind": "# 1. Where I stand\n...",
+      "mind_truncated": false,
+      "memo": [
+        {
+          "seq": 3,
+          "text": "...",
+          "truncated": false
+        }
+      ],
+      "skills_carried": [],
       "tokens_before": 158432,
       "tokens_after_estimate": 31877,
       "threshold": 155808,
