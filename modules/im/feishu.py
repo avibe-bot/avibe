@@ -9,7 +9,6 @@ import os
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
-from urllib.parse import quote
 
 import aiohttp
 
@@ -29,6 +28,7 @@ from .message_facts import (
 )
 from .download_target import open_download_target
 from config.v2_config import LarkConfig
+from core.citations import spell_destination
 from core.reply_enhancer import inline_links
 from vibe.i18n import get_supported_languages, t as i18n_t
 from modules.agents.opencode.utils import (
@@ -237,22 +237,26 @@ class FeishuBot(BaseIMClient):
         a link destination is kept in the address. A numeric entity is what
         Feishu documents for showing a syntax character, and it holds in prose
         and labels alike, so each escape comes back as one (``\\*`` as
-        ``&#42;``). An escape inside a destination is part of an address, not
-        text: it comes back as the character, percent-encoded where a bare one
-        could end the link or is no URI character (``\\(`` as ``%28``). Text
-        without an escape is handed over as it is.
+        ``&#42;``). A destination with an escape in it is an address, not text:
+        it is written as the address a Markdown reader resolves, spelled as a
+        URI (``spell_destination``: an existing ``%HH`` kept, a stray ``%``
+        encoded), parentheses included, since a bare one can end the link.
+        Text without an escape is handed over as it is.
         """
         if not text:
             return text
         held, escaped = hold_markdown_escapes(text)
         if not escaped:
             return text
-        in_address = {token: quote(character, safe="!$&'*+,;=:@/?#[]~-._") for token, character in escaped.items()}
         parts: List[str] = []
         cursor = 0
         for link in inline_links(held):
+            source = held[link.destination_start : link.destination_end]
+            if not any(token in source for token in escaped):
+                continue
+            address = spell_destination(restore_held(link.destination, escaped))
             parts.append(held[cursor : link.destination_start])
-            parts.append(restore_held(held[link.destination_start : link.destination_end], in_address))
+            parts.append(address.replace("(", "%28").replace(")", "%29"))
             cursor = link.destination_end
         parts.append(held[cursor:])
         return restore_held("".join(parts), {token: f"&#{ord(character)};" for token, character in escaped.items()})

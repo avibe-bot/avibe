@@ -548,6 +548,13 @@ class FeishuConsumerTests(unittest.TestCase):
             with self.subTest(case=key):
                 self.assertEqual(self.feishu.format_markdown(case(key)["im_text"]), body)
 
+    def test_an_escaped_address_is_the_one_a_markdown_reader_resolves(self):
+        """``\\%`` resolves to ``%``, so ``a\\%20b`` names ``a%20b``: the escape it spells is kept, not encoded again."""
+        self.assertEqual(
+            self.feishu.format_markdown(r"[x](https://example.com/a\%20b) and [y](<https://example.com/a\_b c>)"),
+            "[x](https://example.com/a%20b) and [y](https://example.com/a_b%20c)",
+        )
+
     def test_a_body_with_no_escape_is_handed_over_unchanged(self):
         for row in CASES:
             if "\\" in row["im_text"]:
