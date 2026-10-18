@@ -10,10 +10,34 @@ native input, after waiting for runtime readiness.
 
 `[Now: ...]` is the local wall-clock time at that native dispatch, including the
 UTC offset. It is not the sender's timestamp or the admission timestamp. The
-global time and identity switches apply when rendering. Harness source-session
-provenance remains independent of those switches. No formatted prefix is written
-back into canonical content. Native transcripts and reconciliation receipts may
-contain the actual rendered input.
+global time and identity switches apply when rendering. No formatted prefix is
+written back into canonical content. Native transcripts and reconciliation
+receipts may contain the actual rendered input.
+
+Every input no person typed starts with one `[Harness: <source>]` line, before
+the clock line and independent of both switches, so a model can never read a
+Watch prompt, a Task, another Agent's message, or a callback as the user's own
+words. The source comes from the dispatch provenance the scheduler records
+(`task_trigger_kind` and the run's `source_kind`), never from the text; every id
+and name in it is one sanitized line, and a definition name is quoted. A
+person's input never carries it. The sources are:
+
+| Input | Line |
+| --- | --- |
+| Watch follow-up | `[Harness: Watch <watch id> "<name>"]` |
+| Scheduled Task message | `[Harness: Task <task id> "<name>"]` |
+| Task on-failure Agent turn | `[Harness: Task <task id> "<name>" on-failure]` |
+| Webhook | `[Harness: webhook <definition id> "<name>"]` |
+| `vibe agent run` from an Agent shell | `[Harness: agent run <run id> from #<caller session>]` |
+| `vibe agent run` outside an Agent shell | `[Harness: agent run <run id> from the CLI]` |
+| Callback of a finished run | `[Harness: callback of run <run id> from #<run's session>]` |
+| Vault request outcome | `[Harness: Vault request <request id>]` |
+| Released `vibe hook send` | `[Harness: hook send <run id>]` |
+| No recoverable provenance | `[Harness: background input]` |
+
+This line replaces the released `From: #<session>` line, which named only the
+source Session of agent runs and callbacks. The Harness routing block of the
+injected system prompt says what the line means.
 
 ## Scope
 

@@ -81,7 +81,7 @@ class MessageHandlerHarnessEchoTests(unittest.IsolatedAsyncioTestCase):
 
         _agent_name, request = controller.agent_service.requests[0]
         self.assertEqual(request.message, "work")
-        self.assertEqual(request.input_metadata.source_session_id, "source")
+        self.assertEqual(request.input_metadata.harness_source, "Task task-echo")
         self.assertIsNone(request.input_metadata.user_id)
 
     async def test_subagent_prefixed_prompt_is_staged_unstripped(self):
@@ -156,7 +156,7 @@ class MessageHandlerHarnessEchoTests(unittest.IsolatedAsyncioTestCase):
             request.message,
             "audit the queue",
         )
-        self.assertEqual(request.input_metadata.source_session_id, "source-session")
+        self.assertEqual(request.input_metadata.harness_source, "Task task-echo")
 
     async def test_human_turn_never_stages_a_prompt(self):
         controller, handler = _build_handler()

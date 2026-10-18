@@ -1085,7 +1085,7 @@ async def test_resume_renders_a_recovered_steer_as_the_live_path_would(engine, s
     )
     owner._engine = engine
     harness.controller.session_turns._steer_input_metadata = owner._steer_input_metadata
-    handler = SimpleNamespace(_source_session_id=MessageHandler._source_session_id)
+    handler = SimpleNamespace()
     harness.controller.message_handler = SimpleNamespace(
         prepare_input_metadata=MethodType(MessageHandler.prepare_input_metadata, handler)
     )
@@ -1107,8 +1107,12 @@ async def test_resume_renders_a_recovered_steer_as_the_live_path_would(engine, s
                 scope_id=_SCOPES["avibe"], session_id=SESSION, platform="avibe", author="harness",
                 source="harness", message_type="harness", text="the deploy finished",
                 metadata={"scheduled_provenance": {
-                    "task_execution_id": "run_1",
-                    "platform_specific": {"task_trigger_kind": "agent_run", "source_session_id": "ses_source"},
+                    "platform_specific": {
+                        "task_trigger_kind": "agent_run",
+                        "task_execution_id": "run_1",
+                        "source_kind": "agent",
+                        "source_actor": "ses_source",
+                    },
                 }},
             ),
             dispatch_text="the deploy finished",
@@ -1126,7 +1130,7 @@ async def test_resume_renders_a_recovered_steer_as_the_live_path_would(engine, s
     await harness.agent.handle_message(harness.request("anything new?"))
 
     [recovered] = [entry for entry in await harness.context_rows() if entry.row_id == "dlv_agent_steer"]
-    assert "From: #ses_source" in recovered.message.content[-1].text
+    assert recovered.message.content[-1].text.startswith("[Harness: agent run run_1 from #ses_source]\n")
 
 
 async def _blocked_second_turn(engine, tmp_path, *, finished_step: bool):

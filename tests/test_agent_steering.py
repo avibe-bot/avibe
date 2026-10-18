@@ -55,7 +55,9 @@ def native_input(request, monkeypatch):
         return None, ""
     if request.param == "human":
         return AgentInputMetadata(user_id="incoming", user_name="Sender"), "[Now: 2026-09-06 11:10:00 UTC+00:00]\n[Sender<incoming>]\n"
-    return AgentInputMetadata(source_session_id="source-session"), "[Now: 2026-09-06 11:10:00 UTC+00:00]\nFrom: #source-session\n"
+    return AgentInputMetadata(harness_source="agent run run-1 from #source-session"), (
+        "[Harness: agent run run-1 from #source-session]\n[Now: 2026-09-06 11:10:00 UTC+00:00]\n"
+    )
 
 
 def test_steer_outcomes_are_exhaustive() -> None:
