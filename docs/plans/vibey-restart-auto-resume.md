@@ -264,6 +264,16 @@ Scenario IDs in `tests/scenarios/message_delivery/catalog.yaml`:
 - A Stop requested before the restart keeps the notice even when the final was
   committed (item 1 applies to every Turn); the answer stays in the
   transcript.
+- A rerun has a live Turn's reliability, and no durable retry beyond it. A
+  transient failure in its run or its end is handled as in a live Turn:
+  - removing the 👀 the dead process left is one attempt, like a live Turn's
+    own removal;
+  - a failed read or write of a silent final's promotion is logged and the
+    Turn settles, as a live promotion's failure is (a silent final's Run
+    result is empty either way);
+  - a failure in the rerun's own T2 or T3 before its run fails the Turn with
+    the notice and Retry, as at the start of any live run. A command whose
+    result was not committed keeps its job's output for the next resume.
 - A rerun whose transport never becomes ready stays open, as a scheduled Run
   waits for its transport; a Stop ends it.
 - A rerun's final that cites sources is displayed again from its message, so
