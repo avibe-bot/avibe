@@ -43,6 +43,8 @@ from core.backend_failure import is_backend_failure_notification
 from storage import agent_events_service, messages_service
 from storage.models import message_deliveries, session_turns
 from vibe.message_types import (
+    PROMOTED_FROM_KEY,
+    PROMOTED_FROM_TYPES,
     activity_role_for,
     is_detached_completion,
     spec_for,
@@ -123,6 +125,23 @@ def _duration_ms(started_iso: Optional[str], ended_iso: Optional[str]) -> Option
     return int(delta)
 
 
+def _activity_role(msg_type: Any, metadata: Optional[dict]) -> str:
+    """A row's Activity role, where a promoted silent-final result keeps its text's role.
+
+    Only Activity grouping reads the promotion marker: the row stays where its text
+    was mid-Turn, so the Turn's groups are the ones that text had. Every other
+    reader, fork recovery among them, sees the Turn's terminal output it now is.
+    The marker counts only on a ``result`` and only with a type promotion writes,
+    because a client may put any metadata on its own message.
+    """
+    message_type = msg_type if isinstance(msg_type, str) else ""
+    values = metadata or {}
+    promoted_from = values.get(PROMOTED_FROM_KEY)
+    if message_type == "result" and promoted_from in PROMOTED_FROM_TYPES:
+        message_type = promoted_from
+    return activity_role_for(message_type, values)
+
+
 def _is_terminal(msg_type: Any, author: Any, metadata: Optional[dict]) -> bool:
     """Whether an agent message legally CLOSES a turn.
 
@@ -140,10 +159,7 @@ def _is_terminal(msg_type: Any, author: Any, metadata: Optional[dict]) -> bool:
     """
     if author != "agent":
         return False
-    return activity_role_for(
-        msg_type if isinstance(msg_type, str) else "",
-        metadata,
-    ) == "terminal"
+    return _activity_role(msg_type, metadata) == "terminal"
 
 
 def _outcome_status(terminal_outcome: Any) -> str:
@@ -286,10 +302,7 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
         mtype = msg.get("type")
         author = msg.get("author")
         metadata = msg.get("metadata") or {}
-        activity_role = activity_role_for(
-            mtype if isinstance(mtype, str) else "",
-            metadata,
-        )
+        activity_role = _activity_role(mtype, metadata)
         accepted_role = accepted_roles.get(str(msg.get("id") or ""))
         if _is_terminal(mtype, author, metadata):
             kind = "terminal"

@@ -2018,6 +2018,7 @@ def test_a_promoted_silent_final_result_keeps_the_turns_activity(isolated_state,
 
     from core import web_push_notifications
     from core.message_mirror import promote_turn_text_to_result
+    from vibe.message_types import activity_role_for
 
     monkeypatch.setattr(
         web_push_notifications,
@@ -2088,3 +2089,32 @@ def test_a_promoted_silent_final_result_keeps_the_turns_activity(isolated_state,
     with engine.connect() as conn:
         after = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
     assert after == before
+    # Everywhere else, fork recovery among them, the row is the Turn's terminal output.
+    assert activity_role_for(promoted["type"], promoted["metadata"]) == "terminal"
+
+
+def test_a_promotion_marker_counts_only_on_a_promoted_result(isolated_state):
+    """Scenario: MESSAGE-DELIVERY-325.
+
+    A client can put any metadata on its own message: a forged marker on a user row
+    neither hides that Turn's start nor merges the previous Turn's activity into it.
+    """
+    engine = create_sqlite_engine()
+    sid = "ses_forged"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(conn, scope, sid, mid="m_q1", mtype="user", author="user", created_at="2026-06-01T10:00:00Z", text="q1", source="user")
+        _evt(conn, scope, sid, eid="e_f1", created_at="2026-06-01T10:00:01Z", text="🔧 `Bash` `{\"command\":\"a\"}`")
+        _msg(
+            conn, scope, sid, mid="m_q2", mtype="user", author="user", created_at="2026-06-01T10:01:00Z",
+            text="q2", source="user", metadata={"promoted_from": "result"},
+        )
+        _evt(conn, scope, sid, eid="e_f2", created_at="2026-06-01T10:01:01Z", text="🔧 `Read` `{\"file_path\":\"b\"}`")
+        _msg(conn, scope, sid, mid="m_r2", mtype="result", author="agent", created_at="2026-06-01T10:01:02Z", text="answer")
+
+    with engine.connect() as conn:
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
+    assert [(g["status"], g["anchor_message_id"], g["steps"]) for g in groups] == [
+        ("interrupted", "m_q1", 1),
+        ("done", "m_r2", 1),
+    ]

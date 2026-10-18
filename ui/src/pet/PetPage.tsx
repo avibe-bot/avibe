@@ -1121,14 +1121,17 @@ const MainReplyBubble: React.FC<Omit<MainDetailProps, 'visible'> & { open: boole
 const MainDetail: React.FC<MainDetailProps> = (props) => {
   const { t } = useTranslation();
   const lastResultRef = useRef<HTMLDivElement>(null);
+  const latestInputRef = useRef<HTMLDivElement>(null);
   const resultKey = `${props.binding}\u0000${props.exchange.results.at(-1)?.id ?? ''}`;
   const [seenResult, setSeenResult] = useState<{ epoch: PetSurfaceEpoch; key: string } | null>(null);
   useLayoutEffect(() => {
     if (!props.visible) return;
-    const result = lastResultRef.current;
-    const history = result?.closest<HTMLElement>('.pet-mini-bubble-history');
-    if (result && history) history.scrollTop = result.offsetTop + result.offsetHeight - history.clientHeight;
-  }, [props.visible, resultKey]);
+    // The view ends at the newest row drawn: the last result, or the later input
+    // drawn after a promoted result that answered an earlier one.
+    const end = (props.exchange.answersEarlierInput && latestInputRef.current) || lastResultRef.current;
+    const history = end?.closest<HTMLElement>('.pet-mini-bubble-history');
+    if (end && history) history.scrollTop = end.offsetTop + end.offsetHeight - history.clientHeight;
+  }, [props.visible, resultKey, props.exchange.answersEarlierInput]);
   useEffect(() => {
     const node = lastResultRef.current;
     if (!props.visible || !node) return;
@@ -1145,7 +1148,7 @@ const MainDetail: React.FC<MainDetailProps> = (props) => {
   const firstCurrent = props.messages.findIndex((message) => message.id === props.exchange.user?.id || props.exchange.results.some((result) => result.id === message.id));
   const history = props.messages.slice(0, Math.max(0, firstCurrent))
     .filter((message) => message.type === 'user' || message.type === 'result').slice(-6);
-  const currentUser = props.exchange.user && <div className="pet-mini-detail-user"><Markdown content={props.exchange.user.text} references={(props.exchange.user.content as { references?: MentionReference[] })?.references} softBreaks /></div>;
+  const currentUser = props.exchange.user && <div ref={latestInputRef} className="pet-mini-detail-user"><Markdown content={props.exchange.user.text} references={(props.exchange.user.content as { references?: MentionReference[] })?.references} softBreaks /></div>;
   return (
     <div className="pet-mini-detail-inner">
       {history.map((message) => <div key={message.id} className={message.author === 'user' ? 'pet-mini-detail-user' : 'pet-mini-detail-result'}><Markdown content={message.text} references={(message.content as { references?: MentionReference[] })?.references} softBreaks /></div>)}

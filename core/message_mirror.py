@@ -37,7 +37,7 @@ from core.services import sessions as workbench_sessions_service
 from modules.im.base import MessageContext
 from storage import agent_events_service, messages_service, settings_service
 from storage.db import get_cached_sqlite_engine
-from vibe.message_types import PROMOTED_FROM_KEY, activity_role_for, spec_for
+from vibe.message_types import PROMOTED_FROM_KEY, PROMOTED_FROM_TYPES, activity_role_for, spec_for
 
 logger = logging.getLogger(__name__)
 
@@ -753,9 +753,6 @@ def _write_committed_row(
     return messages_service.get_message(conn, row_id, include_local_error_detail=True)
 
 
-# Transcript-visible agent text that does not end its Turn: an ``output`` phase
-# boundary and an ``interim`` narration bubble.
-_TURN_TEXT_TYPES = ("output", "interim")
 
 
 def promote_turn_text_to_result(row_id: str, *, suppress_delivery: bool = False) -> Optional[dict]:
@@ -789,7 +786,7 @@ def promote_turn_text_to_result(row_id: str, *, suppress_delivery: bool = False)
             turn_text = (
                 messages.c.id == row_id,
                 messages.c.author == "agent",
-                messages.c.type.in_(_TURN_TEXT_TYPES),
+                messages.c.type.in_(PROMOTED_FROM_TYPES),
             )
             stored = conn.execute(
                 select(messages.c.type, messages.c.content_json, messages.c.metadata_json).where(*turn_text)
