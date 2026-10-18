@@ -581,7 +581,9 @@ class Agent:
         except ProjectionError as error:
             raise ProviderProtocolViolation(f"Provider protocol violation: {error}") from error
 
-    async def _response(self, message: AssistantMessage, *, final: bool, replied: Optional[bool] = None) -> ContextEntry:
+    async def _response(
+        self, message: AssistantMessage, *, final: bool, replied: Optional[bool] = None, superseded: bool = False
+    ) -> ContextEntry:
         self._validate_response(message)
         await self._save_state()
         # The attempt this response answered: the ledger's latest conversation attempt (the C-9 anchor).
@@ -594,6 +596,7 @@ class Agent:
                 final=final,
                 replied=replied,
                 images=tuple(self._generated_images) if final else (),
+                superseded=superseded,
                 **facts,
             ),
             interruptible=False,
@@ -1029,7 +1032,7 @@ class Agent:
                 final = not message.tool_calls and not pending and not failed
                 if final or failed:
                     self._open = False
-                row = await self._response(message, final=final, replied=replied)
+                row = await self._response(message, final=final, replied=replied, superseded=bool(pending))
                 for item, is_steer in pending:
                     await self._consume(item)
                     (self._steers if is_steer else self._follow_ups).popleft()

@@ -12,7 +12,7 @@ unique per Session across both tables (partial unique index on each table, plus 
 | --- | --- | --- | --- | --- |
 | user or steer input | `messages` | `user` | — | `content_json.model` = `ModelInput` |
 | harness input | `messages` | `harness`, `agent_initiated`, `annotation` | — | `content_json.model` = `ModelInput` |
-| model response | `messages` | `assistant` (not final), `result` or `error` (final) | — | `content_json.model` = `ModelResponse` |
+| model response | `messages` | `assistant` or `output` (not final), `result` or `error` (final) | — | `content_json.model` = `ModelResponse` |
 | tool result | `agent_events` | `tool_result` | `context` | `content_json` = `ToolResult` |
 | checkpoint | `agent_events` | `context_compaction` | `context` | `content_json` = `Compaction` |
 | cleared result | `agent_events` | `context_edit` | `context` | `content_json` = `ContextEdit` |
@@ -23,10 +23,12 @@ A final response is `error` when it failed by itself (no text of its own: an emp
 stop without an explanation), as the other backends' failed terminal rows are. A successful final with nothing to show
 (a silent reply) is the hidden response type `assistant`: context, but no transcript row, inbox reply, or unread
 result, as the other backends persist nothing visible for it; a terminal write at delivery (a run that failed after
-the commit) types it `error`. Context loading accepts all three.
+the commit) types it `error`. A non-final response is `output` when it is a reply pending input superseded and has
+text to show (`superseded`, [`loop-control.md`](loop-control.md)): a visible reply, which a silent final can make the
+Turn's `result`; every other non-final response is `assistant`. Context loading accepts all four.
 
 Display-only rows keep `context_seq` null: `interim`, `notify`, an `error` that reports a run failure, `vault`,
-`output`, queued or removed inputs, and the `tool_call` trace row written at tool start (its `metadata_json` carries
+an `output` that is not a committed response, queued or removed inputs, and the `tool_call` trace row written at tool start (its `metadata_json` carries
 `tool_call_id` and `job_id` so the activity panel can pair it with the result). Audit rows are never context
 either: `agent_events` with `visibility = 'audit'` and no `context_seq`, written by `append_audit`, as
 `fork_turn` (`ForkTurn`, C-10 `fork.md` §7: one side turn, such as a C-9 checkpoint, with its own attempts' partials

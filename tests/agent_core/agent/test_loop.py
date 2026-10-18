@@ -533,11 +533,13 @@ async def test_C4_pending_steer_prevents_finality_and_late_steer_is_refused_duri
             super().__init__()
             self.final_entered, self.final_release = asyncio.Event(), asyncio.Event()
 
-        async def append_response(self, session_id, message, *, final, replied=None, images=()):
+        async def append_response(self, session_id, message, *, final, replied=None, images=(), superseded=False):
             if final:
                 self.final_entered.set()
                 await self.final_release.wait()
-            return await super().append_response(session_id, message, final=final, replied=replied, images=images)
+            return await super().append_response(
+                session_id, message, final=final, replied=replied, images=images, superseded=superseded
+            )
 
     entered, release = asyncio.Event(), asyncio.Event()
 
@@ -893,7 +895,7 @@ async def test_retry_keeps_a_usage_only_partial_out_of_the_context():
 
 
 class _FailingResponses(InMemoryTranscriptStore):
-    async def append_response(self, session_id, message, *, final, request=None, replied=None, images=()):
+    async def append_response(self, session_id, message, *, final, request=None, replied=None, images=(), superseded=False):
         raise RuntimeError("disk full")
 
 
@@ -1487,7 +1489,7 @@ async def test_failed_queued_input_commit_keeps_pending_input_and_announces_prio
 
 async def test_partial_response_commit_failure_still_emits_a_terminal_error():
     class Store(InMemoryTranscriptStore):
-        async def append_response(self, session_id, message, *, final, replied=None, images=()):
+        async def append_response(self, session_id, message, *, final, replied=None, images=(), superseded=False):
             raise OSError("response persistence unavailable")
 
     provider = ScriptedProvider(

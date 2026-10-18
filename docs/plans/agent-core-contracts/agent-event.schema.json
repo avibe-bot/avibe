@@ -86,6 +86,11 @@
           "final": {
             "type": "boolean",
             "description": "True for the run's final response (`result` row)."
+          },
+          "superseded": {
+            "type": "boolean",
+            "default": false,
+            "description": "True for a non-final response that is a completed reply pending input took the final word from: tool-free, not failed, and committed non-final only because a steer or follow-up was pending. Its row commits as `output`, a visible reply, when it has text to show. Never true for narration beside tool calls or a stream error's partial."
           }
         }
       }

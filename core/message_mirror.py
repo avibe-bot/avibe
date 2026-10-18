@@ -692,9 +692,7 @@ def _write_committed_row(
     * the row is attributed to the delivery target (``platform``, ``scope_id``);
     * a terminal write types the row ``result`` or ``error`` (the dispatcher's
       failure classification), including a final the backend committed hidden
-      because it had nothing to show; an ``output`` write types a non-final
-      ``assistant`` row ``output`` (a reply that later input superseded), never a
-      committed final; any other write keeps the row's type;
+      because it had nothing to show; any other write keeps the row's type;
     * the row takes the output's ``native_message_id``, which is how the
       dispatcher recognizes a retry of the same output, but never one another row
       holds, so the unique index cannot break (a concurrent duplicate, which
@@ -738,7 +736,7 @@ def _write_committed_row(
     }
     if scope_id is not None:
         values.update(platform=platform, scope_id=scope_id)
-    if message_type in _FINAL_ROW_TYPES or (message_type == "output" and row["type"] == "assistant"):
+    if message_type in _FINAL_ROW_TYPES:
         values["type"] = message_type
     if parent_native_message_id and not row["parent_native_message_id"]:
         values["parent_native_message_id"] = parent_native_message_id

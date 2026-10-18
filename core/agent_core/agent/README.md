@@ -122,8 +122,8 @@ localize that error rather than deliver a silent success.
   Empty non-final responses with queued inputs can still continue to a reply;
   tool calls, explicit hook end, and tool termination retain their contracts.
   A tool-free response that queued input made non-final is committed
-  `superseded`: a completed reply, which the adapter shows as one, unlike
-  narration beside tool calls or a stream error's partial.
+  `superseded`: a completed reply, stored as one in the same transaction and
+  shown as one, unlike narration beside tool calls or a stream error's partial.
 - A tool batch runs in groups (C-3 section 2): neighbouring calls to tools that
   declare `concurrent` run at the same time, every other call runs alone, and
   each group starts after the one before it has committed. Each group's

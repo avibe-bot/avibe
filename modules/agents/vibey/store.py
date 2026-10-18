@@ -140,6 +140,7 @@ class AdapterTranscriptStore:
         request: Optional[Mapping[str, Any]] = None,
         replied: Optional[bool] = None,
         images: Sequence[HostedImage] = (),
+        superseded: bool = False,
     ) -> ContextEntry:
         entry = await self._store.append_response(
             session_id,
@@ -148,6 +149,7 @@ class AdapterTranscriptStore:
             request=request,
             replied=replied,
             images=images,
+            superseded=superseded,
             agent_name=self._agents.get(session_id),
             turn_id=self._turns.get(session_id),
         )

@@ -410,6 +410,8 @@ scenarios:
     status: covered
     kind: regression
     layer: contract
-    test: tests/test_vibey_agent.py::test_a_short_reply_a_steer_superseded_stays_a_visible_reply
+    test:
+      - tests/test_vibey_agent.py::test_a_short_reply_a_steer_superseded_stays_a_visible_reply
+      - tests/test_agent_transcript.py::test_a_reply_pending_input_superseded_commits_as_a_visible_reply
 next_priority:
   - MESSAGE-DELIVERY-327
