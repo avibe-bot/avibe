@@ -781,6 +781,25 @@ to {
   clip-path:polygon(100% 0,100% 100%,0 100%);
   transform:rotate(45deg);
   pointer-events:none}
+/* The main bubble lays out bottom-up (the toggle is first in the DOM for focus
+   order): the toggle row holds its place at the bottom and the history opens
+   above it. The divider sits on the clip, outside the history's edge-fade
+   mask, so it stays crisp and collapses away with the detail. */
+.pet-mini-reply-bubble.is-main {
+  display:flex;
+  flex-direction:column-reverse}
+.pet-mini-reply-bubble.is-main .pet-mini-detail-clip {
+  position:relative}
+.pet-mini-reply-bubble.is-main .pet-mini-detail-clip:after {
+  position:absolute;
+  z-index:2;
+  right:0;
+  bottom:0;
+  left:0;
+  height:1px;
+  background:color-mix(in srgb,var(--pet-ink) 8%,transparent);
+  content:"";
+  pointer-events:none}
 .pet-mini-reply-toggle {
   display:block;
   width:100%;
@@ -803,7 +822,7 @@ to {
   color:color-mix(in srgb,var(--pet-ink) 60%,transparent);
   font-size:10px;
   font-weight:400}
-.pet-mini-reply-toggle[aria-expanded=true] svg { transform:rotate(90deg) }
+.pet-mini-reply-toggle[aria-expanded=true] svg { transform:rotate(180deg) }
 .pet-mini-reply-toggle p {
   display:flex;
   align-items:center;
@@ -822,12 +841,14 @@ to {
 .pet-mini-bubble-history {
   position:relative;
   z-index:1;
+  border-radius:21px 21px 0 0;
   /* Share the list's 292px box, bounded by the fixed avatar/dock reservation
      (147px), bubble header (62px), top inset (16px), and measured stack. */
   max-height:min(292px,max(0px,calc(100dvh - 225px - var(--pet-collapsed-height,0px))));
   overflow:auto;
   overscroll-behavior:contain;
-  border-top:1px solid color-mix(in srgb,var(--pet-ink) 8%,transparent);
   scrollbar-width:thin}
-.pet-mini-bubble-history .pet-mini-detail-inner { padding:8px 14px }
+/* The history's top edge is now the bubble's rounded top, so it gets more room
+   than the bottom edge, which meets the divider. */
+.pet-mini-bubble-history .pet-mini-detail-inner { padding:12px 14px 8px }
 .pet-mini-swap:has(.pet-mini-collapsed) { padding-bottom:14px }
