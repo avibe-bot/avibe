@@ -319,6 +319,25 @@ def test_session_binding_lookup_failure_is_not_resource_absence() -> None:
     assert resolution == RuntimeActivationResolution(authoritative=False)
 
 
+def test_session_binding_lookup_for_an_unregistered_backend_is_resource_absence() -> None:
+    """No registered agent means no runtime resource: a definite absence, as the
+    request lookup already answers it, never an inconclusive lookup to retry."""
+
+    service = object.__new__(AgentService)
+    service.agents = {}
+
+    binding = service.runtime_activation_identity_for_session_binding(
+        "codex",
+        session_anchor="anchor",
+        workdir="/work",
+    )
+
+    assert binding == RuntimeActivationResolution(authoritative=True)
+    assert binding == service.runtime_activation_identity_for_request(
+        "codex", SimpleNamespace(session_key="route:base")
+    )
+
+
 def test_request_lookup_failure_is_not_resource_absence() -> None:
     service = object.__new__(AgentService)
     service.agents = {
