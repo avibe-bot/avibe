@@ -18,7 +18,10 @@ pointer ownership that is released only by those terminal events, so a withheld
 - Clearing or changing the selection must hide or recompute the toolbar even if
   a previous touch ended without a terminal event.
 - On coarse pointers, the toolbar is placed at least 44px plus the existing
-  8px gap from the first or last selection line used as its anchor.
+  8px gap from both endpoint selection lines.
+- A one-line selection whose endpoint rects differ by sub-pixel amounts (for
+  example, bold text followed by regular text) still sits directly above or
+  below its line, never at a viewport edge.
 - Quote, Ask in a new session, and Copy still activate once on a complete
   pointer gesture; keyboard activation remains unchanged.
 - Desktop placement and selection behavior remain unchanged except for using
@@ -34,11 +37,13 @@ pointer ownership that is released only by those terminal events, so a withheld
   when the bounded 700ms grace period expires.
 - Track the first and last client rects of the selection instead of only the
   aggregate range rect.
-- Place the touch toolbar above the first line or below the last line with a
-  52px safe offset. Evaluate those positions, the safe middle band, and the
-  viewport edges as full-rectangle candidates; choose a candidate that does
-  not intersect either expanded endpoint handle region, or the candidate with
-  the smallest overlap when no fully safe slot exists.
+- Place the touch toolbar above the topmost or below the bottommost endpoint
+  line with a 52px safe offset, so neither slot can overlap the other
+  endpoint's handle region when both endpoints share a line. Evaluate those
+  positions, the safe middle band, and the viewport edges as full-rectangle
+  candidates; choose a candidate that does not intersect either expanded
+  endpoint handle region, or the candidate with the smallest overlap when no
+  fully safe slot exists.
 
 ## Select-all touch completion
 
@@ -55,7 +60,8 @@ physical-device limits are documented in
 
 - Component tests simulate pointerdown without any terminal pointer event,
   clear the selection, select new text, and activate the new toolbar.
-- Geometry tests verify the toolbar clears the native 44px handle region.
+- Geometry tests verify the toolbar clears the native 44px handle region,
+  including a one-line selection with WebKit-measured mixed-font endpoint rects.
 - Long-selection geometry tests cover endpoint lines near or beyond both
   viewport edges and the safe middle band between visible endpoints.
 - Focused UI tests, changed-file lint, and production build are required.

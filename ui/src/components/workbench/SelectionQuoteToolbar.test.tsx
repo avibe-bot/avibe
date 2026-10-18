@@ -565,6 +565,40 @@ describe('chat selection action gesture lifetime', () => {
     }
   });
 
+  // Rects WebKit reports for a one-line selection that starts in bold text
+  // ("**v6**：…"): the bold rect sits a fraction of a pixel lower than the
+  // regular-text rect after it. Offsets place the line in each viewport half.
+  it.each([
+    ['below', 0],
+    ['above', -258],
+  ] as const)('places a one-line mixed-font selection %s its line, not at the viewport edge', (side, shift) => {
+    const first = { top: 458.060546875 + shift, bottom: 474.548828125 + shift, left: 50.59375, right: 67.95361328125 };
+    const last = { top: 458.046875 + shift, bottom: 474.53125 + shift, left: 67.59375, right: 259.59375 };
+    selectionLineRects = [first, last].map((rect) => ({
+      ...rect,
+      width: rect.right - rect.left,
+      height: rect.bottom - rect.top,
+    }));
+    selectionBounds = {
+      top: last.top,
+      bottom: first.bottom,
+      left: first.left,
+      right: last.right,
+      width: last.right - first.left,
+      height: first.bottom - last.top,
+    };
+    mountToolbar();
+    const toolbar = screen.getByRole('toolbar');
+    const top = Number.parseFloat(toolbar.getAttribute('style')!.match(/top:\s*([^;]+)/)![1]);
+
+    expect(top).toBeCloseTo(
+      side === 'below' ? first.bottom + 44 + 8 : last.top - 36 - 44 - 8,
+    );
+    for (const line of selectionLineRects) {
+      expect(top >= line.bottom + 44 + 8 || top + 36 <= line.top - 44 - 8).toBe(true);
+    }
+  });
+
   it('keeps desktop placement at the original selection gap', () => {
     coarsePointer = false;
     selectionBounds = { ...defaultBounds, top: 80, bottom: 116 };
