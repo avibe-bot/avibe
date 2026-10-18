@@ -60,6 +60,20 @@ def _token(value: Any) -> str:
     return sanitize_identity(text) if text else ""
 
 
+#: The dispatch provenance a ``[Harness: ...]`` label is built from: all a merged batch's
+#: Message keeps of each later Delivery's provenance (``merged_harness_sources``).
+HARNESS_SOURCE_FIELDS = (
+    "task_trigger_kind",
+    "task_execution_id",
+    "task_definition_id",
+    "task_definition_name",
+    "source_kind",
+    "source_actor",
+    "source_session_id",
+    "parent_run_id",
+)
+
+
 def harness_source(spec: Mapping[str, Any]) -> str:
     """The label of the ``[Harness: ...]`` line for an input no person typed.
 

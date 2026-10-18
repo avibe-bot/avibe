@@ -24,7 +24,9 @@ becomes a space), and a definition name is quoted. A person's input never carrie
 it. A merged batch of queued Harness inputs is labelled once when every Delivery
 has the same source, else source by source in the batch's FIFO order, which is
 the order of its `---`-separated bodies, so no body is attributed to another
-Delivery's sender. The sources are:
+Delivery's sender. Acceptance drops each Delivery's own snapshot, so the merged
+Message keeps every merged Harness input's sender facts (`merged_harness_sources`)
+and a restart that recovers the batch renders the same line. The sources are:
 
 | Input | Line |
 | --- | --- |

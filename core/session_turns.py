@@ -359,6 +359,23 @@ def _agent_run_merge_definition_id(spec: dict[str, Any]) -> str:
     return "agent_run"
 
 
+def _batch_harness_sources(leader: dict[str, Any], payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Each Delivery's dispatch provenance in a Harness batch, in batch order.
+
+    Read from each Delivery's own snapshot while it has one; once the batch is accepted
+    (a restart recovering it), from what its merged Message kept of each.
+    """
+    live = [
+        spec
+        for spec in ((_scheduled_provenance(payload) or {}).get("platform_specific") for payload in payloads)
+        if isinstance(spec, dict)
+    ]
+    if live:
+        return live
+    kept = (leader.get("metadata") or {}).get("merged_harness_sources")
+    return [spec for spec in kept if isinstance(spec, dict)] if isinstance(kept, list) else []
+
+
 def _scheduled_merge_key(row: dict[str, Any]) -> Optional[tuple[str, ...]]:
     provenance = _scheduled_provenance(row)
     if provenance is None:
@@ -2670,14 +2687,7 @@ class SessionTurnManager:
                 # One sender label per Delivery, in FIFO order: a merged batch of Agent
                 # Runs or callbacks shares a merge key but not a sender, and the leader's
                 # provenance alone would attribute every body to the first one.
-                "harness_sources": [
-                    harness_source(spec)
-                    for spec in (
-                        (_scheduled_provenance(payload) or {}).get("platform_specific")
-                        for payload in payloads
-                    )
-                    if isinstance(spec, dict)
-                ],
+                "harness_sources": [harness_source(spec) for spec in _batch_harness_sources(first, payloads)],
                 "message_content": {
                     "text": "\n".join(
                         str(payload.get("text") or "")

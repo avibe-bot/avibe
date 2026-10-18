@@ -11,6 +11,7 @@ from typing import Any, Iterable, Literal
 from sqlalchemy import Select, and_, func, literal_column, or_, select, text, union, union_all, update
 from sqlalchemy.engine import Connection
 
+from core.agent_input import HARNESS_SOURCE_FIELDS
 from core.delivery_target import normalize_message_kind
 from storage.delivery_states import (
     CLAIMABLE_QUEUE_STATES,
@@ -1416,6 +1417,22 @@ def _merged_initial_snapshot(deliveries: list[dict[str, Any]]) -> dict[str, Any]
         metadata.pop(WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA, None)
     if len(deliveries) > 1:
         metadata["merged_delivery_ids"] = [str(delivery["id"]) for delivery in deliveries]
+        # Acceptance drops each Delivery's own snapshot, so the Message keeps every merged
+        # Harness input's sender facts: a restart renders the batch's ``[Harness: ...]``
+        # line from them, one source per body, as the live dispatch did.
+        harness_sources = [
+            {key: spec[key] for key in HARNESS_SOURCE_FIELDS if spec.get(key) is not None}
+            for spec in (
+                ((_json_object(snapshot.get("metadata_json")).get("scheduled_provenance") or {}).get(
+                    "platform_specific"
+                ))
+                for snapshot in snapshots
+                if snapshot.get("source") == "harness"
+            )
+            if isinstance(spec, dict)
+        ]
+        if harness_sources:
+            metadata["merged_harness_sources"] = harness_sources
         native_ids = [
             str(snapshot.get("native_message_id") or "")
             for snapshot in snapshots
