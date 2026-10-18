@@ -8,6 +8,7 @@ is the Turn's result: typed, rendered, and notified as one, exactly once.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -89,25 +90,29 @@ class SilentFinalTurnResultTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, {"AVIBE_HOME": home}):
             dispose_cached_sqlite_engines()
             ensure_sqlite_state()
-            engine = create_sqlite_engine()
-            try:
-                with engine.begin() as conn:
-                    scope_id = upsert_scope(
-                        conn, platform="avibe", scope_type="project", native_id="proj_silent", now=NOW
-                    )
-                    conn.execute(
-                        agent_sessions.insert().values(
-                            id=SESSION, scope_id=scope_id, agent_backend="claude", agent_variant="default",
-                            session_anchor=f"anchor_{SESSION}", native_session_id="", status="active",
-                            metadata_json="{}", created_at=NOW, updated_at=NOW, last_active_at=NOW,
-                        )
-                    )
-            finally:
-                engine.dispose()
+            self.seed_session(SESSION)
             try:
                 yield
             finally:
                 dispose_cached_sqlite_engines()
+
+    @staticmethod
+    def seed_session(session_id: str) -> None:
+        engine = create_sqlite_engine()
+        try:
+            with engine.begin() as conn:
+                scope_id = upsert_scope(
+                    conn, platform="avibe", scope_type="project", native_id="proj_silent", now=NOW
+                )
+                conn.execute(
+                    agent_sessions.insert().values(
+                        id=session_id, scope_id=scope_id, agent_backend="claude", agent_variant="default",
+                        session_anchor=f"anchor_{session_id}", native_session_id="", status="active",
+                        metadata_json="{}", created_at=NOW, updated_at=NOW, last_active_at=NOW,
+                    )
+                )
+        finally:
+            engine.dispose()
 
     @staticmethod
     def context(platform: str = "avibe", turn: str = "trn_1") -> MessageContext:
@@ -120,21 +125,29 @@ class SilentFinalTurnResultTests(unittest.IsolatedAsyncioTestCase):
         )
 
     @staticmethod
-    def agent_rows() -> list[tuple[str, str]]:
+    def _visible_rows(session_id: str, *columns):
         engine = create_sqlite_engine()
         try:
             with engine.connect() as conn:
-                return [
-                    (row.type, row.content_text)
-                    for row in conn.execute(
-                        select(messages.c.type, messages.c.content_text)
-                        .where(messages.c.session_id == SESSION, messages.c.author == "agent")
+                return list(
+                    conn.execute(
+                        select(*columns)
+                        .where(messages.c.session_id == session_id, messages.c.author == "agent")
                         .where(messages.c.type != "assistant")
                         .order_by(messages.c.created_at)
                     )
-                ]
+                )
         finally:
             engine.dispose()
+
+    def agent_rows(self, session_id: str = SESSION) -> list[tuple[str, str]]:
+        return [
+            (row.type, row.content_text)
+            for row in self._visible_rows(session_id, messages.c.type, messages.c.content_text)
+        ]
+
+    def content_kinds(self) -> list[str]:
+        return [json.loads(row.content_json)["kind"] for row in self._visible_rows(SESSION, messages.c.content_json)]
 
     async def test_a_silent_final_makes_the_last_visible_text_the_result(self):
         """Scenario: MESSAGE-DELIVERY-325."""
@@ -160,6 +173,7 @@ class SilentFinalTurnResultTests(unittest.IsolatedAsyncioTestCase):
                     await agent.emit_result_message(context, "<silent>nothing to add</silent>")
 
                 self.assertEqual(self.agent_rows(), [("result", text)])
+                self.assertEqual(self.content_kinds(), ["result"])
                 updated = [payload for name, payload in self.published if name == "message.updated"]
                 if platform == "avibe":
                     [row] = updated
@@ -172,6 +186,31 @@ class SilentFinalTurnResultTests(unittest.IsolatedAsyncioTestCase):
                 else:
                     self.assertEqual(updated, [])
                     self.assertEqual(_ScheduledPush.pushes, [])
+
+    async def test_concurrent_turns_in_one_channel_each_promote_their_own_text(self):
+        """Scenario: MESSAGE-DELIVERY-325."""
+        with self.state():
+            for thread in ("t1", "t2"):
+                self.seed_session(f"ses_{thread}")
+            controller = _Controller("slack")
+            agent = _Agent(controller)
+            threads = {
+                "t1": MessageContext(
+                    user_id="u1", channel_id="c1", platform="slack", thread_id="t1",
+                    platform_specific={"agent_session_id": "ses_t1", "turn_token": "trn_t1"},
+                ),
+                "t2": MessageContext(
+                    user_id="u1", channel_id="c1", platform="slack", thread_id="t2",
+                    platform_specific={"agent_session_id": "ses_t2", "turn_token": "trn_t2"},
+                ),
+            }
+            for thread, context in threads.items():
+                await controller.emit_agent_message(context, "output", f"Report from {thread}.", output=PHASE)
+            for context in threads.values():
+                await agent.emit_result_message(context, "<silent>noted</silent>")
+
+            for thread in threads:
+                self.assertEqual(self.agent_rows(f"ses_{thread}"), [("result", f"Report from {thread}.")])
 
     async def test_nothing_else_promotes_earlier_text(self):
         """Scenario: MESSAGE-DELIVERY-325."""

@@ -420,11 +420,12 @@ class ConsolidatedMessageDispatcher:
         # first use per turn (see ``_concise_progress_style``), dropped in
         # ``_drop_status_keys``.
         self._turn_progress_style: dict[str, str] = {}
-        # Per session key, the current Turn's latest transcript-visible text that
-        # did not end it (an ``output`` boundary or an ``interim`` bubble), with
-        # that Turn's token. A Turn that ends on a silent reply makes this row its
-        # result (``promote_turn_text_to_result``). Every lifecycle-terminal emit
-        # takes the entry, so it never outlives its Turn.
+        # Per turn-sink key (thread-scoped, so concurrent Turns in one channel stay
+        # apart), the current Turn's latest transcript-visible text that did not
+        # end it (an ``output`` boundary or an ``interim`` bubble), with that Turn's
+        # token. A Turn that ends on a silent reply makes this row its result
+        # (``promote_turn_text_to_result``). Every lifecycle-terminal emit takes
+        # the entry, so it never outlives its Turn.
         self._turn_visible_text: dict[str, tuple[str, str]] = {}
         # Harness deliveries whose prompt has already been echoed to IM, kept as a
         # bounded FIFO (see ``emit_harness_prompt``). Per-process only: a restart
@@ -2792,12 +2793,12 @@ class ConsolidatedMessageDispatcher:
         row_id = (row or {}).get("id")
         turn_token = (context.platform_specific or {}).get("turn_token")
         if row_id and turn_token:
-            self._turn_visible_text[self._get_session_key(context)] = (turn_token, row_id)
+            self._turn_visible_text[resolve_turn_sink_key(self.controller, context)] = (turn_token, row_id)
 
     def _take_turn_text(self, context: MessageContext) -> Optional[str]:
         """Remove and return the row recorded for this context's Turn, if any."""
 
-        entry = self._turn_visible_text.pop(self._get_session_key(context), None)
+        entry = self._turn_visible_text.pop(resolve_turn_sink_key(self.controller, context), None)
         if entry is None or entry[0] != (context.platform_specific or {}).get("turn_token"):
             return None
         return entry[1]

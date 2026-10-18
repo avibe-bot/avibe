@@ -772,23 +772,42 @@ def promote_turn_text_to_result(row_id: str, *, suppress_delivery: bool = False)
     changes, publishes, and notifies nothing.
     """
 
-    from sqlalchemy import update
+    import json
 
+    from sqlalchemy import select, update
+
+    from storage.agent_session_rows import reserve_write_lock
     from storage.models import messages
 
     try:
         engine = get_cached_sqlite_engine()
         inbox_row = None
         with engine.begin() as conn:
+            # The content read below decides the write, so the write lock is held
+            # from before it.
+            reserve_write_lock(conn)
+            turn_text = (
+                messages.c.id == row_id,
+                messages.c.author == "agent",
+                messages.c.type.in_(_TURN_TEXT_TYPES),
+            )
+            stored = conn.execute(select(messages.c.content_json).where(*turn_text)).first()
+            if stored is None:
+                return None
+            # ``content.kind`` names the type the row was persisted as; it moves
+            # with the type, as every persist path keeps the two together.
+            try:
+                content = json.loads(stored[0] or "{}")
+            except (TypeError, ValueError):
+                content = {}
+            if not isinstance(content, dict):
+                content = {}
             promoted = conn.execute(
                 update(messages)
-                .where(
-                    messages.c.id == row_id,
-                    messages.c.author == "agent",
-                    messages.c.type.in_(_TURN_TEXT_TYPES),
-                )
+                .where(*turn_text)
                 .values(
                     type="result",
+                    content_json=json.dumps({**content, "kind": "result"}),
                     updated_at=messages_service.canonical_message_timestamp(_now()),
                 )
             ).rowcount
