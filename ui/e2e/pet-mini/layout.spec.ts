@@ -252,6 +252,63 @@ test('the reply bubble names Vibey as written', async ({ page }) => {
   expect(await eyebrow.evaluate((node) => node.innerText)).toContain('Vibey');
 });
 
+test('expanded dismiss controls stay local to hover and focus', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&activities=2');
+  await page.locator('.pet-mini-collapsed').click();
+  await page.locator('.pet-mini-swap').evaluate(async (node) => {
+    await Promise.all(node.getAnimations().map((animation) => animation.finished));
+  });
+  await page.mouse.move(0, 0);
+  const cards = page.locator('.pet-mini-card');
+  const dismisses = page.locator('.pet-mini-dismiss');
+  await expect(cards).toHaveCount(2);
+  await expect(dismisses).toHaveCount(2);
+  const before = await cards.evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().toJSON()));
+  for (const dismiss of await dismisses.all()) {
+    await expect(dismiss).toHaveCSS('opacity', '0');
+    await expect(dismiss).toHaveCSS('pointer-events', 'none');
+  }
+
+  await cards.nth(0).hover();
+  expect(await cards.evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().toJSON()))).toEqual(before);
+  await expect(dismisses.nth(0)).toHaveCSS('opacity', '1');
+  await expect(dismisses.nth(0)).toHaveCSS('pointer-events', 'auto');
+  await expect(dismisses.nth(1)).toHaveCSS('opacity', '0');
+  await expect(dismisses.nth(1)).toHaveCSS('pointer-events', 'none');
+
+  await page.mouse.move(0, 0);
+  await cards.nth(1).locator('.pet-mini-card-reference').focus();
+  await expect(dismisses.nth(0)).toHaveCSS('opacity', '0');
+  await expect(dismisses.nth(1)).toHaveCSS('opacity', '1');
+  await expect(dismisses.nth(1)).toHaveCSS('pointer-events', 'auto');
+});
+
+test.describe('expanded dismiss controls on touch', () => {
+  test.use({ hasTouch: true });
+
+  test('remain visible when hover is unavailable', async ({ page }) => {
+    await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&activities=2');
+    await page.locator('.pet-mini-collapsed').click();
+    await expect(page.locator('.pet-mini-card')).toHaveCount(2);
+    expect(await page.evaluate(() => matchMedia('(hover: none)').matches)).toBe(true);
+    for (const dismiss of await page.locator('.pet-mini-dismiss').all()) {
+      await expect(dismiss).toHaveCSS('opacity', '1');
+      await expect(dismiss).toHaveCSS('pointer-events', 'auto');
+    }
+  });
+});
+
+for (const theme of ['light', 'dark']) {
+  test(`captures expanded dismiss hover state (${theme})`, async ({ page }, testInfo) => {
+    await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&activities=2');
+    await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
+    await page.locator('.pet-mini-collapsed').click();
+    await expect(page.locator('.pet-mini-card')).toHaveCount(2);
+    await page.locator('.pet-mini-card').first().hover();
+    await page.screenshot({ path: testInfo.outputPath(`expanded-dismiss-${theme}.png`), scale: 'css', animations: 'disabled' });
+  });
+}
+
 
 test('attention leads the list and referencing sends only through the main composer', async ({ page }) => {
   await page.goto('/e2e/pet-mini/fixture.html?scenario=personal');
@@ -357,6 +414,7 @@ test('a close during a main outage lasts until the mini document reopens', async
     window.petFixtureConnection(true);
   });
   await expect(page.getByText("Couldn't open the conversation with Vibey. Try again in a moment.")).toBeVisible();
+  await card.hover();
   await card.locator('.pet-mini-dismiss').click();
   await expect(card).toHaveCount(0);
   await page.evaluate(() => {

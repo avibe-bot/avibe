@@ -198,7 +198,17 @@ to {
   border-radius:999px;
   background:var(--pet-dismiss);
   color:color-mix(in srgb,var(--pet-ink) 70%,transparent);
-  cursor:pointer}
+  cursor:pointer;
+  opacity:0;
+  pointer-events:none;
+  transition:opacity 120ms ease}
+.pet-mini-card:hover .pet-mini-dismiss,
+.pet-mini-card-wrap:hover .pet-mini-dismiss,
+.pet-mini-card:focus-within .pet-mini-dismiss,
+.pet-mini-card-wrap:focus-within .pet-mini-dismiss,
+.pet-mini-dismiss:focus-visible {
+  opacity:1;
+  pointer-events:auto}
 .pet-mini-dismiss:hover {
   background:var(--pet-dismiss-hover);
   color:var(--pet-ink)}
@@ -544,6 +554,9 @@ to {
   .pet-mini-dock {
   opacity:1;
   transform:none;
+  pointer-events:auto}
+  .pet-mini-dismiss {
+  opacity:1;
   pointer-events:auto}
 }
 @media(prefers-reduced-motion:reduce) {
