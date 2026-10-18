@@ -598,12 +598,13 @@ class EngineSupervisor:
                 except Exception as exc:
                     self._stop_locked()
                     raise EngineUnavailableError("models.engine.unsafe_permissions") from exc
+                # It has answered: a refusal from here on, the grant wait's included, is a lost listener (#2826).
+                self._engine_answered = True
                 if not self._oauth_grants_listed_locked(connection) or process.poll() is not None:
                     time.sleep(min(_STARTUP_POLL_INTERVAL_SECONDS, max(0.0, deadline - time.monotonic())))
                     continue
                 self._last_check = _utc_now()
                 self._verified_at = time.monotonic()
-                self._engine_answered = True
                 logger.info(
                     "Model Hub engine startup outcome=ready managed_version=%s "
                     "elapsed_seconds=%.3f child_output_retained=false",
@@ -637,7 +638,8 @@ class EngineSupervisor:
         The wait has exactly two outcomes:
 
         * Not ready (False): the engine refused a listing as a credential or
-          route it does not hold (``_disowns_config_locked``). The caller also
+          route it does not hold, or stopped listening after it answered its
+          health check (``_disowns_config_locked``). The caller also
           treats an engine that exited as not ready. Either way the start fails
           like any start that never becomes ready.
         * Ready (True): every loaded grant lists a model the discovery reader
@@ -687,7 +689,8 @@ class EngineSupervisor:
                     models = listing("/auth-files/models", {"name": name})
                     if models is not None and _lists_a_model(models):
                         listed.add(name)
-                    elif models is not None and models.get("models"):
+                    elif models is not None and models.get("models") != []:
+                        # An empty list is a grant with no model yet; anything else is not a listing.
                         failure = "malformed_listing"
                 if pending is not None:
                     pending = [name for name in pending if name not in listed]
