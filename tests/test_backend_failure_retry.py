@@ -303,17 +303,32 @@ def test_restart_continues_a_cut_vibey_turn_from_its_transcript_without_a_notice
     ],
 )
 def test_restart_completes_a_cut_vibey_turn_whose_final_reply_was_committed(
-    isolated_state, tmp_path, origin, delivery, late_stop, final
+    isolated_state, tmp_path, monkeypatch, origin, delivery, late_stop, final
 ):
     """MESSAGE-DELIVERY-327: nothing is left to continue, and nothing failed, even when a Stop
     landed after the final (it loses the race, as live). The 👀 the dead process left on an IM
     message is retired once its transport can deliver, and a failed attempt is kept for the next.
     A silent final leaves the Turn's narration before it as the result, as live."""
+    from core import message_mirror
+
     cut = _accepted_turn(tmp_path, backend="vibey", delivery=delivery, native_message_id=origin)
     clear = AsyncMock(side_effect=[False, True] if delivery == "failing" else None, return_value=True)
     cut.manager.controller.processing_indicator = SimpleNamespace(clear_orphaned_running_reaction=clear)
+    promote, promoted_on_loop = message_mirror.promote_turn_text_to_result, []
+
+    def promote_where(*args, **kwargs):
+        try:
+            asyncio.get_running_loop()
+            promoted_on_loop.append(True)
+        except RuntimeError:
+            promoted_on_loop.append(False)
+        return promote(*args, **kwargs)
+
+    monkeypatch.setattr(message_mirror, "promote_turn_text_to_result", promote_where)
 
     _restart(cut, _then(_previous_process(final), _request_stop) if late_stop else _previous_process(final))
+    # The promotion takes SQLite's write lock: off the controller loop, as the dispatcher runs it.
+    assert promoted_on_loop == ([False] if final == "silent_final" else [])
     if delivery in {"unready", "failing"}:
         assert clear.await_count == (1 if delivery == "failing" else 0)
         cut.manager._transport_can_deliver = lambda _platform: True

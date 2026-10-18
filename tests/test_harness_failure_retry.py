@@ -340,7 +340,7 @@ def test_a_vibey_agent_run_cut_by_a_restart_settles_from_the_continued_work(
             return await finish(*args, **kwargs)
 
         manager._finish_steer = lost_once
-        monkeypatch.setattr(SessionTurnManager, "RESTART_FALLBACK_RETRY_DELAYS", (0.05,))
+        monkeypatch.setattr(SessionTurnManager, "RESTART_FALLBACK_RETRY_DELAYS", (0.05, 0.05))
 
     async def startup():
         await manager.recover_durable_delivery_state(session_id, service_restart=True)
@@ -349,6 +349,16 @@ def test_a_vibey_agent_run_cut_by_a_restart_settles_from_the_continued_work(
             with engine.connect() as conn:
                 assert message_deliveries.get_turn(conn, original.turn_id)["state"] == "active"
             assert len(started) == 1 and lost
+            # The first retry pass fails outright; the retries go on.
+            recover, failed = manager.recover_durable_delivery_state, []
+
+            async def fails_once(*args, **kwargs):
+                if not failed:
+                    failed.append(True)
+                    raise RuntimeError("database is locked")
+                return await recover(*args, **kwargs)
+
+            manager.recover_durable_delivery_state = fails_once
             for _ in range(100):
                 if len(started) > 1:
                     break

@@ -90,7 +90,7 @@ from core.backend_failure import emit_backend_failure
 from core.citations import CitationBundle, register_text_citations
 from core.hosted_activity import HostedActivity, hosted_line, native_activities, proxy_activity
 from core.message_output import MessageOutput, stop_output_for, terminal_output_for
-from core.native_dispatch_phase import mark_backend_dispatch_attempted
+from core.native_dispatch_phase import mark_backend_dispatch_attempted, prewrite_user_stop_requested
 from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.reply_enhancer import strip_silent_blocks
 from core.skill_observability import accept_catalog
@@ -334,7 +334,16 @@ class VibeyAgent(BaseAgent):
         # A transcript resume (a restart continuation) gives a job that survived the restart the
         # foreground wait its live call would have, so its real output becomes the call's result.
         resuming = (context.platform_specific or {}).get("vibey_resume") is True
-        await self._resume(runtime, stop=turn.stop_event if resuming else None)
+        try:
+            await self._resume(runtime, stop=turn.stop_event if resuming else None)
+        except asyncio.CancelledError:
+            if resuming and prewrite_user_stop_requested(context):
+                # Before dispatch a Stop cancels this task instead of calling ``handle_stop``:
+                # end the command the wait was for as that Stop would, then let it finish.
+                turn.stop_requested = True
+                turn.stop_event.set()
+                await self._settle_open_calls(runtime, stop=turn.stop_event)
+            raise
         if turn.stop_requested:
             return await self._settle_stopped(turn)
         cwd = request.working_path or runtime.cwd

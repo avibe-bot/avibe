@@ -2678,6 +2678,7 @@ async def test_a_restart_continuation_waits_for_its_surviving_command_as_the_liv
     foreground until it ends; a Stop ends the wait and the command. It never starts again."""
     import core.watches as watches_module
     from core.backend_failure_retry import reserve_restart_resume
+    from core.native_dispatch_phase import mark_prewrite_user_stop
     from core.scheduled_tasks import TaskExecutionStore
     from core.watches import ManagedWatchStore
 
@@ -2735,8 +2736,15 @@ async def test_a_restart_continuation_waits_for_its_surviving_command_as_the_liv
         if case == "stop":
             await _until(lambda: harness.agent._run_for(SESSION, resumed_turn) is not None, "the continuation never ran")
             await asyncio.sleep(0.3)
-            assert not resumed.done() and await harness.agent.handle_stop(resume)
-        await asyncio.wait_for(resumed, timeout=20)
+            assert not resumed.done()
+            # Nothing is dispatched yet, so the Turn owner's Stop is the pre-write one: it
+            # publishes the Stop on the context and cancels the task (``_cancel_prewrite_durable_turn``).
+            mark_prewrite_user_stop(resume.context)
+            resumed.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(resumed, timeout=20)
+        else:
+            await asyncio.wait_for(resumed, timeout=20)
 
         [result] = [entry for entry in await harness.context_rows() if entry.kind == "tool_result"]
         body = result.message.content[0].text

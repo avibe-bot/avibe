@@ -540,21 +540,26 @@ async def test_a_reply_pending_input_superseded_commits_as_a_visible_reply(engin
 
 
 async def test_the_restart_reads_of_a_turns_context_tail_stay_bounded(engine) -> None:
-    """MESSAGE-DELIVERY-327: restart recovery decides a cut Turn from its context tail, synchronously on
-    the controller loop, once per recovered Turn. Each read is an indexed SEARCH bounded by the Session's
-    tail, the Turn's own Deliveries, or the Turn's own time window: no scan and no temporary sort over
-    the growing history."""
+    """MESSAGE-DELIVERY-327: restart recovery decides each cut Turn (``restart_resume_plan``) and a
+    silent final's result synchronously on the controller loop. Every read is an indexed SEARCH
+    keyed by the Turn, a row id, the Session's context tail, or the Turn's own time window: no scan,
+    and a temporary sort only over the Turn's own Deliveries, never over the growing history."""
     from sqlalchemy import event
 
-    from storage.agent_transcript import committed_final, last_turn_text
+    from core.backend_failure_retry import restart_resume_plan
+    from storage.agent_transcript import last_turn_text
 
     with engine.begin() as conn:
         home = _scope(conn, "C-home")
         _session(conn, "ses_main", home)
         first = _accepted_turn(conn, "ses_main", home, "看一下目录", "turn_main")
+        _session(conn, "ses_cut", home)
+        cut = _accepted_turn(conn, "ses_cut", home, "跑一下测试", "turn_cut")
     store = SQLiteTranscriptStore(engine)
     await store.consume_input("ses_main", first, _user("看一下目录"))
     await store.append_response("ses_main", _assistant("两个文件。"), final=True, turn_id="turn_main")
+    await store.consume_input("ses_cut", cut, _user("跑一下测试"))
+    await store.append_response("ses_cut", _assistant("先跑", call_id="call_1"), final=False, turn_id="turn_cut")
     statements: list[tuple[str, object]] = []
 
     def capture(_conn, _cursor, statement, parameters, _context, _executemany):
@@ -563,27 +568,34 @@ async def test_the_restart_reads_of_a_turns_context_tail_stay_bounded(engine) ->
     event.listen(engine, "before_cursor_execute", capture)
     try:
         with engine.connect() as conn:
-            # A committed final runs every read: the tail, the input after it, the Turn's unconsumed inputs.
-            assert committed_final(conn, "ses_main", "turn_main") is not None
-            # A silent final's result: the Turn's last narration or superseded reply, one read per type.
+            # Every read of both outcomes: a committed final, and a Turn left to continue.
+            assert restart_resume_plan(conn, message_deliveries.get_turn(conn, "turn_main"))[0] == "final"
+            assert restart_resume_plan(conn, message_deliveries.get_turn(conn, "turn_cut"))[0] == "continue"
+            # A silent final's result: the Turn's last narration or superseded reply.
             last_turn_text(conn, "ses_main", since="2026-01-01T00:00:00.000000Z")
     finally:
         event.remove(engine, "before_cursor_execute", capture)
 
     raw = sqlite3.connect(str(get_sqlite_state_path()))
     try:
-        plans = [" | ".join(row[-1] for row in raw.execute("EXPLAIN QUERY PLAN " + sql, params)) for sql, params in statements]
+        plans = [[row[-1] for row in raw.execute("EXPLAIN QUERY PLAN " + sql, params)] for sql, params in statements]
     finally:
         raw.close()
-    assert len(plans) == 5, plans
-    for plan in plans[:2]:
-        assert "SEARCH messages USING INDEX uq_messages_session_context_seq (session_id=? AND context_seq>?)" in plan, plan
-    # Either of the two turn-keyed indexes bounds it; the planner may take either.
-    assert re.search(r"SEARCH message_deliveries USING INDEX \w+ \(turn_id=\?\)", plans[2]), plans[2]
-    for plan in plans[3:]:
-        assert "SEARCH messages USING INDEX ix_messages_session_type_created_id (session_id=? AND type=? AND created_at>?)" in plan, plan
-    for plan in plans:
-        assert "SCAN" not in plan and "TEMP B-TREE" not in plan, plan
+    turn_keys = ("(turn_id=?)", "(current_target_turn_id=?)")
+    bounded = re.compile(
+        r"SEARCH \w+ USING (?:COVERING )?INDEX \w+ \((?:id=\?|delivery_id=\?|turn_id=\?|current_target_turn_id=\?"
+        r"|session_id=\? AND context_seq>\?|session_id=\? AND type=\? AND created_at>\?)\)"
+    )
+    for (sql, _params), plan in zip(statements, plans):
+        searches = [step for step in plan if step.startswith(("SEARCH", "SCAN"))]
+        assert searches and all(bounded.fullmatch(step) for step in searches), (sql, plan)
+        if any("TEMP B-TREE" in step for step in plan):
+            assert all(step.endswith(turn_keys) for step in searches), (sql, plan)
+    # The steer the Turn may still wait for is found by the Turn it targets.
+    assert any(
+        "current_target_turn_id" in sql and "steering" in str(params) and bounded.fullmatch(plan[0])
+        for (sql, params), plan in zip(statements, plans)
+    )
 
 
 async def test_a_call_instance_is_settled_once_whoever_writes(engine) -> None:

@@ -70,7 +70,8 @@ This replaces recovery invariant T4 for Vibey (`agent-core-contracts/recovery.md
    projection, waits for it until it exits, until the call's foreground window
    (`bash`'s, 120 s by default) passes, counted from the job's launch
    (`meta.created_at`), or until a Stop, which ends the command as in a live
-   Turn. An exited job gives its real output; only a job still running then is
+   Turn (the wait precedes dispatch, so this is the Turn owner's pre-write Stop,
+   which cancels the run after publishing the Stop on its context). An exited job gives its real output; only a job still running then is
    handed to a Watch, with the ordinary handover result; a window the downtime
    already spent hands over at once. A handover that fails is retried once, and
    with no Watch to take it the job stays in the foreground until it ends, as

@@ -6894,16 +6894,22 @@ class SessionTurnManager:
                     await asyncio.sleep(
                         delays[attempt] if attempt < len(delays) else self.RESTART_FALLBACK_RETRY_PERIOD
                     )
-                    with self._sqlite_engine().connect() as conn:
-                        live = delivery_store.active_turn(conn, session_id)
-                    if live is None or live.get("backend") != "vibey":
-                        return  # a Stop or another owner settled it meanwhile
-                    if await self._settle_vibey_session(session_id):
+                    try:
+                        with self._sqlite_engine().connect() as conn:
+                            live = delivery_store.active_turn(conn, session_id)
+                        if live is None or live.get("backend") != "vibey":
+                            return  # a Stop or another owner settled it meanwhile
+                        if not await self._settle_vibey_session(session_id):
+                            continue
                         await self.recover_durable_delivery_state(session_id, service_restart=True)
                         with self._sqlite_engine().connect() as conn:
                             after = delivery_store.active_turn(conn, session_id)
                         if after is None or after["id"] != live["id"]:
                             return
+                    except Exception:
+                        # A failed pass is retried like what it waited on: this task is the
+                        # Session's only retry, so it must outlive one.
+                        logger.exception("restart recovery retry failed for Session=%s", session_id)
             finally:
                 if self._restart_fallback_retries.get(session_id) is asyncio.current_task():
                     self._restart_fallback_retries.pop(session_id, None)
@@ -7292,16 +7298,21 @@ class SessionTurnManager:
                 },
                 expected_start_attempt_id=attempt_id,
             )
-            if terminal.get("changed") and visible is not None and not failed:
-                from core.message_mirror import promote_turn_text_to_result
-
-                promote_turn_text_to_result(result_id, suppress_delivery=suppress_delivery)
             if terminal.get("changed") and run_ids:
                 with self._sqlite_engine().connect() as conn:
                     settled = delivery_store.get_turn(conn, turn_id)
                 if settled is not None:
                     self._settle_agent_run_ids_from_terminal_turn(run_ids, settled)
-            return {**terminal, "restart_final": True}
+            return {
+                **terminal,
+                "restart_final": True,
+                # Promoted by the async caller, off the controller loop, as the dispatcher does.
+                "promote_turn_text": (
+                    (result_id, suppress_delivery)
+                    if terminal.get("changed") and visible is not None and not failed
+                    else None
+                ),
+            }
         if plan == "wait":
             return {"changed": False, "successor_turn_id": None, "restart_wait": True}
         if plan != "continue":
@@ -7518,6 +7529,13 @@ class SessionTurnManager:
                 if continued is not None:
                     if continued.get("changed"):
                         recovered.append(target_session)
+                    if continued.get("promote_turn_text"):
+                        from core.message_mirror import promote_turn_text_to_result
+
+                        row_id, suppress_delivery = continued["promote_turn_text"]
+                        await asyncio.to_thread(
+                            promote_turn_text_to_result, row_id, suppress_delivery=suppress_delivery
+                        )
                     if continued.get("changed") and continued.get("restart_final"):
                         await self._clear_orphaned_running_reaction(
                             target_session, self._turn_origin_native_message_id(turn_id)
