@@ -30,7 +30,7 @@ from core.agent_core.harness.context import (
     MEMO_ITEM,
     MIND_CUT,
     MIND_EMPTY,
-    MIND_FILE_CUT,
+    MIND_CURRENT,
     MIND_FILE_FIRST,
     MIND_FILE_PREVIOUS,
     MIND_TEMPLATE,
@@ -39,13 +39,14 @@ from core.agent_core.harness.context import (
     SKILL_TOKENS,
     SKILLS_LEAD_CARRIED,
     SKILLS_LISTED,
-    TRUNCATED_LEAD,
     CarriedSkill,
     MemoItem,
     MemoList,
     MindReview,
     carry_skills,
     fit_memo,
+    MIND_SECTIONS,
+    mind_limits,
     fit_mind,
     memo_item,
     memo_problems,
@@ -1122,11 +1123,12 @@ def test_the_checkpoint_request_and_its_repair_are_the_contract_text_verbatim():
     assert MIND_FILE_FIRST in first and "Goals 2,000, Key decisions 1,500" in first
     assert first.endswith("Current memo.md:\n- [x] (#3) the goal\n- [ ] (#9) continue\n</context-checkpoint-request>")
     assert "{" not in first.replace("{name}", "")
-    cut = checkpoint_request((), mind="cut", cut_sections=["# 3. Key decisions\n- a"]).content[0].text
-    assert MIND_FILE_CUT in cut and cut.endswith(
-        f"Current memo.md:\n{MEMO_EMPTY}\n\n{TRUNCATED_LEAD}\n# 3. Key decisions\n- a\n</context-checkpoint-request>"
+    # A later checkpoint gives the mind whole after the memo list, word for word, whatever the checkpoint above shows.
+    later = checkpoint_request((), mind="# 1. Where I stand\n- a").content[0].text
+    assert MIND_FILE_PREVIOUS in later and MIND_FILE_FIRST not in later and later.endswith(
+        f"Current memo.md:\n{MEMO_EMPTY}\n\n{MIND_CURRENT}\n# 1. Where I stand\n- a\n</context-checkpoint-request>"
     )
-    assert MIND_FILE_PREVIOUS in checkpoint_request(mind="previous").content[0].text
+    assert MIND_CURRENT not in first
     assert "Your scratch directory is /s/x. " in checkpoint_request(scratch="/s/x").content[0].text
     assert f"Your scratch directory is {SCRATCH_UNAVAILABLE}. " in first
 
@@ -1194,6 +1196,28 @@ def test_a_mind_past_a_section_limit_is_shown_cut_per_section_with_every_heading
         fit_mind("no headings", marker)
 
 
+def test_on_a_small_route_a_cut_section_shows_its_headings_and_one_marker_and_no_more():
+    # On an 8,000-token route Where I stand has 41 tokens (section 7): less than its four heading lines and one marker.
+    # Every sub-block is past it; the section shows the fixed part once, not a marker per sub-block.
+    filler = "\n".join(f"- point {index}: " + "p" * 120 for index in range(8))
+    mind = _mind(**{"## For whom and why": filler, "## What I own": filler, "## Agreements": filler,
+                    "## Mission": "- the mission", "## Workstreams": filler, "# 3. Key decisions": filler,
+                    "# 4. Lessons": filler})
+    marker = MIND_CUT.format(path="/Users/someone/.avibe/state/agent_core/checkpoints/ses0123456789/mind-0123456789abcdef.md")
+    assert mind_limits(8_000) == (41, 83, 62, 62)
+    shown, cut = fit_mind(mind, marker, 8_000)
+    assert len(cut) == 4 and shown.count(marker) == 4  # one per section
+    for (top, _, subs), limit, part in zip(MIND_SECTIONS, mind_limits(8_000), _split_sections(shown)):
+        fixed = text_tokens("\n".join([top, *subs, marker]))
+        assert text_tokens(part) <= max(limit, fixed) + 1, top  # bounded by the limit or the fixed part
+
+
+def _split_sections(shown: str) -> list[str]:
+    tops = [top for top, _, _ in MIND_SECTIONS]
+    starts = [shown.index(top) for top in tops] + [len(shown)]
+    return [shown[a:b].strip("\n") for a, b in zip(starts, starts[1:])]
+
+
 def test_a_memo_list_reads_back_only_its_checkboxes():
     memo = MemoList(
         (MemoItem(1, "review every PR\noldest first"), MemoItem(7, "继续" * 40), MemoItem(9, "y" * 300)),
@@ -1220,7 +1244,10 @@ def test_a_memo_list_reads_back_only_its_checkboxes():
 def test_the_memo_keeps_every_message_within_its_budget_by_cutting_the_longest_first():
     # One message's share first (section 7), then the budget: no item is dropped, the longest are cut to one share.
     assert memo_item(4, "x" * (4 * MEMO_ITEM + 40)) == MemoItem(4, "x" * (4 * MEMO_ITEM), True)
-    assert memo_item(4, "  short  ") == MemoItem(4, "short")
+    # Verbatim, whitespace included: an indented block stays one; only the checklist's preview is normalized.
+    assert memo_item(4, "    indented code\n  next") == MemoItem(4, "    indented code\n  next")
+    assert MemoList((memo_item(4, "    indented code\n  next"),)).lines() == ["- [ ] (#4) indented code next"]
+    assert _memo_lines((memo_item(4, "    indented code\n  next"),))[1:] == ["- (#4)     indented code", "    next"]
     items = [MemoItem(seq, "z" * 1_200) for seq in range(1, 13)] + [MemoItem(20, "keep the API stable")]
     assert memo_tokens(items) > MEMO_BUDGET
     problem = memo_problems(MemoList(tuple(items), frozenset(item.seq for item in items)), "\n".join(

@@ -1538,7 +1538,7 @@ class Agent:
             return request, plan  # nothing can move out
         cut = len(view.units) - 1
         hosted = await self._hosted(view, cut)
-        dropped = self._dropped(view, cut, carry=carry, window=plan.window)
+        dropped = await self._dropped(view, cut, carry=carry, window=plan.window)
         payload, after = await self._compaction(request, view, plan, cut, **dropped, hosted=hosted)
         minimal, _ = self._built(system, selected, messages=self._carried(after))
         return minimal, budget(minimal, selected.capabilities, transcript=after.messages)
@@ -1547,7 +1547,7 @@ class Agent:
         """What a conversation request carries for ``view``: the rehydrated state, then the projected context."""
         return (*self._rehydrated(), *view.messages)
 
-    def _dropped(self, view: ContextView, cut: int, *, carry: bool, window: int) -> dict[str, Any]:
+    async def _dropped(self, view: ContextView, cut: int, *, carry: bool, window: int) -> dict[str, Any]:
         """A dropped row's fields (section 8 c): no model call. When ``carry``, the previous checkpoint as it was (its
         now, mind, and skills) and a memo that keeps every message, the new ones included, no one choosing among
         them; otherwise all of it left out, and said so."""
@@ -1567,9 +1567,24 @@ class Agent:
                 mind=mind,
                 mind_shown=self._mind_shown(mind, window),
                 memo=fit_memo(self._memo_list(view, cut).select(None), memo_budget(window)),
-                skills=tuple(CarriedSkill(**skill) for skill in previous.get("skills_carried", ())),
+                skills=await self._kept_skills(view, window),
             )
         return fields
+
+    async def _kept_skills(self, view: ContextView, window: int) -> tuple[CarriedSkill, ...]:
+        """The skills a drop keeps (section 8 c): the latest checkpoint's, as it carried them. A ``checkpoint-v4`` row
+        names them only, so the host renders them now, as a checkpoint would carry them (section 7)."""
+        row = view.compaction
+        previous = row.payload if row is not None else {}
+        if "skills_carried" in previous:
+            return tuple(CarriedSkill(**skill) for skill in previous["skills_carried"])
+        host = self.context.host if self.context is not None else None
+        names = [skill["name"] for skill in previous.get("skills", ())]
+        if host is None or not names:
+            return ()
+        written = (row.created_at or 0.0) if row is not None else 0.0
+        rendered = await self._scope.call(lambda: asyncio.to_thread(host.skill_contents, self.session_id, names))
+        return carry_skills([(name, written) for name in names], rendered.get, window)
 
     @staticmethod
     def _carryable(view: ContextView) -> bool:
@@ -1786,7 +1801,6 @@ class Agent:
         prior: str = previous.get("mind") or ""
         start = prior or MIND_TEMPLATE
         window = plan.window
-        cut_sections = fit_mind(prior, MIND_CUT_UNSTORED, window)[1] if prior and previous.get("mind_truncated") else []
         refused = None
         try:
             memo = self._memo_list(view, cut)
@@ -1800,8 +1814,7 @@ class Agent:
         listed = "".join(f"{line}\n" for line in lines)  # memo.md as the turn starts
         prompt = checkpoint_request(
             lines,
-            mind="first" if not prior else ("cut" if cut_sections else "previous"),
-            cut_sections=cut_sections,
+            mind=prior,
             scratch=os.path.abspath(self.context.scratch_dir) if self.context and self.context.scratch_dir else None,
             window=window,
         )
@@ -2294,14 +2307,18 @@ class Agent:
         fit (``_carries``)."""
         await emit(CompactionStarted, reason="overflow")
         hosted = await self._hosted(view, cut)
-        dropped = self._dropped(view, cut, carry=carry, window=plan.window)
-        if dropped.get("mind_shown", "") != dropped.get("mind", ""):
-            # This route cuts the mind the drop carries: its copy must exist, or the mind is not carried.
-            try:
-                await self._mind_copy(dropped["mind"])
-            except OSError:
-                logger.warning("Cannot write the mind's copy; dropping without the checkpoint", exc_info=True)
-                dropped = self._dropped(view, cut, carry=False, window=plan.window)
+        try:
+            dropped = await self._dropped(view, cut, carry=carry, window=plan.window)
+            if dropped.get("mind_shown", "") != dropped.get("mind", ""):
+                await self._mind_copy(dropped["mind"])  # this route cuts the mind the drop carries: its copy must exist
+        except (_Aborted, asyncio.CancelledError):
+            raise
+        except Exception:
+            if not carry:
+                raise
+            # What it would carry cannot be gathered (the host, the mind's copy): the drop must still free the room.
+            logger.warning("Cannot gather what a drop would carry; dropping without it", exc_info=True)
+            dropped = await self._dropped(view, cut, carry=False, window=plan.window)
         payload, _ = await self._compaction(request, view, plan, cut, **dropped, hosted=hosted)
         (row,) = await self._commit_context([("compaction", payload)])
         await emit(

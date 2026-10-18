@@ -46,12 +46,11 @@ from core.agent_core.harness.context import (
     MEMO_HEADING,
     MIND_CUT,
     MIND_FILE,
-    MIND_FILE_CUT,
+    MIND_CURRENT,
     MIND_FILE_FIRST,
     MIND_FILE_PREVIOUS,
     MIND_TEMPLATE,
     SKILLS_LEAD_CARRIED,
-    TRUNCATED_LEAD,
     text_tokens,
     MemoItem,
     memo_tokens,
@@ -1998,10 +1997,10 @@ async def test_a_later_checkpoint_starts_from_the_mind_and_memo_it_left_and_need
 
     request = _request(models[1])
     assert MIND_FILE_PREVIOUS in request
-    # The first crossing's input: in the first checkpoint's tail, moved out by the second.
+    # The first crossing's input: in the first checkpoint's tail, moved out by the second. The mind follows, whole.
     seq = next(row.context_seq for row in await _store_rows(models) if row.row_id == "cross0")
-    assert request.endswith(f"Current memo.md:\n- [x] (#1) typed input\n- [ ] (#{seq}) typed cross0\n"
-                            "</context-checkpoint-request>")
+    assert request.endswith(f"Current memo.md:\n- [x] (#1) typed input\n- [ ] (#{seq}) typed cross0\n\n"
+                            f"{MIND_CURRENT}\n{first.payload['mind']}\n</context-checkpoint-request>")
     assert len(models[1].checkpoint_requests) == 1  # no tool, no repair: one request
     # What the turn left alone stays word for word: the mind, and the message it carried; one left unchecked goes.
     assert second.payload["mind"] == FIRST_MIND
@@ -2046,10 +2045,10 @@ async def test_a_mind_past_a_section_limit_is_kept_whole_shown_cut_and_given_who
     assert len(copies) == 1 and copies[0].read_text() == whole and not os.access(copies[0], os.W_OK)
     summary = second.payload["summary"]
     assert MIND_CUT.format(path=str(copies[0])) in summary and "- workstream 29" not in summary and MISSION in summary
-    # The next turn starts from the whole mind, and its request gives the cut section whole.
+    # The next turn starts from the whole mind, and its request gives it whole, the cut section too.
     request = _request(models[2])
-    assert MIND_FILE_CUT in request and f"{TRUNCATED_LEAD}\n# 2. Goals\n## Mission\n{MISSION}" in request
-    assert "- workstream 29: " in request and third.payload["mind"] == whole
+    assert MIND_FILE_PREVIOUS in request and request.endswith(f"{MIND_CURRENT}\n{whole}\n</context-checkpoint-request>")
+    assert third.payload["mind"] == whole
 
 
 async def test_a_mind_piled_past_twice_its_budget_is_not_kept(tmp_path):
@@ -2173,6 +2172,34 @@ async def test_a_host_that_cannot_say_who_typed_what_still_lets_the_ladder_drop(
     assert any(isinstance(event, CompactionFailed) for event in events)
     drops = [row for row in await store.load("session") if row.kind == "compaction"]
     assert drops and all(row.payload["mode"] == "dropped" and row.payload["memo"] == [] for row in drops)
+
+
+async def test_a_drop_after_a_v4_row_carries_its_skills_rendered_now(tmp_path):
+    # A checkpoint-v4 row names its skills only. A drop that keeps it carries them as a checkpoint would: rendered by
+    # the host now (section 8 c), not lost with the summary the drop replaces.
+    store = InMemoryTranscriptStore()
+    body = '<skill_content name="review">\nRead the whole diff first.\n</skill_content>'
+    host = Host(skills={"review": body})
+    context = _v5(tmp_path, host)
+    await _history_on_a_large_window(store, [5_000] * 4)
+    view = context_view(await store.load("session"))
+    v4 = compaction_payload(
+        view, len(view.units) - 1, mode="normal", reason="threshold", checkpoint=CHECKPOINT_BODY, state=(),
+        earlier_record=None, tokens_before=1, threshold=2, window=1_000_000, summarizer=None, usage=None,
+    )
+    for key in ("mind", "mind_truncated", "memo", "skills_carried"):
+        del v4[key]
+    v4["skills"] = [{"name": "review"}]
+    await store.append_payloads("session", [("compaction", v4)])
+    await _history_on_a_large_window(store, [5_000] * 12, row="more")
+    model = Model([[Done(assistant("done"))]], [[ProviderError("server", "down", False)]])
+    events = await run(make_agent(model, store=store, context=context))
+    assert events[-1].reason == "completed"
+    _, first, *_ = [row for row in await store.load("session") if row.kind == "compaction"]
+    assert first.payload["mode"] == "dropped" and first.payload["checkpoint"] == CHECKPOINT_BODY
+    (carried,) = first.payload["skills_carried"]
+    assert (carried["name"], carried["content"]) == ("review", body) and ["review"] in host.rendered
+    assert f"<skills>\n{SKILLS_LEAD_CARRIED}\n{body}\n</skills>" in first.payload["summary"]
 
 
 async def test_the_skills_a_checkpoint_takes_out_come_back_as_they_read_now(tmp_path):

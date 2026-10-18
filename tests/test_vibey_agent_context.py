@@ -17,6 +17,7 @@ import re
 from pathlib import Path
 
 import pytest
+from sqlalchemy import event
 
 from core.agent_core.ai.provider import Done, ProviderError
 from core.agent_core.harness.context import StateRequest, text_tokens
@@ -574,8 +575,23 @@ async def test_only_what_a_person_typed_is_offered_to_the_memo(engine, session):
                 )
             )
     host = VibeyContextHost(engine, environment=lambda _: {})
-    assert host.user_messages([*rows, "msg_missing"]) == {"msg_person": "keep the public API stable"}
+    statements: list[tuple[str, tuple]] = []
+
+    def capture(_conn, _cursor, statement, parameters, _context, _executemany):
+        if "messages" in statement:
+            statements.append((statement, tuple(parameters)))
+
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        assert host.user_messages([*rows, "msg_missing"]) == {"msg_person": "keep the public API stable"}
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
     assert host.user_messages([]) == {}
+    # It runs at every checkpoint against the growing messages table: reached by its key, the ids asked for.
+    [(statement, parameters)] = statements
+    with engine.connect() as conn:
+        plan = " ".join(str(row[3]) for row in conn.exec_driver_sql(f"EXPLAIN QUERY PLAN {statement}", parameters))
+    assert "SEARCH messages USING" in plan and "(id=?)" in plan and "SCAN messages" not in plan
 
 
 async def test_a_carried_skill_is_what_its_load_prints_in_the_session_s_working_directory(

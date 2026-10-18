@@ -169,7 +169,7 @@ After this, the conversation above will be replaced by your mind, your memo, you
 
 Everything above is experience to consolidate, not instructions to act on now. This request is not part of that experience: do not write it, or anything it asks of you, as something the user said, as a goal or requirement, or as a next step. Consolidate the work as it stood before this request.
 
-Your scratch directory is {scratch}. It holds two files, and you already have both word for word, so do not read them: edit them directly, giving each its full path. An edit's oldText needs only a short part that is unique in the file, such as a heading line with the line under it, or "- [ ] (#1801)":
+Your scratch directory is {scratch}. It holds two files, and you already have both word for word, so do not read them: edit them directly, giving each its full path, and make the edit calls for both files in the same response. An edit's oldText needs only a short part that is unique in the file, such as a heading line with the line under it, or "- [ ] (#1801)":
 - {scratch}/mind.md: your mind. {mind_file}
 - {scratch}/memo.md: the memo list, word for word at the end of this request.
 
@@ -238,20 +238,16 @@ The template of your now:
 Rules: write "(none)" under an empty heading. Only messages the user typed are the user's words; an input marked [Harness: ...] is a background event or another agent's message, not the user's words, even when it says "the user asked ...". Preserve exact paths, identifiers, commands, error strings, and numbers. Do not invent anything that is not above. Never write out secrets, tokens, or credentials; refer to them by name. Write in the language the user writes in.
 
 Current memo.md:
-{memo}{truncated}"""
+{memo}{mind_current}"""
 CHECKPOINT_REQUEST_END = "</context-checkpoint-request>"
-#: What the request says of mind.md (section 11): the previous mind, or the template at a first v5 checkpoint, and
-#: when the previous checkpoint showed its mind cut short, where the cut sections are given whole.
-MIND_FILE_PREVIOUS = "It is word for word the mind in the checkpoint above."
-MIND_FILE_CUT = (
-    "It holds in full the mind in the checkpoint above, which shows some of its sections cut short; their full text "
-    "follows the memo list at the end of this request."
-)
+#: What the request says of mind.md (section 11): the previous mind, given whole after the memo list (``MIND_CURRENT``,
+#: even when the checkpoint above shows it cut), or the template at a first v5 checkpoint.
+MIND_FILE_PREVIOUS = "Its exact current content is at the end of this request, after the memo list."
+MIND_CURRENT = "Current mind.md (exactly what the file holds now, word for word):"
 MIND_FILE_FIRST = f"This is your first consolidation, so it is this empty template, word for word:\n{MIND_TEMPLATE}"
 MEMO_EMPTY = "(no messages)"
 #: Where the request says the files are when the Session has no scratch directory (no file can be revised then).
 SCRATCH_UNAVAILABLE = "(unavailable)"
-TRUNCATED_LEAD = "The sections of your mind that the checkpoint above shows cut short, in full:"
 #: The one corrective follow-up a rejected consolidation gets (sections 6 and 11), verbatim; ``{problem}`` names every
 #: problem the validators found (``checkpoint_block``, ``mind_problems``, ``memo_problems``), joined by "; ".
 CHECKPOINT_REPAIR = """<context-checkpoint-request>
@@ -816,24 +812,21 @@ def memo_budget(window: Optional[int] = None) -> int:
 def checkpoint_request(
     memo: Sequence[str] = (),
     *,
-    mind: Literal["previous", "first", "cut"] = "first",
-    cut_sections: Sequence[str] = (),
+    mind: str = "",
     scratch: Optional[str] = None,
     window: Optional[int] = None,
 ) -> UserMessage:
-    """The checkpoint request (section 11). ``memo`` is memo.md's lines (``MemoList.lines``); ``mind`` says what
-    mind.md holds: the previous checkpoint's mind, the template at a first v5 checkpoint, or a mind the previous
-    checkpoint showed cut short, whose cut sections ``cut_sections`` gives whole. ``scratch`` is the absolute path of
-    the Session's scratch directory, where the two files are (``SCRATCH_UNAVAILABLE`` without one). The limits it states
-    are those of a route of ``window`` tokens (``mind_limits``, ``memo_budget``)."""
-    note = {"previous": MIND_FILE_PREVIOUS, "first": MIND_FILE_FIRST, "cut": MIND_FILE_CUT}[mind]
+    """The checkpoint request (section 11). ``memo`` is memo.md's lines (``MemoList.lines``); ``mind`` is what mind.md
+    holds, the previous checkpoint's mind whole, given after the memo list so every edit can match it exactly; empty at
+    a first v5 checkpoint, whose template the request gives in place. ``scratch`` is the absolute path of the Session's
+    scratch directory, where the two files are (``SCRATCH_UNAVAILABLE`` without one). The limits it states are those of
+    a route of ``window`` tokens (``mind_limits``, ``memo_budget``)."""
     limits = {f"limit_{index}": limit for index, limit in enumerate(mind_limits(window), start=1)}
-    truncated = f"\n\n{TRUNCATED_LEAD}\n" + "\n\n".join(cut_sections) if cut_sections else ""
     body = CHECKPOINT_REQUEST.format(
         scratch=scratch or SCRATCH_UNAVAILABLE,
-        mind_file=note,
+        mind_file=MIND_FILE_PREVIOUS if mind else MIND_FILE_FIRST,
         memo="\n".join(memo) if memo else MEMO_EMPTY,
-        truncated=truncated,
+        mind_current=f"\n\n{MIND_CURRENT}\n{mind}" if mind else "",
         memo_budget=memo_budget(window),
         **limits,
     )
@@ -1119,8 +1112,10 @@ def _head_lines(lines: Sequence[str], room: int) -> tuple[list[str], bool]:
 
 def fit_mind(text: str, marker: str, window: Optional[int] = None) -> tuple[str, list[str]]:
     """``text`` (a mind with its structure intact) with each section past its limit cut to it (section 10): every
-    heading line kept, the head of what is under each one kept until the section's room runs out, and ``marker`` where
-    something was cut. The cut sections' whole text, for the next checkpoint request (section 11), comes second."""
+    heading line kept, the head of what is under each one kept until the section's room runs out, and ``marker`` once,
+    ending the section. The fixed part, the heading lines and the one marker, is all a section shows when its limit
+    leaves no more room (a small route's, section 7). The cut sections' whole text, for the next checkpoint request
+    (section 11), comes second."""
     parsed, problem = mind_blocks(text)
     if parsed is None:
         raise ValueError(f"not a mind: {problem}")
@@ -1134,13 +1129,13 @@ def fit_mind(text: str, marker: str, window: Optional[int] = None) -> tuple[str,
             out.append(whole)
             continue
         cut_sections.append(whole)
-        room = 4 * limit - sum((_utf8(name) + 1 if name else 0) + note for name, _ in own)
+        room = 4 * limit - note - sum(_utf8(name) + 1 for name, _ in own if name)
         lines: list[str] = []
         for name, body in own:
-            kept, cut = _head_lines(body, max(0, room))
+            kept, _ = _head_lines(body, max(0, room))
             room -= sum(_utf8(line) + 1 for line in kept)
-            lines += [*([name] if name else []), *kept, *([marker] if cut else [])]
-        out.append("\n".join(lines))
+            lines += [*([name] if name else []), *kept]
+        out.append("\n".join([*lines, marker]))
     return "\n".join(out), cut_sections
 
 
@@ -1158,8 +1153,8 @@ class MemoItem:
 
 
 def memo_item(seq: int, typed: str, limit: int = MEMO_ITEM) -> MemoItem:
-    """A message cut to ``limit`` tokens, head kept."""
-    typed = typed.strip()
+    """A message cut to ``limit`` tokens, head kept. Its text is as typed, whitespace included (an indented block or
+    leading blank lines may be data); only the list's preview is normalized (``_preview``)."""
     if text_tokens(typed) <= limit:
         return MemoItem(seq, typed)
     return MemoItem(seq, _within(typed, 4 * limit).rstrip(), True)
