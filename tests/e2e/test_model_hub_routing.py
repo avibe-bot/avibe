@@ -971,7 +971,6 @@ def _assert_probe_cooldown_and_next_request_selection(
     expected_detail: str,
     expected_reason: str,
     expected_delay: int,
-    expected_max_delay: float | None = None,
 ) -> None:
     first, second = _prepare_probe_chain(
         app, first_upstream, second_upstream
@@ -988,9 +987,8 @@ def _assert_probe_cooldown_and_next_request_selection(
     assert first_state["status"] == "cooldown"
     assert first_state["detail_key"] == expected_detail
     retry_at = datetime.fromisoformat(first_state["retry_at"])
-    upper = expected_max_delay if expected_max_delay is not None else expected_delay
     assert before_probe + timedelta(seconds=expected_delay) <= retry_at
-    assert retry_at <= after_probe + timedelta(seconds=upper)
+    assert retry_at <= after_probe + timedelta(seconds=expected_delay)
 
     next_probe = _probe(app)
     next_body = next_probe.json()
@@ -1016,6 +1014,8 @@ def test_d3_rate_limit_moves_the_next_api_probe_to_hop_one(
     gateway credential issued only to a live backend turn.
     """
 
+    # D-4: the 429's Retry-After: 120 reaches Avibe through the real engine and
+    # outlasts the local 60-72 s backoff, so it sets the cooldown.
     with MockLLMUpstream() as second_upstream:
         with _engine_app(model_hub_app_factory) as app:
             _assert_probe_cooldown_and_next_request_selection(
@@ -1025,8 +1025,7 @@ def test_d3_rate_limit_moves_the_next_api_probe_to_hop_one(
                 auth_behavior="429",
                 expected_detail="models.source.cooldown.rate_limited",
                 expected_reason="rate_limited",
-                expected_delay=60,
-                expected_max_delay=72,
+                expected_delay=120,
             )
 
 

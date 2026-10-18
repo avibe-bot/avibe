@@ -68,10 +68,10 @@ Out of scope (documented, not dropped silently):
 |---|---|---|---|
 | D1 | add api_key source first, subscription-class source second | the subscription is placed ahead of the key (decision D-1, #2156); a contract test owns it, since adding a subscription hermetically is impossible (a takeover validates its grant with the provider) | contract |
 | D2 | turn with hop0 healthy | served; provenance records hop; usage metered | assert |
-| D3 | hop0 → 429 before first output | same-turn failover to hop1; `switch` event; hop0 initial local cooldown 60–72s; chat copy unchanged (silent) | assert |
+| D3 | hop0 → 429 before first output | same-turn failover to hop1; `switch` event; hop0 cools for the later of its initial local backoff (60–72s) and a valid Retry-After that survives the managed engine (D-4); chat copy unchanged (silent) | assert |
 | D4 | hop0 → quota (`insufficient_quota`) | fallback, cooldown 300s | assert |
 | D5 | hop0 → 401 (api_key, non-refreshable) | `credential_revoked` needs_action; UI shows repair action; no mid-turn refresh attempt | assert |
-| D6 | hop0 → 5xx | source backoff with positive bounded jitter; later valid Retry-After survives the managed engine and takes precedence | xfail: the engine never forwards an upstream error's headers (its status errors carry none, with or without `passthrough-headers`), so upstream advice never arrives |
+| D6 | hop0 → 5xx | source backoff with positive bounded jitter; later valid Retry-After survives the managed engine and takes precedence | assert |
 | D7 | stream interrupt after first output | terminal frame injected per protocol; **no replay/failover**; source still settles; next turn resolves hop1 (takeover pill visible) | assert |
 | D8 | cooldown `retry_at` elapses | hop0 becomes eligible; only recognized output or valid empty completion clears its state and emits `recover` | unit/loopback covered; local Incus outstanding |
 | D9 | all temporary hops keep failing | one closed recovery-exhausted result (Codex 400, Claude/OpenCode 424); localized final copy and original upstream provenance | gateway/scenario covered; local Incus outstanding |
