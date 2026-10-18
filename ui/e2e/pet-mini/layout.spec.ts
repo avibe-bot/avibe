@@ -364,7 +364,8 @@ for (const theme of ['light', 'dark']) {
           .map((animation) => animation.finished.catch(() => {})));
       });
       const history = page.locator('.pet-mini-bubble-history');
-      for (const name of ['在 Avibe 中打开', '需要授权，在 Avibe 中打开', '继续']) {
+      // Open in Avibe is pinned outside the scroll box; see the history test below.
+      for (const name of ['需要授权，在 Avibe 中打开', '继续']) {
         const button = history.getByRole('button', { name, exact: true });
         await expect(button).toBeVisible();
         const bounds = await button.boundingBox(), box = await history.boundingBox();
@@ -551,8 +552,8 @@ for (const theme of ['light', 'dark']) {
     // It must also sit clear of both edge fades, not merely inside the box.
     const last = (await history.locator('.pet-mini-detail-result').last().boundingBox())!;
     const fades = await history.evaluate((node) => ({
-      top: Math.min(32, node.scrollTop),
-      bottom: Math.min(32, node.scrollHeight - node.clientHeight - node.scrollTop),
+      top: Math.min(48, node.scrollTop),
+      bottom: Math.min(48, node.scrollHeight - node.clientHeight - node.scrollTop),
     }));
     expect(fades.top).toBeGreaterThan(0);
     expect(last.y).toBeGreaterThanOrEqual(box.y + fades.top - 1);
@@ -567,3 +568,91 @@ for (const theme of ['light', 'dark']) {
     near(await toggle.boundingBox(), collapsed);
   });
 }
+
+for (const theme of ['light', 'dark']) {
+  test(`Open in Avibe is an icon pinned to the open history's corner (${theme})`, async ({ page, browserName }) => {
+    await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long');
+    await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
+    const settle = () => page.evaluate(async () => {
+      await Promise.all(document.getAnimations()
+        .filter((animation) => animation.effect?.getTiming().iterations !== Infinity)
+        .map((animation) => animation.finished.catch(() => {})));
+    });
+    const toggle = page.locator('.pet-mini-reply-toggle');
+    const history = page.locator('.pet-mini-bubble-history');
+    const icon = page.locator('.pet-mini-reply-bubble').getByRole('button', { name: '在 Avibe 中打开', exact: true });
+    await expect(toggle).toBeVisible();
+    await expect(icon).toHaveCount(0);
+
+    await toggle.click();
+    await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).toHaveClass(/is-open/);
+    await settle();
+    await expect(icon).toBeVisible();
+    await expect(icon).toHaveAttribute('title', '在 Avibe 中打开');
+    expect((await icon.innerText()).trim()).toBe('');
+    // Only the pinned icon remains: no text link inside the scrolling history.
+    await expect(history.getByRole('button', { name: '在 Avibe 中打开', exact: true })).toHaveCount(0);
+    expect(await history.evaluate((node) => getComputedStyle(node).scrollbarWidth)).toBe('none');
+
+    const box = (await history.boundingBox())!;
+    const pinned = (await icon.boundingBox())!;
+    expect(pinned.width).toBeGreaterThanOrEqual(28);
+    expect(pinned.height).toBeGreaterThanOrEqual(28);
+    expect(pinned.y - box.y).toBeGreaterThanOrEqual(4);
+    expect(pinned.y - box.y).toBeLessThanOrEqual(12);
+    expect(box.x + box.width - (pinned.x + pinned.width)).toBeGreaterThanOrEqual(8);
+    expect(box.x + box.width - (pinned.x + pinned.width)).toBeLessThanOrEqual(20);
+
+    // It stays put while the history scrolls, and at the top of the scroll it
+    // covers none of the content.
+    for (const top of [0, 1e6]) {
+      await history.evaluate((node, top) => { node.scrollTop = top; }, top);
+      await expect.poll(() => icon.boundingBox()).toEqual(pinned);
+    }
+    await history.evaluate((node) => { node.scrollTop = 0; });
+    const first = (await history.locator('.pet-mini-detail-inner > *').first().boundingBox())!;
+    expect(first.y).toBeGreaterThanOrEqual(pinned.y + pinned.height);
+
+    // Reachable with Tab from the toggle, with a visible focus ring.
+    await toggle.focus();
+    // WebKit on macOS only tabs to buttons with Option held (Full Keyboard Access).
+    await page.keyboard.press(browserName === 'webkit' ? 'Alt+Tab' : 'Tab');
+    await expect(icon).toBeFocused();
+    await expect(icon).toHaveCSS('outline-style', 'solid');
+
+    await icon.click();
+    await expect.poll(() => page.evaluate(() => window.petFixtureOpens)).toEqual([expect.stringContaining('ses_main')]);
+
+    await toggle.click();
+    await expect(icon).toHaveCount(0);
+  });
+}
+
+test('the history fades over a taller, darker band than the card list', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long&activities=8');
+  const mask = (selector: string) => page.locator(selector).evaluate((node) => (node as HTMLElement).style.maskImage || (node as HTMLElement).style.webkitMaskImage);
+  const scrollTo = (selector: string, where: 'top' | 'middle') => page.locator(selector).evaluate((node, where) => {
+    node.scrollTop = where === 'top' ? 0 : (node.scrollHeight - node.clientHeight) / 2;
+    node.dispatchEvent(new Event('scroll'));
+    return node.scrollHeight - node.clientHeight;
+  }, where);
+
+  await page.locator('.pet-mini-collapsed').click();
+  expect(await scrollTo('.pet-mini-scroll', 'middle')).toBeGreaterThan(64);
+  await expect.poll(() => mask('.pet-mini-scroll')).toContain('rgb(0, 0, 0) 32px');
+  expect(await mask('.pet-mini-scroll')).toContain('calc(100% - 32px)');
+  expect(await mask('.pet-mini-scroll')).not.toContain('rgba');
+
+  await page.locator('.pet-mini-reply-toggle').click();
+  await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).toHaveClass(/is-open/);
+  expect(await scrollTo('.pet-mini-bubble-history', 'middle')).toBeGreaterThan(96);
+  // A 48px band that is already well faded across its outer two thirds.
+  await expect.poll(() => mask('.pet-mini-bubble-history')).toContain('rgb(0, 0, 0) 48px');
+  const middle = await mask('.pet-mini-bubble-history');
+  for (const stop of ['rgba(0, 0, 0, 0.12) 16.8px', 'rgba(0, 0, 0, 0.55) 33.6px', 'calc(100% - 48px)', 'rgba(0, 0, 0, 0.55) calc(100% - 33.6px)', 'rgba(0, 0, 0, 0.12) calc(100% - 16.8px)']) {
+    expect(middle).toContain(stop);
+  }
+  // No top fade before the history is scrolled.
+  await scrollTo('.pet-mini-bubble-history', 'top');
+  await expect.poll(() => mask('.pet-mini-bubble-history')).toContain('rgb(0, 0, 0) 0px');
+});
