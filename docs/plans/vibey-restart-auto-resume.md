@@ -136,8 +136,9 @@ exists; "handled" names where the in-place design still owns it.
    recovery owner to settle that Session), so its notice still names its
    Watches and offers no Retry. While no Watch can take its command yet, that
    Turn stays open and its owner retries (T2 before T4); a Stop still settles
-   it, and then T2 ends the command (a command whose Turn was canceled is
-   ended, as the Stop would have ended it live, never handed to a Watch, and
+   it, and then T2 ends the command at once, since settling a Turn open for
+   a restart retry (also one held for its transport or a steer) wakes the
+   retry (a command whose Turn was canceled is ended, as the Stop would have ended it live, never handed to a Watch, and
    so is one whose Turn holds a stop the dead process recorded and never
    settled, by the same `stop_requested` rule that keeps it from rerunning).
 4. **Runs follow the work.** Runs never leave the Turn: the rerun settles them

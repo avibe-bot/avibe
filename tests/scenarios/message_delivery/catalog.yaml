@@ -456,6 +456,7 @@ scenarios:
     test:
       - tests/test_backend_failure_retry.py::test_restart_reruns_a_cut_vibey_turn_in_place_without_a_notice
       - tests/test_backend_failure_retry.py::test_a_turn_waiting_for_its_steer_keeps_its_running_command_for_the_rerun
+      - tests/test_backend_failure_retry.py::test_a_stop_ends_the_command_of_a_turn_held_for_its_rerun_at_once
       - tests/test_backend_failure_retry.py::test_a_rerun_cancelled_before_its_adapter_owns_the_command_still_ends_it
       - tests/test_vibey_agent.py::test_a_restart_rerun_waits_for_its_surviving_command_as_the_live_call_would
       - tests/agent_core/tools/test_bash.py::test_a_stop_during_a_failed_recovered_handover_ends_the_command_before_another_attempt

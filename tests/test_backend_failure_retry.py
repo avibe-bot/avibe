@@ -514,6 +514,38 @@ def test_a_turn_waiting_for_its_steer_keeps_its_running_command_for_the_rerun(
         assert message_deliveries.get_delivery(conn, steer["id"])["turn_id"] == cut.turn_id
 
 
+def test_a_stop_ends_the_command_of_a_turn_held_for_its_rerun_at_once(isolated_state, tmp_path):
+    """MESSAGE-DELIVERY-330: a cut Turn held open for its rerun (its transport not ready yet) has
+    no runtime for a Stop to reach, so the Stop settles it directly; its retry wakes at once and
+    T2 ends the surviving command, as the Stop would have live, without waiting out its delay."""
+    from core.agent_core.tools.base import JobStatus
+    from tests.agent_core.fakes import FakeJobHost
+
+    jobs = FakeJobHost()
+    jobs.states["job_1"] = JobStatus("running")
+    cut = _accepted_turn(tmp_path, backend="vibey", delivery="unready", jobs=jobs)
+    _previous_process("running")(cut.engine, cut.session_id, cut.turn_id)
+    cut.manager._active_identity = lambda *_args: None
+    cut.manager._transport_can_deliver = lambda _platform: False
+
+    async def startup_then_stop():
+        assert await cut.manager.controller.vibey_recovery.start() == []
+        await cut.manager.recover_durable_delivery_state(service_restart=True)
+        # Held: the command stays with the Turn.
+        assert cut.starts == [] and jobs.killed == [] and jobs.watches == {}
+        cut.manager._terminalize_durable_turn(
+            cut.turn_id, "canceled", settled_by="adapter_not_active", evidence_kind="stop_not_active"
+        )
+        for _ in range(50):
+            if jobs.killed:
+                break
+            await asyncio.sleep(0.02)
+
+    asyncio.run(startup_then_stop())
+
+    assert jobs.killed == ["job_1"] and jobs.watches == {} and cut.starts == []
+
+
 def test_concurrent_recovery_passes_rerun_a_cut_turn_once(isolated_state, tmp_path):
     """MESSAGE-DELIVERY-327: two recovery passes over the same cut Turn (a held rerun's transport
     callback and its retry) both decide to rerun it; one rotates and reruns it, and the other,

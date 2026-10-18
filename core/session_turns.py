@@ -21,7 +21,7 @@ import json
 import logging
 import uuid
 import weakref
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from functools import partial
@@ -763,8 +763,10 @@ class SessionTurnManager:
         # reports above: ``(session_id, turn_id)``. The Turn stays open, so another
         # restart reruns it whatever this queue held.
         self._reruns_awaiting_transport: dict[str, list[tuple[str, str]]] = {}
-        # One retry per Session whose cut Vibey Turn startup had to leave open.
+        # One retry per Session whose cut Vibey Turn startup had to leave open, and what wakes
+        # it before its next pass: that Turn settling (a Stop has no runtime to reach then).
         self._restart_recovery_retries: dict[str, asyncio.Task[None]] = {}
+        self._restart_recovery_wakes: dict[str, tuple[asyncio.AbstractEventLoop, asyncio.Event]] = {}
         # The live turn sink per TURN SINK KEY. Each is
         # ``{on_chunk, done_event, turn_token}`` — the turn's stream callback +
         # completion event + correlation token. Every dispatched turn registers one,
@@ -5533,6 +5535,12 @@ class SessionTurnManager:
             if requeued_input:
                 self._publish_queue_update(session_id)
             self._publish_terminal_inbox_update(session_id)
+            waiting = self._restart_recovery_wakes.get(session_id)
+            if waiting is not None:
+                # A cut Turn open for a restart retry has no runtime for a Stop to reach: its
+                # retry runs now, so T2 ends the command of a canceled Turn as live.
+                with suppress(RuntimeError):  # its loop has closed
+                    waiting[0].call_soon_threadsafe(waiting[1].set)
         if status_changed and projected_status is not None:
             from core.inbox_events import bus
 
@@ -6982,13 +6990,20 @@ class SessionTurnManager:
         except RuntimeError:
             return
 
+        wake = asyncio.Event()
+
         async def retry() -> None:
             try:
                 for attempt in itertools.count():
                     delays = self.RESTART_RECOVERY_RETRY_DELAYS
-                    await asyncio.sleep(
-                        delays[attempt] if attempt < len(delays) else self.RESTART_RECOVERY_RETRY_PERIOD
-                    )
+                    try:
+                        await asyncio.wait_for(
+                            wake.wait(),
+                            delays[attempt] if attempt < len(delays) else self.RESTART_RECOVERY_RETRY_PERIOD,
+                        )
+                    except asyncio.TimeoutError:
+                        pass
+                    wake.clear()
                     try:
                         with self._sqlite_engine().connect() as conn:
                             turn = delivery_store.get_turn(conn, turn_id)
@@ -7005,7 +7020,9 @@ class SessionTurnManager:
             finally:
                 if self._restart_recovery_retries.get(session_id) is asyncio.current_task():
                     self._restart_recovery_retries.pop(session_id, None)
+                    self._restart_recovery_wakes.pop(session_id, None)
 
+        self._restart_recovery_wakes[session_id] = (loop, wake)
         self._restart_recovery_retries[session_id] = loop.create_task(
             retry(), name=f"vibey-restart-recovery:{session_id}"
         )
