@@ -587,7 +587,7 @@ class EngineSupervisor:
                 except Exception as exc:
                     self._stop_locked()
                     raise EngineUnavailableError("models.engine.unsafe_permissions") from exc
-                if not self._oauth_grants_listed_locked(connection, deadline):
+                if not self._oauth_grants_listed_locked(connection, deadline) or process.poll() is not None:
                     time.sleep(min(_STARTUP_POLL_INTERVAL_SECONDS, max(0.0, deadline - time.monotonic())))
                     continue
                 self._last_check = _utc_now()
@@ -623,25 +623,30 @@ class EngineSupervisor:
         models: a refresh or turn in that window finds a grant that offers
         nothing (#2756). API-key Sources are registered before it answers. One
         deadline, that watcher's reload bound, covers the whole wait and every
-        request in it; a grant still listing nothing then is left to its own
-        state, as the engine is up. A listing that fails is not readiness: the
-        start checks the engine again, and fails like any start that never
-        becomes ready.
+        request in it. A listing the engine refuses as one whose credentials or
+        config it does not hold (``_disowns_config_locked``) is not readiness:
+        the start checks the engine again, and fails like any start that never
+        becomes ready. Any other failure is polled through; a grant still
+        unlisted at the deadline is logged and left to its own state, as the
+        engine is up.
         """
 
         client = EngineClient(connection)
         deadline = min(time.monotonic() + MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS, startup_deadline)
 
+        failure: str | None = None
+
         def listing(path: str, query: dict[str, str] | None = None) -> dict[str, Any] | None:
-            # A timeout proves nothing about the engine (see _disowns_config_locked): the wait goes on.
+            nonlocal failure
             try:
                 return client.management_request(
                     "GET", path, query=query, timeout=min(1.0, max(0.01, deadline - time.monotonic())),
                 )
             except EngineClientError as exc:
-                if exc.error_type == "TimeoutError":
-                    return None
-                raise
+                if self._disowns_config_locked(exc.status_code, local_os_errno(exc)):
+                    raise
+                failure = str(exc.status_code or exc.error_type)
+                return None
 
         pending: list[str] | None = None
         try:
@@ -668,8 +673,8 @@ class EngineSupervisor:
         except EngineClientError:
             return False
         logger.warning(
-            "Model Hub engine startup: OAuth grants unlisted=%s listed_no_model=%d within %.1fs",
-            pending is None, len(pending or ()), MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS,
+            "Model Hub engine startup: OAuth grants unlisted=%s listed_no_model=%d last_failure=%s within %.1fs",
+            pending is None, len(pending or ()), failure, MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS,
         )
         return True
 

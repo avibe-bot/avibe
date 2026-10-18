@@ -4715,14 +4715,30 @@ def test_the_wait_for_oauth_grants_is_bounded_as_a_whole_however_many_grants_ans
         supervisor.stop()
 
 
-def test_a_start_whose_grant_listing_fails_is_not_ready(tmp_path: Path) -> None:
-    """MH-RUNTIME-005 (#2756): an engine that answers its health check but refuses the grant listing never starts
-    as ready; the start fails like any that never becomes ready, and stops it."""
+@pytest.mark.parametrize(
+    ("status", "ready"),
+    [(404, False), (401, False), (503, True)],
+    ids=["disowned-404", "disowned-401", "transient-503"],
+)
+def test_a_failed_grant_listing_fails_the_start_only_when_the_engine_disowns_its_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int, ready: bool,
+) -> None:
+    """MH-RUNTIME-005 (#2756): an engine that answers its health check but refuses the grant listing as a credential
+    or route it does not hold never starts as ready, and is stopped. Any other failure is a degraded listing, not a
+    failed engine: the start polls it through the bound, then is ready."""
 
-    supervisor, store = _fixture_supervisor(tmp_path, startup_timeout=1.0, auth_files_status=404)
-    with pytest.raises(EngineUnavailableError):
-        supervisor.ensure_running()
-    assert supervisor.status()["status"]["health"] != "ok"
+    monkeypatch.setattr(supervisor_module, "MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS", 0.5)
+    supervisor, _store = _fixture_supervisor(tmp_path, startup_timeout=1.5, auth_files_status=status)
+    try:
+        if ready:
+            supervisor.ensure_running()
+            assert supervisor.status()["status"]["health"] == "ok"
+        else:
+            with pytest.raises(EngineUnavailableError):
+                supervisor.ensure_running()
+            assert supervisor.status()["status"]["health"] != "ok"
+    finally:
+        supervisor.stop()
 
 
 def test_mh_runtime_006_timeout_stops_engine_with_bounded_structured_diagnostics(
