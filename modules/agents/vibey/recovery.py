@@ -51,6 +51,23 @@ class VibeyRecovery:
                 self._task = asyncio.create_task(self._retry(), name="vibey-agent-recovery")
         return unsettled
 
+    async def settle_session(self, session_id: str) -> bool:
+        """Settle one Session now, a running job handed to its Watch: ``True`` once it settled.
+
+        The Turn owner asks before it settles a Turn a restart cut without continuing it, so
+        that Turn's notice names the Watches (T2 before T4). Serialized with every pass; a
+        failure is retried like any unsettled Session.
+        """
+        async with self._lock:
+            try:
+                unsettled = await self._controller.agent_service.agents["vibey"].recover_runtime_state(session_id)
+            except Exception:
+                logger.exception("Vibey could not settle Session %s", session_id)
+                unsettled = [session_id]
+        if unsettled:
+            self.ensure()
+        return not unsettled
+
     def ensure(self) -> None:
         """A Turn could not settle something (a returned input it failed to admit): retry it."""
         if not self.retrying:

@@ -14,7 +14,13 @@ from modules.agents.catalog import AGENT_BACKENDS
 from storage import message_deliveries, messages_service
 from storage.agent_session_rows import reserve_write_lock
 from storage.db import create_sqlite_engine
-from storage.models import agent_sessions, message_deliveries as message_deliveries_table, messages, session_turns
+from storage.models import (
+    agent_events,
+    agent_sessions,
+    message_deliveries as message_deliveries_table,
+    messages,
+    session_turns,
+)
 from tests.backend_failure_retry_helpers import previous_process as _previous_process
 from tests.backend_failure_retry_helpers import reserve_failure_retry, seed_failed_notice
 from tests.test_session_delivery_fsm import _context, _fsm_schema_template, managers  # noqa: F401
@@ -22,8 +28,31 @@ from tests.test_ui_session_stream import _accepted_dispatch, _make_session, isol
 from tests.ui_server_test_helpers import csrf_headers
 
 
-def _accepted_turn(tmp_path, *, backend, delivery="ready", native_message_id=None):
-    """One accepted Turn through the real Delivery owner, notice dispatcher, and storage."""
+def _with_vibey_recovery(controller, engine, tmp_path, jobs):
+    """The registered Vibey adapter over ``jobs`` and its single recovery owner, as at startup."""
+    from core.agent_core.messages import text
+    from core.agent_core.tools.base import ToolResult
+    from modules.agents.vibey import VibeyAgent
+    from modules.agents.vibey.recovery import VibeyRecovery
+    from modules.agents.vibey.tools import ToolSuite
+
+    async def handed_over(_call, _job_id, _status, watch_id):
+        return ToolResult((text(f"Command is still running and is now Watch {watch_id}."),))
+
+    suite = ToolSuite(
+        jobs=jobs, create_tools=lambda *_args: [], render_recovered=handed_over,
+        find_job=lambda call: "job_1" if call.tool_call_id == "call_bash" else None,
+    )
+    controller.agent_service.agents["vibey"] = VibeyAgent(
+        controller, engine=engine, tool_suite=suite, state_dir=tmp_path / "agent_core"
+    )
+    controller.vibey_recovery = VibeyRecovery(controller)
+
+
+def _accepted_turn(tmp_path, *, backend, delivery="ready", native_message_id=None, jobs=None):
+    """One accepted Turn through the real Delivery owner, notice dispatcher, and storage.
+
+    With ``jobs``, startup also runs Vibey's own recovery pass first, over those jobs."""
     from core.message_dispatcher import ConsolidatedMessageDispatcher
     from core.session_turns import SessionTurnManager
     from tests.scenario_harness.message_delivery import MessageDeliveryController
@@ -44,6 +73,8 @@ def _accepted_turn(tmp_path, *, backend, delivery="ready", native_message_id=Non
     controller.session_turns = manager
     dispatcher = ConsolidatedMessageDispatcher(controller)
     controller.emit_agent_message = dispatcher.emit_agent_message
+    if jobs is not None:
+        _with_vibey_recovery(controller, engine, tmp_path, jobs)
     if delivery == "send_failed":
         controller.im_client.send_message = AsyncMock(side_effect=[OSError("transport offline"), "msg-recovered"])
     starts, contexts = [], []
@@ -76,7 +107,15 @@ def _restart(turn, before_restart=None):
         before_restart(turn.engine, turn.session_id, turn.turn_id)
     turn.manager._active_identity = lambda *_args: None
     turn.manager._transport_can_deliver = lambda _platform: turn.delivery != "unready"
-    asyncio.run(turn.manager.recover_durable_delivery_state(turn.session_id, service_restart=True))
+    recovery = getattr(turn.manager.controller, "vibey_recovery", None)
+
+    async def startup():
+        # The controller's order: Vibey's T2 pass, then Turn recovery.
+        if recovery is not None:
+            assert await recovery.start() == []
+        await turn.manager.recover_durable_delivery_state(turn.session_id, service_restart=True)
+
+    asyncio.run(startup())
 
 
 def _notices(engine, session_id):
@@ -87,9 +126,9 @@ def _notices(engine, session_id):
         ]
 
 
-def _restart_failure_notice(tmp_path, *, backend, delivery="ready", before_restart=None):
+def _restart_failure_notice(tmp_path, *, backend, delivery="ready", before_restart=None, jobs=None):
     """Recover an accepted Turn through the real notice dispatcher and storage."""
-    cut = _accepted_turn(tmp_path, backend=backend, delivery=delivery)
+    cut = _accepted_turn(tmp_path, backend=backend, delivery=delivery, jobs=jobs)
     manager, engine, session_id = cut.manager, cut.engine, cut.session_id
     _restart(cut, before_restart)
     assert cut.starts == []
@@ -201,14 +240,30 @@ def _continuations(engine, session_id):
         ]
 
 
-@pytest.mark.parametrize("step", ["tool", "handover", "partial"])
+@pytest.mark.parametrize("step", ["tool", "handover", "partial", "running"])
 def test_restart_continues_a_cut_vibey_turn_from_its_transcript_without_a_notice(isolated_state, tmp_path, step):
     """MESSAGE-DELIVERY-327 / MESSAGE-DELIVERY-330: one hidden continuation, no notice;
-    a command T2 handed to a Watch does not stop it, and a failed stream's partial text
-    is not a final reply."""
-    cut = _accepted_turn(tmp_path, backend="vibey")
+    a committed handover does not stop it, a command still running is left to it, not
+    handed over at startup, and a failed stream's partial text is not a final reply."""
+    from core.agent_core.tools.base import JobStatus
+    from tests.agent_core.fakes import FakeJobHost
+
+    jobs = None
+    if step == "running":
+        jobs = FakeJobHost()
+        jobs.states["job_1"] = JobStatus("running")
+    cut = _accepted_turn(tmp_path, backend="vibey", jobs=jobs)
 
     _restart(cut, _previous_process(step))
+
+    if jobs is not None:
+        assert jobs.watches == {}
+        with cut.engine.connect() as conn:
+            assert not conn.execute(
+                select(agent_events.c.id).where(
+                    agent_events.c.session_id == cut.session_id, agent_events.c.event_type == "tool_result"
+                )
+            ).first()
 
     [continuation] = _continuations(cut.engine, cut.session_id)
     with cut.engine.connect() as conn:
@@ -330,9 +385,16 @@ def test_restart_notice_names_the_watch_running_the_command_and_offers_no_retry(
     """MESSAGE-DELIVERY-322: resending a command that still runs as a Watch would run its effects twice."""
     from vibe.ui_server import app
 
+    from core.agent_core.tools.base import JobStatus
+    from tests.agent_core.fakes import FakeJobHost
+
+    jobs = FakeJobHost()
+    jobs.states["job_1"] = JobStatus("running")
+    # Startup's pass leaves the command to the Turn's owner, which hands it over before its notice.
     session_id, notice = _restart_failure_notice(
-        tmp_path, backend="vibey", before_restart=_then(_previous_process("handover"), _request_stop)
+        tmp_path, backend="vibey", jobs=jobs, before_restart=_then(_previous_process("running"), _request_stop)
     )
+    assert jobs.watches == {"job_1": "watch_job_1"}
 
     assert "watch_job_1" in notice["text"] and "重新发送" not in notice["text"]
     assert notice["metadata"]["watch_ids"] == ["watch_job_1"]

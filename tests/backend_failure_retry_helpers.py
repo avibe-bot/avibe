@@ -118,6 +118,7 @@ def previous_process(step):
     ``tool``: a ``write`` call cut mid-call (T2 gives it the interrupted result);
     ``handover``: a bash command still running (T2 hands it to a Watch);
     ``partial``: the text a failed stream carried, committed as a non-final response;
+    ``running``: a bash command left running, its call still open (startup T2 has not run);
     ``final``: the Turn's final reply.
     """
     from core.agent_core.agent.recovery import settle_open_calls
@@ -133,7 +134,7 @@ def previous_process(step):
         jobs.states["job_1"] = JobStatus("running")
         call = (
             ToolCallBlock(id="call_bash", name="bash", arguments={"command": "sleep 60; echo done >> s6.txt"})
-            if step == "handover"
+            if step in {"handover", "running"}
             else ToolCallBlock(id="call_write", name="write", arguments={"path": "notes.md", "content": "x"})
         )
 
@@ -149,6 +150,8 @@ def previous_process(step):
                 await store.append_response(session_id, assistant("先读完日志", stop_reason="error"), final=False)
                 return
             response = await store.append_response(session_id, assistant("", calls=(call,)), final=False)
+            if step == "running":
+                return
             instance = CallInstance(session_id, response.row_id, response.context_seq, call.id)
             await settle_open_calls(
                 session_id=session_id, store=store, jobs=jobs,

@@ -302,6 +302,16 @@ def _turn(context) -> str:
     return str((context.platform_specific or {}).get("turn_token") or "")
 
 
+def _owner_settled(engine, *requests) -> None:
+    """The Turn owner settled these Turns without continuing them, as after a restart notice."""
+    with engine.begin() as conn:
+        conn.execute(
+            update(session_turns)
+            .where(session_turns.c.id.in_([_turn(request.context) for request in requests]))
+            .values(state="terminal", terminal_outcome="failed", terminal_at=NOW)
+        )
+
+
 def _context(platform: str, session_id: str, *, turn_id: str, delivery_id: str) -> MessageContext:
     return MessageContext(
         user_id="u1",
@@ -2603,6 +2613,8 @@ async def test_startup_hands_an_orphaned_foreground_job_to_its_watch(engine, ses
     call = ToolCallBlock(id="call_bash", name="bash", arguments={"command": "pytest -q"})
     await harness.agent.store.append_response(SESSION, assistant("", calls=(call,)), final=False)
     jobs.states["job_1"] = JobStatus("running")
+    # The Turn owner settled the Turn without continuing it, so the job is startup's to hand over.
+    _owner_settled(engine, request)
 
     # A pass that failed before it settled anything runs again in full.
     harness.new_agent()
@@ -2655,60 +2667,91 @@ async def test_a_run_the_service_stop_cut_leaves_its_turn_open_for_the_restart_c
         await running
 
 
-async def test_a_restart_continuation_resumes_past_the_watch_handover_without_rerunning_the_command(
-    engine, session, tmp_path, published
+@pytest.mark.parametrize("case", ["exits", "window_passed", "stop"])
+async def test_a_restart_continuation_waits_for_its_surviving_command_as_the_live_call_would(
+    engine, session, tmp_path, published, case
 ) -> None:
-    """MESSAGE-DELIVERY-330: the hidden continuation recovery reserves resumes the transcript;
-    the command T2 handed to a Watch is not started again."""
+    """MESSAGE-DELIVERY-330: startup leaves a running command to the Turn it continues; the
+    continuation waits for it within the call's foreground window, counted from its launch, so
+    its real output is the result the reply (and a Run, MESSAGE-DELIVERY-328) settles from. A
+    window the downtime spent hands it over; a Stop ends the wait and the command. It never
+    starts again."""
     from core.backend_failure_retry import reserve_restart_resume
+    from core.scheduled_tasks import TaskExecutionStore
+    from core.watches import ManagedWatchStore
 
-    jobs = FakeJobHost()
-    bash = FakeTool("bash")
-
-    async def render(call, job_id, status, watch_id):
-        return ToolResult((text(f"Command is still running and is now Watch {watch_id}."),))
-
-    suite = ToolSuite(
-        jobs=jobs,
-        create_tools=lambda jobs_, sink: [bash],
-        render_recovered=render,
-        find_job=lambda call: "job_1" if (call.session_id, call.tool_call_id) == (SESSION, "call_bash") else None,
-    )
-    harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant("The suite runs on as watch_job_1."))]], suite=suite)
-    # The previous process: an accepted Turn whose foreground command the restart cut.
-    request = harness.request("run the slow suite")
+    suite = local_tool_suite(str(tmp_path / "jobs"))
+    harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant("步骤三完成"))]], suite=suite)
+    # The previous process: an accepted Turn of an Agent Run, cut while its command ran.
+    request = harness.request("run the three steps")
     cut_turn = _turn(request.context)
     harness.controller._native_start(request.context)
     await harness.agent.store.consume_input(
-        SESSION, request.context.platform_specific["delivery_id"], UserMessage((text("run the slow suite"),))
+        SESSION, request.context.platform_specific["delivery_id"], UserMessage((text("run the three steps"),))
     )
-    call = ToolCallBlock(id="call_bash", name="bash", arguments={"command": "pytest -q"})
-    await harness.agent.store.append_response(SESSION, assistant("", calls=(call,)), final=False)
-    jobs.states["job_1"] = JobStatus("running")
-    # The next start: T2 hands the command to its Watch, then Turn recovery continues the Turn.
-    harness.new_agent()
-    assert await harness.agent.recover_runtime_state() == []
-    with engine.begin() as conn:
-        continuation = reserve_restart_resume(conn, message_deliveries.get_turn(conn, cut_turn))
-        assert continuation is not None
-        message_deliveries.terminalize_turn(
-            conn, cut_turn, outcome="completed", settled_by="restart_resumed", evidence_kind="restart_resume"
-        )
-        resumed_turn = message_deliveries.new_turn_id()
-        message_deliveries.claim_start_batch(
-            conn, turn_id=resumed_turn, session_id=SESSION, backend="vibey", deliveries=[continuation], dispatch_text=""
-        )
-    context = _context("avibe", SESSION, turn_id=resumed_turn, delivery_id=continuation["id"])
-    context.platform_specific.update({"vibey_resume": True, "vibey_source_turn_id": cut_turn})
-    resume = AgentRequest(**{**request.__dict__, "context": context, "message": "", "user_message": ""})
+    command = "sleep 1; printf step-two-done" if case == "exits" else "sleep 30"
+    call = ToolCallBlock(id="call_bash", name="bash", arguments={"command": command})
+    response = await harness.agent.store.append_response(SESSION, assistant("", calls=(call,)), final=False)
+    job_id = await _real_job(suite, command, call=_instance(response, "call_bash"), cwd=tmp_path)
+    requests = TaskExecutionStore()
+    run = requests.enqueue_agent_run(message="run the three steps", session_id=SESSION, agent_name="vibey")
+    assert requests.claim(run.id) is not None
+    try:
+        if case == "window_passed":
+            # The job launched three minutes ago: the downtime spent its 120 s window.
+            from datetime import datetime, timedelta
 
-    await harness.agent.handle_message(resume)
+            meta_path = Path(suite.jobs.job_dir(job_id)) / "meta.json"
+            meta = json.loads(meta_path.read_text())
+            launched = datetime.fromisoformat(meta["created_at"].replace("Z", "+00:00")) - timedelta(minutes=3)
+            meta["created_at"] = launched.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+            meta_path.write_text(json.dumps(meta))
+        harness.new_agent()
+        assert await harness.agent.recover_runtime_state() == []
+        assert ManagedWatchStore().find_job_watch(job_id) is None
+        with engine.begin() as conn:
+            continuation = reserve_restart_resume(conn, message_deliveries.get_turn(conn, cut_turn))
+            message_deliveries.terminalize_turn(
+                conn, cut_turn, outcome="completed", settled_by="restart_resumed", evidence_kind="restart_resume"
+            )
+            resumed_turn = message_deliveries.new_turn_id()
+            message_deliveries.claim_start_batch(
+                conn, turn_id=resumed_turn, session_id=SESSION, backend="vibey", deliveries=[continuation], dispatch_text=""
+            )
+        context = _context("avibe", SESSION, turn_id=resumed_turn, delivery_id=continuation["id"])
+        context.platform_specific.update(
+            {"vibey_resume": True, "vibey_source_turn_id": cut_turn, "accepted_agent_run_ids": [run.id]}
+        )
+        resume = AgentRequest(**{**request.__dict__, "context": context, "message": "", "user_message": ""})
 
-    assert bash.calls == [] and jobs.watches == {"job_1": "watch_job_1"}
-    [model_request] = harness.provider.requests
-    assert "now Watch watch_job_1" in json.dumps(message_to_dict(model_request.messages[-1]))
-    assert harness.controller.im_client.sent[-1] == "The suite runs on as watch_job_1."
-    assert len(harness.rows("user")) == 1 and harness.rows("agent_initiated")[0]["context_seq"] is None
+        resumed = asyncio.create_task(harness.agent.handle_message(resume))
+        if case == "stop":
+            await _until(lambda: harness.agent._run_for(SESSION, resumed_turn) is not None, "the continuation never ran")
+            await asyncio.sleep(0.3)
+            assert not resumed.done() and await harness.agent.handle_stop(resume)
+        await asyncio.wait_for(resumed, timeout=20)
+
+        [result] = [entry for entry in await harness.context_rows() if entry.kind == "tool_result"]
+        body = result.message.content[0].text
+        watch_id = ManagedWatchStore().find_job_watch(job_id)
+        if case == "exits":
+            assert "step-two-done" in body and watch_id is None
+            assert "step-two-done" in json.dumps(message_to_dict(harness.provider.requests[0].messages[-1]))
+            assert harness.controller.im_client.sent[-1] == "步骤三完成"
+            stored = requests.get_run(run.id)
+            assert (stored["status"], stored["result_text"]) == ("succeeded", "步骤三完成")
+        elif case == "window_passed":
+            assert watch_id and f"now Watch {watch_id}" in body
+            assert suite.jobs.status(job_id).state == "running"
+        else:
+            # Stopped before the continuation was dispatched: no model call, no hidden row.
+            assert "Stopped by the user" in body and watch_id is None
+            assert suite.jobs.status(job_id).state != "running" and harness.provider.requests == []
+        assert len(harness.rows("user")) == 1
+        assert [row["context_seq"] for row in harness.rows("agent_initiated")] == ([] if case == "stop" else [None])
+    finally:
+        if suite.jobs.status(job_id).state == "running":
+            await suite.jobs.kill(job_id)
 
 
 async def test_startup_recovers_a_session_routed_to_another_agent_since(engine, session, tmp_path, published) -> None:
@@ -2739,7 +2782,8 @@ async def test_startup_recovers_a_session_routed_to_another_agent_since(engine, 
         )
 
     harness.new_agent()
-    await harness.agent.recover_runtime_state()
+    # Startup leaves the job to the Turn owner, whose notice for a Session off Vibey asks for it first.
+    await harness.agent.recover_runtime_state(SESSION)
 
     assert jobs.watches == {"job_1": "watch_job_1"}
     assert (await harness.context_rows())[-1].kind == "tool_result"
@@ -4137,7 +4181,7 @@ async def test_resume_settles_a_real_bash_job_through_the_real_renderer(
             await _until(lambda: suite.jobs.status(job_id).state == "exited", "the command never exited")
 
         harness.new_agent()
-        await harness.agent.recover_runtime_state()
+        await harness.agent.recover_runtime_state(SESSION)
 
         result = (await harness.context_rows())[-1]
         assert result.kind == "tool_result"
@@ -4202,7 +4246,7 @@ async def test_resume_settles_a_reused_call_id_from_its_own_instance_whatever_th
     try:
         agent = harness.new_agent()
         agent._tool_suite = None
-        await agent.recover_runtime_state()
+        await agent.recover_runtime_state(SESSION)
 
         result = (await harness.context_rows())[-1]
         watch = _job_watch(current)
@@ -4283,6 +4327,13 @@ async def test_recovery_retries_a_session_it_could_not_settle(
 
     _hand_over_failing_once(monkeypatch)
     harness, running, _exited = await _two_sessions_with_open_calls(engine, tmp_path, local_tool_suite())
+    with engine.begin() as conn:
+        # SESSION's Turn owner settled its Turn without continuing it: the job is recovery's.
+        conn.execute(
+            update(session_turns)
+            .where(session_turns.c.session_id == SESSION)
+            .values(state="terminal", terminal_outcome="failed", terminal_at=NOW)
+        )
     recovery = _controller_with(harness.new_agent()).vibey_recovery
     try:
         # The first pass settles ses_b and reports SESSION, never success over a failure.
@@ -4502,10 +4553,11 @@ async def test_startup_recovery_hands_a_job_over_with_its_turns_authorization(
     job_id = await _remote_turn_with_open_call(harness, tmp_path, snapshot=snapshot, author_id=author_id)
     suite = harness.agent._tool_suite
     try:
-        # The process restarted: no live request, only the Turn's durable rows.
+        # The process restarted: no live request, only the Turn's durable rows; the Turn owner
+        # settles this Session before its notice.
         agent = harness.new_agent()
         agent._tool_suite = None
-        assert await agent.recover_runtime_state() == []
+        assert await agent.recover_runtime_state(SESSION) == []
 
         watch = _job_watch(job_id)
         assert watch is not None and watch.agent_name == "vibey"

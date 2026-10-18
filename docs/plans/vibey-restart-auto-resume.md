@@ -55,12 +55,21 @@ This replaces recovery invariant T4 for Vibey (`agent-core-contracts/recovery.md
    no input row, no visible `continue`, no replay of a committed tool call.
    Accepted steers of the cut Turn and its retry ancestry are pinned as for
    Retry.
-3. **Tool calls.** T2 runs first, unchanged: an exited job gives its output, a
-   running job is handed to a Watch, a call without job state gets the
-   interrupted result. The continuation proceeds after a Watch handover: the
-   handover result is already committed, so nothing runs twice, and the model
-   sees the same handover result a long command produces in a live Turn. The
-   "no Retry after a handover" rule stays for the manual notice only.
+3. **Tool calls.** A continued Turn treats a job that survived the restart as
+   its live call would. Startup's T2 pass leaves a running job of a Turn still
+   unsettled to the Turn owner; the continuation's own T2, before its first
+   projection, waits for it until it exits, until the call's foreground window
+   (`bash`'s, 120 s by default) passes, counted from the job's launch
+   (`meta.created_at`), or until a Stop, which ends the command as in a live
+   Turn. An exited job gives its real output; only a job still running then is
+   handed to a Watch, with the ordinary handover result; a window the downtime
+   already spent hands over at once. So within the window the continuation, and
+   any Run it settles, see the command's real result, exactly as without a
+   restart. Nothing runs twice: the wait commits and starts nothing, and a
+   committed result or handover is reused. A Turn that falls back to the notice
+   gets today's T2 first (the Turn owner asks Vibey's recovery owner to settle
+   that Session), so its notice still names its Watches and offers no Retry.
+   That rule stays for the manual notice only.
 4. **Runs follow the work.** The cut Turn settles with
    `settled_by = restart_resumed`, which is not a settlement without result, so
    none of its Runs is failed or owes a notice. The Runs' Delivery link moves to
@@ -107,8 +116,11 @@ This replaces recovery invariant T4 for Vibey (`agent-core-contracts/recovery.md
   `restart_resume_binding`.
 - `core/run_settlement.py`: `SETTLED_BY_RESTART_RESUMED`, outside
   `SETTLEMENTS_WITHOUT_RESULT`.
-- `modules/agents/vibey/agent.py`: none on the resume path, which is Retry's.
-  One addition the code required: stopping the service stops the Model Hub
+- `modules/agents/vibey/agent.py`, `recovery.py`, `tools.py` and agent-core
+  `settle_open_calls` / `bash.wait_in_foreground_window`: item 3's T2 split
+  (startup defers a running job of an unsettled Turn; the continuation's T2
+  waits; `VibeyRecovery.settle_session` hands over before a fallback notice).
+  Another addition the code required: stopping the service stops the Model Hub
   gateway before Turns end, so a run in a model call fails during shutdown. A
   run that ends without completing while the service is stopping leaves its
   Turn open instead of settling it, so startup continues it like any other cut
@@ -140,9 +152,13 @@ Scenario IDs in `tests/scenarios/message_delivery/catalog.yaml`:
   and notice: Stop requested, archived Session, Agent switched off Vibey, the
   fourth restart in a row without a model response. A start never accepted
   stays on the unknown-start path it takes today.
-- `MESSAGE-DELIVERY-330`: running command at shutdown: T2 hands it to a Watch,
-  the continuation still starts, resumes past the handover result, and the
-  command is not started again.
+- `MESSAGE-DELIVERY-330`: a command running at the restart: startup leaves it
+  to the continuation, which gives a job exiting inside its window (from launch)
+  its real output, hands over one whose window the downtime spent, and ends it
+  on a Stop; a committed handover is reused; the command never starts again.
+  `MESSAGE-DELIVERY-328` also checks a Run settles with the answer given after
+  the command's real output. The fallback still names its Watch
+  (`MESSAGE-DELIVERY-322`).
 - `MESSAGE-DELIVERY-331`: input queued during downtime runs after the
   continuation.
 - `MESSAGE-DELIVERY-332`: a run that fails because the service is stopping
@@ -159,6 +175,10 @@ Scenario IDs in `tests/scenarios/message_delivery/catalog.yaml`:
   output was never committed.
 - A `write` or `edit` cut mid-call gets the interrupted result and the model is
   told to re-read the file, as after any interruption.
+- While the continuation waits for a surviving command it shows as running
+  without new activity, as a live foreground command does; it starts its model
+  call after the wait. A Stop then ends the command and the continuation before
+  any model call.
 - A final reply committed but not yet delivered when the process died is in the
   Workbench transcript; its IM delivery is not retried (agent-core recovery,
   Delivery section). The Turn settles from it as completed.

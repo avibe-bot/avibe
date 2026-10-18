@@ -15,9 +15,11 @@ import logging
 import os
 import re
 import time
+from datetime import datetime, timezone
 from typing import Any, Mapping, Optional
 
 from core.agent_core.cancel import CancelToken
+from core.agent_core.messages import ToolCallBlock
 from core.agent_core.tools.args import (
     ToolInputError,
     error_result,
@@ -206,6 +208,45 @@ async def recovered_result(
         return None
     line = _stopped_line(jobs.stop_reason(job_id), jobs.meta(job_id).get("timeout_s"))
     return await stopped_result(output, line) if line else None
+
+
+async def wait_in_foreground_window(
+    jobs: LocalJobHost,
+    call: ToolCallBlock,
+    job_id: str,
+    *,
+    stop: asyncio.Event,
+    foreground_window_s: float = DEFAULT_FOREGROUND_WINDOW_S,
+) -> JobStatus:
+    """Wait for a job that survived a restart as its live call would (``recovery.md`` T2).
+
+    The call's foreground window counts from the job's launch (``meta.created_at``),
+    so downtime spends it: a window that already passed returns the status at once. A
+    Stop ends the wait and the command, as it ends a live foreground command.
+    """
+    window_s = min(foreground_window_s, _WATCH_GRACE_S) if (call.arguments or {}).get("watch") is True else foreground_window_s
+    try:
+        launched = datetime.fromisoformat(str(jobs.meta(job_id).get("created_at") or "").replace("Z", "+00:00"))
+    except ValueError:
+        return jobs.status(job_id)
+    # A wall clock that stepped back never stretches the window past its length.
+    remaining = min(window_s, window_s - (datetime.now(timezone.utc) - launched).total_seconds())
+    if remaining <= 0 or stop.is_set():
+        if stop.is_set() and jobs.status(job_id).state == "running":
+            await jobs.kill(job_id, reason=STOP_ABORTED)
+        return jobs.status(job_id)
+    waiting = asyncio.ensure_future(jobs.wait(job_id, deadline_s=remaining))
+    stopped = asyncio.ensure_future(stop.wait())
+    try:
+        await asyncio.wait({waiting, stopped}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in (waiting, stopped):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(waiting, stopped, return_exceptions=True)
+    if stop.is_set() and jobs.status(job_id).state == "running":
+        await jobs.kill(job_id, reason=STOP_ABORTED)
+    return jobs.status(job_id)
 
 
 async def settle_bash_call(jobs: LocalJobHost, call: CallInstance) -> Optional[ToolResult]:

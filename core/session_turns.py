@@ -6851,6 +6851,18 @@ class SessionTurnManager:
             # ready callback is coming to flush it — retry on our own clock.
             self._schedule_lost_turn_retry(platform)
 
+    async def _settle_vibey_session(self, session_id: str) -> None:
+        """Vibey's T2 for one Session, through its single recovery owner; best effort."""
+
+        recovery = getattr(self.controller, "vibey_recovery", None)
+        settle = getattr(recovery, "settle_session", None)
+        if not callable(settle):
+            return
+        try:
+            await settle(session_id)
+        except Exception:
+            logger.warning("Vibey settlement failed for session=%s", session_id, exc_info=True)
+
     async def _clear_orphaned_running_reaction(self, session_id: str, message_id: str) -> None:
         """Retire the 👀 a dead process left on a Turn recovery completed; best effort.
 
@@ -7331,6 +7343,10 @@ class SessionTurnManager:
                     if successor_turn_id:
                         await self._start_persisted_turn(successor_turn_id)
                     continue
+            if backend == "vibey":
+                # Startup recovery left a running job of this Turn to its owner: hand it over
+                # now, so the notice below names its Watch (T2 before T4).
+                await self._settle_vibey_session(target_session)
             # Read Run attribution BEFORE terminalizing: the notice below is owed
             # only to a turn that has none, and terminalization retires the
             # deliveries the attribution is derived from.

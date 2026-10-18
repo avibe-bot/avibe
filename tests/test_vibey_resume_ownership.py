@@ -207,7 +207,7 @@ async def test_retry_events_and_recovered_job_belong_to_retry_turn_not_last_inpu
     await harness.agent.store.append_payload(SESSION, "agent_state", {"version": 1, "state": {"resumed": True}})
     jobs.states["job_retry"] = JobStatus("running")
     harness.new_agent()
-    assert await harness.agent.recover_runtime_state() == []
+    assert await harness.agent.recover_runtime_state(SESSION) == []
 
     with engine.connect() as conn:
         events = conn.execute(select(agent_events).where(agent_events.c.session_id == SESSION)).mappings().all()
