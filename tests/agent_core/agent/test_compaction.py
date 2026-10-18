@@ -51,6 +51,7 @@ from core.agent_core.harness.context import (
     MIND_FILE_FIRST,
     MIND_HEADINGS,
     MIND_PLACEHOLDERS,
+    MIND_SECTIONS,
     MIND_FILE_PREVIOUS,
     MIND_TEMPLATE,
     SKILLS_LEAD_CARRIED,
@@ -2036,6 +2037,36 @@ async def test_a_first_consolidation_replaces_each_line_under_a_heading_alone_an
     assert review_mind(mind, MIND_TEMPLATE).structure is None
     assert all(heading in mind.split("\n") for heading in MIND_HEADINGS)
     assert all(f"{heading}\n{body}" in mind for heading, body in contents.items() if not heading.startswith("# "))
+
+
+async def test_a_mind_stored_before_the_placeholders_is_filled_by_placeholder_edits(tmp_path):
+    # A Session whose last checkpoint stored a mind under the earlier template, "(none)" in every empty section. Its
+    # next checkpoint turn starts from that mind with the placeholders in place, in mind.md and in the request, so an
+    # edit that names only a section's placeholder, as the request asks, fills it.
+    store = InMemoryTranscriptStore()
+    context = _v5(tmp_path, Host())
+    await run(make_agent(Model(history()), store=store, tools=[reader(tokens(3_000))], selection=ROOMY, context=context))
+    legacy = "\n\n".join(
+        "\n".join([top, *(f"{sub}\n(none)" for sub in subs)] if subs else [top, "(none)"]) for top, _, subs in MIND_SECTIONS
+    ).replace("## Mission\n(none)", f"## Mission\n{MISSION}")
+    view = context_view(await store.load("session"))
+    stored = compaction_payload(
+        view, len(view.units) - 1, mode="normal", reason="threshold", checkpoint=CHECKPOINT_BODY, state=(),
+        earlier_record=None, tokens_before=1, threshold=2, window=32_000, summarizer=None, usage=None, mind=legacy,
+    )
+    await store.append_payloads("session", [("compaction", stored)])
+    scratch = tmp_path / "scratch"
+    fill = [
+        _batch(_edit("m", scratch / MIND_FILE, (MIND_PLACEHOLDERS["## Workstreams"], "- the parser fix: in progress"))),
+        [Done(assistant(CHECKPOINT))],
+    ]
+    model = Model([[Done(assistant("after"))]], fill)
+    await run(make_agent(model, store=store, tools=[reader(tokens(3_000))], selection=ROOMY, context=context), tokens(29_000), row="cross")
+    assert MIND_PLACEHOLDERS["## Workstreams"] in _request(model) and "\n(none)\n" not in _request(model).split(MIND_CURRENT)[-1]
+    results = [m for m in model.checkpoint_requests[-1].messages if isinstance(m, ToolResultMessage)]
+    assert not results[-1].is_error and len(model.checkpoint_requests) == 2  # applied; no repair
+    row = [row for row in await store.load("session") if row.kind == "compaction"][-1]
+    assert row.payload["mind"] == FIRST_MIND.replace(MIND_PLACEHOLDERS["## Workstreams"], "- the parser fix: in progress")
 
 
 async def test_a_later_checkpoint_starts_from_the_mind_and_memo_it_left_and_needs_one_request_when_nothing_changed(

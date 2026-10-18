@@ -1061,6 +1061,29 @@ def _block_text(blocks: Sequence[MindBlock]) -> str:
     return "\n".join(line for name, body in blocks for line in ((name, *body) if name else body))
 
 
+def _section_tokens(blocks: Sequence[MindBlock]) -> int:
+    """What a section counts toward its limit (section 7): its text but its placeholder lines, which mark it empty."""
+    placeholders = frozenset(MIND_PLACEHOLDERS.values())
+    return text_tokens(_block_text([(name, tuple(l for l in body if l.strip() not in placeholders)) for name, body in blocks]))
+
+
+def migrate_placeholders(mind: str) -> str:
+    """``mind`` with each section that holds only the earlier template's "(none)" given its own placeholder (section
+    7): a mind stored before the placeholders, whose empty sections could otherwise be edited only with a heading in
+    ``oldText``. Anything else, and a mind that lost its structure, stays as it is."""
+    if mind_blocks(mind)[0] is None:
+        return mind
+    lines = _lines(mind)
+    found = [index for index, line in enumerate(lines) if line.rstrip() in MIND_HEADINGS]
+    changed = False
+    for start, end in zip(found, [*found[1:], len(lines)]):
+        heading = lines[start].rstrip()
+        body = [index for index in range(start + 1, end) if lines[index].strip()]
+        if heading in MIND_PLACEHOLDERS and len(body) == 1 and lines[body[0]].strip() == MIND_EMPTY:
+            lines[body[0]], changed = MIND_PLACEHOLDERS[heading], True
+    return "\n".join(lines) if changed else mind
+
+
 def _normalized(text: str) -> list[str]:
     return [line.strip() for line in _lines(text) if line.strip()]
 
@@ -1111,7 +1134,7 @@ def review_mind(text: Optional[str], previous: str, window: Optional[int] = None
     over = tuple(
         (_section_title(top), size, limit)
         for top, limit, own in _sections(preamble, blocks, window)
-        if (size := text_tokens(_block_text(own))) > limit
+        if (size := _section_tokens(own)) > limit
     )
     return MindReview(empty=_normalized(text) == _normalized(MIND_TEMPLATE), over=over, tokens=text_tokens(text))
 
@@ -1145,7 +1168,7 @@ def fit_mind(text: str, marker: str, window: Optional[int] = None) -> tuple[str,
     note = _utf8(marker) + 1
     for _, limit, own in _sections(preamble, blocks, window):
         whole = _block_text(own)
-        if text_tokens(whole) <= limit:
+        if _section_tokens(own) <= limit:
             out.append(whole)
             continue
         cut_sections.append(whole)

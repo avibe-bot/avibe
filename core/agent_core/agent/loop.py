@@ -124,6 +124,7 @@ from core.agent_core.harness.context import (
     memo_budget,
     memo_item,
     memo_problems,
+    migrate_placeholders,
     mind_revert,
     message_tokens,
     messages_tokens,
@@ -1798,7 +1799,9 @@ class Agent:
         holding one checkpoint block above the floor of the route it was planned on, and asks one repair for a mind or
         memo the validators reject (section 10); its fold commits the checkpoint row."""
         previous = view.compaction.payload if view.compaction is not None else {}
-        prior: str = previous.get("mind") or ""
+        # A mind stored before the template's placeholders gets them in its empty sections (section 7), so they can be
+        # filled without a heading in oldText.
+        prior: str = migrate_placeholders(previous.get("mind") or "")
         start = prior or MIND_TEMPLATE
         window = plan.window
         refused = None
