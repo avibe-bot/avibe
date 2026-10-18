@@ -289,6 +289,11 @@ Scenario IDs in `tests/scenarios/message_delivery/catalog.yaml`:
   Turn whose initial Run ended). It keeps today's restart settlement, as on
   every backend: the Run keeps its result and owes no notice, and the Turn is
   recorded as interrupted.
+- A message-mode processing indicator (Telegram's "processing" message) is
+  deleted once a run's native start is accepted, and a rerun requires an
+  accepted start, so the dead process has already deleted it. Only a process
+  that died inside that delete call leaves it. That is the same on every
+  backend, and no ack message id is recorded durably to clean it up.
 - A rerun whose transport never becomes ready stays open, as a scheduled Run
   waits for its transport; a Stop ends it.
 - A rerun's final that cites sources is displayed again from its message, so
