@@ -255,47 +255,33 @@ class SilentFinalTurnResultTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.agent_rows(), [("result", REPORT)])
             self.assertEqual(len(controller.committed_turns), 1)
 
-    async def test_the_record_follows_the_text_the_user_was_last_shown(self):
+    async def test_a_replayed_output_is_recorded_without_displacing_newer_text(self):
         """Scenario: MESSAGE-DELIVERY-325.
 
-        The record names the row of the text the user saw last, whichever path
-        showed it: a later text the user saw without a row clears it, a later text
-        that never reached the user leaves it, and a replayed output is recorded
-        by a dispatcher that never saw the first emit.
+        An output replayed through the accepted-receipt short-circuit is recorded
+        by a dispatcher that never saw its first emit, and a retry of an older
+        output leaves the newer row recorded.
         """
 
-        async def unmirrored(controller, context):
-            with mock.patch("core.message_dispatcher.persist_agent_message", return_value=None):
-                await controller.emit_agent_message(context, "output", "Second report.", output=PHASE)
+        def phase(key: str) -> MessageOutput:
+            return MessageOutput(completes_turn=False, completes_run=False, idempotency_key=key)
 
-        async def undelivered(controller, context):
-            with mock.patch.object(
-                controller.im_client, "send_message", side_effect=RuntimeError("channel unavailable")
-            ):
-                await controller.emit_agent_message(context, "output", "Second report.", output=PHASE)
-
-        replayed = MessageOutput(completes_turn=False, completes_run=False, idempotency_key="phase-1")
-        cases = {
-            "a later text shown without a row": ("slack", unmirrored, [("output", REPORT)]),
-            "a later text no send delivered": ("slack", undelivered, [("result", REPORT)]),
-        }
-        for name, (platform, later, expected_rows) in cases.items():
-            with self.subTest(name), self.state():
-                controller = _Controller(platform)
-                context = self.context(platform)
-                await controller.emit_agent_message(context, "output", REPORT, output=PHASE)
-                await later(controller, context)
-                await _Agent(controller).emit_result_message(context, "<silent>noted</silent>")
-
-                self.assertEqual(self.agent_rows(), expected_rows)
-
-        with self.subTest("a replayed output on a fresh dispatcher"), self.state():
-            await _Controller("avibe").emit_agent_message(self.context(), "output", REPORT, output=replayed)
+        with self.subTest("a fresh dispatcher replays the output"), self.state():
+            await _Controller("avibe").emit_agent_message(self.context(), "output", REPORT, output=phase("p1"))
             recovered = _Controller("avibe")
-            await recovered.emit_agent_message(self.context(), "output", REPORT, output=replayed)
+            await recovered.emit_agent_message(self.context(), "output", REPORT, output=phase("p1"))
             await _Agent(recovered).emit_result_message(self.context(), "<silent>noted</silent>")
 
             self.assertEqual(self.agent_rows(), [("result", REPORT)])
+
+        with self.subTest("an older output is retried after a newer one"), self.state():
+            controller = _Controller("avibe")
+            await controller.emit_agent_message(self.context(), "output", REPORT, output=phase("p1"))
+            await controller.emit_agent_message(self.context(), "output", "Second report.", output=phase("p2"))
+            await controller.emit_agent_message(self.context(), "output", REPORT, output=phase("p1"))
+            await _Agent(controller).emit_result_message(self.context(), "<silent>noted</silent>")
+
+            self.assertEqual(self.agent_rows(), [("output", REPORT), ("result", "Second report.")])
 
     async def test_nothing_else_promotes_earlier_text(self):
         """Scenario: MESSAGE-DELIVERY-325."""

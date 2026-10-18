@@ -74,6 +74,7 @@ from storage.background import (
     TERMINAL_RUN_STATUSES,
     normalize_run_status,
 )
+from storage.messages_service import canonical_message_timestamp
 from vibe.i18n import t as i18n_t
 from vibe.message_types import TRANSCRIPT_COPY_KEY
 
@@ -426,7 +427,7 @@ class ConsolidatedMessageDispatcher:
         # token. A Turn that ends on a silent reply makes this row its result
         # (``promote_turn_text_to_result``). Every lifecycle-terminal emit takes
         # the entry, so it never outlives its Turn.
-        self._turn_visible_text: dict[str, tuple[str, str]] = {}
+        self._turn_visible_text: dict[str, tuple[str, str, str]] = {}
         # Harness deliveries whose prompt has already been echoed to IM, kept as a
         # bounded FIFO (see ``emit_harness_prompt``). Per-process only: a restart
         # replay writes a new Delivery anyway, and a duplicated echo is cosmetic
@@ -2784,21 +2785,25 @@ class ConsolidatedMessageDispatcher:
         return sum(1 for line in body.splitlines() if line.strip()) >= _INTERIM_MIN_LINES
 
     def _remember_turn_text(self, context: MessageContext, row: Optional[dict]) -> None:
-        """Record the row of text the user was just shown as its Turn's latest.
+        """Record a persisted row as its Turn's latest visible text.
 
-        ``row`` is ``None`` when the shown text has no row (its mirror write
-        failed): the record is cleared, because an older row is no longer the
-        Turn's last visible text. Only a Turn with a token is recorded; without
-        one, a later Turn's silent final could not tell this row from its own.
+        The record is the Turn's last *persisted* visible text: promotion edits
+        history, and a text whose row was never written is not in it. A row older
+        than the one held (a retried or replayed earlier output) never displaces
+        it. Only a row whose Turn is identified: without a token, a later Turn's
+        silent final could not tell this row apart from its own.
         """
 
-        key = resolve_turn_sink_key(self.controller, context)
         row_id = (row or {}).get("id")
         turn_token = (context.platform_specific or {}).get("turn_token")
-        if row_id and turn_token:
-            self._turn_visible_text[key] = (turn_token, row_id)
-        else:
-            self._turn_visible_text.pop(key, None)
+        if not (row_id and turn_token):
+            return
+        key = resolve_turn_sink_key(self.controller, context)
+        created_at = canonical_message_timestamp((row or {}).get("created_at")) or ""
+        held = self._turn_visible_text.get(key)
+        if held is not None and held[0] == turn_token and created_at and held[2] > created_at:
+            return
+        self._turn_visible_text[key] = (turn_token, row_id, created_at)
 
     def _take_turn_text(self, context: MessageContext) -> Optional[str]:
         """Remove and return the row recorded for this context's Turn, if any."""
@@ -3196,8 +3201,8 @@ class ConsolidatedMessageDispatcher:
             break
         if accepted_message:
             logger.info("Skipping duplicate agent output %s", native_output_id)
-            # The replayed output's row is the Turn's latest visible text, whichever
-            # dispatcher persisted it first.
+            # A dispatcher that never saw the first emit (a recovery replay) learns
+            # the row here; an older output's retry keeps the newer row recorded.
             if remembers_turn_text:
                 self._remember_turn_text(context, accepted_message)
             accepted_output_semantics = self._output_with_accepted_provenance(
@@ -3781,10 +3786,8 @@ class ConsolidatedMessageDispatcher:
                             citations=citations,
                             existing_row_id=existing_row_id,
                         )
-                    # Only text that reached the user is the Turn's latest; an IM
-                    # output every send failed leaves the record as it was.
-                    if remembers_turn_text:
-                        self._remember_turn_text(context, persisted_output)
+                if remembers_turn_text:
+                    self._remember_turn_text(context, persisted_output)
 
                 if settlement_waits_for_persistence:
                     accepted_message = persisted_output or (
@@ -4010,9 +4013,7 @@ class ConsolidatedMessageDispatcher:
                     or None,
                     citations=citations,
                 )
-                # A bubble that failed to store was never visible text.
-                if interim_row:
-                    self._remember_turn_text(context, interim_row)
+                self._remember_turn_text(context, interim_row)
         # Persist the intermediate log row BEFORE the mute filter so muted
         # assistant / tool_call messages still land in the store (product
         # requirement: the process log is complete even when a channel hides it).
