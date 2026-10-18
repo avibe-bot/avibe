@@ -1588,7 +1588,8 @@ class TestTextBlockCitations:
     def test_a_literal_marker_in_code_survives_beside_a_provider_citation(self):
         """A code example quoting the marker grammar is the reply's own text: only the markers inserted for
         annotations go, never one the text itself carries."""
-        literal = "\ue200cite\ue202turn0search0\ue201"
+        # The ref this block's first annotation would have, were refs named by position alone.
+        literal = "\ue200cite\ue202t0c0\ue201"
         text = f"Codex writes `{literal}` for a citation. Filters shipped."
         registered, bundle = register_text_citations(
             [("", text, [self.cite(self.FILTERS, "Changelog", len(text) - 1, len(text))])],
