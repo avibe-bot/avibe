@@ -5,7 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import shutil
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import pytest
 
@@ -69,6 +69,53 @@ def _state(tmp_path: Path, *, generation: int = 1) -> tuple[Path, ComputerUseSta
     state_path = tmp_path / "computer-use.json"
     state_path.write_text(json.dumps(payload), encoding="utf-8")
     return state_path, state
+
+
+async def _wait_until(
+    predicate: Callable[[], object],
+    *,
+    timeout: float = 5.0,
+) -> None:
+    """Wait for a condition on a wall-clock bound, never a count of loop turns.
+
+    ``ComputerUseServer.call_tool`` crosses ``asyncio.to_thread`` before it
+    reaches the upstream, so how many loop iterations that takes depends on
+    how busy the machine is.
+    """
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not predicate():
+        if loop.time() >= deadline:
+            raise AssertionError(f"condition not met within {timeout} seconds")
+        await asyncio.sleep(0.001)
+
+
+class _ObservedLock(asyncio.Lock):
+    """An asyncio lock that records each acquire which has to wait."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.contended = 0
+
+    async def acquire(self) -> bool:
+        if self.locked():
+            self.contended += 1
+        return await super().acquire()
+
+
+class _ObservedTargetLocks(_TargetLockManager):
+    """A target lock manager that records each acquire refused by a held lock."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.refusals = 0
+
+    def _available(self, keys: tuple[tuple[str, str], ...]) -> bool:
+        available = super()._available(keys)
+        if not available:
+            self.refusals += 1
+        return available
 
 
 class FakeUpstream:
@@ -1173,15 +1220,18 @@ async def test_one_sessions_calls_are_serial_and_end_releases_after_queue(
         status_reader=lambda: ComputerUseStatus("ready", None, state),
         upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
     )
+    session_lock = _ObservedLock()
+    server._session_locks["ses-a"] = session_lock
     first = asyncio.create_task(
         server.call_tool("list_apps", {"session": "ses-a"})
     )
-    await asyncio.sleep(0)
+    await _wait_until(lambda: upstream.inflight_by_tool.get("list_apps"))
     ending = asyncio.create_task(
         server.call_tool("end_session", {"session": "ses-a"})
     )
-    await asyncio.sleep(0)
+    await _wait_until(lambda: session_lock.contended)
     assert not ending.done()
+    assert upstream.inflight == 1
     upstream.block.set()
     await first
     await ending
@@ -1579,10 +1629,9 @@ async def test_late_failure_from_old_proxy_preserves_new_proxy_observations(
     old_call = asyncio.create_task(
         server.call_tool("list_apps", {"session": "ses-a"})
     )
-    for _attempt in range(100):
-        if upstreams and upstreams[0].inflight:
-            break
-        await asyncio.sleep(0)
+    await _wait_until(
+        lambda: upstreams and upstreams[0].inflight_by_tool.get("list_apps")
+    )
     old = upstreams[0]
     old.fail_after_unblock = True
 
@@ -1809,10 +1858,7 @@ async def test_observations_are_not_serialized_across_sessions(tmp_path: Path) -
             {"session": "ses-b", "pid": 7, "window_id": 9},
         )
     )
-    for _attempt in range(100):
-        if upstream.max_inflight == 2:
-            break
-        await asyncio.sleep(0)
+    await _wait_until(lambda: upstream.max_inflight >= 2)
     assert upstream.max_inflight == 2
     upstream.block.set()
     assert not (await first).get("isError")
@@ -1851,10 +1897,7 @@ async def test_different_window_mutations_run_concurrently(tmp_path: Path) -> No
             {"session": "ses-b", "pid": 7, "window_id": 10, "x": 1, "y": 2},
         )
     )
-    for _attempt in range(100):
-        if upstream.max_inflight >= 2:
-            break
-        await asyncio.sleep(0)
+    await _wait_until(lambda: upstream.max_inflight >= 2)
     assert upstream.max_inflight == 2
     upstream.block.set()
     assert not (await first).get("isError")
@@ -1866,11 +1909,11 @@ async def test_same_window_lock_waits_then_releases_to_the_next_session(
 ) -> None:
     """A target lock waits for release, then admits the next operation."""
 
-    manager = _TargetLockManager(wait_seconds=0.1)
+    manager = _ObservedTargetLocks(wait_seconds=5.0)
     arguments = {"pid": 7, "window_id": 9}
     first = await manager.acquire("click", arguments)
     second_task = asyncio.create_task(manager.acquire("click", arguments))
-    await asyncio.sleep(0.01)
+    await _wait_until(lambda: manager.refusals)
     assert not second_task.done()
     await first.__aexit__(None, None, None)
     second = await second_task
@@ -1906,13 +1949,14 @@ async def test_target_lock_timeout_returns_target_busy_without_dispatch(
             {"session": "ses-a", "pid": 7, "window_id": 9, "x": 1, "y": 2},
         )
     )
-    for _attempt in range(100):
-        if upstream.inflight:
-            break
-        await asyncio.sleep(0)
-    second = await server.call_tool(
-        "click",
-        {"session": "ses-b", "pid": 7, "window_id": 9, "x": 3, "y": 4},
+    await _wait_until(lambda: upstream.inflight_by_tool.get("click"))
+    # Bounded: without the target lock this click would block on the upstream.
+    second = await asyncio.wait_for(
+        server.call_tool(
+            "click",
+            {"session": "ses-b", "pid": 7, "window_id": 9, "x": 3, "y": 4},
+        ),
+        timeout=5,
     )
     payload = json.loads(second["content"][0]["text"])
     assert payload["code"] == "target_busy"
@@ -1951,10 +1995,7 @@ async def test_force_quit_conflicts_with_window_lock_for_same_pid(
             {"session": "ses-a", "pid": 7, "window_id": 9, "x": 1, "y": 2},
         )
     )
-    for _attempt in range(100):
-        if upstream.inflight:
-            break
-        await asyncio.sleep(0)
+    await _wait_until(lambda: upstream.inflight_by_tool.get("click"))
     killed = await server.call_tool("kill_app", {"session": "ses-b", "pid": 7})
     payload = json.loads(killed["content"][0]["text"])
     assert payload["code"] == "target_busy"
@@ -1972,10 +2013,12 @@ async def test_clipboard_writes_are_serialized(tmp_path: Path) -> None:
     upstream = FakeUpstream()
     upstream.block = asyncio.Event()
     upstream.blocked_tools = {"clipboard_write"}
+    target_locks = _ObservedTargetLocks()
     server = ComputerUseServer(
         state_path=state_path,
         status_reader=lambda: ComputerUseStatus("ready", None, state),
         upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+        target_lock_manager=target_locks,
     )
     first = asyncio.create_task(
         server.call_tool(
@@ -1983,17 +2026,14 @@ async def test_clipboard_writes_are_serialized(tmp_path: Path) -> None:
             {"session": "ses-a", "text": "first"},
         )
     )
-    for _attempt in range(100):
-        if upstream.inflight:
-            break
-        await asyncio.sleep(0)
+    await _wait_until(lambda: upstream.inflight_by_tool.get("clipboard_write"))
     second = asyncio.create_task(
         server.call_tool(
             "clipboard_write",
             {"session": "ses-b", "text": "second"},
         )
     )
-    await asyncio.sleep(0.01)
+    await _wait_until(lambda: target_locks.refusals)
     assert sum(
         params["name"] == "clipboard_write"
         for _method, params in upstream.calls
@@ -2028,10 +2068,12 @@ async def test_action_after_other_session_action_uses_driver_stale_token_result(
 
     state_path, state = _state(tmp_path)
     upstream = FakeUpstream()
+    target_locks = _ObservedTargetLocks()
     server = ComputerUseServer(
         state_path=state_path,
         status_reader=lambda: ComputerUseStatus("ready", None, state),
         upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+        target_lock_manager=target_locks,
     )
     for session in ("ses-a", "ses-b"):
         observed = await server.call_tool(
@@ -2060,10 +2102,7 @@ async def test_action_after_other_session_action_uses_driver_stale_token_result(
             },
         )
     )
-    for _attempt in range(100):
-        if upstream.inflight:
-            break
-        await asyncio.sleep(0)
+    await _wait_until(lambda: upstream.inflight_by_tool.get("click"))
     stale_task = asyncio.create_task(
         server.call_tool(
             "click",
@@ -2077,7 +2116,7 @@ async def test_action_after_other_session_action_uses_driver_stale_token_result(
             },
         )
     )
-    await asyncio.sleep(0.01)
+    await _wait_until(lambda: target_locks.refusals)
     upstream.block.set()
     first = await first_task
     stale = await stale_task
@@ -2168,10 +2207,7 @@ async def test_upstream_request_deadline_covers_queued_writers(
     first = asyncio.create_task(
         upstream.request("tools/call", {"name": "list_apps"})
     )
-    for _attempt in range(100):
-        if stdin.writes:
-            break
-        await asyncio.sleep(0)
+    await _wait_until(lambda: stdin.writes)
     assert len(stdin.writes) == 1
     second_started = loop.time()
     second = asyncio.create_task(
