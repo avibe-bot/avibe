@@ -32,7 +32,7 @@ from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import OperationalError
 
 from core.delivery_target import normalize_message_kind
-from core.agent_input import AgentInputMetadata
+from core.agent_input import AgentInputMetadata, harness_source
 from core.backend_failure import backend_failure_notification_output, harness_run_identity
 from core.message_context import (
     TERMINAL_COMMIT_KEY,
@@ -2666,6 +2666,17 @@ class SessionTurnManager:
                         for payload in payloads
                     )
                     if instruction
+                ],
+                # One sender label per Delivery, in FIFO order: a merged batch of Agent
+                # Runs or callbacks shares a merge key but not a sender, and the leader's
+                # provenance alone would attribute every body to the first one.
+                "harness_sources": [
+                    harness_source(spec)
+                    for spec in (
+                        (_scheduled_provenance(payload) or {}).get("platform_specific")
+                        for payload in payloads
+                    )
+                    if isinstance(spec, dict)
                 ],
                 "message_content": {
                     "text": "\n".join(

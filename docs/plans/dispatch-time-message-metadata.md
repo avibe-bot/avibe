@@ -19,8 +19,12 @@ the clock line and independent of both switches, so a model can never read a
 Watch prompt, a Task, another Agent's message, or a callback as the user's own
 words. The source comes from the dispatch provenance the scheduler records
 (`task_trigger_kind` and the run's `source_kind`), never from the text; every id
-and name in it is one sanitized line, and a definition name is quoted. A
-person's input never carries it. The sources are:
+and name in it is one sanitized line (every line break and control character
+becomes a space), and a definition name is quoted. A person's input never carries
+it. A merged batch of queued Harness inputs is labelled once when every Delivery
+has the same source, else source by source in the batch's FIFO order, which is
+the order of its `---`-separated bodies, so no body is attributed to another
+Delivery's sender. The sources are:
 
 | Input | Line |
 | --- | --- |
@@ -29,10 +33,10 @@ person's input never carries it. The sources are:
 | Task on-failure Agent turn | `[Harness: Task <task id> "<name>" on-failure]` |
 | Webhook | `[Harness: webhook <definition id> "<name>"]` |
 | `vibe agent run` from an Agent shell | `[Harness: agent run <run id> from #<caller session>]` |
-| `vibe agent run` outside an Agent shell | `[Harness: agent run <run id> from the CLI]` |
+| `vibe agent run` outside an Agent shell, or `vibe hook send` | `[Harness: agent run <run id> from the CLI]` |
 | Callback of a finished run | `[Harness: callback of run <run id> from #<run's session>]` |
 | Vault request outcome | `[Harness: Vault request <request id>]` |
-| Released `vibe hook send` | `[Harness: hook send <run id>]` |
+| `hook_send` run queued by a release before `vibe hook send` became an Agent run | `[Harness: hook send <run id>]` |
 | No recoverable provenance | `[Harness: background input]` |
 
 This line replaces the released `From: #<session>` line, which named only the

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import re
+import unicodedata
 from typing import Any, Mapping
 
 
@@ -48,8 +49,14 @@ def without_legacy_metadata(text: str, *, original: str, user_id: str) -> str:
 
 
 def _token(value: Any) -> str:
-    """One sanitized line, or empty when there is no value."""
-    text = str(value or "").strip()
+    """One sanitized line, or empty when there is no value.
+
+    Every line break a reader may honour (``str.splitlines``: VT, FF, NEL, U+2028, U+2029
+    among them) and every other control character becomes a space first, so a definition
+    name cannot add a line of its own.
+    """
+    joined = " ".join(str(value or "").splitlines())
+    text = "".join(" " if unicodedata.category(char) == "Cc" else char for char in joined).strip()
     return sanitize_identity(text) if text else ""
 
 
@@ -76,8 +83,9 @@ def harness_source(spec: Mapping[str, Any]) -> str:
     elif trigger == "scheduled":
         parts = ["Task", definition, name]
     elif trigger == "hook":
-        # The one hook a definition still queues is a Task's on-failure Agent turn; a bare
-        # one is a released ``vibe hook send``.
+        # The one hook a definition still queues is a Task's on-failure Agent turn. A bare
+        # one is a ``hook_send`` run an earlier release queued: ``vibe hook send`` now
+        # enqueues an Agent run from the CLI, labelled as one.
         parts = ["Task", definition, name, "on-failure"] if definition else ["hook send", run_id]
     elif trigger == "webhook":
         parts = ["webhook", definition, name]
@@ -94,11 +102,24 @@ def harness_source(spec: Mapping[str, Any]) -> str:
     return " ".join(part for part in parts if part)
 
 
+def harness_label(spec: Mapping[str, Any]) -> str:
+    """The ``[Harness: ...]`` label of a dispatched input, which may merge several Deliveries.
+
+    A merged batch (``harness_sources``, one label per Delivery in FIFO order, as its
+    bodies are) is named once when every label is the same, else label by label, so no
+    body is attributed to another Delivery's sender.
+    """
+    merged = [str(label) for label in spec.get("harness_sources") or () if str(label).strip()]
+    if not merged:
+        return harness_source(spec)
+    return merged[0] if len(set(merged)) == 1 else "; ".join(merged)
+
+
 @dataclass(frozen=True)
 class AgentInputMetadata:
     """Stable sender facts; the clock and display switches are evaluated on send.
 
-    ``harness_source`` names what sent an input no person typed, as ``harness_source()``
+    ``harness_source`` names what sent an input no person typed, as ``harness_label()``
     labels it. Its line comes first and no display switch hides it: a model must never read
     such an input as the user's own words.
     """
