@@ -4804,9 +4804,9 @@ class SessionTurnManager:
         )
         execution = delivery_store.recorded_execution(turn)
         known, agent = self._turn_vibe_agent(session_id, turn_id, execution)
-        if known and agent is None:
-            # The Agent that ran the Turn no longer runs on Vibey: no other Agent continues
-            # its work. It takes the restart notice instead.
+        if known is not None and agent is None:
+            # The Agent that ran the Turn no longer runs on Vibey, or nothing names it: no
+            # other Agent continues its work. It takes the restart notice instead.
             return False
         if agent is not None:
             # The Turn keeps the Agent and request it was accepted with, as a live Turn
@@ -4826,13 +4826,13 @@ class SessionTurnManager:
         )
         return True
 
-    def _turn_vibe_agent(self, session_id: str, turn_id: str, execution: dict[str, Any]) -> tuple[bool, Any]:
-        """``(known, agent)``: whether the Agent that ran a Turn is known, and it while it
-        still runs on Vibey.
+    def _turn_vibe_agent(self, session_id: str, turn_id: str, execution: dict[str, Any]) -> tuple[Optional[bool], Any]:
+        """``(known, agent)``: the Agent that ran a Turn, while it still runs on Vibey.
 
         Its native start records it with the rest of its request (``execution``); a Turn
         an older release accepted names it only as the author of its committed responses,
-        and one cut before any names none.
+        and one cut before any names none (``known`` False). ``known`` is None when no
+        Agent store can tell.
         """
 
         agent_id = str(execution.get("agent_id") or "") or None
@@ -4842,7 +4842,9 @@ class SessionTurnManager:
                 response = last_response(conn, session_id)
             name = response.agent_name if response is not None and response.turn_id == turn_id else None
         store = getattr(self.controller, "vibe_agent_store", None)
-        if store is None or not (agent_id or name):
+        if store is None:
+            return None, None
+        if not (agent_id or name):
             return False, None
         # By its stable id, which survives a rename; the name only where no id was recorded.
         agent = store.get_by_id(agent_id) if agent_id else store.get(name)

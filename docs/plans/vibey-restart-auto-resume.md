@@ -98,7 +98,8 @@ exists; "handled" names where the in-place design still owns it.
    live one. What a run reads from the machine when it starts (project
    instructions, skills, the environment) is read again, as for any run. A Turn
    an older release accepted names its Agent only as the author of its
-   committed responses, and runs with that Agent's current settings. Vibey resumes its committed
+   committed responses, and runs with that Agent's current settings; one cut
+   before any response names none and keeps the notice. Vibey resumes its committed
    transcript (`Agent.resume`, no input consumed, no visible `continue`, no
    replay of a committed tool call), and the rerun's native start binds this
    process's generation where any run's does, once its Agent exists, so steers

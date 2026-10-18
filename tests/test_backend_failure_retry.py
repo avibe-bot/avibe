@@ -470,16 +470,18 @@ def _archive(engine, session_id, _turn_id):
         conn.execute(update(agent_sessions).where(agent_sessions.c.id == session_id).values(status="archived"))
 
 
-@pytest.mark.parametrize("case", ["qualifies", "stop", "switched", "archived", "agent_gone", "bound", "reset"])
+@pytest.mark.parametrize(
+    "case", ["qualifies", "stop", "switched", "archived", "agent_gone", "agent_unknown", "bound", "reset"]
+)
 def test_a_cut_vibey_turn_that_no_longer_qualifies_keeps_the_restart_notice(isolated_state, tmp_path, case):
     """MESSAGE-DELIVERY-329: Stop, an Agent off Vibey, an archived Session, the Agent that ran the
-    Turn no longer on Vibey (another Agent never continues its work), or the third restart in a row
-    with no committed model response keep today's settlement and notice. A response the rerun
-    committed resets that streak."""
+    Turn no longer on Vibey or named nowhere (another Agent never continues its work), or the third
+    restart in a row with no committed model response keep today's settlement and notice. A response
+    the rerun committed resets that streak."""
     from core.vibe_agents import VibeAgent
 
     cut = _accepted_turn(tmp_path, backend="vibey")
-    if case == "agent_gone":
+    if case in {"agent_gone", "agent_unknown"}:
         # The Turn ran with ``worker``, archived since; the Session now selects ``reviewer``.
         agents = {
             "agt_worker": VibeAgent(
@@ -496,6 +498,8 @@ def test_a_cut_vibey_turn_that_no_longer_qualifies_keeps_the_restart_notice(isol
         "stop": _then(_previous_process("tool"), _request_stop),
         "switched": _then(_previous_process("tool"), _switch_off_vibey),
         "archived": _then(_previous_process("tool"), _archive),
+        # An older release accepted it (no recorded request) and it was cut before any response.
+        "agent_unknown": _previous_process("model"),
     }.get(case, _previous_process("tool"))
     _restart(cut, before)
     if case in {"bound", "reset"}:
