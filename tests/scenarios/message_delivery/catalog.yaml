@@ -455,6 +455,7 @@ scenarios:
       - tests/test_backend_failure_retry.py::test_restart_reruns_a_cut_vibey_turn_in_place_without_a_notice
       - tests/test_backend_failure_retry.py::test_a_turn_waiting_for_its_steer_keeps_its_running_command_for_the_rerun
       - tests/test_vibey_agent.py::test_a_restart_rerun_waits_for_its_surviving_command_as_the_live_call_would
+      - tests/agent_core/tools/test_bash.py::test_a_stop_during_a_failed_recovered_handover_ends_the_command_before_another_attempt
   - id: MESSAGE-DELIVERY-331
     name: Input queued while the service was down runs after the rerun of the Turn a restart cut
     status: covered

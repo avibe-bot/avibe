@@ -241,6 +241,9 @@ async def settle_in_foreground(
         return status, None
     error: Optional[Exception] = None
     for _ in range(2):
+        if stop.is_set():
+            # As the live call checks its Stop before each handover: the Stop ends the command.
+            return await _wait_or_stop(jobs, job_id, 0, stop), None
         try:
             return status, await jobs.hand_over(job_id)
         except JobHandOverUnavailable as exc:

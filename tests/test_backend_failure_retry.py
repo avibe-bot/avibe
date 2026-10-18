@@ -258,8 +258,9 @@ def test_restart_reruns_a_cut_vibey_turn_in_place_without_a_notice(isolated_stat
     """MESSAGE-DELIVERY-327 / MESSAGE-DELIVERY-330: the same Turn reruns as a transcript resume of
     itself, with the Agent it ran with: no Delivery, no successor Turn, no notice. A committed
     handover does not stop it, a command still running is left to it, not handed over at startup,
-    and a failed stream's partial text is not a final reply. The Agent is the one its native start
-    recorded, by its id, even when it was cut before its first response or renamed since."""
+    and a failed stream's partial text is not a final reply. The Agent and request are the ones its
+    native start recorded, the Agent found by id, even when it was cut before its first response or
+    renamed since."""
     from core.agent_core.tools.base import JobStatus
     from tests.agent_core.fakes import FakeJobHost
 
@@ -284,11 +285,12 @@ def test_restart_reruns_a_cut_vibey_turn_in_place_without_a_notice(isolated_stat
         "agent_session_id"
     )
     accepted = cut.context(cut.session_id)
+    execution = {
+        "agent_id": "agt_worker", "agent_name": "worker", "model": "model-accepted",
+        "reasoning_effort": "high", "system_prompt": "Review carefully.",
+    }
     accepted.platform_specific.update(
-        {
-            "turn_token": cut.turn_id, "agent_session_id": cut.session_id,
-            "vibe_agent_name": "worker", "vibe_agent_id": "agt_worker",
-        }
+        {"turn_token": cut.turn_id, "agent_session_id": cut.session_id, "vibey_execution": execution}
     )
     cut.manager.on_native_start(
         accepted, backend="vibey", runtime_key=f"runtime:{cut.turn_id}", runtime_turn_id=f"runtime-turn:{cut.turn_id}"
@@ -321,6 +323,8 @@ def test_restart_reruns_a_cut_vibey_turn_in_place_without_a_notice(isolated_stat
     assert (started.platform_specific["vibe_agent_name"], started.platform_specific["vibe_agent_id"]) == (
         "builder", "agt_worker",
     )
+    # With the request it was accepted with: Agent settings edited since reach the next Turn.
+    assert started.platform_specific["vibey_execution"] == execution
     assert _deliveries(cut.engine, cut.session_id) == before
     with cut.engine.connect() as conn:
         turn = message_deliveries.get_turn(conn, cut.turn_id)

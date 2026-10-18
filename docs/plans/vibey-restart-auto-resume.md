@@ -88,11 +88,16 @@ exists; "handled" names where the in-place design still owns it.
    start; recovery clears its runtime generation (the dead process's runtime
    and native ids) and records the restart streak in one writer transaction,
    then reruns the Turn through the ordinary runner with `vibey_resume`, with
-   the Vibe Agent that ran it, while that Agent still runs on Vibey: its native
-   start records that Agent's id and name on the start receipt, and the rerun
-   finds it by id, which survives a rename (a Turn an older release accepted
-   names it only as the author of its committed responses). A Session's
-   switch to another Agent reaches the next Turn, as it does for a live one. Vibey resumes its committed
+   the request it was accepted with, while its Vibe Agent still runs on Vibey:
+   its native start records that request (the Agent's id and name, the
+   effective model and reasoning effort, and the Agent's instructions) on the
+   start receipt, and the rerun finds the Agent by id, which survives a rename,
+   and runs with the recorded settings. A Session's switch to another Agent, or
+   an edit of the Agent's settings, reaches the next Turn, as it does for a
+   live one. What a run reads from the machine when it starts (project
+   instructions, skills, the environment) is read again, as for any run. A Turn
+   an older release accepted names its Agent only as the author of its
+   committed responses, and runs with that Agent's current settings. Vibey resumes its committed
    transcript (`Agent.resume`, no input consumed, no visible `continue`, no
    replay of a committed tool call), and the rerun's native start binds this
    process's generation where any run's does, once its Agent exists, so steers
@@ -227,4 +232,7 @@ Scenario IDs in `tests/scenarios/message_delivery/catalog.yaml`:
 - A final reply committed but not yet delivered when the process died is in the
   Workbench transcript; its IM delivery is not retried (agent-core recovery,
   Delivery section). The Turn settles from it as completed.
+- A Stop is checked before each handover of a surviving command, as the live
+  `bash` call checks it; one that arrives while a handover succeeds leaves the
+  command with its Watch, as it does live, and the Watch can be stopped.
 - Native backends (Claude Code, Codex, OpenCode) keep today's behavior.

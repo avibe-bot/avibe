@@ -334,6 +334,13 @@ class VibeyAgent(BaseAgent):
         # A transcript resume (a Turn rerun after a restart) gives a job that survived the restart
         # the foreground wait its live call would have, so its real output becomes the call's result.
         resuming = (context.platform_specific or {}).get("vibey_resume") is True
+        execution = (context.platform_specific or {}).get("vibey_execution")
+        if resuming and isinstance(execution, dict):
+            # A rerun after a restart runs with the request its Turn was accepted with, not
+            # the Agent settings edited since: those reach the next Turn.
+            request.vibe_agent_model = execution.get("model")
+            request.vibe_agent_reasoning_effort = execution.get("reasoning_effort")
+            request.vibe_agent_system_prompt = execution.get("system_prompt")
         await self._resume(runtime, stop=turn.stop_event if resuming else None)
         if turn.stop_requested:
             return await self._settle_stopped(turn)
@@ -504,20 +511,16 @@ class VibeyAgent(BaseAgent):
         return time.monotonic() - run.continuation_started_at < policy.max_elapsed_s
 
     def _accept_native_start(self, request: AgentRequest, session_id: str) -> None:
-        if request.vibe_agent_name or request.vibe_agent_id:
-            # The native start records the Agent this Turn runs with (a restart rerun keeps it).
-            if request.context.platform_specific is None:
-                request.context.platform_specific = {}
-            request.context.platform_specific.update(
-                {
-                    key: value
-                    for key, value in (
-                        ("vibe_agent_name", request.vibe_agent_name),
-                        ("vibe_agent_id", request.vibe_agent_id),
-                    )
-                    if value
-                }
-            )
+        # The native start records the request this Turn runs with, which a restart rerun keeps.
+        if request.context.platform_specific is None:
+            request.context.platform_specific = {}
+        request.context.platform_specific["vibey_execution"] = {
+            "agent_id": request.vibe_agent_id,
+            "agent_name": request.vibe_agent_name,
+            "model": request.vibe_agent_model,
+            "reasoning_effort": request.vibe_agent_reasoning_effort,
+            "system_prompt": request.vibe_agent_system_prompt,
+        }
         self.bind_agent_session_id(request, session_id)
         mark_backend_dispatch_attempted(request.context)
         self.mark_runtime_turn_started(request.context)

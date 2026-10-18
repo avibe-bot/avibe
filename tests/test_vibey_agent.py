@@ -286,8 +286,7 @@ class _Controller:
         # Outside a run (a crash simulation), the identity a previous process's adapter bound.
         native = self.agent.steering_native_turn_id(target) or f"vibey:previous-process:{turn_id}"
         self.started.append(native)
-        spec = context.platform_specific or {}
-        self.native_agents.append((spec.get("vibe_agent_name"), spec.get("vibe_agent_id")))
+        self.native_agents.append((context.platform_specific or {}).get("vibey_execution"))
         with self.engine.begin() as conn:
             turn = message_deliveries.get_turn(conn, turn_id)
             assert message_deliveries.bind_native_start(
@@ -2759,8 +2758,16 @@ async def test_a_restart_rerun_waits_for_its_surviving_command_as_the_live_call_
         context = _context(
             "avibe", SESSION, turn_id=cut_turn, delivery_id=request.context.platform_specific["delivery_id"]
         )
+        accepted = {
+            "agent_id": "agt_worker", "agent_name": "worker", "model": "model-accepted",
+            "reasoning_effort": None, "system_prompt": "Run the steps in order.",
+        }
         context.platform_specific.update(
-            {"vibey_resume": True, "vibey_source_turn_id": cut_turn, "accepted_agent_run_ids": [run.id]}
+            {
+                "vibey_resume": True, "vibey_source_turn_id": cut_turn, "accepted_agent_run_ids": [run.id],
+                # Recorded by the Turn's native start; the Agent's model was edited since.
+                "vibey_execution": accepted,
+            }
         )
         resume = AgentRequest(
             **{
@@ -2784,8 +2791,10 @@ async def test_a_restart_rerun_waits_for_its_surviving_command_as_the_live_call_
         body = result.message.content[0].text
         watch_id = ManagedWatchStore().find_job_watch(job_id)
         if case in {"exits", "watch_unavailable"}:
-            # Its native start names the Agent it runs with, for a later restart's rerun.
-            assert harness.controller.native_agents[-1] == ("worker", "agt_worker")
+            # It runs with the request its Turn was accepted with, and its native start records
+            # that request again for a later restart's rerun.
+            assert harness.controller.hub_calls[-1] == "model-accepted"
+            assert harness.controller.native_agents[-1] == accepted
             assert "step-two-done" in body and watch_id is None
             assert "step-two-done" in json.dumps(message_to_dict(harness.provider.requests[0].messages[-1]))
             assert harness.controller.im_client.sent[-1] == "步骤三完成"

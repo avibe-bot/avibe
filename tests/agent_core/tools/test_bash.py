@@ -16,7 +16,7 @@ import pytest
 from core.agent_core.agent.jobs import TrackingJobHost
 from core.agent_core.cancel import CancelToken
 import core.agent_core.tools.bash as bash_module
-from core.agent_core.tools.bash import BashTool, settle_bash_call
+from core.agent_core.tools.bash import BashTool, settle_bash_call, settle_in_foreground
 import core.agent_core.tools.jobs as jobs_module
 from core.agent_core.tools.jobs import LocalJobHost
 from core.agent_core.tools.shell import Shell
@@ -627,3 +627,32 @@ async def test_a_timeout_holds_across_handover_and_a_restart(tmp_path, make_ctx)
     settled = await settle_bash_call(restarted, instance())
     assert result_text(settled) == "begun\n\n\nCommand timed out after 60 seconds"
     assert not os.path.exists(os.path.join(restarted.job_dir(job_id), "exit"))
+
+
+async def test_a_stop_during_a_failed_recovered_handover_ends_the_command_before_another_attempt():
+    """MESSAGE-DELIVERY-330: a restart rerun's wait checks its Stop before each handover, as the
+    live call does, so a Stop that arrives while the first attempt fails ends the command
+    instead of a second attempt leaving it running as a Watch."""
+    from core.agent_core.messages import ToolCallBlock
+    from core.agent_core.tools.base import JobStatus
+    from tests.agent_core.fakes import FakeJobHost
+
+    jobs = FakeJobHost()
+    jobs.states["job_1"] = JobStatus("running")
+    stop, attempts = asyncio.Event(), []
+    hand_over = jobs.hand_over
+
+    async def stopped_while_locked(job_id):
+        attempts.append(job_id)
+        if len(attempts) == 1:
+            stop.set()
+            raise RuntimeError("the Watch store is locked")
+        return await hand_over(job_id)
+
+    jobs.hand_over = stopped_while_locked
+    call = ToolCallBlock(id="call_bash", name="bash", arguments={"command": "sleep 60"})
+
+    status, watch_id = await settle_in_foreground(jobs, call, "job_1", stop=stop)
+
+    assert attempts == ["job_1"] and watch_id is None and jobs.watches == {}
+    assert jobs.killed == ["job_1"] and status.state != "running"

@@ -1182,12 +1182,11 @@ def bind_native_start(
     runtime_key: str | None,
     runtime_turn_id: str | None,
     native_turn_id: str | None,
-    vibe_agent_name: str | None = None,
-    vibe_agent_id: str | None = None,
+    execution: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Accept a Turn's native start; ``vibe_agent_*`` record the Agent it runs with.
+    """Accept a Turn's native start; ``execution`` records the request a Vibey Turn runs with.
 
-    A Turn rerun after a restart keeps its restart streak and recorded Agent across
+    A Turn rerun after a restart keeps its restart streak and recorded execution across
     its rebind (``vibey-restart-auto-resume.md``).
     """
     turn = get_turn(conn, turn_id)
@@ -1217,8 +1216,7 @@ def bind_native_start(
                 {
                     "kind": "native_start",
                     **_carried_receipt(turn),
-                    **({"vibe_agent_name": vibe_agent_name} if vibe_agent_name else {}),
-                    **({"vibe_agent_id": vibe_agent_id} if vibe_agent_id else {}),
+                    **({"vibey_execution": dict(execution)} if execution else {}),
                 }
             ),
             "started_at": turn.get("started_at") or turn_now_iso(),
@@ -1245,17 +1243,16 @@ def restart_receipt(turn: dict[str, Any]) -> dict[str, Any]:
     return {key: receipt[key] for key in RESTART_STREAK_KEYS if key in receipt}
 
 
-def recorded_vibe_agent(turn: dict[str, Any]) -> tuple[str | None, str | None]:
-    """``(agent_id, agent_name)`` of the Vibe Agent a Turn's native start recorded, if any."""
-    receipt = _start_receipt(turn)
-    agent_id, name = receipt.get("vibe_agent_id"), receipt.get("vibe_agent_name")
-    return (str(agent_id) if agent_id else None, str(name) if name else None)
+def recorded_execution(turn: dict[str, Any]) -> dict[str, Any]:
+    """The request a Vibey Turn's native start recorded (its Agent, model, effort, and
+    instructions), or ``{}``."""
+    execution = _start_receipt(turn).get("vibey_execution")
+    return dict(execution) if isinstance(execution, dict) else {}
 
 
 def _carried_receipt(turn: dict[str, Any]) -> dict[str, Any]:
     receipt = _start_receipt(turn)
-    keys = (*RESTART_STREAK_KEYS, "vibe_agent_name", "vibe_agent_id")
-    return {key: receipt[key] for key in keys if key in receipt}
+    return {key: receipt[key] for key in (*RESTART_STREAK_KEYS, "vibey_execution") if key in receipt}
 
 
 def rotate_restart_generation(

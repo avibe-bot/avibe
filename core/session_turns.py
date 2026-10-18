@@ -4802,11 +4802,14 @@ class SessionTurnManager:
         self._append_accepted_agent_run_ids(
             resolved.platform_specific, self.accepted_agent_run_ids_for_turn(turn_id)
         )
-        agent = self._turn_vibe_agent(session_id, turn_id)
+        execution = delivery_store.recorded_execution(turn)
+        agent = self._turn_vibe_agent(session_id, turn_id, execution)
         if agent is not None:
-            # The Turn keeps the Agent it ran with, as a live Turn does when the
-            # Session's Agent changes: the change reaches the next Turn.
+            # The Turn keeps the Agent and request it was accepted with, as a live Turn
+            # does when the Session's Agent or its settings change: they reach the next Turn.
             resolved.platform_specific.update({"vibe_agent_name": agent.name, "vibe_agent_id": agent.id})
+            if execution:
+                resolved.platform_specific["vibey_execution"] = execution
         await self._run(
             session_id,
             resolved,
@@ -4819,19 +4822,19 @@ class SessionTurnManager:
         )
         return True
 
-    def _turn_vibe_agent(self, session_id: str, turn_id: str) -> Any:
+    def _turn_vibe_agent(self, session_id: str, turn_id: str, execution: dict[str, Any]) -> Any:
         """The Vibe Agent that ran a Turn, while it still runs on Vibey.
 
-        Its native start records it, by id and name; a Turn an older release accepted
-        names it only as the author of its committed responses.
+        Its native start records it with the rest of its request (``execution``); a Turn
+        an older release accepted names it only as the author of its committed responses.
         """
 
-        with self._sqlite_engine().connect() as conn:
-            turn = delivery_store.get_turn(conn, turn_id)
-            agent_id, name = delivery_store.recorded_vibe_agent(turn) if turn is not None else (None, None)
-            if not agent_id and not name:
+        agent_id = str(execution.get("agent_id") or "") or None
+        name = str(execution.get("agent_name") or "") or None
+        if not agent_id and not name:
+            with self._sqlite_engine().connect() as conn:
                 response = last_response(conn, session_id)
-                name = response.agent_name if response is not None and response.turn_id == turn_id else None
+            name = response.agent_name if response is not None and response.turn_id == turn_id else None
         store = getattr(self.controller, "vibe_agent_store", None)
         agent = None
         if store is not None:
@@ -6040,16 +6043,8 @@ class SessionTurnManager:
             return
         if not self._durable_schema_available():
             return
-        spec = getattr(context, "platform_specific", None) or {}
-        agent_route = (
-            {
-                key: str(spec[key])
-                for key in ("vibe_agent_name", "vibe_agent_id")
-                if spec.get(key)
-            }
-            if backend == "vibey"
-            else {}
-        )
+        execution = (getattr(context, "platform_specific", None) or {}).get("vibey_execution")
+        execution = execution if backend == "vibey" and isinstance(execution, dict) else None
         try:
             identity = self._active_identity(backend, session_id, logical_turn_id)
             native_turn_id = identity[1] if identity and identity[0] == logical_turn_id else None
@@ -6065,9 +6060,8 @@ class SessionTurnManager:
                     runtime_key=runtime_key,
                     runtime_turn_id=runtime_turn_id,
                     native_turn_id=native_turn_id,
-                    # The Agent a Vibey Turn runs with, so a rerun after a restart keeps it.
-                    vibe_agent_name=agent_route.get("vibe_agent_name"),
-                    vibe_agent_id=agent_route.get("vibe_agent_id"),
+                    # The request a Vibey Turn runs with, so a rerun after a restart keeps it.
+                    execution=execution,
                 )
                 materialized: list[dict[str, Any]] = []
                 if bound is not None:
