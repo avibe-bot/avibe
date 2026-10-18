@@ -502,6 +502,7 @@ scenarios:
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: holds every tool while the report is re-read, and after that read fails, until a read lands'
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: names the outcome of a save that ended in a refusal the server named'
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: names the outcome of a save that ended in a lost answer'
+      - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: names the outcome of a save that ended in an engine whose answer never reached the UI process'
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: names the outcome of a save that ended in no answer at all'
   - id: MH-HOSTED-UI-018
     name: Every hosted tool is on by default under its capability group, and nothing locks its switch

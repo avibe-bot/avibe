@@ -210,6 +210,7 @@ describe('useHostedTools ordering', () => {
   it.each([
     ['a refusal the server named', new ApiCallError('tool_unavailable', undefined, true), "Couldn't save the web search setting. Please retry."],
     ['a lost answer', new ApiCallError('http_502', undefined, false), "Couldn't confirm whether the web search setting was saved. It's being re-read from the server; check it before trying again."],
+    ['an engine whose answer never reached the UI process', new ApiCallError('engine_down'), "Couldn't confirm whether the web search setting was saved. It's being re-read from the server; check it before trying again."],
     ['no answer at all', new TypeError('Failed to fetch'), "Couldn't confirm whether the web search setting was saved. It's being re-read from the server; check it before trying again."],
   ])('MH-HOSTED-UI-007: names the outcome of a save that ended in %s', async (_case, error, notice) => {
     vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValue(status(false));

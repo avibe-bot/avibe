@@ -2,6 +2,7 @@ import * as React from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { useToast } from '@/context/ToastContext';
+import { classifyModelHubFailure } from './asyncLifetime';
 import { apiFailure, modelsApi } from './modelsApi';
 import { beginRegionRead, foldRegionRead, loadingRegion, readRegion, readyRegion, settleRegionRead, type RegionRead } from './regionRead';
 import type { HostedToolClear, HostedToolName, HostedToolPut, HostedToolsStatus } from './types';
@@ -115,13 +116,14 @@ export function useHostedTools(active: boolean, revision: string | null = null) 
       } catch (error) {
         // A refused write changed nothing, and a lost answer may have committed;
         // either way the tab converges on what the server now holds. Only a
-        // refusal the server named is a failure: a lost answer is an unknown outcome.
+        // decided refusal is a failure: a lost answer is an unknown outcome.
         clock.rereadAfterWrites = true;
         entry(tool).awaiting = true;
         if (alive.current) {
           const toolInline = t(`settings.models.tools.tool.${tool}.inline`);
-          if (apiFailure(error)?.serverNamed) showToast(t(`settings.models.tools.${failure}Failed`, { toolInline }) as string, 'error');
-          else showToast(t(`settings.models.tools.${failure}Unconfirmed`, { toolInline }) as string, 'warning');
+          // `engine_down` is inconclusive too: the UI process also says it when the engine's answer never reached it.
+          if (classifyModelHubFailure(apiFailure(error)) === 'inconclusive') showToast(t(`settings.models.tools.${failure}Unconfirmed`, { toolInline }) as string, 'warning');
+          else showToast(t(`settings.models.tools.${failure}Failed`, { toolInline }) as string, 'error');
         }
       }
     });
