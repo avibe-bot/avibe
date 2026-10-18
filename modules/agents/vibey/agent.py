@@ -341,6 +341,10 @@ class VibeyAgent(BaseAgent):
         try:
             turn.router = await self._preflight(turn)
         except Exception as error:
+            if self._service_stopping(turn):
+                # Stopping the service (its Model Hub gateway first) failed the route, not
+                # the Turn: leave it open, as a run cut below is, for the restart.
+                await asyncio.Event().wait()
             turn.settled = True
             await self._fail_preflight(request, error)
             return
@@ -422,12 +426,11 @@ class VibeyAgent(BaseAgent):
 
     def _cut_by_service_stop(self, run: _Run) -> bool:
         """Whether a run that did not complete ended while the service was stopping."""
-        return bool(
-            run.reason not in _COMPLETED
-            and not run.final_row
-            and not run.stop_requested
-            and getattr(self.controller, "shutdown_requested", False) is True
-        )
+        return bool(run.reason not in _COMPLETED and not run.final_row and self._service_stopping(run))
+
+    def _service_stopping(self, run: _Run) -> bool:
+        """Whether the service is stopping under a run nobody asked to stop."""
+        return not run.stop_requested and getattr(self.controller, "shutdown_requested", False) is True
 
     def _resume_turn_inputs(self, session_id: str, source_turn_id: Any) -> tuple[int, ...]:
         """Committed inputs of the failed task, including steers across its retry ancestry."""
@@ -501,11 +504,20 @@ class VibeyAgent(BaseAgent):
         return time.monotonic() - run.continuation_started_at < policy.max_elapsed_s
 
     def _accept_native_start(self, request: AgentRequest, session_id: str) -> None:
-        if request.vibe_agent_name:
+        if request.vibe_agent_name or request.vibe_agent_id:
             # The native start records the Agent this Turn runs with (a restart rerun keeps it).
             if request.context.platform_specific is None:
                 request.context.platform_specific = {}
-            request.context.platform_specific["vibe_agent_name"] = request.vibe_agent_name
+            request.context.platform_specific.update(
+                {
+                    key: value
+                    for key, value in (
+                        ("vibe_agent_name", request.vibe_agent_name),
+                        ("vibe_agent_id", request.vibe_agent_id),
+                    )
+                    if value
+                }
+            )
         self.bind_agent_session_id(request, session_id)
         mark_backend_dispatch_attempted(request.context)
         self.mark_runtime_turn_started(request.context)

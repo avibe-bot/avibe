@@ -89,8 +89,9 @@ exists; "handled" names where the in-place design still owns it.
    and native ids) and records the restart streak in one writer transaction,
    then reruns the Turn through the ordinary runner with `vibey_resume`, with
    the Vibe Agent that ran it, while that Agent still runs on Vibey: its native
-   start records that Agent on the start receipt (a Turn an older release
-   accepted names it as the author of its committed responses). A Session's
+   start records that Agent's id and name on the start receipt, and the rerun
+   finds it by id, which survives a rename (a Turn an older release accepted
+   names it only as the author of its committed responses). A Session's
    switch to another Agent reaches the next Turn, as it does for a live one. Vibey resumes its committed
    transcript (`Agent.resume`, no input consumed, no visible `continue`, no
    replay of a committed tool call), and the rerun's native start binds this
@@ -123,8 +124,9 @@ exists; "handled" names where the in-place design still owns it.
    with its own outcome and output, and callbacks fire once, from that outcome.
    At shutdown, `release_for_service_shutdown` and the scheduled-task teardown
    leave a Vibey Turn and its Runs unsettled, and a Vibey run that fails
-   because the service is stopping leaves its Turn open, so startup finds them
-   as lost active Turns like a conversation Turn.
+   because the service is stopping (in a model call, or in a rerun's preflight
+   as the Model Hub stops) leaves its Turn open, so startup finds them as lost
+   active Turns like a conversation Turn.
 5. **Ordering.** The Turn stays the Session's active Turn, so any input queued
    while the service was down waits behind it, and may be steered into it by
    the existing steer path.

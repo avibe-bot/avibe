@@ -462,7 +462,7 @@ scenarios:
     layer: contract
     test: tests/test_backend_failure_retry.py::test_restart_rerun_runs_before_input_queued_while_the_service_was_down
   - id: MESSAGE-DELIVERY-332
-    name: A Vibey run that fails because the service is stopping leaves its Turn open for its restart rerun
+    name: A Vibey run that fails because the service is stopping (a model call, or a rerun's preflight) leaves its Turn open for its restart rerun
     status: covered
     kind: recovery
     layer: contract

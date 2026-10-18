@@ -259,7 +259,7 @@ def test_restart_reruns_a_cut_vibey_turn_in_place_without_a_notice(isolated_stat
     itself, with the Agent it ran with: no Delivery, no successor Turn, no notice. A committed
     handover does not stop it, a command still running is left to it, not handed over at startup,
     and a failed stream's partial text is not a final reply. The Agent is the one its native start
-    recorded, even when it was cut before its first response."""
+    recorded, by its id, even when it was cut before its first response or renamed since."""
     from core.agent_core.tools.base import JobStatus
     from tests.agent_core.fakes import FakeJobHost
 
@@ -272,17 +272,23 @@ def test_restart_reruns_a_cut_vibey_turn_in_place_without_a_notice(isolated_stat
     cut = _accepted_turn(tmp_path, backend="vibey", jobs=jobs)
     before = _deliveries(cut.engine, cut.session_id)
     agents = {
-        name: VibeAgent(id=f"agt_{name}", name=name, normalized_name=name, backend="vibey")
+        f"agt_{name}": VibeAgent(id=f"agt_{name}", name=name, normalized_name=name, backend="vibey")
         for name in ("worker", "reviewer")
     }
-    cut.manager.controller.vibe_agent_store = SimpleNamespace(get=agents.get)
+    cut.manager.controller.vibe_agent_store = SimpleNamespace(
+        get=lambda name: next((agent for agent in agents.values() if agent.name == name), None),
+        get_by_id=agents.get,
+    )
     # The Vibey run's native start, as its adapter accepts it: it names the Agent it runs with.
     cut.manager.controller._session_id_from_context = lambda ctx: (ctx.platform_specific or {}).get(
         "agent_session_id"
     )
     accepted = cut.context(cut.session_id)
     accepted.platform_specific.update(
-        {"turn_token": cut.turn_id, "agent_session_id": cut.session_id, "vibe_agent_name": "worker"}
+        {
+            "turn_token": cut.turn_id, "agent_session_id": cut.session_id,
+            "vibe_agent_name": "worker", "vibe_agent_id": "agt_worker",
+        }
     )
     cut.manager.on_native_start(
         accepted, backend="vibey", runtime_key=f"runtime:{cut.turn_id}", runtime_turn_id=f"runtime-turn:{cut.turn_id}"
@@ -290,8 +296,10 @@ def test_restart_reruns_a_cut_vibey_turn_in_place_without_a_notice(isolated_stat
 
     def switch_agent(engine, session_id, _turn_id):
         # The Session moved to another Vibey Agent while the Turn ran: that reaches the next Turn.
+        # The Turn's own Agent was renamed meanwhile; its id still finds it.
         with engine.begin() as conn:
             conn.execute(update(agent_sessions).where(agent_sessions.c.id == session_id).values(agent_name="reviewer"))
+        agents["agt_worker"] = VibeAgent(id="agt_worker", name="builder", normalized_name="builder", backend="vibey")
 
     _restart(cut, _then(_previous_process(step), switch_agent))
 
@@ -311,7 +319,7 @@ def test_restart_reruns_a_cut_vibey_turn_in_place_without_a_notice(isolated_stat
     assert started.platform_specific["vibey_source_turn_id"] == cut.turn_id
     assert started.platform_specific["delivery_id"] == before[0]
     assert (started.platform_specific["vibe_agent_name"], started.platform_specific["vibe_agent_id"]) == (
-        "worker", "agt_worker",
+        "builder", "agt_worker",
     )
     assert _deliveries(cut.engine, cut.session_id) == before
     with cut.engine.connect() as conn:

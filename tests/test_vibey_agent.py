@@ -286,7 +286,8 @@ class _Controller:
         # Outside a run (a crash simulation), the identity a previous process's adapter bound.
         native = self.agent.steering_native_turn_id(target) or f"vibey:previous-process:{turn_id}"
         self.started.append(native)
-        self.native_agents.append((context.platform_specific or {}).get("vibe_agent_name"))
+        spec = context.platform_specific or {}
+        self.native_agents.append((spec.get("vibe_agent_name"), spec.get("vibe_agent_id")))
         with self.engine.begin() as conn:
             turn = message_deliveries.get_turn(conn, turn_id)
             assert message_deliveries.bind_native_start(
@@ -2641,16 +2642,29 @@ async def test_startup_hands_an_orphaned_foreground_job_to_its_watch(engine, ses
     assert harness.provider.requests == []
 
 
+@pytest.mark.parametrize("cut_in", ["model_call", "preflight"])
 async def test_a_run_the_service_stop_cut_leaves_its_turn_open_for_its_restart_rerun(
-    engine, session, tmp_path, published
+    engine, session, tmp_path, published, cut_in
 ) -> None:
-    """MESSAGE-DELIVERY-332: stopping the service (its gateway first) fails the run; the Turn
-    is the restart's to continue, so it neither fails nor shows a notice."""
+    """MESSAGE-DELIVERY-332: stopping the service (its gateway first) fails the run, in a model
+    call or in a rerun's preflight; the Turn is the restart's to continue, so it neither fails
+    nor shows a notice."""
     from core.agent_core.ai.provider import ProviderError
 
     harness = _Harness(engine, tmp_path, "telegram", [[ProviderError("server", "gateway closed", False)]])
     harness.controller.shutdown_requested = True
     request = harness.request("keep working")
+    if cut_in == "preflight":
+        # A rerun of a Turn the previous process accepted; the Model Hub stops with the service.
+        harness.controller._native_start(request.context)
+        request.context.platform_specific.update(
+            {"vibey_resume": True, "vibey_source_turn_id": _turn(request.context)}
+        )
+
+        async def stopped(*_args, **_kwargs):
+            raise RuntimeError("the Model Hub gateway is stopped")
+
+        harness.controller.model_hub_runtime.resolve = stopped
 
     running = asyncio.create_task(harness.agent.handle_message(request))
     for _ in range(50):
@@ -2749,7 +2763,10 @@ async def test_a_restart_rerun_waits_for_its_surviving_command_as_the_live_call_
             {"vibey_resume": True, "vibey_source_turn_id": cut_turn, "accepted_agent_run_ids": [run.id]}
         )
         resume = AgentRequest(
-            **{**request.__dict__, "context": context, "message": "", "user_message": "", "vibe_agent_name": "worker"}
+            **{
+                **request.__dict__, "context": context, "message": "", "user_message": "",
+                "vibe_agent_name": "worker", "vibe_agent_id": "agt_worker",
+            }
         )
 
         resumed = asyncio.create_task(harness.agent.handle_message(resume))
@@ -2768,7 +2785,7 @@ async def test_a_restart_rerun_waits_for_its_surviving_command_as_the_live_call_
         watch_id = ManagedWatchStore().find_job_watch(job_id)
         if case in {"exits", "watch_unavailable"}:
             # Its native start names the Agent it runs with, for a later restart's rerun.
-            assert harness.controller.native_agents[-1] == "worker"
+            assert harness.controller.native_agents[-1] == ("worker", "agt_worker")
             assert "step-two-done" in body and watch_id is None
             assert "step-two-done" in json.dumps(message_to_dict(harness.provider.requests[0].messages[-1]))
             assert harness.controller.im_client.sent[-1] == "步骤三完成"
