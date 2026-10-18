@@ -2667,15 +2667,16 @@ async def test_a_run_the_service_stop_cut_leaves_its_turn_open_for_the_restart_c
         await running
 
 
-@pytest.mark.parametrize("case", ["exits", "window_passed", "stop"])
+@pytest.mark.parametrize("case", ["exits", "window_passed", "watch_unavailable", "stop"])
 async def test_a_restart_continuation_waits_for_its_surviving_command_as_the_live_call_would(
-    engine, session, tmp_path, published, case
+    engine, session, tmp_path, published, monkeypatch, case
 ) -> None:
     """MESSAGE-DELIVERY-330: startup leaves a running command to the Turn it continues; the
     continuation waits for it within the call's foreground window, counted from its launch, so
     its real output is the result the reply (and a Run, MESSAGE-DELIVERY-328) settles from. A
-    window the downtime spent hands it over; a Stop ends the wait and the command. It never
-    starts again."""
+    window the downtime spent hands it over; with no Watch to take it, it stays in the
+    foreground until it ends; a Stop ends the wait and the command. It never starts again."""
+    import core.watches as watches_module
     from core.backend_failure_retry import reserve_restart_resume
     from core.scheduled_tasks import TaskExecutionStore
     from core.watches import ManagedWatchStore
@@ -2689,7 +2690,7 @@ async def test_a_restart_continuation_waits_for_its_surviving_command_as_the_liv
     await harness.agent.store.consume_input(
         SESSION, request.context.platform_specific["delivery_id"], UserMessage((text("run the three steps"),))
     )
-    command = "sleep 1; printf step-two-done" if case == "exits" else "sleep 30"
+    command = "sleep 1; printf step-two-done" if case in {"exits", "watch_unavailable"} else "sleep 30"
     call = ToolCallBlock(id="call_bash", name="bash", arguments={"command": command})
     response = await harness.agent.store.append_response(SESSION, assistant("", calls=(call,)), final=False)
     job_id = await _real_job(suite, command, call=_instance(response, "call_bash"), cwd=tmp_path)
@@ -2697,7 +2698,13 @@ async def test_a_restart_continuation_waits_for_its_surviving_command_as_the_liv
     run = requests.enqueue_agent_run(message="run the three steps", session_id=SESSION, agent_name="vibey")
     assert requests.claim(run.id) is not None
     try:
-        if case == "window_passed":
+        if case == "watch_unavailable":
+
+            async def no_watch(meta, **_kwargs):
+                raise RuntimeError("the Watch store is locked")
+
+            monkeypatch.setattr(watches_module, "hand_over_job", no_watch)
+        if case in {"window_passed", "watch_unavailable"}:
             # The job launched three minutes ago: the downtime spent its 120 s window.
             from datetime import datetime, timedelta
 
@@ -2734,7 +2741,7 @@ async def test_a_restart_continuation_waits_for_its_surviving_command_as_the_liv
         [result] = [entry for entry in await harness.context_rows() if entry.kind == "tool_result"]
         body = result.message.content[0].text
         watch_id = ManagedWatchStore().find_job_watch(job_id)
-        if case == "exits":
+        if case in {"exits", "watch_unavailable"}:
             assert "step-two-done" in body and watch_id is None
             assert "step-two-done" in json.dumps(message_to_dict(harness.provider.requests[0].messages[-1]))
             assert harness.controller.im_client.sent[-1] == "步骤三完成"

@@ -427,6 +427,7 @@ scenarios:
     test:
       - tests/test_backend_failure_retry.py::test_restart_continues_a_cut_vibey_turn_from_its_transcript_without_a_notice
       - tests/test_backend_failure_retry.py::test_restart_completes_a_cut_vibey_turn_whose_final_reply_was_committed
+      - tests/test_agent_transcript.py::test_the_restart_reads_of_a_turns_context_tail_stay_bounded
   - id: MESSAGE-DELIVERY-328
     name: A Vibey Agent Run cut by a restart is left at shutdown, moves to the continuation, and settles once from the continued result, the answer after its command
     status: covered
@@ -436,7 +437,7 @@ scenarios:
       - tests/test_harness_failure_retry.py::test_a_vibey_agent_run_cut_by_a_restart_settles_from_the_continued_work
       - tests/test_vibey_agent.py::test_a_restart_continuation_waits_for_its_surviving_command_as_the_live_call_would
   - id: MESSAGE-DELIVERY-329
-    name: A cut Vibey Turn that no longer qualifies (Stop, Agent off Vibey, archived, continuation bound) keeps the restart notice
+    name: A cut Vibey Turn that no longer qualifies (Stop, Agent off Vibey, archived, continuation bound, cannot start now) keeps the restart notice
     status: covered
     kind: recovery
     layer: contract

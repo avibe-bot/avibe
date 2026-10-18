@@ -538,6 +538,47 @@ async def test_a_reply_pending_input_superseded_commits_as_a_visible_reply(engin
     assert [entry.row_id for entry in await store.load("ses_main") if entry.kind == "response"] == [reply.row_id]
 
 
+async def test_the_restart_reads_of_a_turns_context_tail_stay_bounded(engine) -> None:
+    """MESSAGE-DELIVERY-327: restart recovery decides a cut Turn from its context tail, synchronously on
+    the controller loop, once per recovered Turn. Each read is an indexed SEARCH bounded by the Session's
+    tail or by the Turn's own Deliveries: no scan and no temporary sort over the growing history."""
+    from sqlalchemy import event
+
+    from storage.agent_transcript import committed_final
+
+    with engine.begin() as conn:
+        home = _scope(conn, "C-home")
+        _session(conn, "ses_main", home)
+        first = _accepted_turn(conn, "ses_main", home, "看一下目录", "turn_main")
+    store = SQLiteTranscriptStore(engine)
+    await store.consume_input("ses_main", first, _user("看一下目录"))
+    await store.append_response("ses_main", _assistant("两个文件。"), final=True, turn_id="turn_main")
+    statements: list[tuple[str, object]] = []
+
+    def capture(_conn, _cursor, statement, parameters, _context, _executemany):
+        statements.append((statement, parameters))
+
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        with engine.connect() as conn:
+            # A committed final runs every read: the tail, the input after it, the Turn's unconsumed inputs.
+            assert committed_final(conn, "ses_main", "turn_main") is not None
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+
+    raw = sqlite3.connect(str(get_sqlite_state_path()))
+    try:
+        plans = [" | ".join(row[-1] for row in raw.execute("EXPLAIN QUERY PLAN " + sql, params)) for sql, params in statements]
+    finally:
+        raw.close()
+    assert len(plans) == 3, plans
+    for plan in plans[:2]:
+        assert "SEARCH messages USING INDEX uq_messages_session_context_seq (session_id=? AND context_seq>?)" in plan, plan
+    assert "SEARCH message_deliveries USING INDEX uq_message_deliveries_turn_position (turn_id=?)" in plans[2], plans[2]
+    for plan in plans:
+        assert "SCAN" not in plan and "TEMP B-TREE" not in plan, plan
+
+
 async def test_a_call_instance_is_settled_once_whoever_writes(engine) -> None:
     with engine.begin() as conn:
         home = _scope(conn, "C-home")

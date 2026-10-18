@@ -63,7 +63,9 @@ This replaces recovery invariant T4 for Vibey (`agent-core-contracts/recovery.md
    (`meta.created_at`), or until a Stop, which ends the command as in a live
    Turn. An exited job gives its real output; only a job still running then is
    handed to a Watch, with the ordinary handover result; a window the downtime
-   already spent hands over at once. So within the window the continuation, and
+   already spent hands over at once. A handover that fails is retried once, and
+   with no Watch to take it the job stays in the foreground until it ends, as
+   `bash` keeps it in a live Turn. So within the window the continuation, and
    any Run it settles, see the command's real result, exactly as without a
    restart. Nothing runs twice: the wait commits and starts nothing, and a
    committed result or handover is reused. A Turn that falls back to the notice
@@ -117,7 +119,7 @@ This replaces recovery invariant T4 for Vibey (`agent-core-contracts/recovery.md
 - `core/run_settlement.py`: `SETTLED_BY_RESTART_RESUMED`, outside
   `SETTLEMENTS_WITHOUT_RESULT`.
 - `modules/agents/vibey/agent.py`, `recovery.py`, `tools.py` and agent-core
-  `settle_open_calls` / `bash.wait_in_foreground_window`: item 3's T2 split
+  `settle_open_calls` / `bash.settle_in_foreground`: item 3's T2 split
   (startup defers a running job of an unsettled Turn; the continuation's T2
   waits; `VibeyRecovery.settle_session` hands over before a fallback notice).
   Another addition the code required: stopping the service stops the Model Hub
@@ -133,7 +135,11 @@ This replaces recovery invariant T4 for Vibey (`agent-core-contracts/recovery.md
 - The continuation keeps the cut Turn's routing: platform, scope, author,
   metadata (Harness provenance included), admission context (with the IM
   message the indicator belongs on), and FIFO position (`submitted_at`), so a
-  deferred start still runs before input queued behind the cut Turn.
+  continuation requeued by a failed start still runs before input queued behind
+  the cut Turn. A continuation that cannot be claimed at once (its runtime not
+  admitted, or a start check refusing it) is never left waiting unclaimed, where
+  a later denial would drop the work unannounced: the transaction rolls back
+  and the Turn keeps today's notice and Retry.
 - Docs: `agent-core-contracts/recovery.md` T4, `backend-failure-retry.md`.
   Public docs (`avibe-docs` `agents/vibey.mdx` Restart bullet, both languages)
   change in a follow-up in that repository.

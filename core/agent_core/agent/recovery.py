@@ -17,8 +17,8 @@ from core.agent_core.tools.base import CallInstance, JobHost, JobStatus, ToolRes
 
 #: ``None`` means the job holds no result for the call (it never ran, or ended for an unrecorded reason).
 RecoveryRenderer = Callable[[ToolCallBlock, str, JobStatus, Optional[str]], Awaitable[Optional[ToolResult]]]
-#: For a job still running: wait for it as its live call would, and return its status then.
-ForegroundWait = Callable[[ToolCallBlock, str], Awaitable[JobStatus]]
+#: For a job still running: settle it as its live call would; its status then, and the Watch it went to, if any.
+ForegroundWait = Callable[[ToolCallBlock, str], Awaitable[tuple[JobStatus, Optional[str]]]]
 
 # recovery.md T2: no job evidence can establish whether a file mutation ran.
 UNRECORDED_EFFECT = "[tool call interrupted; it may or may not have completed; re-read the file before continuing]"
@@ -52,10 +52,11 @@ async def settle_open_calls(
     calls that run left open carry their jobs' recorded reason at once.
 
     ``wait_running`` is the Turn that continues after a restart: a job still
-    running is waited for as its live call would wait (its foreground window from
-    the job's launch, or a Stop), so only a job still running then is handed over.
-    The wait commits nothing, so a crash during it leaves the call open for the
-    next settlement, and no job is ever started here.
+    running is settled as its live call would settle it (its foreground window
+    from the job's launch, then a Watch, or the foreground when no Watch can take
+    it; a Stop ends it), so only a job still running then is handed over. The
+    wait commits nothing, so a crash during it leaves the call open for the next
+    settlement, and no job is ever started here.
     """
     committed: list[ContextEntry] = []
     rows = list(await store.load(session_id))
@@ -67,10 +68,11 @@ async def settle_open_calls(
             message = ToolResultMessage(call.id, call.name, (text(UNRECORDED_EFFECT),), is_error=True)
         else:
             status = jobs.status(job_id)
-            if status.state == "running" and wait_running is not None:
-                status = await wait_running(deepcopy(call), job_id)
             details["job_id"] = job_id
-            watch_id = await jobs.hand_over(job_id) if status.state == "running" else None
+            if status.state == "running" and wait_running is not None:
+                status, watch_id = await wait_running(deepcopy(call), job_id)
+            else:
+                watch_id = await jobs.hand_over(job_id) if status.state == "running" else None
             result = await render_result(deepcopy(call), job_id, status, watch_id)
             if result is not None:
                 message = ToolResultMessage(call.id, call.name, result.content, result.is_error)

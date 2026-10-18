@@ -60,9 +60,9 @@ class ToolSuite:
     #: The job a call instance started, if any.
     find_job: Callable[[CallInstance], Optional[str]]
     prune: Optional[Callable[[CallSettled], list[str]]] = None
-    #: ``(call, job_id, stop)``: a surviving job waited for in its call's foreground window, from its launch,
-    #: or until ``stop``; ``None`` hands a running job over at once.
-    wait_recovered: Optional[Callable[[Any, str, asyncio.Event], Awaitable[JobStatus]]] = None
+    #: ``(call, job_id, stop)``: a surviving job settled as its live call would, from its launch, or until
+    #: ``stop``: its status and Watch (``settle_in_foreground``); ``None`` hands a running job over at once.
+    wait_recovered: Optional[Callable[[Any, str, asyncio.Event], Awaitable[tuple[JobStatus, Optional[str]]]]] = None
     #: The shell commands run in, as the environment block names it (C-7 tools.md section 8).
     shell: str = field(default_factory=lambda: default_shell().describe())
 
@@ -79,7 +79,7 @@ def local_tool_suite(jobs_dir: Optional[str] = None, *, route: Optional[HandOver
     Agent and authorization from ``route``: the job's owning Turn. ``bash`` and the
     recovered wait use the same default foreground window.
     """
-    from core.agent_core.tools.bash import recovered_result, wait_in_foreground_window
+    from core.agent_core.tools.bash import recovered_result, settle_in_foreground
     from core.agent_core.tools.coding import create_coding_tools
     from core.agent_core.tools.jobs import LocalJobHost
     from core.watches import ManagedWatchStore, agent_jobs_dir
@@ -107,8 +107,8 @@ def local_tool_suite(jobs_dir: Optional[str] = None, *, route: Optional[HandOver
     async def render(call: Any, job_id: str, status: Any, watch_id: Optional[str]) -> Any:
         return await recovered_result(host, job_id, status, watch_id)
 
-    async def wait_recovered(call: Any, job_id: str, stop: asyncio.Event) -> JobStatus:
-        return await wait_in_foreground_window(host, call, job_id, stop=stop)
+    async def wait_recovered(call: Any, job_id: str, stop: asyncio.Event) -> tuple[JobStatus, Optional[str]]:
+        return await settle_in_foreground(host, call, job_id, stop=stop)
 
     def prune(call_settled: CallSettled) -> list[str]:
         # J5: a job's files stay until its call has a durable result and no Watch still manages it.

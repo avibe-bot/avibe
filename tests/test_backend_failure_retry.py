@@ -327,11 +327,20 @@ def _archive(engine, session_id, _turn_id):
         conn.execute(update(agent_sessions).where(agent_sessions.c.id == session_id).values(status="archived"))
 
 
-@pytest.mark.parametrize("case", ["qualifies", "stop", "switched", "archived", "bound"])
+@pytest.mark.parametrize("case", ["qualifies", "stop", "switched", "archived", "bound", "not_admitted"])
 def test_a_cut_vibey_turn_that_no_longer_qualifies_keeps_the_restart_notice(isolated_state, tmp_path, case):
-    """MESSAGE-DELIVERY-329: Stop, an Agent off Vibey, an archived Session, or a third
-    restart in a row without a model response keep today's settlement and notice."""
+    """MESSAGE-DELIVERY-329: Stop, an Agent off Vibey, an archived Session, a third restart
+    in a row without a model response, or a continuation that cannot start now (its runtime
+    not admitted) keep today's settlement and notice; no continuation waits unclaimed."""
+    from core.runtime_activation import RuntimeActivationRegistry, RuntimeActivationResolution
+
     cut = _accepted_turn(tmp_path, backend="vibey")
+    if case == "not_admitted":
+        service = cut.manager.controller.agent_service
+        service.activation_registry = RuntimeActivationRegistry()
+        service.runtime_activation_identity_for_session_binding = (
+            lambda *_args, **_kwargs: RuntimeActivationResolution(authoritative=False)
+        )
     restarts = 1
     before = {
         "stop": _then(_previous_process("tool"), _request_stop),

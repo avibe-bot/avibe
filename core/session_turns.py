@@ -4922,8 +4922,9 @@ class SessionTurnManager:
 
         ``restart_resume`` is startup recovery continuing a Vibey Turn a restart cut:
         in this writer transaction it reserves the hidden continuation, moves the
-        Turn's Runs to it, and claims it as the successor ahead of the FIFO. When the
-        Turn no longer qualifies, nothing is written and the result carries
+        Turn's Runs to it, and claims it as the successor ahead of the FIFO, or raises
+        ``RestartResumeLost`` to roll all of it back. When the Turn no longer
+        qualifies, nothing is written and the result carries
         ``reason="restart_resume_unavailable"``.
         """
         if not self._durable_schema_available():
@@ -5316,12 +5317,10 @@ class SessionTurnManager:
                             dispatch_text="",
                         )
                         if claimed is None:
-                            claimed_successor = None
-                            held = delivery_store.get_delivery(conn, str(continuation["id"]))
-                            if held is None or held["state"] != "queued":
-                                # Retired by a start check: keep the Turn for the notice.
-                                raise RestartResumeLost("restart continuation was refused")
-                            start_deferred = True
+                            # Refused or deferred (a draining backend): a continuation never waits
+                            # unclaimed, where a later denial would drop the work unannounced. Roll
+                            # back; the Turn keeps today's notice and Retry.
+                            raise RestartResumeLost("restart continuation could not start")
                     if (
                         claimed_successor is None
                         and resume_successors
