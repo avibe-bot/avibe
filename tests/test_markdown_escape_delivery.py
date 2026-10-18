@@ -29,6 +29,8 @@ from modules.im.slack import SlackBot, SlackMarkdownConverter
 from modules.im.wechat import WeChatBot
 
 LINK = "https://s.example/p"
+# U+034F COMBINING GRAPHEME JOINER, invisible: what keeps mrkdwn from reading the delimiter after it.
+CGJ = "\u034f"
 
 
 def telegram(text: str) -> str:
@@ -59,18 +61,20 @@ class TestEscapedProse:
 
     @DIALECTS
     @pytest.mark.parametrize(
-        "raw, shown",
+        "raw, shown, in_mrkdwn",
         [
-            (r"plain \*literal\* text", "plain *literal* text"),
-            (r"a \_b\_ c", "a _b_ c"),
-            (r"tick \` tick", "tick ` tick"),
-            (r"a \~b\~ c", "a ~b~ c"),
-            (r"a \\ b", "a \\ b"),
+            (r"plain \*literal\* text", "plain *literal* text", f"plain {CGJ}*literal{CGJ}* text"),
+            (r"a \_b\_ c", "a _b_ c", f"a {CGJ}_b{CGJ}_ c"),
+            (r"tick \` tick", "tick ` tick", f"tick {CGJ}` tick"),
+            (r"a \~b\~ c", "a ~b~ c", f"a {CGJ}~b{CGJ}~ c"),
+            (r"a \\ b", "a \\ b", "a \\ b"),
         ],
         ids=["asterisk", "underscore", "backtick", "tilde", "backslash"],
     )
-    def test_the_reader_sees_the_character_and_no_backslash(self, render, raw, shown):
-        assert render(raw) == shown
+    def test_the_reader_sees_the_character_and_no_backslash(self, render, raw, shown, in_mrkdwn):
+        """mrkdwn has no escape: a delimiter is shown as written only behind an invisible combining grapheme joiner
+        (measured on Slack by reading the message back as rich text)."""
+        assert render(raw) == (in_mrkdwn if render is slack else shown)
 
     @DIALECTS
     def test_an_escape_inside_a_code_span_is_still_code(self, render):
@@ -139,3 +143,81 @@ class TestEscapedLinkLabel:
         assert "ex`ample.com" in rendered
         assert LINK in rendered
         assert "](" not in rendered
+
+
+class TestLiteralText:
+    """Text that must reach the reader exactly as written (#2820): a search query, a path, a command.
+
+    The formatter writes it once, as CommonMark escapes (``escape_special_chars``),
+    and each transport resolves those into its own literal. ``*domain*`` is the
+    reported case: a query that ran as ``*domain*`` must not be shown as an
+    emphasised ``domain``.
+    """
+
+    QUERY = "*domain* _x_ `c` [l](u) <b> a&lt;b |t| ~s~ \\"
+
+    def test_telegram_shows_every_character(self):
+        literal = TelegramFormatter().escape_special_chars(self.QUERY)
+
+        assert telegram(literal) == "*domain* _x_ `c` [l](u) &lt;b&gt; a&amp;lt;b |t| ~s~ \\"
+
+    def test_wechat_shows_every_character(self):
+        literal = WeChatFormatter().escape_special_chars(self.QUERY)
+
+        assert wechat(literal) == self.QUERY
+
+    def test_feishu_writes_each_character_as_the_entity_it_shows(self):
+        """Measured by posting the card and reading back Feishu's own parse of it: every character is plain text."""
+        import json
+
+        from config.v2_config import LarkConfig
+        from modules.im.feishu import FeishuBot
+        from modules.im.formatters.feishu_formatter import FeishuFormatter
+
+        bot = FeishuBot(LarkConfig(app_id="app-id", app_secret="app-secret"))
+        card = json.loads(bot._build_card_json(FeishuFormatter().escape_special_chars(self.QUERY)))
+
+        assert card["body"]["elements"][0]["content"] == (
+            "&#42;domain&#42; &#95;x&#95; &#96;c&#96; &#91;l&#93;(u) &#60;b&#62; a&#38;lt;b "
+            "&#124;t&#124; &#126;s&#126; &#92;"
+        )
+
+    def test_slack_markdown_blocks_and_discord_read_the_escapes_themselves(self):
+        """Slack's ``markdown`` block (a status bubble) and Discord render CommonMark escapes as the character,
+        measured on Slack by reading the posted block back as rich text. So the text they are handed is the escape."""
+        from modules.im.formatters.discord_formatter import DiscordFormatter
+        from modules.im.formatters.slack_formatter import SlackFormatter
+
+        expected = r"\*domain\* \_x\_ \`c\` \[l\](u) \<b\> a\&lt;b \|t\| \~s\~ \\"
+        assert DiscordFormatter().escape_special_chars(self.QUERY) == expected
+        bot = SlackBot.__new__(SlackBot)
+        bot.markdown_converter = SlackMarkdownConverter()
+        blocks, fallback = bot._build_status_blocks(SlackFormatter().escape_special_chars(self.QUERY), "working")
+        assert blocks[0] == {"type": "markdown", "text": expected}
+        # The notification text beside the block is read as mrkdwn, so it is spelled as mrkdwn shows it.
+        assert fallback == slack(expected)
+
+    def test_slack_mrkdwn_shows_every_character(self):
+        """mrkdwn has no escape. Measured by posting and reading the message back as rich text: ``&``, ``<`` and ``>``
+        show as entities, and a paired ``*``, ``_``, ``~`` or backtick shows as written only behind a combining
+        grapheme joiner (a zero-width space, word joiner or zero-width joiner beside it still formats)."""
+        from modules.im.formatters.slack_formatter import SlackFormatter
+
+        literal = SlackFormatter().escape_special_chars(self.QUERY)
+
+        assert slack(literal) == (
+            f"{CGJ}*domain{CGJ}* {CGJ}_x{CGJ}_ {CGJ}`c{CGJ}` [l](u) &lt;b&gt; a&amp;lt;b |t| {CGJ}~s{CGJ}~ \\"
+        )
+        assert slack(r"a \<!channel\>") == "a &lt;!channel&gt;"
+
+    def test_a_tool_label_and_a_code_span_show_what_the_tool_was_given(self):
+        from modules.im.formatters.discord_formatter import DiscordFormatter
+
+        formatter = DiscordFormatter()
+
+        assert formatter.format_toolcall_label("Bash", {"command": "rg *domain* src"}) == r"🔧 Bash: rg \*domain\* src"
+        # Shortened before it is escaped, so the cut never leaves half an escape behind.
+        long = formatter.format_toolcall_label("Bash", {"command": "a" * 60 + "*"}, max_len=20)
+        assert long.endswith("…") and "\\" not in long
+        # A code span is literal already; a backslash there would be shown.
+        assert formatter.format_file_path("core/message_dispatcher.py") == "📁 File: `core/message_dispatcher.py`"

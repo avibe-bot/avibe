@@ -386,7 +386,10 @@ never dropped.
   result (§7.3).
 - **`AssistantMessage.hosted_summary`** (per response, present exactly when the message has hosted blocks):
   `cost` (`{basis, usd}` with `basis` `reported` or `list`, or `included` with no `usd`; absent when unknown),
-  `counts` (provider counters by name), `cited_sources[]` (the xAI X-search `url_citation`s).
+  `counts` (provider counters by name, each at most 2^53 - 1), `cited_sources[]` (the xAI X-search `url_citation`s).
+  A provider's counter or `cost_in_usd_ticks` past its bound is refused where it is read
+  (`core/agent_core/ai/hosted.py`), for the native and the proxied call alike, so it reads as absent and never
+  fails a response (#2572).
 - **`TextBlock.citations`** (optional): `[{url, title?, cited_text?, start?, end?}]`, presentation only, never
   replayed, materialized at delivery by `core/citations.py`.
 - **`ToolResultMessage.hosted`** (optional): `{record, execution?, action?}` for a proxied search call and for every
@@ -634,11 +637,16 @@ Unchanged from v1 §7.3 (owner decision, 2026-10-13 19:14), with the producer no
     empty, `xai` or `grok` prefix and then routes the bare id, which `force-model-prefix` never registers (unchanged
     in v8.0.28). That 400 is the engine's own refusal, recognized as local, never learned. xAI ships with no image
     models until the engine or the xAI rendering changes.
-  - **A Codex (ChatGPT) subscription is not offered images.** The engine runs it through the same direct Image API
+  - **A Codex (ChatGPT) subscription** (`gpt-image-2`): the engine runs it through the same direct Image API
     function against `https://chatgpt.com/backend-api/codex`, a host no stub can stand in for (an OAuth auth file
-    takes no base URL), so no hermetic E2E verifies it. The overlay's `kinds: ["api_key"]` keeps the subscription
-    out. Codex CLI itself calls `chatgpt.com/backend-api/codex/images/generations`, so the path very likely works;
-    one real call at a release E2E, with the owner's approval, can turn it on.
+    takes no base URL), so no hermetic E2E verifies it. One real call with the owner's approval verified it on
+    2026-10-18. The call went through engine v8.0.23 with a Codex subscription credential, and its body was the
+    one the gateway sends. It returned one `b64_json` image with HTTP 200, plus `usage` with 515 output image
+    tokens, and no refusal. Its cost reads as `included`, as for every monthly Source. The subscription path
+    ignored `output_format`, `output_compression` and `size`: it answered with a PNG at 1254×1254 and `quality: low`.
+    The result reader takes any supported image type, and the size an answer reports is the size recorded. So
+    `gpt-image-2` lists both credential kinds. The overlay's other image models stay `api_key` only until a call
+    verifies them.
 - **Route verification is the implementation's job, not the user's.** A model whose route is not verified ships
   without an overlay entry, or without the credential kind it was not verified on, so it is never offered and the
   UI never needs an "unverified" tag.

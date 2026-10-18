@@ -15,6 +15,7 @@ capability:
     - ui/src/lib/backendModels.test.ts
     - ui/src/components/workbench/AgentRoutePicker.test.tsx
     - ui/src/components/workbench/AgentsPage.test.tsx
+    - ui/src/components/workbench/NewAgentDialog.test.tsx
     - tests/agent_core/ai/test_hosted_requests.py
     - tests/agent_core/ai/test_hosted_parsing.py
     - tests/agent_core/ai/test_hosted_transform.py
@@ -252,6 +253,7 @@ scenarios:
       - 'ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-008: shows a direct image call by its model and Source, with its size, file and prompt, and no cost when none is known'
       - 'ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-008: shows a total an unpriced attempt left only as a lower bound'
       - 'ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-008: says why a search ran by proxy when the turn''s Source refused it, and how to undo that'
+      - 'ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-008: names a source without a web URL but links nothing'
   - id: MH-HOSTED-UI-009
     name: A hosted call's card payload is projected from the canonical C-1 records in the shape the Web renders
     status: covered
@@ -260,8 +262,10 @@ scenarios:
     test: tests/test_hosted_activity.py::test_payloads_match_the_shape_the_web_card_renders
     related_tests:
       - tests/test_hosted_activity.py::test_a_response_scoped_summary_is_shown_once
+      - tests/test_hosted_activity.py::test_a_source_no_browser_should_open_is_named_but_not_linked
       - tests/test_agent_activity_service.py::test_a_hosted_tool_row_carries_its_card
       - tests/test_message_mirror.py::test_a_hosted_card_rides_on_its_toolcall_row_and_its_image_joins_the_answer
+      - tests/test_message_mirror.py::test_a_hosted_image_without_an_image_suffix_is_served_as_its_recorded_type
   - id: MH-HOSTED-UI-010
     name: IM shows one line per hosted call with tool, query, mode, count and a cost only when known
     status: covered
@@ -280,6 +284,7 @@ scenarios:
     related_tests:
       - tests/test_agent_transcript.py::test_a_final_commits_as_the_loops_reply_decision_says
       - tests/agent_core/agent/test_loop.py::test_a_reply_counts_the_images_of_the_tool_result_that_committed_not_the_writer_that_lost
+      - tests/agent_core/agent/test_loop.py::test_only_an_image_a_surface_can_deliver_makes_a_silent_final_a_reply
   - id: MH-HOSTED-UI-011
     name: Vibey delivers a native hosted call as its IM line and Web card, and its answer with provider citations as links, an answer split into adjacent text blocks reading as written
     status: covered
@@ -329,6 +334,15 @@ scenarios:
     test:
       - ui/src/components/workbench/AgentRoutePicker.test.tsx::MH-EFFORT-MENU-003
       - ui/src/components/workbench/AgentsPage.test.tsx::MH-EFFORT-MENU-003
+  - id: MH-EFFORT-MENU-004
+    name: While an effort-menu read is in flight, the route picker and the Agents page hold the controls that can write an effort, and the New Agent dialog reads again at Create, creating only an effort the answer still offers and nothing when Model Hub cannot answer
+    status: covered
+    kind: observation
+    layer: unit
+    test:
+      - ui/src/components/workbench/AgentRoutePicker.test.tsx::MH-EFFORT-MENU-004
+      - ui/src/components/workbench/AgentsPage.test.tsx::MH-EFFORT-MENU-004
+      - ui/src/components/workbench/NewAgentDialog.test.tsx::MH-EFFORT-MENU-004
   - id: MH-HOSTED-VIBEY-001
     name: Vibey declares a search tool natively, verbatim with its include values, exactly when the hop's facts assume it, and pins that request to the hop's Source
     status: covered
@@ -362,6 +376,7 @@ scenarios:
     test: tests/agent_core/ai/test_hosted_parsing.py::test_an_xai_web_search_is_one_hosted_call_with_its_sources_cited_text_and_reported_cost
     related_tests:
       - tests/agent_core/ai/test_hosted_parsing.py::test_xai_x_searches_keep_their_variants_and_the_answer_cites_each_post_once
+      - tests/agent_core/ai/test_hosted_parsing.py::test_an_xai_response_reporting_a_number_past_its_bound_completes_without_that_number
       - tests/agent_core/ai/test_hosted_parsing.py::test_the_mapping_rule_gives_every_responses_item_a_provider_neutral_action
       - tests/agent_core/ai/test_hosted_parsing.py::test_no_hosted_call_without_a_native_declaration_or_a_known_serving_source
       - tests/agent_core/ai/test_hosted_parsing.py::test_an_anthropic_search_and_its_result_are_one_hosted_call_and_the_text_keeps_its_citation
@@ -421,6 +436,7 @@ scenarios:
       - tests/agent_core/ai/test_hosted_pause_turn.py::test_a_response_paused_past_the_bound_ends_interrupted_and_keeps_everything_it_assembled
       - tests/agent_core/ai/test_hosted_pause_turn.py::test_a_paused_response_its_source_cannot_continue_ends_interrupted_and_keeps_what_it_has
       - tests/agent_core/ai/test_hosted_pause_turn.py::test_a_continued_response_is_verified_only_when_every_response_in_it_was_from_one_origin
+      - tests/agent_core/ai/test_hosted_pause_turn.py::test_a_counter_past_the_bound_in_any_pause_stays_absent_and_the_response_completes
   - id: MH-HOSTED-VIBEY-007
     name: An image_generate call goes to the gateway's image endpoint with its arguments alone, after the turn's frozen models accept every argument and its reference images are read as read reads them; the images it returns are saved through the media sink and its record names those files; no base64 enters history, and a call that saved no file is a failed record with its code
     status: covered
@@ -483,7 +499,7 @@ scenarios:
       - 'ui/src/components/settings/models/hostedTools.test.ts::MH-HOSTED-UI-006: gives a Source model one capability per feature, a call refusal hiding the success and the replay'
       - 'ui/src/components/settings/models/hostedTools.test.ts::MH-HOSTED-UI-006: gives a Source model one capability per tool with a record, in catalog order'
   - id: MH-HOSTED-UI-007
-    name: Hosted-tool writes and clears run one at a time and a read never overlaps one, so the screen holds the newest committed state
+    name: Hosted-tool writes and clears run one at a time and a read never overlaps one, so the screen holds the newest committed state; no control builds on a report being re-read or kept after a failed read, and only a refusal the server named is announced as a failure
     status: covered
     kind: concurrency
     layer: unit
@@ -499,6 +515,11 @@ scenarios:
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: drops a write answer asked under another Source identity'
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: keeps a tool pending until every write queued for it has settled'
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: queues a clear behind a write like any write, so its answer lands last'
+      - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: holds every tool while the report is re-read, and after that read fails, until a read lands'
+      - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: names the outcome of a save that ended in a refusal the server named'
+      - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: names the outcome of a save that ended in a lost answer'
+      - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: names the outcome of a save that ended in an engine whose answer never reached the UI process'
+      - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: names the outcome of a save that ended in no answer at all'
   - id: MH-HOSTED-UI-018
     name: Every hosted tool is on by default under its capability group, and nothing locks its switch
     status: covered
@@ -1134,11 +1155,13 @@ scenarios:
     missing_layer: scenario
     test: tests/test_model_hub_runtime.py::test_mh_runtime_001_service_restart_reports_installed_engine_as_not_started
   - id: MH-RUNTIME-005
-    name: First CLIProxyAPI cold start remains pending until both health surfaces are ready
+    name: First CLIProxyAPI cold start remains pending until both health surfaces are ready and, within a bound, each OAuth grant it loaded lists its models
     status: covered
     kind: recovery
     layer: unit
     test: tests/test_model_hub_runtime.py::test_mh_runtime_005_first_cold_start_waits_for_readiness_within_bounded_budget
+    related_tests:
+      - tests/test_model_hub_runtime.py::test_a_started_engine_is_ready_once_it_lists_the_models_of_each_oauth_grant_it_loaded
   - id: MH-RUNTIME-006
     name: CLIProxyAPI readiness timeout stops the child, discards its output, and leaves bounded structured diagnostics
     status: covered
@@ -1862,7 +1885,7 @@ scenarios:
     layer: unit
     test: tests/test_model_hub_pricing.py::test_a_hosted_response_is_priced_by_the_one_pricing_owner
     related_tests:
-      - tests/test_model_hub_pricing.py::test_xai_cost_ticks_are_converted_by_the_pricing_module
+      - tests/agent_core/ai/test_hosted_parsing.py::test_xai_cost_ticks_are_a_cost_only_as_a_whole_number_within_the_bound
   - id: MH-PRICE-019
     name: A tiered row the current table no longer lists is valued at the largest listed tier it exceeded
     status: covered
@@ -2374,7 +2397,7 @@ scenarios:
     test: tests/e2e/test_model_hub_routing.py::test_d5_nonrefreshable_401_marks_the_key_for_repair
   - id: D6
     name: A server error honors later upstream advice through the real engine
-    status: xfail
+    status: assert
     kind: failover
     layer: e2e-auto
     test: tests/e2e/test_model_hub_routing.py::test_d6_server_error_preserves_later_retry_after_through_real_engine
@@ -2647,8 +2670,8 @@ scenarios:
     layer: e2e
     test: tests/e2e/test_model_hub_engine_hosted_passthrough.py::test_responses_xai_history_replays_in_real_shapes
   - id: MH-ENGINE-HOSTED-007
-    name: The real CPA Responses path replays xAI's 84-rune tool-call reasoning with its id and ciphertext, and the 84-rune call id, as xAI issued them (expected to fail until the engine keeps over-limit upstream ids under is-compat)
-    status: xfail
+    name: The real CPA Responses path replays xAI's 84-rune tool-call reasoning with its id and ciphertext, and the 84-rune call id, as xAI issued them
+    status: covered
     kind: compatibility
     layer: e2e
     test: tests/e2e/test_model_hub_engine_hosted_passthrough.py::test_responses_xai_over_limit_ids_replay_verbatim
@@ -2660,6 +2683,4 @@ next_priority:
   - B5
   - B8
   - B9
-  - D6
   - G3
-  - MH-ENGINE-HOSTED-007

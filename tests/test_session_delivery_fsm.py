@@ -45,7 +45,7 @@ from core.session_turns import (
     _scheduled_merge_key,
     _segment_dispatch_text,
 )
-from core.agent_input import AgentInputMetadata
+from core.agent_input import AgentInputMetadata, harness_source
 from core.handlers.message_handler import MessageHandler
 from core.message_context import resolve_turn_sink_key
 from modules.im import MessageContext
@@ -1034,7 +1034,7 @@ def test_a_turns_person_check_reads_only_that_turns_rows(managers) -> None:
 @pytest.mark.anyio
 async def test_scheduled_submit_passes_metadata_separately_to_native_steering(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
-    metadata = AgentInputMetadata(source_session_id="source-session")
+    metadata = AgentInputMetadata(harness_source="agent run run-1 from #source-session")
     prepare = AsyncMock(return_value=metadata)
     manager.controller.message_handler = SimpleNamespace(
         prepare_input_metadata=prepare,
@@ -1805,7 +1805,7 @@ def test_late_steer_acceptance_upgrades_the_queued_admission_receipt(managers) -
 async def test_pending_scheduled_batches_each_get_dispatch_metadata(managers) -> None:
     manager, _other, _engine, _engine_b, _starts = managers
     prepare = AsyncMock(side_effect=lambda context, **_kwargs: AgentInputMetadata(
-        source_session_id=context.platform_specific["source_session_id"]
+        harness_source=harness_source(context.platform_specific)
     ))
     manager.controller.message_handler = SimpleNamespace(
         prepare_input_metadata=prepare,
@@ -1841,8 +1841,8 @@ async def test_pending_scheduled_batches_each_get_dispatch_metadata(managers) ->
 
     first = await manager._steer_input_metadata([deliveries[0]])
     second = await manager._steer_input_metadata([deliveries[1]])
-    assert first.source_session_id == "source-0"
-    assert second.source_session_id == "source-1"
+    assert first.harness_source == "agent run from #source-0"
+    assert second.harness_source == "agent run from #source-1"
     assert prepare.await_count == 2
 
 

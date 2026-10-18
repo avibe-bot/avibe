@@ -2460,7 +2460,9 @@
         },
         "footnote": "费用按厂商 API 标价估算，中转的实际账单可能不同；订阅不另计费。Claude 订阅不能运行这些工具。",
         "saveFailed": "{{toolInline}}设置未能保存，请重试。",
-        "clearFailed": "{{toolInline}}拒绝记录未能清除，请重试。"
+        "saveUnconfirmed": "无法确认{{toolInline}}设置是否已保存，正在从服务器重新读取，请确认后再重试。",
+        "clearFailed": "{{toolInline}}拒绝记录未能清除，请重试。",
+        "clearUnconfirmed": "无法确认{{toolInline}}拒绝记录是否已清除，正在从服务器重新读取，请确认后再重试。"
       },
       "capability": {
         "readFailed": "未能读取此供应商的工具能力。",
@@ -4328,6 +4330,8 @@
       "model": "模型",
       "modelPlaceholder": "例如 claude-sonnet-4-6",
       "effort": "Effort",
+      "effortRefused": "当前没有供应商支持 {{effort}}，Agent 未创建。请确认 Effort 后重新创建。",
+      "effortUnconfirmed": "模型网关暂时无法确认 Effort，Agent 未创建。请重试。",
       "systemPrompt": "系统提示词",
       "systemPromptHint": "可选",
       "systemPromptPlaceholder": "可选。会拼接到使用本 Agent 的每一段对话前。",

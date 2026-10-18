@@ -20,7 +20,7 @@ from .base import (
     InlineKeyboard,
     MessageContext,
 )
-from .formatters import FeishuFormatter
+from .formatters import FeishuFormatter, hold_markdown_escapes, restore_held
 from .message_facts import (
     feishu_message_kind,
     is_original_human_feishu_attachment,
@@ -28,6 +28,8 @@ from .message_facts import (
 )
 from .download_target import open_download_target
 from config.v2_config import LarkConfig
+from core.citations import spell_destination
+from core.reply_enhancer import inline_links
 from vibe.i18n import get_supported_languages, t as i18n_t
 from modules.agents.opencode.utils import (
     build_claude_reasoning_options,
@@ -227,8 +229,37 @@ class FeishuBot(BaseIMClient):
         return lark.FEISHU_DOMAIN
 
     def format_markdown(self, text: str) -> str:
-        # Feishu's interactive card markdown is close to standard markdown
-        return text
+        """Feishu card Markdown from the Markdown every surface shares.
+
+        Close to standard Markdown, except where a backslash escape is written.
+        Read back from Feishu's parsed card, an escape in prose shows its
+        character, but one in a link label shows the backslash too, and one in
+        a link destination is kept in the address. A numeric entity is what
+        Feishu documents for showing a syntax character, and it holds in prose
+        and labels alike, so each escape comes back as one (``\\*`` as
+        ``&#42;``). A destination with an escape in it is an address, not text:
+        it is written as the address a Markdown reader resolves, spelled as a
+        URI (``spell_destination``: an existing ``%HH`` kept, a stray ``%``
+        encoded), parentheses included, since a bare one can end the link.
+        Text without an escape is handed over as it is.
+        """
+        if not text:
+            return text
+        held, escaped = hold_markdown_escapes(text)
+        if not escaped:
+            return text
+        parts: List[str] = []
+        cursor = 0
+        for link in inline_links(held):
+            source = held[link.destination_start : link.destination_end]
+            if not any(token in source for token in escaped):
+                continue
+            address = spell_destination(restore_held(link.destination, escaped))
+            parts.append(held[cursor : link.destination_start])
+            parts.append(address.replace("(", "%28").replace(")", "%29"))
+            cursor = link.destination_end
+        parts.append(held[cursor:])
+        return restore_held("".join(parts), {token: f"&#{ord(character)};" for token, character in escaped.items()})
 
     # ------------------------------------------------------------------
     # SDK initialisation helpers
@@ -537,7 +568,7 @@ class FeishuBot(BaseIMClient):
         # (text empty AND subtext set) drops the empty body so the note stands
         # alone.
         if text or subtext is None:
-            elements.append({"tag": "markdown", "content": text})
+            elements.append({"tag": "markdown", "content": self.format_markdown(text)})
         if buttons:
             # Full-width ``fill`` only when the whole keyboard is a lone button.
             # A single-button row that is merely the remainder of a chunked
@@ -605,7 +636,7 @@ class FeishuBot(BaseIMClient):
             elements.append(
                 {
                     "tag": "markdown",
-                    "content": f"<font color='grey'>{subtext}</font>",
+                    "content": f"<font color='grey'>{self.format_markdown(subtext)}</font>",
                     "text_size": "notation",
                 }
             )

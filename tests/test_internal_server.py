@@ -8235,6 +8235,56 @@ def test_flush_suppressed_segment_claims_each_delivery_id_in_one_turn(tmp_path, 
         assert message_deliveries.list_queued(conn, session_id) == []
 
 
+@pytest.mark.parametrize(
+    ("trigger", "spec", "expected"),
+    [
+        pytest.param(
+            "agent_run", {"source_kind": "agent", "source_actor": "ses_caller"},
+            "[Harness: agent run run-1 from #ses_caller; agent run run-2 from #ses_caller]",
+            id="agent-runs-from-one-caller",
+        ),
+        pytest.param(
+            "agent_run", {"source_kind": "callback", "source_session_id": "ses_child"},
+            "[Harness: callback of run run-1 from #ses_child; callback of run run-2 from #ses_child]",
+            id="callbacks-from-one-session",
+        ),
+        pytest.param(
+            "watch", {"task_definition_id": "def-watch", "task_definition_name": "deploy"},
+            '[Harness: Watch def-watch "deploy"]',
+            id="firings-of-one-watch",
+        ),
+    ],
+)
+def test_flush_merged_batch_names_each_bodys_sender(tmp_path, monkeypatch, trigger, spec, expected):
+    """A merged batch's Harness line attributes every body, not only the leader's."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from core.handlers.message_handler import MessageHandler
+
+    def prov(execution_id: str) -> dict:
+        callback = spec.get("source_kind") == "callback"
+        own = {"parent_run_id": execution_id, "source_actor": execution_id} if callback else {}
+        return {
+            "message_id": f"{trigger}:{execution_id}",
+            "platform_specific": {
+                "task_execution_id": execution_id,
+                "task_trigger_kind": trigger,
+                "vibe_agent_name": "codex",
+                **spec,
+                **own,
+            },
+        }
+
+    session_id = _seed_avibe_session_with_queue([("first body", prov("run-1")), ("second body", prov("run-2"))])
+    mgr, runs = _manager_capturing_runs()
+
+    assert asyncio.run(mgr.flush_queue(session_id)) is True
+    [(text, _source, context)] = runs
+    assert text == "first body\n\n---\n\nsecond body"
+    prepared = asyncio.run(MessageHandler.prepare_input_metadata(object(), context, human=False))
+    rendered = prepared.render(text, types.SimpleNamespace(include_time_info=False, include_user_info=True))
+    assert rendered.splitlines()[0] == expected
+
+
 def test_flush_does_not_coalesce_scheduled_callbacks_with_different_delivery(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 

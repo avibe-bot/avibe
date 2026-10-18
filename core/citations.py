@@ -1095,6 +1095,14 @@ def register_text_citations(
     blocks - and a citation whose place it removed, or that falls in code, is
     left out rather than written as a stray marker.
     """
+    blocks = list(blocks)
+    # Each ref this call inserts carries a nonce the text does not contain, so no marker the text itself
+    # carries (a literal one in a code example, say) can name an annotation's ref, at registration or at
+    # cleanup.
+    arrived = "".join(separator + text for separator, text, _ in blocks)
+    nonce = secrets.token_hex(_TOKEN_NONCE_BYTES)
+    while nonce in arrived:
+        nonce = secrets.token_hex(_TOKEN_NONCE_BYTES)
     sources: dict[str, CitationSource] = {}
     joined = ""
     for block_index, (separator, text, citations) in enumerate(blocks):
@@ -1104,7 +1112,7 @@ def register_text_citations(
         if not transform(text).strip():
             citations = ()
         for citation_index, citation in enumerate(citations or ()):
-            ref = f"t{block_index}c{citation_index}"
+            ref = f"{nonce}:t{block_index}c{citation_index}"
             sources[ref] = CitationSource(ref_id=ref, title=citation.title or "", url=citation.url)
             end = len(text) if citation.end is None else min(max(citation.end, 0), len(text))
             at.setdefault(end, []).append(ref)
@@ -1118,7 +1126,14 @@ def register_text_citations(
     if not sources:
         return joined, None
     registered, bundle = register_citations(joined, sources, unresolved_label=unresolved_label)
-    return CITATION_MARKER_RE.sub("", registered or ""), bundle
+    # Only the markers inserted here for annotations whose place was left out (in code, or removed by the
+    # display rules) go: only they name this call's refs. A marker the text itself carries, such as a literal
+    # one in a code example that registration deliberately left alone, stays as written.
+    def drop_synthetic(match: re.Match[str]) -> str:
+        refs = [ref for ref in match.group(1).split(_SEP) if ref]
+        return "" if refs and all(ref in sources for ref in refs) else match.group(0)
+
+    return CITATION_MARKER_RE.sub(drop_synthetic, registered or ""), bundle
 
 
 def materialize_citations(

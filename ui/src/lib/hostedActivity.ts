@@ -6,7 +6,8 @@
 export type HostedToolName = 'web_search' | 'x_search' | 'image_generate';
 
 export type HostedActivitySource = {
-  url: string;
+  /** Only a URL a browser should open; a source without one is named by its title. */
+  url?: string;
   title?: string;
   snippet?: string;
   page_age?: string;
@@ -68,7 +69,7 @@ export const hostedActivityFrom = (raw: unknown): HostedActivity | undefined => 
   if (typeof card.status !== 'string' || !STATUSES.includes(card.status)) return undefined;
   return {
     ...(card as unknown as HostedActivity),
-    sources: Array.isArray(card.sources) ? (card.sources as HostedActivitySource[]).filter((s) => typeof s?.url === 'string') : [],
+    sources: Array.isArray(card.sources) ? (card.sources as HostedActivitySource[]).filter((s) => typeof s?.url === 'string' || typeof s?.title === 'string') : [],
     images: Array.isArray(card.images) ? (card.images as HostedActivityImage[]).filter((i) => typeof i?.path === 'string') : [],
   };
 };

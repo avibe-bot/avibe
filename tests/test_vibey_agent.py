@@ -1085,7 +1085,7 @@ async def test_resume_renders_a_recovered_steer_as_the_live_path_would(engine, s
     )
     owner._engine = engine
     harness.controller.session_turns._steer_input_metadata = owner._steer_input_metadata
-    handler = SimpleNamespace(_source_session_id=MessageHandler._source_session_id)
+    handler = SimpleNamespace()
     harness.controller.message_handler = SimpleNamespace(
         prepare_input_metadata=MethodType(MessageHandler.prepare_input_metadata, handler)
     )
@@ -1096,37 +1096,50 @@ async def test_resume_renders_a_recovered_steer_as_the_live_path_would(engine, s
         SESSION, first.context.platform_specific["delivery_id"], UserMessage((text("watch the deploy"),))
     )
     with engine.begin() as conn:
-        # Another Session's agent steers this Turn; the process exits before the loop consumes it.
-        steer = message_deliveries.insert_delivery(
-            conn,
-            delivery_id="dlv_agent_steer",
-            session_id=SESSION,
-            priority="p1",
-            state="reserved",
-            snapshot=message_deliveries.message_snapshot(
-                scope_id=_SCOPES["avibe"], session_id=SESSION, platform="avibe", author="harness",
-                source="harness", message_type="harness", text="the deploy finished",
-                metadata={"scheduled_provenance": {
-                    "task_execution_id": "run_1",
-                    "platform_specific": {"task_trigger_kind": "agent_run", "source_session_id": "ses_source"},
-                }},
-            ),
-            dispatch_text="the deploy finished",
-            now=NOW,
-        )
-        assert message_deliveries.open_steer_attempt(
-            conn, steer["id"], expected_version=int(steer["version"]), turn_id=turn_id,
+        # Another Session's agent steers this Turn with two runs merged into one steer; the
+        # process exits before the loop consumes it.
+        steers = [
+            message_deliveries.insert_delivery(
+                conn,
+                delivery_id=delivery_id,
+                session_id=SESSION,
+                priority="p1",
+                state="reserved",
+                snapshot=message_deliveries.message_snapshot(
+                    scope_id=_SCOPES["avibe"], session_id=SESSION, platform="avibe", author="harness",
+                    source="harness", message_type="harness", text=body,
+                    metadata={"scheduled_provenance": {
+                        "platform_specific": {
+                            "task_trigger_kind": "agent_run",
+                            "task_execution_id": run_id,
+                            "source_kind": "agent",
+                            "source_actor": "ses_source",
+                        },
+                    }},
+                ),
+                dispatch_text=body,
+                now=NOW,
+            )
+            for delivery_id, run_id, body in (
+                ("dlv_agent_steer", "run_1", "the deploy finished"),
+                ("dlv_agent_steer_2", "run_2", "and the smoke test passed"),
+            )
+        ]
+        assert message_deliveries.open_steer_attempt_batch(
+            conn, deliveries=steers, turn_id=turn_id,
             attempt_id="att_agent_steer", expected_native_turn_id=harness.controller.started[-1],
         )
         assert message_deliveries.materialize_steer_acceptance(
-            conn, leader_delivery_id=steer["id"], expected_attempt_id="att_agent_steer", turn_id=turn_id, evidence={}
+            conn, leader_delivery_id=steers[0]["id"], expected_attempt_id="att_agent_steer", turn_id=turn_id, evidence={}
         )
 
     harness.new_agent()
     await harness.agent.handle_message(harness.request("anything new?"))
 
     [recovered] = [entry for entry in await harness.context_rows() if entry.row_id == "dlv_agent_steer"]
-    assert "From: #ses_source" in recovered.message.content[-1].text
+    assert recovered.message.content[-1].text.startswith(
+        "[Harness: agent run run_1 from #ses_source; agent run run_2 from #ses_source]\n"
+    )
 
 
 async def _blocked_second_turn(engine, tmp_path, *, finished_step: bool):
@@ -2183,6 +2196,74 @@ async def test_a_silent_final_leaves_the_visible_reply_before_it_as_the_result(
     assert [payload["type"] for name, payload in published if name == "message.updated"] == ["result"]
     assert [push["message_id"] for push in pushes] == [result["id"]]
     assert harness.controller.terminals[-1]["is_error"] is False
+
+
+@pytest.mark.parametrize(
+    ("stop_reason", "final"),
+    [("stop", "<silent>already answered</silent>"), ("stop", "You're welcome."), ("length", "<silent>noted</silent>")],
+    ids=["silent", "visible", "truncated"],
+)
+async def test_a_short_reply_a_steer_superseded_stays_a_visible_reply(
+    engine, session, tmp_path, published, monkeypatch, stop_reason, final
+) -> None:
+    """Scenario: MESSAGE-DELIVERY-326.
+
+    A reply that a steer took the final word from is a completed reply, not narration: an
+    ``output`` boundary whatever its length, kept in the context, and the Turn's result when
+    the steered phase answers ``<silent>``. One cut off at its output limit was never completed,
+    so it stays narration.
+    """
+    from core import web_push_notifications
+
+    pushes: list[dict] = []
+
+    class _Thread:
+        def __init__(self, *, target, args, daemon):
+            self.payload = args[0]
+
+        def start(self) -> None:
+            pushes.append(self.payload)
+
+    monkeypatch.setattr(web_push_notifications, "threading", SimpleNamespace(Thread=_Thread))
+    generating, steered = asyncio.Event(), asyncio.Event()
+
+    async def answer(_request, _cancel):
+        generating.set()
+        await steered.wait()
+        yield Done(assistant("4.", stop_reason=stop_reason))
+
+    harness = _Harness(engine, tmp_path, "avibe", [answer, [Done(assistant(final))]])
+    request = harness.request("2+2?")
+    turn_id = _turn(request.context)
+    running = asyncio.create_task(harness.agent.handle_message(request))
+    await generating.wait()
+    native = harness.controller.started[0]
+    delivery_id, attempt_id = harness.open_steer("thanks", turn_id, native)
+    receipt = await harness.agent.steer_active_turn(
+        SteerRequest(SESSION, turn_id, native, "thanks", attempt_id=attempt_id),
+        ActiveSteerTarget("runtime", turn_id, request.context, request, harness.agent),
+    )
+    assert receipt.outcome is SteerOutcome.ACCEPTED
+    harness.accept_steer(delivery_id, attempt_id, turn_id)
+    steered.set()
+    await running
+
+    rows = await harness.context_rows()
+    assert [entry.kind for entry in rows] == ["input", "response", "input", "response"]
+    assert harness.rows("interim") == [] and harness.controller.terminals[-1]["is_error"] is False
+    if stop_reason == "length":
+        assert harness.rows("output") == [] and harness.rows("result") == [] and pushes == []
+        assert [row["id"] for row in harness.rows("assistant")][0] == rows[1].row_id
+        return
+    [result] = harness.rows("result")
+    if final.startswith("<silent>"):
+        assert result["id"] == rows[1].row_id and result["content_text"] == "4."
+        assert harness.rows("output") == []
+    else:
+        [reply] = harness.rows("output")
+        assert reply["id"] == rows[1].row_id and reply["content_text"] == "4."
+        assert result["id"] == rows[3].row_id and result["content_text"] == final
+    assert [push["message_id"] for push in pushes] == [result["id"]]
 
 
 async def test_a_silent_final_whose_run_failed_after_its_commit_is_typed_by_its_row(

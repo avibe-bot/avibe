@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 from core.agent_core.ai.errors import redact_provider_text
 from core.agent_core.messages import (
     HOSTED_ERROR_MAX_CHARS,
+    MAX_HOSTED_COUNT,
     AssistantMessage,
     Citation,
     HostedAction,
@@ -33,8 +34,10 @@ from core.agent_core.messages import (
 from core.agent_core.tools.read import MAX_INLINE_IMAGE_BYTES
 from core.agent_core.tools.truncate import format_size
 
-#: xAI reports a response's cost in ticks of 1e-10 USD (``usage.cost_in_usd_ticks``).
-_USD_PER_TICK = 1e-10
+#: xAI reports a response's cost in ticks of 1e-10 USD (``usage.cost_in_usd_ticks``). Past the bound (about $100M
+#: for one response) a reported figure is not a cost.
+_TICKS_PER_USD = 10_000_000_000
+_MAX_TICKS = 10**18
 _X_HOSTS = frozenset({"x.com", "twitter.com"})
 #: The counter names a summary holds (``message.schema.json``); a provider's other keys are not counters.
 _COUNTER_NAME = re.compile(r"[a-z0-9_]{1,64}")
@@ -269,9 +272,11 @@ def x_cited_sources(citations: Iterable[Citation]) -> tuple[HostedSource, ...]:
     return tuple(seen.values())
 
 
-def reported_counts(*sections: Any) -> dict[str, int]:
+def reported_counts(*sections: Any, bound: Optional[int] = MAX_HOSTED_COUNT) -> dict[str, int]:
     """Provider-reported hosted counters (xAI ``server_side_tool_usage_details``, Anthropic ``server_tool_use``),
-    keeping the ones that counted something."""
+    keeping the ones that counted something. A count past ``bound`` is refused here, where counters enter, so it reads
+    as absent to everything that prices or keeps them. A caller that adds responses together reads them unbounded and
+    bounds the total, so a counter past the bound in one response stays past it."""
 
     counts: dict[str, int] = {}
     for section in sections:
@@ -282,17 +287,23 @@ def reported_counts(*sections: Any) -> dict[str, int]:
             if len(counts) >= MAX_HOSTED_COUNTERS or scanned >= _COUNTERS_SCANNED:
                 break
             counted = isinstance(value, int) and not isinstance(value, bool) and value > 0
+            if counted and bound is not None:
+                counted = value <= bound
             if counted and isinstance(name, str) and _COUNTER_NAME.fullmatch(name):
                 counts[name] = value
     return counts
 
 
 def reported_cost(usage: Any) -> Optional[HostedCost]:
-    """The response's cost when the provider reports one (xAI ``cost_in_usd_ticks``); never a priced guess."""
+    """The response's cost when the provider reports one (xAI ``cost_in_usd_ticks``); never a priced guess.
+
+    Vibey's native call and the gateway's proxied one both read it here. A figure that is not a whole number of ticks
+    within the bound is no figure.
+    """
 
     ticks = usage.get("cost_in_usd_ticks") if isinstance(usage, Mapping) else None
-    if isinstance(ticks, int) and not isinstance(ticks, bool) and ticks >= 0:
-        return HostedCost(basis="reported", usd=ticks * _USD_PER_TICK)
+    if isinstance(ticks, int) and not isinstance(ticks, bool) and 0 <= ticks <= _MAX_TICKS:
+        return HostedCost(basis="reported", usd=ticks / _TICKS_PER_USD)
     return None
 
 

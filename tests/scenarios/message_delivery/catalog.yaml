@@ -410,5 +410,13 @@ scenarios:
     supporting_tests:
       - ui/src/pet/petState.test.ts
       - ui/src/pet/PetPage.test.tsx
+  - id: MESSAGE-DELIVERY-326
+    name: A Vibey reply a steer superseded stays a visible reply whatever its length, and a silent final makes it the Turn's result
+    status: covered
+    kind: regression
+    layer: contract
+    test:
+      - tests/test_vibey_agent.py::test_a_short_reply_a_steer_superseded_stays_a_visible_reply
+      - tests/test_agent_transcript.py::test_a_reply_pending_input_superseded_commits_as_a_visible_reply
 next_priority:
-  - MESSAGE-DELIVERY-326
+  - MESSAGE-DELIVERY-327

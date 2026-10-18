@@ -167,6 +167,16 @@ previous main detail behavior:
   uncertain-send notices, and Open in Avibe;
 - the document-wide send lock and authorization/session epoch fencing.
 
+The detail opens **above** the toggle row (speaker row and summary line) and
+grows upward. The toggle row stays at the bubble's bottom and keeps its screen
+position in both states, so collapsing needs no mouse travel; the bubble's
+bottom edge and tail never move. The toggle stays first in the DOM, so focus
+order is unchanged; CSS places the detail above it, and the toggle's
+`aria-controls` names the detail. The divider sits between the history and the
+toggle row. On open the history shows the newest result, which is closest to
+the toggle row, with the §7.5 edge fades. Quick replies, Vault handoffs, notices and Open in
+Avibe follow it at the end of the detail, right above the toggle row. Collapsed shows an up chevron and expanded a down chevron.
+
 Detail retains the 280ms grid / 200ms opacity transition and closes on stack
 collapse. Its own scroll region fits the existing window; opening it never
 resizes the avatar or the 292px activity scroll box. Input and dictation hide

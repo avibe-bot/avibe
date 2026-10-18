@@ -810,6 +810,14 @@ def _ensure_new_background_indexes(conn: sqlite3.Connection) -> None:
     conn.execute('create index if not exists ix_agent_runs_agent_created on agent_runs (agent_name, created_at)')
     conn.execute('create index if not exists ix_agent_runs_callback_status on agent_runs (callback_status, completed_at)')
     conn.execute('create index if not exists ix_agent_runs_updated on agent_runs (updated_at)')
+    live_index = import_module("storage.alembic.versions.20261018_0070_run_definitions_live_index")
+    live_row = conn.execute(
+        "select sql from sqlite_master where type = 'index' and name = ?",
+        (live_index._INDEX,),
+    ).fetchone()
+    if live_row is None or _normalized_index_sql(live_row[0]) != _normalized_index_sql(live_index.CREATE_INDEX_SQL):
+        conn.execute(live_index.DROP_INDEX_SQL)
+        conn.execute(live_index.CREATE_INDEX_SQL)
     if not _agent_runs_managed_indexes_ready(conn):
         _ensure_agent_runs_managed_indexes(conn)
 

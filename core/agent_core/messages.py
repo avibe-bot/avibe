@@ -9,6 +9,7 @@ rows, so the field names here are a shipped surface.
 from __future__ import annotations
 
 import copy
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, Optional, Union
@@ -35,6 +36,9 @@ EXECUTION_MODES: tuple[str, ...] = ("proxy", "direct")
 HostedStatus = Literal["completed", "failed", "incomplete", "pending"]
 HOSTED_STATUSES: tuple[str, ...] = ("completed", "failed", "incomplete", "pending")
 HOSTED_ERROR_MAX_CHARS = 400
+#: The largest hosted count a summary holds: the largest integer every JSON reader holds exactly. A provider's count
+#: past it is no count, and no price or display has to survive one.
+MAX_HOSTED_COUNT = 2**53 - 1
 #: The stable code of each hosted failure Avibe words itself (``HostedRecord.error_code``), by which a display localizes
 #: it; a provider's own reason has none. A record loads with any snake_case code, so one a newer build wrote still reads.
 #: ``image_not_streamed`` has no producer since native images went (v2); it stays for the records already written.
@@ -358,6 +362,17 @@ class HostedImage:
                 raise ValueError(f"image {name} is at least 1")
 
 
+def image_deliverable(image: HostedImage) -> bool:
+    """Whether a surface can send this generated image: its path names a file absolutely. A relative path, from a
+    restored or foreign record, names no file anyone can attach.
+
+    The one rule for both decisions a generated image takes part in: whether the turn's final response counts as a
+    reply (``has_reply``), and which images are delivered with it. Kept in one place so a reply is never counted for
+    an image delivery then skips.
+    """
+    return os.path.isabs(image.path)
+
+
 @dataclass(frozen=True)
 class HostedRecord:
     """Per-call facts. ``images`` is set exactly for ``image_generate`` (possibly empty).
@@ -477,8 +492,8 @@ class HostedSummary:
             if not isinstance(name, str) or not _COUNTER_NAME_RE.fullmatch(name):
                 raise ValueError(f"invalid hosted counter name: {name!r}")
             _require(value, int, f"hosted count {name}")
-            if value < 0:
-                raise ValueError("hosted counts must not be negative")
+            if not 0 <= value <= MAX_HOSTED_COUNT:
+                raise ValueError(f"hosted counts are between 0 and {MAX_HOSTED_COUNT}")
         object.__setattr__(self, "counts", dict(self.counts))
         if not isinstance(self.cited_sources, tuple) or not all(
             isinstance(s, HostedSource) for s in self.cited_sources
@@ -1027,7 +1042,13 @@ def message_from_dict(data: Mapping[str, Any]) -> Message:
         if "hosted_summary" in f:
             h = _read(f["hosted_summary"], "hosted summary", {"counts": dict, "cited_sources": list}, {"cost": dict})
             summary = HostedSummary(
-                counts=dict(h["counts"]),
+                # A release before the bound may have stored a count past it: that counter is dropped, not refused,
+                # so its transcript still loads.
+                counts={
+                    name: value
+                    for name, value in h["counts"].items()
+                    if not (isinstance(value, int) and value > MAX_HOSTED_COUNT)
+                },
                 cited_sources=tuple(_source_from_dict(source) for source in h["cited_sources"]),
                 cost=_cost_from_dict(h["cost"]) if "cost" in h else None,
             )

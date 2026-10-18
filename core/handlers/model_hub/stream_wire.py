@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import AbstractSet, BinaryIO, Callable, Final, Literal, Mapping
+from typing import AbstractSet, BinaryIO, Callable, Final, Iterable, Literal, Mapping
 
 from .async_owner import run_owned_in_thread
 from .hosted_items import responses_item_succeeded
@@ -909,20 +909,27 @@ def is_protocol_model_output(
     )
 
 
-def _usage_sum(container: Mapping[str, object], paths: tuple[tuple[str, ...], ...]) -> int | None:
-    """Sum one logical field's leaves, rejecting anything not a bounded count."""
+def _usage_total(values: Iterable[object]) -> int | None:
+    """Sum one logical field's leaves, rejecting anything not a bounded count.
+
+    Every token count read from the wire, streamed or buffered, passes here: the
+    one place the per-report ceiling applies.
+    """
 
     total: int | None = None
-    for path in paths:
-        for value in _path_values(container, path):
-            if not isinstance(value, int) or isinstance(value, bool):
-                continue
-            if value < 0 or value > USAGE_REPORT_TOKEN_CEILING:
-                continue
-            total = value if total is None else total + value
+    for value in values:
+        if not isinstance(value, int) or isinstance(value, bool):
+            continue
+        if value < 0 or value > USAGE_REPORT_TOKEN_CEILING:
+            continue
+        total = value if total is None else total + value
     if total is None:
         return None
     return min(total, USAGE_REPORT_TOKEN_CEILING)
+
+
+def _usage_sum(container: Mapping[str, object], paths: tuple[tuple[str, ...], ...]) -> int | None:
+    return _usage_total(value for path in paths for value in _path_values(container, path))
 
 
 def extract_protocol_usage(
@@ -963,15 +970,7 @@ def _usage_from_scalar_paths(
     for container_path in taxonomy.container_paths:
 
         def usage_sum(paths: tuple[tuple[str, ...], ...]) -> int | None:
-            total: int | None = None
-            for path in paths:
-                value = scalars.get((*container_path, *path))
-                if not isinstance(value, int) or isinstance(value, bool):
-                    continue
-                if value < 0 or value > USAGE_REPORT_TOKEN_CEILING:
-                    continue
-                total = value if total is None else total + value
-            return None if total is None else min(total, USAGE_REPORT_TOKEN_CEILING)
+            return _usage_total(scalars.get((*container_path, *path)) for path in paths)
 
         input_tokens = usage_sum(taxonomy.input_paths)
         cached_input_tokens = usage_sum(taxonomy.cached_input_paths)

@@ -11,6 +11,16 @@ from storage.db import create_sqlite_engine
 from storage.models import agent_sessions, metadata as db_metadata, scopes
 
 
+def _shown_on_slack(text: str) -> str:
+    """The text a Slack reader is shown: the Markdown, through the adapter's own mrkdwn conversion, less the
+    invisible joiner that keeps mrkdwn from reading a literal ``_`` as markup."""
+    from modules.im.slack import SlackBot, SlackMarkdownConverter
+
+    bot = SlackBot.__new__(SlackBot)
+    bot.markdown_converter = SlackMarkdownConverter()
+    return bot._convert_markdown_to_slack_mrkdwn(text).replace("\u034f", "")
+
+
 class FakeController:
     def __init__(self, *, public_url: str = "https://desk.avibe.bot/u/team") -> None:
         self.config = SimpleNamespace(
@@ -130,7 +140,7 @@ def test_notifies_im_session_with_platform_link_format(tmp_path: Path) -> None:
     assert context.channel_id == "C123"
     assert context.thread_id == "1719990000.1"
     assert context.platform_specific["agent_session_id"] == "ses_im"
-    assert "API_KEY" in emitted["text"]
+    assert "API_KEY" in _shown_on_slack(emitted["text"])
     assert "<https://desk.avibe.bot/u/team/vaults?request_id=vrq_123|Review on the web>" in emitted["text"]
 
 
@@ -209,7 +219,7 @@ def test_provision_request_can_notify_from_secure_input_card(tmp_path: Path) -> 
 
     assert result["sent"] is True
     assert "A secret to fill in" in controller.emitted[0]["text"]
-    assert "NEW_TOKEN" in controller.emitted[0]["text"]
+    assert "NEW_TOKEN" in _shown_on_slack(controller.emitted[0]["text"])
 
 
 def test_workbench_session_is_not_notified(tmp_path: Path) -> None:

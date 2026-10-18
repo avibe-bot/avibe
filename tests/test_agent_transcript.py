@@ -510,6 +510,34 @@ async def test_a_final_commits_as_the_loops_reply_decision_says(engine, replied,
     assert committed == row_type and given == [(bool(replied), (image,))]
 
 
+@pytest.mark.parametrize(
+    ("superseded", "text", "row_type"),
+    [(True, "4.", "output"), (True, "<silent>later</silent>", "assistant"), (False, "4.", "assistant")],
+    ids=["superseded-reply", "superseded-silent", "narration"],
+)
+async def test_a_reply_pending_input_superseded_commits_as_a_visible_reply(engine, superseded, text, row_type) -> None:
+    """MESSAGE-DELIVERY-326: the row is a visible reply from its commit, so it stays one if the process stops before
+    its delivery; one with nothing to show stays hidden, as a silent final does."""
+    with engine.begin() as conn:
+        home = _scope(conn, "C-home")
+        _session(conn, "ses_main", home)
+        consumed = _row(conn, "ses_main", home, "2+2?")
+
+    def render(message, *, final, replied, images):
+        body = "".join(block.text for block in message.content if isinstance(block, TextBlock) and block.text)
+        return "" if body.startswith("<silent>") else body
+
+    store = SQLiteTranscriptStore(engine, render=render)
+    await store.consume_input("ses_main", consumed, _user("2+2?"))
+    reply = await store.append_response("ses_main", _assistant(text), final=False, superseded=superseded)
+
+    with engine.connect() as conn:
+        committed = conn.execute(select(messages.c.type).where(messages.c.id == reply.row_id)).scalar_one()
+    assert committed == row_type
+    # Whatever its type, it is context.
+    assert [entry.row_id for entry in await store.load("ses_main") if entry.kind == "response"] == [reply.row_id]
+
+
 async def test_a_call_instance_is_settled_once_whoever_writes(engine) -> None:
     with engine.begin() as conn:
         home = _scope(conn, "C-home")

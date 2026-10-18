@@ -20,9 +20,8 @@ def encode_slack_delimiters(text: str) -> str:
     string for both, which is the caller's distinction to keep, not this
     function's to guess from the finished text.
 
-    Not the same job as ``escape_special_chars``, which encodes text that was
-    never Markdown (a path, a tool name) - the same encoding, reached without
-    any Markdown interpretation in between.
+    It is also how a character a backslash escape protected comes back into
+    mrkdwn, which has no escape of its own.
     """
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
@@ -83,16 +82,6 @@ class SlackFormatter(BaseMarkdownFormatter):
         """Format hyperlink in Slack style"""
         # Slack uses a different link format: <url|text>
         return f"<{url}|{text}>"
-    
-    def escape_special_chars(self, text: str) -> str:
-        """Escape Slack mrkdwn special characters
-        
-        Slack requires escaping these characters: &, <, >
-        """
-        text = text.replace("&", "&amp;")
-        text = text.replace("<", "&lt;")
-        text = text.replace(">", "&gt;")
-        return text
     
     def format_code_inline(self, text: str) -> str:
         """Format inline code - no escaping inside code blocks"""
@@ -163,16 +152,6 @@ class SlackFormatter(BaseMarkdownFormatter):
         """Format horizontal rule - Slack doesn't support this well"""
         # Use a series of dashes as a visual separator
         return "─" * 40
-    
-    def format_tool_name(self, tool_name: str, emoji: str = "🔧") -> str:
-        """Format tool name with emoji and styling"""
-        # Don't escape tool name - it goes directly in code blocks
-        return f"{emoji} {self.format_bold('Tool')}: {self.format_code_inline(tool_name)}"
-    
-    def format_file_path(self, path: str, emoji: str = "📁") -> str:
-        """Format file path with emoji"""
-        # Don't escape path - it goes directly in code blocks
-        return f"{emoji} File: {self.format_code_inline(path)}"
     
     def format_command(self, command: str) -> str:
         """Format shell command"""

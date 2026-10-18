@@ -97,9 +97,10 @@ INPUT_TYPES = ("user", "harness", "agent_initiated", "annotation")
 # the row carries its outcome, as the other backends' terminal rows do. A final with
 # nothing to show (a silent reply) is the hidden response type ``assistant``: context,
 # but no transcript row, inbox reply, or unread result, as the other backends persist
-# nothing visible for it.
+# nothing visible for it. A non-final reply that pending input superseded commits as
+# ``output``, a visible reply, which a silent final can make the Turn's ``result``.
 FINAL_TYPES = ("result", "error")
-RESPONSE_TYPES = ("assistant", *FINAL_TYPES)
+RESPONSE_TYPES = ("assistant", "output", *FINAL_TYPES)
 CONTEXT_VISIBILITY = "context"
 AUDIT_VISIBILITY = "audit"
 AuditKind = Literal["attempt", "fork_turn"]
@@ -141,9 +142,9 @@ def final_outcome(message: AssistantMessage, *, replied: Optional[bool] = None) 
     return "completed" if replied and message.stop_reason != "length" else "failed"
 
 
-def _response_type(message: AssistantMessage, *, final: bool, display_text: str, replied: bool) -> str:
+def _response_type(message: AssistantMessage, *, final: bool, display_text: str, replied: bool, superseded: bool) -> str:
     if not final:
-        return "assistant"
+        return "output" if superseded and display_text.strip() else "assistant"
     if final_outcome(message, replied=replied) == "failed":
         return "error"
     return "result" if display_text.strip() else "assistant"
@@ -263,6 +264,7 @@ class SQLiteTranscriptStore:
         request: Optional[Mapping[str, Any]] = None,
         replied: Optional[bool] = None,
         images: Sequence[HostedImage] = (),
+        superseded: bool = False,
         agent_name: Optional[str] = None,
         turn_id: Optional[str] = None,
     ) -> ContextEntry:
@@ -287,7 +289,9 @@ class SQLiteTranscriptStore:
                 author="agent",
                 source="agent",
                 author_name=origin.agent_name,
-                message_type=_response_type(message, final=final, display_text=display_text, replied=replied),
+                message_type=_response_type(
+                    message, final=final, display_text=display_text, replied=replied, superseded=superseded
+                ),
                 text=display_text,
                 content={"model": model},
                 metadata={"turn_id": origin.turn_id} if origin.turn_id else None,

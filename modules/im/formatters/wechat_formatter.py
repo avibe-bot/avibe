@@ -30,9 +30,6 @@ class WeChatFormatter(BaseMarkdownFormatter):
     def format_link(self, text: str, url: str) -> str:
         return f"{text} ({url})"
 
-    def escape_special_chars(self, text: str) -> str:
-        return text
-
     def format_code_inline(self, text: str) -> str:
         # No inline code styling in plain text; return as-is
         return text

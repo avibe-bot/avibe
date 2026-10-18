@@ -514,3 +514,56 @@ test('the reply bubble tail starts on the bubble border instead of poking above 
   expect(tail.bottom).toBe(-tail.height / 2);
   expect(tail.clip).toBe('polygon(100% 0px, 100% 100%, 0px 100%)');
 });
+
+for (const theme of ['light', 'dark']) {
+  test(`history opens above a toggle that keeps its place (${theme})`, async ({ page }) => {
+    await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long');
+    await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
+    const settle = () => page.evaluate(async () => {
+      await Promise.all(document.getAnimations()
+        .filter((animation) => animation.effect?.getTiming().iterations !== Infinity)
+        .map((animation) => animation.finished.catch(() => {})));
+    });
+    const toggle = page.locator('.pet-mini-reply-toggle');
+    const detail = page.locator('.pet-mini-reply-bubble .pet-mini-detail');
+    const history = page.locator('.pet-mini-bubble-history');
+    const near = (a: { x: number; y: number; width: number; height: number } | null, b: typeof a) => {
+      for (const key of ['x', 'y', 'width', 'height'] as const) expect(Math.abs(a![key] - b![key])).toBeLessThanOrEqual(1);
+    };
+    await expect(toggle).toBeVisible();
+    await settle();
+    const collapsed = await toggle.boundingBox();
+    expect(await toggle.getAttribute('aria-controls')).toBe(await detail.getAttribute('id'));
+    await expect(toggle.locator('svg')).toHaveClass(/lucide-chevron-up/);
+    await expect(toggle.locator('svg')).toHaveCSS('transform', 'none');
+    expect(await page.evaluate(() => window.petFixtureMarkReads)).toEqual([]);
+
+    await toggle.click();
+    await expect(detail).toHaveClass(/is-open/);
+    await settle();
+    near(await toggle.boundingBox(), collapsed);
+    // Opening upward: the history sits entirely above the toggle row.
+    const box = (await history.boundingBox())!;
+    expect(box.y + box.height).toBeLessThanOrEqual(collapsed!.y + 1);
+    expect(box.y).toBeGreaterThanOrEqual(0);
+    // The newest result is shown on open, so the earlier turns sit scrolled
+    // away under the top edge fade.
+    // It must also sit clear of both edge fades, not merely inside the box.
+    const last = (await history.locator('.pet-mini-detail-result').last().boundingBox())!;
+    const fades = await history.evaluate((node) => ({
+      top: Math.min(32, node.scrollTop),
+      bottom: Math.min(32, node.scrollHeight - node.clientHeight - node.scrollTop),
+    }));
+    expect(fades.top).toBeGreaterThan(0);
+    expect(last.y).toBeGreaterThanOrEqual(box.y + fades.top - 1);
+    expect(last.y + last.height).toBeLessThanOrEqual(box.y + box.height - fades.bottom + 1);
+    expect(await history.evaluate((node) => /#000 [1-9]\d*px|rgb\(0, 0, 0\) [1-9]\d*px/.test(node.style.maskImage || node.style.webkitMaskImage))).toBe(true);
+    await expect(toggle.locator('svg')).not.toHaveCSS('transform', 'none');
+    await expect.poll(() => page.evaluate(() => window.petFixtureMarkReads)).toEqual(['ses_main']);
+
+    await toggle.click();
+    await expect(detail).not.toHaveClass(/is-open/);
+    await settle();
+    near(await toggle.boundingBox(), collapsed);
+  });
+}

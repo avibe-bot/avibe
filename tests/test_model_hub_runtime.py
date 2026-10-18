@@ -907,44 +907,44 @@ def test_packaged_manifest_matches_frozen_runtime_dependency_values(
     assert manifest == {
         "name": "cliproxyapi",
         "resolution": "resolved",
-        "version": "v8.0.23",
-        "source_sha": "d318bcc3afb9ea8782862f5e8cdb541afdc9dfa5",
+        "version": "v8.0.30",
+        "source_sha": "5be2cdab0869cbaa3d401891f740aebf7e15aa99",
         "assets": [
             {
                 "platform": "darwin-arm64",
-                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.23-3/CLIProxyAPI_8.0.23_darwin_aarch64.tar.gz",
-                "size_bytes": 40525867,
-                "sha256": "094d9fdf61d2de655bd9206190b3688fc0c22d6ef2cda09716c9b004bc15b80d",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.30-1/CLIProxyAPI_8.0.30_darwin_aarch64.tar.gz",
+                "size_bytes": 40998093,
+                "sha256": "5350a46bee04f8bde5346f70cd8d5d71cc2bc2e73399f508ee197f9280088aba",
             },
             {
                 "platform": "darwin-x64",
-                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.23-3/CLIProxyAPI_8.0.23_darwin_amd64.tar.gz",
-                "size_bytes": 42988519,
-                "sha256": "4d4f5c754219cf4173254e98fc8d573fea11cb425b883daeae56d57f0a6e89e4",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.30-1/CLIProxyAPI_8.0.30_darwin_amd64.tar.gz",
+                "size_bytes": 43496850,
+                "sha256": "229583a38aeef6f1228aa5ebeaf77f0d9e0cb818163d426c930787fde02fce16",
             },
             {
                 "platform": "linux-amd64",
-                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.23-3/CLIProxyAPI_8.0.23_linux_amd64.tar.gz",
-                "size_bytes": 40946469,
-                "sha256": "3733df8472813f74530ce7a739a3ebcd091db9c16de815e016ed0de537a2e1c6",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.30-1/CLIProxyAPI_8.0.30_linux_amd64.tar.gz",
+                "size_bytes": 41420943,
+                "sha256": "dd7e0c8e1f0464cb4f933b4132005a0390d1c9f3ffcdeaf10dfd73bac5dcd0ae",
             },
             {
                 "platform": "linux-arm64",
-                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.23-3/CLIProxyAPI_8.0.23_linux_aarch64.tar.gz",
-                "size_bytes": 37556916,
-                "sha256": "0ee21fcb4d7316ebce4a46739df75f83bcd8369b3757e5b539d0080477d396a5",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.30-1/CLIProxyAPI_8.0.30_linux_aarch64.tar.gz",
+                "size_bytes": 38014778,
+                "sha256": "e7d2d3ef548769195e8843069435e49dc82cf4ae9777d9f0af8a4dc40057e843",
             },
             {
                 "platform": "windows-amd64",
-                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.23-3/CLIProxyAPI_8.0.23_windows_amd64.tar.gz",
-                "size_bytes": 41463417,
-                "sha256": "543497b874e9370c85967fd3b5688dbf582cd454b074993af11a90ce41c9c501",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.30-1/CLIProxyAPI_8.0.30_windows_amd64.tar.gz",
+                "size_bytes": 41954382,
+                "sha256": "c7ac88680a02476660abf00ee56e07768cb9a859c12c7558cd77fcf9d4919127",
             },
             {
                 "platform": "windows-arm64",
-                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.23-3/CLIProxyAPI_8.0.23_windows_aarch64.tar.gz",
-                "size_bytes": 37817697,
-                "sha256": "cde450406bc9cbe8a19cb71e75ee959e387abee0173b97700481e0cb289018fc",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.30-1/CLIProxyAPI_8.0.30_windows_aarch64.tar.gz",
+                "size_bytes": 38272453,
+                "sha256": "71eba861e9385cdb44bfc7aae5075a49209e3e4dfbc0c7e06255aff1b5d57c64",
             },
         ],
     }
@@ -1447,45 +1447,45 @@ def test_installing_projection_matches_live_owner_or_resumable_claim(
                 "darwin-arm64",
                 False,
                 "darwin-arm64",
-                40525867,
-                "094d9fdf61d2de655bd9206190b3688fc0c22d6ef2cda09716c9b004bc15b80d",
-                "8a58f862e5a881c58f05aa8bd379418ebca442d0ec1445002c8248d4cf8460a9",
+                40998093,
+                "5350a46bee04f8bde5346f70cd8d5d71cc2bc2e73399f508ee197f9280088aba",
+                "c10089fd11f03ef8b01dd489da8e2ed6ce0dcc01ef33f795416d489dd0bcdd64",
                 "cli-proxy-api",
             ),
             (
                 "darwin-x64",
                 False,
                 "darwin-x64",
-                42988519,
-                "4d4f5c754219cf4173254e98fc8d573fea11cb425b883daeae56d57f0a6e89e4",
-                "86870b2e96319b421949d1933f10010a8a7c11c1ba787d9d1bcf08a5e00e0f77",
+                43496850,
+                "229583a38aeef6f1228aa5ebeaf77f0d9e0cb818163d426c930787fde02fce16",
+                "8c16904ea866cd6ee35eec827d4f691c5230c496147725b5e4a19c0e1115f295",
                 "cli-proxy-api",
             ),
             (
                 "linux-x64",
                 False,
                 "linux-amd64",
-                40946469,
-                "3733df8472813f74530ce7a739a3ebcd091db9c16de815e016ed0de537a2e1c6",
-                "2cbf349b79a3026cce551c65df103cf67a0878ad1c195e5087f2c4fab189cc77",
+                41420943,
+                "dd7e0c8e1f0464cb4f933b4132005a0390d1c9f3ffcdeaf10dfd73bac5dcd0ae",
+                "ca55c3d255b5391d823990ea39dceec596c91c6be5ee80856e174e397e46566b",
                 "cli-proxy-api",
             ),
             (
                 "linux-arm64",
                 False,
                 "linux-arm64",
-                37556916,
-                "0ee21fcb4d7316ebce4a46739df75f83bcd8369b3757e5b539d0080477d396a5",
-                "9c968a791a9fda4f48193fafaf5ae9dc87680225c9697e2a06ba0a94ec42e2e9",
+                38014778,
+                "e7d2d3ef548769195e8843069435e49dc82cf4ae9777d9f0af8a4dc40057e843",
+                "54f85bc24a68cced977a422c01f9726d4b7c916bc24d2c3465258c1fa1ecce0b",
                 "cli-proxy-api",
             ),
             (
                 "win32-x64",
                 False,
                 "windows-amd64",
-                41463417,
-                "543497b874e9370c85967fd3b5688dbf582cd454b074993af11a90ce41c9c501",
-                "baea8d2f7a0ae9589552f5c98033d47b1710010bfc8ed16a039c237b7292db7e",
+                41954382,
+                "c7ac88680a02476660abf00ee56e07768cb9a859c12c7558cd77fcf9d4919127",
+                "cb34b4d627efa056bb5b44a1301aad855d2006e350a2b7ed460900ebbcc4428c",
                 "cli-proxy-api.exe",
             ),
             # x64 Python on Windows on Arm still gets the native engine.
@@ -1493,18 +1493,18 @@ def test_installing_projection_matches_live_owner_or_resumable_claim(
                 "win32-x64",
                 True,
                 "windows-arm64",
-                37817697,
-                "cde450406bc9cbe8a19cb71e75ee959e387abee0173b97700481e0cb289018fc",
-                "ce589b8ff37d38c1da86847977692c2a21a342ac8391d749c2cf9adb9444844e",
+                38272453,
+                "71eba861e9385cdb44bfc7aae5075a49209e3e4dfbc0c7e06255aff1b5d57c64",
+                "854351aa7942333c08f52e08139055570dcd7582f732dd8b83ba90a886e5c092",
                 "cli-proxy-api.exe",
             ),
             (
                 "win32-arm64",
                 True,
                 "windows-arm64",
-                37817697,
-                "cde450406bc9cbe8a19cb71e75ee959e387abee0173b97700481e0cb289018fc",
-                "ce589b8ff37d38c1da86847977692c2a21a342ac8391d749c2cf9adb9444844e",
+                38272453,
+                "71eba861e9385cdb44bfc7aae5075a49209e3e4dfbc0c7e06255aff1b5d57c64",
+                "854351aa7942333c08f52e08139055570dcd7582f732dd8b83ba90a886e5c092",
                 "cli-proxy-api.exe",
             ),
     ],
@@ -3055,6 +3055,12 @@ def _write_mock_engine(
     reload_delay: float = 0.0,
     drop_reload_ack: bool = False,
     lose_config_on_reload: str | None = None,
+    grants_load_after: float = 0.0,
+    grant_listing_delay: float = 0.0,
+    auth_files_status: int = 200,
+    auth_files_malformed: bool = False,
+    grant_models: object = "listed",
+    drop_listener_on_auth_files: bool = False,
 ) -> None:
     script = f"""#!{sys.executable}
 import json
@@ -3089,6 +3095,7 @@ exit_before_ready = {exit_before_ready!r}
 if exit_before_ready is not None:
     raise SystemExit(exit_before_ready)
 time.sleep({startup_delay!r})
+answering_since = time.monotonic()
 health_surfaces = set()
 defaulted = False
 
@@ -3133,8 +3140,23 @@ class Handler(BaseHTTPRequestHandler):
             mark_health_surface('management')
             self._json(200, {{'host': config['host']}})
             return
+        if self.path == '/v0/management/auth-files' and {drop_listener_on_auth_files!r}:
+            # The process lives on, but its listener is gone: nothing answers where Avibe connects.
+            self.close_connection = True
+            threading.Thread(target=server.shutdown, daemon=True).start()
+            return
+        if self.path == '/v0/management/auth-files' and self.headers.get('X-Management-Key') == management:
+            grants = sorted(os.listdir(config['auth-dir'])) if os.path.isdir(config['auth-dir']) else []
+            files = [{{'name': name}} for name in grants if name.endswith('.json')]
+            self._json({auth_files_status!r}, {{'files': {{}} if {auth_files_malformed!r} else files}})
+            return
         if self.path.startswith('/v0/management/auth-files/models'):
-            self._json(200, {{'models': [{{'id': 'model-a'}}]}})
+            time.sleep({grant_listing_delay!r})
+            # CPA answers before its watcher loads the auth directory, listing each grant with no model until then.
+            loaded = time.monotonic() - answering_since >= {grants_load_after!r}
+            override = {grant_models!r}
+            models = ([{{'id': 'model-a'}}] if override == 'listed' else override) if loaded else []
+            self._json(200, {{'models': models}})
             return
         self._json(401, {{'error': {{'type': 'unauthorized'}}}})
 
@@ -3312,6 +3334,12 @@ def _fixture_supervisor(
     reload_delay: float = 0.0,
     drop_reload_ack: bool = False,
     lose_config_on_reload: str | None = None,
+    grants_load_after: float = 0.0,
+    grant_listing_delay: float = 0.0,
+    auth_files_status: int = 200,
+    auth_files_malformed: bool = False,
+    grant_models: object = "listed",
+    drop_listener_on_auth_files: bool = False,
 ) -> tuple[EngineSupervisor, EngineStateStore]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     binary = tmp_path / "mock-engine"
@@ -3325,6 +3353,12 @@ def _fixture_supervisor(
         reload_delay=reload_delay,
         drop_reload_ack=drop_reload_ack,
         lose_config_on_reload=lose_config_on_reload,
+        grants_load_after=grants_load_after,
+        grant_listing_delay=grant_listing_delay,
+        auth_files_status=auth_files_status,
+        auth_files_malformed=auth_files_malformed,
+        grant_models=grant_models,
+        drop_listener_on_auth_files=drop_listener_on_auth_files,
     )
     installer = _FixtureInstaller(binary, tmp_path / "versions" / "install-1")
     store = EngineStateStore(tmp_path / "state")
@@ -4663,6 +4697,96 @@ def test_supervisor_process_exit_discards_all_child_output(
         len(child_payload) * 2
     )
     assert not (instance_dir / "health-surfaces-complete").exists()
+
+
+def test_a_started_engine_is_ready_once_it_lists_the_models_of_each_oauth_grant_it_loaded(tmp_path: Path) -> None:
+    """MH-RUNTIME-005 (#2756): the engine answers before it loads its auth directory, and lists each grant with no
+    model until then; a refresh or turn right after the start must not find a grant that offers nothing."""
+
+    supervisor, store = _fixture_supervisor(tmp_path, grants_load_after=0.5)
+    auth_name = "antigravity-account.json"
+    store.write_oauth_auth_file(auth_name, {"type": "antigravity", "access_token": "oauth-fixture"})
+    try:
+        connection = supervisor.ensure_running()
+        listing = EngineClient(connection).management_request("GET", "/auth-files/models", query={"name": auth_name})
+        assert listing["models"] == [{"id": "model-a"}]
+    finally:
+        supervisor.stop()
+
+
+def test_the_wait_for_oauth_grants_is_bounded_as_a_whole_however_many_grants_answer_slowly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MH-RUNTIME-005 (#2756): one deadline covers every grant request, so slow grants cannot stretch the start."""
+
+    monkeypatch.setattr(supervisor_module, "MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS", 1.0)
+    supervisor, store = _fixture_supervisor(tmp_path, grants_load_after=60.0, grant_listing_delay=0.4)
+    for number in range(12):
+        store.write_oauth_auth_file(f"account-{number}.json", {"type": "antigravity", "access_token": "oauth-fixture"})
+    try:
+        started = time.monotonic()
+        supervisor.ensure_running()
+        # One pass over twelve grants at 0.4 s each would take 4.8 s; the start's own spawn and health check get the rest.
+        assert time.monotonic() - started < 3.5
+    finally:
+        supervisor.stop()
+
+
+@pytest.mark.parametrize(
+    ("listing", "degraded"),
+    [
+        ({"auth_files_status": 404}, None),
+        ({"auth_files_status": 401}, None),
+        ({"drop_listener_on_auth_files": True}, None),
+        ({"auth_files_status": 503}, "failure=503"),
+        ({"auth_files_malformed": True}, "failure=malformed_inventory"),
+        ({"grant_models": [{}]}, "failure=malformed_listing"),
+        ({"grant_models": None}, "failure=malformed_listing"),
+    ],
+    ids=[
+        "disowned-404", "disowned-401", "disowned-listener-lost", "degraded-503", "degraded-malformed-inventory",
+        "degraded-malformed-models", "degraded-null-models",
+    ],
+)
+def test_a_failed_grant_listing_fails_the_start_only_when_the_engine_disowns_its_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    listing: dict, degraded: str | None,
+) -> None:
+    """MH-RUNTIME-005 (#2756, #2826): an engine that answers its health check but refuses the grant listing as a
+    credential or route it does not hold, or then stops listening, never starts as ready, and is stopped. Any other failure, a malformed inventory or
+    model listing included, is a degraded listing, not a failed engine: the start polls it through the bound, says
+    why, and is ready."""
+
+    monkeypatch.setattr(supervisor_module, "MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS", 1.5)
+    caplog.set_level(logging.WARNING, logger="vibe.model_hub_runtime.supervisor")
+    supervisor, store = _fixture_supervisor(tmp_path, startup_timeout=2.0, **listing)
+    store.write_oauth_auth_file("antigravity-account.json", {"type": "antigravity", "access_token": "oauth-fixture"})
+    try:
+        if degraded is not None:
+            supervisor.ensure_running()
+            assert supervisor.status()["status"]["health"] == "ok"
+            assert any(degraded in record.getMessage() for record in caplog.records), caplog.text
+        else:
+            with pytest.raises(EngineUnavailableError):
+                supervisor.ensure_running()
+            assert supervisor.status()["status"]["health"] != "ok"
+    finally:
+        supervisor.stop()
+
+
+def test_a_start_ready_late_in_its_budget_still_waits_the_full_bound_for_its_grants(tmp_path: Path) -> None:
+    """MH-RUNTIME-005 (#2756): the grant wait always gets its full bound after the health check, however little of
+    the startup budget is left, so a start that is healthy late still waits for its grants."""
+
+    supervisor, store = _fixture_supervisor(tmp_path, startup_timeout=3.0, startup_delay=2.0, grants_load_after=1.5)
+    auth_name = "antigravity-account.json"
+    store.write_oauth_auth_file(auth_name, {"type": "antigravity", "access_token": "oauth-fixture"})
+    try:
+        connection = supervisor.ensure_running()
+        listing = EngineClient(connection).management_request("GET", "/auth-files/models", query={"name": auth_name})
+        assert listing["models"] == [{"id": "model-a"}]
+    finally:
+        supervisor.stop()
 
 
 def test_mh_runtime_006_timeout_stops_engine_with_bounded_structured_diagnostics(

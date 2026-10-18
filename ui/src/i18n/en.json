@@ -2460,7 +2460,9 @@
         },
         "footnote": "Costs are estimated at the vendor's API price, and a relay may bill differently. Subscriptions add no charge. A Claude subscription can't run these tools.",
         "saveFailed": "Couldn't save the {{toolInline}} setting. Please retry.",
-        "clearFailed": "Couldn't clear the {{toolInline}} refusal. Please retry."
+        "saveUnconfirmed": "Couldn't confirm whether the {{toolInline}} setting was saved. It's being re-read from the server; check it before trying again.",
+        "clearFailed": "Couldn't clear the {{toolInline}} refusal. Please retry.",
+        "clearUnconfirmed": "Couldn't confirm whether the {{toolInline}} refusal was cleared. It's being re-read from the server; check it before trying again."
       },
       "capability": {
         "readFailed": "Couldn't read this Source's tool capabilities.",
@@ -4328,6 +4330,8 @@
       "model": "Model",
       "modelPlaceholder": "e.g. claude-sonnet-4-6",
       "effort": "Effort",
+      "effortRefused": "No Source accepts {{effort}} now, so the agent was not created. Check the effort and create it again.",
+      "effortUnconfirmed": "Model Hub could not confirm the effort just now, so the agent was not created. Try again.",
       "systemPrompt": "System prompt",
       "systemPromptHint": "Optional",
       "systemPromptPlaceholder": "Optional. Prepended to every conversation that uses this agent.",

@@ -34,6 +34,7 @@ declare global {
     petFixtureSends: { sessionId: string; payload: unknown }[];
     petFixtureOpens: string[];
     petFixtureStops: unknown[];
+    petFixtureMarkReads: string[];
     petFixtureMainReads: number;
     setPetMainAvailable: (available: boolean) => void;
     petFixtureConnection: (connected: boolean) => void;
@@ -44,18 +45,27 @@ petBridge.setHitRegions = async (rects) => { window.petLayoutHitRegions = rects;
 window.petFixtureSends = [];
 window.petFixtureOpens = [];
 window.petFixtureStops = [];
+window.petFixtureMarkReads = [];
 petBridge.open = async (link) => { window.petFixtureOpens.push(link); };
 const hasMain = params.get('main') !== 'false';
 const layers = Number(params.get('layers') ?? 3);
 const personal = params.get('scenario') === 'personal';
 const historyActions = params.get('history') === 'actions';
+// Earlier turns that overflow the history box, with the latest reply unread.
+const historyLong = params.get('history') === 'long';
 const title = personal ? '检查桌宠 mini 的交互' : 'A long unbroken title '.repeat(40);
 const session = {
   id: 'ses_main', scope_id: 'fixture', title, agent_backend: 'codex',
   capabilities: { can_chat: true },
   status: 'active', visibility: 'foreground', agent_status: 'idle', metadata: {},
 };
-const messages = hasMain ? [{
+const earlier = historyLong ? Array.from({ length: 6 }, (_, i) => ({
+  id: `earlier_${i}`, session_id: session.id, scope_id: session.scope_id,
+  author: i % 2 ? 'agent' : 'user', type: i % 2 ? 'result' : 'user',
+  text: i % 2 ? `第 ${i} 轮的回复。`.repeat(6) : `第 ${i} 轮的问题`, metadata: {}, content: {},
+  created_at: `2026-10-11T00:00:0${i}Z`, updated_at: `2026-10-11T00:00:0${i}Z`, read_at: '2026-10-11T00:00:09Z',
+})) : [];
+const messages = hasMain ? [...earlier, {
   id: 'user', session_id: session.id, scope_id: session.scope_id,
   author: 'user', type: 'user', text: title, metadata: {}, content: {},
   created_at: '2026-10-12T00:00:00Z', updated_at: '2026-10-12T00:00:00Z',
@@ -63,7 +73,7 @@ const messages = hasMain ? [{
   id: 'result', session_id: session.id, scope_id: session.scope_id,
   author: 'agent', type: 'result',
   text: personal ? '我会帮你跟进各个项目。需要授权的事已经排在前面。' : 'Ready to help with your next task.',
-  metadata: {}, content: historyActions ? { quick_replies: ['继续', '稍后'] } : {}, read_at: '2026-10-12T00:00:01Z',
+  metadata: {}, content: historyActions ? { quick_replies: ['继续', '稍后'] } : {}, read_at: historyLong ? null : '2026-10-12T00:00:01Z',
   created_at: '2026-10-12T00:00:01Z', updated_at: '2026-10-12T00:00:01Z',
 }] : [];
 const agents = Array.from({ length: Number(params.get('activities') ?? layers + 1) }, (_, i) => ({
@@ -111,7 +121,10 @@ window.fetch = async (input, init) => {
     return json({ ok: true });
   }
   if (path.endsWith('/turn-state') && !path.includes('ses_main')) return json({ in_flight: true, foreground: 'running' });
-  if (path.endsWith('/mark-read')) return json({ updated: 1, unread_by_session: unread });
+  if (path.endsWith('/mark-read')) {
+    window.petFixtureMarkReads.push(path.split('/')[3]);
+    return json({ updated: 1, unread_by_session: unread });
+  }
   const payloads: Record<string, unknown> = {
     '/api/csrf-token': { csrf_token: 'fixture-only-token' },
     '/api/config': { mode: 'self_host', setup_state: { needs_setup: false } },

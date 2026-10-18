@@ -103,6 +103,17 @@ class EngineConfigLostError(EngineUnavailableError):
         super().__init__("models.engine.health_failed", reason="engine_config_lost")
 
 
+def _lists_a_model(listing: dict[str, Any]) -> bool:
+    """Whether a grant's listing holds a model the discovery reader (``adapter._discovered_models``) reads as one."""
+
+    models = listing.get("models")
+    return isinstance(models, list) and any(
+        isinstance(value := (item.get("id") or item.get("alias") or item.get("name")) if isinstance(item, dict) else item, str)
+        and bool(value)
+        for item in models
+    )
+
+
 class EngineSupervisor:
     """Start-on-demand supervisor for one loopback-only Model Hub engine."""
 
@@ -587,9 +598,13 @@ class EngineSupervisor:
                 except Exception as exc:
                     self._stop_locked()
                     raise EngineUnavailableError("models.engine.unsafe_permissions") from exc
+                # It has answered: a refusal from here on, the grant wait's included, is a lost listener (#2826).
+                self._engine_answered = True
+                if not self._oauth_grants_listed_locked(connection) or process.poll() is not None:
+                    time.sleep(min(_STARTUP_POLL_INTERVAL_SECONDS, max(0.0, deadline - time.monotonic())))
+                    continue
                 self._last_check = _utc_now()
                 self._verified_at = time.monotonic()
-                self._engine_answered = True
                 logger.info(
                     "Model Hub engine startup outcome=ready managed_version=%s "
                     "elapsed_seconds=%.3f child_output_retained=false",
@@ -611,6 +626,85 @@ class EngineSupervisor:
             self.startup_timeout,
         )
         raise EngineUnavailableError("models.engine.health_failed", os_errno=os_errno)
+
+    def _oauth_grants_listed_locked(self, connection: EngineConnection) -> bool:
+        """Wait, bounded, until a started engine lists a model for each OAuth grant it loaded.
+
+        CPA answers before its watcher has registered the auth directory's
+        grants, and until then lists each with no model and routes none of its
+        models: a refresh or turn in that window finds a grant that offers
+        nothing (#2756). API-key Sources are registered before it answers.
+
+        The wait has exactly two outcomes:
+
+        * Not ready (False): the engine refused a listing as a credential or
+          route it does not hold, or stopped listening after it answered its
+          health check (``_disowns_config_locked``). The caller also
+          treats an engine that exited as not ready. Either way the start fails
+          like any start that never becomes ready.
+        * Ready (True): every loaded grant lists a model the discovery reader
+          can read, or the reload bound expired, after one log line naming why.
+          Grants left unlisted, and listings that failed any other way or
+          answered malformed, are a degraded listing, not a failed engine.
+
+        The bound is that watcher's reload bound. It always runs in full after
+        the health check, and covers every request in the wait.
+        """
+
+        client = EngineClient(connection)
+        deadline = time.monotonic() + MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS
+        failure: str | None = None
+
+        def listing(path: str, query: dict[str, str] | None = None) -> dict[str, Any] | None:
+            nonlocal failure
+            try:
+                return client.management_request(
+                    "GET", path, query=query, timeout=min(1.0, max(0.01, deadline - time.monotonic())),
+                )
+            except EngineClientError as exc:
+                if self._disowns_config_locked(exc.status_code, local_os_errno(exc)):
+                    raise
+                # The request the deadline cut short times out whatever the engine does: an answer says more.
+                if failure is None or exc.error_type != "TimeoutError":
+                    failure = str(exc.status_code or exc.error_type)
+                return None
+
+        pending: list[str] | None = None
+        try:
+            while deadline - time.monotonic() > 0:
+                if pending is None and (inventory := listing("/auth-files")) is not None:
+                    files = inventory.get("files")
+                    if isinstance(files, list):
+                        pending = sorted(
+                            item["name"] for item in files
+                            if isinstance(item, dict) and isinstance(item.get("name"), str) and item["name"]
+                            and item.get("disabled") is not True
+                        )
+                    else:
+                        failure = "malformed_inventory"
+                listed = set()
+                for name in pending or ():
+                    if deadline - time.monotonic() <= 0:
+                        break
+                    models = listing("/auth-files/models", {"name": name})
+                    if models is not None and _lists_a_model(models):
+                        listed.add(name)
+                    elif models is not None and models.get("models") != []:
+                        # An empty list is a grant with no model yet; anything else is not a listing.
+                        failure = "malformed_listing"
+                if pending is not None:
+                    pending = [name for name in pending if name not in listed]
+                    if not pending:
+                        return True
+                time.sleep(min(_STARTUP_POLL_INTERVAL_SECONDS, max(0.0, deadline - time.monotonic())))
+        except EngineClientError:
+            return False
+        logger.warning(
+            "Model Hub engine startup: OAuth grant listing degraded after %.1fs: "
+            "inventory_read=%s grants_without_models=%d failure=%s",
+            MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS, pending is not None, len(pending or ()), failure,
+        )
+        return True
 
     def _healthy_locked(self) -> bool:
         if not self._is_running_locked() or self._connection is None:

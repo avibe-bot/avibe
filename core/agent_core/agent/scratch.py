@@ -113,6 +113,25 @@ class ScratchRoot:
             return error_result(f"Could not edit file: {path}. {os.strerror(exc.errno) if exc.errno else exc}.")
         return text_result(edit_summary(path, edits, counts, changed))
 
+    # --- the harness's own files (C-9 section 6) ------------------------------------------
+
+    def put(self, name: str, content: str) -> None:
+        """Write ``content`` as ``name`` before the turn's first call, replacing whatever a name held."""
+        refusal = self._replaceable(name)
+        if refusal:
+            raise OSError(errno.EEXIST, f"{name}: {refusal}")
+        self._publish(name, encode_file(content))
+
+    def get(self, name: str) -> Optional[str]:
+        """The text of ``name`` as the turn left it; None when it is not a regular file, or too large to edit."""
+        try:
+            raw, _ = self._read(name)
+        except FileNotFoundError:
+            return None
+        if raw is None or len(raw) > MAX_EDIT_BYTES:
+            return None
+        return decode_file(raw)
+
     # --- descriptor-relative steps ------------------------------------------------------------
 
     def _lstat(self, name: str) -> Optional[os.stat_result]:

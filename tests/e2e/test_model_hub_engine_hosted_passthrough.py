@@ -475,15 +475,12 @@ async def test_responses_xai_history_replays_in_real_shapes(tmp_path, monkeypatc
     assert _events(raw) == _events(reply)
 
 
-@pytest.mark.xfail(
-    strict=True, reason="engine drops/shortens xAI over-64 ids under is-compat; fixed by the id patch in #2780",
-)
 async def test_responses_xai_over_limit_ids_replay_verbatim(tmp_path, monkeypatch) -> None:
     """MH-ENGINE-HOSTED-007: xAI's 84-rune tool-call reasoning and call ids reach xAI as it issued them.
 
-    Under ``is-compat``, which Avibe renders for xAI, the pinned engine keeps the ``rs_`` reasoning but
-    drops the ``tco_`` reasoning whole and shortens the ``ctc_`` id to 64 runes. An engine that keeps
-    them turns this strict expected failure into a failure, so that change must flip the marker.
+    Under ``is-compat``, which Avibe renders for xAI, CPA's 64-rune input id limit would drop the
+    ``tco_`` reasoning whole and shorten the ``ctc_`` id; the engine's
+    ``codex-compat-upstream-item-ids`` patch keeps an upstream's over-limit ids verbatim.
     """
     replayed, _raw, _reply = await _replay_xai_turn(tmp_path, monkeypatch)
 

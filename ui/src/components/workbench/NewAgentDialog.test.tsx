@@ -40,6 +40,7 @@ vi.mock('../../context/ApiContext', async (importOriginal) => ({
 type FakeModelCatalog = {
   models: string[];
   reasoningOptions?: Record<string, { value: string; label: string }[]>;
+  effortMenus?: Record<string, { omitted: string[]; not_on: Record<string, string[]> }>;
 };
 let modelCatalog: FakeModelCatalog = { models: [] };
 let modelCatalogReads = 0;
@@ -70,12 +71,18 @@ vi.mock('../../lib/backendModels', async (importOriginal) => ({
 const renderDialog = () => {
   const createVibeAgent = vi.fn().mockResolvedValue({ ok: true, agent: { id: 'agt-new' } });
   apiRef.current = { createVibeAgent };
-  render(
+  const view = render(
     <MemoryRouter>
       <NewAgentDialog open onClose={vi.fn()} onCreated={vi.fn()} />
     </MemoryRouter>,
   );
-  return { createVibeAgent };
+  // The parent closing and reopening the dialog, as the Agents page does.
+  const setOpen = (open: boolean) => view.rerender(
+    <MemoryRouter>
+      <NewAgentDialog open={open} onClose={vi.fn()} onCreated={vi.fn()} />
+    </MemoryRouter>,
+  );
+  return { createVibeAgent, setOpen };
 };
 
 const chooseModel = (value: string) => {
@@ -232,6 +239,116 @@ describe('NewAgentDialog', () => {
     expect(screen.getByText('opus')).toBeTruthy();
     expect(medium().disabled).toBe(false);
     expect(create().disabled).toBe(false);
+  });
+
+  it("MH-EFFORT-MENU-004: creates only an effort Model Hub still offers at Create, not just when the dialog opened", async () => {
+    modelCatalog = {
+      models: [],
+      reasoningOptions: { sonnet: [{ value: 'medium', label: 'medium' }, { value: 'high', label: 'high' }] },
+      effortMenus: { sonnet: { omitted: [], not_on: {} } },
+    };
+    const { createVibeAgent } = renderDialog();
+    // While the dialog stays open, a turn records that every hop refuses `high`.
+    const row = (efforts: string[], omitted: string[]) => ({
+      backend: 'claude', mode: 'hub',
+      catalog_models: [{ id: 'sonnet', routeable: true, reasoning_efforts: efforts, effort_menu: { omitted, not_on: {} } }],
+    });
+    apiRef.current!.readModelHubAgentCatalogForModelPicker = vi.fn().mockResolvedValue(row(['medium'], ['high']));
+
+    fireEvent.change(screen.getByPlaceholderText('agents.create.namePlaceholder'), { target: { value: 'router' } });
+    chooseModel('sonnet');
+    fireEvent.click(screen.getByRole('button', { name: 'high', exact: true }));
+    submit();
+
+    await waitFor(() => expect(screen.getByText('agents.create.effortRefused:{"effort":"high"}')).toBeTruthy());
+    expect(createVibeAgent).not.toHaveBeenCalled();
+    // The menu now follows that answer, so the effort moved to one it offers.
+    expect(screen.queryByRole('button', { name: 'high', exact: true })).toBeNull();
+    // The refused Create has settled when its button takes clicks again.
+    const create = screen.getByRole('button', { name: /agents\.create\.submit/ }) as HTMLButtonElement;
+    await waitFor(() => expect(create.disabled).toBe(false));
+    submit();
+    await waitFor(() => expect(createVibeAgent).toHaveBeenCalledWith(expect.objectContaining({
+      model: 'sonnet', reasoning_effort: 'medium',
+    })));
+  });
+
+  it('creates nothing when Model Hub cannot answer at Create, and says to try again', async () => {
+    modelCatalog = {
+      models: [],
+      reasoningOptions: { sonnet: [{ value: 'medium', label: 'medium' }] },
+      effortMenus: { sonnet: { omitted: [], not_on: {} } },
+    };
+    const { createVibeAgent } = renderDialog();
+    apiRef.current!.readModelHubAgentCatalogForModelPicker = vi.fn().mockResolvedValue(null);
+    fireEvent.change(screen.getByPlaceholderText('agents.create.namePlaceholder'), { target: { value: 'router' } });
+    chooseModel('sonnet');
+    submit();
+
+    await waitFor(() => expect(screen.getByText('agents.create.effortUnconfirmed')).toBeTruthy());
+    expect(createVibeAgent).not.toHaveBeenCalled();
+  });
+
+  it('drops a Create still checking the effort when the backend changes meanwhile', async () => {
+    modelCatalog = {
+      models: [],
+      reasoningOptions: { sonnet: [{ value: 'medium', label: 'medium' }, { value: 'high', label: 'high' }] },
+      effortMenus: { sonnet: { omitted: [], not_on: {} } },
+    };
+    const { createVibeAgent } = renderDialog();
+    let answer: (value: unknown) => void = () => {};
+    apiRef.current!.readModelHubAgentCatalogForModelPicker = vi.fn(() => new Promise((resolve) => { answer = resolve; }));
+    fireEvent.change(screen.getByPlaceholderText('agents.create.namePlaceholder'), { target: { value: 'router' } });
+    chooseModel('sonnet');
+    fireEvent.click(screen.getByRole('button', { name: 'high', exact: true }));
+    submit();
+
+    fireEvent.click(screen.getByRole('button', { name: /Codex/ }));
+    await act(async () => answer({
+      backend: 'claude', mode: 'hub',
+      catalog_models: [{ id: 'sonnet', routeable: true, reasoning_efforts: ['medium'], effort_menu: { omitted: ['high'], not_on: {} } }],
+    }));
+
+    // The answer was for the Claude form: the Codex one shows no refusal, and nothing was created.
+    expect(screen.queryByText('agents.create.effortRefused:{"effort":"high"}')).toBeNull();
+    expect(createVibeAgent).not.toHaveBeenCalled();
+  });
+
+  it('keeps a reopened form submitting while its own Create runs, whatever an earlier one settles', async () => {
+    modelCatalog = {
+      models: [],
+      reasoningOptions: { sonnet: [{ value: 'medium', label: 'medium' }] },
+      effortMenus: { sonnet: { omitted: [], not_on: {} } },
+    };
+    const { createVibeAgent, setOpen } = renderDialog();
+    const answers: ((value: unknown) => void)[] = [];
+    apiRef.current!.readModelHubAgentCatalogForModelPicker = vi.fn(() => new Promise((resolve) => { answers.push(resolve); }));
+    const hub = {
+      backend: 'claude', mode: 'hub',
+      catalog_models: [{ id: 'sonnet', routeable: true, reasoning_efforts: ['medium'], effort_menu: { omitted: [], not_on: {} } }],
+    };
+    const fill = () => {
+      fireEvent.change(screen.getByPlaceholderText('agents.create.namePlaceholder'), { target: { value: 'router' } });
+      chooseModel('sonnet');
+    };
+    const create = () => screen.getByRole('button', { name: /agents\.create\.submit/ }) as HTMLButtonElement;
+    fill();
+    submit();
+
+    // Closed and reopened while that Create checks the effort: the new form starts its own Create.
+    setOpen(false);
+    setOpen(true);
+    fill();
+    submit();
+    expect(answers).toHaveLength(2);
+    expect(create().disabled).toBe(true);
+
+    // The first Create settles for a form that is gone: the current one stays submitting.
+    await act(async () => answers[0](hub));
+    expect(create().disabled).toBe(true);
+    fireEvent.click(create());
+    await act(async () => answers[1](hub));
+    await waitFor(() => expect(createVibeAgent).toHaveBeenCalledTimes(1));
   });
 
   it('creates with no effort when the catalog says the model has none', async () => {

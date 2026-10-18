@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useLayoutEffect, type CSSProperties, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, useLayoutEffect, type CSSProperties, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
-import { ChevronRight, ExternalLink, KeyRound, X } from 'lucide-react';
+import { ChevronUp, ExternalLink, KeyRound, X } from 'lucide-react';
 
 import { ApiError, useApi, type InboxSession, type RunningAgent, type VaultRequest, type WorkbenchMessage } from '@/context/ApiContext';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
@@ -1016,29 +1016,37 @@ const CollapsedCards: React.FC<{ cards: PetCard[]; onOpen: () => void; t: (key: 
   );
 };
 
-const ExpandedCards: React.FC<{ cards: PetCard[]; leaving: string[]; onReference: (card: PetCard) => void; onDismiss: (card: PetCard) => void; stops: Record<string, StopPhase>; onStop: (card: PetCard) => void; t: (key: string, options?: Record<string, unknown>) => string }> = ({ cards, leaving, onReference, onDismiss, stops, onStop, t }) => {
-  const scrollRef = useRef<HTMLDivElement>(null);
+/**
+ * Scroll edge fades (spec §7.5): each edge fades only once there is content
+ * past it. Recomputed on scroll and whenever the box or its content resizes.
+ */
+function useScrollEdgeFade(contentKey: unknown) {
+  const ref = useRef<HTMLDivElement>(null);
   const [edges, setEdges] = useState({ top: 0, bottom: 0 });
   const measure = useCallback(() => {
-    const node = scrollRef.current;
+    const node = ref.current;
     if (!node) return;
     setEdges({ top: Math.min(FADE_PX, Math.max(0, node.scrollTop)), bottom: Math.min(FADE_PX, Math.max(0, node.scrollHeight - node.clientHeight - node.scrollTop)) });
   }, []);
   useEffect(() => {
-    const node = scrollRef.current;
+    const node = ref.current;
     if (!node) return undefined;
     measure();
     if (typeof ResizeObserver === 'undefined') return undefined;
     const observer = new ResizeObserver(measure);
     observer.observe(node);
-    const list = node.querySelector('.pet-mini-list');
-    if (list) observer.observe(list);
+    for (const child of node.children) observer.observe(child);
     return () => observer.disconnect();
-  }, [measure, cards.length]);
+  }, [measure, contentKey]);
   const mask = `linear-gradient(to bottom, transparent 0, #000 ${edges.top}px, #000 calc(100% - ${edges.bottom}px), transparent 100%)`;
+  return { ref, measure, style: { maskImage: mask, WebkitMaskImage: mask } satisfies CSSProperties };
+}
+
+const ExpandedCards: React.FC<{ cards: PetCard[]; leaving: string[]; onReference: (card: PetCard) => void; onDismiss: (card: PetCard) => void; stops: Record<string, StopPhase>; onStop: (card: PetCard) => void; t: (key: string, options?: Record<string, unknown>) => string }> = ({ cards, leaving, onReference, onDismiss, stops, onStop, t }) => {
+  const { ref: fadeRef, measure: measureFade, style: fadeStyle } = useScrollEdgeFade(cards.length);
   return (
     <div className="pet-mini-panel">
-      <div ref={scrollRef} onScroll={measure} className="pet-mini-scroll" style={{ maskImage: mask, WebkitMaskImage: mask }}>
+      <div ref={fadeRef} onScroll={measureFade} className="pet-mini-scroll" style={fadeStyle}>
         <ul className="pet-mini-list">
           {cards.map((card) => {
             const phase = stops[card.id];
@@ -1103,15 +1111,20 @@ const MainReplyBubble: React.FC<Omit<MainDetailProps, 'visible'> & { open: boole
     : props.failure ? `${t('pet.failedPrefix')} ${props.failure.text.trim()}`
         : last?.text?.trim() ? t('pet.repliedPrefix', { text: last.text.trim() })
           : t('pet.waiting');
+  const detailId = useId();
+  const { ref: fadeRef, measure: measureFade, style: fadeStyle } = useScrollEdgeFade(open);
+  // The toggle stays first in the DOM, so focus order is unchanged, but the
+  // bubble lays out bottom-up: the toggle keeps its place at the bottom and
+  // the history opens above it, so expanding never moves what was clicked.
   return (
-    <div className="pet-mini-reply-bubble" data-pet-hit>
-      <button type="button" className="pet-mini-reply-toggle" onClick={onToggle} aria-expanded={open}>
-        <span className="pet-mini-bubble-speaker">{t('pet.mainAgent')}<span>{t(open ? 'pet.collapseHistory' : 'pet.recentTurns')}<ChevronRight size={11} /></span></span>
+    <div className="pet-mini-reply-bubble is-main" data-pet-hit>
+      <button type="button" className="pet-mini-reply-toggle" onClick={onToggle} aria-expanded={open} aria-controls={detailId}>
+        <span className="pet-mini-bubble-speaker">{t('pet.mainAgent')}<span>{t(open ? 'pet.collapseHistory' : 'pet.recentTurns')}<ChevronUp size={11} /></span></span>
         <p title={summary}>{props.running && <span className="pet-mini-running-dot" aria-hidden />}<span className="pet-mini-reply-summary">{summary}</span></p>
       </button>
-      <div className={clsx('pet-mini-detail', open && 'is-open')}>
+      <div id={detailId} className={clsx('pet-mini-detail', open && 'is-open')}>
         <div className="pet-mini-detail-clip" inert={!open || undefined}>
-          <div className="pet-mini-bubble-history"><MainDetail {...props} visible={open} /></div>
+          <div ref={fadeRef} onScroll={measureFade} className="pet-mini-bubble-history" style={fadeStyle}><MainDetail {...props} visible={open} /></div>
         </div>
       </div>
     </div>
@@ -1121,17 +1134,19 @@ const MainReplyBubble: React.FC<Omit<MainDetailProps, 'visible'> & { open: boole
 const MainDetail: React.FC<MainDetailProps> = (props) => {
   const { t } = useTranslation();
   const lastResultRef = useRef<HTMLDivElement>(null);
-  const latestInputRef = useRef<HTMLDivElement>(null);
   const resultKey = `${props.binding}\u0000${props.exchange.results.at(-1)?.id ?? ''}`;
   const [seenResult, setSeenResult] = useState<{ epoch: PetSurfaceEpoch; key: string } | null>(null);
   useLayoutEffect(() => {
     if (!props.visible) return;
-    // The view ends at the newest row drawn: the last result, or the later input
-    // drawn after a promoted result that answered an earlier one.
-    const end = (props.exchange.answersEarlierInput && latestInputRef.current) || lastResultRef.current;
-    const history = end?.closest<HTMLElement>('.pet-mini-bubble-history');
-    if (end && history) history.scrollTop = end.offsetTop + end.offsetHeight - history.clientHeight;
-  }, [props.visible, resultKey, props.exchange.answersEarlierInput, props.exchange.user?.id]);
+    const result = lastResultRef.current;
+    const history = result?.closest<HTMLElement>('.pet-mini-bubble-history');
+    // Open at the end, where the newest result sits right above its actions and
+    // the toggle row. If the result and its actions do not fit, start at the
+    // result instead, just past the top edge fade, so it is read from its first
+    // line rather than from under the fade. A later input drawn after a promoted
+    // result (`answersEarlierInput`) moves the end, so a new input re-scrolls.
+    if (result && history) history.scrollTop = Math.max(0, Math.min(history.scrollHeight - history.clientHeight, result.offsetTop - FADE_PX));
+  }, [props.visible, resultKey, props.exchange.user?.id]);
   useEffect(() => {
     const node = lastResultRef.current;
     if (!props.visible || !node) return;
@@ -1148,7 +1163,7 @@ const MainDetail: React.FC<MainDetailProps> = (props) => {
   const firstCurrent = props.messages.findIndex((message) => message.id === props.exchange.user?.id || props.exchange.results.some((result) => result.id === message.id));
   const history = props.messages.slice(0, Math.max(0, firstCurrent))
     .filter((message) => message.type === 'user' || message.type === 'result').slice(-6);
-  const currentUser = props.exchange.user && <div ref={latestInputRef} className="pet-mini-detail-user"><Markdown content={props.exchange.user.text} references={(props.exchange.user.content as { references?: MentionReference[] })?.references} softBreaks /></div>;
+  const currentUser = props.exchange.user && <div className="pet-mini-detail-user"><Markdown content={props.exchange.user.text} references={(props.exchange.user.content as { references?: MentionReference[] })?.references} softBreaks /></div>;
   return (
     <div className="pet-mini-detail-inner">
       {history.map((message) => <div key={message.id} className={message.author === 'user' ? 'pet-mini-detail-user' : 'pet-mini-detail-result'}><Markdown content={message.text} references={(message.content as { references?: MentionReference[] })?.references} softBreaks /></div>)}
