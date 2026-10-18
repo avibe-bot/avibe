@@ -9,6 +9,7 @@ import io
 import inspect
 import json
 import re
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Hashable, Mapping
 from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
 from typing import Any, TypeVar
@@ -111,15 +112,19 @@ class WireField:
 # call's arguments. One bound covers every wait on the provider: response
 # headers, the first chunk, and each next chunk. Codex, Claude Code, Pi, and
 # OpenCode allow 300s of silence; Avibe allows 600s (owner decision,
-# 2026-10-10), because Model Hub withholds even the response headers until the
-# first model output, so a high-effort reasoning model's thinking time is all
-# silence and can exceed five minutes. For the Sources whose streams keep
-# sending, the gateway bounds the engine's silence at 120s first and retries a
-# stall before output itself (docs/plans/model-hub-inference-deadlines.md), so
-# this bound is the outer guard. Connecting stays separately short, so an
-# unreachable provider still fails fast. Both bounds are shared by every native
-# adapter; the loop may retry the resulting error only when no model output has
-# been emitted.
+# 2026-10-10). Connecting stays separately short, so an unreachable provider
+# still fails fast. Both bounds are shared by every native adapter; the loop
+# may retry the resulting error only when no model output has been emitted.
+#
+# Through the Model Hub gateway the wait for response headers is not this
+# bound's: the gateway withholds the headers, and every upstream byte with them
+# (Anthropic's pings included), until the first model output, so a model that
+# thinks without streaming its thinking is silent here however healthy it is.
+# Only the gateway sees the upstream until then, so the gateway bounds that
+# wait on every attempt: 120 s of byte silence for the Sources whose streams
+# keep sending, this bound for the rest (docs/plans/model-hub-inference-
+# deadlines.md, "Vibey's wait before output"). Once headers arrive the gateway
+# forwards every byte, and this bound covers each next chunk again.
 CONNECT_TIMEOUT_S = 10.0
 PROVIDER_SILENCE_TIMEOUT_S = 600.0
 CLEANUP_TIMEOUT_S = 10.0
@@ -1836,6 +1841,7 @@ async def drive_sse_stream(
     response: httpx.Response | None = None
     opening: asyncio.Task[httpx.Response] | None = None
     candidate: Done | ProviderError | None = None
+    sent_at: float | None = None
     assembler.begin_driver()
     try:
         try:
@@ -1843,7 +1849,8 @@ async def drive_sse_stream(
                 candidate = assembler.aborted(cancel.reason)
             else:
                 # The transport bounds only connecting; the wait for response
-                # headers is the provider's silence, bounded below.
+                # headers is the provider's silence, bounded below, or the
+                # gateway's to bound (``PROVIDER_SILENCE_TIMEOUT_S``).
                 request = client.build_request(
                     method,
                     url,
@@ -1853,11 +1860,12 @@ async def drive_sse_stream(
                 )
                 # Retain the opening task even if cancellation wins the await:
                 # its successful result still belongs to this driver's finally.
+                sent_at = time.monotonic()
                 opening = asyncio.create_task(client.send(request, stream=True))
                 response = await _await_network(
                     opening,
                     cancel,
-                    timeout_s=PROVIDER_SILENCE_TIMEOUT_S,
+                    timeout_s=None if gateway else PROVIDER_SILENCE_TIMEOUT_S,
                 )
                 if response is None:
                     candidate = assembler.aborted(cancel.reason)
@@ -1947,6 +1955,17 @@ async def drive_sse_stream(
             candidate = assembler.exception(exc)
 
         if candidate is not None:
+            if (
+                isinstance(candidate, ProviderError)
+                and sent_at is not None
+                and not assembler.streamed
+                and time.monotonic() - sent_at >= PROVIDER_SILENCE_TIMEOUT_S
+            ):
+                # Whatever ended it, the request went at least the whole silence
+                # bound without output. Sent again it would most likely wait as
+                # long again, so the failure ends the turn: neither replayed nor
+                # continued.
+                candidate = replace(candidate, retryable=False, continuable=False)
             # Translator terminals are candidates, not public errors. Commit
             # and sanitize exactly once at the shared driver boundary.
             assembler.end_driver()

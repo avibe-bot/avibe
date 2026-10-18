@@ -131,7 +131,9 @@ continuation runs, which cannot replay the original input or committed tools. Ra
 future causes, explicit pin/opaque refusals, permanent/protocol errors, unclassified failures, and local preparation
 errors grant no continuation. Neither the terminal sanitizer nor a downstream consumer may infer permission from
 `kind` alone. A recovery-exhausted error after thinking remains non-continuable, because the partial response is not
-safe to replay or continue implicitly.
+safe to replay or continue implicitly. A failure of any kind that arrives before any output, at least the silence bound
+after its request was sent, is neither retryable nor continuable: sent again, the request would most likely wait as
+long again (`conversion-tables.md`, network timeouts).
 
 The loop carries both permissions and `retry_after_s` into the terminal `AgentError` unchanged. These fields do
 not grant permission to replay committed tools or manufacture user input; Vibey uses `Agent.resume` under its

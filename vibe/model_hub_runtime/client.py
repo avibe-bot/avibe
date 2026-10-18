@@ -472,7 +472,14 @@ class EngineClient:
         request_headers: Mapping[str, str] | None = None,
         on_transport_done: Callable[[], None] | None = None,
         on_request_sent: Callable[[], None] | None = None,
+        silence_bound_s: float | None = None,
     ) -> EngineInvokeHandle:
+        """Send one request to the engine.
+
+        ``silence_bound_s`` is the byte-silence bound a caller hands over for a
+        stream the measured Source table leaves unbounded; ``None`` leaves it so.
+        """
+
         request_protocol = request_protocol or source.protocol
         body = dict(request)
         routed_model = f"{source.prefix}/{model_id}"
@@ -509,16 +516,21 @@ class EngineClient:
         if request_protocol == "anthropic":
             headers.setdefault("anthropic-version", "2023-06-01")
 
+        idle_bound: float | None = None
+        if stream:
+            measured = (
+                request_protocol == source.protocol
+                and (source.vendor, source.protocol) in _STREAM_IDLE_BOUNDED_SOURCES
+            )
+            # A caller that holds no bound of its own before model output hands
+            # it over: until then the gateway withholds the whole response,
+            # heartbeats included, so only this read sees the upstream's bytes.
+            idle_bound = _STREAM_IDLE_TIMEOUT_SECONDS if measured else silence_bound_s
         timeout = aiohttp.ClientTimeout(
             total=None,
             connect=self.timeout,
             sock_connect=self.timeout,
-            sock_read=(
-                _STREAM_IDLE_TIMEOUT_SECONDS
-                if stream and request_protocol == source.protocol
-                and (source.vendor, source.protocol) in _STREAM_IDLE_BOUNDED_SOURCES
-                else None
-            ),
+            sock_read=idle_bound,
         )
         # Connecting to the local engine is bounded. Once connected, inference
         # can take any duration; completion, transport failure, or owner

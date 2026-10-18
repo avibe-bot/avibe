@@ -26,6 +26,7 @@ from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
 from modules.agents.model_hub import ModelHubRuntimeRouter, bind_launch
 from tests.test_model_hub_l3 import _assert_valid, _canonicalize_fixed_test_routes, _outcome, _source
 from tests.test_model_hub_retry_policy import WIRE, clock_service, fail
+from vibe.model_hub_runtime import adapter as engine_adapter_module
 from vibe.model_hub_runtime import client as engine_client_module
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
 from vibe.model_hub_runtime.client import EngineClient, EngineConnection
@@ -1131,5 +1132,74 @@ def test_a_silent_engine_stream_is_cancelled_and_retried_at_its_idle_bound(
             assert len(calls) == 2
             assert body == metadata + output + terminal
             assert clock.delays == [1]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "origin,vendor,source_protocol,bound",
+    [
+        # Vibey's own bound, which Vibey no longer applies to the wait for response headers.
+        ("vibey", "xai", "openai_responses", "caller"),
+        # A measured Source keeps its shorter bound for every caller.
+        ("vibey", "anthropic", "anthropic", "idle"),
+        # A native caller keeps its own bound, and an unmeasured Source stays unbounded here.
+        ("codex", "xai", "openai_responses", None),
+    ],
+)
+def test_vibey_hands_its_silence_bound_to_the_engine_read(
+    monkeypatch, tmp_path, origin, vendor, source_protocol, bound,
+):
+    """MH-RUNTIME-013: before model output only the engine read sees the upstream, so it holds Vibey's bound.
+
+    The gateway withholds the response, heartbeats included, until the first
+    model output, and a model that thinks without streaming its thinking sends
+    nothing else for as long as it thinks. Vibey therefore bounds no wait for
+    response headers itself; the engine read applies Vibey's silence bound to
+    every stream the measured Source table leaves unbounded.
+    """
+    idle, caller = 0.3, 0.8
+    monkeypatch.setattr(engine_client_module, "_STREAM_IDLE_TIMEOUT_SECONDS", idle)
+    monkeypatch.setattr(engine_adapter_module, "PROVIDER_SILENCE_TIMEOUT_S", caller)
+
+    async def run() -> None:
+        source = _source("src_silent01", "Silent", vendor=vendor, protocol=source_protocol)
+        service, _clock, _models = configured_service(tmp_path, sources=[source])
+        metadata, output, terminal, _buffered = WIRE[source_protocol]
+        stalled_for: list[float] = []
+
+        async def respond(request: web.Request) -> web.StreamResponse:
+            await request.json()
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
+            await response.write(metadata)
+            started = time.monotonic()
+            try:
+                await asyncio.sleep(caller * 2)
+            except asyncio.CancelledError:
+                stalled_for.append(time.monotonic() - started)
+                raise
+            await response.write(output)
+            await response.write(terminal)
+            await response.write_eof()
+            return response
+
+        async with loopback_engine(tmp_path, service, respond) as (adapter, _engine_client):
+            handle = await asyncio.wait_for(
+                adapter.invoke(source.id, "shared-model", {"stream": True}, True, origin), timeout=5,
+            )
+            body = b"".join([chunk async for chunk in handle.stream]) if handle.stream is not None else b""
+            outcome = await asyncio.wait_for(handle.outcome(), timeout=5)
+            await asyncio.sleep(0.05)
+
+        if bound is None:
+            assert outcome.kind == RawOutcomeKind.SUCCESS
+            assert body == metadata + output + terminal
+            assert stalled_for == []
+            return
+        assert outcome.kind == RawOutcomeKind.TIMEOUT
+        assert body == b""
+        expected = caller if bound == "caller" else idle
+        assert len(stalled_for) == 1 and expected * 0.9 <= stalled_for[0] < min(expected + 0.4, caller * 2)
 
     asyncio.run(run())

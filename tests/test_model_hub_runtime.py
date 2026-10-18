@@ -4864,6 +4864,7 @@ def test_adapter_uses_origin_protocol_for_engine_translation(
             request_headers=None,
             on_transport_done=None,
             on_request_sent=None,
+            silence_bound_s=None,
         ):
             self.request_protocol = request_protocol
             self.request_headers = request_headers
@@ -5032,6 +5033,7 @@ def test_adapter_serializes_source_sync_with_new_invocations(tmp_path: Path) -> 
             request_headers=None,
             on_transport_done=None,
             on_request_sent=None,
+            silence_bound_s=None,
         ):
             invoked_refs.append(source.credential_ref)
             on_transport_done()
