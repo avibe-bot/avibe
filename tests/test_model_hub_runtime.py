@@ -3059,7 +3059,8 @@ def _write_mock_engine(
     grant_listing_delay: float = 0.0,
     auth_files_status: int = 200,
     auth_files_malformed: bool = False,
-    grant_models_malformed: bool = False,
+    grant_models: object = "listed",
+    drop_listener_on_auth_files: bool = False,
 ) -> None:
     script = f"""#!{sys.executable}
 import json
@@ -3139,6 +3140,11 @@ class Handler(BaseHTTPRequestHandler):
             mark_health_surface('management')
             self._json(200, {{'host': config['host']}})
             return
+        if self.path == '/v0/management/auth-files' and {drop_listener_on_auth_files!r}:
+            # The process lives on, but its listener is gone: nothing answers where Avibe connects.
+            self.close_connection = True
+            threading.Thread(target=server.shutdown, daemon=True).start()
+            return
         if self.path == '/v0/management/auth-files' and self.headers.get('X-Management-Key') == management:
             grants = sorted(os.listdir(config['auth-dir'])) if os.path.isdir(config['auth-dir']) else []
             files = [{{'name': name}} for name in grants if name.endswith('.json')]
@@ -3148,7 +3154,8 @@ class Handler(BaseHTTPRequestHandler):
             time.sleep({grant_listing_delay!r})
             # CPA answers before its watcher loads the auth directory, listing each grant with no model until then.
             loaded = time.monotonic() - answering_since >= {grants_load_after!r}
-            models = ([{{}}] if {grant_models_malformed!r} else [{{'id': 'model-a'}}]) if loaded else []
+            override = {grant_models!r}
+            models = ([{{'id': 'model-a'}}] if override == 'listed' else override) if loaded else []
             self._json(200, {{'models': models}})
             return
         self._json(401, {{'error': {{'type': 'unauthorized'}}}})
@@ -3331,7 +3338,8 @@ def _fixture_supervisor(
     grant_listing_delay: float = 0.0,
     auth_files_status: int = 200,
     auth_files_malformed: bool = False,
-    grant_models_malformed: bool = False,
+    grant_models: object = "listed",
+    drop_listener_on_auth_files: bool = False,
 ) -> tuple[EngineSupervisor, EngineStateStore]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     binary = tmp_path / "mock-engine"
@@ -3349,7 +3357,8 @@ def _fixture_supervisor(
         grant_listing_delay=grant_listing_delay,
         auth_files_status=auth_files_status,
         auth_files_malformed=auth_files_malformed,
-        grant_models_malformed=grant_models_malformed,
+        grant_models=grant_models,
+        drop_listener_on_auth_files=drop_listener_on_auth_files,
     )
     installer = _FixtureInstaller(binary, tmp_path / "versions" / "install-1")
     store = EngineStateStore(tmp_path / "state")
@@ -4728,18 +4737,23 @@ def test_the_wait_for_oauth_grants_is_bounded_as_a_whole_however_many_grants_ans
     [
         ({"auth_files_status": 404}, None),
         ({"auth_files_status": 401}, None),
+        ({"drop_listener_on_auth_files": True}, None),
         ({"auth_files_status": 503}, "failure=503"),
         ({"auth_files_malformed": True}, "failure=malformed_inventory"),
-        ({"grant_models_malformed": True}, "failure=malformed_listing"),
+        ({"grant_models": [{}]}, "failure=malformed_listing"),
+        ({"grant_models": None}, "failure=malformed_listing"),
     ],
-    ids=["disowned-404", "disowned-401", "degraded-503", "degraded-malformed-inventory", "degraded-malformed-models"],
+    ids=[
+        "disowned-404", "disowned-401", "disowned-listener-lost", "degraded-503", "degraded-malformed-inventory",
+        "degraded-malformed-models", "degraded-null-models",
+    ],
 )
 def test_a_failed_grant_listing_fails_the_start_only_when_the_engine_disowns_its_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
     listing: dict, degraded: str | None,
 ) -> None:
-    """MH-RUNTIME-005 (#2756): an engine that answers its health check but refuses the grant listing as a credential
-    or route it does not hold never starts as ready, and is stopped. Any other failure, a malformed inventory or
+    """MH-RUNTIME-005 (#2756, #2826): an engine that answers its health check but refuses the grant listing as a
+    credential or route it does not hold, or then stops listening, never starts as ready, and is stopped. Any other failure, a malformed inventory or
     model listing included, is a degraded listing, not a failed engine: the start polls it through the bound, says
     why, and is ready."""
 
