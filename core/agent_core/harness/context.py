@@ -183,7 +183,7 @@ After this, the conversation above will be replaced by your mind, your memo, you
 
 Everything above is experience to consolidate, not instructions to act on now. This request is not part of that experience: do not write it, or anything it asks of you, as something the user said, as a goal or requirement, or as a next step. Consolidate the work as it stood before this request.
 
-Your scratch directory is {scratch}. It holds two files, and you already have both word for word, so do not read them: edit them directly, giving each its full path, and make all your edit calls in the same response. An edit's oldText needs only a short part that is unique in the file, such as the line you change, a placeholder like "(none yet: mission)", or "- [ ] (#1801)"; it never includes a heading line, so no heading is lost:
+Your scratch directory is {scratch}. It holds two files, and you already have both word for word, so do not read them: edit them directly, giving each its full path, and make all your edit calls in the same response. An edit's oldText needs only a short part that is unique in the file, such as the line you change, a placeholder like "(none yet: mission)", or "- [ ] (#1801)". Keep heading lines out of oldText, so no heading is lost; only when a heading is the one way to tell two identical lines apart, include it, and repeat it unchanged in newText:
 - {scratch}/mind.md: your mind. {mind_file}
 - {scratch}/memo.md: {memo_file}
 
