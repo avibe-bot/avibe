@@ -1172,17 +1172,19 @@ class VibeyAgent(BaseAgent):
         """Where the Turn owning an open call stands: ``open``, ``stopped``, or ``settled``.
 
         A Turn a restart cut stays open and reruns in place, so its call's Turn is the one
-        that continues it. ``stopped``: a Stop or a replacement canceled that Turn, or was
-        requested for it and not yet settled (it never reruns).
+        that continues it. ``stopped``: a Stop or a replacement canceled that Turn, or a stop
+        asked of it is not yet settled (``stop_requested``; it never reruns).
         """
+        from core.restart_resume import stop_requested
+
         if not turn_id:
             return "settled"
         with self._engine.connect() as conn:
             turn = delivery_store.get_turn(conn, turn_id)
+            if turn is not None and turn["state"] in delivery_store.TURN_OWNER_STATES:
+                return "stopped" if stop_requested(conn, turn) else "open"
         if turn is None:
             return "settled"
-        if turn["state"] in delivery_store.TURN_OWNER_STATES:
-            return "stopped" if turn.get("control_mode") else "open"
         return "stopped" if turn.get("terminal_outcome") == "canceled" else "settled"
 
     def _response_owner(self, row_id: str) -> tuple[Optional[str], Optional[str]]:

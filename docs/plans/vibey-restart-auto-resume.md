@@ -80,7 +80,8 @@ exists; "handled" names where the in-place design still owns it.
      on the `vibey` backend, as does the Agent that ran the Turn (another
      Agent never continues its work);
    - the Turn's start was accepted (`start_receipt_outcome = accepted`), and no
-     Stop or replacement control was requested for it;
+     stop was asked of it (`stop_requested`: a Stop or replacement control, or
+     a cancel of one of its live Runs), and no Run it started for has ended;
    - the loop bound is not reached (item 6).
    A Turn whose final response was committed qualifies by the same rules; its
    rerun ends with that final (item 8).
@@ -134,8 +135,8 @@ exists; "handled" names where the in-place design still owns it.
    Turn stays open and its owner retries (T2 before T4); a Stop still settles
    it, and then T2 ends the command (a command whose Turn was canceled is
    ended, as the Stop would have ended it live, never handed to a Watch, and
-   so is one whose Turn has a Stop or replacement the dead process recorded
-   and never settled).
+   so is one whose Turn holds a stop the dead process recorded and never
+   settled, by the same `stop_requested` rule that keeps it from rerunning).
 4. **Runs follow the work.** Runs never leave the Turn: the rerun settles them
    with its own outcome and output, and callbacks fire once, from that outcome.
    At shutdown, `release_for_service_shutdown` and the scheduled-task teardown

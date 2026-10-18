@@ -2767,7 +2767,7 @@ async def test_a_restart_rerun_ends_with_the_final_its_cut_run_committed(
     "case",
     [
         "exits", "window_passed", "watch_unavailable", "stop", "cancelled", "cancelled_at_shutdown", "stopped_left_open",
-        "stop_pending",
+        "stop_pending", "cancel_pending",
     ],
 )
 async def test_a_restart_rerun_waits_for_its_surviving_command_as_the_live_call_would(
@@ -2779,7 +2779,7 @@ async def test_a_restart_rerun_waits_for_its_surviving_command_as_the_live_call_
     result the reply (and a Run, MESSAGE-DELIVERY-328) settles from. A window the downtime spent
     hands it over; with no Watch to take it, it stays in the foreground until it ends; a Stop ends
     the wait and the command, as does one that settles the Turn while it is left open, or one the
-    dead process recorded and never settled, and so does a cancellation outside a shutdown (the
+    dead process recorded and never settled (a Stop, or a cancel of the Turn's Run), and so does a cancellation outside a shutdown (the
     backend disabled or refreshed); a shutdown leaves the command for the next start. It never
     starts again."""
     import core.watches as watches_module
@@ -2827,10 +2827,20 @@ async def test_a_restart_rerun_waits_for_its_surviving_command_as_the_live_call_
                     conn, cut_turn, expected_version=int(turn["version"]), expected_states=("active",),
                     values={"control_mode": "stop_only"},
                 )
+        if case == "cancel_pending":
+            # The caller canceled the Turn's Run as the service went down, before its Stop reached
+            # the Turn: the same.
+            from storage.background import attach_agent_run_delivery_in_connection
+
+            with engine.begin() as conn:
+                assert attach_agent_run_delivery_in_connection(
+                    conn, run.id, session_id=SESSION, delivery_id=request.context.platform_specific["delivery_id"]
+                )
+            assert requests.cancel_run(run.id)
         harness.new_agent()
         assert await harness.agent.recover_runtime_state() == []
         assert ManagedWatchStore().find_job_watch(job_id) is None
-        if case in {"stopped_left_open", "stop_pending"}:
+        if case in {"stopped_left_open", "stop_pending", "cancel_pending"}:
             if case == "stopped_left_open":
                 # The Turn stays open (its fallback waits for a Watch) and a Stop settles it with no
                 # runtime holding it: the next T2 ends the command, as the Stop would have.
