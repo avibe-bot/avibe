@@ -1036,7 +1036,13 @@ class Agent:
                     consumed.append((item, is_steer))
         finally:
             if row is not None and not self._consumer_closed:
-                await emit(MessageCommitted, message_id=row.row_id, context_seq=row.context_seq, final=final)
+                await emit(
+                    MessageCommitted,
+                    message_id=row.row_id,
+                    context_seq=row.context_seq,
+                    final=final,
+                    superseded=bool(pending),
+                )
                 for item, is_steer in consumed:
                     if is_steer:
                         await emit(SteerApplied, message_id=item.message_id)

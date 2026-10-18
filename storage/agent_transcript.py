@@ -97,9 +97,10 @@ INPUT_TYPES = ("user", "harness", "agent_initiated", "annotation")
 # the row carries its outcome, as the other backends' terminal rows do. A final with
 # nothing to show (a silent reply) is the hidden response type ``assistant``: context,
 # but no transcript row, inbox reply, or unread result, as the other backends persist
-# nothing visible for it.
+# nothing visible for it. A reply that later input superseded is shown as an ``output``
+# boundary, and a silent final can make it the Turn's ``result``.
 FINAL_TYPES = ("result", "error")
-RESPONSE_TYPES = ("assistant", *FINAL_TYPES)
+RESPONSE_TYPES = ("assistant", "output", *FINAL_TYPES)
 CONTEXT_VISIBILITY = "context"
 AUDIT_VISIBILITY = "audit"
 AuditKind = Literal["attempt", "fork_turn"]

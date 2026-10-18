@@ -69,6 +69,9 @@ class MessageCommitted:
     message_id: str
     context_seq: int
     final: bool
+    #: A completed reply that queued input took the final word from: tool-free and not failed, committed non-final
+    #: only because a steer or follow-up was pending. Never narration beside tool calls or a stream error's partial.
+    superseded: bool = False
 
 
 @dataclass(frozen=True)

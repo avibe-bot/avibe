@@ -405,5 +405,11 @@ scenarios:
       - tests/test_message_dispatcher_silent_final.py::SilentFinalTurnResultTests::test_a_cancellation_during_the_promotion_still_commits_the_turn
       - tests/test_message_dispatcher_silent_final.py::SilentFinalTurnResultTests::test_nothing_else_promotes_earlier_text
       - tests/test_vibey_agent.py::test_a_silent_final_leaves_the_visible_reply_before_it_as_the_result
+  - id: MESSAGE-DELIVERY-326
+    name: A Vibey reply a steer superseded stays a visible reply whatever its length, and a silent final makes it the Turn's result
+    status: covered
+    kind: regression
+    layer: contract
+    test: tests/test_vibey_agent.py::test_a_short_reply_a_steer_superseded_stays_a_visible_reply
 next_priority:
-  - MESSAGE-DELIVERY-326
+  - MESSAGE-DELIVERY-327
