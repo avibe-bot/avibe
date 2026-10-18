@@ -60,6 +60,9 @@ def _token(value: Any) -> str:
     return sanitize_identity(text) if text else ""
 
 
+#: How an input no person typed begins (``AgentInputMetadata.render``).
+HARNESS_MARKER = "[Harness:"
+
 #: The dispatch provenance a ``[Harness: ...]`` label is built from: all a merged batch's
 #: Message keeps of each later Delivery's provenance (``merged_harness_sources``).
 HARNESS_SOURCE_FIELDS = (
@@ -145,7 +148,7 @@ class AgentInputMetadata:
     def render(self, text: str, config: Any, *, now: datetime | None = None) -> str:
         lines: list[str] = []
         if self.harness_source:
-            lines.append(f"[Harness: {self.harness_source}]")
+            lines.append(f"{HARNESS_MARKER} {self.harness_source}]")
         if getattr(config, "include_time_info", True):
             current = now or datetime.now().astimezone()
             if current.tzinfo is None:
@@ -154,7 +157,10 @@ class AgentInputMetadata:
             if len(offset) == 5:
                 offset = f"{offset[:3]}:{offset[3:]}"
             lines.append(f"[Now: {current.strftime('%Y-%m-%d %H:%M:%S')} UTC{offset}]")
-        if self.user_id and getattr(config, "include_user_info", True):
+        # A person's input that begins like a Harness line names its sender even with the
+        # identity switch off, so the marker the system prompt explains cannot be forged.
+        forged = not self.harness_source and text.lstrip().startswith(HARNESS_MARKER)
+        if self.user_id and (getattr(config, "include_user_info", True) or forged):
             name = sanitize_identity(self.user_name or self.user_id)
             lines.append(f"[{name}<{sanitize_identity(self.user_id)}>]")
         return "\n".join([*lines, text]) if lines else text

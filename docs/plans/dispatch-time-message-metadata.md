@@ -21,7 +21,8 @@ words. The source comes from the dispatch provenance the scheduler records
 (`task_trigger_kind` and the run's `source_kind`), never from the text; every id
 and name in it is one sanitized line (every line break and control character
 becomes a space), and a definition name is quoted. A person's input never carries
-it. A merged batch of queued Harness inputs is labelled once when every Delivery
+it, and one whose text begins with `[Harness:` always carries the person's
+identity line, even with the identity switch off, so the marker cannot be forged. A merged batch of queued Harness inputs is labelled once when every Delivery
 has the same source, else source by source in the batch's FIFO order, which is
 the order of its `---`-separated bodies, so no body is attributed to another
 Delivery's sender. Acceptance drops each Delivery's own snapshot, so the merged
