@@ -620,7 +620,7 @@ async def test_a_carried_skill_is_what_its_load_prints_in_the_session_s_working_
 async def test_the_mind_is_revised_in_the_session_s_scratch_and_a_cut_one_points_to_its_read_only_copy(
     engine, session, tmp_path
 ):
-    from core.agent_core.harness.context import MIND_CUT, MIND_FILE
+    from core.agent_core.harness.context import MIND_CUT, MIND_FILE, MIND_PLACEHOLDERS
 
     harness = _Harness(engine, tmp_path, "avibe", [])
     # T = 51,904 on a 64,000-token route answering 4,096; the Turns cross it just above, so the checkpoint turn has
@@ -633,7 +633,7 @@ async def test_the_mind_is_revised_in_the_session_s_scratch_and_a_cut_one_points
         "edit",
         {
             "path": str(state / "scratch" / SESSION / MIND_FILE),
-            "edits": [{"oldText": "## Agreements\n(none)", "newText": f"## Agreements\n{agreements}"}],
+            "edits": [{"oldText": MIND_PLACEHOLDERS["## Agreements"], "newText": agreements}],
         },
     )
     harness.provider.scripts.extend(

@@ -32,6 +32,8 @@ from core.agent_core.harness.context import (
     MEMO_ITEM,
     MIND_CUT,
     MIND_EMPTY,
+    MIND_HEADINGS,
+    MIND_PLACEHOLDERS,
     MIND_CURRENT,
     MIND_FILE_FIRST,
     MIND_FILE_PREVIOUS,
@@ -1147,20 +1149,38 @@ def _mind(**sections) -> str:
     """The template with ``sections`` (keyed by heading line) filled in."""
     text = MIND_TEMPLATE
     for heading, body in sections.items():
-        text = text.replace(f"{heading}\n{MIND_EMPTY}", f"{heading}\n{body}", 1)
+        text = text.replace(MIND_PLACEHOLDERS[heading], body, 1)
     return text
+
+
+def test_the_template_holds_a_unique_placeholder_under_each_heading_and_a_kept_one_is_an_empty_section():
+    # Each line under a heading is unique in the template, so an edit replaces it alone, never touching a heading.
+    assert list(MIND_PLACEHOLDERS) == [h for top, _, subs in MIND_SECTIONS for h in (subs or (top,))]
+    assert MIND_PLACEHOLDERS["## Mission"] == "(none yet: mission)"
+    assert MIND_PLACEHOLDERS["# 3. Key decisions"] == "(none yet: key decisions)"
+    for placeholder in MIND_PLACEHOLDERS.values():
+        assert MIND_TEMPLATE.count(placeholder) == 1 and placeholder not in MIND_HEADINGS
+    assert review_mind(MIND_TEMPLATE, MIND_TEMPLATE).empty  # untouched: no mind
+    # A section left with its placeholder is empty and valid; the mind is kept, and shown, as it is.
+    partial = _mind(**{"## Mission": "- review every open PR (in progress)"})
+    assert "(none yet: lessons)" in partial and review_mind(partial, MIND_TEMPLATE) == MindReview(
+        tokens=text_tokens(partial)
+    )
+    assert fit_mind(partial, "[cut]") == (partial, [])
 
 
 def test_a_mind_keeps_its_heading_lines_once_each_in_order_and_never_loses_a_mission_entry():
     previous = _mind(**{"## Mission": "- review every open PR, oldest first (in progress)\n- keep CI green"})
     # Any content under the fixed headings, sub-headings of the model's own, and text before the first heading.
-    kept = "Notes to self\n" + previous.replace("## Workstreams\n(none)", "## Workstreams\n### Queue\n- #2704 next")
+    kept = "Notes to self\n" + previous.replace(MIND_PLACEHOLDERS["## Workstreams"], "### Queue\n- #2704 next")
     assert review_mind(kept, previous) == MindReview(tokens=text_tokens(kept))
     assert mission_entries(mind_blocks(kept)[0][1]) == 2
     broken = {
         previous.replace("## Mission\n", "## Missions\n"): 'the heading line "## Mission" is missing',
         previous + "\n# 3. Key decisions\n- again": 'the heading line "# 3. Key decisions" appears 2 times',
-        previous.replace("# 4. Lessons\n(none)", "").replace("# 3. Key decisions", "# 4. Lessons\n(none)\n# 3. Key decisions"):
+        previous.replace(f"# 4. Lessons\n{MIND_PLACEHOLDERS['# 4. Lessons']}", "").replace(
+            "# 3. Key decisions", "# 4. Lessons\n(none)\n# 3. Key decisions"
+        ):
             "its heading lines are out of order",
         previous.replace("\n- keep CI green", ""): "its Mission lists 1 entries, fewer than the 2 it had",
     }

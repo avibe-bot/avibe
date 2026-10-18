@@ -49,6 +49,8 @@ from core.agent_core.harness.context import (
     MIND_CURRENT,
     MEMO_FILE_EMPTY,
     MIND_FILE_FIRST,
+    MIND_HEADINGS,
+    MIND_PLACEHOLDERS,
     MIND_FILE_PREVIOUS,
     MIND_TEMPLATE,
     SKILLS_LEAD_CARRIED,
@@ -549,7 +551,7 @@ async def test_a_threshold_checkpoint_may_read_while_the_window_has_room_and_nev
     # A response that leaves under 1,000 tokens of room still gets the policy's fixed text, never a cut of it:
     # a truncation note would tell the model to read again, and another call fails the turn.
     long = AssistantMessage(
-        (ThinkingBlock(tokens(5_900)), ToolCallBlock("peek", "read", {"path": "f"})), assistant().origin, "tool_use"
+        (ThinkingBlock(tokens(5_800)), ToolCallBlock("peek", "read", {"path": "f"})), assistant().origin, "tool_use"
     )
     model = Model(reads(4), [[Done(long)], [Done(assistant(CHECKPOINT))]])
     tool = sized_reader(6_000, 6_000, 6_000, 2_000)
@@ -1928,7 +1930,7 @@ def _v5(tmp_path, host=None, **options) -> ContextConfig:
 
 
 MISSION = "- fix the parser without changing its API (in progress)"
-FIRST_MIND = MIND_TEMPLATE.replace("## Mission\n(none)", f"## Mission\n{MISSION}")
+FIRST_MIND = MIND_TEMPLATE.replace(MIND_PLACEHOLDERS["## Mission"], MISSION)
 
 
 def _fill_mind(tmp_path) -> list:
@@ -1936,7 +1938,7 @@ def _fill_mind(tmp_path) -> list:
     scratch = tmp_path / "scratch"
     return [
         _batch(
-            _edit("m", scratch / MIND_FILE, ("## Mission\n(none)", f"## Mission\n{MISSION}")),
+            _edit("m", scratch / MIND_FILE, (MIND_PLACEHOLDERS["## Mission"], MISSION)),
             _edit("n", scratch / MEMO_FILE, ("- [ ] (#1)", "- [x] (#1)")),
         ),
         [Done(assistant(CHECKPOINT))],
@@ -1994,7 +1996,7 @@ async def test_with_no_memo_candidate_the_request_shows_no_list_and_the_turn_edi
     # placeholder sent a real turn to edit the empty file, twice); it says the file is empty and to leave it so.
     scratch = tmp_path / "scratch"
     mind_only = [
-        _batch(_edit("m", scratch / MIND_FILE, ("## Mission\n(none)", f"## Mission\n{MISSION}"))),
+        _batch(_edit("m", scratch / MIND_FILE, (MIND_PLACEHOLDERS["## Mission"], MISSION))),
         [Done(assistant(CHECKPOINT))],
     ]
     (model,), (row,), _ = await _consolidate(tmp_path, [mind_only], host=Host(typed={}))
@@ -2005,6 +2007,35 @@ async def test_with_no_memo_candidate_the_request_shows_no_list_and_the_turn_edi
     assert len(model.checkpoint_requests) == 2  # the mind's edit, then the reply: no repair
     assert (row.payload["mind"], row.payload["memo"]) == (FIRST_MIND, [])
     assert "# 5. The user's words\n(none)" in row.payload["summary"]
+
+
+async def test_a_first_consolidation_replaces_each_line_under_a_heading_alone_and_keeps_every_heading(tmp_path):
+    # The first consolidation fills every section in one edit call whose oldTexts are the lines under the headings
+    # alone, never a heading: each must be unique in the template, so the edit applies, every heading stays, and no
+    # structure repair is needed. Under one "(none)" for all seven, the heading was the only unique oldText, and a
+    # real turn's seven-part edit dropped one.
+    scratch = tmp_path / "scratch"
+    lines = MIND_TEMPLATE.split("\n")
+    under = {
+        line: lines[index + 1]
+        for index, line in enumerate(lines[:-1])
+        if line in MIND_HEADINGS and lines[index + 1] and lines[index + 1] not in MIND_HEADINGS
+    }
+    assert len(under) == 7
+    contents = {heading: f"- {heading.lstrip('# ')}: filled" for heading in under}
+    contents["## Mission"] = MISSION
+    fill = [
+        _batch(_edit("m", scratch / MIND_FILE, *((under[heading], body) for heading, body in contents.items()))),
+        [Done(assistant(CHECKPOINT))],
+    ]
+    (model,), (row,), _ = await _consolidate(tmp_path, [fill])
+    results = [m for m in model.checkpoint_requests[-1].messages if isinstance(m, ToolResultMessage)]
+    assert not results[-1].is_error  # the one edit call applied
+    assert len(model.checkpoint_requests) == 2  # the edit, then the reply: no repair
+    mind = row.payload["mind"]
+    assert review_mind(mind, MIND_TEMPLATE).structure is None
+    assert all(heading in mind.split("\n") for heading in MIND_HEADINGS)
+    assert all(f"{heading}\n{body}" in mind for heading, body in contents.items() if not heading.startswith("# "))
 
 
 async def test_a_later_checkpoint_starts_from_the_mind_and_memo_it_left_and_needs_one_request_when_nothing_changed(
@@ -2050,7 +2081,7 @@ async def test_a_mind_past_a_section_limit_is_kept_whole_shown_cut_and_given_who
     scratch = tmp_path / "scratch"
     workstreams = "\n".join(f"- workstream {index}: " + "w" * 60 for index in range(30))  # ~600 tokens
     grown = [
-        _batch(_edit("m", scratch / MIND_FILE, ("## Workstreams\n(none)", f"## Workstreams\n{workstreams}"))),
+        _batch(_edit("m", scratch / MIND_FILE, (MIND_PLACEHOLDERS["## Workstreams"], workstreams))),
         [Done(assistant(CHECKPOINT))],
         [Done(assistant(CHECKPOINT))],  # the repair asked to condense it; it did not
     ]
@@ -2059,7 +2090,7 @@ async def test_a_mind_past_a_section_limit_is_kept_whole_shown_cut_and_given_who
     models, (_, second, third), _ = await _consolidate(tmp_path, [_fill_mind(tmp_path), grown, again])
     repair = models[1].checkpoint_requests[-1].messages[-1].content[0].text
     assert "mind.md is over its length limits: Goals is about" in repair and "at most 333" in repair
-    whole = FIRST_MIND.replace("## Workstreams\n(none)", f"## Workstreams\n{workstreams}")
+    whole = FIRST_MIND.replace(MIND_PLACEHOLDERS["## Workstreams"], workstreams)
     assert (second.payload["mind"], second.payload["mind_truncated"]) == (whole, True)
     copies = list((tmp_path / "checkpoints").iterdir())
     assert len(copies) == 1 and copies[0].read_text() == whole and not os.access(copies[0], os.W_OK)
@@ -2076,7 +2107,7 @@ async def test_a_mind_piled_past_twice_its_budget_is_not_kept(tmp_path):
     lessons = "\n".join(f"- lesson {index}: " + "l" * 400 for index in range(130))  # ~13,000 tokens
     assert text_tokens(lessons) > mind_revert()  # past twice the user's 6,000, on any window
     piled = [
-        _batch(_edit("m", scratch / MIND_FILE, ("# 4. Lessons\n(none)", f"# 4. Lessons\n{lessons}"))),
+        _batch(_edit("m", scratch / MIND_FILE, (MIND_PLACEHOLDERS["# 4. Lessons"], lessons))),
         [Done(assistant(CHECKPOINT))],
         [Done(assistant(CHECKPOINT))],
     ]
@@ -2271,7 +2302,7 @@ async def test_a_drop_carries_the_mind_skills_and_every_message(tmp_path):
     scratch = tmp_path / "scratch"
     fill = [
         _batch(
-            _edit("m", scratch / MIND_FILE, ("## Mission\n(none)", f"## Mission\n{MISSION}")),
+            _edit("m", scratch / MIND_FILE, (MIND_PLACEHOLDERS["## Mission"], MISSION)),
             _edit("n", scratch / MEMO_FILE, ("- [ ] (#1)", "- [x] (#1)")),
         ),
         [Done(assistant(CHECKPOINT))],
@@ -2313,7 +2344,7 @@ async def test_a_scratch_edit_runs_with_less_room_than_a_read_needs(tmp_path):
     await run(make_agent(Model([[Done(assistant("ok"))]]), store=store, context=context), "keep the API", "person")
     scratch = tmp_path / "scratch"
     batch = _batch(
-        _edit("m", scratch / MIND_FILE, ("## Mission\n(none)", f"## Mission\n{MISSION}")),
+        _edit("m", scratch / MIND_FILE, (MIND_PLACEHOLDERS["## Mission"], MISSION)),
         ToolCallBlock("r", "read", {"path": "f"}),
     )
     model = Model(reads(4), [batch, [Done(assistant(CHECKPOINT))]])
@@ -2331,7 +2362,7 @@ async def test_a_mind_copy_is_published_whole_or_not_at_all(tmp_path, monkeypatc
     scratch = tmp_path / "scratch"
     workstreams = "\n".join(f"- workstream {index}: " + "w" * 60 for index in range(30))  # past Goals' 333 on ROOMY
     grown = [
-        _batch(_edit("m", scratch / MIND_FILE, ("## Workstreams\n(none)", f"## Workstreams\n{workstreams}"))),
+        _batch(_edit("m", scratch / MIND_FILE, (MIND_PLACEHOLDERS["## Workstreams"], workstreams))),
         [Done(assistant(CHECKPOINT))],
         [Done(assistant(CHECKPOINT))],
     ]
@@ -2413,10 +2444,10 @@ async def test_on_a_small_route_a_checkpoint_leaves_the_context_much_smaller(tmp
     view = context_view(await store.load("session"))
     lines = lambda n, width: "\n".join(f"- item {i}: " + "m" * width for i in range(n))  # noqa: E731
     mind = (
-        MIND_TEMPLATE.replace("## Agreements\n(none)", f"## Agreements\n{lines(12, 300)}")
-        .replace("## Mission\n(none)", f"## Mission\n{MISSION}\n{lines(20, 350)}")
-        .replace("# 3. Key decisions\n(none)", f"# 3. Key decisions\n{lines(18, 300)}")
-        .replace("# 4. Lessons\n(none)", f"# 4. Lessons\n{lines(18, 300)}")
+        MIND_TEMPLATE.replace(MIND_PLACEHOLDERS["## Agreements"], f"{lines(12, 300)}")
+        .replace(MIND_PLACEHOLDERS["## Mission"], f"{MISSION}\n{lines(20, 350)}")
+        .replace(MIND_PLACEHOLDERS["# 3. Key decisions"], f"{lines(18, 300)}")
+        .replace(MIND_PLACEHOLDERS["# 4. Lessons"], f"{lines(18, 300)}")
     )
     assert review_mind(mind, mind).over == () and text_tokens(mind) > 5_000  # within the user's limits
     memo = tuple(MemoItem(unit.seq, typed[unit.lead.row_id]) for unit in view.units if unit.lead.kind == "input")
