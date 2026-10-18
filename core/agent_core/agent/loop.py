@@ -1030,9 +1030,12 @@ class Agent:
                     if not pending:
                         pending = [(item, False) for item in self._follow_ups]
                 final = not message.tool_calls and not pending and not failed
+                # A completed reply the pending input took the final word from: one cut off at its output limit
+                # never completed, as ``final_outcome`` holds for a final.
+                superseded = bool(pending) and replied and message.stop_reason != "length"
                 if final or failed:
                     self._open = False
-                row = await self._response(message, final=final, replied=replied, superseded=bool(pending))
+                row = await self._response(message, final=final, replied=replied, superseded=superseded)
                 for item, is_steer in pending:
                     await self._consume(item)
                     (self._steers if is_steer else self._follow_ups).popleft()
@@ -1044,7 +1047,7 @@ class Agent:
                     message_id=row.row_id,
                     context_seq=row.context_seq,
                     final=final,
-                    superseded=bool(pending),
+                    superseded=superseded,
                 )
                 for item, is_steer in consumed:
                     if is_steer:

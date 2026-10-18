@@ -78,10 +78,11 @@ as `replied`, with the images a final delivers as `images`. The row's type and
 display at commit carry both, so the committed final is the complete terminal
 reply even if delivery never runs; live settlement takes the same values. This does not
 add a model call, increase an output limit, or replay a task. Non-final responses
-with pending steer/follow-up keep continuing normally; a tool-free one is a
-completed reply that the pending input superseded, which the loop passes to
-`append_response` as `superseded`, so it commits as `output`, a visible reply,
-in the same transaction. Truncated tool calls keep the existing bounded reissue
+with pending steer/follow-up keep continuing normally; a tool-free one that
+replies and did not stop at its output limit is a completed reply that the
+pending input superseded, which the loop passes to `append_response` as
+`superseded`, so it commits as `output`, a visible reply, in the same
+transaction. A truncated one stays narration, as it would fail as a final. Truncated tool calls keep the existing bounded reissue
 path without executing their partial arguments.
 
 A final response with `stop_reason` `refusal` or `safety` and no text is still committed as the final

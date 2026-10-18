@@ -90,7 +90,7 @@
           "superseded": {
             "type": "boolean",
             "default": false,
-            "description": "True for a non-final response that is a completed reply pending input took the final word from: tool-free, not failed, and committed non-final only because a steer or follow-up was pending. Its row commits as `output`, a visible reply, when it has text to show. Never true for narration beside tool calls or a stream error's partial."
+            "description": "True for a non-final response that is a completed reply pending input took the final word from: tool-free, not failed, a reply (`has_reply`), not stopped at its output limit, and committed non-final only because a steer or follow-up was pending. Its row commits as `output`, a visible reply. Never true for narration beside tool calls, a stream error's partial, or a truncated reply."
           }
         }
       }
