@@ -2151,6 +2151,40 @@ async def test_a_silent_final_shows_nothing_and_completes(engine, session, tmp_p
     assert harness.controller.terminals[-1]["is_error"] is False
 
 
+async def test_a_silent_final_leaves_the_visible_reply_before_it_as_the_result(
+    engine, session, tmp_path, published, monkeypatch
+) -> None:
+    """Scenario: MESSAGE-DELIVERY-325.
+
+    A silent final is an empty reply, as the other backends emit one, so it never displaces visible text.
+    """
+    from core import web_push_notifications
+
+    pushes: list[dict] = []
+
+    class _Thread:
+        def __init__(self, *, target, args, daemon):
+            self.payload = args[0]
+
+        def start(self) -> None:
+            pushes.append(self.payload)
+
+    monkeypatch.setattr(web_push_notifications, "threading", SimpleNamespace(Thread=_Thread))
+    report = "Found it.\nThe cache is shared.\nTwo writers race.\nThe lock went in #12.\nFixed and verified."
+    call = ToolCallBlock(id="call_1", name="echo", arguments={"path": "src"})
+    harness = _Harness(
+        engine, tmp_path, "avibe", [[Done(assistant(report, calls=(call,)))], [Done(assistant("<silent>done</silent>"))]]
+    )
+
+    await harness.agent.handle_message(harness.request("fix the race"))
+
+    [result] = harness.rows("result")
+    assert result["content_text"] == report and harness.rows("interim") == []
+    assert [payload["type"] for name, payload in published if name == "message.updated"] == ["result"]
+    assert [push["message_id"] for push in pushes] == [result["id"]]
+    assert harness.controller.terminals[-1]["is_error"] is False
+
+
 async def test_a_silent_final_whose_run_failed_after_its_commit_is_typed_by_its_row(
     engine, session, tmp_path, published
 ) -> None:
