@@ -71,11 +71,12 @@ DREAMING = ForkPolicy(
         }
     ),
     denied=(
-        "This is a checkpoint turn: tools that act outside your own scratch space are unavailable. "
-        "Write the checkpoint as your reply text, not into a file."
+        "This is a checkpoint turn: tools that act outside your own scratch directory are unavailable. Revise mind.md "
+        "and memo.md there with edit, at the paths the request gives, and write your now as your reply text."
     ),
     budget_used=(
-        "This is a checkpoint turn and its tool budget is used up. Write the checkpoint as your reply text, not into a file."
+        "This is a checkpoint turn and its tool budget is used up. Write your now as your reply text; mind.md and "
+        "memo.md stay as they are."
     ),
     max_rounds=5,
     room_floor=4_000,

@@ -34,6 +34,7 @@ from core.agent_core.harness.context import (
     MIND_FILE_FIRST,
     MIND_FILE_PREVIOUS,
     MIND_TEMPLATE,
+    SCRATCH_UNAVAILABLE,
     SKILL_CUT,
     SKILL_TOKENS,
     SKILLS_LEAD_CARRIED,
@@ -1124,6 +1125,8 @@ def test_the_checkpoint_request_and_its_repair_are_the_contract_text_verbatim():
         f"Current memo.md:\n{MEMO_EMPTY}\n\n{TRUNCATED_LEAD}\n# 3. Key decisions\n- a\n</context-checkpoint-request>"
     )
     assert MIND_FILE_PREVIOUS in checkpoint_request(mind="previous").content[0].text
+    assert "Your scratch directory is /s/x. " in checkpoint_request(scratch="/s/x").content[0].text
+    assert f"Your scratch directory is {SCRATCH_UNAVAILABLE}. " in first
 
 
 def _mind(**sections) -> str:

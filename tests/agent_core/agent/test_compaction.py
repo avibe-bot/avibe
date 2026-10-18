@@ -298,7 +298,7 @@ async def test_a_threshold_checkpoint_forks_the_exact_prefix_and_leaves_checkpoi
     assert [is_checkpoint(request) for request in model.requests] == [False] * 4 + [True, False]
     # Cache safety: the fork is the previous request extended, with every cache-relevant setting unchanged.
     assert fork.messages[: len(previous.messages)] == previous.messages
-    assert fork.messages[-1].content[0].text.startswith(CHECKPOINT_REQUEST.split("{mind_file}")[0])
+    assert fork.messages[-1].content[0].text.startswith(CHECKPOINT_REQUEST.split("{scratch}")[0])
     for field in ("endpoint", "system", "tools", "reasoning_effort", "supports_images", "cache", "max_tokens"):
         assert getattr(fork, field) == getattr(previous, field)
 
@@ -1091,9 +1091,9 @@ async def test_a_checkpoint_turn_that_replies_with_a_meta_note_fails_after_its_o
     (audit,) = [payload for _, _, payload in agent.store.audits]  # the checkpoint-turn audits
     assert audit["outcome"] == "failed" and audit["repair"] == NO_BLOCK
     assert json.dumps(audit["messages"], ensure_ascii=False).count(_E2E_NOTE) == 2
-    # The denial told the model where the checkpoint belongs; the repair named what was missing.
+    # The denial told the model where its files and its now belong; the repair named what was missing.
     denied = model.checkpoint_requests[1].messages[-1]
-    assert denied.content[0].text.endswith("Write the checkpoint as your reply text, not into a file.")
+    assert "Write your now as your reply text" in denied.content[0].text
     assert model.checkpoint_requests[2].messages[-1] == checkpoint_repair(NO_BLOCK)
 
 
@@ -1962,6 +1962,9 @@ async def test_a_checkpoint_consolidates_into_a_mind_it_edits_a_memo_it_checks_a
     # The turn starts with the template and the memo list in its scratch root, and the request says so (section 6).
     request = _request(model)
     assert MIND_FILE_FIRST in request
+    # It names where the files are: a model told only "your scratch directory" went looking for them with bash.
+    scratch = tmp_path / "scratch"
+    assert f"Your scratch directory is {scratch}." in request and f"- {scratch}/mind.md: your mind." in request
     assert request.endswith("Current memo.md:\n- [ ] (#1) typed input\n</context-checkpoint-request>")
     assert host.asked == [["input"]]  # the inputs the cut moves out; the crossing Turn's own input stays as it was
     payload = row.payload

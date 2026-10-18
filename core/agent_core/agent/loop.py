@@ -1779,7 +1779,10 @@ class Agent:
         lines = memo.lines()
         listed = "".join(f"{line}\n" for line in lines)  # memo.md as the turn starts
         prompt = checkpoint_request(
-            lines, mind="first" if not prior else ("cut" if cut_sections else "previous"), cut_sections=cut_sections
+            lines,
+            mind="first" if not prior else ("cut" if cut_sections else "previous"),
+            cut_sections=cut_sections,
+            scratch=os.path.abspath(self.context.scratch_dir) if self.context and self.context.scratch_dir else None,
         )
 
         def check(message: AssistantMessage, files: Files, final: bool) -> Optional[str]:

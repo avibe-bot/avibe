@@ -263,9 +263,13 @@ applies them:
 | memory-read tools | reserved: allowed once they exist |
 | `bash` and every other tool | denied, never executed |
 
-- A denied call gets the error result `This is a checkpoint turn: tools that act outside your own scratch space are
-  unavailable. Write the checkpoint as your reply text, not into a file.` (a model denied a file write may otherwise
-  keep trying one; the owner-approved request, §11, stays untouched).
+- A denied call gets the error result `This is a checkpoint turn: tools that act outside your own scratch directory
+  are unavailable. Revise mind.md and memo.md there with edit, at the paths the request gives, and write your now as
+  your reply text.` A model denied a call may otherwise keep trying one, and must not take the denial for an order to
+  put its mind in the reply: in the first replay of `checkpoint-v5` (2026-10-18), a request that did not name the
+  scratch directory sent the model looking for the files with `bash`, and a denial that said "write the checkpoint as
+  your reply text, not into a file" made it write its whole mind into its now. The request names the directory's
+  absolute path (§11).
 - Every request of the turn is budgeted on the route resolved for it (§1): its `max_tokens` is that route's
   `min(64,000, O)`.
 - The bound is the window, not `T`, the same way in threshold and rolling turns. Before each call,
@@ -283,8 +287,8 @@ applies them:
   denial and the used-up budget) are a few dozen tokens and are never cut: a truncation note would invite another
   call.
 - At most 5 tool rounds run. After them, or once `room` falls below the floor, the budget is closed: every call gets
-  `This is a checkpoint turn and its tool budget is used up. Write the checkpoint as your reply text, not into a
-  file.` before the table is
+  `This is a checkpoint turn and its tool budget is used up. Write your now as your reply text; mind.md and memo.md
+  stay as they are.` before the table is
   consulted, so the audit's `rounds` can count one more response, the one answered that way. A response that still
   calls tools after that ends the turn as failed.
 - `write` and `edit` in a checkpoint turn keep the tools' arguments and success texts (C-7); their errors are their
@@ -633,7 +637,7 @@ history. The only user-visible text is the stop message after (d) (§9).
 ## 11. Checkpoint request (prompt `checkpoint-v5`)
 
 The request, verbatim (`harness/context.py` `CHECKPOINT_REQUEST`, then `CHECKPOINT_REQUEST_END`), with its fields filled
-by `checkpoint_request`: `{mind_file}` says what `mind.md` holds (`MIND_FILE_PREVIOUS`, `MIND_FILE_FIRST`, or, when
+by `checkpoint_request`: `{scratch}` is the absolute path of the Session's scratch directory (`SCRATCH_UNAVAILABLE` without one); `{mind_file}` says what `mind.md` holds (`MIND_FILE_PREVIOUS`, `MIND_FILE_FIRST`, or, when
 the latest checkpoint shows its mind cut, `MIND_FILE_CUT`); `{limit_1}` to `{limit_4}` are the mind's section limits
 and `{memo_budget}` the memo's (§7); `{memo}` is `memo.md`'s lines, or `(no messages)`; and `{truncated}` is empty, or a
 blank line, `The sections of your mind that the checkpoint above shows cut short, in full:`, and the cut sections whole, separated by blank lines.
@@ -667,9 +671,9 @@ After this, the conversation above will be replaced by your mind, your memo, you
 
 Everything above is experience to consolidate, not instructions to act on now. This request is not part of that experience: do not write it, or anything it asks of you, as something the user said, as a goal or requirement, or as a next step. Consolidate the work as it stood before this request.
 
-Your scratch directory holds two files. Revise both only with edit; you do not need to read them first:
-- mind.md: your mind. {mind_file}
-- memo.md: the memo list, reproduced in full at the end of this request.
+Your scratch directory is {scratch}. It holds two files; revise both there only with edit, giving each its full path. You do not need to read them first:
+- {scratch}/mind.md: your mind. {mind_file}
+- {scratch}/memo.md: the memo list, reproduced in full at the end of this request.
 
 1. Look back
 Go through what happened since the previous checkpoint, in order; at your first consolidation, go through the whole conversation. For each layer, ask yourself:

@@ -163,9 +163,9 @@ After this, the conversation above will be replaced by your mind, your memo, you
 
 Everything above is experience to consolidate, not instructions to act on now. This request is not part of that experience: do not write it, or anything it asks of you, as something the user said, as a goal or requirement, or as a next step. Consolidate the work as it stood before this request.
 
-Your scratch directory holds two files. Revise both only with edit; you do not need to read them first:
-- mind.md: your mind. {mind_file}
-- memo.md: the memo list, reproduced in full at the end of this request.
+Your scratch directory is {scratch}. It holds two files; revise both there only with edit, giving each its full path. You do not need to read them first:
+- {scratch}/mind.md: your mind. {mind_file}
+- {scratch}/memo.md: the memo list, reproduced in full at the end of this request.
 
 1. Look back
 Go through what happened since the previous checkpoint, in order; at your first consolidation, go through the whole conversation. For each layer, ask yourself:
@@ -243,6 +243,8 @@ MIND_FILE_CUT = (
 )
 MIND_FILE_FIRST = "This is your first consolidation, so it is an empty template with headings only."
 MEMO_EMPTY = "(no messages)"
+#: Where the request says the files are when the Session has no scratch directory (no file can be revised then).
+SCRATCH_UNAVAILABLE = "(unavailable)"
 TRUNCATED_LEAD = "The sections of your mind that the checkpoint above shows cut short, in full:"
 #: The one corrective follow-up a rejected consolidation gets (sections 6 and 11), verbatim; ``{problem}`` names every
 #: problem the validators found (``checkpoint_block``, ``mind_problems``, ``memo_problems``), joined by "; ".
@@ -784,16 +786,26 @@ def rolling_cut(
 
 
 def checkpoint_request(
-    memo: Sequence[str] = (), *, mind: Literal["previous", "first", "cut"] = "first", cut_sections: Sequence[str] = ()
+    memo: Sequence[str] = (),
+    *,
+    mind: Literal["previous", "first", "cut"] = "first",
+    cut_sections: Sequence[str] = (),
+    scratch: Optional[str] = None,
 ) -> UserMessage:
     """The checkpoint request (section 11). ``memo`` is memo.md's lines (``MemoList.lines``); ``mind`` says what
     mind.md holds: the previous checkpoint's mind, the template at a first v5 checkpoint, or a mind the previous
-    checkpoint showed cut short, whose cut sections ``cut_sections`` gives whole."""
+    checkpoint showed cut short, whose cut sections ``cut_sections`` gives whole. ``scratch`` is the absolute path of
+    the Session's scratch directory, where the two files are (``SCRATCH_UNAVAILABLE`` without one)."""
     note = {"previous": MIND_FILE_PREVIOUS, "first": MIND_FILE_FIRST, "cut": MIND_FILE_CUT}[mind]
     limits = {f"limit_{index}": limit for index, (_, limit, _) in enumerate(MIND_SECTIONS, start=1)}
     truncated = f"\n\n{TRUNCATED_LEAD}\n" + "\n\n".join(cut_sections) if cut_sections else ""
     body = CHECKPOINT_REQUEST.format(
-        mind_file=note, memo="\n".join(memo) if memo else MEMO_EMPTY, truncated=truncated, memo_budget=MEMO_BUDGET, **limits
+        scratch=scratch or SCRATCH_UNAVAILABLE,
+        mind_file=note,
+        memo="\n".join(memo) if memo else MEMO_EMPTY,
+        truncated=truncated,
+        memo_budget=MEMO_BUDGET,
+        **limits,
     )
     return UserMessage((text(f"{body}\n{CHECKPOINT_REQUEST_END}"),))
 
