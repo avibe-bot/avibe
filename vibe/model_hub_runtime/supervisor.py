@@ -103,6 +103,17 @@ class EngineConfigLostError(EngineUnavailableError):
         super().__init__("models.engine.health_failed", reason="engine_config_lost")
 
 
+def _lists_a_model(listing: dict[str, Any]) -> bool:
+    """Whether a grant's listing holds a model the discovery reader (``adapter._discovered_models``) reads as one."""
+
+    models = listing.get("models")
+    return isinstance(models, list) and any(
+        isinstance(value := (item.get("id") or item.get("alias") or item.get("name")) if isinstance(item, dict) else item, str)
+        and bool(value)
+        for item in models
+    )
+
+
 class EngineSupervisor:
     """Start-on-demand supervisor for one loopback-only Model Hub engine."""
 
@@ -587,7 +598,7 @@ class EngineSupervisor:
                 except Exception as exc:
                     self._stop_locked()
                     raise EngineUnavailableError("models.engine.unsafe_permissions") from exc
-                if not self._oauth_grants_listed_locked(connection, deadline) or process.poll() is not None:
+                if not self._oauth_grants_listed_locked(connection) or process.poll() is not None:
                     time.sleep(min(_STARTUP_POLL_INTERVAL_SECONDS, max(0.0, deadline - time.monotonic())))
                     continue
                 self._last_check = _utc_now()
@@ -615,25 +626,31 @@ class EngineSupervisor:
         )
         raise EngineUnavailableError("models.engine.health_failed", os_errno=os_errno)
 
-    def _oauth_grants_listed_locked(self, connection: EngineConnection, startup_deadline: float) -> bool:
+    def _oauth_grants_listed_locked(self, connection: EngineConnection) -> bool:
         """Wait, bounded, until a started engine lists a model for each OAuth grant it loaded.
 
         CPA answers before its watcher has registered the auth directory's
         grants, and until then lists each with no model and routes none of its
         models: a refresh or turn in that window finds a grant that offers
-        nothing (#2756). API-key Sources are registered before it answers. One
-        deadline, that watcher's reload bound, covers the whole wait and every
-        request in it. A listing the engine refuses as one whose credentials or
-        config it does not hold (``_disowns_config_locked``) is not readiness:
-        the start checks the engine again, and fails like any start that never
-        becomes ready. Any other failure is polled through; a grant still
-        unlisted at the deadline is logged and left to its own state, as the
-        engine is up.
+        nothing (#2756). API-key Sources are registered before it answers.
+
+        The wait has exactly two outcomes:
+
+        * Not ready (False): the engine refused a listing as a credential or
+          route it does not hold (``_disowns_config_locked``). The caller also
+          treats an engine that exited as not ready. Either way the start fails
+          like any start that never becomes ready.
+        * Ready (True): every loaded grant lists a model the discovery reader
+          can read, or the reload bound expired, after one log line naming why.
+          Grants left unlisted, and listings that failed any other way or
+          answered malformed, are a degraded listing, not a failed engine.
+
+        The bound is that watcher's reload bound. It always runs in full after
+        the health check, and covers every request in the wait.
         """
 
         client = EngineClient(connection)
-        deadline = min(time.monotonic() + MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS, startup_deadline)
-
+        deadline = time.monotonic() + MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS
         failure: str | None = None
 
         def listing(path: str, query: dict[str, str] | None = None) -> dict[str, Any] | None:
@@ -653,18 +670,23 @@ class EngineSupervisor:
             while deadline - time.monotonic() > 0:
                 if pending is None and (inventory := listing("/auth-files")) is not None:
                     files = inventory.get("files")
-                    pending = sorted(
-                        item["name"] for item in (files if isinstance(files, list) else ())
-                        if isinstance(item, dict) and isinstance(item.get("name"), str) and item["name"]
-                        and item.get("disabled") is not True
-                    )
+                    if isinstance(files, list):
+                        pending = sorted(
+                            item["name"] for item in files
+                            if isinstance(item, dict) and isinstance(item.get("name"), str) and item["name"]
+                            and item.get("disabled") is not True
+                        )
+                    else:
+                        failure = "malformed_inventory"
                 listed = set()
                 for name in pending or ():
                     if deadline - time.monotonic() <= 0:
                         break
                     models = listing("/auth-files/models", {"name": name})
-                    if models is not None and models.get("models"):
+                    if models is not None and _lists_a_model(models):
                         listed.add(name)
+                    elif models is not None and models.get("models"):
+                        failure = "malformed_listing"
                 if pending is not None:
                     pending = [name for name in pending if name not in listed]
                     if not pending:
@@ -673,8 +695,9 @@ class EngineSupervisor:
         except EngineClientError:
             return False
         logger.warning(
-            "Model Hub engine startup: OAuth grants unlisted=%s listed_no_model=%d last_failure=%s within %.1fs",
-            pending is None, len(pending or ()), failure, MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS,
+            "Model Hub engine startup: OAuth grant listing degraded after %.1fs: "
+            "inventory_read=%s grants_without_models=%d last_failure=%s",
+            MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS, pending is not None, len(pending or ()), failure,
         )
         return True
 
