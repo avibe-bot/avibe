@@ -338,13 +338,6 @@ class VibeyAgent(BaseAgent):
         # A transcript resume (a Turn rerun after a restart) gives a job that survived the restart
         # the foreground wait its live call would have, so its real output becomes the call's result.
         resuming = (context.platform_specific or {}).get("vibey_resume") is True
-        execution = (context.platform_specific or {}).get("vibey_execution")
-        if resuming and isinstance(execution, dict):
-            # A rerun after a restart runs with the request its Turn was accepted with, not
-            # the Agent settings edited since: those reach the next Turn.
-            request.vibe_agent_model = execution.get("model")
-            request.vibe_agent_reasoning_effort = execution.get("reasoning_effort")
-            request.vibe_agent_system_prompt = execution.get("system_prompt")
         try:
             await self._resume(runtime, stop=turn.stop_event if resuming else None)
         except asyncio.CancelledError:

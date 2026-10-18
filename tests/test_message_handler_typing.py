@@ -731,6 +731,36 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.message, "reviewer: inspect the change")
         self.assertIsNone(request.subagent_name)
 
+    async def test_a_restart_rerun_runs_with_the_request_its_turn_was_accepted_with(self):
+        """MESSAGE-DELIVERY-327: the rerun's request carries the model, effort, and instructions its
+        native start recorded, before the shared model validation, so an Agent edited (or its
+        model cleared) while the service was down reaches only the next Turn."""
+        controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
+        agent = controller.resolve_vibe_agent_for_context(None)
+        agent.backend, agent.model, agent.reasoning_effort = "vibey", None, None
+        controller.resolve_agent_for_context = lambda _context: "vibey"
+        controller.resolve_vibe_agent_for_context = lambda *_args, **_kwargs: agent
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        context = MessageContext(
+            user_id="U1", channel_id="C1", message_id="m1", platform="slack",
+            platform_specific={
+                "vibey_resume": True,
+                "vibey_execution": {
+                    "agent_id": "agent-default", "agent_name": "default", "model": "team-model",
+                    "reasoning_effort": "high", "system_prompt": "Run the steps in order.",
+                },
+            },
+        )
+
+        await handler.handle_user_message(context, "")
+
+        _, request = controller.agent_service.requests[0]
+        self.assertEqual(
+            (request.vibe_agent_model, request.vibe_agent_reasoning_effort, request.vibe_agent_system_prompt),
+            ("team-model", "high", "Run the steps in order."),
+        )
+
     async def test_scope_model_and_reasoning_override_vibe_agent_defaults(self):
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
         controller.settings_manager.routing = type(

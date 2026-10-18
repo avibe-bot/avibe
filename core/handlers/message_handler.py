@@ -781,6 +781,16 @@ class MessageHandler(BaseHandler):
                 }
                 context.platform_specific = spec
 
+            system_prompt = vibe_agent.system_prompt if vibe_agent else None
+            spec = context.platform_specific or {}
+            recorded = spec.get("vibey_execution") if spec.get("vibey_resume") is True else None
+            if isinstance(recorded, dict):
+                # A Turn rerun after a restart runs with the request it was accepted with, as
+                # its native start recorded it, not the Agent settings edited since: those
+                # reach the next Turn. Here, before the shared model validation.
+                effective_model = recorded.get("model")
+                effective_reasoning_effort = recorded.get("reasoning_effort")
+                system_prompt = recorded.get("system_prompt")
             request = self._build_agent_request(
                 context=context,
                 message=message,
@@ -801,7 +811,7 @@ class MessageHandler(BaseHandler):
                 vibe_agent_reasoning_effort=effective_reasoning_effort,
                 vibe_agent_model_explicit="model" in explicit_overrides,
                 vibe_agent_reasoning_effort_explicit="reasoning_effort" in explicit_overrides,
-                vibe_agent_system_prompt=vibe_agent.system_prompt if vibe_agent else None,
+                vibe_agent_system_prompt=system_prompt,
                 processing_indicator=processing_indicator,
                 files=processed_files,
             )

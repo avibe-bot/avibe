@@ -99,7 +99,8 @@ exists; "handled" names where the in-place design still owns it.
    its native start records that request (the Agent's id and name, the
    effective model and reasoning effort, and the Agent's instructions) on the
    start receipt, and the rerun finds the Agent by id, which survives a rename,
-   and runs with the recorded settings. A Session's switch to another Agent, or
+   and runs with the recorded settings, which the message handler puts on the
+   rerun's request before the shared model validation. A Session's switch to another Agent, or
    an edit of the Agent's settings, reaches the next Turn, as it does for a
    live one. What a run reads from the machine when it starts (project
    instructions, skills, the environment) is read again, as for any run. A Turn
@@ -124,7 +125,9 @@ exists; "handled" names where the in-place design still owns it.
    a Stop, which ends the command as in a live Turn: the Turn is durably
    active, so a Stop reaches the adapter's own Stop during the wait. A
    cancellation outside a shutdown (the backend disabled or refreshed) ends the
-   command too, also before the adapter took it; a shutdown leaves it for the
+   command too, also before the adapter took it, and a rerun that fails before
+   its adapter has its command handed to a Watch, as a failed run's is; a
+   shutdown leaves it for the
    next start's rerun. An exited
    job gives its real output; only a job still running then is
    handed to a Watch, with the ordinary handover result; a window the downtime

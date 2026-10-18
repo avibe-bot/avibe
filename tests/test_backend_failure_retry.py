@@ -633,10 +633,12 @@ def test_a_rerun_whose_setup_fails_is_retried_not_settled(isolated_state, tmp_pa
     assert _notices(cut.engine, cut.session_id) == []
 
 
-def test_a_rerun_cancelled_before_its_adapter_owns_the_command_still_ends_it(isolated_state, tmp_path):
+@pytest.mark.parametrize("ended", ["cancelled", "failed"])
+def test_a_rerun_cancelled_before_its_adapter_owns_the_command_still_ends_it(isolated_state, tmp_path, ended):
     """MESSAGE-DELIVERY-330: the rerun is published before Vibey takes the command its restart
     left running; a backend disable that cancels it in that interval still ends the command with
-    the canceled Turn, never leaving it running unowned."""
+    the canceled Turn, and a failure there (a pre-turn step raising, which the runner turns into a
+    failed Turn) hands the command to a Watch as a failed run's is: never left running unowned."""
     from core.agent_core.tools.base import JobStatus
     from core.run_settlement import SETTLED_BY_BACKEND_DISABLED
     from core.session_turns import Turn
@@ -647,13 +649,25 @@ def test_a_rerun_cancelled_before_its_adapter_owns_the_command_still_ends_it(iso
     jobs.states["job_1"] = JobStatus("running")
     cut = _accepted_turn(tmp_path, backend="vibey", jobs=jobs)
 
+    release = asyncio.Event()
+
+    async def fails_before_its_adapter(turn_id):
+        await release.wait()
+        # The runner catches the failure and settles the Turn; its task ends normally.
+        cut.manager._terminalize_durable_turn(
+            turn_id, "failed", settled_by="no_terminal_result", evidence_kind="test_pre_turn_failure"
+        )
+
     async def published_not_yet_adapted(sid, ctx, text, **_kwargs):
         # ``_run`` publishes the in-flight Turn; the adapter has not started yet.
         cut.starts.append((sid, text))
         _bind_test_native_start(cut.engine, ctx)
+        turn_id = ctx.platform_specific["turn_token"]
         cut.manager.in_flight[sid] = Turn(
-            task=asyncio.ensure_future(asyncio.Event().wait()), context=ctx,
-            logical_turn_id=ctx.platform_specific["turn_token"],
+            task=asyncio.ensure_future(
+                fails_before_its_adapter(turn_id) if ended == "failed" else asyncio.Event().wait()
+            ),
+            context=ctx, logical_turn_id=turn_id,
         )
 
     cut.manager._run = published_not_yet_adapted
@@ -664,19 +678,25 @@ def test_a_rerun_cancelled_before_its_adapter_owns_the_command_still_ends_it(iso
         assert await cut.manager.controller.vibey_recovery.start() == []
         await cut.manager.recover_durable_delivery_state(service_restart=True)
         assert cut.starts == [(cut.session_id, "")] and jobs.killed == []
-        # The backend is disabled: its Turns are settled and their tasks cancelled.
-        cut.manager._terminalize_durable_turn(
-            cut.turn_id, "canceled", settled_by=SETTLED_BY_BACKEND_DISABLED, evidence_kind="backend_disabled"
-        )
-        cut.manager.in_flight.pop(cut.session_id).task.cancel()
+        if ended == "failed":
+            release.set()
+        else:
+            # The backend is disabled: its Turns are settled and their tasks cancelled.
+            cut.manager._terminalize_durable_turn(
+                cut.turn_id, "canceled", settled_by=SETTLED_BY_BACKEND_DISABLED, evidence_kind="backend_disabled"
+            )
+            cut.manager.in_flight.pop(cut.session_id).task.cancel()
         for _ in range(100):
-            if jobs.killed:
+            if jobs.killed or jobs.watches:
                 break
             await asyncio.sleep(0.02)
 
     asyncio.run(startup())
 
-    assert jobs.killed == ["job_1"] and jobs.watches == {}
+    if ended == "failed":
+        assert jobs.killed == [] and jobs.watches == {"job_1": "watch_job_1"}
+    else:
+        assert jobs.killed == ["job_1"] and jobs.watches == {}
 
 
 def test_a_rerun_that_exits_before_dispatching_fails_its_turn(isolated_state, tmp_path):

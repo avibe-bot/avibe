@@ -4832,17 +4832,19 @@ class SessionTurnManager:
         return True
 
     def _after_rerun(self, session_id: str, task: "asyncio.Task[None]") -> None:
-        """A rerun cancelled outside a shutdown (a Stop, the backend disabled or refreshed)
-        may end before its adapter owns the command the restart left running: Vibey's T2
-        then ends it with the canceled Turn, rather than leaving it running unowned."""
+        """A rerun may end before its adapter owns the command the restart left running:
+        cancelled (a Stop, the backend disabled or refreshed) or failed before dispatch. Vibey's
+        T2 then ends that command with a canceled Turn, or hands it to a Watch as a failed run's
+        is, rather than leaving it running unowned. After the adapter ran it finds nothing; a
+        shutdown leaves the command for the next start's rerun."""
 
-        if not task.cancelled() or getattr(self.controller, "shutdown_requested", False) is True:
+        if getattr(self.controller, "shutdown_requested", False) is True:
             return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        loop.create_task(self._settle_vibey_session(session_id), name=f"vibey-rerun-cancelled:{session_id}")
+        loop.create_task(self._settle_vibey_session(session_id), name=f"vibey-rerun-ended:{session_id}")
 
     def _turn_vibe_agent(self, session_id: str, turn_id: str, execution: dict[str, Any]) -> tuple[Optional[bool], Any]:
         """``(known, agent)``: the Agent that ran a Turn, while it still runs on Vibey.

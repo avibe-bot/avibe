@@ -2879,10 +2879,12 @@ async def test_a_restart_rerun_waits_for_its_surviving_command_as_the_live_call_
                 "vibey_execution": accepted,
             }
         )
+        # The rerun's request, as the message handler builds it from that record.
         resume = AgentRequest(
             **{
                 **request.__dict__, "context": context, "message": "", "user_message": "",
-                "vibe_agent_name": "worker", "vibe_agent_id": "agt_worker",
+                "vibe_agent_name": "worker", "vibe_agent_id": "agt_worker", "vibe_agent_model": "model-accepted",
+                "vibe_agent_reasoning_effort": None, "vibe_agent_system_prompt": "Run the steps in order.",
             }
         )
 
