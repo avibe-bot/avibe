@@ -192,6 +192,7 @@ class Host:
         self.typed = typed
         self.skills = dict(skills or {})
         self.asked: list[list[str]] = []
+        self.rendered: list[list[str]] = []
 
     def user_messages(self, row_ids):
         self.asked.append(list(row_ids))
@@ -199,9 +200,9 @@ class Host:
             return {row_id: f"typed {row_id}" for row_id in row_ids}
         return {row_id: self.typed[row_id] for row_id in row_ids if row_id in self.typed}
 
-    def skill_content(self, session_id, name):
-        body = self.skills.get(name)
-        return None if body is None else (f"rev-{name}", body)
+    def skill_contents(self, session_id, names):
+        self.rendered.append(list(names))
+        return {name: (f"rev-{name}", self.skills[name]) for name in names if name in self.skills}
 
     def earlier_record(self, session_id, through_seq):
         self.records.append((session_id, through_seq))
@@ -1966,7 +1967,9 @@ async def test_a_checkpoint_consolidates_into_a_mind_it_edits_a_memo_it_checks_a
     scratch = tmp_path / "scratch"
     assert f"Your scratch directory is {scratch}." in request and f"- {scratch}/mind.md: your mind." in request
     assert request.endswith("Current memo.md:\n- [ ] (#1) typed input\n</context-checkpoint-request>")
-    assert host.asked == [["input"]]  # the inputs the cut moves out; the crossing Turn's own input stays as it was
+    # One question, off the event loop, about every input a cut could move out; the crossing Turn's own input is not
+    # offered: it stays as it was.
+    assert host.asked == [["input", "cross0"]]
     payload = row.payload
     assert (payload["mind"], payload["mind_truncated"]) == (FIRST_MIND, False)
     assert payload["memo"] == [{"seq": 1, "text": "typed input", "truncated": False}]
@@ -2157,7 +2160,7 @@ async def test_the_skills_a_checkpoint_takes_out_come_back_as_they_read_now(tmp_
     model = Model([[Done(assistant("after"))]], [[Done(assistant(CHECKPOINT))]])
     await cross(make_agent(model, store=store, tools=[reader(tokens(3_000))], selection=ROOMY, context=context))
     (row,) = [row for row in await store.load("session") if row.kind == "compaction"]
-    assert row.payload["skills"] == [{"name": "review"}]
+    assert row.payload["skills"] == [{"name": "review"}] and host.rendered == [["review"]]  # one call per checkpoint
     (carried,) = row.payload["skills_carried"]
     assert (carried["name"], carried["revision"], carried["content"]) == ("review", "rev-review", body)
     assert f"<skills>\n{SKILLS_LEAD_CARRIED}\n{body}\n</skills>" in row.payload["summary"]
@@ -2247,3 +2250,62 @@ async def test_a_scratch_edit_runs_with_less_room_than_a_read_needs(tmp_path):
     assert read.content == (text(BUDGET_USED),)
     (row,) = [row for row in await store.load("session") if row.kind == "compaction"]
     assert row.payload["mind"] == FIRST_MIND
+
+
+async def test_a_mind_copy_is_published_whole_or_not_at_all(tmp_path, monkeypatch):
+    # A copy that fails mid-write leaves nothing at its name, so a later checkpoint of the same mind never points to a
+    # partial copy (section 10).
+    scratch = tmp_path / "scratch"
+    workstreams = "\n".join(f"- workstream {index}: " + "w" * 200 for index in range(60))
+    grown = [
+        _batch(_edit("m", scratch / MIND_FILE, ("## Workstreams\n(none)", f"## Workstreams\n{workstreams}"))),
+        [Done(assistant(CHECKPOINT))],
+        [Done(assistant(CHECKPOINT))],
+    ]
+    real_fdopen = os.fdopen
+
+    def path_of(fd) -> str:
+        try:
+            return os.readlink(f"/proc/self/fd/{fd}")
+        except OSError:
+            import fcntl
+
+            return fcntl.fcntl(fd, fcntl.F_GETPATH, b"\0" * 1024).split(b"\0", 1)[0].decode()
+
+    class FullDisk:
+        """A file under checkpoints/ whose disk fills after its first bytes."""
+
+        def __init__(self, handle):
+            self.handle = handle
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.handle.close()
+
+        def write(self, data):
+            self.handle.write(data[:10])
+            self.handle.flush()
+            raise OSError(28, "No space left on device")
+
+    def fdopen(fd, *args, **options):
+        handle = real_fdopen(fd, *args, **options)
+        return FullDisk(handle) if "checkpoints" in path_of(fd) else handle
+
+    monkeypatch.setattr("core.agent_core.agent.loop.os.fdopen", fdopen)
+    store = InMemoryTranscriptStore()
+    context = _v5(tmp_path)
+    await run(make_agent(Model(history()), store=store, tools=[reader(tokens(3_000))], selection=ROOMY, context=context))
+    model = Model([[Done(assistant("after"))]], grown)
+    events = await cross(make_agent(model, store=store, tools=[reader(tokens(3_000))], selection=ROOMY, context=context))
+    (failed,) = [event for event in events if isinstance(event, CompactionFailed)]
+    assert "No space left on device" in failed.error
+    assert not [row for row in await store.load("session") if row.kind == "compaction"]
+    assert not list((tmp_path / "checkpoints").iterdir())  # no partial copy, no temporary file
+    monkeypatch.setattr("core.agent_core.agent.loop.os.fdopen", real_fdopen)
+    model = Model([[Done(assistant("after"))]], grown)
+    await cross(make_agent(model, store=store, tools=[reader(tokens(3_000))], selection=ROOMY, context=context), "again")
+    (row,) = [row for row in await store.load("session") if row.kind == "compaction"]
+    (copy,) = (tmp_path / "checkpoints").iterdir()
+    assert copy.read_text() == row.payload["mind"] and row.payload["mind_truncated"]

@@ -306,9 +306,9 @@ class ContextHost(Protocol):
         came from anything else (a Watch, a Task, another Session, a callback) is absent (section 7, the memo)."""
         ...
 
-    def skill_content(self, session_id: str, name: str) -> Optional[tuple[str, str]]:
-        """The skill ``name`` as the Session would load it now: its revision and its text as its load prints it;
-        None when it no longer resolves (section 7)."""
+    def skill_contents(self, session_id: str, names: Sequence[str]) -> Mapping[str, tuple[str, str]]:
+        """Each of ``names`` as the Session would load it now, by name: its revision and its text as its load prints
+        it; one that no longer resolves is absent (section 7). Called off the event loop, once per checkpoint."""
         ...
 
 
@@ -997,14 +997,19 @@ def _section_title(top: str) -> str:
     return top.split(". ", 1)[-1]
 
 
-def _sections(blocks: Sequence[MindBlock]) -> list[tuple[str, int, list[MindBlock]]]:
-    """Each top-level section of ``MIND_SECTIONS`` with its limit and its own blocks."""
+def _sections(preamble: str, blocks: Sequence[MindBlock]) -> list[tuple[str, int, list[MindBlock]]]:
+    """Each top-level section of ``MIND_SECTIONS`` with its limit and its own blocks. Text before the first heading
+    counts toward the first section, as a block with no heading line: it is bounded like any of its text."""
     own = dict(blocks)
-    return [(top, limit, [(name, own[name]) for name in (top, *subs)]) for top, limit, subs in MIND_SECTIONS]
+    sections = [(top, limit, [(name, own[name]) for name in (top, *subs)]) for top, limit, subs in MIND_SECTIONS]
+    if preamble.strip():
+        top, limit, first = sections[0]
+        sections[0] = (top, limit, [("", tuple(_lines(preamble))), *first])
+    return sections
 
 
 def _block_text(blocks: Sequence[MindBlock]) -> str:
-    return "\n".join(line for name, body in blocks for line in (name, *body))
+    return "\n".join(line for name, body in blocks for line in ((name, *body) if name else body))
 
 
 def _normalized(text: str) -> list[str]:
@@ -1047,7 +1052,7 @@ def review_mind(text: Optional[str], previous: str) -> MindReview:
     parsed, problem = mind_blocks(text)
     if parsed is None:
         return MindReview(structure=problem, tokens=text_tokens(text))
-    _, blocks = parsed
+    preamble, blocks = parsed
     before = mind_blocks(previous)[0]
     if before is not None and mission_entries(blocks) < (had := mission_entries(before[1])):
         return MindReview(
@@ -1056,7 +1061,7 @@ def review_mind(text: Optional[str], previous: str) -> MindReview:
         )
     over = tuple(
         (_section_title(top), size, limit)
-        for top, limit, own in _sections(blocks)
+        for top, limit, own in _sections(preamble, blocks)
         if (size := text_tokens(_block_text(own))) > limit
     )
     return MindReview(empty=_normalized(text) == _normalized(MIND_TEMPLATE), over=over, tokens=text_tokens(text))
@@ -1084,21 +1089,21 @@ def fit_mind(text: str, marker: str) -> tuple[str, list[str]]:
     if parsed is None:
         raise ValueError(f"not a mind: {problem}")
     preamble, blocks = parsed
-    out: list[str] = [preamble] if preamble.strip() else []
+    out: list[str] = []
     cut_sections: list[str] = []
     note = _utf8(marker) + 1
-    for _, limit, own in _sections(blocks):
+    for _, limit, own in _sections(preamble, blocks):
         whole = _block_text(own)
         if text_tokens(whole) <= limit:
             out.append(whole)
             continue
         cut_sections.append(whole)
-        room = 4 * limit - sum(_utf8(name) + 1 + note for name, _ in own)
+        room = 4 * limit - sum((_utf8(name) + 1 if name else 0) + note for name, _ in own)
         lines: list[str] = []
         for name, body in own:
             kept, cut = _head_lines(body, max(0, room))
             room -= sum(_utf8(line) + 1 for line in kept)
-            lines += [name, *kept, *([marker] if cut else [])]
+            lines += [*([name] if name else []), *kept, *([marker] if cut else [])]
         out.append("\n".join(lines))
     return "\n".join(out), cut_sections
 
@@ -1186,7 +1191,8 @@ def memo_problems(memo: MemoList, content: Optional[str]) -> list[str]:
 
 def fit_memo(items: Sequence[MemoItem], budget: int = MEMO_BUDGET) -> tuple[MemoItem, ...]:
     """``items`` within ``budget`` tokens (section 10): the longest cut to one common share, water-filling, each head
-    kept and marked; no item is dropped."""
+    kept and marked; no item is dropped, though past ``budget`` items a share may be no text at all (the item still
+    says where its whole message is)."""
     sizes = [text_tokens(item.text) for item in items]
     if sum(sizes) <= budget:
         return tuple(items)
@@ -1194,7 +1200,7 @@ def fit_memo(items: Sequence[MemoItem], budget: int = MEMO_BUDGET) -> tuple[Memo
     while high - low > 1:
         middle = (low + high) // 2
         low, high = (middle, high) if sum(min(size, middle) for size in sizes) <= budget else (low, middle)
-    share = max(low, 1)
+    share = low
     return tuple(
         item if size <= share else MemoItem(item.seq, _within(item.text, 4 * share).rstrip(), True)
         for item, size in zip(items, sizes)

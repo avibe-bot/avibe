@@ -11,7 +11,7 @@
 * ``user_messages`` says which inputs a person typed, and what: the memo's candidates
   are only those (section 7), never a Watch's, a Task's, a callback's, or another
   Session's message, whatever its text says;
-* ``skill_content`` renders a skill as ``vibe skill load`` would print it in the
+* ``skill_contents`` renders skills as ``vibe skill load`` would print them in the
   Session's working directory now, which a checkpoint carries back (section 7).
 
 A skill load is a ``bash`` call to ``vibe skill load``, which writes one
@@ -114,17 +114,20 @@ class VibeyContextHost:
             ).all()
         return {row.id: row.content_text or "" for row in rows}
 
-    def skill_content(self, session_id: str, name: str) -> Optional[tuple[str, str]]:
-        """``name`` as ``vibe skill load`` would print it in the Session's working directory now, and its revision
-        (the SHA-256 of that text); None when it no longer resolves."""
-        from core.managed_skills import load_skill, render_skill_content
+    def skill_contents(self, session_id: str, names: Sequence[str]) -> dict[str, tuple[str, str]]:
+        """Each of ``names`` as ``vibe skill load`` would print it in the Session's working directory now, with its
+        revision (the SHA-256 of that text); one that no longer resolves is absent. The catalog is resolved once."""
+        from core.managed_skills import load_skill, render_skill_content, resolve_skills
 
         cwd = str(self._environment(session_id).get("cwd") or "") or None
-        skill = load_skill(name, cwd)
-        if skill is None:
-            return None
-        content = render_skill_content(skill)
-        return hashlib.sha256(content.encode("utf-8", "surrogatepass")).hexdigest(), content
+        catalog = resolve_skills(cwd)
+        found: dict[str, tuple[str, str]] = {}
+        for name in names:
+            skill = load_skill(name, cwd, resolved_skills=catalog)
+            if skill is not None:
+                content = render_skill_content(skill)
+                found[name] = (hashlib.sha256(content.encode("utf-8", "surrogatepass")).hexdigest(), content)
+        return found
 
 
 def example_query(session_id: str, through_seq: int) -> Optional[str]:

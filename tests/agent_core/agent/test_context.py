@@ -1155,6 +1155,13 @@ def test_a_mind_keeps_its_heading_lines_once_each_in_order_and_never_loses_a_mis
         assert review.structure == structure, text
         assert review.problems()[0].startswith(f"mind.md lost its structure: {structure};")
     assert review_mind(None, previous).structure == "it is not a readable file"
+    # Text before the first heading counts toward the first section: it cannot grow the mind past its limits.
+    lead = "x" * 4 * 1_200 + "\n"
+    review = review_mind(lead + previous, previous)
+    assert [(title, limit) for title, _, limit in review.over] == [("Where I stand", 1_000)]
+    shown, cut = fit_mind(lead + previous, "[cut]")
+    first = shown.split("# 2. Goals")[0]
+    assert text_tokens(first) <= 1_000 and "[cut]" in first and cut[0].startswith("x")
     # A status on an entry is not a deletion; the template untouched is no mind, and asks no repair.
     done = previous.replace("(in progress)", "(done, the user closed it)")
     assert review_mind(done, previous).problems() == []
@@ -1222,6 +1229,11 @@ def test_the_memo_keeps_every_message_within_its_budget_by_cutting_the_longest_f
     assert [item.seq for item in fitted] == [item.seq for item in items] and memo_tokens(fitted) <= MEMO_BUDGET
     assert fitted[-1] == MemoItem(20, "keep the API stable") and all(item.truncated for item in fitted[:-1])
     assert fit_memo(items[-1:]) == tuple(items[-1:])
+    # Past the budget in items, a share may be no text at all: every item stays, each saying where its message is.
+    many = [MemoItem(seq, "word") for seq in range(1, 3_200)]
+    fitted = fit_memo(many)
+    assert len(fitted) == len(many) and memo_tokens(fitted) <= MEMO_BUDGET
+    assert fitted[0] == MemoItem(1, "", True)
 
 
 def test_a_checkpoint_carries_its_mind_memo_now_files_and_skills_and_pins_the_split_turn_input():

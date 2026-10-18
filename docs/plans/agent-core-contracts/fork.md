@@ -337,7 +337,8 @@ turn runs inside the caller's run, in these steps:
 4. **End.** A response that stops with `stop` and calls no tool is the reply. Anything else fails the turn: an
    overflow, an error, a response refused at admission, a length stop, or calls after the budget closed.
    - **Files.** A purpose may supply `files`, scratch files the turn starts with: written through the root's
-     descriptor when it opens, before the first call, and read back the same way whenever a reply is checked. Without
+     descriptor when it opens, before the first call, and read back the same way whenever a reply is checked, both
+     as joined work off the event loop. Without
      a scratch root none are written, and the check and the reply see none (`None`).
    - **Check and repair.** A purpose may supply `check(reply, files, final)`, which accepts the reply or names its
      problem, with `repair(problem)`, the corrective follow-up (they come together). A rejected reply gets that

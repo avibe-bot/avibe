@@ -239,9 +239,10 @@ A checkpoint is written by a **side turn** of the conversation (C-10 `fork.md` �
 - One user message is appended: the checkpoint request (§11). It takes the user role, but it comes from the harness,
   not the user, and its text says so. It ends with the memo list, so it is built for its cut.
 - **The turn's files.** When the turn opens its scratch root, before its first call, the loop writes two files into
-  it through the root's descriptor: `mind.md`, the mind of the latest checkpoint (§7) or, when it has none (a
+  it through the root's descriptor, off the event loop (the writes are synced): `mind.md`, the mind of the latest checkpoint (§7) or, when it has none (a
   Session's first checkpoint, or one after a `checkpoint-v4` row), the template; and `memo.md`, the memo list (§7).
-  Whenever the turn gives a final response, the loop reads both back the same way, before the validator runs, and
+  Whenever the turn gives a final response, the loop reads both back the same way, off the event loop, before the
+  validator runs, and
   the reply it accepts carries them to the fold. The request says what `mind.md` holds and gives `memo.md` whole, so
   the model need not read either. Without a scratch root (no scratch directory, or a platform that cannot open one,
   Windows) nothing is written: the validator skips the files, and the fold keeps the latest checkpoint's mind and
@@ -391,7 +392,8 @@ is written, so projection stays a pure function of the rows:
   | `# 4. Lessons` | | 1,500 tokens |
 
   The template has "(none)" under each heading that holds text. The model revises what is under the headings, never
-  the lines themselves, and may add headings of its own beneath them. A mind still the template keeps no mind
+  the lines themselves, and may add headings of its own beneath them. Text before the first heading counts toward the
+  first section's limit and is cut with it. A mind still the template keeps no mind
   (`mind` is empty), and the next checkpoint starts from the template again. My identity and the Session's id are the
   system prompt's; the mind never restates them.
 - **The memo** (`memo`: `{seq, text, truncated}`, in `context_seq` order): the messages a person typed that the next
@@ -521,10 +523,12 @@ ends the run `context_exhausted`, as in P1. The adapter supplies the following; 
 - `ContextHost.render_state(StateRequest)`: the `state` texts (§7): the environment's core fields.
 - `ContextHost.user_messages(row_ids)`: for the input rows among them that a person typed, the text they typed, by
   row id (Vibey: `messages.type = 'user'`, its `content_text`); every other input is absent. Only these are memo
-  candidates (§7). A message never changes, so the loop keeps the answer for the Agent's life. A host that fails here
+  candidates (§7). The stage asks it, off the event loop, about every input any cut could move out, before it builds
+  a compaction; a message never changes, so the loop keeps the answer for the Agent's life. A host that fails here
   fails the checkpoint before any model call.
-- `ContextHost.skill_content(session_id, name)`: the skill as the Session's `vibe skill load` would print it now, in
-  its working directory, and its revision (Vibey: the SHA-256 of that text); None when it no longer resolves (§7).
+- `ContextHost.skill_contents(session_id, names)`: each skill as the Session's `vibe skill load` would print it now,
+  in its working directory, with its revision (Vibey: the SHA-256 of that text), by name; one that no longer resolves
+  is absent (§7). The fold asks it once per checkpoint, off the event loop (resolving skills reads the filesystem).
 - Skill loads marked in their results: `vibe skill load` writes one `<skill_content name="...">` block per skill it
   loads, and every top-level block in a successful `bash` result is recorded in the result's `details.skills`
   (`[{name}]`), whatever the command looked like; blocks are parsed as balanced, so an example tag inside a skill's
@@ -573,12 +577,12 @@ ends the run `context_exhausted`, as in P1. The adapter supplies the following; 
   | What the file shows | After the one repair |
   | --- | --- |
   | `mind.md` lost its structure: a heading line of the template missing, repeated, or out of order; fewer Mission entries (top-level bullets or numbered items) than the mind it started from; not a readable file | the latest checkpoint's mind is kept as it was |
-  | a mind section past its limit (§7) | the whole mind is kept in the row, and `summary` shows each such section cut to its limit: every heading line, the head of what is under each heading while the section has room, then `[This section continues; the whole of it is in <path>.]`. The path is a read-only copy of the whole mind (`checkpoint_dir`, named by the SHA-256 of its text, written before the row commits); without `checkpoint_dir` the line is `[This section is cut short here.]`. The next checkpoint request gives the cut sections whole (§11) |
+  | a mind section past its limit (§7) | the whole mind is kept in the row, and `summary` shows each such section cut to its limit: every heading line, the head of what is under each heading while the section has room, then `[This section continues; the whole of it is in <path>.]`. The path is a read-only copy of the whole mind (`checkpoint_dir`, named by the SHA-256 of its text, published whole before the row commits: a private temporary file, synced, then renamed onto the name, so a failed write leaves nothing there); without `checkpoint_dir` the line is `[This section is cut short here.]`. The next checkpoint request gives the cut sections whole (§11) |
   | the mind past 12,000 tokens (twice its 6,000), however its sections stand: piled up, not condensed | the latest checkpoint's mind is kept as it was |
   | the template untouched | no mind is kept (no repair is asked) |
   | `memo.md` changed beyond its checkboxes: a line not one of the two the harness wrote for its candidate, a line added or missing, or not a readable file | every candidate is kept: more of the user's words, never fewer |
   | `memo.md` as the harness wrote it, in a turn whose tool budget closed on a call (its room or rounds ran out, §6): it may never have had room to check it | every candidate is kept |
-  | the checked messages past 3,000 tokens | every checked message is kept, the longest cut to one common share, water-filling, each marked as cut: none is dropped |
+  | the checked messages past 3,000 tokens | every checked message is kept, the longest cut to one common share, water-filling, each marked as cut: none is dropped. Past 3,000 messages the share can be no text at all; the entry still names its message |
 
   A failure of the host's part after the model answered (state, lookup, skills, the mind's copy) is a failed
   checkpoint, counted (invariant 4).

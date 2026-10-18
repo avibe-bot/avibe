@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import os
+import secrets
 import time
 from collections import deque
 from contextlib import asynccontextmanager, suppress
@@ -369,6 +370,7 @@ class Agent:
         # What a person typed, by input row id, as the host answered (None: not a person's message); a message never
         # changes, so the answer holds for the Agent's life (C-9 section 7, the memo).
         self._typed: dict[str, Optional[str]] = {}
+        self._typed_failure: Optional[Exception] = None
         # The run's attempt ledger (C-9): every model attempt, in order.
         self._attempts: list[_Attempt] = []
         self._refusals = _Refusals()
@@ -1444,6 +1446,9 @@ class Agent:
         Whether the run still compacts is read from its live bound at every decision, never kept: a checkpoint
         attempt in this pass can use it up.
         """
+        if not self._stopped and (plan.est >= plan.threshold or not plan.fits or ladder.refused):
+            # A compaction may follow: what a person typed, for its memo, read off the event loop first.
+            await self._prefetch_typed(view)
         # The bound first: once the run has stopped compacting, nothing is built for a compaction either.
         if not plan.can_fit:
             if self._stopped:
@@ -1808,7 +1813,7 @@ class Agent:
             try:
                 hosted = await self._hosted(view, cut)
                 mind, shown = await self._settled_mind(left, start, prior)
-                skills = self._carried_skills(view, cut, plan.window)
+                skills = await self._carried_skills(view, cut, plan.window)
             except (_Aborted, asyncio.CancelledError):
                 raise
             except Exception as failure:
@@ -1854,19 +1859,53 @@ class Agent:
             refused=refused,
         )
 
+    def _memo_bounds(self, view: ContextView) -> tuple[int, set[int], int]:
+        """What a memo may offer (section 7): inputs after ``boundary`` or among ``released`` (the inputs the latest
+        checkpoint kept as they were), and the latest checkpoint's ``summarized_to_seq``."""
+        row = view.compaction
+        previous = row.payload if row is not None else {}
+        summarized = previous.get("summarized_to_seq", 0) if row is not None else 0
+        boundary = 0 if row is not None and "memo" not in previous else summarized
+        return boundary, set(previous.get("kept_inputs", ())), summarized
+
+    async def _prefetch_typed(self, view: ContextView) -> None:
+        """Ask the host, off the event loop, which inputs any cut of ``view`` could move out a person typed; a failure
+        is kept for the memo to raise (``_typed_by``)."""
+        host = self.context.host if self.context is not None else None
+        if host is None:
+            return
+        boundary, released, _ = self._memo_bounds(view)
+        last = view.units[-1].seq if view.units else 0
+        missing = [
+            entry.row_id
+            for entry in self._rows
+            if entry.kind == "input"
+            and (boundary < entry.context_seq <= last or entry.context_seq in released)
+            and entry.row_id not in self._typed
+        ]
+        if not missing:
+            return
+        try:
+            found = await self._scope.call(lambda: asyncio.to_thread(host.user_messages, missing))
+        except (_Aborted, asyncio.CancelledError):
+            raise
+        except Exception as failure:
+            self._typed_failure = failure
+            return
+        self._typed_failure = None
+        for row_id in missing:
+            value = found.get(row_id)
+            self._typed[row_id] = value if isinstance(value, str) else None
+
     def _memo_list(self, view: ContextView, cut: int) -> MemoList:
         """memo.md for a checkpoint at ``cut`` (C-9 section 7): what the previous checkpoint's memo carries, checked,
         then every input a person typed that this cut takes out of the context and no memo offered before,
         unchecked. The in-flight Turn's inputs the cut keeps are not offered: they stay as they were. A
         ``checkpoint-v4`` row has no memo, so the inputs it summarized are offered too, previewed longer: the
         conversation the turn reads no longer shows them."""
-        row = view.compaction
-        previous = row.payload if row is not None else {}
+        previous = view.compaction.payload if view.compaction is not None else {}
         carried = tuple(MemoItem(**item) for item in previous.get("memo", ()))
-        upgrading = row is not None and "memo" not in previous
-        summarized = previous.get("summarized_to_seq", 0) if row is not None else 0
-        boundary = 0 if upgrading else summarized
-        released = set(previous.get("kept_inputs", ()))  # kept as they were by the previous checkpoint, until now
+        boundary, released, summarized = self._memo_bounds(view)
         through = summarized_to_seq(view, cut)
         kept = {unit.seq for unit in view.units[:cut] if unit.lead.kind == "input" and unit.seq in self._turn_inputs}
         known = {item.seq for item in carried}
@@ -1884,16 +1923,15 @@ class Agent:
         return MemoList(tuple(sorted((*carried, *new), key=lambda item: item.seq)), frozenset(known), hidden)
 
     def _typed_by(self, entries: Sequence[ContextEntry]) -> dict[str, str]:
-        """What a person typed for each of ``entries`` that is a person's message, by row id (the host's answer)."""
+        """What a person typed for each of ``entries`` that is a person's message, by row id, from the host's answers
+        the stage prefetched (``_prefetch_typed``); its failure is raised here."""
         host = self.context.host if self.context is not None else None
         if host is None:
             return {}
-        missing = [entry.row_id for entry in entries if entry.row_id not in self._typed]
-        if missing:
-            found = host.user_messages(missing)
-            for row_id in missing:
-                value = found.get(row_id)
-                self._typed[row_id] = value if isinstance(value, str) else None
+        if any(entry.row_id not in self._typed for entry in entries):
+            if self._typed_failure is not None:
+                raise self._typed_failure
+            raise RuntimeError("the memo asked for inputs the stage did not prefetch")
         return {entry.row_id: typed for entry in entries if (typed := self._typed.get(entry.row_id)) is not None}
 
     async def _settled_mind(self, files: Files, start: str, prior: str) -> tuple[str, str]:
@@ -1940,25 +1978,37 @@ class Agent:
             return MIND_CUT_UNSTORED
 
         def write() -> None:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
+            if os.path.isfile(path):
+                return  # the same content, by its name: it is published only whole
+            directory = os.path.dirname(path)
+            os.makedirs(directory, exist_ok=True)
+            # Whole or not at all: a private temporary file, synced, then renamed onto the name.
+            tmp = os.path.join(directory, f".mind-{secrets.token_hex(6)}.tmp")
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o444)
             try:
-                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o444)
-            except FileExistsError:
-                return  # the same content, by its name
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(mind.encode("utf-8", "surrogatepass"))
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(mind.encode("utf-8", "surrogatepass"))
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(tmp, path)
+            except BaseException:
+                with suppress(OSError):
+                    os.unlink(tmp)
+                raise
 
         await self._scope.call(lambda: asyncio.to_thread(write), interruptible=False)
         return MIND_CUT.format(path=path)
 
-    def _carried_skills(self, view: ContextView, cut: int, window: int) -> tuple[CarriedSkill, ...]:
-        """The skills a checkpoint at ``cut`` carries back (section 7), rendered by the host as they read now."""
+    async def _carried_skills(self, view: ContextView, cut: int, window: int) -> tuple[CarriedSkill, ...]:
+        """The skills a checkpoint at ``cut`` carries back (section 7), rendered by the host as they read now: every
+        candidate in one call, off the event loop (resolving skills reads the filesystem)."""
         host = self.context.host if self.context is not None else None
-        if host is None:
+        candidates = skill_candidates(view, cut)
+        if host is None or not candidates:
             return ()
-        return carry_skills(
-            skill_candidates(view, cut), lambda name: host.skill_content(self.session_id, name), window
-        )
+        names = [name for name, _ in candidates]
+        rendered = await self._scope.call(lambda: asyncio.to_thread(host.skill_contents, self.session_id, names))
+        return carry_skills(candidates, rendered.get, window)
 
     # --- C-10 side turn (agent-core-contracts/fork.md section 7) ----------------
 
@@ -2005,14 +2055,22 @@ class Agent:
 
         finished: dict[str, Any] = {"outcome": "failed", "error": None, "folded_event_id": None}
         aborted = False
-        # The purpose's files, written before the first call; read back whenever a reply is checked (C-9 section 6).
-        seeded = bool(turn.files) and turn.refused is None and gate.seed(turn.files)
+        seeded = False
 
-        def files() -> Files:
-            return gate.read(list(turn.files)) if seeded else None
+        async def files() -> Files:
+            if not seeded:
+                return None
+            # Off the event loop, joined like any scratch call: the root closes only after it is done.
+            return await self._scope.call(lambda: to_thread_joined(gate.read, list(turn.files)), interruptible=False)
 
         try:
             try:
+                if turn.files and turn.refused is None:
+                    # The purpose's files, written before the first call; read back whenever a reply is checked
+                    # (C-9 section 6). Their writes are fsynced: never on the event loop.
+                    seeded = await self._scope.call(
+                        lambda: to_thread_joined(gate.seed, turn.files), interruptible=False
+                    )
                 while turn.refused is None:
                     try:
                         async with self._model(
@@ -2038,7 +2096,7 @@ class Agent:
                     self._scope.check()
                     so_far.append(message)
                     if message.stop_reason == "stop" and not message.tool_calls:
-                        left = files()
+                        left = await files()
                         final = repaired is not None or turn.repair is None
                         problem = turn.check(message, left, final) if turn.check is not None else None
                         if problem is None:

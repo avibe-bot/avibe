@@ -591,13 +591,14 @@ async def test_a_carried_skill_is_what_its_load_prints_in_the_session_s_working_
     skill.mkdir(parents=True)
     (skill / "SKILL.md").write_text("---\nname: carry-me\ndescription: A test skill.\n---\nRead the diff first.\n")
     host = VibeyContextHost(engine, environment=lambda _: {"cwd": str(project)})
-    revision, content = host.skill_content(SESSION, "carry-me")
+    found = host.skill_contents(SESSION, ["carry-me", "no-such-skill"])
+    revision, content = found["carry-me"]
     assert content == render_skill_content(load_skill("carry-me", project))
     assert "Read the diff first." in content and content.startswith('<skill_content name="carry-me"')
     assert revision == hashlib.sha256(content.encode()).hexdigest()
     # One the Session can no longer load is not carried.
-    assert host.skill_content(SESSION, "no-such-skill") is None
-    assert VibeyContextHost(engine, environment=lambda _: {"cwd": str(tmp_path)}).skill_content(SESSION, "carry-me") is None
+    assert "no-such-skill" not in found
+    assert VibeyContextHost(engine, environment=lambda _: {"cwd": str(tmp_path)}).skill_contents(SESSION, ["carry-me"]) == {}
 
 
 async def test_the_mind_is_revised_in_the_session_s_scratch_and_a_cut_one_points_to_its_read_only_copy(
