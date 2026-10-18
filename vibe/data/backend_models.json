@@ -88,7 +88,7 @@
           "description": "GPT Image 2: precise prompts, legible text, edits",
           "params": ["images", "n", "size"],
           "size_forms": ["pixels"],
-          "kinds": ["api_key"],
+          "kinds": ["api_key", "subscription"],
           "request": {"output_format": "jpeg", "output_compression": 90}
         }
       ]
