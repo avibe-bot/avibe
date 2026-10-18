@@ -3,13 +3,13 @@
 // the whole status, so what is on screen must be the newest state the server
 // committed, whatever order the requests happen to return in.
 import * as React from 'react';
-import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
+import { act, cleanup, renderHook, screen, waitFor } from '@testing-library/react';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ToastProvider } from '@/context/ToastProvider';
 import i18n from '@/i18n';
-import { modelsApi } from './modelsApi';
+import { ApiCallError, modelsApi } from './modelsApi';
 import { foldRegionRead, type RegionRead } from './regionRead';
 import type { HostedToolsStatus } from './types';
 import { useHostedTools } from './useHostedTools';
@@ -183,6 +183,42 @@ describe('useHostedTools ordering', () => {
     await act(async () => { await result.current.refresh(); });
     expect(shown(result.current.read)).toBe(true);
     expect(result.current.pending.has('web_search')).toBe(false);
+  });
+
+  it('MH-HOSTED-UI-007: holds every tool while the report is re-read, and after that read fails, until a read lands', async () => {
+    const reread = deferred<HostedToolsStatus>();
+    vi.spyOn(modelsApi, 'getHostedTools')
+      .mockResolvedValueOnce(status(false))
+      .mockReturnValueOnce(reread.promise)
+      .mockResolvedValueOnce(status(true));
+    const { result } = renderHook(() => useHostedTools(true), { wrapper });
+    await waitFor(() => expect(shown(result.current.read)).toBe(false));
+
+    // An engine or Source change asks for a re-read: what is shown may no longer be what the server holds.
+    let refreshing!: Promise<void>;
+    act(() => { refreshing = result.current.refresh(); });
+    expect(result.current.pending.has('web_search')).toBe(true);
+    await act(async () => { reread.reject(new Error('offline')); await refreshing; });
+    expect(result.current.read.kind).toBe('degraded');
+    expect(result.current.pending.has('web_search')).toBe(true);
+
+    await act(async () => { await result.current.refresh(); });
+    expect(shown(result.current.read)).toBe(true);
+    expect(result.current.pending.has('web_search')).toBe(false);
+  });
+
+  it.each([
+    ['a refusal the server named', new ApiCallError('tool_unavailable', undefined, true), "Couldn't save the web search setting. Please retry."],
+    ['a lost answer', new ApiCallError('http_502', undefined, false), "Couldn't confirm whether the web search setting was saved. It's being re-read from the server; check it before trying again."],
+    ['no answer at all', new TypeError('Failed to fetch'), "Couldn't confirm whether the web search setting was saved. It's being re-read from the server; check it before trying again."],
+  ])('MH-HOSTED-UI-007: names the outcome of a save that ended in %s', async (_case, error, notice) => {
+    vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValue(status(false));
+    vi.spyOn(modelsApi, 'putHostedTool').mockRejectedValue(error);
+    const { result } = renderHook(() => useHostedTools(true), { wrapper });
+    await waitFor(() => expect(shown(result.current.read)).toBe(false));
+
+    await act(async () => { await result.current.save('web_search', { enabled: true }); });
+    await screen.findByText(notice);
   });
 
   it('MH-HOSTED-UI-007: drops a write answer asked under another Source identity', async () => {
