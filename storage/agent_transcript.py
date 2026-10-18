@@ -862,6 +862,37 @@ def committed_final(conn: Connection, session_id: str, turn_id: str) -> Optional
     return None if unconsumed is not None else response
 
 
+# The rows the dispatcher remembers as a Turn's visible text (``_remember_turn_text``).
+_TURN_TEXT_TYPES = ("interim", "output")
+
+
+def last_turn_text(conn: Connection, session_id: str, *, since: str) -> Optional[tuple[str, str]]:
+    """``(row_id, text)`` of the last visible text the Session's agent wrote since ``since``.
+
+    What a Turn that ends on a silent final leaves as its result
+    (``promote_turn_text_to_result``): its narration (``interim``) or a superseded
+    reply (``output``). A Session runs one Turn at a time, so with ``since`` the
+    Turn's start these are the Turn's own rows; each read is an index-keyed
+    ``SEARCH`` bounded by that window.
+    """
+    latest: Optional[tuple[str, str, str]] = None
+    for message_type in _TURN_TEXT_TYPES:
+        row = conn.execute(
+            select(messages.c.created_at, messages.c.id, messages.c.content_text)
+            .where(
+                messages.c.session_id == session_id,
+                messages.c.type == message_type,
+                messages.c.created_at >= since,
+                messages.c.author == "agent",
+            )
+            .order_by(messages.c.created_at.desc(), messages.c.id.desc())
+            .limit(1)
+        ).first()
+        if row is not None and str(row.content_text or "").strip() and (latest is None or (row[0], row[1]) > latest[:2]):
+            latest = (str(row.created_at), str(row.id), str(row.content_text))
+    return (latest[1], latest[2]) if latest else None
+
+
 def fork_link(conn: Connection, session_id: str) -> Optional[tuple[str, int]]:
     """``(source_session_id, anchor_seq)`` when the Session inherits a context."""
     raw = conn.execute(

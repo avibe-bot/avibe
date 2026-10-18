@@ -46,7 +46,9 @@ This replaces recovery invariant T4 for Vibey (`agent-core-contracts/recovery.md
      a final response. A Turn whose final response was committed is settled as
      completed (`terminal_result`), with no continuation and no notice, before
      any of the other conditions apply: a Stop or a Session change after the
-     final loses the race, as it does in a live Turn;
+     final loses the race, as it does in a live Turn. Its result is that final,
+     or, for a silent final, the Turn's last visible text, promoted to the
+     result as the live dispatcher does;
    - the continuation bound is not exhausted (item 6).
    Anything else keeps today's behavior: the Turn settles as interrupted, its
    Runs settle without result, and the user gets today's notice.
@@ -56,7 +58,9 @@ This replaces recovery invariant T4 for Vibey (`agent-core-contracts/recovery.md
    `restart_resume` instead of a notice. Vibey resumes its committed transcript;
    no input row, no visible `continue`, no replay of a committed tool call.
    Accepted steers of the cut Turn and its retry ancestry are pinned as for
-   Retry.
+   Retry. A steer whose acceptance receipt the dead process recorded but did
+   not materialize is reconciled into the cut Turn first, so it joins the Turn
+   and its Run moves with the rest (item 4).
 3. **Tool calls.** A continued Turn treats a job that survived the restart as
    its live call would. Startup's T2 pass leaves a running job of a Turn still
    unsettled to the Turn owner; the continuation's own T2, before its first
@@ -80,7 +84,8 @@ This replaces recovery invariant T4 for Vibey (`agent-core-contracts/recovery.md
 4. **Runs follow the work.** The cut Turn settles with
    `settled_by = restart_resumed`, which is not a settlement without result, so
    none of its Runs is failed or owes a notice. The Runs' Delivery link moves to
-   the continuation Delivery in the same writer transaction, so the continued
+   the continuation in the same writer transaction (one hidden Delivery per
+   Run, since a Run belongs to one Delivery, claimed as one batch), so the continued
    Turn settles them with its own outcome and output, and callbacks fire once,
    from that outcome. At shutdown, `release_for_service_shutdown` and the
    scheduled-task teardown leave a Vibey Turn and its Runs unsettled, and a
@@ -101,7 +106,8 @@ This replaces recovery invariant T4 for Vibey (`agent-core-contracts/recovery.md
 
 ## Ownership and touch points
 
-- `core/session_turns.py`: `recover_durable_delivery_state` asks
+- `core/session_turns.py`: `recover_durable_delivery_state` reconciles the
+  cut Turn's steer receipts (`_recover_steer_attempts`), then asks
   `_settle_restart_cut_vibey_turn` before today's settlement of a lost Vibey
   Turn. `_terminalize_durable_turn(restart_resume=True)` reserves the
   continuation, moves the Runs, writes the cut Turn's terminal row
@@ -116,7 +122,8 @@ This replaces recovery invariant T4 for Vibey (`agent-core-contracts/recovery.md
   `restart_resume` branch of `admission_denial` (the cut Turn must still be the
   Session's latest Turn; input queued behind it does not deny it).
 - `storage/agent_transcript.py`: `last_response` and `committed_final`, bounded
-  reads of the context tail. A final follows the loop's own rule: no tool calls,
+  reads of the context tail, and `last_turn_text`, the silent final's result,
+  bounded by the Turn's start. A final follows the loop's own rule: no tool calls,
   not the `error`/`aborted` partial a failed stream commits, and no input after
   it. `storage/background.py`:
   `move_agent_run_deliveries_in_connection`. `storage/message_deliveries.py`:
@@ -139,9 +146,10 @@ This replaces recovery invariant T4 for Vibey (`agent-core-contracts/recovery.md
   which is neither a settlement without result nor carries `settles_run`.
 - The continuation keeps the cut Turn's routing: platform, scope, author,
   metadata (Harness provenance included), admission context (with the IM
-  message the indicator belongs on), and FIFO position (`submitted_at`), so a
-  continuation requeued by a failed start still runs before input queued behind
-  the cut Turn. A continuation that cannot be claimed at once (its runtime not
+  message the indicator belongs on), and FIFO position: the cut Turn's
+  `submitted_at`, with an id that extends its initial Delivery's (the FIFO
+  tie-breaker, as timestamps have second resolution), so a continuation requeued
+  by a failed start still runs before input queued behind the cut Turn. A continuation that cannot be claimed at once (its runtime not
   admitted, or a start check refusing it) is never left waiting unclaimed, where
   a later denial would drop the work unannounced: the transaction rolls back
   and the Turn keeps today's notice and Retry.
@@ -155,10 +163,12 @@ Scenario IDs in `tests/scenarios/message_delivery/catalog.yaml`:
 
 - `MESSAGE-DELIVERY-327`: startup recovery with a cut conversation Turn: one
   continuation Delivery, no notice, a transcript resume of the cut Turn; with
-  the final response already committed: settled completed, no continuation.
+  the final response already committed: settled completed, no continuation;
+  a silent final settles with the Turn's narration before it as the result.
 - `MESSAGE-DELIVERY-328`: cut Harness Turn: shutdown leaves the Turn and its Run;
   the Run is not failed, its Delivery moves to the continuation, the continued
-  Turn's result settles it, no owed restart notice.
+  Turn's result settles it, no owed restart notice; a Run steered into the
+  Turn whose receipt was never materialized moves and settles the same way.
 - `MESSAGE-DELIVERY-329`: ineligible cases each fall back to today's settlement
   and notice: Stop requested, archived Session, Agent switched off Vibey, the
   fourth restart in a row without a model response. A start never accepted
@@ -171,7 +181,8 @@ Scenario IDs in `tests/scenarios/message_delivery/catalog.yaml`:
   the command's real output. The fallback still names its Watch
   (`MESSAGE-DELIVERY-322`).
 - `MESSAGE-DELIVERY-331`: input queued during downtime runs after the
-  continuation.
+  continuation, even when queued in the cut Turn's second and the
+  continuation's first start is requeued.
 - `MESSAGE-DELIVERY-332`: a run that fails because the service is stopping
   leaves its Turn open.
 - `MESSAGE-DELIVERY-322` keeps the Watch-naming notice without Retry for the

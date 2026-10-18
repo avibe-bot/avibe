@@ -70,7 +70,7 @@ from core.services.agent_steering import (
 )
 from storage import loop_writers, messages_service
 from storage import message_deliveries as delivery_store
-from storage.agent_transcript import recovered_watch_ids
+from storage.agent_transcript import last_turn_text, recovered_watch_ids
 from storage.agent_session_rows import reserve_write_lock
 from storage.db import get_cached_sqlite_engine
 from storage.background import (
@@ -4993,7 +4993,7 @@ class SessionTurnManager:
                 session_status = conn.execute(
                     select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)
                 ).scalar_one_or_none()
-                continuation: dict[str, Any] | None = None
+                continuation: list[dict[str, Any]] | None = None
                 if restart_resume:
                     from core.backend_failure_retry import reserve_restart_resume
 
@@ -5321,7 +5321,7 @@ class SessionTurnManager:
                             turn_id=claimed_successor,
                             session_id=session_id,
                             backend=str(turn["backend"]),
-                            deliveries=[continuation],
+                            deliveries=continuation,
                             dispatch_text="",
                         )
                         if claimed is None:
@@ -7137,6 +7137,92 @@ class SessionTurnManager:
             )
         return True
 
+    async def _recover_steer_attempts(
+        self,
+        session_id: str | None,
+        *,
+        target_turn_id: str | None = None,
+    ) -> list[str]:
+        """Settle steer attempts a dead process left unresolved; the Sessions it changed.
+
+        ``target_turn_id`` limits it to one Turn's attempts: a cut Vibey Turn reconciles
+        its own before it is continued, so a steer the dead run accepted joins the Turn
+        and its Run moves to the continuation with the rest of the Turn's work.
+        """
+
+        recovered: list[str] = []
+        with self._sqlite_engine().connect() as conn:
+            unresolved = delivery_store.unresolved_deliveries(conn, session_id)
+            accepted_steer_attempts: list[dict[str, Any]] = []
+            steer_attempts: list[tuple[dict[str, Any], str]] = []
+            seen_attempt_ids: set[str] = set()
+            for attempt in unresolved:
+                if attempt["state"] not in {"steering", "reconciling_steer"}:
+                    continue
+                attempt_id = str(attempt.get("current_attempt_id") or "")
+                attempt_target = str(attempt.get("current_target_turn_id") or "")
+                expected_native_id = str(
+                    attempt.get("current_expected_native_turn_id") or ""
+                )
+                if (
+                    not attempt_id
+                    or attempt_id in seen_attempt_ids
+                    or not attempt_target
+                    or (target_turn_id is not None and attempt_target != target_turn_id)
+                ):
+                    continue
+                target_turn = delivery_store.get_turn(conn, attempt_target)
+                if target_turn is None:
+                    continue
+                seen_attempt_ids.add(attempt_id)
+                if (
+                    attempt["state"] == "reconciling_steer"
+                    and attempt.get("current_receipt_outcome") == "accepted"
+                ):
+                    accepted_steer_attempts.append(attempt)
+                    continue
+                if not expected_native_id:
+                    continue
+                steer_attempts.append((attempt, str(target_turn["backend"])))
+
+        for attempt in accepted_steer_attempts:
+            result = await self._finish_steer(
+                str(attempt["id"]),
+                _accepted_steer_receipt(attempt),
+                context=None,
+            )
+            if result.state != "reconciling_steer":
+                recovered.append(str(attempt["session_id"]))
+
+        for attempt, backend in steer_attempts:
+            attempt_id = str(attempt["current_attempt_id"])
+            receipt = await self._reconcile_steer_attempt(
+                backend,
+                SteerReconcileRequest(
+                    target_session_id=str(attempt["session_id"]),
+                    expected_logical_turn_id=str(attempt["current_target_turn_id"]),
+                    expected_native_turn_id=str(
+                        attempt["current_expected_native_turn_id"]
+                    ),
+                    attempt_id=attempt_id,
+                ),
+            )
+            outcome = getattr(receipt, "outcome", SteerOutcome.UNKNOWN)
+            if (
+                str(getattr(outcome, "value", outcome)) == SteerOutcome.UNKNOWN.value
+                and attempt["state"] == "reconciling_steer"
+            ):
+                continue
+            result = await self._finish_steer(
+                str(attempt["id"]),
+                receipt,
+                context=None,
+                expected_attempt_id=attempt_id,
+            )
+            if result.state != "reconciling_steer":
+                recovered.append(str(attempt["session_id"]))
+        return recovered
+
     def _settle_restart_cut_vibey_turn(
         self,
         turn_id: str,
@@ -7157,8 +7243,32 @@ class SessionTurnManager:
             plan, final = (
                 restart_resume_plan(conn, turn) if turn is not None else ("unavailable", None)
             )
+            # A silent final leaves the Turn's last visible text its result, as live.
+            visible = (
+                last_turn_text(
+                    conn,
+                    str(turn["session_id"]),
+                    since=str(turn.get("started_at") or turn["created_at"]),
+                )
+                if plan == "final" and final is not None and turn is not None and not final.text.strip()
+                else None
+            )
+            initial = (
+                delivery_store.get_delivery(conn, str(turn["initial_delivery_id"]))
+                if visible is not None and turn is not None
+                else None
+            )
+            provenance = (
+                _scheduled_provenance(delivery_store.execution_delivery_payload(conn, initial))
+                if initial is not None
+                else None
+            )
+            suppress_delivery = bool(
+                ((provenance or {}).get("platform_specific") or {}).get("suppress_delivery")
+            )
         if plan == "final" and final is not None:
             failed = final.message_type == "error"
+            result_id, result_text = visible or (final.row_id, final.text)
             run_ids = self.accepted_agent_run_ids_for_turn(turn_id)
             terminal = self._terminalize_durable_turn(
                 turn_id,
@@ -7167,12 +7277,16 @@ class SessionTurnManager:
                 evidence_kind="restart_final_committed",
                 evidence={
                     "settles_run": True,
-                    "result_text": final.text,
-                    "terminal_error": final.text if failed else None,
-                    "message_id": final.row_id,
+                    "result_text": result_text,
+                    "terminal_error": result_text if failed else None,
+                    "message_id": result_id,
                 },
                 expected_start_attempt_id=attempt_id,
             )
+            if terminal.get("changed") and visible is not None and not failed:
+                from core.message_mirror import promote_turn_text_to_result
+
+                promote_turn_text_to_result(result_id, suppress_delivery=suppress_delivery)
             if terminal.get("changed") and run_ids:
                 with self._sqlite_engine().connect() as conn:
                     settled = delivery_store.get_turn(conn, turn_id)
@@ -7379,7 +7493,11 @@ class SessionTurnManager:
         for target_session, turn_id, attempt_id, backend in lost_active_turns:
             if backend == "vibey":
                 # Vibey continues its own work from the committed transcript; only a
-                # Turn that no longer qualifies falls through to the notice below.
+                # Turn that no longer qualifies falls through to the notice below. A
+                # steer the dead run accepted joins this Turn first.
+                recovered.extend(
+                    await self._recover_steer_attempts(target_session, target_turn_id=turn_id)
+                )
                 continued = self._settle_restart_cut_vibey_turn(turn_id, attempt_id)
                 if continued is not None:
                     if continued.get("changed"):
@@ -7444,76 +7562,7 @@ class SessionTurnManager:
             if retry_turn_id:
                 await self._start_persisted_turn(retry_turn_id)
 
-        with self._sqlite_engine().connect() as conn:
-            unresolved = delivery_store.unresolved_deliveries(conn, session_id)
-            accepted_steer_attempts: list[dict[str, Any]] = []
-            steer_attempts: list[tuple[dict[str, Any], str]] = []
-            seen_attempt_ids: set[str] = set()
-            for attempt in unresolved:
-                if attempt["state"] not in {"steering", "reconciling_steer"}:
-                    continue
-                attempt_id = str(attempt.get("current_attempt_id") or "")
-                target_turn_id = str(attempt.get("current_target_turn_id") or "")
-                expected_native_id = str(
-                    attempt.get("current_expected_native_turn_id") or ""
-                )
-                if (
-                    not attempt_id
-                    or attempt_id in seen_attempt_ids
-                    or not target_turn_id
-                ):
-                    continue
-                target_turn = delivery_store.get_turn(conn, target_turn_id)
-                if target_turn is None:
-                    continue
-                seen_attempt_ids.add(attempt_id)
-                if (
-                    attempt["state"] == "reconciling_steer"
-                    and attempt.get("current_receipt_outcome") == "accepted"
-                ):
-                    accepted_steer_attempts.append(attempt)
-                    continue
-                if not expected_native_id:
-                    continue
-                steer_attempts.append((attempt, str(target_turn["backend"])))
-
-        for attempt in accepted_steer_attempts:
-            result = await self._finish_steer(
-                str(attempt["id"]),
-                _accepted_steer_receipt(attempt),
-                context=None,
-            )
-            if result.state != "reconciling_steer":
-                recovered.append(str(attempt["session_id"]))
-
-        for attempt, backend in steer_attempts:
-            attempt_id = str(attempt["current_attempt_id"])
-            target_turn_id = str(attempt["current_target_turn_id"])
-            receipt = await self._reconcile_steer_attempt(
-                backend,
-                SteerReconcileRequest(
-                    target_session_id=str(attempt["session_id"]),
-                    expected_logical_turn_id=target_turn_id,
-                    expected_native_turn_id=str(
-                        attempt["current_expected_native_turn_id"]
-                    ),
-                    attempt_id=attempt_id,
-                ),
-            )
-            outcome = getattr(receipt, "outcome", SteerOutcome.UNKNOWN)
-            if (
-                str(getattr(outcome, "value", outcome)) == SteerOutcome.UNKNOWN.value
-                and attempt["state"] == "reconciling_steer"
-            ):
-                continue
-            result = await self._finish_steer(
-                str(attempt["id"]),
-                receipt,
-                context=None,
-                expected_attempt_id=attempt_id,
-            )
-            if result.state != "reconciling_steer":
-                recovered.append(str(attempt["session_id"]))
+        recovered.extend(await self._recover_steer_attempts(session_id))
 
         for target_session, turn_id in pending_interrupts:
             await self._run_pending_interrupt(target_session, turn_id)

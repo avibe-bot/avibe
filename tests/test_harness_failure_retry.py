@@ -215,10 +215,11 @@ def test_harness_notice_keeps_retry_boundary_guards(isolated_state, tmp_path, ch
     dispatch.assert_not_awaited()
 
 
-@pytest.mark.parametrize("step", ["tool", "final"])
+@pytest.mark.parametrize("step", ["tool", "steered", "final"])
 def test_a_vibey_agent_run_cut_by_a_restart_settles_from_the_continued_work(isolated_state, tmp_path, step):
     """MESSAGE-DELIVERY-328: shutdown leaves the Run with its Turn, startup moves it to the
-    continuation, and it settles once, from the continued Turn's result, owing no notice."""
+    continuation, and it settles once, from the continued Turn's result, owing no notice. A
+    Run whose steer the dead run accepted, its receipt not yet materialized, moves too."""
     from core.session_turns import Turn
 
     _scope_id, session_id = _make_session(tmp_path, agent_backend="vibey")
@@ -246,6 +247,11 @@ def test_a_vibey_agent_run_cut_by_a_restart_settles_from_the_continued_work(isol
         message="整理日志并汇报", session_id=session_id, agent_name="worker", agent_backend="vibey",
         callback_session_id="ses_caller",
     )
+
+    steered = request_store.enqueue_agent_run(
+        message="也看一下告警", session_id=session_id, agent_name="worker", agent_backend="vibey",
+    )
+    assert request_store.claim(steered.id) is not None
 
     def callbacks():
         return [(row["status"], row["result_text"]) for row in request_store.list_pending_callbacks() if row["id"] == run.id]
@@ -277,6 +283,29 @@ def test_a_vibey_agent_run_cut_by_a_restart_settles_from_the_continued_work(isol
             assert attach_agent_run_delivery_in_connection(
                 conn, run.id, session_id=session_id, delivery_id=original.delivery_id,
             )
+            if step == "steered":
+                # A second Run steered into the Turn: the run accepted it, then the process
+                # died after the receipt and before the Delivery was materialized.
+                steer_id = message_deliveries.new_delivery_id()
+                steer = message_deliveries.insert_delivery(
+                    conn, delivery_id=steer_id, session_id=session_id, priority="p1", state="reserved",
+                    snapshot=message_deliveries.message_snapshot(
+                        scope_id=None, session_id=session_id, platform="avibe", author="harness",
+                        source="harness", message_type="harness", text="也看一下告警",
+                    ),
+                    dispatch_text="也看一下告警",
+                )
+                assert attach_agent_run_delivery_in_connection(
+                    conn, steered.id, session_id=session_id, delivery_id=steer_id,
+                )
+                cut = message_deliveries.get_turn(conn, original.turn_id)
+                opened = message_deliveries.open_steer_attempt(
+                    conn, steer_id, expected_version=int(steer["version"]), turn_id=original.turn_id,
+                    attempt_id="atm_steer", expected_native_turn_id=cut["native_turn_id"],
+                )
+                assert message_deliveries.mark_attempt_receipt(
+                    conn, steer_id, expected_version=int(opened["version"]), outcome="accepted", receipt={},
+                )
         # Service shutdown while the Turn runs: nobody asked it to stop.
         running = asyncio.create_task(asyncio.Event().wait())
         manager.in_flight[session_id] = Turn(
@@ -315,11 +344,15 @@ def test_a_vibey_agent_run_cut_by_a_restart_settles_from_the_continued_work(isol
         assert stored["status"] == "running" and callbacks() == []
         assert stored["delivery_id"] == continued.platform_specific["delivery_id"]
         assert run.id in manager.accepted_agent_run_ids_for_turn(continued.platform_specific["turn_token"])
+        if step == "steered":
+            assert steered.id in manager.accepted_agent_run_ids_for_turn(continued.platform_specific["turn_token"])
         # The continued Turn's own result settles the Run, exactly once.
         asyncio.run(controller.emit_agent_message(continued, "result", "日志已整理完毕"))
         stored = request_store.get_run(run.id)
         assert stored["status"] == "succeeded"
         assert stored["result_text"] == "日志已整理完毕"
+        if step == "steered":
+            assert request_store.get_run(steered.id)["status"] == "succeeded"
     # The caller's callback reports the work's own result, once.
     assert callbacks() == [("succeeded", stored["result_text"])]
     assert request_store.sqlite_backend.owed_failure_notice(run.id) is None

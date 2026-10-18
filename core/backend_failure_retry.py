@@ -9,6 +9,7 @@ these helpers while holding the SQLite writer reservation.
 from __future__ import annotations
 
 import json
+import secrets
 from typing import Any
 
 from sqlalchemy import select, update
@@ -30,6 +31,7 @@ from storage.models import agent_runs, agent_sessions, message_deliveries, messa
 #: in between; the Turn that would be the next one falls back to the restart notice.
 RESTART_RESUME_LIMIT = 3
 _PENDING_CONTROL_STATES = frozenset({"pending", "interrupting", "waiting_terminal", "reconciling"})
+_CONTINUATION_ID_MARK = "_r"
 
 
 class RetryUnavailable(ValueError):
@@ -363,10 +365,11 @@ def restart_resume_plan(
     return "continue", None
 
 
-def reserve_restart_resume(conn: Connection, turn: dict[str, Any]) -> dict[str, Any] | None:
+def reserve_restart_resume(conn: Connection, turn: dict[str, Any]) -> list[dict[str, Any]] | None:
     """Reserve the hidden continuation of a cut Turn and move its Runs to it.
 
-    Returns ``None`` (writing nothing) unless the plan is still ``continue``. The
+    Returns the continuation's Deliveries, one per live Run (at least one), or ``None``
+    (writing nothing) unless the plan is still ``continue``. The
     continuation keeps the cut Turn's routing: its platform, scope, author, metadata
     (Harness provenance included), admission context, and FIFO place, so input queued
     while the service was down waits behind it.
@@ -404,48 +407,71 @@ def reserve_restart_resume(conn: Connection, turn: dict[str, Any]) -> dict[str, 
         # The continuation answers the same IM message: its indicator replaces the 👀
         # the dead process left there.
         admission["processing_indicator_message_id"] = native_message_id
-    delivery_id = deliveries.new_delivery_id()
-    reserved = deliveries.insert_delivery(
-        conn,
-        delivery_id=delivery_id,
-        session_id=session_id,
-        priority="p3",
-        state="reserved",
-        snapshot=snapshot,
-        dispatch_text="",
-        history_event={
-            "kind": "admission",
-            "priority": "p3",
-            "state": "reserved",
-            **({"context": admission} if admission else {}),
-        },
-    )
-    bound = deliveries.cas_delivery(
-        conn,
-        delivery_id,
-        expected_version=int(reserved["version"]),
-        expected_states=("reserved",),
-        # The cut Turn's place in the FIFO, ahead of anything queued behind it.
-        values={"submitted_at": initial["submitted_at"]},
-        history_event={
-            "kind": RESTART_RESUME_HISTORY_KIND,
-            "source_turn_id": str(turn["id"]),
-            "delivery_ids": [delivery_id],
-        },
-    )
-    if bound is None:
-        raise RestartResumeLost("restart continuation binding lost")
     run_ids, _stop = _live_run_ids(conn, str(turn["id"]))
     owned = {
         str(row["id"])
         for row in deliveries.deliveries_for_turn(conn, str(turn["id"]))
         if row.get("state") == "accepted" and row.get("turn_id") == turn["id"]
     }
-    if run_ids and not move_agent_run_deliveries_in_connection(
-        conn, run_ids, from_delivery_ids=owned, to_delivery_id=delivery_id
-    ):
-        raise RestartResumeLost("restart continuation lost a Run move")
-    return bound
+    # A Run belongs to exactly one Delivery, so each live Run gets its own hidden
+    # Delivery; they start as one batch, the continuation Turn, which hydrates from the
+    # first: the one holding the Run of the cut Turn's own initial Delivery.
+    initial_runs = set(deliveries.agent_run_ids_for_delivery(conn, initial))
+    run_ids.sort(key=lambda run_id: run_id not in initial_runs)
+    delivery_ids = _continuation_delivery_ids(str(initial["id"]), max(1, len(run_ids)))
+    bound_rows: list[dict[str, Any]] = []
+    for delivery_id in delivery_ids:
+        reserved = deliveries.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id=session_id,
+            priority="p3",
+            state="reserved",
+            snapshot=snapshot,
+            dispatch_text="",
+            history_event={
+                "kind": "admission",
+                "priority": "p3",
+                "state": "reserved",
+                **({"context": admission} if admission else {}),
+            },
+        )
+        bound = deliveries.cas_delivery(
+            conn,
+            delivery_id,
+            expected_version=int(reserved["version"]),
+            expected_states=("reserved",),
+            # The cut Turn's place in the FIFO, ahead of anything queued behind it: its
+            # ``submitted_at``, and an id that sorts right after its own (the tie-breaker).
+            values={"submitted_at": initial["submitted_at"]},
+            history_event={
+                "kind": RESTART_RESUME_HISTORY_KIND,
+                "source_turn_id": str(turn["id"]),
+                "delivery_ids": delivery_ids,
+            },
+        )
+        if bound is None:
+            raise RestartResumeLost("restart continuation binding lost")
+        bound_rows.append(bound)
+    for run_id, delivery_id in zip(run_ids, delivery_ids):
+        if not move_agent_run_deliveries_in_connection(
+            conn, [run_id], from_delivery_ids=owned, to_delivery_id=delivery_id
+        ):
+            raise RestartResumeLost("restart continuation lost a Run move")
+    return bound_rows
+
+
+def _continuation_delivery_ids(initial_id: str, count: int) -> list[str]:
+    """Ids for the continuation's Deliveries, in batch order.
+
+    The cut Turn's own Delivery id plus a suffix. FIFO order is ``submitted_at``, then
+    id, and the continuation keeps that Delivery's ``submitted_at``; no other id extends
+    it, so the continuation sorts right after it and ahead of every Delivery that sorted
+    after it, even when its start fails and it is requeued.
+    """
+    root = initial_id.split(_CONTINUATION_ID_MARK, 1)[0]
+    token = secrets.token_hex(4)
+    return [f"{root}{_CONTINUATION_ID_MARK}{token}{index:03d}" for index in range(count)]
 
 
 def _restart_resume_denial(

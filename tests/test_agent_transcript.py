@@ -542,10 +542,11 @@ async def test_a_reply_pending_input_superseded_commits_as_a_visible_reply(engin
 async def test_the_restart_reads_of_a_turns_context_tail_stay_bounded(engine) -> None:
     """MESSAGE-DELIVERY-327: restart recovery decides a cut Turn from its context tail, synchronously on
     the controller loop, once per recovered Turn. Each read is an indexed SEARCH bounded by the Session's
-    tail or by the Turn's own Deliveries: no scan and no temporary sort over the growing history."""
+    tail, the Turn's own Deliveries, or the Turn's own time window: no scan and no temporary sort over
+    the growing history."""
     from sqlalchemy import event
 
-    from storage.agent_transcript import committed_final
+    from storage.agent_transcript import committed_final, last_turn_text
 
     with engine.begin() as conn:
         home = _scope(conn, "C-home")
@@ -564,6 +565,8 @@ async def test_the_restart_reads_of_a_turns_context_tail_stay_bounded(engine) ->
         with engine.connect() as conn:
             # A committed final runs every read: the tail, the input after it, the Turn's unconsumed inputs.
             assert committed_final(conn, "ses_main", "turn_main") is not None
+            # A silent final's result: the Turn's last narration or superseded reply, one read per type.
+            last_turn_text(conn, "ses_main", since="2026-01-01T00:00:00.000000Z")
     finally:
         event.remove(engine, "before_cursor_execute", capture)
 
@@ -572,11 +575,13 @@ async def test_the_restart_reads_of_a_turns_context_tail_stay_bounded(engine) ->
         plans = [" | ".join(row[-1] for row in raw.execute("EXPLAIN QUERY PLAN " + sql, params)) for sql, params in statements]
     finally:
         raw.close()
-    assert len(plans) == 3, plans
+    assert len(plans) == 5, plans
     for plan in plans[:2]:
         assert "SEARCH messages USING INDEX uq_messages_session_context_seq (session_id=? AND context_seq>?)" in plan, plan
     # Either of the two turn-keyed indexes bounds it; the planner may take either.
     assert re.search(r"SEARCH message_deliveries USING INDEX \w+ \(turn_id=\?\)", plans[2]), plans[2]
+    for plan in plans[3:]:
+        assert "SEARCH messages USING INDEX ix_messages_session_type_created_id (session_id=? AND type=? AND created_at>?)" in plan, plan
     for plan in plans:
         assert "SCAN" not in plan and "TEMP B-TREE" not in plan, plan
 

@@ -119,7 +119,8 @@ def previous_process(step):
     ``handover``: a bash command still running (T2 hands it to a Watch);
     ``partial``: the text a failed stream carried, committed as a non-final response;
     ``running``: a bash command left running, its call still open (startup T2 has not run);
-    ``final``: the Turn's final reply.
+    ``final``: the Turn's final reply;
+    ``silent_final``: delivered narration, then a final with nothing to show.
     """
     from core.agent_core.agent.recovery import settle_open_calls
     from core.agent_core.messages import ToolCallBlock, UserMessage, text
@@ -145,6 +146,17 @@ def previous_process(step):
             await store.consume_input(session_id, input_id, UserMessage((text("run it"),)))
             if step == "final":
                 await store.append_response(session_id, assistant("全部完成"), final=True)
+                return
+            if step == "silent_final":
+                # The narration the dispatcher delivered and persisted, then the silent final.
+                with engine.begin() as conn:
+                    messages_service.append(
+                        conn, scope_id=None, session_id=session_id, platform="avibe", author="agent",
+                        source="agent", message_type="interim",
+                        text="日志读完了。\n缓存被两个写者共享。\n锁已加上。\n已验证。",
+                    )
+                # A final whose reply is all ``<silent>``: it replies, and shows nothing.
+                await store.append_response(session_id, assistant(""), final=True, replied=True)
                 return
             if step == "partial":
                 await store.append_response(session_id, assistant("先读完日志", stop_reason="error"), final=False)

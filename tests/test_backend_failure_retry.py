@@ -292,26 +292,28 @@ def test_restart_continues_a_cut_vibey_turn_from_its_transcript_without_a_notice
 
 
 @pytest.mark.parametrize(
-    "origin,delivery,late_stop",
+    "origin,delivery,late_stop,final",
     [
-        (None, "ready", False),
-        ("1760000000.000100", "ready", False),
-        ("1760000000.000100", "unready", False),
-        ("1760000000.000100", "failing", False),
-        (None, "ready", True),
+        (None, "ready", False, "final"),
+        ("1760000000.000100", "ready", False, "final"),
+        ("1760000000.000100", "unready", False, "final"),
+        ("1760000000.000100", "failing", False, "final"),
+        (None, "ready", True, "final"),
+        (None, "ready", False, "silent_final"),
     ],
 )
 def test_restart_completes_a_cut_vibey_turn_whose_final_reply_was_committed(
-    isolated_state, tmp_path, origin, delivery, late_stop
+    isolated_state, tmp_path, origin, delivery, late_stop, final
 ):
     """MESSAGE-DELIVERY-327: nothing is left to continue, and nothing failed, even when a Stop
     landed after the final (it loses the race, as live). The 👀 the dead process left on an IM
-    message is retired once its transport can deliver, and a failed attempt is kept for the next."""
+    message is retired once its transport can deliver, and a failed attempt is kept for the next.
+    A silent final leaves the Turn's narration before it as the result, as live."""
     cut = _accepted_turn(tmp_path, backend="vibey", delivery=delivery, native_message_id=origin)
     clear = AsyncMock(side_effect=[False, True] if delivery == "failing" else None, return_value=True)
     cut.manager.controller.processing_indicator = SimpleNamespace(clear_orphaned_running_reaction=clear)
 
-    _restart(cut, _then(_previous_process("final"), _request_stop) if late_stop else _previous_process("final"))
+    _restart(cut, _then(_previous_process(final), _request_stop) if late_stop else _previous_process(final))
     if delivery in {"unready", "failing"}:
         assert clear.await_count == (1 if delivery == "failing" else 0)
         cut.manager._transport_can_deliver = lambda _platform: True
@@ -323,7 +325,15 @@ def test_restart_completes_a_cut_vibey_turn_whose_final_reply_was_committed(
 
     with cut.engine.connect() as conn:
         turn = message_deliveries.get_turn(conn, cut.turn_id)
+        replies = [
+            (row["type"], row["text"])
+            for row in messages_service.list_session_messages(conn, session_id=cut.session_id)["messages"]
+            if row["author"] == "agent" and row["type"] != "assistant"
+        ]
     assert (turn["terminal_outcome"], turn["settled_by"]) == ("completed", "terminal_result")
+    answer = "全部完成" if final == "final" else "日志读完了。\n缓存被两个写者共享。\n锁已加上。\n已验证。"
+    assert json.loads(turn["terminal_evidence_json"])["result_text"] == answer
+    assert replies == [("result", answer)]
     assert cut.starts == []
     assert _continuations(cut.engine, cut.session_id) == []
     assert _notices(cut.engine, cut.session_id) == []
@@ -382,20 +392,48 @@ def test_a_cut_vibey_turn_that_no_longer_qualifies_keeps_the_restart_notice(isol
         assert notice["metadata"]["turn_id"] == cut.turn_id
 
 
-def test_restart_continuation_runs_before_input_queued_while_the_service_was_down(isolated_state, tmp_path):
-    """MESSAGE-DELIVERY-331: the queued input waits behind the continuation, then runs."""
+@pytest.mark.parametrize("first_start", ["accepted", "not_written"])
+def test_restart_continuation_runs_before_input_queued_while_the_service_was_down(isolated_state, tmp_path, first_start):
+    """MESSAGE-DELIVERY-331: the queued input waits behind the continuation, then runs; even
+    when it was queued in the cut Turn's second and the continuation's first start is requeued."""
     cut = _accepted_turn(tmp_path, backend="vibey")
 
-    def queue_input(engine, session_id, _turn_id):
+    def queue_input(engine, session_id, turn_id):
         with engine.begin() as conn:
-            message_deliveries.enqueue_queued(
+            queued = message_deliveries.enqueue_queued(
                 conn, scope_id=None, session_id=session_id, text="然后再看看日志",
             )
+            # Delivery timestamps have second resolution: the same second as the cut Turn's.
+            submitted_at = message_deliveries.delivery_for_turn(conn, turn_id)["submitted_at"]
+            conn.execute(
+                update(message_deliveries_table)
+                .where(message_deliveries_table.c.id == queued["id"])
+                .values(submitted_at=submitted_at)
+            )
+
+    if first_start == "not_written":
+        accepting = cut.manager._run
+
+        async def unwritten_once(sid, ctx, text, **_kwargs):
+            # The backend refuses before writing anything; the next start is accepted.
+            cut.manager._run = accepting
+            cut.starts.append((sid, text))
+            cut.contexts.append(ctx)
+
+        cut.manager._run = unwritten_once
 
     _restart(cut, _then(_previous_process("tool"), queue_input))
 
     assert cut.starts == [(cut.session_id, "")]
     resumed = cut.contexts[0].platform_specific["turn_token"]
+    if first_start == "not_written":
+        cut.manager._terminalize_durable_turn(
+            resumed, "not_written", settled_by="pre_write_failure", evidence_kind="definitive_prewrite_failure",
+        )
+        asyncio.run(cut.manager.drain_delivery_queue(cut.session_id))
+        assert cut.starts == [(cut.session_id, ""), (cut.session_id, "")]
+        resumed = cut.contexts[-1].platform_specific["turn_token"]
+        cut.starts[:] = cut.starts[-1:]
     with cut.engine.connect() as conn:
         assert [row["text"] for row in message_deliveries.list_queued(conn, cut.session_id)] == ["然后再看看日志"]
     assert asyncio.run(cut.manager.terminalize_turn(resumed))

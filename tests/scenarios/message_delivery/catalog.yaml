@@ -422,7 +422,7 @@ scenarios:
       - tests/test_vibey_agent.py::test_a_short_reply_a_steer_superseded_stays_a_visible_reply
       - tests/test_agent_transcript.py::test_a_reply_pending_input_superseded_commits_as_a_visible_reply
   - id: MESSAGE-DELIVERY-327
-    name: Startup continues a Vibey Turn a restart cut from its transcript, or completes it from a committed final, without a notice
+    name: Startup continues a Vibey Turn a restart cut from its transcript, or completes it from a committed final (a silent final leaving its visible text as the result), without a notice
     status: covered
     kind: recovery
     layer: contract
@@ -431,7 +431,7 @@ scenarios:
       - tests/test_backend_failure_retry.py::test_restart_completes_a_cut_vibey_turn_whose_final_reply_was_committed
       - tests/test_agent_transcript.py::test_the_restart_reads_of_a_turns_context_tail_stay_bounded
   - id: MESSAGE-DELIVERY-328
-    name: A Vibey Agent Run cut by a restart is left at shutdown, moves to the continuation, and settles once from the continued result, the answer after its command
+    name: A Vibey Agent Run cut by a restart, steered-in Runs included, is left at shutdown, moves to the continuation, and settles once from the continued result, the answer after its command
     status: covered
     kind: recovery
     layer: contract
@@ -453,7 +453,7 @@ scenarios:
       - tests/test_backend_failure_retry.py::test_restart_continues_a_cut_vibey_turn_from_its_transcript_without_a_notice
       - tests/test_vibey_agent.py::test_a_restart_continuation_waits_for_its_surviving_command_as_the_live_call_would
   - id: MESSAGE-DELIVERY-331
-    name: Input queued while the service was down runs after the restart continuation
+    name: Input queued while the service was down runs after the restart continuation, even in the cut Turn's second after a requeued start
     status: covered
     kind: concurrency
     layer: contract

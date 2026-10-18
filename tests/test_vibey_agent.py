@@ -2717,7 +2717,7 @@ async def test_a_restart_continuation_waits_for_its_surviving_command_as_the_liv
         assert await harness.agent.recover_runtime_state() == []
         assert ManagedWatchStore().find_job_watch(job_id) is None
         with engine.begin() as conn:
-            continuation = reserve_restart_resume(conn, message_deliveries.get_turn(conn, cut_turn))
+            [continuation] = reserve_restart_resume(conn, message_deliveries.get_turn(conn, cut_turn))
             message_deliveries.terminalize_turn(
                 conn, cut_turn, outcome="completed", settled_by="restart_resumed", evidence_kind="restart_resume"
             )
