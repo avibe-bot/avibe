@@ -1,6 +1,8 @@
+import gc
 import os
 import sys
 import time
+import timeit
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +18,41 @@ from core.system_prompt_injection import build_system_prompt_injection
 from config import paths
 from modules.agents.base import AgentRequest, BaseAgent
 from modules.im import MessageContext
+
+
+
+# Each input grows by this factor between the two timed runs.
+_GROWTH_STEP = 8
+# Linear work grows about ``_GROWTH_STEP`` times across the step and quadratic
+# work about its square (64); the bound sits between them with room on both sides.
+_LINEAR_GROWTH_BOUND = 32
+
+
+def _growth(make, count: int):
+    """How many times longer ``process_reply`` takes on an input ``_GROWTH_STEP`` times larger.
+
+    The parser is measured against itself, both sizes on the same runner moments
+    apart, so the runner's speed cancels out: an absolute wall-clock bound
+    measured the runner as much as the parser (#2636). The garbage collector is
+    off while timing, as in ``timeit``; the smaller input, whose noise would
+    inflate the growth, is timed best of three. The larger size must be one at
+    which a quadratic term outweighs the parser's linear cost. Returns the growth
+    and the larger input's reply.
+    """
+
+    small = make(count)
+    small_seconds = min(timeit.repeat(lambda: process_reply(small), repeat=3, number=1))
+    large = make(count * _GROWTH_STEP)
+    collecting = gc.isenabled()
+    gc.disable()
+    try:
+        started = time.perf_counter()
+        reply = process_reply(large)
+        large_seconds = time.perf_counter() - started
+    finally:
+        if collecting:
+            gc.enable()
+    return large_seconds / small_seconds, reply
 
 
 class _StubSettingsManager:
@@ -2166,39 +2203,30 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stripped, "> report\n\n```\ncode\n```\n")
         self.assertEqual(replaced, "> [report](</media/report>)\n\n```\ncode\n```\n")
 
-    def test_file_link_parser_handles_many_openers_in_bounded_time(self):
-        text = "[" * 100000 + "[report](<file:///tmp/report.md>)"
-
-        started = time.perf_counter()
-        enhanced = process_reply(text)
-        elapsed = time.perf_counter() - started
+    def test_file_link_parser_handles_many_openers_in_linear_time(self):
+        growth, enhanced = _growth(lambda count: "[" * count + "[report](<file:///tmp/report.md>)", 12_500)
 
         self.assertEqual([file.path for file in enhanced.files], ["/tmp/report.md"])
-        self.assertLess(elapsed, 10.0)
+        self.assertLess(growth, _LINEAR_GROWTH_BOUND)
 
-    def test_legacy_bare_file_link_scans_malformed_destination_in_bounded_time(self):
-        text = "[missing](file:///tmp/" + "a " * 50000 + "tail"
+    def test_legacy_bare_file_link_scans_malformed_destination_in_linear_time(self):
+        def destination(count):
+            return "[missing](file:///tmp/" + "a " * count + "tail"
 
-        started = time.perf_counter()
-        enhanced = process_reply(text)
-        elapsed = time.perf_counter() - started
+        growth, enhanced = _growth(destination, 25_000)
 
-        self.assertEqual(enhanced.text, text)
+        self.assertEqual(enhanced.text, destination(25_000 * _GROWTH_STEP))
         self.assertEqual(enhanced.files, [])
-        self.assertLess(elapsed, 10.0)
+        self.assertLess(growth, _LINEAR_GROWTH_BOUND)
 
     def test_legacy_bare_file_link_scans_many_malformed_candidates_linearly(self):
-        text = (
-            "[bad](file:///tmp/My Report " * 4000
-            + "[ok](file:///tmp/Good Report.md)"
+        growth, enhanced = _growth(
+            lambda count: "[bad](file:///tmp/My Report " * count + "[ok](file:///tmp/Good Report.md)",
+            250,
         )
 
-        started = time.perf_counter()
-        enhanced = process_reply(text)
-        elapsed = time.perf_counter() - started
-
         self.assertEqual([file.path for file in enhanced.files], ["/tmp/Good Report.md"])
-        self.assertLess(elapsed, 10.0)
+        self.assertLess(growth, _LINEAR_GROWTH_BOUND)
 
     def test_unwrapped_file_link_parser_keeps_existing_destination_behavior(self):
         enhanced = process_reply("[report](file:///tmp/report>draft.md)")
