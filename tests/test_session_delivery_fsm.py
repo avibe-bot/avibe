@@ -48,6 +48,7 @@ from core.session_turns import (
 from core.agent_input import AgentInputMetadata, harness_source
 from core.handlers.message_handler import MessageHandler
 from core.message_context import resolve_turn_sink_key
+from modules.agents.service import AgentService
 from modules.im import MessageContext
 from modules.im.base import FileAttachment
 from storage import message_deliveries as delivery_store
@@ -1290,6 +1291,33 @@ async def test_persisted_scheduled_start_preserves_raw_text_for_handler_routing(
     assert admitted.state == "claimed"
     assert captured["text"] == "callback result"
     assert captured["context"].platform_specific["source_actor"] == "source-session"
+
+
+def test_a_session_bound_to_an_unregistered_backend_starts_rather_than_refusing_forever(managers) -> None:
+    """A Session whose backend has no registered agent (a disabled backend, or an
+    Agent created for one while the service ran) starts its Turn: there is no
+    runtime resource to hold, and dispatch ends the Turn with the backend's
+    not-configured notice. Read as an inconclusive lookup, it was refused and left
+    queued, and the runtime-work lane retried it every second without end."""
+
+    manager, _other, _engine, _engine_b, starts = managers
+    registry = RuntimeActivationRegistry()
+    service = SimpleNamespace(agents={}, _turn_gates={}, activation_registry=registry)
+    service.runtime_activation_identity_for_session_binding = (
+        AgentService.runtime_activation_identity_for_session_binding.__get__(service)
+    )
+    manager.controller.agent_service = service
+    manager.controller.runtime_activation = registry
+
+    result = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="Reply with one word"),
+            context=_context(),
+        )
+    )
+
+    assert result.state == "claimed"
+    assert [text for _turn_id, text in starts] == ["Reply with one word"]
 
 
 def test_first_delivery_binds_agentless_session_before_runtime_start(managers) -> None:

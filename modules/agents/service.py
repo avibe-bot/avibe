@@ -133,7 +133,16 @@ class AgentService:
         session_anchor: str,
         workdir: str | None,
     ) -> RuntimeActivationResolution:
-        """Resolve one exact disposable resource from durable Session fields."""
+        """Resolve one exact disposable resource from durable Session fields.
+
+        A backend with no registered agent has no runtime resource, which is a
+        definite answer, as ``runtime_activation_identity_for_request`` gives it:
+        the start goes ahead, and dispatch ends the Turn with the backend's
+        not-configured notice. Calling that absence inconclusive refused the start
+        and left the head queued, so the lane retried it every second for as long
+        as the backend stayed unregistered (a disabled backend, or an Agent
+        created for one). Only a lookup that fails is inconclusive.
+        """
 
         agent = self.agents.get(str(backend or ""))
         resolve = getattr(
@@ -142,7 +151,7 @@ class AgentService:
             None,
         )
         if not callable(resolve):
-            return RuntimeActivationResolution(authoritative=False)
+            return RuntimeActivationResolution(authoritative=True)
         try:
             return RuntimeActivationResolution(
                 authoritative=True,
