@@ -291,6 +291,12 @@ class OrphanedTerminalReactionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(cleared)
         self.assertEqual(im.calls, [("remove", "m1", ACK_REACTION_EMOJI)])
 
+    async def test_a_running_reaction_the_adapter_could_not_remove_is_not_cleared(self):
+        # Slack, Discord, and Feishu report a failed removal by returning False.
+        svc = _svc(_FakeIM(remove_ok=False))
+
+        self.assertFalse(await svc.clear_orphaned_running_reaction(_ctx(), "m1"))
+
     async def test_a_platform_without_reaction_indicators_has_no_running_reaction_to_clear(self):
         # WeChat shows typing instead: done at once, so no follow-up waits on it.
         im = _FakeIM()

@@ -4820,11 +4820,18 @@ class SessionTurnManager:
         return True
 
     def _turn_vibe_agent(self, session_id: str, turn_id: str) -> Any:
-        """The Vibe Agent that ran a Turn, from its committed responses, while it still runs on Vibey."""
+        """The Vibe Agent that ran a Turn, while it still runs on Vibey.
+
+        Its native start records it; a Turn an older release accepted names it only
+        as the author of its committed responses.
+        """
 
         with self._sqlite_engine().connect() as conn:
-            response = last_response(conn, session_id)
-        name = response.agent_name if response is not None and response.turn_id == turn_id else None
+            turn = delivery_store.get_turn(conn, turn_id)
+            name = delivery_store.recorded_vibe_agent(turn) if turn is not None else None
+            if not name:
+                response = last_response(conn, session_id)
+                name = response.agent_name if response is not None and response.turn_id == turn_id else None
         store = getattr(self.controller, "vibe_agent_store", None)
         agent = store.get(name) if name and store is not None else None
         if agent is None or agent.backend != "vibey" or not agent.enabled or agent.archived_at:
@@ -6045,6 +6052,12 @@ class SessionTurnManager:
                     runtime_key=runtime_key,
                     runtime_turn_id=runtime_turn_id,
                     native_turn_id=native_turn_id,
+                    # The Agent a Vibey Turn runs with, so a rerun after a restart keeps it.
+                    vibe_agent_name=(
+                        str((context.platform_specific or {}).get("vibe_agent_name") or "") or None
+                        if backend == "vibey"
+                        else None
+                    ),
                 )
                 materialized: list[dict[str, Any]] = []
                 if bound is not None:
@@ -6999,6 +7012,8 @@ class SessionTurnManager:
                     promoted = messages_service.get_message(conn, str(promote["row_id"]))
                 if promoted is not None and promoted.get("type") == "result":
                     self._restart_followup_done(key, "promote")
+                else:
+                    self._restart_followup_failed(key, "promote")
             message_id = str(followups.get("clear_reaction") or "")
             if message_id:
                 await self._clear_orphaned_running_reaction(str(followups.get("session_id") or ""), message_id, key)
@@ -7009,6 +7024,17 @@ class SessionTurnManager:
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             restart_followups.done(conn, turn_id, key)
+
+    def _restart_followup_failed(self, turn_id: str, key: str) -> bool:
+        """Count a failed attempt at a follow-up; whether it was dropped after its last."""
+        from storage import restart_followups
+
+        with self._sqlite_engine().begin() as conn:
+            reserve_write_lock(conn)
+            dropped = restart_followups.failed(conn, turn_id, key)
+        if dropped:
+            logger.warning("restart follow-up %s of Turn=%s dropped after repeated failures", key, turn_id)
+        return dropped
 
     async def _clear_orphaned_running_reaction(self, session_id: str, message_id: str, turn_id: str) -> None:
         """Retire the 👀 a dead process left on a Turn recovery completed.
@@ -7038,8 +7064,13 @@ class SessionTurnManager:
             self._restart_followup_done(turn_id, "clear_reaction")
             return
         held = self._pending_orphan_reaction_clears.setdefault(platform, [])
-        if (session_id, message_id, turn_id) not in held:
-            held.append((session_id, message_id, turn_id))
+        entry = (session_id, message_id, turn_id)
+        if self._transport_can_deliver(platform) and self._restart_followup_failed(turn_id, "clear_reaction"):
+            if entry in held:
+                held.remove(entry)
+            return
+        if entry not in held:
+            held.append(entry)
         if self._transport_can_deliver(platform):
             # Ready yet failed: no ready callback is coming, so retry on the reports' clock.
             self._schedule_lost_turn_retry(platform)

@@ -115,6 +115,7 @@ def reserve_failure_retry(conn, notice):
 def previous_process(step):
     """What the previous process committed for the Turn before the restart, then startup T2.
 
+    ``model``: the input consumed, the first model call cut before anything committed;
     ``tool``: a ``write`` call cut mid-call (T2 gives it the interrupted result);
     ``handover``: a bash command still running (T2 hands it to a Watch);
     ``partial``: the text a failed stream carried, committed as a non-final response;
@@ -145,6 +146,8 @@ def previous_process(step):
 
         async def previous_process_then_t2():
             await store.consume_input(session_id, input_id, UserMessage((text("run it"),)))
+            if step == "model":
+                return
             if step == "final":
                 await store.append_response(session_id, assistant("全部完成"), final=True)
                 return

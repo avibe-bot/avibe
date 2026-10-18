@@ -1182,7 +1182,13 @@ def bind_native_start(
     runtime_key: str | None,
     runtime_turn_id: str | None,
     native_turn_id: str | None,
+    vibe_agent_name: str | None = None,
 ) -> dict[str, Any] | None:
+    """Accept a Turn's native start; ``vibe_agent_name`` records the Agent it runs with.
+
+    A Turn rerun after a restart keeps its restart streak and recorded Agent across
+    its rebind (``vibey-restart-auto-resume.md``).
+    """
     turn = get_turn(conn, turn_id)
     if turn is None:
         return None
@@ -1206,8 +1212,13 @@ def bind_native_start(
             "runtime_turn_id": runtime_turn_id or turn.get("runtime_turn_id"),
             "native_turn_id": native_turn_id or turn.get("native_turn_id"),
             "start_receipt_outcome": "accepted",
-            # A Turn rerun after a restart keeps its restart streak across this bind.
-            "start_receipt_json": _canonical_json({"kind": "native_start", **restart_receipt(turn)}),
+            "start_receipt_json": _canonical_json(
+                {
+                    "kind": "native_start",
+                    **_carried_receipt(turn),
+                    **({"vibe_agent_name": vibe_agent_name} if vibe_agent_name else {}),
+                }
+            ),
             "started_at": turn.get("started_at") or turn_now_iso(),
         },
     )
@@ -1218,15 +1229,29 @@ def bind_native_start(
 RESTART_STREAK_KEYS = ("restart_streak", "restart_response_seq")
 
 
-def restart_receipt(turn: dict[str, Any]) -> dict[str, Any]:
-    """The restart streak a Turn's start receipt carries, if it was rerun after a restart."""
+def _start_receipt(turn: dict[str, Any]) -> dict[str, Any]:
     try:
         receipt = json.loads(str(turn.get("start_receipt_json") or "{}"))
     except (TypeError, ValueError):
         return {}
-    if not isinstance(receipt, dict):
-        return {}
+    return receipt if isinstance(receipt, dict) else {}
+
+
+def restart_receipt(turn: dict[str, Any]) -> dict[str, Any]:
+    """The restart streak a Turn's start receipt carries, if it was rerun after a restart."""
+    receipt = _start_receipt(turn)
     return {key: receipt[key] for key in RESTART_STREAK_KEYS if key in receipt}
+
+
+def recorded_vibe_agent(turn: dict[str, Any]) -> str | None:
+    """The Vibe Agent a Turn's native start recorded, if any."""
+    name = _start_receipt(turn).get("vibe_agent_name")
+    return str(name) if name else None
+
+
+def _carried_receipt(turn: dict[str, Any]) -> dict[str, Any]:
+    receipt = _start_receipt(turn)
+    return {key: receipt[key] for key in (*RESTART_STREAK_KEYS, "vibe_agent_name") if key in receipt}
 
 
 def rotate_restart_generation(
@@ -1251,12 +1276,7 @@ def rotate_restart_generation(
         or int(turn["version"]) != expected_version
     ):
         return None
-    try:
-        receipt = json.loads(str(turn.get("start_receipt_json") or "{}"))
-    except (TypeError, ValueError):
-        receipt = {}
-    if not isinstance(receipt, dict):
-        receipt = {}
+    receipt = _start_receipt(turn)
     receipt.update({"restart_streak": streak, "restart_response_seq": response_seq})
     return cas_turn(
         conn,

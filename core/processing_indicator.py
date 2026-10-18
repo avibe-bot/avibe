@@ -667,11 +667,10 @@ class ProcessingIndicatorService:
         if not self._capabilities(context).supports_reaction_indicator:
             return True  # no running reaction can exist here
         try:
-            await self._get_im_client(context).remove_reaction(context, message_id, ACK_REACTION_EMOJI)
+            return bool(await self._get_im_client(context).remove_reaction(context, message_id, ACK_REACTION_EMOJI))
         except Exception as err:
             logger.debug("Failed to remove orphaned ack reaction: %s", err)
             return False
-        return True
 
     async def _stamp_terminal_reaction_without_indicator(
         self,

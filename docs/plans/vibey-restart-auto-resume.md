@@ -88,9 +88,10 @@ exists; "handled" names where the in-place design still owns it.
    start; recovery clears its runtime generation (the dead process's runtime
    and native ids) and records the restart streak in one writer transaction,
    then reruns the Turn through the ordinary runner with `vibey_resume`, with
-   the Vibe Agent that ran it (the author of its committed responses, while
-   that Agent still runs on Vibey): a Session's switch to another Agent reaches
-   the next Turn, as it does for a live one. Vibey resumes its committed
+   the Vibe Agent that ran it, while that Agent still runs on Vibey: its native
+   start records that Agent on the start receipt (a Turn an older release
+   accepted names it as the author of its committed responses). A Session's
+   switch to another Agent reaches the next Turn, as it does for a live one. Vibey resumes its committed
    transcript (`Agent.resume`, no input consumed, no visible `continue`, no
    replay of a committed tool call), and the rerun's native start binds this
    process's generation where any run's does, once its Agent exists, so steers
@@ -141,7 +142,8 @@ exists; "handled" names where the in-place design still owns it.
    its committed final loses that 👀 once its transport can deliver (a platform
    without reaction indicators has none); that and the silent-final promotion
    are recorded durably before the Turn settles, so another restart before
-   they run loses neither.
+   they run loses neither. A follow-up that keeps failing (a platform reports a
+   reaction already gone as a failed removal) is dropped after five attempts.
 
 ## Ownership and touch points
 

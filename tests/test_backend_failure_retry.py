@@ -253,12 +253,13 @@ def _respond(engine, session_id, turn_id):
     asyncio.run(respond())
 
 
-@pytest.mark.parametrize("step", ["tool", "handover", "partial", "running"])
+@pytest.mark.parametrize("step", ["model", "tool", "handover", "partial", "running"])
 def test_restart_reruns_a_cut_vibey_turn_in_place_without_a_notice(isolated_state, tmp_path, step):
     """MESSAGE-DELIVERY-327 / MESSAGE-DELIVERY-330: the same Turn reruns as a transcript resume of
     itself, with the Agent it ran with: no Delivery, no successor Turn, no notice. A committed
     handover does not stop it, a command still running is left to it, not handed over at startup,
-    and a failed stream's partial text is not a final reply."""
+    and a failed stream's partial text is not a final reply. The Agent is the one its native start
+    recorded, even when it was cut before its first response."""
     from core.agent_core.tools.base import JobStatus
     from tests.agent_core.fakes import FakeJobHost
 
@@ -275,6 +276,17 @@ def test_restart_reruns_a_cut_vibey_turn_in_place_without_a_notice(isolated_stat
         for name in ("worker", "reviewer")
     }
     cut.manager.controller.vibe_agent_store = SimpleNamespace(get=agents.get)
+    # The Vibey run's native start, as its adapter accepts it: it names the Agent it runs with.
+    cut.manager.controller._session_id_from_context = lambda ctx: (ctx.platform_specific or {}).get(
+        "agent_session_id"
+    )
+    accepted = cut.context(cut.session_id)
+    accepted.platform_specific.update(
+        {"turn_token": cut.turn_id, "agent_session_id": cut.session_id, "vibe_agent_name": "worker"}
+    )
+    cut.manager.on_native_start(
+        accepted, backend="vibey", runtime_key=f"runtime:{cut.turn_id}", runtime_turn_id=f"runtime-turn:{cut.turn_id}"
+    )
 
     def switch_agent(engine, session_id, _turn_id):
         # The Session moved to another Vibey Agent while the Turn ran: that reaches the next Turn.
@@ -298,10 +310,9 @@ def test_restart_reruns_a_cut_vibey_turn_in_place_without_a_notice(isolated_stat
     assert started.platform_specific["vibey_resume"] is True
     assert started.platform_specific["vibey_source_turn_id"] == cut.turn_id
     assert started.platform_specific["delivery_id"] == before[0]
-    if step != "running":  # a Turn cut before any response keeps the Session's binding
-        assert (started.platform_specific["vibe_agent_name"], started.platform_specific["vibe_agent_id"]) == (
-            "worker", "agt_worker",
-        )
+    assert (started.platform_specific["vibe_agent_name"], started.platform_specific["vibe_agent_id"]) == (
+        "worker", "agt_worker",
+    )
     assert _deliveries(cut.engine, cut.session_id) == before
     with cut.engine.connect() as conn:
         turn = message_deliveries.get_turn(conn, cut.turn_id)
@@ -324,6 +335,7 @@ def test_restart_reruns_a_cut_vibey_turn_in_place_without_a_notice(isolated_stat
         ("1760000000.000100", "failing", False, "final"),
         (None, "ready", True, "final"),
         ("1760000000.000100", "restarted", False, "final"),
+        ("1760000000.000100", "gone", False, "final"),
         (None, "ready", False, "silent_final"),
         (None, "ready", False, "silent_final_retried"),
         (None, "ready", False, "failed_final"),
@@ -346,7 +358,8 @@ def test_restart_completes_a_cut_vibey_turn_whose_final_reply_was_committed(
         tmp_path, backend="vibey", delivery="unready" if delivery == "restarted" else delivery,
         native_message_id=origin,
     )
-    clear = AsyncMock(side_effect=[False, True] if delivery == "failing" else None, return_value=True)
+    # ``gone``: the adapter cannot remove it (already gone, or a lasting refusal) and says so.
+    clear = AsyncMock(side_effect=[False, True] if delivery == "failing" else None, return_value=delivery != "gone")
     cut.manager.controller.processing_indicator = SimpleNamespace(clear_orphaned_running_reaction=clear)
     promote, promoted_on_loop = message_mirror.promote_turn_text_to_result, []
 
@@ -366,6 +379,10 @@ def test_restart_completes_a_cut_vibey_turn_whose_final_reply_was_committed(
     _restart(cut, _then(previous, _request_stop) if late_stop else previous)
     if final == "silent_final_retried":
         _restart(cut)
+    if delivery == "gone":
+        # Each start tries again, until the bound: then the follow-up is dropped.
+        for _ in range(restart_followups.MAX_ATTEMPTS - 1):
+            _restart(cut)
     if delivery == "restarted":
         # The process dies again before the transport connects: a new one picks the clear up.
         manager = SessionTurnManager(cut.manager.controller, build_context=cut.context)
@@ -380,7 +397,8 @@ def test_restart_completes_a_cut_vibey_turn_whose_final_reply_was_committed(
         cut.manager._transport_can_deliver = lambda _platform: True
         assert asyncio.run(cut.manager.notify_transport_ready("avibe")) == 0
 
-    expected = [origin] * (2 if delivery == "failing" else 1) if origin else []
+    attempts = {"failing": 2, "gone": restart_followups.MAX_ATTEMPTS}.get(delivery, 1)
+    expected = [origin] * attempts if origin else []
     assert [call.args[1] for call in clear.await_args_list] == expected
     assert cut.manager._pending_orphan_reaction_clears.get("avibe", []) == []
     with cut.engine.connect() as conn:

@@ -501,6 +501,11 @@ class VibeyAgent(BaseAgent):
         return time.monotonic() - run.continuation_started_at < policy.max_elapsed_s
 
     def _accept_native_start(self, request: AgentRequest, session_id: str) -> None:
+        if request.vibe_agent_name:
+            # The native start records the Agent this Turn runs with (a restart rerun keeps it).
+            if request.context.platform_specific is None:
+                request.context.platform_specific = {}
+            request.context.platform_specific["vibe_agent_name"] = request.vibe_agent_name
         self.bind_agent_session_id(request, session_id)
         mark_backend_dispatch_attempted(request.context)
         self.mark_runtime_turn_started(request.context)

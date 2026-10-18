@@ -21,6 +21,9 @@ from sqlalchemy.engine import Connection
 from storage.models import runtime_records
 
 RECORD_TYPE = "vibey_restart_followup"
+#: Failed attempts after which a follow-up is dropped: a platform reports a reaction
+#: that is already gone the same way as a transient failure.
+MAX_ATTEMPTS = 5
 
 
 def _record_id(turn_id: str) -> str:
@@ -68,4 +71,21 @@ def done(conn: Connection, turn_id: str, key: str) -> None:
     if payload is None:
         return
     payload.pop(key, None)
+    payload.pop(f"{key}_attempts", None)
     save(conn, turn_id, payload if set(payload) - {"session_id"} else {})
+
+
+def failed(conn: Connection, turn_id: str, key: str) -> bool:
+    """One attempt at a follow-up failed: whether it is now dropped, after ``MAX_ATTEMPTS``."""
+    payload = pending(conn, turn_id).get(turn_id)
+    if payload is None or key not in payload:
+        return True
+    attempts = int(payload.get(f"{key}_attempts") or 0) + 1
+    if attempts >= MAX_ATTEMPTS:
+        payload.pop(key, None)
+        payload.pop(f"{key}_attempts", None)
+        save(conn, turn_id, payload if set(payload) - {"session_id"} else {})
+        return True
+    payload[f"{key}_attempts"] = attempts
+    save(conn, turn_id, payload)
+    return False

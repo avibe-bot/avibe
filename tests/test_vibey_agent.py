@@ -208,6 +208,7 @@ class _Controller:
         self.terminal_texts: list[Optional[str]] = []
         self.released: list[str] = []
         self.started: list[Optional[str]] = []
+        self.native_agents: list[Optional[str]] = []
         self.hub_calls: list[str] = []
         self.hub_protocol = "anthropic"
         # The Model Hub model definition's limits (C-9 takes W, L_in, and O from them).
@@ -285,6 +286,7 @@ class _Controller:
         # Outside a run (a crash simulation), the identity a previous process's adapter bound.
         native = self.agent.steering_native_turn_id(target) or f"vibey:previous-process:{turn_id}"
         self.started.append(native)
+        self.native_agents.append((context.platform_specific or {}).get("vibe_agent_name"))
         with self.engine.begin() as conn:
             turn = message_deliveries.get_turn(conn, turn_id)
             assert message_deliveries.bind_native_start(
@@ -2746,7 +2748,9 @@ async def test_a_restart_rerun_waits_for_its_surviving_command_as_the_live_call_
         context.platform_specific.update(
             {"vibey_resume": True, "vibey_source_turn_id": cut_turn, "accepted_agent_run_ids": [run.id]}
         )
-        resume = AgentRequest(**{**request.__dict__, "context": context, "message": "", "user_message": ""})
+        resume = AgentRequest(
+            **{**request.__dict__, "context": context, "message": "", "user_message": "", "vibe_agent_name": "worker"}
+        )
 
         resumed = asyncio.create_task(harness.agent.handle_message(resume))
         if case == "stop":
@@ -2763,6 +2767,8 @@ async def test_a_restart_rerun_waits_for_its_surviving_command_as_the_live_call_
         body = result.message.content[0].text
         watch_id = ManagedWatchStore().find_job_watch(job_id)
         if case in {"exits", "watch_unavailable"}:
+            # Its native start names the Agent it runs with, for a later restart's rerun.
+            assert harness.controller.native_agents[-1] == "worker"
             assert "step-two-done" in body and watch_id is None
             assert "step-two-done" in json.dumps(message_to_dict(harness.provider.requests[0].messages[-1]))
             assert harness.controller.im_client.sent[-1] == "步骤三完成"
