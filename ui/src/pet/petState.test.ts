@@ -138,6 +138,24 @@ describe('latestExchange', () => {
     const exchange = latestExchange([user(), row({ type: 'tool_call' }), result({ text: 'done' })], false);
     expect(exchange.results.map((message) => message.text)).toEqual(['done']);
   });
+
+  it('pairs a promoted result with the input before it, not a later input answered by silence', () => {
+    // Scenario: MESSAGE-DELIVERY-325. The earlier text was promoted where it stood.
+    const report = result({ read_at: null, text: 'report', metadata: { promoted_from: 'output' } });
+    const exchange = latestExchange([user('check CI'), report, user('also the docs')], false);
+    expect(exchange.user?.text).toBe('also the docs');
+    expect(exchange.results).toEqual([report]);
+    expect(exchange.answersEarlierInput).toBe(true);
+  });
+
+  it.each([
+    ['a promoted result after the latest input answers that input', { promoted_from: 'interim' }, 'after'],
+    ['an unpromoted result before the latest input keeps today\'s order', {}, 'before'],
+  ] as const)('%s', (_name, metadata, position) => {
+    const reply = result({ read_at: null, text: 'reply', metadata });
+    const rows = position === 'after' ? [user('old'), user('ask'), reply] : [user('old'), reply, user('ask')];
+    expect(latestExchange(rows, false).answersEarlierInput).toBe(false);
+  });
 });
 
 const agent = (overrides: Partial<RunningAgent>): RunningAgent => ({

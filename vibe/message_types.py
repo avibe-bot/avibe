@@ -150,6 +150,15 @@ def is_detached_completion(message_type: str, metadata: Any = None) -> bool:
 TRANSCRIPT_COPY_KEY = "transcript_copy"
 
 
+# Metadata on a ``result`` promoted from Turn text when its Turn ended on a silent
+# reply (``core.message_mirror.promote_turn_text_to_result``): the type it was
+# persisted as, one of ``PROMOTED_FROM_TYPES``. The row is that Turn's terminal
+# output everywhere; only Activity grouping keeps it where its text was mid-Turn.
+PROMOTED_FROM_KEY = "promoted_from"
+# Transcript-visible agent text that does not end its Turn, and so can be promoted.
+PROMOTED_FROM_TYPES = ("output", "interim")
+
+
 def activity_role_for(message_type: str, metadata: Any = None) -> str:
     """Resolve one row's role in the current Turn's Activity timeline."""
 

@@ -2004,3 +2004,117 @@ def test_stop_without_terminal_stays_interrupted(isolated_state):
     assert [g["status"] for g in groups] == ["interrupted"]
     assert groups[0]["anchor_message_id"] == "m_u1"  # anchored to its own trigger
     assert groups[0]["anchor_position"] == "after"
+
+
+@pytest.mark.parametrize("shown_type", ["interim", "output"])
+def test_a_promoted_silent_final_result_keeps_the_turns_activity(isolated_state, monkeypatch, shown_type):
+    """Scenario: MESSAGE-DELIVERY-325.
+
+    A Turn's text promoted to its result when the Turn ended on a silent reply
+    renders as the result, but stays where it was mid-Turn: the Activity groups
+    around it are exactly the ones its text had before promotion.
+    """
+    from types import SimpleNamespace
+
+    from core import web_push_notifications
+    from core.message_mirror import promote_turn_text_to_result
+    from vibe.message_types import activity_role_for
+
+    monkeypatch.setattr(
+        web_push_notifications,
+        "threading",
+        SimpleNamespace(Thread=lambda **_kwargs: SimpleNamespace(start=lambda: None)),
+    )
+    engine = create_sqlite_engine()
+    sid, turn_id = "ses_promoted", "trn_promoted"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        delivery = message_deliveries.insert_delivery(
+            conn,
+            delivery_id="m_p1",
+            session_id=sid,
+            priority="p3",
+            state="reserved",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=scope,
+                session_id=sid,
+                platform="avibe",
+                author="harness",
+                source="harness",
+                message_type="harness",
+                text="watch fired",
+            ),
+            dispatch_text="watch fired",
+            now="2026-06-01T10:00:00.000000+00:00",
+        )
+        message_deliveries.insert_turn(
+            conn,
+            turn_id=turn_id,
+            session_id=sid,
+            initial_delivery_id=delivery["id"],
+            state="starting",
+            backend="claude",
+            start_attempt_id="atm_promoted",
+            dispatch_text="watch fired",
+            now="2026-06-01T10:00:00.000000+00:00",
+        )
+        assert message_deliveries.open_start_attempt(
+            conn,
+            delivery["id"],
+            expected_version=int(delivery["version"]),
+            turn_id=turn_id,
+            attempt_id="atm_promoted",
+        ) is not None
+        assert _accept_start(conn, turn_id)
+        _evt(conn, scope, sid, eid="e_p1", created_at="2026-06-01T10:00:01Z", text="🔧 `Bash` `{\"command\":\"a\"}`")
+        _msg(
+            conn, scope, sid, mid="m_text", mtype=shown_type, author="agent",
+            created_at="2026-06-01T10:00:02Z", text="The report.", metadata={"turn_id": turn_id},
+        )
+        _evt(conn, scope, sid, eid="e_p2", created_at="2026-06-01T10:00:03Z", text="🔧 `Read` `{\"file_path\":\"b\"}`")
+        message_deliveries.terminalize_turn(
+            conn,
+            turn_id,
+            outcome="completed",
+            settled_by="terminal_result",
+            evidence_kind="test_silent_final",
+        )
+
+    with engine.connect() as conn:
+        before = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
+
+    promoted = promote_turn_text_to_result("m_text")
+
+    assert promoted is not None and promoted["type"] == "result"
+    with engine.connect() as conn:
+        after = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
+    assert after == before
+    # Everywhere else, fork recovery among them, the row is the Turn's terminal output.
+    assert activity_role_for(promoted["type"], promoted["metadata"]) == "terminal"
+
+
+def test_a_promotion_marker_counts_only_on_a_promoted_result(isolated_state):
+    """Scenario: MESSAGE-DELIVERY-325.
+
+    A client can put any metadata on its own message: a forged marker on a user row
+    neither hides that Turn's start nor merges the previous Turn's activity into it.
+    """
+    engine = create_sqlite_engine()
+    sid = "ses_forged"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(conn, scope, sid, mid="m_q1", mtype="user", author="user", created_at="2026-06-01T10:00:00Z", text="q1", source="user")
+        _evt(conn, scope, sid, eid="e_f1", created_at="2026-06-01T10:00:01Z", text="🔧 `Bash` `{\"command\":\"a\"}`")
+        _msg(
+            conn, scope, sid, mid="m_q2", mtype="user", author="user", created_at="2026-06-01T10:01:00Z",
+            text="q2", source="user", metadata={"promoted_from": "result"},
+        )
+        _evt(conn, scope, sid, eid="e_f2", created_at="2026-06-01T10:01:01Z", text="🔧 `Read` `{\"file_path\":\"b\"}`")
+        _msg(conn, scope, sid, mid="m_r2", mtype="result", author="agent", created_at="2026-06-01T10:01:02Z", text="answer")
+
+    with engine.connect() as conn:
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
+    assert [(g["status"], g["anchor_message_id"], g["steps"]) for g in groups] == [
+        ("interrupted", "m_q1", 1),
+        ("done", "m_r2", 1),
+    ]

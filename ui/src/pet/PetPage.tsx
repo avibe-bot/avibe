@@ -1143,9 +1143,10 @@ const MainDetail: React.FC<MainDetailProps> = (props) => {
     // Open at the end, where the newest result sits right above its actions and
     // the toggle row. If the result and its actions do not fit, start at the
     // result instead, just past the top edge fade, so it is read from its first
-    // line rather than from under the fade.
+    // line rather than from under the fade. A later input drawn after a promoted
+    // result (`answersEarlierInput`) moves the end, so a new input re-scrolls.
     if (result && history) history.scrollTop = Math.max(0, Math.min(history.scrollHeight - history.clientHeight, result.offsetTop - FADE_PX));
-  }, [props.visible, resultKey]);
+  }, [props.visible, resultKey, props.exchange.user?.id]);
   useEffect(() => {
     const node = lastResultRef.current;
     if (!props.visible || !node) return;
@@ -1162,11 +1163,13 @@ const MainDetail: React.FC<MainDetailProps> = (props) => {
   const firstCurrent = props.messages.findIndex((message) => message.id === props.exchange.user?.id || props.exchange.results.some((result) => result.id === message.id));
   const history = props.messages.slice(0, Math.max(0, firstCurrent))
     .filter((message) => message.type === 'user' || message.type === 'result').slice(-6);
+  const currentUser = props.exchange.user && <div className="pet-mini-detail-user"><Markdown content={props.exchange.user.text} references={(props.exchange.user.content as { references?: MentionReference[] })?.references} softBreaks /></div>;
   return (
     <div className="pet-mini-detail-inner">
       {history.map((message) => <div key={message.id} className={message.author === 'user' ? 'pet-mini-detail-user' : 'pet-mini-detail-result'}><Markdown content={message.text} references={(message.content as { references?: MentionReference[] })?.references} softBreaks /></div>)}
-      {props.exchange.user && <div className="pet-mini-detail-user"><Markdown content={props.exchange.user.text} references={(props.exchange.user.content as { references?: MentionReference[] })?.references} softBreaks /></div>}
+      {!props.exchange.answersEarlierInput && currentUser}
       {props.exchange.results.map((message, index) => <div ref={index === props.exchange.results.length - 1 ? lastResultRef : undefined} key={message.id} className="pet-mini-detail-result"><Markdown content={message.text} references={(message.content as { references?: MentionReference[] })?.references} softBreaks /></div>)}
+      {props.exchange.answersEarlierInput && currentUser}
       {props.failure && (
         <div className="pet-mini-detail-notice" role="status">
           <p>{props.failure.text}</p>
