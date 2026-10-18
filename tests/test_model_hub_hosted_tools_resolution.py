@@ -72,7 +72,7 @@ def _image(model_id: str, description: str, *, price: float | None = None, kinds
 
 
 IMAGE_MODELS = {
-    # Verified on API keys only: a subscription that lists the model is not offered it.
+    # An image model verified on API keys only: a subscription that lists it is not offered it.
     "openai": (_image("gpt-image-2", "OpenAI's image model", kinds=("api_key",)),),
     "xai": (_image("grok-imagine-image", "Grok Imagine", price=0.02),),
 }
