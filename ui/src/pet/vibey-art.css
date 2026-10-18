@@ -196,8 +196,9 @@
   90%, 100% { opacity: 0; transform: translate(14%, -26%) scale(.9); }
 }
 
-/* Inactive pages pause looping body/accessory motion while allowing the
-   one-shot pose-change squash to reach its final state. */
+/* Hidden documents pause looping body/accessory motion while allowing the
+   one-shot pose-change squash to reach its final state. Focus does not
+   matter: the pet window is visible without ever taking focus. */
 .vibey-art[data-active='false'] * {
   animation-play-state: paused !important;
 }

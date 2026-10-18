@@ -401,3 +401,41 @@ for (const trigger of ['reconnect', 'reactivation']) {
     expect(await page.evaluate(() => JSON.parse(localStorage.getItem('avibe.pet.devBinding')!).binding)).toBe('ses_main');
   });
 }
+
+for (const pose of ['idle', 'ready', 'sleeping']) {
+  test(`layered art animates while visible but unfocused and pauses only when hidden (${pose})`, async ({ page }) => {
+    await page.goto(`/e2e/pet-mini/fixture.html?pose=${pose}`);
+    const art = page.locator('.vibey-art');
+    await expect(art).toBeVisible();
+    // The loops live on the layers; the root's one-shot pose-change squash is
+    // allowed to finish, so it is not part of the reading.
+    const playStates = () => art.evaluate((node) => [...node.querySelectorAll('*')]
+      .map((element) => getComputedStyle(element))
+      .filter((style) => style.animationName !== 'none')
+      .map((style) => style.animationPlayState));
+
+    // The pet window is shown without ever taking focus.
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => false });
+      window.dispatchEvent(new Event('blur'));
+    });
+    await expect(art).toHaveAttribute('data-active', 'true');
+    const unfocused = await playStates();
+    expect(unfocused.length).toBeGreaterThan(0);
+    expect(new Set(unfocused)).toEqual(new Set(['running']));
+
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await expect(art).toHaveAttribute('data-active', 'false');
+    expect(new Set(await playStates())).toEqual(new Set(['paused']));
+
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await expect(art).toHaveAttribute('data-active', 'true');
+    expect(new Set(await playStates())).toEqual(new Set(['running']));
+  });
+}

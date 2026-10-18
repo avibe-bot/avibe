@@ -107,8 +107,9 @@ const CONFIG: Record<VibeyPose, { body: string; mood: 'is-breathing' | 'is-sleep
 
 /**
  * Layered Vibey art. The body breathes while accessories run their own loops.
- * `active` is controlled by page activity so a hidden desktop window pauses all
- * animation work without changing the rendered composition.
+ * `active` follows document visibility, not focus, so a hidden desktop window
+ * pauses all animation work without changing the rendered composition while a
+ * visible but unfocused pet keeps moving.
  */
 export function VibeyArt({
   pose,

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { usePageActive } from '@/lib/pageActivity';
+import { useDocumentVisible } from '@/lib/pageActivity';
 
 import { VibeyArt, type VibeyPose } from './VibeyArt';
 import type { PetState } from './petState';
@@ -38,7 +38,9 @@ export const PetAvatar: React.FC<{ pose: PetPose; badge?: number }> = ({
 };
 
 const PetPoseImage: React.FC<{ pose: PetPose; alt: string }> = ({ pose, alt }) => {
-  const pageActive = usePageActive();
+  // Visibility, not focus: the pet window never takes focus by itself, so
+  // gating on focus would freeze the art for as long as the user only looks.
+  const visible = useDocumentVisible();
   const resting = pose === 'idle';
   const [settled, setSettled] = useState(false);
 
@@ -52,7 +54,7 @@ const PetPoseImage: React.FC<{ pose: PetPose; alt: string }> = ({ pose, alt }) =
     <VibeyArt
       pose={pose as VibeyPose}
       label={alt}
-      active={pageActive}
+      active={visible}
       breathing={!resting || !settled}
     />
   );
