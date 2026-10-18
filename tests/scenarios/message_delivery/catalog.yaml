@@ -419,7 +419,7 @@ scenarios:
     test:
       - tests/test_vibey_agent.py::test_a_short_reply_a_steer_superseded_stays_a_visible_reply
       - tests/test_agent_transcript.py::test_a_reply_pending_input_superseded_commits_as_a_visible_reply
-  - id: MESSAGE-DELIVERY-326
+  - id: MESSAGE-DELIVERY-327
     name: Startup continues a Vibey Turn a restart cut from its transcript, or completes it from a committed final, without a notice
     status: covered
     kind: recovery
@@ -427,19 +427,19 @@ scenarios:
     test:
       - tests/test_backend_failure_retry.py::test_restart_continues_a_cut_vibey_turn_from_its_transcript_without_a_notice
       - tests/test_backend_failure_retry.py::test_restart_completes_a_cut_vibey_turn_whose_final_reply_was_committed
-  - id: MESSAGE-DELIVERY-327
+  - id: MESSAGE-DELIVERY-328
     name: A Vibey Agent Run cut by a restart is left at shutdown, moves to the continuation, and settles once from the continued result
     status: covered
     kind: recovery
     layer: contract
     test: tests/test_harness_failure_retry.py::test_a_vibey_agent_run_cut_by_a_restart_settles_from_the_continued_work
-  - id: MESSAGE-DELIVERY-328
+  - id: MESSAGE-DELIVERY-329
     name: A cut Vibey Turn that no longer qualifies (Stop, Agent off Vibey, archived, continuation bound) keeps the restart notice
     status: covered
     kind: recovery
     layer: contract
     test: tests/test_backend_failure_retry.py::test_a_cut_vibey_turn_that_no_longer_qualifies_keeps_the_restart_notice
-  - id: MESSAGE-DELIVERY-329
+  - id: MESSAGE-DELIVERY-330
     name: A command handed to a Watch at restart does not stop the continuation and is not started again
     status: covered
     kind: recovery
@@ -447,17 +447,17 @@ scenarios:
     test:
       - tests/test_backend_failure_retry.py::test_restart_continues_a_cut_vibey_turn_from_its_transcript_without_a_notice
       - tests/test_vibey_agent.py::test_a_restart_continuation_resumes_past_the_watch_handover_without_rerunning_the_command
-  - id: MESSAGE-DELIVERY-330
+  - id: MESSAGE-DELIVERY-331
     name: Input queued while the service was down runs after the restart continuation
     status: covered
     kind: concurrency
     layer: contract
     test: tests/test_backend_failure_retry.py::test_restart_continuation_runs_before_input_queued_while_the_service_was_down
-  - id: MESSAGE-DELIVERY-331
+  - id: MESSAGE-DELIVERY-332
     name: A Vibey run that fails because the service is stopping leaves its Turn open for the restart continuation
     status: covered
     kind: recovery
     layer: contract
     test: tests/test_vibey_agent.py::test_a_run_the_service_stop_cut_leaves_its_turn_open_for_the_restart_continuation
 next_priority:
-  - MESSAGE-DELIVERY-332
+  - MESSAGE-DELIVERY-333

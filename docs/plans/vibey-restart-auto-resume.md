@@ -130,22 +130,22 @@ This replaces recovery invariant T4 for Vibey (`agent-core-contracts/recovery.md
 
 Scenario IDs in `tests/scenarios/message_delivery/catalog.yaml`:
 
-- `MESSAGE-DELIVERY-326`: startup recovery with a cut conversation Turn: one
+- `MESSAGE-DELIVERY-327`: startup recovery with a cut conversation Turn: one
   continuation Delivery, no notice, a transcript resume of the cut Turn; with
   the final response already committed: settled completed, no continuation.
-- `MESSAGE-DELIVERY-327`: cut Harness Turn: shutdown leaves the Turn and its Run;
+- `MESSAGE-DELIVERY-328`: cut Harness Turn: shutdown leaves the Turn and its Run;
   the Run is not failed, its Delivery moves to the continuation, the continued
   Turn's result settles it, no owed restart notice.
-- `MESSAGE-DELIVERY-328`: ineligible cases each fall back to today's settlement
+- `MESSAGE-DELIVERY-329`: ineligible cases each fall back to today's settlement
   and notice: Stop requested, archived Session, Agent switched off Vibey, the
   fourth restart in a row without a model response. A start never accepted
   stays on the unknown-start path it takes today.
-- `MESSAGE-DELIVERY-329`: running command at shutdown: T2 hands it to a Watch,
+- `MESSAGE-DELIVERY-330`: running command at shutdown: T2 hands it to a Watch,
   the continuation still starts, resumes past the handover result, and the
   command is not started again.
-- `MESSAGE-DELIVERY-330`: input queued during downtime runs after the
+- `MESSAGE-DELIVERY-331`: input queued during downtime runs after the
   continuation.
-- `MESSAGE-DELIVERY-331`: a run that fails because the service is stopping
+- `MESSAGE-DELIVERY-332`: a run that fails because the service is stopping
   leaves its Turn open.
 - `MESSAGE-DELIVERY-322` keeps the Watch-naming notice without Retry for the
   fallback.

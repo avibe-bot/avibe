@@ -203,7 +203,7 @@ def _continuations(engine, session_id):
 
 @pytest.mark.parametrize("step", ["tool", "handover", "partial"])
 def test_restart_continues_a_cut_vibey_turn_from_its_transcript_without_a_notice(isolated_state, tmp_path, step):
-    """MESSAGE-DELIVERY-326 / MESSAGE-DELIVERY-329: one hidden continuation, no notice;
+    """MESSAGE-DELIVERY-327 / MESSAGE-DELIVERY-330: one hidden continuation, no notice;
     a command T2 handed to a Watch does not stop it, and a failed stream's partial text
     is not a final reply."""
     cut = _accepted_turn(tmp_path, backend="vibey")
@@ -240,7 +240,7 @@ def test_restart_continues_a_cut_vibey_turn_from_its_transcript_without_a_notice
     "origin,delivery", [(None, "ready"), ("1760000000.000100", "ready"), ("1760000000.000100", "unready")]
 )
 def test_restart_completes_a_cut_vibey_turn_whose_final_reply_was_committed(isolated_state, tmp_path, origin, delivery):
-    """MESSAGE-DELIVERY-326: nothing is left to continue, and nothing failed; the 👀 the
+    """MESSAGE-DELIVERY-327: nothing is left to continue, and nothing failed; the 👀 the
     dead process left on an IM message is retired once its transport can deliver."""
     cut = _accepted_turn(tmp_path, backend="vibey", delivery=delivery, native_message_id=origin)
     clear = AsyncMock(return_value=True)
@@ -274,7 +274,7 @@ def _archive(engine, session_id, _turn_id):
 
 @pytest.mark.parametrize("case", ["qualifies", "stop", "switched", "archived", "bound"])
 def test_a_cut_vibey_turn_that_no_longer_qualifies_keeps_the_restart_notice(isolated_state, tmp_path, case):
-    """MESSAGE-DELIVERY-328: Stop, an Agent off Vibey, an archived Session, or a third
+    """MESSAGE-DELIVERY-329: Stop, an Agent off Vibey, an archived Session, or a third
     restart in a row without a model response keep today's settlement and notice."""
     cut = _accepted_turn(tmp_path, backend="vibey")
     restarts = 1
@@ -307,7 +307,7 @@ def test_a_cut_vibey_turn_that_no_longer_qualifies_keeps_the_restart_notice(isol
 
 
 def test_restart_continuation_runs_before_input_queued_while_the_service_was_down(isolated_state, tmp_path):
-    """MESSAGE-DELIVERY-330: the queued input waits behind the continuation, then runs."""
+    """MESSAGE-DELIVERY-331: the queued input waits behind the continuation, then runs."""
     cut = _accepted_turn(tmp_path, backend="vibey")
 
     def queue_input(engine, session_id, _turn_id):

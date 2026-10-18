@@ -217,7 +217,7 @@ def test_harness_notice_keeps_retry_boundary_guards(isolated_state, tmp_path, ch
 
 @pytest.mark.parametrize("step", ["tool", "final"])
 def test_a_vibey_agent_run_cut_by_a_restart_settles_from_the_continued_work(isolated_state, tmp_path, step):
-    """MESSAGE-DELIVERY-327: shutdown leaves the Run with its Turn, startup moves it to the
+    """MESSAGE-DELIVERY-328: shutdown leaves the Run with its Turn, startup moves it to the
     continuation, and it settles once, from the continued Turn's result, owing no notice."""
     from core.session_turns import Turn
 

@@ -835,6 +835,8 @@ def committed_final(conn: Connection, session_id: str, turn_id: str) -> Optional
         or response.turn_id != turn_id
         or response.has_tool_calls
         or response.stop_reason in _UNFINISHED_STOP_REASONS
+        # A reply pending input superseded is visible, never final.
+        or response.message_type == "output"
     ):
         return None
     later_input = conn.execute(

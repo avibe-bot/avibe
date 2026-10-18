@@ -2630,7 +2630,7 @@ async def test_startup_hands_an_orphaned_foreground_job_to_its_watch(engine, ses
 async def test_a_run_the_service_stop_cut_leaves_its_turn_open_for_the_restart_continuation(
     engine, session, tmp_path, published
 ) -> None:
-    """MESSAGE-DELIVERY-331: stopping the service (its gateway first) fails the run; the Turn
+    """MESSAGE-DELIVERY-332: stopping the service (its gateway first) fails the run; the Turn
     is the restart's to continue, so it neither fails nor shows a notice."""
     from core.agent_core.ai.provider import ProviderError
 
@@ -2658,7 +2658,7 @@ async def test_a_run_the_service_stop_cut_leaves_its_turn_open_for_the_restart_c
 async def test_a_restart_continuation_resumes_past_the_watch_handover_without_rerunning_the_command(
     engine, session, tmp_path, published
 ) -> None:
-    """MESSAGE-DELIVERY-329: the hidden continuation recovery reserves resumes the transcript;
+    """MESSAGE-DELIVERY-330: the hidden continuation recovery reserves resumes the transcript;
     the command T2 handed to a Watch is not started again."""
     from core.backend_failure_retry import reserve_restart_resume
 

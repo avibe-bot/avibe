@@ -127,8 +127,8 @@ not added here.
 Scenario contracts: `MESSAGE-DELIVERY-026` through `MESSAGE-DELIVERY-028`.
 Restart notification binding and continuation: `MESSAGE-DELIVERY-030`.
 Harness-owned notification binding and continuation: `MESSAGE-DELIVERY-320`.
-Vibey restart continuation without a notice: `MESSAGE-DELIVERY-326` through
-`MESSAGE-DELIVERY-331`.
+Vibey restart continuation without a notice: `MESSAGE-DELIVERY-327` through
+`MESSAGE-DELIVERY-332`.
 
 ## Review-boundary correction contract
 
