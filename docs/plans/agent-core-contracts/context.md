@@ -661,8 +661,9 @@ the previous mind whole, even when the checkpoint above shows it cut. Both files
 word, next to it, so the turn edits them without reading them first and every `oldText` can match exactly. In a
 replay of three chained checkpoints of a real Session (2026-10-18), the turn read neither file and no edit failed,
 in both this form and one that pointed to the mind in the checkpoint above; asked to read first, it spent two more
-requests on every checkpoint. The edit calls for both files go in one response: done one file per response, each
-checkpoint took a request more, about a quarter of its cost at a warm cache.
+requests on every checkpoint. The request asks for both files' edit calls in one response: each response is a
+request over the whole context, about a quarter of a checkpoint's cost at a warm cache. In that replay the first
+checkpoint did so; the later ones edited one file per response.
 
 History: `checkpoint-v3` (owner decision 2026-10-11) asked for the checkpoint in one `<checkpoint>` block of the final
 reply. `checkpoint-v4` (owner decision 2026-10-12) said that the request and its repair come from the harness, not the
