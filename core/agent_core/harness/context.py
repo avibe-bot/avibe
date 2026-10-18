@@ -1061,25 +1061,40 @@ def _block_text(blocks: Sequence[MindBlock]) -> str:
     return "\n".join(line for name, body in blocks for line in ((name, *body) if name else body))
 
 
+def _holds_only(body: Sequence[str], line: str) -> bool:
+    return [text.strip() for text in body if text.strip()] == [line]
+
+
 def _section_tokens(blocks: Sequence[MindBlock]) -> int:
-    """What a section counts toward its limit (section 7): its text but its placeholder lines, which mark it empty."""
-    placeholders = frozenset(MIND_PLACEHOLDERS.values())
-    return text_tokens(_block_text([(name, tuple(l for l in body if l.strip() not in placeholders)) for name, body in blocks]))
+    """What a section counts toward its limit (section 7): its text, but a block that holds only its own placeholder
+    counts as empty. A placeholder anywhere else, or repeated, counts like any text."""
+    return text_tokens(
+        _block_text([(name, () if _holds_only(body, MIND_PLACEHOLDERS.get(name, "")) else body) for name, body in blocks])
+    )
 
 
-def migrate_placeholders(mind: str) -> str:
-    """``mind`` with each section that holds only the earlier template's "(none)" given its own placeholder (section
-    7): a mind stored before the placeholders, whose empty sections could otherwise be edited only with a heading in
-    ``oldText``. Anything else, and a mind that lost its structure, stays as it is."""
+def with_placeholders(mind: str) -> str:
+    """``mind`` with each section that holds nothing, or only the earlier template's "(none)", given its own
+    placeholder (section 7), so every empty section has a line an edit can name without its heading: a mind stored
+    before the placeholders, or one whose turn deleted a placeholder and wrote nothing. Anything else, and a mind that
+    lost its structure, stays as it is."""
     if mind_blocks(mind)[0] is None:
         return mind
     lines = _lines(mind)
     found = [index for index, line in enumerate(lines) if line.rstrip() in MIND_HEADINGS]
     changed = False
-    for start, end in zip(found, [*found[1:], len(lines)]):
+    for start, end in reversed(list(zip(found, [*found[1:], len(lines)]))):
         heading = lines[start].rstrip()
+        if heading not in MIND_PLACEHOLDERS:
+            continue
         body = [index for index in range(start + 1, end) if lines[index].strip()]
-        if heading in MIND_PLACEHOLDERS and len(body) == 1 and lines[body[0]].strip() == MIND_EMPTY:
+        if not body:  # on its first blank line, or on a new line when the next heading follows at once
+            if start + 1 < end:
+                lines[start + 1] = MIND_PLACEHOLDERS[heading]
+            else:
+                lines.insert(start + 1, MIND_PLACEHOLDERS[heading])
+            changed = True
+        elif len(body) == 1 and lines[body[0]].strip() == MIND_EMPTY:
             lines[body[0]], changed = MIND_PLACEHOLDERS[heading], True
     return "\n".join(lines) if changed else mind
 

@@ -402,10 +402,12 @@ is written, so projection stays a pure function of the rows:
   The template has, under each heading that holds text, a placeholder line of its own, `(none yet: <the heading's
   name>)` (`(none yet: for whom and why)` ... `(none yet: lessons)`): each is unique, so the first consolidation's
   edits replace placeholder lines alone and never touch a heading. A section that still holds its placeholder is
-  empty: it is shown as it is, keeps its placeholder until there is something to put there, and its placeholder does
-  not count toward the section's limit (§10), so an empty section is within it on any route. A mind stored before
-  the placeholders gets them when the next checkpoint turn starts: each section that holds only `(none)` holds its
-  placeholder instead, in `mind.md` and in the request alike. With
+  empty: it is shown as it is, keeps its placeholder until there is something to put there, and a block that holds
+  only its own placeholder does not count toward the section's limit (§10), so an empty section is within it on any
+  route; a placeholder anywhere else, or repeated, counts like any text. When a checkpoint turn starts, every empty
+  section of the stored mind holds its placeholder, in `mind.md` and in the request alike: a section that holds
+  nothing (its turn deleted the placeholder and wrote nothing), or only `(none)` (a mind stored before the
+  placeholders), gets it, so every empty section has a line an edit can name without its heading. With
   the same "(none)" under every heading, a heading line with the line under it was the only unique `oldText`; in one
   of two real first consolidations, a seven-part edit dropped a heading, and the structure repair it took doubled
   the checkpoint's requests. The model revises what is under the headings, never the lines themselves, and may add headings of its own beneath them. Text before the first heading counts toward the

@@ -55,7 +55,8 @@ from core.agent_core.harness.context import (
     memo_item,
     memo_problems,
     memo_tokens,
-    migrate_placeholders,
+    with_placeholders,
+    _section_tokens,
     MEMO_SHARE_FLOOR,
     _memo_lines,
     mind_blocks,
@@ -1175,21 +1176,35 @@ def test_the_template_holds_a_unique_placeholder_under_each_heading_and_a_kept_o
     assert review_mind(partial, MIND_TEMPLATE, 5_500).over == () and review_mind(MIND_TEMPLATE, MIND_TEMPLATE, 5_500).over == ()
     filled = _mind(**{"## For whom and why": "- " + "w" * 200, "## Mission": "- review every open PR (in progress)"})
     assert [title for title, _, _ in review_mind(filled, MIND_TEMPLATE, 5_500).over] == ["Where I stand"]
+    # Only a block holding nothing but its own placeholder is empty: repeated, or under another heading, it is text.
+    mission = "- review every open PR (in progress)\n" + "\n".join([MIND_PLACEHOLDERS["## Mission"]] * 400)
+    assert [title for title, _, _ in review_mind(_mind(**{"## Mission": mission}), MIND_TEMPLATE).over] == ["Goals"]
+    misplaced = _mind(**{"## Mission": "- review every open PR", "## Workstreams": MIND_PLACEHOLDERS["## Mission"]})
+    assert review_mind(misplaced, MIND_TEMPLATE, 5_500).over == () and _section_tokens(
+        [("## Workstreams", (MIND_PLACEHOLDERS["## Mission"],))]
+    ) > _section_tokens([("## Workstreams", (MIND_PLACEHOLDERS["## Workstreams"],))])
 
 
 def test_a_mind_stored_before_the_placeholders_gets_them_in_its_empty_sections():
     legacy = "\n\n".join(
         "\n".join([top, *(f"{sub}\n(none)" for sub in subs)] if subs else [top, "(none)"]) for top, _, subs in MIND_SECTIONS
     ).replace("## Mission\n(none)", "## Mission\n- review every open PR (in progress)")
-    migrated = migrate_placeholders(legacy)
+    migrated = with_placeholders(legacy)
     assert migrated == _mind(**{"## Mission": "- review every open PR (in progress)"})
     for placeholder in MIND_PLACEHOLDERS.values():
         assert migrated.count(placeholder) == (0 if placeholder == MIND_PLACEHOLDERS["## Mission"] else 1)
     # Only a section that holds nothing but "(none)": one with text keeps its "(none)" line; a broken mind is kept.
     mixed = legacy.replace("## Workstreams\n(none)", "## Workstreams\n- a\n(none)")
-    assert "## Workstreams\n- a\n(none)" in migrate_placeholders(mixed)
-    assert migrate_placeholders("no headings\n(none)") == "no headings\n(none)"
-    assert migrate_placeholders(migrated) is migrated  # nothing to migrate: the same text
+    assert "## Workstreams\n- a\n(none)" in with_placeholders(mixed)
+    assert with_placeholders("no headings\n(none)") == "no headings\n(none)"
+    assert with_placeholders(migrated) is migrated  # nothing to migrate: the same text
+    # A section its turn left blank, its placeholder deleted and nothing written, gets the placeholder back, so an
+    # edit can still name it without its heading.
+    blank = migrated.replace(MIND_PLACEHOLDERS["## Agreements"], "").replace(MIND_PLACEHOLDERS["# 4. Lessons"] , "")
+    assert with_placeholders(blank) == migrated
+    # One with no line at all, its next heading right below it: the placeholder goes between, no heading touched.
+    tight = migrated.replace(f"## What I own\n{MIND_PLACEHOLDERS['## What I own']}\n", "## What I own\n")
+    assert "## What I own\n## Agreements" in tight and with_placeholders(tight) == migrated
 
 
 def test_a_mind_keeps_its_heading_lines_once_each_in_order_and_never_loses_a_mission_entry():
