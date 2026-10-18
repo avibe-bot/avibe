@@ -121,6 +121,10 @@ localize that error rather than deliver a silent success.
   `empty_response` and end as error. A received terminal is never retried.
   Empty non-final responses with queued inputs can still continue to a reply;
   tool calls, explicit hook end, and tool termination retain their contracts.
+  A tool-free reply that queued input made non-final, and that did not stop at
+  its output limit, is committed `superseded`: a completed reply, stored as one
+  in the same transaction and shown as one, unlike narration beside tool calls,
+  a stream error's partial, or a truncated reply.
 - A tool batch runs in groups (C-3 section 2): neighbouring calls to tools that
   declare `concurrent` run at the same time, every other call runs alone, and
   each group starts after the one before it has committed. Each group's

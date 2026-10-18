@@ -776,7 +776,7 @@ class VibeyAgent(BaseAgent):
                 # Delivered at the end of the run, which decides how the Turn settles.
                 run.final_row = event.message_id
             else:
-                await self._emit_narration(run, event.message_id)
+                await self._emit_narration(run, event.message_id, superseded=event.superseded)
         elif isinstance(event, ToolStarted):
             run.tool_started[event.tool_call_id] = time.monotonic()
             await self._emit_tool_started(run, event)
@@ -1347,8 +1347,14 @@ class VibeyAgent(BaseAgent):
 
     # --- output helpers ------------------------------------------------------
 
-    async def _emit_narration(self, run: _Run, row_id: str) -> None:
-        """A non-final response through the same process path as the other backends' narration."""
+    async def _emit_narration(self, run: _Run, row_id: str, *, superseded: bool = False) -> None:
+        """A non-final response through the same process path as the other backends' narration.
+
+        A ``superseded`` response is a completed reply that later input took the final
+        word from, not narration: like Claude's pre-steer phase, it is an ``output``
+        boundary, transcript-visible whatever its length, which a silent final makes
+        the Turn's result (#2803).
+        """
         message = run.responses.get(row_id)
         body, citations = self._display_with_citations(message, final=False) if message is not None else ("", None)
         if not body.strip():
@@ -1356,7 +1362,7 @@ class VibeyAgent(BaseAgent):
         try:
             await self.controller.emit_agent_message(
                 run.request.context,
-                "assistant",
+                "output" if superseded else "assistant",
                 body,
                 output=MessageOutput(completes_turn=False, completes_run=False, persisted_row_id=row_id),
                 citations=citations,

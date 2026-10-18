@@ -57,6 +57,7 @@ class TranscriptStore(Protocol):
         request: Optional[Mapping[str, Any]] = None,
         replied: Optional[bool] = None,
         images: Sequence[HostedImage] = (),
+        superseded: bool = False,
     ) -> ContextEntry:
         """Commit a response; ``request`` (C-9 ``ModelResponse.request``) is stored with it and read back in ``payload``.
 
@@ -64,6 +65,8 @@ class TranscriptStore(Protocol):
         response replies (``has_reply``), which a final's row type takes as given; without one, the response alone
         decides. ``images`` are those the run's committed tool results generated, which a final delivers with its
         reply: its committed display carries them, so the row is a complete result even if delivery never runs.
+        ``superseded``: a non-final response is a completed reply that pending input took the final word from, which
+        commits as a visible reply (``output``), so it stays one even if delivery never runs.
         """
         ...
 

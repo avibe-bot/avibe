@@ -78,8 +78,12 @@ as `replied`, with the images a final delivers as `images`. The row's type and
 display at commit carry both, so the committed final is the complete terminal
 reply even if delivery never runs; live settlement takes the same values. This does not
 add a model call, increase an output limit, or replay a task. Non-final responses
-with pending steer/follow-up keep continuing normally; truncated tool calls keep
-the existing bounded reissue path without executing their partial arguments.
+with pending steer/follow-up keep continuing normally; a tool-free one that
+replies and did not stop at its output limit is a completed reply that the
+pending input superseded, which the loop passes to `append_response` as
+`superseded`, so it commits as `output`, a visible reply, in the same
+transaction. A truncated one stays narration, as it would fail as a final. Truncated tool calls keep the existing bounded reissue
+path without executing their partial arguments.
 
 A final response with `stop_reason` `refusal` or `safety` and no text is still committed as the final
 response, typed `error` ([`transcript.md`](transcript.md) §1); its commit-time display text is the localized
@@ -173,7 +177,7 @@ sent with that request gets the error result `Tool <name> is not available.`
 | --- | --- |
 | `run_started` | none; the Turn was opened by its delivery |
 | `text_delta`, `thinking_delta` | dropped: no backend shows live partial text, and none will (owner decision, 2026-10-08), so progress comes from the committed narration and tool lines, as for the other backends |
-| `message_committed` | the committed `messages` row is delivered: `assistant` as activity, `result` as the reply |
+| `message_committed` | the committed `messages` row is delivered: `assistant` as activity, `output` (`superseded`, a reply pending input took the final word from) as a visible reply that a silent final makes the Turn's result, `result` as the reply |
 | `tool_started` | `agent_events` `tool_call` trace row; IM progress line |
 | `tool_progress` | dropped: no backend shows live tool output, and none will (owner decision, 2026-10-08), so a running tool shows its `tool_started` line, as for the other backends |
 | `tool_finished` | the committed `tool_result` row; a handed-over job names its Watch |

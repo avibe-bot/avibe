@@ -581,7 +581,9 @@ class Agent:
         except ProjectionError as error:
             raise ProviderProtocolViolation(f"Provider protocol violation: {error}") from error
 
-    async def _response(self, message: AssistantMessage, *, final: bool, replied: Optional[bool] = None) -> ContextEntry:
+    async def _response(
+        self, message: AssistantMessage, *, final: bool, replied: Optional[bool] = None, superseded: bool = False
+    ) -> ContextEntry:
         self._validate_response(message)
         await self._save_state()
         # The attempt this response answered: the ledger's latest conversation attempt (the C-9 anchor).
@@ -594,6 +596,7 @@ class Agent:
                 final=final,
                 replied=replied,
                 images=tuple(self._generated_images) if final else (),
+                superseded=superseded,
                 **facts,
             ),
             interruptible=False,
@@ -1027,16 +1030,25 @@ class Agent:
                     if not pending:
                         pending = [(item, False) for item in self._follow_ups]
                 final = not message.tool_calls and not pending and not failed
+                # A completed reply the pending input took the final word from: one cut off at its output limit
+                # never completed, as ``final_outcome`` holds for a final.
+                superseded = bool(pending) and replied and message.stop_reason != "length"
                 if final or failed:
                     self._open = False
-                row = await self._response(message, final=final, replied=replied)
+                row = await self._response(message, final=final, replied=replied, superseded=superseded)
                 for item, is_steer in pending:
                     await self._consume(item)
                     (self._steers if is_steer else self._follow_ups).popleft()
                     consumed.append((item, is_steer))
         finally:
             if row is not None and not self._consumer_closed:
-                await emit(MessageCommitted, message_id=row.row_id, context_seq=row.context_seq, final=final)
+                await emit(
+                    MessageCommitted,
+                    message_id=row.row_id,
+                    context_seq=row.context_seq,
+                    final=final,
+                    superseded=superseded,
+                )
                 for item, is_steer in consumed:
                     if is_steer:
                         await emit(SteerApplied, message_id=item.message_id)
