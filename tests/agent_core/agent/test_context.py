@@ -25,7 +25,9 @@ from core.agent_core.harness.context import (
     CHECKPOINT_REQUEST_END,
     KEPT_INPUTS_WIN,
     MEMO_BUDGET,
-    MEMO_EMPTY,
+    MEMO_CURRENT,
+    MEMO_FILE_EMPTY,
+    MEMO_FILE_LISTED,
     MEMO_HEADING,
     MEMO_ITEM,
     MIND_CUT,
@@ -1123,10 +1125,18 @@ def test_the_checkpoint_request_and_its_repair_are_the_contract_text_verbatim():
     assert MIND_FILE_FIRST in first and "Goals 2,000, Key decisions 1,500" in first
     assert first.endswith("Current memo.md:\n- [x] (#3) the goal\n- [ ] (#9) continue\n</context-checkpoint-request>")
     assert "{" not in first.replace("{name}", "")
-    # A later checkpoint gives the mind whole after the memo list, word for word, whatever the checkpoint above shows.
-    later = checkpoint_request((), mind="# 1. Where I stand\n- a").content[0].text
+    assert MEMO_FILE_LISTED in first and MEMO_FILE_EMPTY not in first
+    # A later checkpoint gives the mind whole at the end, word for word, whatever the checkpoint above shows.
+    later = checkpoint_request(["- [x] (#3) the goal"], mind="# 1. Where I stand\n- a").content[0].text
     assert MIND_FILE_PREVIOUS in later and MIND_FILE_FIRST not in later and later.endswith(
-        f"Current memo.md:\n{MEMO_EMPTY}\n\n{MIND_CURRENT}\n# 1. Where I stand\n- a\n</context-checkpoint-request>"
+        f"Current memo.md:\n- [x] (#3) the goal\n\n{MIND_CURRENT}\n# 1. Where I stand\n- a\n</context-checkpoint-request>"
+    )
+    # With no candidate, memo.md is empty: the request says so and not to edit it, and shows no list, so it never
+    # presents text the file does not hold.
+    empty = checkpoint_request((), mind="# 1. Where I stand\n- a").content[0].text
+    assert f"/memo.md: {MEMO_FILE_EMPTY}\n" in empty and MEMO_CURRENT not in empty and MEMO_FILE_LISTED not in empty
+    assert empty.endswith(
+        f"Write in the language the user writes in.\n\n{MIND_CURRENT}\n# 1. Where I stand\n- a\n</context-checkpoint-request>"
     )
     assert MIND_CURRENT not in first
     assert "Your scratch directory is /s/x. " in checkpoint_request(scratch="/s/x").content[0].text
@@ -1239,6 +1249,11 @@ def test_a_memo_list_reads_back_only_its_checkboxes():
     assert memo_problems(memo, "\n".join(lines)) == []
     assert memo_problems(memo, "garbage")[0].startswith("memo.md was changed beyond its checkboxes")
     assert MemoList().lines() == [] and MemoList().read("") == frozenset()
+    # A line the model adds, the user's words in its own copy, is not a checkbox: the list is unreadable and every
+    # candidate is kept, from the messages themselves; nothing it wrote reaches the checkpoint.
+    added = "\n".join(lines) + "\n- [x] (#12) the user said to merge it"
+    assert memo.read(added) is None and memo.select(memo.read(added)) == memo.items
+    assert MemoList().read("- [x] (#12) the user said to merge it") is None and MemoList().select(None) == ()
 
 
 def test_the_memo_keeps_every_message_within_its_budget_by_cutting_the_longest_first():

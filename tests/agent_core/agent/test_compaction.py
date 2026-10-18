@@ -47,6 +47,7 @@ from core.agent_core.harness.context import (
     MIND_CUT,
     MIND_FILE,
     MIND_CURRENT,
+    MEMO_FILE_EMPTY,
     MIND_FILE_FIRST,
     MIND_FILE_PREVIOUS,
     MIND_TEMPLATE,
@@ -1985,6 +1986,25 @@ async def test_a_checkpoint_consolidates_into_a_mind_it_edits_a_memo_it_checks_a
     assert audit["outcome"] == "completed" and "repair" not in audit
     edits = [message for message in audit["messages"] if message["role"] == "tool_result"]
     assert [message["is_error"] for message in edits] == [False, False]
+
+
+async def test_with_no_memo_candidate_the_request_shows_no_list_and_the_turn_edits_only_the_mind(tmp_path):
+    # A Session no person typed into since the last checkpoint (a Watch's, a Task's, another agent's inputs only): no
+    # memo candidate. memo.md starts empty, so the request must not present any text as its content (a "(no messages)"
+    # placeholder sent a real turn to edit the empty file, twice); it says the file is empty and to leave it so.
+    scratch = tmp_path / "scratch"
+    mind_only = [
+        _batch(_edit("m", scratch / MIND_FILE, ("## Mission\n(none)", f"## Mission\n{MISSION}"))),
+        [Done(assistant(CHECKPOINT))],
+    ]
+    (model,), (row,), _ = await _consolidate(tmp_path, [mind_only], host=Host(typed={}))
+    request = _request(model)
+    assert (scratch / MEMO_FILE).read_text() == ""  # the file the turn found, and left
+    assert "Current memo.md:" not in request  # no list: nothing shown that the file does not hold
+    assert f"- {scratch}/memo.md: {MEMO_FILE_EMPTY}\n" in request
+    assert len(model.checkpoint_requests) == 2  # the mind's edit, then the reply: no repair
+    assert (row.payload["mind"], row.payload["memo"]) == (FIRST_MIND, [])
+    assert "# 5. The user's words\n(none)" in row.payload["summary"]
 
 
 async def test_a_later_checkpoint_starts_from_the_mind_and_memo_it_left_and_needs_one_request_when_nothing_changed(
