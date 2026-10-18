@@ -737,19 +737,24 @@ class ProcessingIndicatorService:
         through the remaining indicator modes (``agent_name`` labels the ack message).
         """
         handle, request = self._resolve_handle(request_or_handle)
-        if not handle.reaction_indicator_selected:
-            return
-        if handle.ack_reaction_emoji == ACK_REACTION_EMOJI:
-            return
-        if not handle.ack_reaction_emoji and (handle.context.platform_specific or {}).get("vibey_resume") is True:
-            # A Turn rerun after a restart answers a message that still wears the 👀 its
-            # dead process added: own that one, so this Turn's own end retires it.
+        if (
+            not handle.ack_reaction_emoji
+            and (handle.context.platform_specific or {}).get("vibey_resume") is True
+            and self._capabilities(handle.context).supports_reaction_indicator
+        ):
+            # A Turn rerun after a restart answers a message that may still wear the 👀 its
+            # dead process added, whatever indicator the current settings pick: own that
+            # one, so this Turn's own end retires it.
             target = self._reaction_target_message_id(handle.context)
             if target:
                 handle.ack_reaction_message_id = target
                 handle.ack_reaction_emoji = ACK_REACTION_EMOJI
                 self._sync_reaction_to_request(handle, request)
                 return
+        if not handle.reaction_indicator_selected:
+            return
+        if handle.ack_reaction_emoji == ACK_REACTION_EMOJI:
+            return
         if handle.ack_reaction_emoji == QUEUED_REACTION_EMOJI and handle.ack_reaction_message_id:
             removed = False
             try:

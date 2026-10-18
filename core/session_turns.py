@@ -7001,13 +7001,17 @@ class SessionTurnManager:
         from core.message_mirror import promote_turn_text_to_result
         from storage import restart_followups
 
-        with self._sqlite_engine().connect() as conn:
-            outstanding = restart_followups.pending(conn, turn_id)
-            settled = {
-                key
-                for key in outstanding
-                if (turn := delivery_store.get_turn(conn, key)) is not None and turn["state"] == "terminal"
-            }
+        def outstanding_of_settled() -> tuple[dict[str, dict[str, Any]], set[str]]:
+            with self._sqlite_engine().connect() as conn:
+                found = restart_followups.pending(conn, turn_id)
+                return found, {
+                    key
+                    for key in found
+                    if (turn := delivery_store.get_turn(conn, key)) is not None and turn["state"] == "terminal"
+                }
+
+        # Off the controller loop, like every follow-up read and write below.
+        outstanding, settled = await asyncio.to_thread(outstanding_of_settled)
         for key, followups in outstanding.items():
             if key not in settled:
                 continue
@@ -7018,30 +7022,39 @@ class SessionTurnManager:
                     str(promote["row_id"]),
                     suppress_delivery=bool(promote.get("suppress_delivery")),
                 )
-                with self._sqlite_engine().connect() as conn:
-                    promoted = messages_service.get_message(conn, str(promote["row_id"]))
+                promoted = await asyncio.to_thread(self._message_row, str(promote["row_id"]))
                 if promoted is not None and promoted.get("type") == "result":
-                    self._restart_followup_done(key, "promote")
+                    await self._restart_followup_done(key, "promote")
                 else:
-                    self._restart_followup_failed(key, "promote")
+                    await self._restart_followup_failed(key, "promote")
             message_id = str(followups.get("clear_reaction") or "")
             if message_id:
                 await self._clear_orphaned_running_reaction(str(followups.get("session_id") or ""), message_id, key)
 
-    def _restart_followup_done(self, turn_id: str, key: str) -> None:
+    async def _write_restart_followups(self, write: Any, *args: Any) -> Any:
+        """One follow-up write in its own writer transaction, off the controller loop."""
+
+        def run() -> Any:
+            with self._sqlite_engine().begin() as conn:
+                reserve_write_lock(conn)
+                return write(conn, *args)
+
+        return await asyncio.to_thread(run)
+
+    def _message_row(self, message_id: str) -> Optional[dict[str, Any]]:
+        with self._sqlite_engine().connect() as conn:
+            return messages_service.get_message(conn, message_id)
+
+    async def _restart_followup_done(self, turn_id: str, key: str) -> None:
         from storage import restart_followups
 
-        with self._sqlite_engine().begin() as conn:
-            reserve_write_lock(conn)
-            restart_followups.done(conn, turn_id, key)
+        await self._write_restart_followups(restart_followups.done, turn_id, key)
 
-    def _restart_followup_failed(self, turn_id: str, key: str) -> bool:
+    async def _restart_followup_failed(self, turn_id: str, key: str) -> bool:
         """Count a failed attempt at a follow-up; whether it was dropped after its last."""
         from storage import restart_followups
 
-        with self._sqlite_engine().begin() as conn:
-            reserve_write_lock(conn)
-            dropped = restart_followups.failed(conn, turn_id, key)
+        dropped = await self._write_restart_followups(restart_followups.failed, turn_id, key)
         if dropped:
             logger.warning("restart follow-up %s of Turn=%s dropped after repeated failures", key, turn_id)
         return dropped
@@ -7071,11 +7084,11 @@ class SessionTurnManager:
             except Exception:
                 logger.debug("orphaned reaction: clear failed for session=%s", session_id, exc_info=True)
         if cleared:
-            self._restart_followup_done(turn_id, "clear_reaction")
+            await self._restart_followup_done(turn_id, "clear_reaction")
             return
         held = self._pending_orphan_reaction_clears.setdefault(platform, [])
         entry = (session_id, message_id, turn_id)
-        if self._transport_can_deliver(platform) and self._restart_followup_failed(turn_id, "clear_reaction"):
+        if self._transport_can_deliver(platform) and await self._restart_followup_failed(turn_id, "clear_reaction"):
             if entry in held:
                 held.remove(entry)
             return
@@ -7456,9 +7469,7 @@ class SessionTurnManager:
         if origin:
             followups["clear_reaction"] = origin
         if followups:
-            with self._sqlite_engine().begin() as conn:
-                reserve_write_lock(conn)
-                restart_followups.save(conn, turn_id, {"session_id": session_id, **followups})
+            await self._write_restart_followups(restart_followups.save, turn_id, {"session_id": session_id, **followups})
         run_ids = self.accepted_agent_run_ids_for_turn(turn_id)
         terminal = self._terminalize_durable_turn(
             turn_id,
@@ -7476,9 +7487,7 @@ class SessionTurnManager:
         if not terminal.get("changed"):
             if followups:
                 # Another owner settled the Turn; its own path presents it.
-                with self._sqlite_engine().begin() as conn:
-                    reserve_write_lock(conn)
-                    restart_followups.save(conn, turn_id, {})
+                await self._write_restart_followups(restart_followups.save, turn_id, {})
             return
         if run_ids:
             with self._sqlite_engine().connect() as conn:

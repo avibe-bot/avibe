@@ -111,19 +111,24 @@ class QueuedReactionLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(im.calls, [("add", "m1", ACK_REACTION_EMOJI)])
 
     async def test_a_restart_rerun_owns_the_running_reaction_its_dead_process_left(self):
-        """MESSAGE-DELIVERY-327: the message still wears the 👀; the rerun's own end retires it."""
-        im = _FakeIM()
-        svc = _svc(im)
-        context = _ctx()
-        context.platform_specific = {"vibey_resume": True}
-        handle = ProcessingIndicatorHandle(context=context, reaction_indicator_selected=True)
+        """MESSAGE-DELIVERY-327: the message still wears the 👀; the rerun's own end retires it,
+        whatever indicator the settings pick for it now."""
+        for selected in (True, False):
+            with self.subTest(reaction_indicator_selected=selected):
+                im = _FakeIM()
+                svc = _svc(im)
+                context = _ctx()
+                context.platform_specific = {"vibey_resume": True}
+                handle = ProcessingIndicatorHandle(context=context, reaction_indicator_selected=selected)
 
-        await svc.promote_reaction_to_running(handle)
-        self.assertEqual((handle.ack_reaction_message_id, handle.ack_reaction_emoji), ("m1", ACK_REACTION_EMOJI))
-        self.assertEqual(im.calls, [])
+                await svc.promote_reaction_to_running(handle)
+                self.assertEqual(
+                    (handle.ack_reaction_message_id, handle.ack_reaction_emoji), ("m1", ACK_REACTION_EMOJI)
+                )
+                self.assertEqual(im.calls, [])
 
-        await svc.finish(handle)
-        self.assertEqual(im.calls, [("remove", "m1", ACK_REACTION_EMOJI)])
+                await svc.finish(handle)
+                self.assertEqual(im.calls, [("remove", "m1", ACK_REACTION_EMOJI)])
 
     async def test_promote_is_idempotent(self):
         im = _FakeIM()

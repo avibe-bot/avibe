@@ -386,6 +386,18 @@ def test_restart_completes_a_cut_vibey_turn_whose_final_reply_was_committed(
         return promote(*args, **kwargs)
 
     monkeypatch.setattr(message_mirror, "promote_turn_text_to_result", promote_where)
+    followup_writes_on_loop = []
+    for name in ("save", "done", "failed"):
+
+        def where(*args, _write=getattr(restart_followups, name), **kwargs):
+            try:
+                asyncio.get_running_loop()
+                followup_writes_on_loop.append(True)
+            except RuntimeError:
+                followup_writes_on_loop.append(False)
+            return _write(*args, **kwargs)
+
+        monkeypatch.setattr(restart_followups, name, where)
     previous = _previous_process("silent_final" if final == "silent_final_retried" else final)
 
     _restart(cut, _then(previous, _request_stop) if late_stop else previous)
@@ -402,8 +414,11 @@ def test_restart_completes_a_cut_vibey_turn_whose_final_reply_was_committed(
         cut.manager.controller.session_turns = cut.manager = manager
         cut.delivery = "ready"
         _restart(cut)
-    # The promotion takes SQLite's write lock: off the controller loop, as the dispatcher runs it.
+    # The promotion and the follow-up records take SQLite's write lock: off the controller loop,
+    # as the dispatcher runs the promotion.
     assert promoted_on_loop == {"silent_final": [False], "silent_final_retried": [False, False]}.get(final, [])
+    assert True not in followup_writes_on_loop
+    assert followup_writes_on_loop or not (origin or final.startswith("silent_final"))
     if delivery in {"unready", "failing"}:
         assert clear.await_count == (1 if delivery == "failing" else 0)
         cut.manager._transport_can_deliver = lambda _platform: True
