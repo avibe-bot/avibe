@@ -86,6 +86,9 @@ class ContextView:
     pinned: int = 0
     #: The opaque payloads, by (Source identity, kind), a provider refused in this Session (``replay_refusal`` rows).
     opaque_refused: frozenset[tuple[Optional[str], str]] = frozenset()
+    #: Row ids of tool results a ``context_edit`` replaced, cleared or cut to fit: their projection no longer holds
+    #: their whole original content.
+    edited: frozenset[str] = frozenset()
 
     @property
     def messages(self) -> tuple[Message, ...]:
@@ -232,6 +235,23 @@ _PAYLOAD_SHAPES: dict[str, Check] = {
                 _object({"origin": _reads(origin_from_dict), "prompt_version": _string, "rounds": _count})
             ),
             "usage": _reads(usage_from_dict),
+            # checkpoint-v5 (context.md section 7): a checkpoint-v4 row has none of them.
+            "mind": _string,
+            "mind_truncated": _boolean,
+            "memo": _list(
+                _object({"seq": lambda value: _integer(value) and value > 0, "text": _string, "truncated": _boolean})
+            ),
+            "skills_carried": _list(
+                _object(
+                    {
+                        "name": _string,
+                        "revision": _string,
+                        "loaded_at": lambda value: type(value) in (int, float) and not isinstance(value, bool),
+                        "content": _string,
+                        "truncated": _boolean,
+                    }
+                )
+            ),
         },
     ),
     "context_edit": _object(
@@ -360,6 +380,7 @@ def context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] =
         state=deepcopy(state),
         pinned=len(kept),
         opaque_refused=frozenset(refused),
+        edited=frozenset(reasons),
     )
 
 

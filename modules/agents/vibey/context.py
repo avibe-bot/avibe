@@ -7,7 +7,12 @@
   query, and the Session's fork source when it is a fork. Tool outputs are not
   there: the model runs a tool again for them;
 * ``render_state`` renders the state a checkpoint carries: the environment's core
-  fields (a checkpoint always happens inside a run), bounded by construction.
+  fields (a checkpoint always happens inside a run), bounded by construction;
+* ``user_messages`` says which inputs a person typed, and what: the memo's candidates
+  are only those (section 7), never a Watch's, a Task's, a callback's, or another
+  Session's message, whatever its text says;
+* ``skill_contents`` renders skills as ``vibe skill load`` would print them in the
+  Session's working directory now, which a checkpoint carries back (section 7).
 
 A skill load is a ``bash`` call to ``vibe skill load``, which writes one
 ``<skill_content name="...">`` block per skill into the result; ``mark_skill_loads``
@@ -17,17 +22,20 @@ checkpoint lists it by name (section 7). The result itself clears like any other
 
 from __future__ import annotations
 
+import hashlib
 import html
 import re
 from dataclasses import replace
 from typing import Any, Callable, Mapping, Optional, Sequence
 
+from sqlalchemy import select
 from sqlalchemy.engine import Engine
 
 from core.agent_core.harness.context import COMMAND_TOOLS, StateRequest, display
 from core.agent_core.tools.base import Tool, ToolContext, ToolResult, ToolSpec
 from core.managed_skills import is_skill_name
 from modules.agents.vibey.prompt import EnvironmentValue, render_environment
+from storage.models import messages
 
 #: The tags of the block ``vibe skill load`` writes for each skill it loads (``render_skill_content``).
 _SKILL_TAG = re.compile(r'<skill_content name="([^"]*)"[^>]*>|</skill_content>')
@@ -79,7 +87,9 @@ class VibeyContextHost:
         hint = (
             "The earlier messages of this conversation (your inputs and replies, through context_seq"
             f" {int(through_seq)}) are stored in Avibe's messages table, session_id = '{display(session_id)}'."
-            " Tool outputs are not stored there; re-run a tool if you need its output again."
+            " Tool outputs are not stored there; re-run a tool if you need its output again. When you are unsure of"
+            " the mission, of what the user said, or of the next step, read the user's own messages first, in order;"
+            " a memo entry's #number is its context_seq."
         )
         example = example_query(session_id, through_seq)
         if example is not None:
@@ -91,15 +101,44 @@ class VibeyContextHost:
     async def render_state(self, request: StateRequest) -> list[str]:
         return [_environment(self._environment(request.session_id))]
 
+    def user_messages(self, row_ids: Sequence[str]) -> dict[str, str]:
+        """The text a person typed for each of ``row_ids`` that is a person's message (``messages.type = 'user'``);
+        every other input type (a Watch's, a Task's, a callback's, another Session's) is absent."""
+        if not row_ids:
+            return {}
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                select(messages.c.id, messages.c.content_text).where(
+                    messages.c.id.in_(list(row_ids)), messages.c.type == "user"
+                )
+            ).all()
+        return {row.id: row.content_text or "" for row in rows}
+
+    def skill_contents(self, session_id: str, names: Sequence[str]) -> dict[str, tuple[str, str]]:
+        """Each of ``names`` as ``vibe skill load`` would print it in the Session's working directory now, with its
+        revision (the SHA-256 of that text); one that no longer resolves is absent. The catalog is resolved once."""
+        from core.managed_skills import load_skill, render_skill_content, resolve_skills
+
+        cwd = str(self._environment(session_id).get("cwd") or "") or None
+        catalog = resolve_skills(cwd)
+        found: dict[str, tuple[str, str]] = {}
+        for name in names:
+            skill = load_skill(name, cwd, resolved_skills=catalog)
+            if skill is not None:
+                content = render_skill_content(skill)
+                found[name] = (hashlib.sha256(content.encode("utf-8", "surrogatepass")).hexdigest(), content)
+        return found
+
 
 def example_query(session_id: str, through_seq: int) -> Optional[str]:
-    """One runnable ``vibe data query`` line over the Session's earlier messages, newest first; None for an id it
-    could not quote as it is."""
+    """One runnable ``vibe data query`` line over the user's own earlier messages, in order; None for an id it could
+    not quote as it is."""
     if _PLAIN_ID.fullmatch(session_id) is None:
         return None
     sql = (
-        "SELECT context_seq, type, substr(content_text,1,500) FROM messages"
-        f" WHERE session_id='{session_id}' AND context_seq <= {int(through_seq)} ORDER BY context_seq DESC LIMIT 20"
+        "SELECT context_seq, created_at, substr(content_text,1,300) FROM messages"
+        f" WHERE session_id='{session_id}' AND type='user' AND context_seq <= {int(through_seq)}"
+        " ORDER BY context_seq LIMIT 50"
     )
     return f'vibe data query --sql "{sql}"'
 
