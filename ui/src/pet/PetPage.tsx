@@ -1131,7 +1131,7 @@ const MainDetail: React.FC<MainDetailProps> = (props) => {
     const end = (props.exchange.answersEarlierInput && latestInputRef.current) || lastResultRef.current;
     const history = end?.closest<HTMLElement>('.pet-mini-bubble-history');
     if (end && history) history.scrollTop = end.offsetTop + end.offsetHeight - history.clientHeight;
-  }, [props.visible, resultKey, props.exchange.answersEarlierInput]);
+  }, [props.visible, resultKey, props.exchange.answersEarlierInput, props.exchange.user?.id]);
   useEffect(() => {
     const node = lastResultRef.current;
     if (!props.visible || !node) return;
