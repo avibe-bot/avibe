@@ -37,8 +37,6 @@ TURN_OWNER_STATES = ("starting", "active")
 POSSIBLY_WRITTEN_DELIVERY_STATES = frozenset({"accepted", "steering", "reconciling_steer"})
 UNWRITTEN_STEER_STATES = frozenset({"queued", "pending_steer"})
 FAILURE_RETRY_HISTORY_KIND = "backend_failure_retry"
-# The hidden continuation of a Vibey Turn an Avibe restart cut (startup recovery).
-RESTART_RESUME_HISTORY_KIND = "restart_resume"
 WEB_PUSH_USER_KEY_METADATA = "_web_push_user_key"
 WEB_PUSH_USER_KEYS_METADATA = "_web_push_user_keys"
 WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA = "_web_push_authorization_contexts"
@@ -314,29 +312,16 @@ def delivery_has_history_event(delivery: dict[str, Any], *, kind: str) -> bool:
     )
 
 
-def _history_binding(
-    delivery: dict[str, Any], kind: str, *, unclaimed_only: bool
-) -> dict[str, Any] | None:
-    for event in reversed(_history(delivery.get("delivery_history_json"))["events"]):
-        if unclaimed_only and event.get("kind") == "start" and event.get("outcome") in {"claimed", "opened"}:
-            return None
-        if event.get("kind") == kind:
-            return event
-    return None
-
-
 def failure_retry_binding(
     delivery: dict[str, Any], *, unclaimed_only: bool = False
 ) -> dict[str, Any] | None:
     """Server-written action provenance, never caller Message metadata."""
-    return _history_binding(delivery, FAILURE_RETRY_HISTORY_KIND, unclaimed_only=unclaimed_only)
-
-
-def restart_resume_binding(
-    delivery: dict[str, Any], *, unclaimed_only: bool = False
-) -> dict[str, Any] | None:
-    """Startup recovery's binding of a hidden continuation to the Turn a restart cut."""
-    return _history_binding(delivery, RESTART_RESUME_HISTORY_KIND, unclaimed_only=unclaimed_only)
+    for event in reversed(_history(delivery.get("delivery_history_json"))["events"]):
+        if unclaimed_only and event.get("kind") == "start" and event.get("outcome") in {"claimed", "opened"}:
+            return None
+        if event.get("kind") == FAILURE_RETRY_HISTORY_KIND:
+            return event
+    return None
 
 
 def failure_retry_state(delivery: dict[str, Any]) -> str:
@@ -401,17 +386,6 @@ def consecutive_prewrite_start_failures(delivery: dict[str, Any]) -> int:
             break
         count += 1
     return count
-
-
-def latest_turn(conn: Connection, session_id: str) -> dict[str, Any] | None:
-    """The Session's newest Turn, settled or not."""
-    return _one(
-        conn,
-        select(session_turns)
-        .where(session_turns.c.session_id == session_id)
-        .order_by(session_turns.c.created_at.desc(), session_turns.c.id.desc())
-        .limit(1),
-    )
 
 
 def active_turn(conn: Connection, session_id: str) -> dict[str, Any] | None:
@@ -1232,8 +1206,68 @@ def bind_native_start(
             "runtime_turn_id": runtime_turn_id or turn.get("runtime_turn_id"),
             "native_turn_id": native_turn_id or turn.get("native_turn_id"),
             "start_receipt_outcome": "accepted",
-            "start_receipt_json": _canonical_json({"kind": "native_start"}),
+            # A Turn rerun after a restart keeps its restart streak across this bind.
+            "start_receipt_json": _canonical_json({"kind": "native_start", **restart_receipt(turn)}),
             "started_at": turn.get("started_at") or turn_now_iso(),
+        },
+    )
+
+
+#: Start-receipt keys of a Turn rerun in place after restarts: the restarts in a row
+#: that cut it, and the context sequence of the last model response then committed.
+RESTART_STREAK_KEYS = ("restart_streak", "restart_response_seq")
+
+
+def restart_receipt(turn: dict[str, Any]) -> dict[str, Any]:
+    """The restart streak a Turn's start receipt carries, if it was rerun after a restart."""
+    try:
+        receipt = json.loads(str(turn.get("start_receipt_json") or "{}"))
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(receipt, dict):
+        return {}
+    return {key: receipt[key] for key in RESTART_STREAK_KEYS if key in receipt}
+
+
+def rotate_restart_generation(
+    conn: Connection,
+    turn_id: str,
+    *,
+    expected_version: int,
+    streak: int,
+    response_seq: int | None,
+) -> dict[str, Any] | None:
+    """Release an accepted Turn from the runtime generation a restart killed, to rerun it.
+
+    The Turn keeps its accepted start; the dead process's runtime and native ids are
+    cleared so the rerun's native start binds this process's, and the start receipt
+    records the restart streak (``vibey-restart-auto-resume.md`` item 6).
+    """
+    turn = get_turn(conn, turn_id)
+    if (
+        turn is None
+        or turn["state"] != "active"
+        or turn.get("start_receipt_outcome") != "accepted"
+        or int(turn["version"]) != expected_version
+    ):
+        return None
+    try:
+        receipt = json.loads(str(turn.get("start_receipt_json") or "{}"))
+    except (TypeError, ValueError):
+        receipt = {}
+    if not isinstance(receipt, dict):
+        receipt = {}
+    receipt.update({"restart_streak": streak, "restart_response_seq": response_seq})
+    return cas_turn(
+        conn,
+        turn_id,
+        expected_version=expected_version,
+        expected_states=("active",),
+        values={
+            "runtime_key": None,
+            "runtime_turn_id": None,
+            "native_turn_id": None,
+            "start_receipt_json": _canonical_json(receipt),
         },
     )
 

@@ -540,14 +540,16 @@ async def test_a_reply_pending_input_superseded_commits_as_a_visible_reply(engin
 
 
 async def test_the_restart_reads_of_a_turns_context_tail_stay_bounded(engine) -> None:
-    """MESSAGE-DELIVERY-327: restart recovery decides each cut Turn (``restart_resume_plan``) and a
-    silent final's result, and every start of a continuation rechecks its admission, synchronously
-    on the controller loop. Every read is an indexed SEARCH keyed by the Turn, a row id, the
-    Session's context tail or newest Turn, or the Turn's own time window: no scan, and a temporary
-    sort only over the Turn's own Deliveries, never over the growing history."""
+    """MESSAGE-DELIVERY-327: restart recovery decides each cut Turn (``restart_resume_plan``, its
+    restart streak included), releases its runtime generation to rerun it, reads a silent final's
+    result, and rescans the durable follow-ups, synchronously on the controller loop. Every read is
+    an indexed SEARCH keyed by the Turn, a row id, the Session's context tail, the Turn's own time
+    window, or the follow-up record type: no scan, and a temporary sort only over the Turn's own
+    Deliveries, never over the growing history."""
     from sqlalchemy import event
 
-    from core.backend_failure_retry import admission_denial, reserve_restart_resume, restart_resume_plan
+    from core.restart_resume import restart_resume_plan, restart_streak
+    from storage import restart_followups
     from storage.agent_transcript import last_turn_text
 
     with engine.begin() as conn:
@@ -569,23 +571,20 @@ async def test_the_restart_reads_of_a_turns_context_tail_stay_bounded(engine) ->
     event.listen(engine, "before_cursor_execute", capture)
     try:
         with engine.connect() as conn:
-            # Every read of both outcomes: a committed final, and a Turn left to continue.
+            # Every read of both outcomes: a committed final, and a Turn left to rerun.
             assert restart_resume_plan(conn, message_deliveries.get_turn(conn, "turn_main"))[0] == "final"
-            assert restart_resume_plan(conn, message_deliveries.get_turn(conn, "turn_cut"))[0] == "continue"
+            cut_turn = message_deliveries.get_turn(conn, "turn_cut")
+            assert restart_resume_plan(conn, cut_turn)[0] == "rerun"
             # A silent final's result: the Turn's last narration or superseded reply.
             last_turn_text(conn, "ses_main", since="2026-01-01T00:00:00.000000Z")
-    finally:
-        event.remove(engine, "before_cursor_execute", capture)
-    with engine.begin() as conn:
-        [continuation] = reserve_restart_resume(conn, message_deliveries.get_turn(conn, "turn_cut"))
-        message_deliveries.terminalize_turn(
-            conn, "turn_cut", outcome="completed", settled_by="restart_resumed", evidence_kind="restart_resume"
-        )
-    event.listen(engine, "before_cursor_execute", capture)
-    try:
-        with engine.connect() as conn:
-            # The continuation's admission: its cut Turn must still be the Session's newest.
-            assert admission_denial(conn, message_deliveries.get_delivery(conn, continuation["id"])) is None
+            # The follow-ups an earlier process left: only the outstanding records.
+            restart_followups.pending(conn)
+        with engine.begin() as conn:
+            # The rerun's writer transaction: the streak, and the released generation.
+            streak, response_seq = restart_streak(conn, cut_turn)
+            assert message_deliveries.rotate_restart_generation(
+                conn, "turn_cut", expected_version=int(cut_turn["version"]), streak=streak, response_seq=response_seq
+            )
     finally:
         event.remove(engine, "before_cursor_execute", capture)
 
@@ -597,12 +596,12 @@ async def test_the_restart_reads_of_a_turns_context_tail_stay_bounded(engine) ->
     turn_keys = ("(turn_id=?)", "(current_target_turn_id=?)")
     bounded = re.compile(
         r"SEARCH \w+ USING (?:COVERING )?INDEX \w+ \((?:id=\?|delivery_id=\?|turn_id=\?|current_target_turn_id=\?"
-        r"|session_id=\? AND context_seq>\?|session_id=\? AND type=\? AND created_at>\?)\)"
-        # The Session's newest Turn: its index's order, so LIMIT 1 reads one row.
-        r"|SEARCH session_turns USING (?:COVERING )?INDEX \w+ \(session_id=\?\)"
+        r"|session_id=\? AND context_seq>\?|session_id=\? AND type=\? AND created_at>\?|record_type=\?)\)"
     )
     for (sql, _params), plan in zip(statements, plans):
         searches = [step for step in plan if step.startswith(("SEARCH", "SCAN"))]
+        if not searches and sql.lstrip().upper().startswith("UPDATE"):
+            continue  # a CAS write keyed by the row id, whose plan names no table read
         assert searches and all(bounded.fullmatch(step) for step in searches), (sql, plan)
         if any("TEMP B-TREE" in step for step in plan):
             assert all(step.endswith(turn_keys) for step in searches), (sql, plan)

@@ -422,47 +422,49 @@ scenarios:
       - tests/test_vibey_agent.py::test_a_short_reply_a_steer_superseded_stays_a_visible_reply
       - tests/test_agent_transcript.py::test_a_reply_pending_input_superseded_commits_as_a_visible_reply
   - id: MESSAGE-DELIVERY-327
-    name: Startup continues a Vibey Turn a restart cut from its transcript, or completes it from a committed final (a silent final leaving its visible text as the result), without a notice
+    name: Startup reruns a Vibey Turn a restart cut in place from its transcript, or completes it from a committed final (a silent final leaving its visible text as the result, its follow-ups durable across another restart), without a notice
     status: covered
     kind: recovery
     layer: contract
     test:
-      - tests/test_backend_failure_retry.py::test_restart_continues_a_cut_vibey_turn_from_its_transcript_without_a_notice
+      - tests/test_backend_failure_retry.py::test_restart_reruns_a_cut_vibey_turn_in_place_without_a_notice
+      - tests/test_backend_failure_retry.py::test_a_rerun_that_exits_before_dispatching_fails_its_turn
       - tests/test_backend_failure_retry.py::test_restart_completes_a_cut_vibey_turn_whose_final_reply_was_committed
       - tests/test_agent_transcript.py::test_the_restart_reads_of_a_turns_context_tail_stay_bounded
   - id: MESSAGE-DELIVERY-328
-    name: A Vibey Agent Run cut by a restart, steered-in Runs included (the Turn waiting open until their receipts materialize), is left at shutdown, moves to the continuation, and settles once from the continued result, the answer after its command
+    name: A Vibey Agent Run cut by a restart, steered-in Runs included (the Turn waiting open until their receipts materialize), is left at shutdown and settles once from the rerun's result, the answer after its command
     status: covered
     kind: recovery
     layer: contract
     test:
       - tests/test_harness_failure_retry.py::test_a_vibey_agent_run_cut_by_a_restart_settles_from_the_continued_work
-      - tests/test_vibey_agent.py::test_a_restart_continuation_waits_for_its_surviving_command_as_the_live_call_would
+      - tests/test_vibey_agent.py::test_a_restart_rerun_waits_for_its_surviving_command_as_the_live_call_would
   - id: MESSAGE-DELIVERY-329
-    name: A cut Vibey Turn that no longer qualifies (Stop, Agent off Vibey, archived, continuation bound, cannot start now) keeps the restart notice
+    name: A cut Vibey Turn that no longer qualifies (Stop, Agent off Vibey, archived, the third restart in a row without a model response) keeps the restart notice; a committed response resets the streak
     status: covered
     kind: recovery
     layer: contract
     test: tests/test_backend_failure_retry.py::test_a_cut_vibey_turn_that_no_longer_qualifies_keeps_the_restart_notice
   - id: MESSAGE-DELIVERY-330
-    name: A command still running at restart is left to the continuation (across repeated restarts), which, accepted before it waits, waits for it within its foreground window from launch, hands it over only after, ends it on a Stop, and never starts it again
+    name: A command still running at restart is left to the rerun (across repeated restarts), which waits for it within its foreground window from launch, hands it over only after, ends it on a Stop, and never starts it again
     status: covered
     kind: recovery
     layer: contract
     test:
-      - tests/test_backend_failure_retry.py::test_restart_continues_a_cut_vibey_turn_from_its_transcript_without_a_notice
-      - tests/test_vibey_agent.py::test_a_restart_continuation_waits_for_its_surviving_command_as_the_live_call_would
+      - tests/test_backend_failure_retry.py::test_restart_reruns_a_cut_vibey_turn_in_place_without_a_notice
+      - tests/test_backend_failure_retry.py::test_a_turn_waiting_for_its_steer_keeps_its_running_command_for_the_rerun
+      - tests/test_vibey_agent.py::test_a_restart_rerun_waits_for_its_surviving_command_as_the_live_call_would
   - id: MESSAGE-DELIVERY-331
-    name: Input queued while the service was down runs after the restart continuation, even in the cut Turn's second after a requeued start
+    name: Input queued while the service was down runs after the rerun of the Turn a restart cut
     status: covered
     kind: concurrency
     layer: contract
-    test: tests/test_backend_failure_retry.py::test_restart_continuation_runs_before_input_queued_while_the_service_was_down
+    test: tests/test_backend_failure_retry.py::test_restart_rerun_runs_before_input_queued_while_the_service_was_down
   - id: MESSAGE-DELIVERY-332
-    name: A Vibey run that fails because the service is stopping leaves its Turn open for the restart continuation
+    name: A Vibey run that fails because the service is stopping leaves its Turn open for its restart rerun
     status: covered
     kind: recovery
     layer: contract
-    test: tests/test_vibey_agent.py::test_a_run_the_service_stop_cut_leaves_its_turn_open_for_the_restart_continuation
+    test: tests/test_vibey_agent.py::test_a_run_the_service_stop_cut_leaves_its_turn_open_for_its_restart_rerun
 next_priority:
   - MESSAGE-DELIVERY-333

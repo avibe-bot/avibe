@@ -32,6 +32,38 @@ not tell a controlled restart from a crash.
 
 This replaces recovery invariant T4 for Vibey (`agent-core-contracts/recovery.md`).
 
+## Mechanism: the cut Turn reruns in place
+
+The first implementation handed a cut Turn's work to a new, hidden
+continuation Turn and settled the cut Turn. Five reviewed heads in a row
+raised findings at the seams of that handover, so the mechanism changed: the
+cut Turn keeps its identity. It stays `active` with its accepted start;
+startup recovery rotates it to this process's runtime generation and reruns
+its Vibey loop with `Agent.resume` over its own accepted inputs. No Delivery
+is created, no Run moves, and no successor Turn starts.
+
+### Inventory of the seams raised on the successor design
+
+The acceptance list for the in-place rerun. "Removed" means the seam no longer
+exists; "handled" names where the in-place design still owns it.
+
+| Seam | In-place rerun |
+| --- | --- |
+| Runs move to the continuation (one Delivery per Run, `agent_runs.delivery_id` unique, batch claim) | Removed. Runs stay on the Turn's own Deliveries; the rerun's terminal settles them like any Turn's. |
+| Steers the dead run accepted but never materialized; a steer still unsettled at startup | Handled. Recovery reconciles the Turn's steer receipts into the same Turn before it reruns, and the rerun pins them with the Turn's inputs. While one is unsettled the Turn waits open and recovery retries; the retry only recovers again, so it never hands a command over early. |
+| FIFO tie-break; a requeued continuation overtaken by same-second input | Removed. The Turn stays active, so queued input waits behind it as behind any active Turn. |
+| Job-owner ancestry (an open call owned by a settled source; a replacement successor) | Removed. The open call's Turn is the rerunning Turn: T2 defers while it is open and ends the command once a Stop or replacement canceled it. |
+| Stop or replacement during the rerun's T2 wait (pre-write cancellation instead of `handle_stop`) | Removed. The Turn is durably active, so a Stop or replacement takes the active-Turn interrupt to `handle_stop`, which ends the wait and the command. |
+| A continuation requeued, then retired (backend change) or left unclaimed, after its source settled | Removed. There is no continuation Delivery. A rerun that fails ends its Turn through the ordinary runner, with the failure notice and Retry. |
+| A Model Hub refusal at the continuation's preflight | Handled. The rerun is the accepted Turn continuing, so the refusal fails that Turn with its notice and Retry, as a refusal at any later model call of a live Turn does; the work stays in the transcript. |
+| Another restart during the T2 wait | Handled. The Turn is still accepted and active, so the next start reruns it again, within the loop bound; its startup T2 leaves the job to it. |
+| The orphaned 👀 clear after a committed final | Handled durably. A `runtime_records` row written before the Turn's terminal write and deleted once done; startup rescans it, and the clear waits for its transport. |
+| The silent-final promotion (off the controller loop; a failed write) | Handled durably by the same row: the promotion runs off the loop, and a row not yet `result` keeps it for the next pass. |
+| Retry-loop failures; a Stop while the Turn waits open | Handled. One retry per Turn that survives a failed pass and ends when the Turn reruns or settles; a Stop that settles a waiting Turn has T2 end its command. |
+| Continuation admission recheck | Removed with the continuation. |
+| Failed silent final | Handled. A failed final keeps its own error and promotes nothing. |
+| Query plans of reads on the controller loop | Handled. Every read restart recovery performs is pinned to a bounded index `SEARCH`. |
+
 ## Contract
 
 1. **Who is continued.** At startup, recovery continues every Vibey Turn whose
@@ -44,125 +76,98 @@ This replaces recovery invariant T4 for Vibey (`agent-core-contracts/recovery.md
    - the Turn's transcript has work left: its last committed response has tool
      calls (T2 has just given each one a result), or the run had not committed
      a final response. A Turn whose final response was committed is settled as
-     completed (`terminal_result`), with no continuation and no notice, before
-     any of the other conditions apply: a Stop or a Session change after the
-     final loses the race, as it does in a live Turn. Its result is that final,
-     or, for a successful silent final, the Turn's last visible text, promoted
-     to the result as the live dispatcher does; a failed final keeps its error;
-   - the continuation bound is not exhausted (item 6).
+     completed (`terminal_result`), with no rerun and no notice, before any of
+     the other conditions apply: a Stop or a Session change after the final
+     loses the race, as it does in a live Turn. Its result is that final, or,
+     for a successful silent final, the Turn's last visible text, promoted to
+     the result as the live dispatcher does; a failed final keeps its error;
+   - the loop bound is not reached (item 6).
    Anything else keeps today's behavior: the Turn settles as interrupted, its
    Runs settle without result, and the user gets today's notice.
-2. **What continues.** The same hidden `agent_initiated` Delivery the Web Retry
-   creates (`vibey_resume`, `vibey_source_turn_id` = the cut Turn), admitted
-   through the ordinary P3 path, with server-owned history binding kind
-   `restart_resume` instead of a notice. Vibey resumes its committed transcript;
-   no input row, no visible `continue`, no replay of a committed tool call.
-   Accepted steers of the cut Turn and its retry ancestry are pinned as for
-   Retry. A steer whose acceptance receipt the dead process recorded but did
-   not materialize is reconciled into the cut Turn first, so it joins the Turn
-   and its Run moves with the rest (item 4). While any steer into the Turn is
-   still unsettled (its receipt could not be materialized yet), the Turn stays
-   open and its owner retries, as for item 3's handover, before it completes
-   or continues.
-3. **Tool calls.** A continued Turn treats a job that survived the restart as
-   its live call would. Startup's T2 pass leaves a running job of a Turn still
-   unsettled to the Turn owner; the continuation's own T2, before its first
-   projection, waits for it until it exits, until the call's foreground window
-   (`bash`'s, 120 s by default) passes, counted from the job's launch
-   (`meta.created_at`), or until a Stop, which ends the command as in a live
-   Turn. The continuation writes no input, so it is accepted before it waits:
-   a Stop reaches the adapter's own Stop, and another restart during the wait
-   finds an accepted Turn to continue (within item 6's bound). Startup leaves
-   the job to the continuation even then: an open call whose Turn was
-   `restart_resumed` belongs to the Session's newest Turn while that is
-   unsettled. An exited job gives its real output; only a job still running then is
+2. **What continues.** The same Turn. It stays `active` with its accepted
+   start; recovery clears its runtime generation (the dead process's runtime
+   and native ids) and records the restart streak in one writer transaction,
+   then reruns the Turn through the ordinary runner with `vibey_resume`. Vibey
+   resumes its committed transcript (`Agent.resume`, no input consumed, no
+   visible `continue`, no replay of a committed tool call), and the rerun's
+   native start binds this process's generation. The Turn's accepted inputs,
+   steers included, are pinned as for Retry. A steer whose acceptance receipt
+   the dead process recorded but did not materialize is reconciled into the
+   Turn first; while any steer into the Turn is still unsettled, the Turn stays
+   open and recovery retries before it completes or reruns.
+3. **Tool calls.** A rerun treats a job that survived the restart as its live
+   call would. Startup's T2 pass leaves a running job of a Turn still open to
+   the Turn owner; the rerun's own T2, before its first projection, waits for
+   it until it exits, until the call's foreground window (`bash`'s, 120 s by
+   default) passes, counted from the job's launch (`meta.created_at`), or until
+   a Stop, which ends the command as in a live Turn. The rerun's input was
+   written before the restart, so it marks its dispatch attempted before that
+   wait. An exited job gives its real output; only a job still running then is
    handed to a Watch, with the ordinary handover result; a window the downtime
-   already spent hands over at once. A handover that fails is retried once, and
-   with no Watch to take it the job stays in the foreground until it ends, as
-   `bash` keeps it in a live Turn. So within the window the continuation, and
-   any Run it settles, see the command's real result, exactly as without a
-   restart. Nothing runs twice: the wait commits and starts nothing, and a
-   committed result or handover is reused. A Turn that falls back to the notice
-   gets today's T2 first (the Turn owner asks Vibey's recovery owner to settle
-   that Session), so its notice still names its Watches and offers no Retry.
-   That rule stays for the manual notice only. While no Watch can take its
-   command yet, that Turn stays open and its owner retries (T2 before T4): no
-   notice without the Watch, and no Run failed under a running command; a Stop
-   still settles it, and then T2 ends the command (a command whose Turn was
-   canceled is ended, as the Stop would have ended it live, never handed to a
-   Watch).
-4. **Runs follow the work.** The cut Turn settles with
-   `settled_by = restart_resumed`, which is not a settlement without result, so
-   none of its Runs is failed or owes a notice. The Runs' Delivery link moves to
-   the continuation in the same writer transaction (one hidden Delivery per
-   Run, since a Run belongs to one Delivery, claimed as one batch), so the continued
-   Turn settles them with its own outcome and output, and callbacks fire once,
-   from that outcome. At shutdown, `release_for_service_shutdown` and the
-   scheduled-task teardown leave a Vibey Turn and its Runs unsettled, and a
-   Vibey run that fails because the service is stopping leaves its Turn open, so
-   startup finds them as lost active Turns like a conversation Turn.
-5. **Ordering.** The continuation is admitted before any input queued while the
-   service was down; that input waits behind it, as behind any active Turn, and
-   may be steered into it by the existing steer path.
-6. **Loop bound.** A Turn is not continued when it is the third consecutive
-   `restart_resume` in its ancestry without a committed model response in
-   between. Such a Turn falls back to item 1's notice, which keeps Retry.
-7. **Presentation.** No notice, no ⚠️ reaction, no interruption copy. The
-   session shows the continued Turn as running. The fallback notices of item 1
-   point to Retry where the notice shows it, or to sending `continue`, instead
-   of asking for a resend (copy fix in both languages). A Turn completed from its
-   committed final loses the 👀 the dead process left on its IM message, once
-   that transport can deliver.
+   already spent hands over at once. A handover that fails is retried once,
+   and with no Watch to take it the job stays in the foreground until it ends,
+   as `bash` keeps it in a live Turn. Nothing runs twice: the wait commits and
+   starts nothing, and a committed result or handover is reused. A Turn that
+   falls back to the notice gets today's T2 first (the Turn owner asks Vibey's
+   recovery owner to settle that Session), so its notice still names its
+   Watches and offers no Retry. While no Watch can take its command yet, that
+   Turn stays open and its owner retries (T2 before T4); a Stop still settles
+   it, and then T2 ends the command (a command whose Turn was canceled is
+   ended, as the Stop would have ended it live, never handed to a Watch).
+4. **Runs follow the work.** Runs never leave the Turn: the rerun settles them
+   with its own outcome and output, and callbacks fire once, from that outcome.
+   At shutdown, `release_for_service_shutdown` and the scheduled-task teardown
+   leave a Vibey Turn and its Runs unsettled, and a Vibey run that fails
+   because the service is stopping leaves its Turn open, so startup finds them
+   as lost active Turns like a conversation Turn.
+5. **Ordering.** The Turn stays the Session's active Turn, so any input queued
+   while the service was down waits behind it, and may be steered into it by
+   the existing steer path.
+6. **Loop bound.** The Turn's start receipt carries its restart streak: the
+   restarts in a row that cut it with no committed model response in between.
+   A committed response resets the streak. The third restart in a row falls
+   back to item 1's notice, which keeps Retry.
+7. **Presentation.** No notice, no ⚠️ reaction, no interruption copy, and no
+   second Harness prompt echo (the rerun dispatches no prompt). The session
+   shows the rerunning Turn as running.
+   The fallback notices of item 1 point to Retry where the notice shows it, or
+   to sending `continue`, instead of asking for a resend (copy fix in both
+   languages). A Turn completed from its committed final loses the 👀 the dead
+   process left on its IM message, once that transport can deliver; that and
+   the silent-final promotion are recorded durably before the Turn settles, so
+   another restart before they run loses neither.
 
 ## Ownership and touch points
 
-- `core/session_turns.py`: `recover_durable_delivery_state` reconciles the
-  cut Turn's steer receipts (`_recover_steer_attempts`), then asks
-  `_settle_restart_cut_vibey_turn` before today's settlement of a lost Vibey
-  Turn. `_terminalize_durable_turn(restart_resume=True)` reserves the
-  continuation, moves the Runs, writes the cut Turn's terminal row
-  (`completed` / `restart_resumed`, so its Activity group carries no failure),
-  and claims the continuation as the successor ahead of the FIFO, all in one
-  writer transaction; any failure rolls the transaction back and the Turn
-  keeps today's notice. `release_for_service_shutdown` skips a Vibey Turn
-  nobody asked to stop.
-- `core/backend_failure_retry.py`: `restart_resume_plan` (eligibility, item 1
-  and the bound of item 6), `reserve_restart_resume` (the notice-free
-  reservation, sharing `_vibey_resume_snapshot` with `reserve_retry`), and the
-  `restart_resume` branch of `admission_denial` (the cut Turn must still be the
-  Session's latest Turn; input queued behind it does not deny it).
+- `core/session_turns.py`: `recover_durable_delivery_state` reconciles a lost
+  Vibey Turn's steer receipts (`_recover_steer_attempts`), then
+  `_recover_restart_cut_vibey_turn` completes it from a committed final, reruns
+  it in place (`_rerun_turn`, which shares the dispatch preparation of
+  `_start_persisted_turn`), keeps it open for a retry, or leaves it to today's
+  settlement. `_retry_restart_recovery` recovers a waiting Turn again.
+  `_restart_followups` writes, rescans, and settles the durable follow-ups.
+  `release_for_service_shutdown` skips a Vibey Turn nobody asked to stop.
+- `core/restart_resume.py`: `restart_resume_plan` (item 1, the steer wait, and
+  item 6's streak).
+- `storage/message_deliveries.py`: `rotate_restart_generation` (the writer
+  transaction of item 2) and `turn_has_unresolved_steer`; `bind_native_start`
+  keeps the restart streak when the rerun binds its generation.
 - `storage/agent_transcript.py`: `last_response` and `committed_final`, bounded
   reads of the context tail, and `last_turn_text`, the silent final's result,
-  bounded by the Turn's start. A final follows the loop's own rule: no tool calls,
-  not the `error`/`aborted` partial a failed stream commits, and no input after
-  it. `storage/background.py`:
-  `move_agent_run_deliveries_in_connection`. `storage/message_deliveries.py`:
-  `restart_resume_binding`.
-- `core/run_settlement.py`: `SETTLED_BY_RESTART_RESUMED`, outside
-  `SETTLEMENTS_WITHOUT_RESULT`.
+  bounded by the Turn's start. A final follows the loop's own rule: no tool
+  calls, not the `error`/`aborted` partial a failed stream commits, and no
+  input after it.
 - `modules/agents/vibey/agent.py`, `recovery.py`, `tools.py` and agent-core
   `settle_open_calls` / `bash.settle_in_foreground`: item 3's T2 split
-  (startup defers a running job of an unsettled Turn; the continuation's T2
-  waits; `VibeyRecovery.settle_session` hands over before a fallback notice).
-  Another addition the code required: stopping the service stops the Model Hub
-  gateway before Turns end, so a run in a model call fails during shutdown. A
-  run that ends without completing while the service is stopping leaves its
-  Turn open instead of settling it, so startup continues it like any other cut
-  Turn.
+  (startup defers a running job of an open Turn; the rerun's T2 waits; T2 ends
+  the command of a canceled Turn; `VibeyRecovery.settle_session` hands over
+  before a fallback notice). Stopping the service stops the Model Hub gateway
+  before Turns end, so a run in a model call fails during shutdown; a run that
+  ends without completing while the service is stopping leaves its Turn open
+  instead of settling it.
 - `core/scheduled_tasks.py`: no change needed. Its shutdown cancellation only
   covers executions still in flight, and a Turn-owned Run has already handed
-  its execution to the Turn; `recover_processing` skips Delivery-linked Runs;
-  `settle_agent_runs_from_terminal_turn` settles nothing for `restart_resumed`,
-  which is neither a settlement without result nor carries `settles_run`.
-- The continuation keeps the cut Turn's routing: platform, scope, author,
-  metadata (Harness provenance included), admission context (with the IM
-  message the indicator belongs on), and FIFO position: the cut Turn's
-  `submitted_at`, with an id that extends its initial Delivery's (the FIFO
-  tie-breaker, as timestamps have second resolution), so a continuation requeued
-  by a failed start still runs before input queued behind the cut Turn. A continuation that cannot be claimed at once (its runtime not
-  admitted, or a start check refusing it) is never left waiting unclaimed, where
-  a later denial would drop the work unannounced: the transaction rolls back
-  and the Turn keeps today's notice and Retry.
+  its execution to the Turn; `recover_processing` skips Delivery-linked Runs.
 - Docs: `agent-core-contracts/recovery.md` T4, `backend-failure-retry.md`.
   Public docs (`avibe-docs` `agents/vibey.mdx` Restart bullet, both languages)
   change in a follow-up in that repository.
@@ -171,33 +176,30 @@ This replaces recovery invariant T4 for Vibey (`agent-core-contracts/recovery.md
 
 Scenario IDs in `tests/scenarios/message_delivery/catalog.yaml`:
 
-- `MESSAGE-DELIVERY-327`: startup recovery with a cut conversation Turn: one
-  continuation Delivery, no notice, a transcript resume of the cut Turn; with
-  the final response already committed: settled completed, no continuation;
-  a silent final settles with the Turn's narration before it as the result.
-- `MESSAGE-DELIVERY-328`: cut Harness Turn: shutdown leaves the Turn and its Run;
-  the Run is not failed, its Delivery moves to the continuation, the continued
-  Turn's result settles it, no owed restart notice; a Run steered into the
-  Turn whose receipt was never materialized moves and settles the same way,
-  after a retry when startup could not materialize it.
+- `MESSAGE-DELIVERY-327`: startup recovery with a cut conversation Turn: the
+  same Turn reruns as a transcript resume, no Delivery, no notice; with the
+  final response already committed: settled completed, no rerun; a silent
+  final settles with the Turn's narration before it as the result; the
+  follow-ups survive another restart.
+- `MESSAGE-DELIVERY-328`: cut Harness Turn: shutdown leaves the Turn and its
+  Run; the rerun settles the Run from its own result, no owed restart notice;
+  a Run steered into the Turn whose receipt was never materialized settles the
+  same way, after a retry when startup could not materialize it.
 - `MESSAGE-DELIVERY-329`: ineligible cases each fall back to today's settlement
   and notice: Stop requested, archived Session, Agent switched off Vibey, the
-  fourth restart in a row without a model response. A start never accepted
-  stays on the unknown-start path it takes today.
+  third restart in a row without a model response (a committed response
+  resets the streak). A start never accepted stays on the unknown-start path
+  it takes today.
 - `MESSAGE-DELIVERY-330`: a command running at the restart: startup leaves it
-  to the continuation, which gives a job exiting inside its window (from launch)
-  its real output, hands over one whose window the downtime spent, and ends it
-  on a Stop; a committed handover is reused; the command never starts again.
-  `MESSAGE-DELIVERY-328` also checks a Run settles with the answer given after
-  the command's real output. The fallback still names its Watch
-  (`MESSAGE-DELIVERY-322`).
-- `MESSAGE-DELIVERY-331`: input queued during downtime runs after the
-  continuation, even when queued in the cut Turn's second and the
-  continuation's first start is requeued.
+  to the rerun, also across another restart, which gives a job exiting inside
+  its window (from launch) its real output, hands over one whose window the
+  downtime spent, and ends it on a Stop; a committed handover is reused; the
+  command never starts again.
+- `MESSAGE-DELIVERY-331`: input queued during downtime runs after the rerun.
 - `MESSAGE-DELIVERY-332`: a run that fails because the service is stopping
   leaves its Turn open.
 - `MESSAGE-DELIVERY-322` keeps the Watch-naming notice without Retry for the
-  fallback.
+  fallback, and a Stop while it waits for that Watch ends the command.
 - Local Incus: restart the master environment during a long Vibey conversation
   Turn and during a Vibey Agent Run with a callback; both continue without a
   notice, and the callback reports the continued result.
@@ -208,10 +210,10 @@ Scenario IDs in `tests/scenarios/message_delivery/catalog.yaml`:
   output was never committed.
 - A `write` or `edit` cut mid-call gets the interrupted result and the model is
   told to re-read the file, as after any interruption.
-- While the continuation waits for a surviving command it shows as running
-  without new activity, as a live foreground command does; it starts its model
-  call after the wait. A Stop then ends the command and the continuation before
-  any model call.
+- While the rerun waits for a surviving command it shows as running without
+  new activity, as a live foreground command does; it starts its model call
+  after the wait. A Stop then ends the command and the Turn before any model
+  call.
 - A final reply committed but not yet delivered when the process died is in the
   Workbench transcript; its IM delivery is not retried (agent-core recovery,
   Delivery section). The Turn settles from it as completed.

@@ -220,10 +220,10 @@ def test_harness_notice_keeps_retry_boundary_guards(isolated_state, tmp_path, ch
 def test_a_vibey_agent_run_cut_by_a_restart_settles_from_the_continued_work(
     isolated_state, tmp_path, monkeypatch, step
 ):
-    """MESSAGE-DELIVERY-328: shutdown leaves the Run with its Turn, startup moves it to the
-    continuation, and it settles once, from the continued Turn's result, owing no notice. A
-    Run whose steer the dead run accepted, its receipt not yet materialized, moves too; when
-    the receipt cannot be materialized at startup, the Turn waits open for the retry."""
+    """MESSAGE-DELIVERY-328: shutdown leaves the Run with its Turn, startup reruns that Turn in
+    place, and the Run settles once, from the rerun's result, owing no notice. A Run whose steer
+    the dead run accepted, its receipt not yet materialized, joins the Turn and settles the same
+    way; when the receipt cannot be materialized at startup, the Turn waits open for the retry."""
     from core.session_turns import Turn
 
     _scope_id, session_id = _make_session(tmp_path, agent_backend="vibey")
@@ -340,12 +340,12 @@ def test_a_vibey_agent_run_cut_by_a_restart_settles_from_the_continued_work(
             return await finish(*args, **kwargs)
 
         manager._finish_steer = lost_once
-        monkeypatch.setattr(SessionTurnManager, "RESTART_FALLBACK_RETRY_DELAYS", (0.05, 0.05))
+        monkeypatch.setattr(SessionTurnManager, "RESTART_RECOVERY_RETRY_DELAYS", (0.05, 0.05))
 
     async def startup():
         await manager.recover_durable_delivery_state(session_id, service_restart=True)
         if step == "steer_retried":
-            # Nothing completed or moved without the steer: the Turn stays open.
+            # Nothing completed or reran without the steer: the Turn stays open.
             with engine.connect() as conn:
                 assert message_deliveries.get_turn(conn, original.turn_id)["state"] == "active"
             assert len(started) == 1 and lost
@@ -375,18 +375,18 @@ def test_a_vibey_agent_run_cut_by_a_restart_settles_from_the_continued_work(
         assert stored["status"] == "succeeded"
         assert stored["result_text"] == "全部完成"
     else:
-        assert source["settled_by"] == "restart_resumed"
+        assert source["state"] == "active"
         continued = started[-1]
-        # A transcript resume of the cut Turn that keeps the Run's Harness provenance.
+        # The cut Turn itself reruns as a transcript resume, with the Run's Harness provenance.
+        assert continued.platform_specific["turn_token"] == original.turn_id
         assert continued.platform_specific["vibey_resume"] is True
         assert continued.platform_specific["vibey_source_turn_id"] == original.turn_id
         assert continued.platform_specific["task_execution_id"] == run.id
         assert stored["status"] == "running" and callbacks() == []
-        assert stored["delivery_id"] == continued.platform_specific["delivery_id"]
-        assert run.id in manager.accepted_agent_run_ids_for_turn(continued.platform_specific["turn_token"])
-        if step != "tool":
-            assert steered.id in manager.accepted_agent_run_ids_for_turn(continued.platform_specific["turn_token"])
-        # The continued Turn's own result settles the Run, exactly once.
+        assert stored["delivery_id"] == original.delivery_id
+        owned = {run.id} | ({steered.id} if step != "tool" else set())
+        assert set(continued.platform_specific["accepted_agent_run_ids"]) == owned
+        # The rerun's own result settles the Runs, exactly once.
         asyncio.run(controller.emit_agent_message(continued, "result", "日志已整理完毕"))
         stored = request_store.get_run(run.id)
         assert stored["status"] == "succeeded"

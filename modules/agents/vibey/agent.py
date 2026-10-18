@@ -17,10 +17,10 @@ One Turn is one ``Agent.run`` (plan section 4). The adapter
   settles open tool calls (T2) and admits accepted inputs that were never
   consumed (T3); at startup it settles every Session's open calls eagerly,
   except a running command of a Turn not yet settled. The Turn owner then
-  continues the Turn a restart interrupted through a hidden transcript resume
-  (T4; ``vibey`` is a process-bound runtime), whose T2 waits for that command as
-  its live call would, or settles the Turn after having it handed to a Watch; a
-  run the service stop cut leaves its Turn open for that.
+  reruns the Turn a restart interrupted in place, as a transcript resume of
+  itself (T4; ``vibey`` is a process-bound runtime), whose T2 waits for that
+  command as its live call would, or settles the Turn after having it handed to
+  a Watch; a run the service stop cut leaves its Turn open for that.
 """
 
 from __future__ import annotations
@@ -93,7 +93,6 @@ from core.message_output import MessageOutput, stop_output_for, terminal_output_
 from core.native_dispatch_phase import mark_backend_dispatch_attempted
 from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.reply_enhancer import strip_silent_blocks
-from core.run_settlement import SETTLED_BY_RESTART_RESUMED
 from core.skill_observability import accept_catalog
 from modules.agents.vibey.context import (
     VibeyContextHost,
@@ -332,13 +331,12 @@ class VibeyAgent(BaseAgent):
         # Rows this Turn writes are the Turn's Agent's, from its request snapshot, even if the
         # Session's selected Agent changes while it runs.
         self.store.bind_agent(session_id, request.vibe_agent_name, turn_id=turn.turn_id)
-        # A transcript resume (a restart continuation) gives a job that survived the restart the
-        # foreground wait its live call would have, so its real output becomes the call's result.
+        # A transcript resume (a Turn rerun after a restart) gives a job that survived the restart
+        # the foreground wait its live call would have, so its real output becomes the call's result.
         resuming = (context.platform_specific or {}).get("vibey_resume") is True
         if resuming:
-            # A continuation writes no input: it resumes work already accepted, so it is accepted
-            # before that wait. A Stop then reaches ``handle_stop``, which ends the command, and a
-            # restart during the wait finds an accepted Turn to continue again.
+            # A resume writes no input: its work was accepted before, so it binds this process's
+            # runtime generation before that wait, and steers reach it while it waits.
             self._accept_native_start(request, session_id)
         await self._resume(runtime, stop=turn.stop_event if resuming else None)
         if turn.stop_requested:
@@ -1090,19 +1088,15 @@ class VibeyAgent(BaseAgent):
         return True
 
     def _work_state(self, turn_id: Optional[str]) -> str:
-        """Where the work of the Turn owning an open call stands: ``open``, ``stopped``, or ``settled``.
+        """Where the Turn owning an open call stands: ``open``, ``stopped``, or ``settled``.
 
-        A Turn a restart continued settles ``restart_resumed`` and its work moves on to the
-        Session's latest Turn: a continuation starts ahead of anything queued behind its
-        source, and any later Turn settles open calls before it runs. ``stopped``: the Turn
-        carrying the work was canceled by a Stop or a replacement.
+        A Turn a restart cut stays open and reruns in place, so its call's Turn is the one
+        that continues it. ``stopped``: a Stop or a replacement canceled that Turn.
         """
         if not turn_id:
             return "settled"
         with self._engine.connect() as conn:
             turn = delivery_store.get_turn(conn, turn_id)
-            if turn is not None and turn.get("settled_by") == SETTLED_BY_RESTART_RESUMED:
-                turn = delivery_store.latest_turn(conn, str(turn["session_id"]))
         if turn is None:
             return "settled"
         if turn["state"] in delivery_store.TURN_OWNER_STATES:
