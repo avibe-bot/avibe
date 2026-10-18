@@ -427,7 +427,7 @@ class ConsolidatedMessageDispatcher:
         # token. A Turn that ends on a silent reply makes this row its result
         # (``promote_turn_text_to_result``). Every lifecycle-terminal emit takes
         # the entry, so it never outlives its Turn.
-        self._turn_visible_text: dict[str, tuple[str, str, str]] = {}
+        self._turn_visible_text: dict[str, tuple[str, str, Optional[tuple[str, str]]]] = {}
         # Harness deliveries whose prompt has already been echoed to IM, kept as a
         # bounded FIFO (see ``emit_harness_prompt``). Per-process only: a restart
         # replay writes a new Delivery anyway, and a duplicated echo is cosmetic
@@ -2788,10 +2788,13 @@ class ConsolidatedMessageDispatcher:
         """Record a persisted row as its Turn's latest visible text.
 
         The record is the Turn's last *persisted* visible text: promotion edits
-        history, and a text whose row was never written is not in it. A row older
-        than the one held (a retried or replayed earlier output) never displaces
-        it. Only a row whose Turn is identified: without a token, a later Turn's
-        silent final could not tell this row apart from its own.
+        history, and a text whose row was never written is not in it. A row that
+        sits earlier in the transcript than the one held (a retried earlier
+        output) never displaces it; the order is the transcript's own
+        (``messages_service.transcript_order_value``: when the row entered the
+        transcript, then its id). Only a row whose Turn is identified: without a
+        token, a later Turn's silent final could not tell this row apart from its
+        own.
         """
 
         row_id = (row or {}).get("id")
@@ -2799,11 +2802,12 @@ class ConsolidatedMessageDispatcher:
         if not (row_id and turn_token):
             return
         key = resolve_turn_sink_key(self.controller, context)
-        created_at = canonical_message_timestamp((row or {}).get("created_at")) or ""
+        entered = canonical_message_timestamp(row.get("delivered_at") or row.get("created_at"))
+        order = (entered, str(row_id)) if entered else None
         held = self._turn_visible_text.get(key)
-        if held is not None and held[0] == turn_token and created_at and held[2] > created_at:
+        if held is not None and held[0] == turn_token and order and held[2] and held[2] > order:
             return
-        self._turn_visible_text[key] = (turn_token, row_id, created_at)
+        self._turn_visible_text[key] = (turn_token, row_id, order)
 
     def _take_turn_text(self, context: MessageContext) -> Optional[str]:
         """Remove and return the row recorded for this context's Turn, if any."""

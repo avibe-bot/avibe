@@ -274,6 +274,21 @@ class SilentFinalTurnResultTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(self.agent_rows(), [("result", REPORT)])
 
+        with self.subTest("a local-only output is replayed visibly after a newer one"), self.state():
+            # The replayed row keeps its creation time but enters the transcript
+            # now (``delivered_at``), after the newer output: it is the text shown last.
+            controller = _Controller("avibe")
+            background = self.context()
+            background.platform_specific["suppress_delivery"] = True
+            await controller.emit_agent_message(background, "output", REPORT, output=phase("p1"))
+            await controller.emit_agent_message(self.context(), "output", "Second report.", output=phase("p2"))
+            await controller.emit_agent_message(self.context(), "output", REPORT, output=phase("p1"))
+            await _Agent(controller).emit_result_message(self.context(), "<silent>noted</silent>")
+
+            self.assertEqual(
+                sorted(self.agent_rows()), [("output", "Second report."), ("result", REPORT)]
+            )
+
         with self.subTest("an older output is retried after a newer one"), self.state():
             controller = _Controller("avibe")
             await controller.emit_agent_message(self.context(), "output", REPORT, output=phase("p1"))
