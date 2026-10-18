@@ -264,8 +264,10 @@ def register_agent_reply_media(
     kind: str,
     local_path: str,
     file_name: str,
+    content_type: str | None = None,
 ) -> str:
-    """Register a local agent-reply file under the shared media proxy."""
+    """Register a local agent-reply file under the shared media proxy. ``content_type`` is a type the producer
+    knows; without one, the path's suffix decides."""
     return media_service.register(
         conn,
         scope_id=scope_id,
@@ -274,6 +276,7 @@ def register_agent_reply_media(
         source="agent_reply",
         local_path=local_path,
         file_name=file_name,
+        content_type=content_type,
     )
 
 

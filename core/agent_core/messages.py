@@ -9,6 +9,7 @@ rows, so the field names here are a shipped surface.
 from __future__ import annotations
 
 import copy
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, Optional, Union
@@ -359,6 +360,17 @@ class HostedImage:
             _require(value, int, f"image {name}", optional=True)
             if value is not None and value < 1:
                 raise ValueError(f"image {name} is at least 1")
+
+
+def image_deliverable(image: HostedImage) -> bool:
+    """Whether a surface can send this generated image: its path names a file absolutely. A relative path, from a
+    restored or foreign record, names no file anyone can attach.
+
+    The one rule for both decisions a generated image takes part in: whether the turn's final response counts as a
+    reply (``has_reply``), and which images are delivered with it. Kept in one place so a reply is never counted for
+    an image delivery then skips.
+    """
+    return os.path.isabs(image.path)
 
 
 @dataclass(frozen=True)

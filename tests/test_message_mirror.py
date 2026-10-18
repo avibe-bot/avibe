@@ -40,7 +40,7 @@ from core.message_mirror import (
     persist_silent_terminal,
 )
 from modules.im import MessageContext
-from storage import messages_service
+from storage import media_service, messages_service
 from storage.agent_session_rows import SESSION_VISIBILITIES
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
@@ -1697,6 +1697,47 @@ def test_a_hosted_card_rides_on_its_toolcall_row_and_its_image_joins_the_answer(
     assert event["content_text"] == "🖼 Image generation · 1 image"
     # Ordered before the response that carried it (``agent_activity_service``).
     assert json.loads(event["metadata_json"])["precedes_message_id"] == "msg_response"
+
+
+def test_a_hosted_image_without_an_image_suffix_is_served_as_its_recorded_type(isolated_state, tmp_path):
+    """MH-HOSTED-UI-009: the record's ``mime`` decides the served type, so a suffixless image still renders inline
+    (a guessed ``application/octet-stream`` is served as an attachment the card cannot show)."""
+    image = tmp_path / "image-3f2a"
+    image.write_bytes(b"\x89PNG\r\n\x1a\nimage")
+    engine = create_sqlite_engine()
+    now = "2026-10-14T00:00:00Z"
+    with engine.begin() as conn:
+        scope_id = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_hosted", now=now)
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_hosted",
+                scope_id=scope_id,
+                agent_name="vibey",
+                agent_backend="vibey",
+                agent_variant="default",
+                session_anchor="anchor_ses_hosted",
+                native_session_id="",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+    ctx = MessageContext(
+        user_id="workbench",
+        channel_id="ses_hosted",
+        platform="avibe",
+        platform_specific={"agent_session_id": "ses_hosted"},
+    )
+
+    persist_agent_message(ctx, "toolcall", "🖼 Image generation · 1 image", hosted=_hosted_card(str(image)))
+
+    with engine.connect() as conn:
+        event = conn.execute(select(agent_events).where(agent_events.c.session_id == "ses_hosted")).mappings().one()
+        [stored] = json.loads(event["content_json"])["hosted"]["images"]
+        row = media_service.get_by_token(conn, stored["media_url"].split("?")[0].removeprefix("/api/media/"))
+    assert row["content_type"] == "image/png"
 
 
 def test_an_im_hosted_card_keeps_its_file_paths(isolated_state, tmp_path):

@@ -43,6 +43,17 @@ const domainOf = (url: string): string => {
   }
 };
 
+/** A source's link, only to a web page. The producer sends only such URLs; rows stored before it did may hold any string. */
+const webUrl = (url: string | undefined): string | undefined => {
+  if (!url) return undefined;
+  try {
+    const { protocol } = new URL(url);
+    return protocol === 'https:' || protocol === 'http:' ? url : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
 const fileName = (path: string): string => path.split(/[\\/]/).pop() || path;
 
 const formatBytes = (bytes: number): string =>
@@ -212,18 +223,24 @@ const HostedDetail: React.FC<{ card: HostedActivity }> = ({ card }) => {
       )}
       {completed && card.sources.length > 0 && (
         <ol className="flex flex-col">
-          {card.sources.map((source, index) => (
-            <li key={`${source.url}:${index}`} className="flex gap-2.5 border-b border-border px-2.5 py-2 last:border-b-0">
-              <span className="mt-px inline-flex size-[18px] shrink-0 items-center justify-center rounded border border-mint/30 bg-mint/[0.08] text-[10px] font-semibold text-mint-ink">{index + 1}</span>
-              <span className="flex min-w-0 flex-col gap-0.5">
-                <span className="flex min-w-0 flex-wrap items-baseline gap-x-2">
-                  <a href={source.url} target="_blank" rel="noopener noreferrer" className="min-w-0 truncate text-[12px] font-medium text-foreground hover:underline" title={source.title ?? source.url}>{source.title || domainOf(source.url)}</a>
-                  <span className="shrink-0 text-[11px] text-muted">{[domainOf(source.url), source.page_age].filter(Boolean).join(' · ')}</span>
+          {card.sources.map((source, index) => {
+            const href = webUrl(source.url);
+            const name = source.title || (href ? domainOf(href) : source.url);
+            return (
+              <li key={`${source.url ?? source.title}:${index}`} className="flex gap-2.5 border-b border-border px-2.5 py-2 last:border-b-0">
+                <span className="mt-px inline-flex size-[18px] shrink-0 items-center justify-center rounded border border-mint/30 bg-mint/[0.08] text-[10px] font-semibold text-mint-ink">{index + 1}</span>
+                <span className="flex min-w-0 flex-col gap-0.5">
+                  <span className="flex min-w-0 flex-wrap items-baseline gap-x-2">
+                    {href
+                      ? <a href={href} target="_blank" rel="noopener noreferrer" className="min-w-0 truncate text-[12px] font-medium text-foreground hover:underline" title={source.title ?? href}>{name}</a>
+                      : <span className="min-w-0 truncate text-[12px] font-medium text-foreground" title={name}>{name}</span>}
+                    <span className="shrink-0 text-[11px] text-muted">{[href && domainOf(href), source.page_age].filter(Boolean).join(' · ')}</span>
+                  </span>
+                  {source.snippet && <span className="text-[11px] leading-relaxed text-muted">{source.snippet}</span>}
                 </span>
-                {source.snippet && <span className="text-[11px] leading-relaxed text-muted">{source.snippet}</span>}
-              </span>
-            </li>
-          ))}
+              </li>
+            );
+          })}
         </ol>
       )}
       {completed && card.images.map((image) => (
