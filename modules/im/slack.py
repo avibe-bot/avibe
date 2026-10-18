@@ -689,6 +689,15 @@ class SlackBot(BaseIMClient):
             },
         }
 
+    def _markdown_block_fallback(self, text: str) -> str:
+        """The top-level ``text`` beside a ``markdown`` block: what notifications and screen readers get.
+
+        Slack reads that field as mrkdwn, not Markdown, so it is the block's text
+        converted the way every mrkdwn message is (escapes resolved, links
+        re-spelled), never the Markdown as written.
+        """
+        return self._get_visible_text(self._convert_markdown_to_slack_mrkdwn(text))
+
     @staticmethod
     def _build_markdown_block(text: str) -> Dict[str, Any]:
         return {
@@ -776,7 +785,7 @@ class SlackBot(BaseIMClient):
         blocks.append(self._build_context_footer_block(subtext, parse_mode=parse_mode))
         if keyboard:
             blocks.extend(self._build_actions_blocks(keyboard))
-        fallback_text = self._get_visible_text(body) if (body and body.strip()) else (subtext or "").strip()
+        fallback_text = self._markdown_block_fallback(body) if (body and body.strip()) else (subtext or "").strip()
         return blocks, fallback_text
 
     @staticmethod
@@ -1054,7 +1063,7 @@ class SlackBot(BaseIMClient):
 
         kwargs = {
             "channel": context.channel_id,
-            "text": self._get_visible_text(text),
+            "text": self._markdown_block_fallback(text),
             "blocks": blocks,
         }
 

@@ -191,8 +191,11 @@ class TestLiteralText:
         expected = r"\*domain\* \_x\_ \`c\` \[l\](u) \<b\> a\&lt;b \|t\| \~s\~ \\"
         assert DiscordFormatter().escape_special_chars(self.QUERY) == expected
         bot = SlackBot.__new__(SlackBot)
-        blocks, _ = bot._build_status_blocks(SlackFormatter().escape_special_chars(self.QUERY), "working")
+        bot.markdown_converter = SlackMarkdownConverter()
+        blocks, fallback = bot._build_status_blocks(SlackFormatter().escape_special_chars(self.QUERY), "working")
         assert blocks[0] == {"type": "markdown", "text": expected}
+        # The notification text beside the block is read as mrkdwn, so it is spelled as mrkdwn shows it.
+        assert fallback == slack(expected)
 
     def test_slack_mrkdwn_shows_every_character(self):
         """mrkdwn has no escape. Measured by posting and reading the message back as rich text: ``&``, ``<`` and ``>``

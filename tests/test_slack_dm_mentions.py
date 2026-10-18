@@ -143,7 +143,8 @@ class SlackDmMentionTests(unittest.IsolatedAsyncioTestCase):
         message_ts = await slack.send_markdown_message(context, text, keyboard=keyboard)
 
         self.assertEqual(message_ts, "1710000000.000020")
-        self.assertEqual(sent_payloads[0]["text"], text)
+        # Notifications and screen readers get the top-level text, which Slack reads as mrkdwn.
+        self.assertEqual(sent_payloads[0]["text"], "*Col 1* | *Col 2*\nA | B")
         self.assertEqual(sent_payloads[0]["blocks"][0], {"type": "markdown", "text": text})
         self.assertEqual(sent_payloads[0]["blocks"][1]["type"], "actions")
         self.assertEqual(sent_payloads[0]["blocks"][1]["elements"][0]["value"], "quick_reply:Continue")
