@@ -12,12 +12,13 @@ from storage.models import agent_sessions, metadata as db_metadata, scopes
 
 
 def _shown_on_slack(text: str) -> str:
-    """The text a Slack reader is shown: the Markdown, through the adapter's own mrkdwn conversion."""
+    """The text a Slack reader is shown: the Markdown, through the adapter's own mrkdwn conversion, less the
+    invisible joiner that keeps mrkdwn from reading a literal ``_`` as markup."""
     from modules.im.slack import SlackBot, SlackMarkdownConverter
 
     bot = SlackBot.__new__(SlackBot)
     bot.markdown_converter = SlackMarkdownConverter()
-    return bot._convert_markdown_to_slack_mrkdwn(text)
+    return bot._convert_markdown_to_slack_mrkdwn(text).replace("\u034f", "")
 
 
 class FakeController:

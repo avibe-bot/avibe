@@ -29,6 +29,8 @@ from modules.im.slack import SlackBot, SlackMarkdownConverter
 from modules.im.wechat import WeChatBot
 
 LINK = "https://s.example/p"
+# U+034F COMBINING GRAPHEME JOINER, invisible: what keeps mrkdwn from reading the delimiter after it.
+CGJ = "\u034f"
 
 
 def telegram(text: str) -> str:
@@ -59,18 +61,20 @@ class TestEscapedProse:
 
     @DIALECTS
     @pytest.mark.parametrize(
-        "raw, shown",
+        "raw, shown, in_mrkdwn",
         [
-            (r"plain \*literal\* text", "plain *literal* text"),
-            (r"a \_b\_ c", "a _b_ c"),
-            (r"tick \` tick", "tick ` tick"),
-            (r"a \~b\~ c", "a ~b~ c"),
-            (r"a \\ b", "a \\ b"),
+            (r"plain \*literal\* text", "plain *literal* text", f"plain {CGJ}*literal{CGJ}* text"),
+            (r"a \_b\_ c", "a _b_ c", f"a {CGJ}_b{CGJ}_ c"),
+            (r"tick \` tick", "tick ` tick", f"tick {CGJ}` tick"),
+            (r"a \~b\~ c", "a ~b~ c", f"a {CGJ}~b{CGJ}~ c"),
+            (r"a \\ b", "a \\ b", "a \\ b"),
         ],
         ids=["asterisk", "underscore", "backtick", "tilde", "backslash"],
     )
-    def test_the_reader_sees_the_character_and_no_backslash(self, render, raw, shown):
-        assert render(raw) == shown
+    def test_the_reader_sees_the_character_and_no_backslash(self, render, raw, shown, in_mrkdwn):
+        """mrkdwn has no escape: a delimiter is shown as written only behind an invisible combining grapheme joiner
+        (measured on Slack by reading the message back as rich text)."""
+        assert render(raw) == (in_mrkdwn if render is slack else shown)
 
     @DIALECTS
     def test_an_escape_inside_a_code_span_is_still_code(self, render):
@@ -190,10 +194,18 @@ class TestLiteralText:
         blocks, _ = bot._build_status_blocks(SlackFormatter().escape_special_chars(self.QUERY), "working")
         assert blocks[0] == {"type": "markdown", "text": expected}
 
-    def test_slack_mrkdwn_spells_the_delimiters_it_reads_as_markup(self):
-        """mrkdwn has no escape for paired ``*``, ``_``, ``~`` or a backtick (measured: not even a zero-width space
-        beside one stops it), but a bare ``&``, ``<`` or ``>`` is markup it can be told is not: ``<!channel>``."""
-        assert slack(r"a \<!channel\> \& \&lt;") == "a &lt;!channel&gt; &amp; &amp;lt;"
+    def test_slack_mrkdwn_shows_every_character(self):
+        """mrkdwn has no escape. Measured by posting and reading the message back as rich text: ``&``, ``<`` and ``>``
+        show as entities, and a paired ``*``, ``_``, ``~`` or backtick shows as written only behind a combining
+        grapheme joiner (a zero-width space, word joiner or zero-width joiner beside it still formats)."""
+        from modules.im.formatters.slack_formatter import SlackFormatter
+
+        literal = SlackFormatter().escape_special_chars(self.QUERY)
+
+        assert slack(literal) == (
+            f"{CGJ}*domain{CGJ}* {CGJ}_x{CGJ}_ {CGJ}`c{CGJ}` [l](u) &lt;b&gt; a&amp;lt;b |t| {CGJ}~s{CGJ}~ \\"
+        )
+        assert slack(r"a \<!channel\>") == "a &lt;!channel&gt;"
 
     def test_a_tool_label_and_a_code_span_show_what_the_tool_was_given(self):
         from modules.im.formatters.discord_formatter import DiscordFormatter
