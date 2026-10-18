@@ -61,10 +61,12 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
   // dialog stays open, so Create reads it again.
   const [hubAnswered, setHubAnswered] = useState(false);
   // The form a Create was made from: a backend switch or a close starts another,
-  // and a Create still checking an earlier one then changes nothing.
+  // which starts unsubmitted. A Create's state belongs to its form, so one still
+  // running for an earlier form changes nothing the current one shows.
   const formRef = useRef(0);
   useEffect(() => {
     formRef.current += 1;
+    setSubmitting(false);
   }, [backend, open]);
   const [editorOpen, setEditorOpen] = useState(false);
   const openAddModel = useAddModelExit(backend, open);
@@ -154,12 +156,13 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
     setError(null);
     setSubmitting(true);
     const form = formRef.current;
+    const current = () => form === formRef.current;
     try {
       if (hubAnswered) {
         // Create writes the effort, so it is checked against Model Hub's answer
         // now, not the one read when the dialog opened (`readHubBackendModels`).
         const fresh = await readHubBackendModels(api, backend);
-        if (form !== formRef.current) return;
+        if (!current()) return;
         if (fresh === 'unread') {
           setError(t('agents.create.effortUnconfirmed'));
           return;
@@ -181,13 +184,14 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
         enabled: true,
       });
       if (result.ok) {
+        // The agent exists whichever form is showing now; only its own form closes.
         onCreated(result.agent);
-        onClose();
+        if (current()) onClose();
       }
     } catch (err) {
-      setError(errorMessage(err) ?? String(err));
+      if (current()) setError(errorMessage(err) ?? String(err));
     } finally {
-      setSubmitting(false);
+      if (current()) setSubmitting(false);
     }
   };
 

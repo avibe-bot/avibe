@@ -71,12 +71,18 @@ vi.mock('../../lib/backendModels', async (importOriginal) => ({
 const renderDialog = () => {
   const createVibeAgent = vi.fn().mockResolvedValue({ ok: true, agent: { id: 'agt-new' } });
   apiRef.current = { createVibeAgent };
-  render(
+  const view = render(
     <MemoryRouter>
       <NewAgentDialog open onClose={vi.fn()} onCreated={vi.fn()} />
     </MemoryRouter>,
   );
-  return { createVibeAgent };
+  // The parent closing and reopening the dialog, as the Agents page does.
+  const setOpen = (open: boolean) => view.rerender(
+    <MemoryRouter>
+      <NewAgentDialog open={open} onClose={vi.fn()} onCreated={vi.fn()} />
+    </MemoryRouter>,
+  );
+  return { createVibeAgent, setOpen };
 };
 
 const chooseModel = (value: string) => {
@@ -306,6 +312,43 @@ describe('NewAgentDialog', () => {
     // The answer was for the Claude form: the Codex one shows no refusal, and nothing was created.
     expect(screen.queryByText('agents.create.effortRefused:{"effort":"high"}')).toBeNull();
     expect(createVibeAgent).not.toHaveBeenCalled();
+  });
+
+  it('keeps a reopened form submitting while its own Create runs, whatever an earlier one settles', async () => {
+    modelCatalog = {
+      models: [],
+      reasoningOptions: { sonnet: [{ value: 'medium', label: 'medium' }] },
+      effortMenus: { sonnet: { omitted: [], not_on: {} } },
+    };
+    const { createVibeAgent, setOpen } = renderDialog();
+    const answers: ((value: unknown) => void)[] = [];
+    apiRef.current!.readModelHubAgentCatalogForModelPicker = vi.fn(() => new Promise((resolve) => { answers.push(resolve); }));
+    const hub = {
+      backend: 'claude', mode: 'hub',
+      catalog_models: [{ id: 'sonnet', routeable: true, reasoning_efforts: ['medium'], effort_menu: { omitted: [], not_on: {} } }],
+    };
+    const fill = () => {
+      fireEvent.change(screen.getByPlaceholderText('agents.create.namePlaceholder'), { target: { value: 'router' } });
+      chooseModel('sonnet');
+    };
+    const create = () => screen.getByRole('button', { name: /agents\.create\.submit/ }) as HTMLButtonElement;
+    fill();
+    submit();
+
+    // Closed and reopened while that Create checks the effort: the new form starts its own Create.
+    setOpen(false);
+    setOpen(true);
+    fill();
+    submit();
+    expect(answers).toHaveLength(2);
+    expect(create().disabled).toBe(true);
+
+    // The first Create settles for a form that is gone: the current one stays submitting.
+    await act(async () => answers[0](hub));
+    expect(create().disabled).toBe(true);
+    fireEvent.click(create());
+    await act(async () => answers[1](hub));
+    await waitFor(() => expect(createVibeAgent).toHaveBeenCalledTimes(1));
   });
 
   it('creates with no effort when the catalog says the model has none', async () => {
