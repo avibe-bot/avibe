@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import { act, renderHook } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -10,6 +11,7 @@ import {
   onPageReactivated,
   type AwayReason,
   type PageActivitySnapshot,
+  useDocumentVisible,
 } from './pageActivity';
 
 describe('isPageActive', () => {
@@ -428,5 +430,29 @@ describe('canMarkConversationRead', () => {
     expect(canMarkConversationRead({ ...visibleTranscript, historicalWindow: true })).toBe(false);
     expect(canMarkConversationRead({ ...visibleTranscript, showPageActive: true })).toBe(false);
     expect(canMarkConversationRead({ ...visibleTranscript, foregroundAppWindow: true })).toBe(false);
+  });
+});
+
+describe('useDocumentVisible', () => {
+  afterEach(() => {
+    delete (document as { visibilityState?: unknown }).visibilityState;
+    delete (document as { hasFocus?: unknown }).hasFocus;
+  });
+
+  const setVisibility = (state: DocumentVisibilityState) => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => state });
+    document.dispatchEvent(new Event('visibilitychange'));
+  };
+
+  it('follows document visibility and ignores window focus', () => {
+    Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => false });
+    setVisibility('visible');
+    const { result } = renderHook(() => useDocumentVisible());
+    act(() => { window.dispatchEvent(new Event('blur')); });
+    expect(result.current).toBe(true);
+    act(() => setVisibility('hidden'));
+    expect(result.current).toBe(false);
+    act(() => setVisibility('visible'));
+    expect(result.current).toBe(true);
   });
 });

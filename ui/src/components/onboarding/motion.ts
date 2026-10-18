@@ -1,23 +1,7 @@
 import { useEffect, useState } from 'react';
+import { useDocumentVisible } from '@/lib/pageActivity';
 import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
 import { useReducedMotion } from 'framer-motion';
-
-/**
- * Whether the document is being presented at all. An interval keeps firing in a
- * background tab — throttled, so its deltas arrive in one lump — and a CSS
- * animation keeps its own timeline running there too. Reading visibility here is
- * what lets both stop together.
- */
-function useDocumentVisible() {
-  const [visible, setVisible] = useState(() => typeof document === 'undefined' || !document.hidden);
-  useEffect(() => {
-    const read = () => setVisible(!document.hidden);
-    read();
-    document.addEventListener('visibilitychange', read);
-    return () => document.removeEventListener('visibilitychange', read);
-  }, []);
-  return visible;
-}
 
 /**
  * Whether this particular composition is on screen. A hidden tab is only half the

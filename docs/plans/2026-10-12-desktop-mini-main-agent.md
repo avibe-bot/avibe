@@ -424,7 +424,9 @@ Two beats, so the exit reads before the reflow:
   down; and `sleeping` sends a small `z` followed by a large `Z` upward.
   `idle` and `listening` render body-only art with the existing breathing.
 - The layered loops animate `transform` and `opacity` only. They pause while
-  the page is inactive. Reduced motion disables every animation and leaves the
+  the window is hidden (`document.visibilityState` is not `visible`); focus
+  does not matter, because the pet window is visible without ever taking
+  focus. Reduced motion disables every animation and leaves the
   full static composition visible. Sleeping deliberately keeps its `z`/`Z`
   loop while the window is visible, even though idle still settles after 30s.
 - Vibey on the mini stage is **115px** (the owner tuned it on the prototype:

@@ -363,3 +363,23 @@ export function onPageReactivated(listener: PageReactivationListener): () => voi
 export function usePageActive(): boolean {
   return useSyncExternalStore(subscribePageActive, getPageActive, () => false);
 }
+
+const readDocumentVisible = (): boolean =>
+  typeof document === 'undefined' || document.visibilityState === 'visible';
+
+const subscribeDocumentVisible = (listener: () => void): (() => void) => {
+  if (typeof document === 'undefined') return () => {};
+  document.addEventListener('visibilitychange', listener);
+  return () => document.removeEventListener('visibilitychange', listener);
+};
+
+/**
+ * Whether the document is shown at all, ignoring focus. This is the half of
+ * page activity that decides whether work drawn on screen is seen: a visible
+ * window the user has not clicked into is still in front of them. Read
+ * `usePageActive` instead where the user's attention matters, such as marking
+ * a conversation read.
+ */
+export function useDocumentVisible(): boolean {
+  return useSyncExternalStore(subscribeDocumentVisible, readDocumentVisible, () => true);
+}
