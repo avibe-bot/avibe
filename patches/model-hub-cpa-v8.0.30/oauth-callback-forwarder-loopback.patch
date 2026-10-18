@@ -1,5 +1,5 @@
 diff --git a/internal/api/handlers/management/auth_files_oauth_callback.go b/internal/api/handlers/management/auth_files_oauth_callback.go
-index f33f82e..b1cefdf 100644
+index f33f82e1..b1cefdfa 100644
 --- a/internal/api/handlers/management/auth_files_oauth_callback.go
 +++ b/internal/api/handlers/management/auth_files_oauth_callback.go
 @@ -50,7 +50,10 @@ func startCallbackForwarder(port int, provider, targetBase string) (*callbackFor
@@ -15,7 +15,7 @@ index f33f82e..b1cefdf 100644
  	if err != nil {
  		return nil, fmt.Errorf("failed to listen on %s: %w", addr, err)
 diff --git a/internal/api/handlers/management/auth_files_provider_oauth.go b/internal/api/handlers/management/auth_files_provider_oauth.go
-index 48fc4ef..cac8253 100644
+index 48fc4ef4..cac82532 100644
 --- a/internal/api/handlers/management/auth_files_provider_oauth.go
 +++ b/internal/api/handlers/management/auth_files_provider_oauth.go
 @@ -80,9 +80,9 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {

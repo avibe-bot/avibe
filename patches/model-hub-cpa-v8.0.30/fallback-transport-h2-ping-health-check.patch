@@ -1,8 +1,8 @@
 diff --git a/internal/runtime/executor/helps/proxy_helpers.go b/internal/runtime/executor/helps/proxy_helpers.go
-index 0c5f6c95..4c15b243 100644
+index d98f7d49..aaff4472 100644
 --- a/internal/runtime/executor/helps/proxy_helpers.go
 +++ b/internal/runtime/executor/helps/proxy_helpers.go
-@@ -153,5 +153,8 @@ func buildProxyTransport(proxyURL string) *http.Transport {
+@@ -156,5 +156,8 @@ func buildProxyTransport(proxyURL string) *http.Transport {
  		log.Errorf("%v", errBuild)
  		return nil
  	}
@@ -14,16 +14,21 @@ index 0c5f6c95..4c15b243 100644
  }
 diff --git a/internal/runtime/executor/helps/upstream_transport.go b/internal/runtime/executor/helps/upstream_transport.go
 new file mode 100644
-index 00000000..3e2bae5b
+index 00000000..d8f22b21
 --- /dev/null
 +++ b/internal/runtime/executor/helps/upstream_transport.go
-@@ -0,0 +1,57 @@
+@@ -0,0 +1,71 @@
 +package helps
 +
 +import (
++	"context"
 +	"net/http"
 +	"sync"
 +	"time"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 +)
 +
 +// upstreamHTTP2SendPingTimeout and upstreamHTTP2PingTimeout turn on the HTTP/2 health check for
@@ -62,6 +67,15 @@ index 00000000..3e2bae5b
 +	return client
 +}
 +
++// NewUpstreamHTTPClient is NewProxyAwareHTTPClient with the shared upstream transport as its
++// fallback. A request-scoped decorator (sdk/httptransport) is applied once, after that transport is
++// chosen, so it wraps the health-checked transport instead of http.DefaultTransport; the Antigravity
++// executor decorates its own pool the same way.
++func NewUpstreamHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
++	client := WithUpstreamFallbackTransport(NewProxyAwareHTTPClient(httptransport.WithoutDecorator(ctx), cfg, auth, timeout))
++	return httptransport.Decorate(ctx, client)
++}
++
 +// withUpstreamHTTP2HealthCheck sets the HTTP/2 health check on transport and returns it, keeping any
 +// other HTTP/2 settings the transport already has.
 +func withUpstreamHTTP2HealthCheck(transport *http.Transport, sendPingTimeout, pingTimeout time.Duration) *http.Transport {
@@ -77,10 +91,10 @@ index 00000000..3e2bae5b
 +}
 diff --git a/internal/runtime/executor/helps/upstream_transport_test.go b/internal/runtime/executor/helps/upstream_transport_test.go
 new file mode 100644
-index 00000000..be953d58
+index 00000000..a539360d
 --- /dev/null
 +++ b/internal/runtime/executor/helps/upstream_transport_test.go
-@@ -0,0 +1,220 @@
+@@ -0,0 +1,233 @@
 +package helps
 +
 +import (
@@ -98,6 +112,7 @@ index 00000000..be953d58
 +	"time"
 +
 +	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 +	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 +)
 +
@@ -227,6 +242,18 @@ index 00000000..be953d58
 +	if got := WithUpstreamFallbackTransport(NewProxyAwareHTTPClient(context.Background(), direct, nil, 0)).Transport; got != http.RoundTripper(shared) {
 +		t.Fatalf("WithUpstreamFallbackTransport transport = %T, want the shared upstream transport", got)
 +	}
++	if got := NewUpstreamHTTPClient(context.Background(), direct, nil, 0).Transport; got != http.RoundTripper(shared) {
++		t.Fatalf("NewUpstreamHTTPClient transport = %T, want the shared upstream transport", got)
++	}
++	// A request-scoped decorator wraps the health-checked transport, not http.DefaultTransport.
++	var decorated http.RoundTripper
++	decoratorCtx := httptransport.WithDecorator(context.Background(), func(next http.RoundTripper) http.RoundTripper {
++		decorated = next
++		return roundTripperFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("unused") })
++	})
++	if client := NewUpstreamHTTPClient(decoratorCtx, direct, nil, 0); decorated != http.RoundTripper(shared) || client.Transport == http.RoundTripper(shared) {
++		t.Fatalf("decorator wrapped %T, want the shared upstream transport", decorated)
++	}
 +
 +	proxied := &config.Config{}
 +	proxied.ProxyURL = "http://127.0.0.1:9"
@@ -302,10 +329,10 @@ index 00000000..be953d58
 +	}
 +}
 diff --git a/internal/runtime/executor/helps/utls_client.go b/internal/runtime/executor/helps/utls_client.go
-index f832748b..c3417e78 100644
+index f35432d3..1782b6d9 100644
 --- a/internal/runtime/executor/helps/utls_client.go
 +++ b/internal/runtime/executor/helps/utls_client.go
-@@ -405,7 +405,7 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
+@@ -419,7 +419,7 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
  
  	var chromeRT http.RoundTripper = newUtlsRoundTripper(proxyURL)
  	var anthropicRT http.RoundTripper = cachedClaudeCodeRoundTripper(proxyURL)
@@ -315,7 +342,7 @@ index f832748b..c3417e78 100644
  		if transport := buildProxyTransport(proxyURL); transport != nil {
  			standardTransport = transport
 diff --git a/internal/runtime/executor/openai_compat_executor.go b/internal/runtime/executor/openai_compat_executor.go
-index b63f1258..47aaa55e 100644
+index b63f1258..09fe923c 100644
 --- a/internal/runtime/executor/openai_compat_executor.go
 +++ b/internal/runtime/executor/openai_compat_executor.go
 @@ -81,7 +81,7 @@ func (e *OpenAICompatExecutor) HttpRequest(ctx context.Context, auth *cliproxyau
@@ -323,7 +350,7 @@ index b63f1258..47aaa55e 100644
  		return nil, err
  	}
 -	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-+	httpClient := helps.WithUpstreamFallbackTransport(helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0))
++	httpClient := helps.NewUpstreamHTTPClient(ctx, e.cfg, auth, 0)
  	return httpClient.Do(httpReq)
  }
  
@@ -332,7 +359,7 @@ index b63f1258..47aaa55e 100644
  	})
  
 -	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-+	httpClient := helps.WithUpstreamFallbackTransport(helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0))
++	httpClient := helps.NewUpstreamHTTPClient(ctx, e.cfg, auth, 0)
  	httpClient = reporter.TrackHTTPClient(httpClient)
  	httpResp, err := httpClient.Do(httpReq)
  	if err != nil {
@@ -341,7 +368,7 @@ index b63f1258..47aaa55e 100644
  	})
  
 -	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-+	httpClient := helps.WithUpstreamFallbackTransport(helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0))
++	httpClient := helps.NewUpstreamHTTPClient(ctx, e.cfg, auth, 0)
  	httpClient = reporter.TrackHTTPClient(httpClient)
  	httpResp, err := httpClient.Do(httpReq)
  	if err != nil {
@@ -350,7 +377,7 @@ index b63f1258..47aaa55e 100644
  	})
  
 -	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-+	httpClient := helps.WithUpstreamFallbackTransport(helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0))
++	httpClient := helps.NewUpstreamHTTPClient(ctx, e.cfg, auth, 0)
  	// Early role/empty frames are only first-packet fallbacks, not effective tokens.
  	httpClient = reporter.TrackHTTPClientRoundTripOnly(httpClient)
  	httpResp, err := httpClient.Do(httpReq)
@@ -359,7 +386,7 @@ index b63f1258..47aaa55e 100644
  	})
  
 -	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-+	httpClient := helps.WithUpstreamFallbackTransport(helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0))
++	httpClient := helps.NewUpstreamHTTPClient(ctx, e.cfg, auth, 0)
  	httpClient = reporter.TrackHTTPClient(httpClient)
  	httpResp, err := httpClient.Do(httpReq)
  	if err != nil {

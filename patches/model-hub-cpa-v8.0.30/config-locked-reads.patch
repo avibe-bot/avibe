@@ -1,0 +1,544 @@
+From a010cf786b688ecbd3715bf290d3ea831dfffc1f Mon Sep 17 00:00:00 2001
+From: cyhhao <5381613+cyhhao@users.noreply.github.com>
+Date: Sat, 17 Oct 2026 15:42:59 +0800
+Subject: [PATCH] fix(config): stop readers seeing a half-written config
+
+In-process config writers rewrite config.yaml by truncating it and then
+writing it, so a concurrent reader (a reload's LoadConfig, the
+management config endpoints, the management stale-snapshot check, a
+read-modify-write save) could see an empty or partial file. An empty
+read loads as defaults: no api-keys and no management secret until the
+next event reloads the full file.
+
+Order every in-process config write against those reads with one
+RWMutex (config.WriteConfigFile / config.ReadConfigFile). Writes stay in
+place, keeping the inode of a mounted config file, and are fsynced. A
+call-site test parks each reader and the management write inside its
+file I/O on a named pipe and checks that it holds the lock there.
+
+Upstream: router-for-me/CLIProxyAPI#6701 at 0cd78a14a.
+---
+ .../api/handlers/management/config_basic.go   |  17 +--
+ internal/api/handlers/management/config_v8.go |   3 +-
+ internal/api/handlers/management/handler.go   |   5 +-
+ internal/config/config_callsite_unix_test.go  | 127 ++++++++++++++++++
+ internal/config/config_load.go                |  10 +-
+ internal/config/config_write.go               |  37 +++++
+ internal/config/config_write_test.go          |  37 +++++
+ internal/config/config_write_unix_test.go     |  74 ++++++++++
+ internal/config/config_yaml.go                |   9 +-
+ internal/config/export_test.go                |   4 +
+ internal/watcher/config_reload.go             |   3 +-
+ 11 files changed, 295 insertions(+), 31 deletions(-)
+ create mode 100644 internal/config/config_callsite_unix_test.go
+ create mode 100644 internal/config/config_write.go
+ create mode 100644 internal/config/config_write_test.go
+ create mode 100644 internal/config/config_write_unix_test.go
+ create mode 100644 internal/config/export_test.go
+
+diff --git a/internal/api/handlers/management/config_basic.go b/internal/api/handlers/management/config_basic.go
+index a6c02c4d6..86035b0b0 100644
+--- a/internal/api/handlers/management/config_basic.go
++++ b/internal/api/handlers/management/config_basic.go
+@@ -110,20 +110,7 @@ func WriteConfig(path string, data []byte) error {
+ 			return err
+ 		}
+ 	}
+-	data = config.NormalizeCommentIndentation(data)
+-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+-	if err != nil {
+-		return err
+-	}
+-	if _, errWrite := f.Write(data); errWrite != nil {
+-		_ = f.Close()
+-		return errWrite
+-	}
+-	if errSync := f.Sync(); errSync != nil {
+-		_ = f.Close()
+-		return errSync
+-	}
+-	return f.Close()
++	return config.WriteConfigFile(path, config.NormalizeCommentIndentation(data), 0o644)
+ }
+ 
+ func (h *Handler) PutConfigYAML(c *gin.Context) {
+@@ -183,7 +170,7 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
+ // GetConfigYAML returns the raw config.yaml file bytes without re-encoding.
+ // It preserves comments and original formatting/styles.
+ func (h *Handler) GetConfigYAML(c *gin.Context) {
+-	data, err := os.ReadFile(h.configFilePath)
++	data, err := config.ReadConfigFile(h.configFilePath)
+ 	if err != nil {
+ 		if os.IsNotExist(err) {
+ 			c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "config file not found"})
+diff --git a/internal/api/handlers/management/config_v8.go b/internal/api/handlers/management/config_v8.go
+index b4b8e4184..d4063d516 100644
+--- a/internal/api/handlers/management/config_v8.go
++++ b/internal/api/handlers/management/config_v8.go
+@@ -4,7 +4,6 @@ import (
+ 	"encoding/json"
+ 	"io"
+ 	"net/http"
+-	"os"
+ 	"reflect"
+ 	"strings"
+ 
+@@ -22,7 +21,7 @@ const ConfigV8ContextKey = "management.config-v8"
+ func (h *Handler) ConfigV8(c *gin.Context) {
+ 	h.mu.Lock()
+ 	defer h.mu.Unlock()
+-	data, err := os.ReadFile(h.configFilePath)
++	data, err := config.ReadConfigFile(h.configFilePath)
+ 	if err != nil {
+ 		c.JSON(http.StatusInternalServerError, gin.H{"error": "read_failed"})
+ 		return
+diff --git a/internal/api/handlers/management/handler.go b/internal/api/handlers/management/handler.go
+index c186e75f4..f4c2df15b 100644
+--- a/internal/api/handlers/management/handler.go
++++ b/internal/api/handlers/management/handler.go
+@@ -140,12 +140,13 @@ func (h *Handler) SetConfig(cfg *config.Config) {
+ 
+ // isStaleConfigFileSnapshotLocked reports whether cfg was parsed from config file
+ // bytes that are no longer on disk. Management saves hold h.mu, so none can land
+-// during the check. Callers must hold h.mu.
++// during the check, and config.ReadConfigFile keeps other in-process writes (such
++// as LoadConfig's write-backs) from being read half-done. Callers must hold h.mu.
+ func (h *Handler) isStaleConfigFileSnapshotLocked(cfg *config.Config) bool {
+ 	if cfg == nil || cfg.SourceHash == "" || h.configFilePath == "" {
+ 		return false
+ 	}
+-	data, errRead := os.ReadFile(h.configFilePath)
++	data, errRead := config.ReadConfigFile(h.configFilePath)
+ 	if errRead != nil {
+ 		return false
+ 	}
+diff --git a/internal/config/config_callsite_unix_test.go b/internal/config/config_callsite_unix_test.go
+new file mode 100644
+index 000000000..b069194a8
+--- /dev/null
++++ b/internal/config/config_callsite_unix_test.go
+@@ -0,0 +1,127 @@
++//go:build unix
++
++package config_test
++
++import (
++	"bytes"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"syscall"
++	"testing"
++
++	"github.com/gin-gonic/gin"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher"
++)
++
++// configPipe creates a named pipe where the config file would be. A read or a
++// write of it parks inside the file I/O until the test opens the other end.
++func configPipe(t *testing.T) string {
++	t.Helper()
++	path := filepath.Join(t.TempDir(), "config.yaml")
++	if err := syscall.Mkfifo(path, 0o600); err != nil {
++		t.Fatalf("mkfifo: %v", err)
++	}
++	return path
++}
++
++// assertReadHoldsLock runs read, which must read the config at path, and checks
++// that it holds the config file lock while it reads, so no write can interleave.
++func assertReadHoldsLock(t *testing.T, path string, content []byte, read func()) {
++	t.Helper()
++	done := make(chan struct{})
++	go func() {
++		defer close(done)
++		read()
++	}()
++	// Opening the write end returns once the reader has opened the pipe, and the
++	// reader then waits for data inside its read.
++	pipe, err := os.OpenFile(path, os.O_WRONLY, 0)
++	if err != nil {
++		t.Fatalf("open pipe for writing: %v", err)
++	}
++	if config.ConfigFileMu.TryLock() {
++		config.ConfigFileMu.Unlock()
++		t.Error("the config is read without the config file lock")
++	}
++	if _, err = pipe.Write(content); err != nil {
++		t.Fatalf("write pipe: %v", err)
++	}
++	if err = pipe.Close(); err != nil {
++		t.Fatalf("close pipe: %v", err)
++	}
++	<-done
++}
++
++func managementContext(method, target string) *gin.Context {
++	gin.SetMode(gin.TestMode)
++	c, _ := gin.CreateTestContext(httptest.NewRecorder())
++	c.Request = httptest.NewRequest(method, target, nil)
++	return c
++}
++
++func TestConfigFileCallSitesHoldTheLock(t *testing.T) {
++	t.Run("watcher reload", func(t *testing.T) {
++		path := configPipe(t)
++		w, err := watcher.NewWatcher(path, t.TempDir(), nil)
++		if err != nil {
++			t.Fatalf("NewWatcher: %v", err)
++		}
++		defer func() {
++			if errStop := w.Stop(); errStop != nil {
++				t.Errorf("stop watcher: %v", errStop)
++			}
++		}()
++		// Empty bytes end the reload right after its read.
++		assertReadHoldsLock(t, path, nil, w.ReloadConfigIfChanged)
++	})
++	t.Run("management GET config.yaml", func(t *testing.T) {
++		path := configPipe(t)
++		h := management.NewHandler(&config.Config{}, path, nil)
++		assertReadHoldsLock(t, path, []byte("port: 8317\n"), func() {
++			h.GetConfigYAML(managementContext(http.MethodGet, "/v0/management/config.yaml"))
++		})
++	})
++	t.Run("management v8 config", func(t *testing.T) {
++		path := configPipe(t)
++		h := management.NewHandler(&config.Config{}, path, nil)
++		assertReadHoldsLock(t, path, []byte("port: 8317\n"), func() {
++			h.ConfigV8(managementContext(http.MethodGet, "/v8/management/config"))
++		})
++	})
++	t.Run("management stale-snapshot check", func(t *testing.T) {
++		path := configPipe(t)
++		h := management.NewHandler(&config.Config{}, path, nil)
++		assertReadHoldsLock(t, path, []byte("port: 8317\n"), func() {
++			h.SetConfig(&config.Config{SourceHash: "applied"})
++		})
++	})
++	t.Run("management write", func(t *testing.T) {
++		path := configPipe(t)
++		// More than a pipe buffer holds, so the writer stays inside its write until
++		// the test drains the pipe.
++		data := append(bytes.Repeat([]byte("# padding\n"), 1<<17), []byte("port: 8317\n")...)
++		written := make(chan error, 1)
++		go func() { written <- management.WriteConfig(path, data) }()
++		pipe, err := os.Open(path)
++		if err != nil {
++			t.Fatalf("open pipe for reading: %v", err)
++		}
++		if config.ConfigFileMu.TryRLock() {
++			config.ConfigFileMu.RUnlock()
++			t.Error("the config is written without the config file lock")
++		}
++		if _, err = io.Copy(io.Discard, pipe); err != nil {
++			t.Fatalf("drain pipe: %v", err)
++		}
++		if err = pipe.Close(); err != nil {
++			t.Fatalf("close pipe: %v", err)
++		}
++		// A pipe cannot be synced, so the write reports an error after writing.
++		<-written
++	})
++}
+diff --git a/internal/config/config_load.go b/internal/config/config_load.go
+index 93cc22efb..ac03a338e 100644
+--- a/internal/config/config_load.go
++++ b/internal/config/config_load.go
+@@ -41,7 +41,7 @@ func ComputeSourceHash(data []byte) string {
+ // copies stay identical. When the plaintext cannot be removed it returns an error and
+ // leaves configFile untouched, so every later attempt refuses the file again.
+ func PrepareConfigFileForUpload(configFile string) error {
+-	data, errRead := os.ReadFile(configFile)
++	data, errRead := ReadConfigFile(configFile)
+ 	if errRead != nil {
+ 		return errRead
+ 	}
+@@ -52,7 +52,7 @@ func PrepareConfigFileForUpload(configFile string) error {
+ 	if bytes.Equal(prepared, data) {
+ 		return nil
+ 	}
+-	if errWrite := os.WriteFile(configFile, prepared, 0600); errWrite != nil {
++	if errWrite := WriteConfigFile(configFile, prepared, 0o600); errWrite != nil {
+ 		return fmt.Errorf("failed to write prepared config file: %w", errWrite)
+ 	}
+ 	return nil
+@@ -156,7 +156,7 @@ func managementSecretKeyPath(data []byte) []string {
+ // If optional is true and the file is empty or invalid, it returns an empty Config.
+ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
+ 	// Read the entire configuration file into memory.
+-	data, err := os.ReadFile(configFile)
++	data, err := ReadConfigFile(configFile)
+ 	if err != nil {
+ 		if optional {
+ 			if os.IsNotExist(err) || errors.Is(err, syscall.EISDIR) {
+@@ -331,7 +331,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
+ 
+ 	// Only conflicting legacy fields are removed on load. A legacy-only document
+ 	// stays legacy until a v8 configuration write explicitly migrates it.
+-	current, errRead := os.ReadFile(configFile)
++	current, errRead := ReadConfigFile(configFile)
+ 	if errRead != nil {
+ 		return nil, errRead
+ 	}
+@@ -340,7 +340,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
+ 		return nil, errLayout
+ 	}
+ 	if changed {
+-		if errWrite := os.WriteFile(configFile, cleaned, 0600); errWrite != nil {
++		if errWrite := WriteConfigFile(configFile, cleaned, 0o600); errWrite != nil {
+ 			return nil, fmt.Errorf("clean conflicting config fields: %w", errWrite)
+ 		}
+ 	}
+diff --git a/internal/config/config_write.go b/internal/config/config_write.go
+new file mode 100644
+index 000000000..ea6f7315f
+--- /dev/null
++++ b/internal/config/config_write.go
+@@ -0,0 +1,37 @@
++package config
++
++import (
++	"os"
++	"sync"
++)
++
++// configFileMu orders config file writes against reads within this process, so
++// a reader such as the config watcher never sees a truncated or half-written file.
++var configFileMu sync.RWMutex
++
++// ReadConfigFile reads a config file. It never overlaps a WriteConfigFile call,
++// so it returns either the previous or the new content of a concurrent write.
++func ReadConfigFile(path string) ([]byte, error) {
++	configFileMu.RLock()
++	defer configFileMu.RUnlock()
++	return os.ReadFile(path)
++}
++
++// WriteConfigFile rewrites a config file and syncs it to disk. The file is
++// written in place to keep the inode of a mounted configuration file.
++func WriteConfigFile(path string, data []byte, perm os.FileMode) error {
++	configFileMu.Lock()
++	defer configFileMu.Unlock()
++	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
++	if err != nil {
++		return err
++	}
++	_, err = f.Write(data)
++	if err == nil {
++		err = f.Sync()
++	}
++	if errClose := f.Close(); err == nil {
++		err = errClose
++	}
++	return err
++}
+diff --git a/internal/config/config_write_test.go b/internal/config/config_write_test.go
+new file mode 100644
+index 000000000..dba45497b
+--- /dev/null
++++ b/internal/config/config_write_test.go
+@@ -0,0 +1,37 @@
++package config
++
++import (
++	"os"
++	"path/filepath"
++	"testing"
++)
++
++func TestWriteConfigFileKeepsInode(t *testing.T) {
++	path := filepath.Join(t.TempDir(), "config.yaml")
++	if err := os.WriteFile(path, []byte("port: 8001\n"), 0o640); err != nil {
++		t.Fatalf("write config: %v", err)
++	}
++	before, err := os.Stat(path)
++	if err != nil {
++		t.Fatalf("stat config: %v", err)
++	}
++
++	if err = WriteConfigFile(path, []byte("port: 8002\n"), 0o600); err != nil {
++		t.Fatalf("WriteConfigFile: %v", err)
++	}
++
++	after, err := os.Stat(path)
++	if err != nil {
++		t.Fatalf("stat config: %v", err)
++	}
++	if !os.SameFile(before, after) {
++		t.Fatal("WriteConfigFile replaced the config file")
++	}
++	data, err := ReadConfigFile(path)
++	if err != nil {
++		t.Fatalf("read config: %v", err)
++	}
++	if string(data) != "port: 8002\n" {
++		t.Fatalf("config = %q, want the new content", data)
++	}
++}
+diff --git a/internal/config/config_write_unix_test.go b/internal/config/config_write_unix_test.go
+new file mode 100644
+index 000000000..4dc438b71
+--- /dev/null
++++ b/internal/config/config_write_unix_test.go
+@@ -0,0 +1,74 @@
++//go:build unix
++
++package config
++
++import (
++	"bytes"
++	"io"
++	"os"
++	"path/filepath"
++	"syscall"
++	"testing"
++)
++
++// A named pipe parks a read or a write inside the file I/O, so the test can check,
++// without timing, that the other side cannot start until it finishes.
++func TestConfigFileReadsAndWritesExcludeEachOther(t *testing.T) {
++	path := filepath.Join(t.TempDir(), "config.yaml")
++	if err := syscall.Mkfifo(path, 0o600); err != nil {
++		t.Fatalf("mkfifo: %v", err)
++	}
++
++	read := make(chan error, 1)
++	go func() {
++		_, err := ReadConfigFile(path)
++		read <- err
++	}()
++	// Opening the write end returns once the reader has opened the pipe, and the
++	// reader then waits for data inside ReadConfigFile.
++	pipe, err := os.OpenFile(path, os.O_WRONLY, 0)
++	if err != nil {
++		t.Fatalf("open pipe for writing: %v", err)
++	}
++	if configFileMu.TryLock() {
++		configFileMu.Unlock()
++		t.Error("a write could start while a read was in progress")
++	}
++	if _, err = pipe.Write([]byte("port: 8001\n")); err != nil {
++		t.Fatalf("write pipe: %v", err)
++	}
++	if err = pipe.Close(); err != nil {
++		t.Fatalf("close pipe: %v", err)
++	}
++	if err = <-read; err != nil {
++		t.Fatalf("ReadConfigFile: %v", err)
++	}
++
++	written := make(chan error, 1)
++	// More than a pipe buffer holds, so the writer stays inside WriteConfigFile
++	// until the test drains the pipe.
++	data := bytes.Repeat([]byte("# padding\n"), 1<<17)
++	go func() {
++		written <- WriteConfigFile(path, data, 0o600)
++	}()
++	pipe, err = os.Open(path)
++	if err != nil {
++		t.Fatalf("open pipe for reading: %v", err)
++	}
++	if configFileMu.TryRLock() {
++		configFileMu.RUnlock()
++		t.Error("a read could start while a write was in progress")
++	}
++	got, err := io.ReadAll(pipe)
++	if err != nil {
++		t.Fatalf("read pipe: %v", err)
++	}
++	if err = pipe.Close(); err != nil {
++		t.Fatalf("close pipe: %v", err)
++	}
++	if !bytes.Equal(got, data) {
++		t.Fatalf("pipe carried %d bytes, want %d", len(got), len(data))
++	}
++	// A pipe cannot be synced, so the write reports an error after writing.
++	<-written
++}
+diff --git a/internal/config/config_yaml.go b/internal/config/config_yaml.go
+index a915eb074..f5544864a 100644
+--- a/internal/config/config_yaml.go
++++ b/internal/config/config_yaml.go
+@@ -3,7 +3,6 @@ package config
+ import (
+ 	"bytes"
+ 	"fmt"
+-	"os"
+ 	"strings"
+ 
+ 	"gopkg.in/yaml.v3"
+@@ -17,7 +16,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
+ 	persistCfg := cfg
+ 	migrating := len(migrateV8) > 0 && migrateV8[0]
+ 	// Load original YAML as a node tree to preserve comments and ordering.
+-	data, err := os.ReadFile(configFile)
++	data, err := ReadConfigFile(configFile)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -113,7 +112,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
+ 			return fmt.Errorf("decode migrated config: %w", err)
+ 		}
+ 	}
+-	if err = os.WriteFile(configFile, data, 0600); err != nil {
++	if err = WriteConfigFile(configFile, data, 0o600); err != nil {
+ 		return err
+ 	}
+ 	if migrated != nil {
+@@ -126,7 +125,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
+ // SaveConfigPreserveCommentsUpdateNestedScalar updates a nested scalar key path like ["a","b"]
+ // while preserving comments and positions.
+ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []string, value string) error {
+-	data, err := os.ReadFile(configFile)
++	data, err := ReadConfigFile(configFile)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -134,7 +133,7 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
+ 	if err != nil {
+ 		return err
+ 	}
+-	return os.WriteFile(configFile, data, 0600)
++	return WriteConfigFile(configFile, data, 0o600)
+ }
+ 
+ // updateNestedScalarYAML returns data with the nested scalar key path like ["a","b"] set to
+diff --git a/internal/config/export_test.go b/internal/config/export_test.go
+new file mode 100644
+index 000000000..578b99224
+--- /dev/null
++++ b/internal/config/export_test.go
+@@ -0,0 +1,4 @@
++package config
++
++// ConfigFileMu exposes the config file lock to call-site tests in this directory.
++var ConfigFileMu = &configFileMu
+diff --git a/internal/watcher/config_reload.go b/internal/watcher/config_reload.go
+index b9d5aabbf..0a8e04a4a 100644
+--- a/internal/watcher/config_reload.go
++++ b/internal/watcher/config_reload.go
+@@ -5,7 +5,6 @@ package watcher
+ import (
+ 	"crypto/sha256"
+ 	"encoding/hex"
+-	"os"
+ 	"reflect"
+ 	"time"
+ 
+@@ -56,7 +55,7 @@ func (w *Watcher) reloadConfigIfChanged() {
+ 	w.configApplyMu.Lock()
+ 	defer w.configApplyMu.Unlock()
+ 
+-	data, err := os.ReadFile(w.configPath)
++	data, err := config.ReadConfigFile(w.configPath)
+ 	if err != nil {
+ 		log.Errorf("failed to read config file for hash check: %v", err)
+ 		return
+-- 
+2.50.1 (Apple Git-155)
+

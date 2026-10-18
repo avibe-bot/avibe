@@ -2397,7 +2397,7 @@ scenarios:
     test: tests/e2e/test_model_hub_routing.py::test_d5_nonrefreshable_401_marks_the_key_for_repair
   - id: D6
     name: A server error honors later upstream advice through the real engine
-    status: xfail
+    status: assert
     kind: failover
     layer: e2e-auto
     test: tests/e2e/test_model_hub_routing.py::test_d6_server_error_preserves_later_retry_after_through_real_engine
@@ -2670,8 +2670,8 @@ scenarios:
     layer: e2e
     test: tests/e2e/test_model_hub_engine_hosted_passthrough.py::test_responses_xai_history_replays_in_real_shapes
   - id: MH-ENGINE-HOSTED-007
-    name: The real CPA Responses path replays xAI's 84-rune tool-call reasoning with its id and ciphertext, and the 84-rune call id, as xAI issued them (expected to fail until the engine keeps over-limit upstream ids under is-compat)
-    status: xfail
+    name: The real CPA Responses path replays xAI's 84-rune tool-call reasoning with its id and ciphertext, and the 84-rune call id, as xAI issued them
+    status: covered
     kind: compatibility
     layer: e2e
     test: tests/e2e/test_model_hub_engine_hosted_passthrough.py::test_responses_xai_over_limit_ids_replay_verbatim
@@ -2683,6 +2683,4 @@ next_priority:
   - B5
   - B8
   - B9
-  - D6
   - G3
-  - MH-ENGINE-HOSTED-007

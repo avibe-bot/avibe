@@ -273,7 +273,7 @@ even an opt-in HTTP/2 health check. Its maintainers closed
 router-for-me/CLIProxyAPI#6534 as not planned: timeouts and cancellation belong
 to the downstream client. For the engine that client is this gateway.
 
-Engine patches 4 and 5 (`patches/model-hub-cpa-v8.0.23/README.md`) are carried
+Engine patches 4 and 5 (`patches/model-hub-cpa-v8.0.30/README.md`) are carried
 by design and turn a dead network path into an error in about 45 s. They cannot
 see a relay that stays alive while its own upstream is stuck: the relay answers
 PINGs and keeps writing `: keep-alive` comments, and the engine holds
