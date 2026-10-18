@@ -757,6 +757,11 @@ def recovered_watch_ids(conn: Connection, session_id: str, turn_id: str) -> list
     return [str(json.loads(raw)["details"]["watch_id"]) for raw in rows]
 
 
+# A response that stopped this way is never final: the loop commits the partial a failed
+# stream carried with ``final=False`` (``Agent._commit_model_message``).
+_UNFINISHED_STOP_REASONS = frozenset({"error", "aborted"})
+
+
 @dataclass(frozen=True)
 class CommittedResponse:
     """A response row in a Session's own context: the facts restart recovery reads."""
@@ -767,6 +772,7 @@ class CommittedResponse:
     turn_id: Optional[str]
     text: str
     has_tool_calls: bool
+    stop_reason: str
 
 
 def last_response(conn: Connection, session_id: str) -> Optional[CommittedResponse]:
@@ -791,10 +797,10 @@ def last_response(conn: Connection, session_id: str) -> Optional[CommittedRespon
     if row is None:
         return None
     try:
-        content = json.loads(row["content_json"] or "{}")
-        blocks = content["model"]["message"]["content"]
-    except (TypeError, ValueError, KeyError):
-        blocks = []
+        model_message = json.loads(row["content_json"] or "{}")["model"]["message"]
+        blocks, stop_reason = model_message["content"], str(model_message.get("stop_reason") or "")
+    except (TypeError, ValueError, KeyError, AttributeError):
+        blocks, stop_reason = [], ""
     try:
         metadata = json.loads(row["metadata_json"] or "{}")
     except (TypeError, ValueError):
@@ -809,19 +815,27 @@ def last_response(conn: Connection, session_id: str) -> Optional[CommittedRespon
         has_tool_calls=any(
             isinstance(block, dict) and block.get("type") == "tool_call" for block in blocks or ()
         ),
+        stop_reason=stop_reason,
     )
 
 
 def committed_final(conn: Connection, session_id: str, turn_id: str) -> Optional[CommittedResponse]:
     """The final response ``turn_id`` committed, when the Turn's work ended with it.
 
-    Read after T2 and T3: a Turn has work left unless its last committed response has
-    no tool calls and no input follows it, in the context or still waiting to enter it
-    (an accepted steer no run consumed). Every read is bounded by the Session's context
-    tail or by the Turn's own Deliveries.
+    Read after T2 and T3, with the loop's finality rule (``Agent._commit_model_message``):
+    a Turn has work left unless its last committed response has no tool calls, did not
+    stop with ``error`` or ``aborted`` (the partial a failed stream commits), and no
+    input follows it, in the context or still waiting to enter it (an accepted steer no
+    run consumed). Every read is bounded by the Session's context tail or by the Turn's
+    own Deliveries.
     """
     response = last_response(conn, session_id)
-    if response is None or response.turn_id != turn_id or response.has_tool_calls:
+    if (
+        response is None
+        or response.turn_id != turn_id
+        or response.has_tool_calls
+        or response.stop_reason in _UNFINISHED_STOP_REASONS
+    ):
         return None
     later_input = conn.execute(
         select(messages.c.id)

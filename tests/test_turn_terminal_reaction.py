@@ -281,6 +281,16 @@ class OrphanedTerminalReactionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(stamped)
         self.assertEqual(im.calls[-1], ("add", "m1", INTERRUPTED_REACTION_EMOJI))
 
+    async def test_a_recovered_completed_turn_only_loses_its_stale_running_reaction(self):
+        # Its committed reply is the receipt, as for a live completion: no ⚠️.
+        im = _FakeIM()
+        svc = _svc(im)
+
+        cleared = await svc.clear_orphaned_running_reaction(_ctx(), "m1")
+
+        self.assertTrue(cleared)
+        self.assertEqual(im.calls, [("remove", "m1", ACK_REACTION_EMOJI)])
+
     async def test_noop_without_a_message_id(self):
         im = _FakeIM()
         svc = _svc(im)

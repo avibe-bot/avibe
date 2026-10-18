@@ -22,7 +22,7 @@ from tests.test_ui_session_stream import _accepted_dispatch, _make_session, isol
 from tests.ui_server_test_helpers import csrf_headers
 
 
-def _accepted_turn(tmp_path, *, backend, delivery="ready"):
+def _accepted_turn(tmp_path, *, backend, delivery="ready", native_message_id=None):
     """One accepted Turn through the real Delivery owner, notice dispatcher, and storage."""
     from core.message_dispatcher import ConsolidatedMessageDispatcher
     from core.session_turns import SessionTurnManager
@@ -55,7 +55,10 @@ def _accepted_turn(tmp_path, *, backend, delivery="ready"):
 
     manager._run = accepted
     original = asyncio.run(manager.deliver(
-        DeliveryRequest(session_id=session_id, priority="p3", content="完成剩余工作，不要重复提交"),
+        DeliveryRequest(
+            session_id=session_id, priority="p3", content="完成剩余工作，不要重复提交",
+            **({"platform": "slack", "native_message_id": native_message_id} if native_message_id else {}),
+        ),
         context=context(session_id),
     ))
     starts.clear()
@@ -198,10 +201,11 @@ def _continuations(engine, session_id):
         ]
 
 
-@pytest.mark.parametrize("step", ["tool", "handover"])
+@pytest.mark.parametrize("step", ["tool", "handover", "partial"])
 def test_restart_continues_a_cut_vibey_turn_from_its_transcript_without_a_notice(isolated_state, tmp_path, step):
     """MESSAGE-DELIVERY-326 / MESSAGE-DELIVERY-329: one hidden continuation, no notice;
-    a command T2 handed to a Watch does not stop it."""
+    a command T2 handed to a Watch does not stop it, and a failed stream's partial text
+    is not a final reply."""
     cut = _accepted_turn(tmp_path, backend="vibey")
 
     _restart(cut, _previous_process(step))
@@ -232,11 +236,23 @@ def test_restart_continues_a_cut_vibey_turn_from_its_transcript_without_a_notice
     assert [row["text"] for row in users] == ["完成剩余工作，不要重复提交"]
 
 
-def test_restart_completes_a_cut_vibey_turn_whose_final_reply_was_committed(isolated_state, tmp_path):
-    """MESSAGE-DELIVERY-326: nothing is left to continue, and nothing failed."""
-    cut = _accepted_turn(tmp_path, backend="vibey")
+@pytest.mark.parametrize(
+    "origin,delivery", [(None, "ready"), ("1760000000.000100", "ready"), ("1760000000.000100", "unready")]
+)
+def test_restart_completes_a_cut_vibey_turn_whose_final_reply_was_committed(isolated_state, tmp_path, origin, delivery):
+    """MESSAGE-DELIVERY-326: nothing is left to continue, and nothing failed; the 👀 the
+    dead process left on an IM message is retired once its transport can deliver."""
+    cut = _accepted_turn(tmp_path, backend="vibey", delivery=delivery, native_message_id=origin)
+    clear = AsyncMock(return_value=True)
+    cut.manager.controller.processing_indicator = SimpleNamespace(clear_orphaned_running_reaction=clear)
 
     _restart(cut, _previous_process("final"))
+    if delivery == "unready":
+        clear.assert_not_awaited()
+        cut.manager._transport_can_deliver = lambda _platform: True
+        assert asyncio.run(cut.manager.notify_transport_ready("avibe")) == 0
+
+    assert [call.args[1] for call in clear.await_args_list] == ([origin] if origin else [])
 
     with cut.engine.connect() as conn:
         turn = message_deliveries.get_turn(conn, cut.turn_id)

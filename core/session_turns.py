@@ -753,6 +753,9 @@ class SessionTurnManager:
         self._pending_lost_turn_reports: dict[str, list[tuple[str, str, str, str, str]]] = {}
         # One in-flight retry task per platform for the reports above.
         self._lost_turn_retry_tasks: dict[str, asyncio.Task[None]] = {}
+        # Running reactions a dead process left on Turns recovery completed from a
+        # committed final, held like the reports above: ``(session_id, message_id)``.
+        self._pending_orphan_reaction_clears: dict[str, list[tuple[str, str]]] = {}
         # The live turn sink per TURN SINK KEY. Each is
         # ``{on_chunk, done_event, turn_token}`` — the turn's stream callback +
         # completion event + correlation token. Every dispatched turn registers one,
@@ -6848,6 +6851,31 @@ class SessionTurnManager:
             # ready callback is coming to flush it — retry on our own clock.
             self._schedule_lost_turn_retry(platform)
 
+    async def _clear_orphaned_running_reaction(self, session_id: str, message_id: str) -> None:
+        """Retire the 👀 a dead process left on a Turn recovery completed; best effort.
+
+        Held until the platform can deliver, like an interruption report, since
+        recovery runs before external transports connect.
+        """
+
+        service = getattr(self.controller, "processing_indicator", None)
+        clear = getattr(service, "clear_orphaned_running_reaction", None)
+        if not message_id or not callable(clear):
+            return
+        try:
+            context = self._delivery_context(session_id)
+        except Exception:
+            logger.debug("orphaned reaction: no delivery context for session=%s", session_id, exc_info=True)
+            return
+        platform = str(getattr(context, "platform", "") or "")
+        if not self._transport_can_deliver(platform):
+            self._pending_orphan_reaction_clears.setdefault(platform, []).append((session_id, message_id))
+            return
+        try:
+            await clear(context, message_id)
+        except Exception:
+            logger.debug("orphaned reaction: clear failed for session=%s", session_id, exc_info=True)
+
     def _transport_can_deliver(self, platform: str) -> bool:
         """Whether ``platform`` can deliver right now.
 
@@ -6876,6 +6904,8 @@ class SessionTurnManager:
         backoff — see ``_schedule_lost_turn_retry`` for why nothing else would.
         """
 
+        for session_id, message_id in self._pending_orphan_reaction_clears.pop(platform, []):
+            await self._clear_orphaned_running_reaction(session_id, message_id)
         pending = self._pending_lost_turn_reports.pop(platform, [])
         if not pending or self.controller is None:
             return 0
@@ -7087,7 +7117,7 @@ class SessionTurnManager:
                     settled = delivery_store.get_turn(conn, turn_id)
                 if settled is not None:
                     self._settle_agent_run_ids_from_terminal_turn(run_ids, settled)
-            return terminal
+            return {**terminal, "restart_final": True}
         if plan != "continue":
             return None
         try:
@@ -7293,6 +7323,10 @@ class SessionTurnManager:
                 if continued is not None:
                     if continued.get("changed"):
                         recovered.append(target_session)
+                    if continued.get("changed") and continued.get("restart_final"):
+                        await self._clear_orphaned_running_reaction(
+                            target_session, self._turn_origin_native_message_id(turn_id)
+                        )
                     successor_turn_id = str(continued.get("successor_turn_id") or "")
                     if successor_turn_id:
                         await self._start_persisted_turn(successor_turn_id)

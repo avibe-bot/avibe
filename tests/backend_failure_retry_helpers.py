@@ -117,6 +117,7 @@ def previous_process(step):
 
     ``tool``: a ``write`` call cut mid-call (T2 gives it the interrupted result);
     ``handover``: a bash command still running (T2 hands it to a Watch);
+    ``partial``: the text a failed stream carried, committed as a non-final response;
     ``final``: the Turn's final reply.
     """
     from core.agent_core.agent.recovery import settle_open_calls
@@ -143,6 +144,9 @@ def previous_process(step):
             await store.consume_input(session_id, input_id, UserMessage((text("run it"),)))
             if step == "final":
                 await store.append_response(session_id, assistant("全部完成"), final=True)
+                return
+            if step == "partial":
+                await store.append_response(session_id, assistant("先读完日志", stop_reason="error"), final=False)
                 return
             response = await store.append_response(session_id, assistant("", calls=(call,)), final=False)
             instance = CallInstance(session_id, response.row_id, response.context_seq, call.id)

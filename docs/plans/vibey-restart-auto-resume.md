@@ -78,8 +78,10 @@ This replaces recovery invariant T4 for Vibey (`agent-core-contracts/recovery.md
    between. Such a Turn falls back to item 1's notice, which keeps Retry.
 7. **Presentation.** No notice, no ⚠️ reaction, no interruption copy. The
    session shows the continued Turn as running. The fallback notices of item 1
-   name Retry on the Web instead of asking for a resend (copy fix in both
-   languages).
+   point to Retry where the notice shows it, or to sending `continue`, instead
+   of asking for a resend (copy fix in both languages). A Turn completed from its
+   committed final loses the 👀 the dead process left on its IM message, once
+   that transport can deliver.
 
 ## Ownership and touch points
 
@@ -98,7 +100,9 @@ This replaces recovery invariant T4 for Vibey (`agent-core-contracts/recovery.md
   `restart_resume` branch of `admission_denial` (the cut Turn must still be the
   Session's latest Turn; input queued behind it does not deny it).
 - `storage/agent_transcript.py`: `last_response` and `committed_final`, bounded
-  reads of the context tail. `storage/background.py`:
+  reads of the context tail. A final follows the loop's own rule: no tool calls,
+  not the `error`/`aborted` partial a failed stream commits, and no input after
+  it. `storage/background.py`:
   `move_agent_run_deliveries_in_connection`. `storage/message_deliveries.py`:
   `restart_resume_binding`.
 - `core/run_settlement.py`: `SETTLED_BY_RESTART_RESUMED`, outside

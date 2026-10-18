@@ -215,8 +215,8 @@
       "watchCircuitRepairFailed": "[Avibe Harness] Watch「{name}」的熔断修复 Agent Run 失败，Watch 将保持暂停。",
       "watchFollowUpFailed": "[Avibe Harness] Watch「{name}」的后续 Agent 处理失败。",
       "interrupted": "[Avibe Harness] 后台任务「{name}」被中断({reason}),任务本身没有问题。",
-      "restartStopped": "[Avibe Harness] 后台任务「{name}」已随 Avibe 重启停止。如需继续，请在 Web 端点击“重试”，或发送“继续”给 Agent。",
-      "restartStoppedUnnamed": "[Avibe Harness] 一项后台任务已随 Avibe 重启停止。如需继续，请在 Web 端点击“重试”，或发送“继续”给 Agent。",
+      "restartStopped": "[Avibe Harness] 后台任务「{name}」已随 Avibe 重启停止。如需继续，请点击“重试”（如有显示），或发送“继续”给 Agent。",
+      "restartStoppedUnnamed": "[Avibe Harness] 一项后台任务已随 Avibe 重启停止。如需继续，请点击“重试”（如有显示），或发送“继续”给 Agent。",
       "commandLine": "命令:{command}",
       "error": "错误:{error}",
       "commandExit": "退出码:{exitCode}",
@@ -1289,7 +1289,7 @@
     "interrupted": {
       "backendRefresh": "⚠️ 本轮执行被中断——它运行期间 Agent 运行时不得不被替换（例如凭据迁移）。如果这项工作仍需完成，请重新发送请求。",
       "backendDisabled": "⏹ 本轮执行已停止，因为 {agent} 已被关闭。请在设置中重新开启它；如果这项工作仍需完成，再重新发送请求。",
-      "serviceRestart": "⚠️ 本轮执行被中断——Avibe 服务在它运行期间重启。如需继续，请在 Web 端点击“重试”，或发送“继续”。",
+      "serviceRestart": "⚠️ 本轮执行被中断——Avibe 服务在它运行期间重启。如需继续，请点击“重试”（如有显示），或发送“继续”。",
       "serviceRestartWatch": "⚠️ 本轮执行被中断——Avibe 服务在它运行期间重启。正在运行的命令已作为 Watch {watch} 继续执行，结果会发到这里。",
       "serviceRestartWatches": "⚠️ 本轮执行被中断——Avibe 服务在它运行期间重启。正在运行的命令已作为 Watch {watches} 继续执行，结果会发到这里。"
     }
