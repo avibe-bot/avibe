@@ -292,22 +292,34 @@ def test_restart_continues_a_cut_vibey_turn_from_its_transcript_without_a_notice
 
 
 @pytest.mark.parametrize(
-    "origin,delivery", [(None, "ready"), ("1760000000.000100", "ready"), ("1760000000.000100", "unready")]
+    "origin,delivery,late_stop",
+    [
+        (None, "ready", False),
+        ("1760000000.000100", "ready", False),
+        ("1760000000.000100", "unready", False),
+        ("1760000000.000100", "failing", False),
+        (None, "ready", True),
+    ],
 )
-def test_restart_completes_a_cut_vibey_turn_whose_final_reply_was_committed(isolated_state, tmp_path, origin, delivery):
-    """MESSAGE-DELIVERY-327: nothing is left to continue, and nothing failed; the 👀 the
-    dead process left on an IM message is retired once its transport can deliver."""
+def test_restart_completes_a_cut_vibey_turn_whose_final_reply_was_committed(
+    isolated_state, tmp_path, origin, delivery, late_stop
+):
+    """MESSAGE-DELIVERY-327: nothing is left to continue, and nothing failed, even when a Stop
+    landed after the final (it loses the race, as live). The 👀 the dead process left on an IM
+    message is retired once its transport can deliver, and a failed attempt is kept for the next."""
     cut = _accepted_turn(tmp_path, backend="vibey", delivery=delivery, native_message_id=origin)
-    clear = AsyncMock(return_value=True)
+    clear = AsyncMock(side_effect=[False, True] if delivery == "failing" else None, return_value=True)
     cut.manager.controller.processing_indicator = SimpleNamespace(clear_orphaned_running_reaction=clear)
 
-    _restart(cut, _previous_process("final"))
-    if delivery == "unready":
-        clear.assert_not_awaited()
+    _restart(cut, _then(_previous_process("final"), _request_stop) if late_stop else _previous_process("final"))
+    if delivery in {"unready", "failing"}:
+        assert clear.await_count == (1 if delivery == "failing" else 0)
         cut.manager._transport_can_deliver = lambda _platform: True
         assert asyncio.run(cut.manager.notify_transport_ready("avibe")) == 0
 
-    assert [call.args[1] for call in clear.await_args_list] == ([origin] if origin else [])
+    expected = [origin] * (2 if delivery == "failing" else 1) if origin else []
+    assert [call.args[1] for call in clear.await_args_list] == expected
+    assert cut.manager._pending_orphan_reaction_clears.get("avibe", []) == []
 
     with cut.engine.connect() as conn:
         turn = message_deliveries.get_turn(conn, cut.turn_id)
@@ -415,6 +427,50 @@ def test_restart_notice_names_the_watch_running_the_command_and_offers_no_retry(
         )
     assert response.status_code == 409
     dispatch.assert_not_awaited()
+
+
+def test_a_restart_notice_waits_until_its_running_command_is_handed_over(isolated_state, tmp_path, monkeypatch):
+    """MESSAGE-DELIVERY-322: with no Watch to take the command yet, the Turn stays open (T2 before
+    T4): no notice without the Watch, nothing failed under a running command; the retry hands it
+    over and the notice then names it."""
+    from core.agent_core.tools.base import JobStatus
+    from core.session_turns import SessionTurnManager
+    from tests.agent_core.fakes import FakeJobHost
+
+    jobs = FakeJobHost()
+    jobs.states["job_1"] = JobStatus("running")
+    attempts = []
+    hand_over = jobs.hand_over
+
+    async def locked_once(job_id):
+        attempts.append(job_id)
+        if len(attempts) == 1:
+            raise RuntimeError("the Watch store is locked")
+        return await hand_over(job_id)
+
+    jobs.hand_over = locked_once
+    monkeypatch.setattr(SessionTurnManager, "RESTART_FALLBACK_RETRY_DELAYS", (0.05,))
+    cut = _accepted_turn(tmp_path, backend="vibey", jobs=jobs)
+    _then(_previous_process("running"), _request_stop)(cut.engine, cut.session_id, cut.turn_id)
+    cut.manager._active_identity = lambda *_args: None
+
+    async def startup():
+        assert await cut.manager.controller.vibey_recovery.start() == []
+        await cut.manager.recover_durable_delivery_state(cut.session_id, service_restart=True)
+        with cut.engine.connect() as conn:
+            assert message_deliveries.get_turn(conn, cut.turn_id)["state"] == "active"
+        assert _notices(cut.engine, cut.session_id) == []
+        for _ in range(100):
+            if _notices(cut.engine, cut.session_id):
+                break
+            await asyncio.sleep(0.02)
+
+    asyncio.run(startup())
+
+    [notice] = _notices(cut.engine, cut.session_id)
+    assert notice["metadata"]["watch_ids"] == ["watch_job_1"] and jobs.watches == {"job_1": "watch_job_1"}
+    with cut.engine.connect() as conn:
+        assert message_deliveries.get_turn(conn, cut.turn_id)["settled_by"] == "no_terminal_result"
 
 
 @pytest.mark.parametrize("change", ["newer", "busy", "unlinked"])

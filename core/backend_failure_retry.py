@@ -325,12 +325,22 @@ def restart_resume_plan(
 ) -> tuple[str, agent_transcript.CommittedResponse | None]:
     """How startup recovery settles an accepted Vibey Turn a restart cut.
 
+    ``("final", response)``: its final response was committed; it completed, whatever
+    arrived after it: a Stop then loses the race, as it does in a live Turn.
     ``("continue", None)``: a hidden continuation resumes its transcript.
-    ``("final", response)``: its final response was committed; it completed.
-    ``("unavailable", None)``: it keeps the restart notice (Stop or replacement
-    requested, Session archived or system, Agent off Vibey, start not accepted, or
-    the continuation bound reached).
+    ``("unavailable", None)``: it keeps the restart notice (start not accepted, Stop
+    or replacement requested, Session archived or system, Agent off Vibey, or the
+    continuation bound reached).
     """
+    if (
+        turn.get("backend") != "vibey"
+        or turn.get("state") != "active"
+        or turn.get("start_receipt_outcome") != "accepted"
+    ):
+        return "unavailable", None
+    final = agent_transcript.committed_final(conn, str(turn["session_id"]), str(turn["id"]))
+    if final is not None:
+        return "final", final
     session = conn.execute(
         select(agent_sessions.c.status, agent_sessions.c.visibility, agent_sessions.c.agent_backend).where(
             agent_sessions.c.id == turn["session_id"]
@@ -341,9 +351,6 @@ def restart_resume_plan(
         or session["status"] != "active"
         or session["visibility"] == "system"
         or session["agent_backend"] != "vibey"
-        or turn.get("backend") != "vibey"
-        or turn.get("state") != "active"
-        or turn.get("start_receipt_outcome") != "accepted"
         or turn.get("control_mode")
         or turn.get("control_state") in _PENDING_CONTROL_STATES
     ):
@@ -351,9 +358,6 @@ def restart_resume_plan(
     _runs, stop_requested = _live_run_ids(conn, str(turn["id"]))
     if stop_requested:
         return "unavailable", None
-    final = agent_transcript.committed_final(conn, str(turn["session_id"]), str(turn["id"]))
-    if final is not None:
-        return "final", final
     if _restart_chain_length(conn, turn) >= RESTART_RESUME_LIMIT:
         return "unavailable", None
     return "continue", None

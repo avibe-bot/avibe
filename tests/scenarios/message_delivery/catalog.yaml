@@ -378,7 +378,9 @@ scenarios:
     status: covered
     kind: recovery
     layer: contract
-    test: tests/test_backend_failure_retry.py::test_restart_notice_names_the_watch_running_the_command_and_offers_no_retry
+    test:
+      - tests/test_backend_failure_retry.py::test_restart_notice_names_the_watch_running_the_command_and_offers_no_retry
+      - tests/test_backend_failure_retry.py::test_a_restart_notice_waits_until_its_running_command_is_handed_over
   - id: MESSAGE-DELIVERY-323
     name: A scheduled Harness P1 input queues behind a Turn a person's input is part of and runs as its own Turn
     status: covered

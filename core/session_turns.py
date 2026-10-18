@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import itertools
 import json
 import logging
 import uuid
@@ -729,6 +730,11 @@ class SessionTurnManager:
     # enough that a hard outage does not spin; a class attribute so tests can
     # shrink it instead of sleeping.
     LOST_TURN_RETRY_DELAYS: tuple[float, ...] = (5.0, 30.0, 120.0)
+    # Backoff for a cut Vibey Turn whose running command could not be handed to a
+    # Watch yet: its notice waits for that handover (T2 before T4), retried like
+    # Vibey's own recovery owner retries a Session, then every period.
+    RESTART_FALLBACK_RETRY_DELAYS: tuple[float, ...] = (5.0, 30.0, 120.0)
+    RESTART_FALLBACK_RETRY_PERIOD: float = 600.0
 
     def __init__(
         self,
@@ -756,6 +762,8 @@ class SessionTurnManager:
         # Running reactions a dead process left on Turns recovery completed from a
         # committed final, held like the reports above: ``(session_id, message_id)``.
         self._pending_orphan_reaction_clears: dict[str, list[tuple[str, str]]] = {}
+        # One retry per Session whose cut Vibey Turn waits for its command's handover.
+        self._restart_fallback_retries: dict[str, asyncio.Task[None]] = {}
         # The live turn sink per TURN SINK KEY. Each is
         # ``{on_chunk, done_event, turn_token}`` — the turn's stream callback +
         # completion event + correlation token. Every dispatched turn registers one,
@@ -6850,17 +6858,51 @@ class SessionTurnManager:
             # ready callback is coming to flush it — retry on our own clock.
             self._schedule_lost_turn_retry(platform)
 
-    async def _settle_vibey_session(self, session_id: str) -> None:
-        """Vibey's T2 for one Session, through its single recovery owner; best effort."""
+    async def _settle_vibey_session(self, session_id: str) -> bool:
+        """Vibey's T2 for one Session, through its single recovery owner: whether it settled."""
 
         recovery = getattr(self.controller, "vibey_recovery", None)
         settle = getattr(recovery, "settle_session", None)
         if not callable(settle):
-            return
+            return True
         try:
-            await settle(session_id)
+            return bool(await settle(session_id))
         except Exception:
             logger.warning("Vibey settlement failed for session=%s", session_id, exc_info=True)
+            return False
+
+    def _retry_restart_fallback(self, session_id: str) -> None:
+        """Retry a cut Vibey Turn's T2, then recover the Session again once it settled."""
+
+        existing = self._restart_fallback_retries.get(session_id)
+        if existing is not None and not existing.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        async def retry() -> None:
+            try:
+                for attempt in itertools.count():
+                    delays = self.RESTART_FALLBACK_RETRY_DELAYS
+                    await asyncio.sleep(
+                        delays[attempt] if attempt < len(delays) else self.RESTART_FALLBACK_RETRY_PERIOD
+                    )
+                    with self._sqlite_engine().connect() as conn:
+                        live = delivery_store.active_turn(conn, session_id)
+                    if live is None or live.get("backend") != "vibey":
+                        return  # a Stop or another owner settled it meanwhile
+                    if await self._settle_vibey_session(session_id):
+                        await self.recover_durable_delivery_state(session_id, service_restart=True)
+                        return
+            finally:
+                if self._restart_fallback_retries.get(session_id) is asyncio.current_task():
+                    self._restart_fallback_retries.pop(session_id, None)
+
+        self._restart_fallback_retries[session_id] = loop.create_task(
+            retry(), name=f"vibey-restart-fallback:{session_id}"
+        )
 
     async def _clear_orphaned_running_reaction(self, session_id: str, message_id: str) -> None:
         """Retire the 👀 a dead process left on a Turn recovery completed; best effort.
@@ -6879,13 +6921,18 @@ class SessionTurnManager:
             logger.debug("orphaned reaction: no delivery context for session=%s", session_id, exc_info=True)
             return
         platform = str(getattr(context, "platform", "") or "")
-        if not self._transport_can_deliver(platform):
-            self._pending_orphan_reaction_clears.setdefault(platform, []).append((session_id, message_id))
+        cleared = False
+        if self._transport_can_deliver(platform):
+            try:
+                cleared = bool(await clear(context, message_id))
+            except Exception:
+                logger.debug("orphaned reaction: clear failed for session=%s", session_id, exc_info=True)
+        if cleared:
             return
-        try:
-            await clear(context, message_id)
-        except Exception:
-            logger.debug("orphaned reaction: clear failed for session=%s", session_id, exc_info=True)
+        self._pending_orphan_reaction_clears.setdefault(platform, []).append((session_id, message_id))
+        if self._transport_can_deliver(platform):
+            # Ready yet failed: no ready callback is coming, so retry on the reports' clock.
+            self._schedule_lost_turn_retry(platform)
 
     def _transport_can_deliver(self, platform: str) -> bool:
         """Whether ``platform`` can deliver right now.
@@ -6982,7 +7029,10 @@ class SessionTurnManager:
         try:
             for delay in self.LOST_TURN_RETRY_DELAYS:
                 await asyncio.sleep(delay)
-                if not self._pending_lost_turn_reports.get(platform):
+                if not (
+                    self._pending_lost_turn_reports.get(platform)
+                    or self._pending_orphan_reaction_clears.get(platform)
+                ):
                     return
                 if not self._transport_can_deliver(platform):
                     # Went unready again; the reconnect's ready callback flushes.
@@ -7342,10 +7392,13 @@ class SessionTurnManager:
                     if successor_turn_id:
                         await self._start_persisted_turn(successor_turn_id)
                     continue
-            if backend == "vibey":
-                # Startup recovery left a running job of this Turn to its owner: hand it over
-                # now, so the notice below names its Watch (T2 before T4).
-                await self._settle_vibey_session(target_session)
+            if backend == "vibey" and not await self._settle_vibey_session(target_session):
+                # Startup recovery left a running job of this Turn to its owner, and no Watch
+                # could take it yet. T2 before T4: the Turn stays open until it is handed over,
+                # so its notice names the Watch and its Runs are not failed under a running
+                # command. A Stop still settles it.
+                self._retry_restart_fallback(target_session)
+                continue
             # Read Run attribution BEFORE terminalizing: the notice below is owed
             # only to a turn that has none, and terminalization retires the
             # deliveries the attribution is derived from.

@@ -44,7 +44,9 @@ This replaces recovery invariant T4 for Vibey (`agent-core-contracts/recovery.md
    - the Turn's transcript has work left: its last committed response has tool
      calls (T2 has just given each one a result), or the run had not committed
      a final response. A Turn whose final response was committed is settled as
-     completed (`terminal_result`), with no continuation and no notice;
+     completed (`terminal_result`), with no continuation and no notice, before
+     any of the other conditions apply: a Stop or a Session change after the
+     final loses the race, as it does in a live Turn;
    - the continuation bound is not exhausted (item 6).
    Anything else keeps today's behavior: the Turn settles as interrupted, its
    Runs settle without result, and the user gets today's notice.
@@ -71,7 +73,10 @@ This replaces recovery invariant T4 for Vibey (`agent-core-contracts/recovery.md
    committed result or handover is reused. A Turn that falls back to the notice
    gets today's T2 first (the Turn owner asks Vibey's recovery owner to settle
    that Session), so its notice still names its Watches and offers no Retry.
-   That rule stays for the manual notice only.
+   That rule stays for the manual notice only. While no Watch can take its
+   command yet, that Turn stays open and its owner retries (T2 before T4): no
+   notice without the Watch, and no Run failed under a running command; a Stop
+   still settles it.
 4. **Runs follow the work.** The cut Turn settles with
    `settled_by = restart_resumed`, which is not a settlement without result, so
    none of its Runs is failed or owes a notice. The Runs' Delivery link moves to

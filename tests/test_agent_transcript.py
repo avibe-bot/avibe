@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sqlite3
 import threading
 
@@ -574,7 +575,8 @@ async def test_the_restart_reads_of_a_turns_context_tail_stay_bounded(engine) ->
     assert len(plans) == 3, plans
     for plan in plans[:2]:
         assert "SEARCH messages USING INDEX uq_messages_session_context_seq (session_id=? AND context_seq>?)" in plan, plan
-    assert "SEARCH message_deliveries USING INDEX uq_message_deliveries_turn_position (turn_id=?)" in plans[2], plans[2]
+    # Either of the two turn-keyed indexes bounds it; the planner may take either.
+    assert re.search(r"SEARCH message_deliveries USING INDEX \w+ \(turn_id=\?\)", plans[2]), plans[2]
     for plan in plans:
         assert "SCAN" not in plan and "TEMP B-TREE" not in plan, plan
 
