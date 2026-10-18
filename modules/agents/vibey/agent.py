@@ -845,9 +845,11 @@ class VibeyAgent(BaseAgent):
                     citations=citations,
                 )
             else:
-                # A reply the model chose to keep silent.
+                # A reply the model chose to keep silent: an empty reply, as the base
+                # result path emits one, not a ``level="silent"`` settlement, so an
+                # earlier visible reply in the Turn becomes its result.
                 await self.controller.emit_agent_message(
-                    context, "result", "", level="silent", output=terminal_output_for(request)
+                    context, "result", "", output=terminal_output_for(request)
                 )
             return
         # Generated images are paid for and already announced: they reach the user

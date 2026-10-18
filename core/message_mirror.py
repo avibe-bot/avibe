@@ -753,6 +753,76 @@ def _write_committed_row(
     return messages_service.get_message(conn, row_id, include_local_error_detail=True)
 
 
+# Transcript-visible agent text that does not end its Turn: an ``output`` phase
+# boundary and an ``interim`` narration bubble.
+_TURN_TEXT_TYPES = ("output", "interim")
+
+
+def promote_turn_text_to_result(row_id: str, *, suppress_delivery: bool = False) -> Optional[dict]:
+    """Make a Turn's last visible text its result once its final reply is silent.
+
+    The row was delivered as text that did not end the Turn, and the Turn then
+    ended on a reply that is empty once ``<silent>`` blocks are stripped. That
+    text is what the Turn answered, so it takes the result type: it renders as a
+    reply, settles the Inbox card, counts as unread, and pushes the notification
+    a result pushes. Its body, its place in the transcript, and its read state
+    stay as delivered, so text the reader has already seen is not unread again.
+
+    The update is guarded on the row still being Turn text, so a repeated call
+    changes, publishes, and notifies nothing.
+    """
+
+    from sqlalchemy import update
+
+    from storage.models import messages
+
+    try:
+        engine = get_cached_sqlite_engine()
+        inbox_row = None
+        with engine.begin() as conn:
+            promoted = conn.execute(
+                update(messages)
+                .where(
+                    messages.c.id == row_id,
+                    messages.c.author == "agent",
+                    messages.c.type.in_(_TURN_TEXT_TYPES),
+                )
+                .values(
+                    type="result",
+                    updated_at=messages_service.canonical_message_timestamp(_now()),
+                )
+            ).rowcount
+            if promoted != 1:
+                return None
+            row = messages_service.get_message(conn, row_id, include_local_error_detail=True)
+            # The same audience ``persist_agent_message`` publishes a new row to.
+            session_id = (row or {}).get("session_id")
+            visible = bool(
+                row is not None
+                and row.get("platform") == "avibe"
+                and session_id
+                and not suppress_delivery
+            )
+            if visible:
+                inbox_row = messages_service.get_inbox_session(conn, session_id)
+        if visible:
+            from core.inbox_events import bus
+
+            bus.publish("message.updated", row)
+            if inbox_row is not None:
+                bus.publish("inbox.session.updated", inbox_row)
+                try:
+                    from core.web_push_notifications import maybe_notify_inbox_message
+
+                    maybe_notify_inbox_message(row, inbox_row)
+                except Exception:
+                    logger.debug("web push notification scheduling failed", exc_info=True)
+        return row
+    except Exception:
+        logger.exception("promote_turn_text_to_result: failure for row %s", row_id)
+        return None
+
+
 def persist_silent_terminal(
     context: MessageContext,
     *,

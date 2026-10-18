@@ -394,5 +394,14 @@ scenarios:
     kind: regression
     layer: scenario
     test: tests/test_vibey_agent.py::test_a_harness_input_during_a_persons_turn_leaves_the_answer_its_result_and_runs_next
+  - id: MESSAGE-DELIVERY-325
+    name: A silent final reply makes the Turn's last visible text its result, rendered and notified once
+    status: covered
+    kind: regression
+    layer: contract
+    test:
+      - tests/test_message_dispatcher_silent_final.py::SilentFinalTurnResultTests::test_a_silent_final_makes_the_last_visible_text_the_result
+      - tests/test_message_dispatcher_silent_final.py::SilentFinalTurnResultTests::test_nothing_else_promotes_earlier_text
+      - tests/test_vibey_agent.py::test_a_silent_final_leaves_the_visible_reply_before_it_as_the_result
 next_priority:
-  - MESSAGE-DELIVERY-325
+  - MESSAGE-DELIVERY-326
