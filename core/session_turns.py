@@ -69,7 +69,7 @@ from core.services.agent_steering import (
 )
 from storage import loop_writers, messages_service
 from storage import message_deliveries as delivery_store
-from storage.agent_transcript import last_response, last_turn_text, recovered_watch_ids
+from storage.agent_transcript import last_response, recovered_watch_ids
 from storage.agent_session_rows import reserve_write_lock
 from storage.db import get_cached_sqlite_engine
 from storage.background import (
@@ -759,10 +759,10 @@ class SessionTurnManager:
         self._pending_lost_turn_reports: dict[str, list[tuple[str, str, str, str, str]]] = {}
         # One in-flight retry task per platform for the reports above.
         self._lost_turn_retry_tasks: dict[str, asyncio.Task[None]] = {}
-        # Running reactions a dead process left on Turns recovery completed from a
-        # committed final, held like the reports above: ``(session_id, message_id,
-        # turn_id)``; the Turn's durable follow-up record outlives this queue.
-        self._pending_orphan_reaction_clears: dict[str, list[tuple[str, str, str]]] = {}
+        # Cut Vibey Turns whose rerun waits for their platform to deliver, held like the
+        # reports above: ``(session_id, turn_id)``. The Turn stays open, so another
+        # restart reruns it whatever this queue held.
+        self._reruns_awaiting_transport: dict[str, list[tuple[str, str]]] = {}
         # One retry per Session whose cut Vibey Turn startup had to leave open.
         self._restart_recovery_retries: dict[str, asyncio.Task[None]] = {}
         # The live turn sink per TURN SINK KEY. Each is
@@ -5037,13 +5037,7 @@ class SessionTurnManager:
         retire_unwritten_delivery_ids: set[str] | None = None,
         retire_unwritten_attempt_outcome: str = "invalid_input",
         resume_successors: bool = True,
-        on_settled: Callable[[Connection], None] | None = None,
     ) -> dict[str, Any]:
-        """Settle one durable Turn and start what follows it.
-
-        ``on_settled`` writes in the same transaction once this call settles the Turn,
-        so its record commits with the terminal row or not at all.
-        """
         if not self._durable_schema_available():
             return {
                 "changed": False,
@@ -5292,8 +5286,6 @@ class SessionTurnManager:
                         "defer_queue_resume": False,
                     }
                 else:
-                    if on_settled is not None:
-                        on_settled(conn)
                     # A never-called steer has definitive negative evidence once
                     # its exact target Turn settles. In-flight and unknown attempts
                     # remain untouched because they may already have written.
@@ -7018,112 +7010,6 @@ class SessionTurnManager:
             retry(), name=f"vibey-restart-recovery:{session_id}"
         )
 
-    async def _run_restart_followups(self, turn_id: str | None = None) -> None:
-        """Run the durable follow-ups of Turns recovery completed: one Turn's, or all.
-
-        A Turn still open is skipped: its recovery records them again when it settles.
-        """
-
-        from core.message_mirror import promote_turn_text_to_result
-        from storage import restart_followups
-
-        def outstanding_of_settled() -> tuple[dict[str, dict[str, Any]], set[str]]:
-            with self._sqlite_engine().connect() as conn:
-                found = restart_followups.pending(conn, turn_id)
-                return found, {
-                    key
-                    for key in found
-                    if (turn := delivery_store.get_turn(conn, key)) is not None and turn["state"] == "terminal"
-                }
-
-        # Off the controller loop, like every follow-up read and write below.
-        outstanding, settled = await asyncio.to_thread(outstanding_of_settled)
-        for key, followups in outstanding.items():
-            if key not in settled:
-                continue
-            promote = followups.get("promote")
-            if isinstance(promote, dict) and promote.get("row_id"):
-                await asyncio.to_thread(
-                    promote_turn_text_to_result,
-                    str(promote["row_id"]),
-                    suppress_delivery=bool(promote.get("suppress_delivery")),
-                )
-                promoted = await asyncio.to_thread(self._message_row, str(promote["row_id"]))
-                if promoted is not None and promoted.get("type") == "result":
-                    await self._restart_followup_done(key, "promote")
-                else:
-                    await self._restart_followup_failed(key, "promote")
-            message_id = str(followups.get("clear_reaction") or "")
-            if message_id:
-                await self._clear_orphaned_running_reaction(str(followups.get("session_id") or ""), message_id, key)
-
-    async def _write_restart_followups(self, write: Any, *args: Any) -> Any:
-        """One follow-up write in its own writer transaction, off the controller loop."""
-
-        def run() -> Any:
-            with self._sqlite_engine().begin() as conn:
-                reserve_write_lock(conn)
-                return write(conn, *args)
-
-        return await asyncio.to_thread(run)
-
-    def _message_row(self, message_id: str) -> Optional[dict[str, Any]]:
-        with self._sqlite_engine().connect() as conn:
-            return messages_service.get_message(conn, message_id)
-
-    async def _restart_followup_done(self, turn_id: str, key: str) -> None:
-        from storage import restart_followups
-
-        await self._write_restart_followups(restart_followups.done, turn_id, key)
-
-    async def _restart_followup_failed(self, turn_id: str, key: str) -> bool:
-        """Count a failed attempt at a follow-up; whether it was dropped after its last."""
-        from storage import restart_followups
-
-        dropped = await self._write_restart_followups(restart_followups.failed, turn_id, key)
-        if dropped:
-            logger.warning("restart follow-up %s of Turn=%s dropped after repeated failures", key, turn_id)
-        return dropped
-
-    async def _clear_orphaned_running_reaction(self, session_id: str, message_id: str, turn_id: str) -> None:
-        """Retire the 👀 a dead process left on a Turn recovery completed.
-
-        Held until the platform can deliver, like an interruption report, since
-        recovery runs before external transports connect; the Turn's durable
-        follow-up record keeps it across another restart until it is cleared.
-        """
-
-        service = getattr(self.controller, "processing_indicator", None)
-        clear = getattr(service, "clear_orphaned_running_reaction", None)
-        if not message_id or not callable(clear):
-            return
-        try:
-            context = self._delivery_context(session_id)
-        except Exception:
-            logger.debug("orphaned reaction: no delivery context for session=%s", session_id, exc_info=True)
-            return
-        platform = str(getattr(context, "platform", "") or "")
-        cleared = False
-        if self._transport_can_deliver(platform):
-            try:
-                cleared = bool(await clear(context, message_id))
-            except Exception:
-                logger.debug("orphaned reaction: clear failed for session=%s", session_id, exc_info=True)
-        if cleared:
-            await self._restart_followup_done(turn_id, "clear_reaction")
-            return
-        held = self._pending_orphan_reaction_clears.setdefault(platform, [])
-        entry = (session_id, message_id, turn_id)
-        if self._transport_can_deliver(platform) and await self._restart_followup_failed(turn_id, "clear_reaction"):
-            if entry in held:
-                held.remove(entry)
-            return
-        if entry not in held:
-            held.append(entry)
-        if self._transport_can_deliver(platform):
-            # Ready yet failed: no ready callback is coming, so retry on the reports' clock.
-            self._schedule_lost_turn_retry(platform)
-
     def _transport_can_deliver(self, platform: str) -> bool:
         """Whether ``platform`` can deliver right now.
 
@@ -7143,17 +7029,23 @@ class SessionTurnManager:
             return True
 
     async def notify_transport_ready(self, platform: str) -> int:
-        """Flush the interruption reports held for one platform.
+        """Start the restart reruns and flush the interruption reports held for one platform.
 
-        Held in memory only: the turn is already terminal, so a report that never
+        A held rerun's Turn is still open, so it needs no other record. Reports
+        are held in memory only: the turn is already terminal, so a report that never
         drains (transport disabled before it connects) is dropped rather than
         replayed on the next start, where it would be stale news. A send that
         fails against a connected transport is retained AND retried on a bounded
         backoff — see ``_schedule_lost_turn_retry`` for why nothing else would.
         """
 
-        for session_id, message_id, turn_id in self._pending_orphan_reaction_clears.pop(platform, []):
-            await self._clear_orphaned_running_reaction(session_id, message_id, turn_id)
+        for session_id, turn_id in self._reruns_awaiting_transport.pop(platform, []):
+            # A rerun held for this transport: the ordinary recovery of its Session starts it.
+            try:
+                await self.recover_durable_delivery_state(session_id, service_restart=True)
+            except Exception:
+                logger.exception("held restart rerun failed to start for Session=%s", session_id)
+                self._retry_restart_recovery(session_id, turn_id)
         pending = self._pending_lost_turn_reports.pop(platform, [])
         if not pending or self.controller is None:
             return 0
@@ -7219,10 +7111,7 @@ class SessionTurnManager:
         try:
             for delay in self.LOST_TURN_RETRY_DELAYS:
                 await asyncio.sleep(delay)
-                if not (
-                    self._pending_lost_turn_reports.get(platform)
-                    or self._pending_orphan_reaction_clears.get(platform)
-                ):
+                if not self._pending_lost_turn_reports.get(platform):
                     return
                 if not self._transport_can_deliver(platform):
                     # Went unready again; the reconnect's ready callback flushes.
@@ -7414,29 +7303,38 @@ class SessionTurnManager:
         return recovered
 
     async def _recover_restart_cut_vibey_turn(self, turn_id: str, attempt_id: str) -> str:
-        """Settle a Vibey Turn a restart cut: ``final``, ``rerun``, ``wait``, or ``unavailable``.
+        """Settle a Vibey Turn a restart cut: ``rerun``, ``held``, ``wait``, or ``unavailable``.
 
-        T2 has already given every open call a result. A Turn whose final response was
-        committed completes from it; a Turn with work left reruns in place, with its
-        restart streak written in the same transaction that releases the dead runtime
-        generation (``docs/plans/vibey-restart-auto-resume.md``); a Turn with a steer
-        still unsettled stays open for a retry; anything else keeps today's notice.
+        T2 has already given every open call a result. An eligible Turn reruns in place,
+        with its restart streak written in the same transaction that releases the dead
+        runtime generation (``docs/plans/vibey-restart-auto-resume.md``); one whose final
+        response was committed ends there, through its live end. The rerun delivers to
+        the Turn's surface, so it is ``held`` until that surface can, as the restart
+        notice is. A Turn with a steer still unsettled stays open for a retry; anything
+        else keeps today's notice.
         """
 
         from core.restart_resume import restart_resume_plan
 
-        # A bounded read: the final path reaches its terminal write with nothing awaited in
-        # between, so a Stop cannot settle the Turn after its final was found.
         with self._sqlite_engine().connect() as conn:
             turn = delivery_store.get_turn(conn, turn_id)
             if turn is None or str(turn.get("start_attempt_id") or "") != attempt_id:
                 return "unavailable"
-            plan, final = restart_resume_plan(conn, turn)
-        if plan == "final" and final is not None:
-            await self._complete_from_committed_final(turn, final)
-            return "final"
+            plan = restart_resume_plan(conn, turn)
         if plan != "rerun":
             return plan
+        session_id = str(turn["session_id"])
+        try:
+            platform = str(getattr(self._delivery_context(session_id), "platform", "") or "")
+        except Exception:
+            # Setting up the rerun failed, not the Turn: it stays open and recovery retries.
+            logger.exception("restart rerun could not resolve Turn=%s's surface; retrying", turn_id)
+            return "wait"
+        if not self._transport_can_deliver(platform):
+            held = self._reruns_awaiting_transport.setdefault(platform, [])
+            if (session_id, turn_id) not in held:
+                held.append((session_id, turn_id))
+            return "held"
         if not await asyncio.to_thread(self._rotate_for_rerun, turn_id, attempt_id):
             return "wait"  # it changed meanwhile: the retry decides again
         try:
@@ -7459,7 +7357,7 @@ class SessionTurnManager:
             if (
                 turn is None
                 or str(turn.get("start_attempt_id") or "") != attempt_id
-                or restart_resume_plan(conn, turn)[0] != "rerun"
+                or restart_resume_plan(conn, turn) != "rerun"
             ):
                 return False
             streak, response_seq = restart_streak(conn, turn)
@@ -7475,82 +7373,6 @@ class SessionTurnManager:
                 is not None
             )
 
-    async def _complete_from_committed_final(
-        self,
-        turn: dict[str, Any],
-        final: Any,
-    ) -> None:
-        """Complete a cut Vibey Turn from the final response it committed, as live.
-
-        A successful silent final leaves the Turn's last visible text its result; a
-        failed final keeps its own error. The promotion and the removal of the 👀 the
-        dead process left are recorded with the Turn's terminal write, so another
-        restart before they run loses neither.
-        """
-
-        from storage import restart_followups
-
-        turn_id, session_id = str(turn["id"]), str(turn["session_id"])
-        failed = final.message_type == "error"
-        visible = None
-        suppress_delivery = False
-        with self._sqlite_engine().connect() as conn:
-            if not failed and not final.text.strip():
-                visible = last_turn_text(
-                    conn, session_id, since=str(turn.get("started_at") or turn["created_at"])
-                )
-            if visible is not None:
-                initial = delivery_store.get_delivery(conn, str(turn["initial_delivery_id"]))
-                provenance = (
-                    _scheduled_provenance(delivery_store.execution_delivery_payload(conn, initial))
-                    if initial is not None
-                    else None
-                )
-                suppress_delivery = bool(
-                    ((provenance or {}).get("platform_specific") or {}).get("suppress_delivery")
-                )
-        result_id, result_text = visible or (final.row_id, final.text)
-        followups: dict[str, Any] = {}
-        if visible is not None:
-            followups["promote"] = {"row_id": result_id, "suppress_delivery": suppress_delivery}
-        origin = self._turn_origin_native_message_id(turn_id)
-        if origin:
-            followups["clear_reaction"] = origin
-        record = {"session_id": session_id, **followups}
-        run_ids = self.accepted_agent_run_ids_for_turn(turn_id)
-        terminal = self._terminalize_durable_turn(
-            turn_id,
-            "failed" if failed else "completed",
-            settled_by=SETTLED_BY_TERMINAL_RESULT,
-            evidence_kind="restart_final_committed",
-            evidence={
-                "settles_run": True,
-                "result_text": result_text,
-                "terminal_error": result_text if failed else None,
-                "message_id": result_id,
-            },
-            expected_start_attempt_id=str(turn.get("start_attempt_id") or ""),
-            # The follow-ups commit with the terminal row: nothing yields between the
-            # committed-final decision and this write, so a later Stop cannot settle first.
-            on_settled=(lambda conn: restart_followups.save(conn, turn_id, record)) if followups else None,
-        )
-        if not terminal.get("changed"):
-            return
-        if run_ids:
-            with self._sqlite_engine().connect() as conn:
-                settled = delivery_store.get_turn(conn, turn_id)
-            if settled is not None:
-                self._settle_agent_run_ids_from_terminal_turn(run_ids, settled)
-        successor_turn_id = str(terminal.get("successor_turn_id") or "")
-        if successor_turn_id:
-            await self._start_persisted_turn(successor_turn_id)
-        if followups:
-            # Durable and retried at the next start: a failure here never holds anything.
-            try:
-                await self._run_restart_followups(turn_id)
-            except Exception:
-                logger.exception("restart follow-ups of Turn=%s deferred to the next start", turn_id)
-
     async def recover_durable_delivery_state(
         self,
         session_id: str | None = None,
@@ -7563,12 +7385,6 @@ class SessionTurnManager:
         cannot still be executing in another live controller recovery pass.
         """
 
-        if service_restart and session_id is None:
-            # What an earlier process recorded for Turns it completed and did not finish.
-            try:
-                await self._run_restart_followups()
-            except Exception:
-                logger.exception("restart follow-ups deferred to the next start")
         with self._sqlite_engine().connect() as conn:
             turns = delivery_store.recovery_turns(conn, session_id)
         pending_interrupts: list[tuple[str, str]] = []
@@ -7735,9 +7551,10 @@ class SessionTurnManager:
                     await self._recover_steer_attempts(target_session, target_turn_id=turn_id)
                 )
                 outcome = await self._recover_restart_cut_vibey_turn(turn_id, attempt_id)
-                if outcome == "wait":
-                    # A steer the dead run may have accepted is not settled yet: it joins
-                    # the Turn before the Turn completes or reruns.
+                if outcome in ("wait", "held"):
+                    # A steer the dead run may have accepted is not settled yet, so it joins
+                    # the Turn before the Turn reruns; or its surface cannot deliver yet, and
+                    # its transport's ready callback starts it. The retry keeps the Turn owned.
                     self._retry_restart_recovery(target_session, turn_id)
                     continue
                 if outcome != "unavailable":

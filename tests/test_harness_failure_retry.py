@@ -216,7 +216,7 @@ def test_harness_notice_keeps_retry_boundary_guards(isolated_state, tmp_path, ch
     dispatch.assert_not_awaited()
 
 
-@pytest.mark.parametrize("step", ["tool", "steered", "steer_retried", "final"])
+@pytest.mark.parametrize("step", ["tool", "steered", "steer_retried"])
 def test_a_vibey_agent_run_cut_by_a_restart_settles_from_the_continued_work(
     isolated_state, tmp_path, monkeypatch, step
 ):
@@ -326,7 +326,7 @@ def test_a_vibey_agent_run_cut_by_a_restart_settles_from_the_continued_work(
 
     original = asyncio.run(scenario())
     # The next start: T2 settled the cut call, then Turn recovery.
-    _previous_process("final" if step == "final" else "tool")(engine, session_id, original.turn_id)
+    _previous_process("tool")(engine, session_id, original.turn_id)
     manager._active_identity = lambda *_args: None
     if step == "steer_retried":
         # Startup cannot materialize the receipt (its CAS is lost); the retry can.
@@ -369,30 +369,24 @@ def test_a_vibey_agent_run_cut_by_a_restart_settles_from_the_continued_work(
     stored = request_store.get_run(run.id)
     with engine.connect() as conn:
         source = message_deliveries.get_turn(conn, original.turn_id)
-    if step == "final":
-        assert len(started) == 1
-        assert (source["terminal_outcome"], source["settled_by"]) == ("completed", "terminal_result")
-        assert stored["status"] == "succeeded"
-        assert stored["result_text"] == "全部完成"
-    else:
-        assert source["state"] == "active"
-        continued = started[-1]
-        # The cut Turn itself reruns as a transcript resume, with the Run's Harness provenance.
-        assert continued.platform_specific["turn_token"] == original.turn_id
-        assert continued.platform_specific["vibey_resume"] is True
-        assert continued.platform_specific["vibey_source_turn_id"] == original.turn_id
-        assert continued.platform_specific["task_execution_id"] == run.id
-        assert stored["status"] == "running" and callbacks() == []
-        assert stored["delivery_id"] == original.delivery_id
-        owned = {run.id} | ({steered.id} if step != "tool" else set())
-        assert set(continued.platform_specific["accepted_agent_run_ids"]) == owned
-        # The rerun's own result settles the Runs, exactly once.
-        asyncio.run(controller.emit_agent_message(continued, "result", "日志已整理完毕"))
-        stored = request_store.get_run(run.id)
-        assert stored["status"] == "succeeded"
-        assert stored["result_text"] == "日志已整理完毕"
-        if step != "tool":
-            assert request_store.get_run(steered.id)["status"] == "succeeded"
+    assert source["state"] == "active"
+    continued = started[-1]
+    # The cut Turn itself reruns as a transcript resume, with the Run's Harness provenance.
+    assert continued.platform_specific["turn_token"] == original.turn_id
+    assert continued.platform_specific["vibey_resume"] is True
+    assert continued.platform_specific["vibey_source_turn_id"] == original.turn_id
+    assert continued.platform_specific["task_execution_id"] == run.id
+    assert stored["status"] == "running" and callbacks() == []
+    assert stored["delivery_id"] == original.delivery_id
+    owned = {run.id} | ({steered.id} if step != "tool" else set())
+    assert set(continued.platform_specific["accepted_agent_run_ids"]) == owned
+    # The rerun's own result settles the Runs, exactly once.
+    asyncio.run(controller.emit_agent_message(continued, "result", "日志已整理完毕"))
+    stored = request_store.get_run(run.id)
+    assert stored["status"] == "succeeded"
+    assert stored["result_text"] == "日志已整理完毕"
+    if step != "tool":
+        assert request_store.get_run(steered.id)["status"] == "succeeded"
     # The caller's callback reports the work's own result, once.
     assert callbacks() == [("succeeded", stored["result_text"])]
     assert request_store.sqlite_backend.owed_failure_notice(run.id) is None

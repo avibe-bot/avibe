@@ -943,6 +943,71 @@ def agent_message_exists(
         return None
 
 
+def delivered_committed_row(
+    context: MessageContext,
+    row_id: str | None,
+    *,
+    outward: bool,
+) -> Optional[dict[str, Any]]:
+    """The receipt of a backend-committed row an earlier emit already delivered to ``context``.
+
+    A row its backend committed (the Avibe Agent's) has no native id a repeated emit
+    could be recognized by, but its display is written only as its delivery: on the
+    Web that write is the delivery, and on IM it follows a send that returned an id
+    (``persist_agent_message``). A row written for this platform is therefore the
+    receipt a native id is for an inserted row, except local-only history for an
+    outward send. A repeat between a send and that write sends again.
+    """
+
+    platform = str(context.platform or "").strip()
+    if not platform or not row_id:
+        return None
+    try:
+        engine = get_cached_sqlite_engine()
+        with engine.connect() as conn:
+            row = messages_service.get_message(conn, row_id, include_local_error_detail=True)
+            if row is None or row.get("author") != "agent" or row.get("platform") != platform:
+                return None
+            if row.get("scope_id") != _agent_message_scope_id(conn, context):
+                return None
+    except Exception:
+        logger.debug("delivered_committed_row: lookup failed open", exc_info=True)
+        return None
+    content, metadata = row.get("content"), row.get("metadata")
+    if not isinstance(content, dict) or "kind" not in content:
+        return None  # as committed: never delivered
+    if outward and isinstance(metadata, dict) and metadata.get("delivery_suppressed") is True:
+        return None
+    return row
+
+
+def resumed_turn_text(context: MessageContext) -> Optional[str]:
+    """The last visible text of a Turn a restart reran, from the Turn's own rows.
+
+    The dispatcher remembers each Turn's visible text as it delivers it; what a rerun
+    Turn showed before the restart was delivered by the process that died, so a
+    silent final of the rerun reads it from the transcript (``last_turn_text``).
+    """
+
+    spec = context.platform_specific or {}
+    session_id, turn_id = str(spec.get("agent_session_id") or ""), str(spec.get("turn_token") or "")
+    if spec.get("vibey_resume") is not True or not session_id or not turn_id:
+        return None
+    from storage import message_deliveries
+    from storage.agent_transcript import last_turn_text
+
+    try:
+        with get_cached_sqlite_engine().connect() as conn:
+            turn = message_deliveries.get_turn(conn, turn_id)
+            if turn is None or turn["session_id"] != session_id:
+                return None
+            found = last_turn_text(conn, session_id, since=str(turn.get("started_at") or turn["created_at"]))
+    except Exception:
+        logger.debug("resumed_turn_text: lookup failed", exc_info=True)
+        return None
+    return found[0] if found else None
+
+
 def mirror_harness_inbound(
     context: MessageContext,
     text: str,

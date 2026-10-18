@@ -115,6 +115,7 @@ from storage.agent_transcript import (
     RESPONSE_TYPES,
     SQLiteTranscriptStore,
     call_instance_result,
+    committed_final,
     final_outcome,
     render_text,
     text_parts,
@@ -204,6 +205,9 @@ class _Run:
     replied: dict[str, bool] = field(default_factory=dict)
     # The images each final delivers with its reply, as committed with its row.
     reply_images: dict[str, tuple[HostedImage, ...]] = field(default_factory=dict)
+    # A rerun's final as its row committed it, undelivered: that display carries the images
+    # the run that died generated, which this run does not have.
+    committed_display: Optional[str] = None
     # Steer attempts ``Agent.steer`` accepted into this run: reconcile's in-process evidence.
     accepted_steers: set[str] = field(default_factory=set)
     # Automatic transcript-only continuations already spent by this Turn. The
@@ -351,6 +355,16 @@ class VibeyAgent(BaseAgent):
                 turn.stop_event.set()
                 await self._settle_open_calls(runtime, stop=turn.stop_event)
             raise
+        if resuming and await self._take_committed_final(turn):
+            # The run that died committed the Turn's final: this one ends where that one
+            # would have, with no model call. A Stop now loses to it, as it does live.
+            self._accept_native_start(request, session_id)
+            indicator = getattr(self.controller, "processing_indicator", None)
+            if indicator is not None:
+                await indicator.delete_ack_message(request)
+            await self._settle(turn)
+            self._maybe_backfill_session_title(request, session_id)
+            return
         if turn.stop_requested:
             return await self._settle_stopped(turn)
         cwd = request.working_path or runtime.cwd
@@ -439,6 +453,46 @@ class VibeyAgent(BaseAgent):
             await self._settle_left_open(runtime)
         await self._settle(turn)
         self._maybe_backfill_session_title(request, session_id)
+
+    async def _take_committed_final(self, run: _Run) -> bool:
+        """Whether the Turn's transcript already holds its final response, which the run then takes.
+
+        Its replied decision is the one its row's type was committed by (``final_outcome``).
+        """
+        found = await asyncio.to_thread(self._committed_final, run.session_id, run.turn_id)
+        if found is None:
+            return False
+        row_id, message_type, message, display = found
+        run.final_row, run.reason = row_id, "completed"
+        run.responses[row_id] = message
+        run.replied[row_id] = message_type != "error"
+        run.committed_display = display
+        return True
+
+    def _committed_final(
+        self, session_id: str, turn_id: str
+    ) -> Optional[tuple[str, str, AssistantMessage, Optional[str]]]:
+        """``(row_id, type, message, committed display or None once delivered)`` of the Turn's final."""
+        with self._engine.connect() as conn:
+            final = committed_final(conn, session_id, turn_id)
+            row = (
+                conn.execute(
+                    select(messages.c.content_json, messages.c.content_text).where(messages.c.id == final.row_id)
+                ).first()
+                if final is not None
+                else None
+            )
+        if final is None or row is None:
+            return None
+        try:
+            content = json.loads(row.content_json or "{}")
+            message = message_from_dict(content["model"]["message"])
+        except (TypeError, ValueError, KeyError):
+            logger.warning("Vibey could not read the committed final %s of Turn %s", final.row_id, turn_id)
+            return None
+        if not isinstance(message, AssistantMessage):
+            return None
+        return final.row_id, final.message_type, message, None if "kind" in content else str(row.content_text or "")
 
     def _cut_by_service_stop(self, run: _Run) -> bool:
         """Whether a run that did not complete ended while the service was stopping."""
@@ -888,6 +942,8 @@ class VibeyAgent(BaseAgent):
             body, citations = self._display_with_citations(
                 final, final=True, replied=bool(replied), images=run.reply_images.get(run.final_row, ())
             )
+            if run.committed_display is not None and citations is None:
+                body = run.committed_display
             if failed and not body.strip():
                 # A silent final whose run failed after the commit: like a final without text
                 # of its own (``_display_source``), its row carries the explanation.

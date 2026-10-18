@@ -25,7 +25,7 @@ RESTART_RESUME_LIMIT = 3
 PROCESS_TOKEN = secrets.token_hex(8)
 _PENDING_CONTROL_STATES = frozenset({"pending", "interrupting", "waiting_terminal", "reconciling"})
 
-Plan = Literal["wait", "final", "rerun", "unavailable"]
+Plan = Literal["wait", "rerun", "unavailable"]
 
 
 def restart_streak(conn: Connection, turn: dict[str, Any]) -> tuple[int, int | None]:
@@ -72,19 +72,16 @@ def _runs_released(conn: Connection, turn_id: str) -> bool:
     return False
 
 
-def restart_resume_plan(
-    conn: Connection, turn: dict[str, Any]
-) -> tuple[Plan, agent_transcript.CommittedResponse | None]:
+def restart_resume_plan(conn: Connection, turn: dict[str, Any]) -> Plan:
     """How recovery settles an accepted Vibey Turn a restart cut.
 
-    ``("wait", None)``: a steer into it is still unsettled (its receipt could not be
+    ``"wait"``: a steer into it is still unsettled (its receipt could not be
     materialized yet); the Turn stays open and recovery retries, so the steer joins
-    the Turn before it completes or reruns.
-    ``("final", response)``: its final response was committed; it completed, whatever
-    arrived after it: a Stop then loses the race, as it does in a live Turn.
-    ``("rerun", None)``: the Turn reruns in place from its committed transcript.
-    ``("unavailable", None)``: it keeps the restart notice (start not accepted, Stop
-    or replacement requested, a Run cancelled or already ended, Session archived or
+    the Turn before it reruns.
+    ``"rerun"``: the Turn reruns in place from its committed transcript. One whose
+    final response was committed ends there, as its live run would have.
+    ``"unavailable"``: it keeps the restart notice (start not accepted, Stop or
+    replacement requested, a Run cancelled or already ended, Session archived or
     system, Agent off Vibey, or the loop bound reached).
     """
     if (
@@ -92,12 +89,9 @@ def restart_resume_plan(
         or turn.get("state") != "active"
         or turn.get("start_receipt_outcome") != "accepted"
     ):
-        return "unavailable", None
+        return "unavailable"
     if deliveries.turn_has_unresolved_steer(conn, str(turn["id"])):
-        return "wait", None
-    final = agent_transcript.committed_final(conn, str(turn["session_id"]), str(turn["id"]))
-    if final is not None:
-        return "final", final
+        return "wait"
     session = conn.execute(
         select(agent_sessions.c.status, agent_sessions.c.visibility, agent_sessions.c.agent_backend).where(
             agent_sessions.c.id == turn["session_id"]
@@ -113,5 +107,5 @@ def restart_resume_plan(
         or _runs_released(conn, str(turn["id"]))
         or restart_streak(conn, turn)[0] >= RESTART_RESUME_LIMIT
     ):
-        return "unavailable", None
-    return "rerun", None
+        return "unavailable"
+    return "rerun"

@@ -2683,6 +2683,87 @@ async def test_a_run_the_service_stop_cut_leaves_its_turn_open_for_its_restart_r
 
 
 @pytest.mark.parametrize(
+    ("platform", "case"), [("telegram", "undelivered"), ("telegram", "delivered"), ("avibe", "silent")]
+)
+async def test_a_restart_rerun_ends_with_the_final_its_cut_run_committed(
+    engine, session, tmp_path, published, platform, case
+) -> None:
+    """MESSAGE-DELIVERY-333: the run a restart cut had committed the Turn's final, so the rerun
+    ends with that row through the live end, with no model call. A final that process never sent
+    to IM is delivered once, with the image that run generated; one whose delivery the dispatcher
+    recorded is not sent again; a silent final leaves the narration that process showed as the
+    Turn's result."""
+    from dataclasses import replace
+
+    from core.message_output import MessageOutput, terminal_output_for
+
+    answer = "The cache is safe: one writer holds the lock."
+    narration = "Found it.\nThe cache is shared.\nTwo writers race.\nThe lock went in #12.\nFixed and verified."
+    harness = _Harness(engine, tmp_path, platform, [])
+    # The previous process: the Turn's final committed, then the restart cut the run.
+    request = harness.request("is the cache safe?")
+    cut_turn = _turn(request.context)
+    harness.controller._native_start(request.context)
+    harness.agent.store.bind_agent(SESSION, None, turn_id=cut_turn)
+    await harness.agent.store.consume_input(
+        SESSION, request.context.platform_specific["delivery_id"], UserMessage((text("is the cache safe?"),))
+    )
+    if case == "silent":
+        shown = await harness.agent.store.append_response(SESSION, assistant(narration), final=False)
+        await harness.controller.emit_agent_message(
+            request.context, "assistant", narration,
+            output=MessageOutput(completes_turn=False, completes_run=False, persisted_row_id=shown.row_id),
+        )
+        [shown] = harness.rows("interim")
+    image = tmp_path / "lighthouse.jpg"
+    image.write_bytes(_JPEG)
+    final = await harness.agent.store.append_response(
+        SESSION, assistant("<silent>done</silent>" if case == "silent" else answer), final=True,
+        images=(HostedImage(path=str(image), mime="image/jpeg"),) if case == "undelivered" else (),
+    )
+    if case == "delivered":
+        # It was delivered before the process died, but the Turn was not yet settled.
+        await harness.agent.emit_result_message(
+            request.context, answer, request=request,
+            output=replace(terminal_output_for(request), persisted_row_id=final.row_id),
+        )
+        assert harness.controller.im_client.sent == [answer]
+        harness.controller.im_client.sent.clear()
+    with engine.begin() as conn:
+        # The Turn owner releases the dead runtime generation to rerun the Turn in place.
+        turn = message_deliveries.get_turn(conn, cut_turn)
+        assert message_deliveries.rotate_restart_generation(
+            conn, cut_turn, expected_version=int(turn["version"]), streak=1, response_seq=final.context_seq
+        )
+    # A new process: a new adapter, and a dispatcher that has seen none of the Turn.
+    harness.controller.message_dispatcher = ConsolidatedMessageDispatcher(harness.controller)
+    harness.new_agent()
+    context = _context(
+        platform, SESSION, turn_id=cut_turn, delivery_id=request.context.platform_specific["delivery_id"]
+    )
+    context.platform_specific.update({"vibey_resume": True, "vibey_source_turn_id": cut_turn})
+    resume = AgentRequest(**{**request.__dict__, "context": context, "message": "", "user_message": ""})
+
+    await harness.agent.handle_message(resume)
+
+    assert harness.provider.requests == [] and harness.controller.hub_calls == []
+    assert harness.controller.terminals[-1] == {"turn": cut_turn, "is_error": False, "settled_by": "terminal_result"}
+    [result] = harness.rows("result")
+    if case == "silent":
+        assert (result["id"], result["content_text"]) == (shown["id"], narration)
+        assert harness.rows("interim") == []
+        return
+    assert result["id"] == final.row_id and result["content_text"].startswith(answer)
+    sent, uploads = harness.controller.im_client.sent, harness.controller.im_client.uploads
+    if case == "delivered":
+        assert sent == [] and uploads == []
+        return
+    # Sent once, with the image its run generated.
+    assert len(sent) == 1 and sent[0].startswith(answer)
+    assert uploads == [str(image.resolve())]
+
+
+@pytest.mark.parametrize(
     "case",
     ["exits", "window_passed", "watch_unavailable", "stop", "cancelled", "cancelled_at_shutdown", "stopped_left_open"],
 )

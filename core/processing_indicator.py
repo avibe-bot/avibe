@@ -656,22 +656,6 @@ class ProcessingIndicatorService:
             logger.debug("Failed to stamp orphaned terminal reaction: %s", err)
             return False
 
-    async def clear_orphaned_running_reaction(self, context: MessageContext, message_id: str) -> bool:
-        """Drop a running 👀 a dead runtime left on a Turn recovery found already answered.
-
-        A completed Turn's own result is its receipt, so nothing replaces the 👀.
-        """
-
-        if not message_id:
-            return False
-        if not self._capabilities(context).supports_reaction_indicator:
-            return True  # no running reaction can exist here
-        try:
-            return bool(await self._get_im_client(context).remove_reaction(context, message_id, ACK_REACTION_EMOJI))
-        except Exception as err:
-            logger.debug("Failed to remove orphaned ack reaction: %s", err)
-            return False
-
     async def _stamp_terminal_reaction_without_indicator(
         self,
         handle: ProcessingIndicatorHandle,

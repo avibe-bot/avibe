@@ -32,9 +32,11 @@ from core import failure_notices
 from core.message_context import TERMINAL_COMMIT_KEY, resolve_turn_sink_key
 from core.message_mirror import (
     agent_message_exists,
+    delivered_committed_row,
     persist_agent_message,
     persist_silent_terminal,
     promote_turn_text_to_result,
+    resumed_turn_text,
 )
 from core.message_output import (
     HARNESS_RUN_ID_TRIGGER_KINDS,
@@ -3047,6 +3049,15 @@ class ConsolidatedMessageDispatcher:
                 # that arrives meanwhile waits for it and is delivered at the next
                 # await, as the Run terminal record below does.
                 if (
+                    turn_text_row_id is None
+                    and mutates_turn_lifecycle
+                    and level != "silent"
+                    and terminal_reason == "done"
+                ):
+                    # A rerun after a restart: what its Turn showed before was delivered
+                    # by the process that died, so it is read from the Turn's rows.
+                    turn_text_row_id = resumed_turn_text(context)
+                if (
                     turn_text_row_id is not None
                     and level != "silent"
                     and terminal_reason == "done"
@@ -3203,8 +3214,14 @@ class ConsolidatedMessageDispatcher:
             accepted_message = candidate_message
             native_output_id = candidate
             break
+        if accepted_message is None and existing_row_id and canonical_type == "result":
+            # A committed row's own display write is its receipt (a Turn rerun after a
+            # restart ends with the final its dead process may have delivered).
+            accepted_message = delivered_committed_row(
+                target_context, existing_row_id, outward=not suppresses_outward_delivery
+            )
         if accepted_message:
-            logger.info("Skipping duplicate agent output %s", native_output_id)
+            logger.info("Skipping duplicate agent output %s", native_output_id or existing_row_id)
             # A dispatcher that never saw the first emit (a recovery replay) learns
             # the row here; an older output's retry keeps the newer row recorded.
             if remembers_turn_text:

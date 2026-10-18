@@ -422,7 +422,7 @@ scenarios:
       - tests/test_vibey_agent.py::test_a_short_reply_a_steer_superseded_stays_a_visible_reply
       - tests/test_agent_transcript.py::test_a_reply_pending_input_superseded_commits_as_a_visible_reply
   - id: MESSAGE-DELIVERY-327
-    name: Startup reruns a Vibey Turn a restart cut in place from its transcript, or completes it from a committed final (a silent final leaving its visible text as the result, its follow-ups durable across another restart), without a notice
+    name: Startup reruns a Vibey Turn a restart cut in place from its transcript, once its surface can deliver, without a notice
     status: covered
     kind: recovery
     layer: contract
@@ -430,8 +430,7 @@ scenarios:
       - tests/test_backend_failure_retry.py::test_restart_reruns_a_cut_vibey_turn_in_place_without_a_notice
       - tests/test_backend_failure_retry.py::test_a_rerun_that_exits_before_dispatching_fails_its_turn
       - tests/test_backend_failure_retry.py::test_a_rerun_whose_setup_fails_is_retried_not_settled
-      - tests/test_backend_failure_retry.py::test_a_stop_arriving_while_a_committed_final_settles_loses_the_race
-      - tests/test_backend_failure_retry.py::test_restart_completes_a_cut_vibey_turn_whose_final_reply_was_committed
+      - tests/test_backend_failure_retry.py::test_a_cut_vibey_turn_that_no_longer_qualifies_keeps_the_restart_notice
       - tests/test_processing_indicator_reaction.py::QueuedReactionLifecycleTests::test_a_restart_rerun_retires_the_running_reaction_its_dead_process_may_have_left
       - tests/test_agent_transcript.py::test_the_restart_reads_of_a_turns_context_tail_stay_bounded
   - id: MESSAGE-DELIVERY-328
@@ -464,14 +463,22 @@ scenarios:
     status: covered
     kind: concurrency
     layer: contract
-    test:
-      - tests/test_backend_failure_retry.py::test_restart_rerun_runs_before_input_queued_while_the_service_was_down
-      - tests/test_backend_failure_retry.py::test_a_committed_final_starts_its_successor_even_when_its_follow_ups_fail
+    test: tests/test_backend_failure_retry.py::test_restart_rerun_runs_before_input_queued_while_the_service_was_down
   - id: MESSAGE-DELIVERY-332
     name: A Vibey run that fails because the service is stopping (a model call, or a rerun's preflight) leaves its Turn open for its restart rerun
     status: covered
     kind: recovery
     layer: contract
     test: tests/test_vibey_agent.py::test_a_run_the_service_stop_cut_leaves_its_turn_open_for_its_restart_rerun
+  - id: MESSAGE-DELIVERY-333
+    name: The rerun of a Turn whose final was committed ends with it through the live end, with no model call; a final not yet delivered is sent once, one already delivered is not sent again, a silent final promotes the Turn's earlier visible text, and the Turn stays open across another restart until then
+    status: covered
+    kind: recovery
+    layer: contract
+    test:
+      - tests/test_vibey_agent.py::test_a_restart_rerun_ends_with_the_final_its_cut_run_committed
+      - tests/test_backend_failure_retry.py::test_restart_reruns_a_cut_vibey_turn_in_place_without_a_notice
+      - tests/test_backend_failure_retry.py::test_a_cut_vibey_turn_that_no_longer_qualifies_keeps_the_restart_notice
+      - tests/test_agent_transcript.py::test_the_restart_reads_of_a_turns_context_tail_stay_bounded
 next_priority:
-  - MESSAGE-DELIVERY-333
+  - MESSAGE-DELIVERY-334
