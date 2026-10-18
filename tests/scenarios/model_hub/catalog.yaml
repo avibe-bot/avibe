@@ -499,7 +499,7 @@ scenarios:
       - 'ui/src/components/settings/models/hostedTools.test.ts::MH-HOSTED-UI-006: gives a Source model one capability per feature, a call refusal hiding the success and the replay'
       - 'ui/src/components/settings/models/hostedTools.test.ts::MH-HOSTED-UI-006: gives a Source model one capability per tool with a record, in catalog order'
   - id: MH-HOSTED-UI-007
-    name: Hosted-tool writes and clears run one at a time and a read never overlaps one, so the screen holds the newest committed state
+    name: Hosted-tool writes and clears run one at a time and a read never overlaps one, so the screen holds the newest committed state; no control builds on a report being re-read or kept after a failed read, and only a refusal the server named is announced as a failure
     status: covered
     kind: concurrency
     layer: unit
@@ -515,6 +515,11 @@ scenarios:
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: drops a write answer asked under another Source identity'
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: keeps a tool pending until every write queued for it has settled'
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: queues a clear behind a write like any write, so its answer lands last'
+      - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: holds every tool while the report is re-read, and after that read fails, until a read lands'
+      - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: names the outcome of a save that ended in a refusal the server named'
+      - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: names the outcome of a save that ended in a lost answer'
+      - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: names the outcome of a save that ended in an engine whose answer never reached the UI process'
+      - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: names the outcome of a save that ended in no answer at all'
   - id: MH-HOSTED-UI-018
     name: Every hosted tool is on by default under its capability group, and nothing locks its switch
     status: covered

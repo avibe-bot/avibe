@@ -2,8 +2,9 @@ import * as React from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { useToast } from '@/context/ToastContext';
-import { modelsApi } from './modelsApi';
-import { beginRegionRead, loadingRegion, readRegion, readyRegion, settleRegionRead, type RegionRead } from './regionRead';
+import { classifyModelHubFailure } from './asyncLifetime';
+import { apiFailure, modelsApi } from './modelsApi';
+import { beginRegionRead, foldRegionRead, loadingRegion, readRegion, readyRegion, settleRegionRead, type RegionRead } from './regionRead';
 import type { HostedToolClear, HostedToolName, HostedToolPut, HostedToolsStatus } from './types';
 
 /**
@@ -22,13 +23,15 @@ import type { HostedToolClear, HostedToolName, HostedToolPut, HostedToolsStatus 
  * already out when a write is queued is dropped, because it cannot tell
  * whether it saw that write.
  *
- * `pending` comes from one per-tool ledger and nowhere else. A tool is pending
- * while a write for it is queued or out, or while a write for it ended without
- * an answer and no authoritative status has landed since: that write may have
- * committed, so no control may build a body on what is shown. Only an
- * authoritative status ends that wait: a write's answer or a read that landed.
- * Each is the whole status and newer than every write before it, so it covers
- * every tool. A read that failed or was dropped covers nothing.
+ * `pending` comes from one per-tool ledger and the report's freshness. A tool
+ * is pending while a write for it is queued or out, or while a write for it
+ * ended without an answer and no authoritative status has landed since: that
+ * write may have committed, so no control may build a body on what is shown.
+ * Only an authoritative status ends that wait: a write's answer or a read that
+ * landed. Each is the whole status and newer than every write before it, so it
+ * covers every tool. A read that failed or was dropped covers nothing. A report
+ * that is itself out of date (being re-read, or kept after its read failed)
+ * holds every tool it shows the same way, for the same reason.
  */
 export function useHostedTools(active: boolean, revision: string | null = null) {
   const { t } = useTranslation();
@@ -92,7 +95,7 @@ export function useHostedTools(active: boolean, revision: string | null = null) 
   const write = React.useCallback(async (
     tool: HostedToolName,
     send: () => Promise<HostedToolsStatus>,
-    failure: 'saveFailed' | 'clearFailed',
+    failure: 'save' | 'clear',
   ) => {
     const clock = order.current;
     clock.writes += 1;
@@ -110,13 +113,17 @@ export function useHostedTools(active: boolean, revision: string | null = null) 
         } else {
           clock.rereadAfterWrites = true;
         }
-      } catch {
+      } catch (error) {
         // A refused write changed nothing, and a lost answer may have committed;
-        // either way the tab converges on what the server now holds.
+        // either way the tab converges on what the server now holds. Only a
+        // decided refusal is a failure: a lost answer is an unknown outcome.
         clock.rereadAfterWrites = true;
         entry(tool).awaiting = true;
         if (alive.current) {
-          showToast(t(`settings.models.tools.${failure}`, { toolInline: t(`settings.models.tools.tool.${tool}.inline`) }) as string, 'error');
+          const toolInline = t(`settings.models.tools.tool.${tool}.inline`);
+          // `engine_down` is inconclusive too: the UI process also says it when the engine's answer never reached it.
+          if (classifyModelHubFailure(apiFailure(error)) === 'inconclusive') showToast(t(`settings.models.tools.${failure}Unconfirmed`, { toolInline }) as string, 'warning');
+          else showToast(t(`settings.models.tools.${failure}Failed`, { toolInline }) as string, 'error');
         }
       }
     });
@@ -133,14 +140,21 @@ export function useHostedTools(active: boolean, revision: string | null = null) 
 
   /** Change the fields `body` names; an absent field stays as saved. */
   const save = React.useCallback(
-    (tool: HostedToolName, body: HostedToolPut) => write(tool, () => modelsApi.putHostedTool(tool, body), 'saveFailed'),
+    (tool: HostedToolName, body: HostedToolPut) => write(tool, () => modelsApi.putHostedTool(tool, body), 'save'),
     [write],
   );
   /** Clear refusals: from the next request the tool is tried natively again there. */
   const clear = React.useCallback(
-    (tool: HostedToolName, body: HostedToolClear) => write(tool, () => modelsApi.clearHostedTool(tool, body), 'clearFailed'),
+    (tool: HostedToolName, body: HostedToolClear) => write(tool, () => modelsApi.clearHostedTool(tool, body), 'clear'),
     [write],
   );
 
-  return { read, pending, refresh, save, clear };
+  const held = React.useMemo<ReadonlySet<HostedToolName>>(() => foldRegionRead(read, {
+    loading: () => pending,
+    ready: () => pending,
+    unread: () => pending,
+    degraded: (stale) => new Set([...pending, ...stale.tools.map((tool) => tool.name)]),
+  }), [read, pending]);
+
+  return { read, pending: held, refresh, save, clear };
 }
