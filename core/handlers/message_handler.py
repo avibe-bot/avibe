@@ -9,7 +9,7 @@ from core.audio_asr import (
     append_audio_transcripts_to_message,
     format_audio_transcript_echo,
 )
-from core.agent_input import AgentInputMetadata
+from core.agent_input import AgentInputMetadata, harness_label
 from core.backend_failure import emit_backend_failure
 from core.delivery_target import routed_delivery_context
 from core.message_output import HARNESS_PROMPT_ECHO_SPEC_KEY
@@ -1339,22 +1339,10 @@ class MessageHandler(BaseHandler):
         self, context: MessageContext, *, human: bool
     ) -> AgentInputMetadata:
         """Resolve stable sender facts without rendering execution context."""
-        return AgentInputMetadata(
-            user_id=context.user_id if human else None,
-            user_name=await self._input_user_name(context) if human else None,
-            source_session_id=self._source_session_id(context) or None,
-        )
-
-    @staticmethod
-    def _source_session_id(context: MessageContext) -> str:
-        """Return the Agent Session that authored this Harness input, if known."""
-        payload = context.platform_specific or {}
-        source_session_id = str(payload.get("source_session_id") or "").strip()
-        if source_session_id:
-            return source_session_id
-        if str(payload.get("source_kind") or "").strip() == "agent":
-            return str(payload.get("source_actor") or "").strip()
-        return ""
+        if not human:
+            # Every input no person typed names its sender, from its dispatch provenance.
+            return AgentInputMetadata(harness_source=harness_label(context.platform_specific or {}))
+        return AgentInputMetadata(user_id=context.user_id, user_name=await self._input_user_name(context))
 
     async def _input_user_name(self, context: MessageContext) -> str:
         payload = context.platform_specific or {}

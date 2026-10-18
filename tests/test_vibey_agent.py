@@ -1085,7 +1085,7 @@ async def test_resume_renders_a_recovered_steer_as_the_live_path_would(engine, s
     )
     owner._engine = engine
     harness.controller.session_turns._steer_input_metadata = owner._steer_input_metadata
-    handler = SimpleNamespace(_source_session_id=MessageHandler._source_session_id)
+    handler = SimpleNamespace()
     harness.controller.message_handler = SimpleNamespace(
         prepare_input_metadata=MethodType(MessageHandler.prepare_input_metadata, handler)
     )
@@ -1096,37 +1096,50 @@ async def test_resume_renders_a_recovered_steer_as_the_live_path_would(engine, s
         SESSION, first.context.platform_specific["delivery_id"], UserMessage((text("watch the deploy"),))
     )
     with engine.begin() as conn:
-        # Another Session's agent steers this Turn; the process exits before the loop consumes it.
-        steer = message_deliveries.insert_delivery(
-            conn,
-            delivery_id="dlv_agent_steer",
-            session_id=SESSION,
-            priority="p1",
-            state="reserved",
-            snapshot=message_deliveries.message_snapshot(
-                scope_id=_SCOPES["avibe"], session_id=SESSION, platform="avibe", author="harness",
-                source="harness", message_type="harness", text="the deploy finished",
-                metadata={"scheduled_provenance": {
-                    "task_execution_id": "run_1",
-                    "platform_specific": {"task_trigger_kind": "agent_run", "source_session_id": "ses_source"},
-                }},
-            ),
-            dispatch_text="the deploy finished",
-            now=NOW,
-        )
-        assert message_deliveries.open_steer_attempt(
-            conn, steer["id"], expected_version=int(steer["version"]), turn_id=turn_id,
+        # Another Session's agent steers this Turn with two runs merged into one steer; the
+        # process exits before the loop consumes it.
+        steers = [
+            message_deliveries.insert_delivery(
+                conn,
+                delivery_id=delivery_id,
+                session_id=SESSION,
+                priority="p1",
+                state="reserved",
+                snapshot=message_deliveries.message_snapshot(
+                    scope_id=_SCOPES["avibe"], session_id=SESSION, platform="avibe", author="harness",
+                    source="harness", message_type="harness", text=body,
+                    metadata={"scheduled_provenance": {
+                        "platform_specific": {
+                            "task_trigger_kind": "agent_run",
+                            "task_execution_id": run_id,
+                            "source_kind": "agent",
+                            "source_actor": "ses_source",
+                        },
+                    }},
+                ),
+                dispatch_text=body,
+                now=NOW,
+            )
+            for delivery_id, run_id, body in (
+                ("dlv_agent_steer", "run_1", "the deploy finished"),
+                ("dlv_agent_steer_2", "run_2", "and the smoke test passed"),
+            )
+        ]
+        assert message_deliveries.open_steer_attempt_batch(
+            conn, deliveries=steers, turn_id=turn_id,
             attempt_id="att_agent_steer", expected_native_turn_id=harness.controller.started[-1],
         )
         assert message_deliveries.materialize_steer_acceptance(
-            conn, leader_delivery_id=steer["id"], expected_attempt_id="att_agent_steer", turn_id=turn_id, evidence={}
+            conn, leader_delivery_id=steers[0]["id"], expected_attempt_id="att_agent_steer", turn_id=turn_id, evidence={}
         )
 
     harness.new_agent()
     await harness.agent.handle_message(harness.request("anything new?"))
 
     [recovered] = [entry for entry in await harness.context_rows() if entry.row_id == "dlv_agent_steer"]
-    assert "From: #ses_source" in recovered.message.content[-1].text
+    assert recovered.message.content[-1].text.startswith(
+        "[Harness: agent run run_1 from #ses_source; agent run run_2 from #ses_source]\n"
+    )
 
 
 async def _blocked_second_turn(engine, tmp_path, *, finished_step: bool):

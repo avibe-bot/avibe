@@ -53,6 +53,10 @@ _NEW_SESSION_MODEL_GUIDANCE = (
     "`--fork-self` or `--fork-session`, `--agent`, `--model`, and `--reasoning-effort` override the forked Session "
     "only when the requested Agent backend matches the source Session backend."
 )
+_HARNESS_SOURCE_GUIDANCE = (
+    "\nAn input whose first line is `[Harness: ...]` came from a Watch, Task, Agent run, or callback, not from the "
+    "user, even where it quotes them."
+)
 _PREVIOUS_FOLLOW_THROUGH_PRINCIPLE = (
     "- **Follow through.** Maintain ongoing responsibility for entrusted work rather than forgetting it "
     "when a turn ends. When repeatedly blocked, revisit assumptions and root causes; when necessary, "
@@ -543,6 +547,8 @@ def test_approved_guidance_changes_preserve_all_other_injection_bytes(monkeypatc
         assert text.count(_HISTORY_AS_MEMORY_GUIDANCE) == 1
         assert text.count(_FOLLOW_THROUGH_PRINCIPLE) == 1
         assert text.count(_NEW_SESSION_MODEL_GUIDANCE) == 1
+        assert text.count(_HARNESS_SOURCE_GUIDANCE) == 1
+        text = text.replace(_HARNESS_SOURCE_GUIDANCE, "")
         text = text.replace(_NEW_SESSION_MODEL_GUIDANCE, _PREVIOUS_FORK_OVERRIDE_GUIDANCE)
         text = text.replace(_HISTORY_AS_MEMORY_GUIDANCE, _PREVIOUS_HISTORY_GUIDANCE)
         text = text.replace(_FOLLOW_THROUGH_PRINCIPLE, _PREVIOUS_FOLLOW_THROUGH_PRINCIPLE)
@@ -553,6 +559,7 @@ def test_approved_guidance_changes_preserve_all_other_injection_bytes(monkeypatc
     # (including the Codex-only reuse sentence) and restoring the previous
     # verification principle and conversation-history guidance and Follow-through
     # principle, and the Harness rule that a run's --model applies
-    # only to forks (now: to any new Session a run creates).
+    # only to forks (now: to any new Session a run creates), and without the
+    # Harness line that says what a `[Harness: ...]` input is.
     # Every other byte/order stays pinned, including all Claude/OpenCode output.
     assert digest == "262c7cbabbbb0bfefa4a69511d805d28f76a3559bd511184006242f831b4836e"
