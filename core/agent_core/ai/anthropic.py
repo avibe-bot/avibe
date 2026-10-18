@@ -55,6 +55,7 @@ from core.agent_core.ai.provider import (
 )
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
+    MAX_HOSTED_COUNT,
     AssistantMessage,
     HostedToolBlock,
     ImageBlock,
@@ -1263,7 +1264,8 @@ def _summed(counts: Mapping[str, int], more: Mapping[str, int]) -> dict[str, int
     summed = dict(counts)
     for name, value in more.items():
         summed[name] = summed.get(name, 0) + value
-    return summed
+    # Each response's counts are bounded, but not their total across pauses: a total past the bound is no count either.
+    return {name: value for name, value in summed.items() if value <= MAX_HOSTED_COUNT}
 
 
 def _normalize_stop_reason(value: Any) -> str:

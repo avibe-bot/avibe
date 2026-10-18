@@ -17,6 +17,7 @@ from referencing import Registry, Resource
 
 from core.agent_core.messages import (
     HOSTED_ERROR_CODES,
+    MAX_HOSTED_COUNT,
     AssistantMessage,
     Citation,
     FailedAttempt,
@@ -321,6 +322,22 @@ def test_schema_and_reader_refuse_the_same_hosted_violations(payload):
     assert not VALIDATOR.is_valid(payload)
     with pytest.raises(ValueError):
         message_from_dict(payload)
+
+
+def test_a_count_past_the_bound_is_never_written_and_a_stored_one_is_dropped_on_read():
+    """#2572: a count is at most 2^53 - 1, the largest integer every JSON reader holds exactly. A release before the
+    bound may have stored a larger one: that counter alone is dropped, so its transcript still loads."""
+
+    with pytest.raises(ValueError):
+        HostedSummary(counts={"x_posts_fetched": MAX_HOSTED_COUNT + 1})
+    stored = _set(NATIVE, ("hosted_summary", "counts", "x_posts_fetched"), MAX_HOSTED_COUNT + 1)
+    assert not VALIDATOR.is_valid(stored)
+    loaded = message_from_dict(stored)
+    assert loaded.hosted_summary.counts == {"web_search_calls": 2, "x_search_calls": 1}
+    VALIDATOR.validate(message_to_dict(loaded))
+    at_bound = _set(NATIVE, ("hosted_summary", "counts", "x_posts_fetched"), MAX_HOSTED_COUNT)
+    VALIDATOR.validate(at_bound)
+    assert message_from_dict(at_bound).hosted_summary.counts["x_posts_fetched"] == MAX_HOSTED_COUNT
 
 
 def test_a_record_with_an_error_code_this_build_does_not_know_still_loads():

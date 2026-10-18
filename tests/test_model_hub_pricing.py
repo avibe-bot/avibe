@@ -917,16 +917,6 @@ def test_a_hosted_response_is_priced_by_the_one_pricing_owner(billing, reported,
         assert result[0] == expected[0] and result[1] == pytest.approx(expected[1])
 
 
-def test_xai_cost_ticks_are_converted_by_the_pricing_module():
-    """MH-PRICE-020: xAI reports cost in 1e-10 USD ticks."""
-    from core.handlers.model_hub.pricing import usd_from_xai_ticks
-
-    assert usd_from_xai_ticks(1127268800) == pytest.approx(0.11272688)
-    assert usd_from_xai_ticks(-1) is None and usd_from_xai_ticks(True) is None and usd_from_xai_ticks("9") is None
-    # An absurd figure from a malformed relay is unknown, never an OverflowError that fails the turn.
-    assert usd_from_xai_ticks(10**400) is None
-
-
 def test_a_price_table_parses_every_price_when_built_and_none_on_lookup(monkeypatch):
     """MH-PRICE-016: building the table (never on the loop) parses every price, so a lookup on the loop parses none."""
     from core.handlers.model_hub import pricing

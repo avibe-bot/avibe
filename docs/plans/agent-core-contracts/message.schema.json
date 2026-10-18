@@ -1207,9 +1207,10 @@
           },
           "additionalProperties": {
             "type": "integer",
-            "minimum": 0
+            "minimum": 0,
+            "maximum": 9007199254740991
           },
-          "description": "Provider-reported counters by name, e.g. `web_search_calls`, `x_posts_fetched`, `web_search_requests`."
+          "description": "Provider-reported counters by name, e.g. `web_search_calls`, `x_posts_fetched`, `web_search_requests`. A count is at most 2^53 - 1, the largest integer every JSON reader holds exactly; a provider's count past it is not kept."
         },
         "cited_sources": {
           "type": "array",

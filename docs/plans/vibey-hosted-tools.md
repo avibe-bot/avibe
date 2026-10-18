@@ -386,7 +386,10 @@ never dropped.
   result (§7.3).
 - **`AssistantMessage.hosted_summary`** (per response, present exactly when the message has hosted blocks):
   `cost` (`{basis, usd}` with `basis` `reported` or `list`, or `included` with no `usd`; absent when unknown),
-  `counts` (provider counters by name), `cited_sources[]` (the xAI X-search `url_citation`s).
+  `counts` (provider counters by name, each at most 2^53 - 1), `cited_sources[]` (the xAI X-search `url_citation`s).
+  A provider's counter or `cost_in_usd_ticks` past its bound is refused where it is read
+  (`core/agent_core/ai/hosted.py`), for the native and the proxied call alike, so it reads as absent and never
+  fails a response (#2572).
 - **`TextBlock.citations`** (optional): `[{url, title?, cited_text?, start?, end?}]`, presentation only, never
   replayed, materialized at delivery by `core/citations.py`.
 - **`ToolResultMessage.hosted`** (optional): `{record, execution?, action?}` for a proxied search call and for every

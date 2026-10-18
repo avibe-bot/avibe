@@ -311,6 +311,20 @@ ANTHROPIC_SEARCH = {
         _responses(WEB_CALL, WEB_ANSWER, usage={"input_tokens": 2000, "output_tokens": 100}),
         None,
     ),
+    # A provider's number past its bound is refused where it enters (#2572): the call still completes, and a cost
+    # that needs the number is unknown, never an error. A search counter past the bound counts no searches to value.
+    (
+        "web_search", (ANTHROPIC, "claude-haiku-4-5"), "metered",
+        {**ANTHROPIC_SEARCH, "usage": {"input_tokens": 2000, "output_tokens": 100,
+                                       "server_tool_use": {"web_search_requests": 10**400}}},
+        None,
+    ),
+    # xAI's own figure past the bound is no figure, and nothing else prices this call.
+    (
+        "x_search", (XAI, "grok-4.6"), "metered",
+        _responses(X_CALL, X_ANSWER, usage={"input_tokens": 2000, "output_tokens": 100, "cost_in_usd_ticks": 10**400}),
+        None,
+    ),
 ])
 async def test_a_proxied_call_carries_the_pricing_modules_cost(tmp_path, tool, executor, billing, response, cost):
     """MH-HOSTED-GATEWAY-004: the cost is included, the provider's own figure, or the list price; absent when unknown."""

@@ -20,7 +20,15 @@ from core.agent_core.ai.anthropic import MAX_PAUSE_CONTINUATIONS, PAUSE_LIMIT_ME
 from core.agent_core.ai.provider import Done, HostedToolRoute, ModelEndpoint, ModelRequest, ProviderError
 from core.agent_core.ai.registry import create_adapter
 from core.agent_core.cancel import CancelToken
-from core.agent_core.messages import HostedToolBlock, ImageBlock, TextBlock, ThinkingBlock, Usage, UserMessage
+from core.agent_core.messages import (
+    MAX_HOSTED_COUNT,
+    HostedToolBlock,
+    ImageBlock,
+    TextBlock,
+    ThinkingBlock,
+    Usage,
+    UserMessage,
+)
 from core.agent_core.tools.hosted import hosted_tool_spec
 
 SOURCE = "src_served00001"
@@ -160,6 +168,26 @@ async def test_a_paused_response_continues_as_one_response_pinned_to_its_source_
     assert message.usage == Usage(input_tokens=300, output_tokens=20)
     assert dict(message.hosted_summary.counts) == {"web_search_requests": 2}
     assert not [event for event in events if isinstance(event, ProviderError)]
+
+
+async def test_counters_summed_past_the_bound_across_pauses_are_dropped_and_the_response_completes():
+    """MH-HOSTED-VIBEY-006 (#2572): each response's counts are bounded, but not their total across pauses; a total
+    past the bound is no count either, never a summary that fails the turn."""
+
+    def answer(number: int) -> httpx.Response:
+        if number == 1:
+            body = _response(
+                _use(), stop_reason="pause_turn", input_tokens=100, output_tokens=10, searches=MAX_HOSTED_COUNT
+            )
+        else:
+            body = _response([{"type": "content_block_start", "content_block": RESULT}], _text("v8 is out"),
+                             stop_reason="end_turn", input_tokens=300, output_tokens=20, searches=MAX_HOSTED_COUNT)
+        return httpx.Response(200, headers=_served(), text=body)
+
+    _, events = await _stream(answer)
+
+    assert isinstance(events[-1], Done) and events[-1].message.stop_reason == "stop"
+    assert dict(events[-1].message.hosted_summary.counts) == {}
 
 
 async def test_a_continuation_that_reports_no_usage_leaves_the_message_without_the_paused_requests():

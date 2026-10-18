@@ -639,11 +639,8 @@ def quota_values(
 #
 # One owner turns a hosted response's usage into money: this module. Callers
 # (Vibey's hosted_summary, the gateway's ProxyExecution) only pass what the
-# response reported.
-
-XAI_USD_TICKS_PER_USD: Final = 10_000_000_000
-# Above this (about $100M for one response) a reported figure is not a cost.
-_MAX_XAI_TICKS: Final = 10**18
+# response reported, read and bounded where it enters
+# (``core.agent_core.ai.hosted``, ``stream_wire``), so no guard is needed here.
 
 # The provider counter that counts one unit of a hosted tool's list price.
 _HOSTED_UNIT_COUNTERS: Final[Mapping[tuple[str, str], str]] = {
@@ -653,14 +650,6 @@ _HOSTED_UNIT_COUNTERS: Final[Mapping[tuple[str, str], str]] = {
     ("x_search", "post"): "x_posts_fetched",
     ("x_search", "profile"): "x_users_fetched",
 }
-
-
-def usd_from_xai_ticks(ticks: object) -> Optional[float]:
-    """xAI's ``cost_in_usd_ticks`` in USD; None when it is not a non-negative integer."""
-
-    if isinstance(ticks, bool) or not isinstance(ticks, int) or not 0 <= ticks <= _MAX_XAI_TICKS:
-        return None
-    return ticks / XAI_USD_TICKS_PER_USD
 
 
 def hosted_response_cost(

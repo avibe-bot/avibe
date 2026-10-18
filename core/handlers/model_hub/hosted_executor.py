@@ -19,12 +19,11 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Final, Mapping
 
 from config.v2_config import ModelHubSourceConfig
-from core.agent_core.ai.hosted import reported_counts
+from core.agent_core.ai.hosted import reported_cost, reported_counts
 from core.agent_core.ai.sse import SSEParser
 
 from .events import bounded_diagnostic_detail
 from .hosted_items import responses_item_tool
-from .pricing import usd_from_xai_ticks
 from .request import ModelHubRequest
 
 EXECUTOR_TOOLS: Final = ("web_search", "x_search")
@@ -301,7 +300,8 @@ def provider_charges(protocol: str, usage: Mapping[str, Any] | None) -> tuple[di
     if usage is None:
         return {}, None
     counters = usage.get("server_tool_use") if protocol == "anthropic" else usage.get("server_side_tool_usage_details")
-    return reported_counts(counters), usd_from_xai_ticks(usage.get("cost_in_usd_ticks"))
+    cost = reported_cost(usage)
+    return reported_counts(counters), cost.usd if cost is not None else None
 
 
 def _usage_section(response: Any) -> Mapping[str, Any] | None:
