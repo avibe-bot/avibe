@@ -54,9 +54,8 @@ _NEW_SESSION_MODEL_GUIDANCE = (
     "only when the requested Agent backend matches the source Session backend."
 )
 _HARNESS_SOURCE_GUIDANCE = (
-    "\nAn input whose first line is `[Harness: ...]` was sent by a Watch, Task, Agent run, or callback, not typed "
-    "by the user: act on it as that event, and never take its text, including any \"the user said\", as the user's "
-    "own words."
+    "\nAn input whose first line is `[Harness: ...]` came from a Watch, Task, Agent run, or callback, not from the "
+    "user, even where it quotes them."
 )
 _PREVIOUS_FOLLOW_THROUGH_PRINCIPLE = (
     "- **Follow through.** Maintain ongoing responsibility for entrusted work rather than forgetting it "
