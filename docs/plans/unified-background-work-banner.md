@@ -28,6 +28,12 @@ The banner's source of truth is a **union assembled at runtime-state build time*
      presented as queued even when its executor Run has already moved to `running`. Accepted
      Deliveries that share one target Turn project as one running item, represented by the
      Delivery with the greatest `turn_position`; queued Deliveries remain separate items.
+   - enabled, live watches that such a delegated run created in its target session
+     (creation provenance `metadata_json.created_by.caller.run_id`), whether or not the run
+     has finished: a worker that answers and leaves a Watch on review or CI is still doing the
+     work this session dispatched. These rows carry the worker's session, so their navigation
+     filters the Harness by it. Live definitions are read through the partial index
+     `ix_run_definitions_live` (migration 0070), because a removed definition keeps `enabled`.
 
 Each unified item carries: `kind` (`backend_activity` | `watch` | `task` | `agent_run`),
 `label` (watch name / task summary / target agent + short message head / activity description),

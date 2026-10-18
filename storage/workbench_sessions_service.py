@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from sqlalchemy import Integer, and_, cast, func, or_, select, update
+from sqlalchemy import Integer, and_, case, cast, func, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection
 
@@ -1593,7 +1593,10 @@ def derive_session_harness_activities(conn: Connection, session_id: str) -> list
       is authoritative, with the bound session as a legacy fallback for
       definitions that predate provenance capture;
     - queued/running delegated agent runs whose callback returns here (work this
-      session dispatched and is waiting on).
+      session dispatched and is waiting on);
+    - enabled, live watches such a delegated run created in its target session
+      (creation provenance ``metadata_json.created_by.caller.run_id``), whether or
+      not the run has finished: the work it dispatched goes on in them.
 
     Each row is shaped like a serialized background activity plus the unified
     banner fields (see ``_harness_banner_item``).
@@ -1669,6 +1672,57 @@ def derive_session_harness_activities(conn: Connection, session_id: str) -> list
                 since=since,
                 updated_at=str(row["updated_at"] or since),
                 schedule_type=schedule_type,
+            )
+        )
+
+    # Watches left by work this session dispatched. A delegated run whose result
+    # returns here may answer and finish while a Watch it created in its target
+    # session keeps that work going (review, CI); the work is not done, so its
+    # Watches stay here too, routed to the session they run in. A Watch of this
+    # session is already listed above. Live definitions are reached through
+    # ``ix_run_definitions_live`` and each creator Run by its primary key, so the
+    # read is bounded by live Watches, not by definition or run history.
+    metadata_json = run_definitions.c.metadata_json
+    creator_run_id = case(
+        (func.json_valid(metadata_json) == 1, func.json_extract(metadata_json, "$.created_by.caller.run_id")),
+    )
+    delegated_watch_rows = (
+        conn.execute(
+            select(
+                run_definitions.c.id,
+                run_definitions.c.name,
+                run_definitions.c.session_id,
+                run_definitions.c.created_at,
+                run_definitions.c.updated_at,
+                agent_runs.c.agent_name,
+                agent_runs.c.agent_backend,
+            )
+            .select_from(run_definitions.join(agent_runs, agent_runs.c.id == creator_run_id))
+            .where(run_definitions.c.definition_type == "watch")
+            .where(run_definitions.c.enabled == 1)
+            .where(run_definitions.c.deleted_at.is_(None))
+            .where(run_definitions.c.session_id != session_id)
+            .where(agent_runs.c.run_type == "agent_run")
+            .where(agent_runs.c.callback_session_id == session_id)
+            .order_by(run_definitions.c.created_at, run_definitions.c.id)
+        )
+        .mappings()
+        .all()
+    )
+    for row in delegated_watch_rows:
+        name = _banner_label(row["name"])
+        agent_name = str(row["agent_name"] or "").strip()
+        since = str(row["created_at"] or "")
+        items.append(
+            _harness_banner_item(
+                item_id=f"watch:{row['id']}",
+                item_kind="watch",
+                session_id=str(row["session_id"]),
+                status="enabled",
+                label=_banner_label(f"{agent_name}: {name}") if agent_name and name else agent_name or name,
+                since=since,
+                updated_at=str(row["updated_at"] or since),
+                backend=str(row["agent_backend"] or ""),
             )
         )
 

@@ -306,6 +306,13 @@ run_definitions = Table(
     Column("last_run_id", String, nullable=True),
     Column("metadata_json", Text, nullable=False),
     Index("ix_run_definitions_type_enabled", "definition_type", "enabled"),
+    # Live definitions only (migration 0070): a removed one keeps ``enabled``.
+    Index(
+        "ix_run_definitions_live",
+        "definition_type",
+        "enabled",
+        sqlite_where=text("deleted_at is null"),
+    ),
     Index("ix_run_definitions_session", "session_id"),
     Index("ix_run_definitions_agent", "agent_name"),
     Index("ix_run_definitions_updated", "updated_at"),

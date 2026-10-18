@@ -92,20 +92,22 @@ export function sortBackgroundActivities(items: SessionActivityState[]): Session
 }
 
 // Where a harness banner row navigates (spec req 4). Watch/task rows open the
-// matching Harness tab filtered to the originating session (route param, shown
-// as a removable chip). A delegated run executes in another session, so it can't
+// matching Harness tab filtered to the row's own session (route param, shown as a
+// removable chip): the viewing session, or for a Watch a delegated run left, the
+// session that run went to. A delegated run executes in another session, so it can't
 // be session-filtered — it opens the runs tab anchored to that run instead.
 // Backend activities never navigate (guarded by the caller); they fall back to
 // the bare Harness page.
 export function harnessNavPath(
-  item: Pick<SessionActivityState, 'id' | 'item_kind'>,
+  item: Pick<SessionActivityState, 'id' | 'item_kind'> & { session_id?: string | null },
   sessionId: string | null | undefined,
 ): string {
   const kind = activityItemKind(item);
   const params = new URLSearchParams();
   if (kind === 'watch' || kind === 'task') {
     params.set('tab', kind === 'watch' ? 'watches' : 'tasks');
-    if (sessionId) params.set('session', sessionId);
+    const filter = item.session_id || sessionId;
+    if (filter) params.set('session', filter);
   } else if (kind === 'agent_run') {
     params.set('tab', 'runs');
     const runId = harnessItemNativeId(item);
