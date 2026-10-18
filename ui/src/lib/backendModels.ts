@@ -88,13 +88,16 @@ export const supersedesHubAnswer = (result: BackendModels, knownHub: boolean): b
  * Model Hub's catalog answer for a backend: null when Hub does not serve it,
  * `'unread'` when Hub gave no answer. It starts no CLI.
  *
- * A Hub effort menu follows capability evidence that any turn can change, so an
- * effort is written only against an answer read for that write (#2606). The
- * route picker and the Agents page read as their menu opens or is approached,
- * and every control that can write an effort (an effort, or a model that keeps
- * or clears one) waits, disabled, until that read lands. The New Agent dialog
- * writes on Create, so Create reads this answer again and creates only an effort
- * it still offers, and nothing when Hub cannot answer.
+ * A Hub effort menu follows capability evidence that any turn can change
+ * (#2606). The route picker and the Agents page read it again as their menu
+ * opens or the effort field is approached, and while that read is in flight the
+ * controls that can write an effort (an effort, or a model that keeps or clears
+ * one) are held. The New Agent dialog writes on Create, so Create reads this
+ * answer again and creates only an effort it still offers, and nothing when Hub
+ * cannot answer. A write made outside those (a model changed before any read
+ * started, or after a read that came back unread) uses the last answer; a stale
+ * effort then fails at the turn as `effort_unsupported`, which records the
+ * evidence the next read uses.
  */
 export async function readHubBackendModels(
   api: ApiContextType,

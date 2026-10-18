@@ -2153,7 +2153,8 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
   // session can change while this panel stays open. Like the route picker, which
   // reads it as its menu opens, read it again as the user turns to the effort
   // field, the moment it is chosen from; the last answer shows until it lands,
-  // the controls that can write an effort held until then (`readHubBackendModels`).
+  // and the controls that can write an effort are held while the read is in
+  // flight (`readHubBackendModels`).
   const effortRefreshRef = useRef<(() => void) | null>(null);
   // One read per approach: a read still out answers for this one too. Dropping a
   // read does not stop its request, so restarting would only add requests.

@@ -331,7 +331,7 @@ scenarios:
       - ui/src/components/workbench/AgentRoutePicker.test.tsx::MH-EFFORT-MENU-003
       - ui/src/components/workbench/AgentsPage.test.tsx::MH-EFFORT-MENU-003
   - id: MH-EFFORT-MENU-004
-    name: An effort is committed only against the effort menu read for that commit; the route picker and the Agents page hold their efforts while a re-read is out, and the New Agent dialog reads again at Create and creates only an effort the answer still offers
+    name: While an effort-menu read is in flight, the route picker and the Agents page hold the controls that can write an effort, and the New Agent dialog reads again at Create, creating only an effort the answer still offers and nothing when Model Hub cannot answer
     status: covered
     kind: observation
     layer: unit

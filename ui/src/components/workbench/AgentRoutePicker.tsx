@@ -232,9 +232,9 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   // under Settings reads again as it is uncovered. A Hub catalog is read again on
   // every open: its effort menu follows capability evidence, which any turn can
   // change, and the read is the persisted catalog, which starts no CLI. The last
-  // answer shows until the new one lands, its efforts and models held until then:
-  // an effort is written only against the answer read for it, and a model choice
-  // keeps or clears one (`readHubBackendModels`).
+  // answer shows until the new one lands, and its efforts and models (a model
+  // choice keeps or clears the effort) are held while the read is in flight
+  // (`readHubBackendModels`).
   useEffect(() => {
     const loadedBackends = loadedModelBackendsRef.current;
     if (!open || !surfaceActive || !backend || loadedBackends.has(backend)) return;
