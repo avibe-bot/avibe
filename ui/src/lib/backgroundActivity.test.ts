@@ -175,6 +175,12 @@ describe('harnessNavPath', () => {
     );
   });
 
+  it("filters a Watch a delegated run left by the session it runs in", () => {
+    expect(harnessNavPath({ id: 'watch:w2', item_kind: 'watch', session_id: 'ses-worker' }, 'ses-pm')).toBe(
+      '/harness?tab=watches&session=ses-worker',
+    );
+  });
+
   it('anchors a delegated run by id (no session filter — it runs elsewhere)', () => {
     expect(harnessNavPath({ id: 'agent_run:r1', item_kind: 'agent_run' }, 'ses-1')).toBe(
       '/harness?tab=runs&run=r1',

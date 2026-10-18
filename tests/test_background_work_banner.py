@@ -757,6 +757,89 @@ def test_sync_run_without_pending_callback_is_excluded(tmp_path: Path):
     assert items == []
 
 
+def test_a_watch_a_delegated_run_left_stays_after_the_run_answers(tmp_path: Path):
+    # The PM dispatched a worker; the worker answered ("the Watch will continue")
+    # and left a forever Watch on review and CI in its own session. The run is
+    # finished, but the work it dispatched is not, so the PM still sees it, routed
+    # to the worker's session (where the Harness filter finds it).
+    engine, _ = _make_engine(tmp_path)
+    _insert_run(
+        engine,
+        id="run-worker",
+        agent_name="claude",
+        status="succeeded",
+        callback_status="sent",
+        session_id="ses-worker",
+        callback_session_id="ses-pm",
+    )
+    created_by = {"created_by": {"kind": "caller_context", "caller": {"session_id": "ses-worker", "run_id": "run-worker"}}}
+    _insert_definition(
+        engine,
+        id="w-review",
+        definition_type="watch",
+        name="pr-2821 review",
+        session_id="ses-worker",
+        metadata_json=json.dumps(created_by),
+    )
+    # Not this session's work: a Watch the worker removed or paused, and one left
+    # by a run another session dispatched.
+    _insert_definition(engine, id="w-removed", definition_type="watch", session_id="ses-worker", deleted_at=_NOW, metadata_json=json.dumps(created_by))
+    _insert_definition(engine, id="w-paused", definition_type="watch", session_id="ses-worker", enabled=0, metadata_json=json.dumps(created_by))
+    _insert_run(engine, id="run-other", status="succeeded", session_id="ses-worker", callback_session_id="ses-other")
+    _insert_definition(
+        engine,
+        id="w-foreign",
+        definition_type="watch",
+        session_id="ses-worker",
+        metadata_json=json.dumps({"created_by": {"caller": {"session_id": "ses-worker", "run_id": "run-other"}}}),
+    )
+    _insert_definition(engine, id="w-unreadable", definition_type="watch", session_id="ses-worker", metadata_json="not json")
+
+    with engine.connect() as conn:
+        items = derive_session_harness_activities(conn, "ses-pm")
+
+    assert [(item["id"], item["label"], item["session_id"], item["status"]) for item in items] == [
+        ("watch:w-review", "claude: pr-2821 review", "ses-worker", "enabled"),
+    ]
+
+
+def test_delegated_watches_are_read_through_live_definitions_only(tmp_path: Path):
+    # The banner is re-read on every runtime-state build. A removed Watch keeps
+    # ``enabled = 1``, so seeking (definition_type, enabled) alone walks every Watch
+    # ever removed; the read must touch live definitions and each creator Run by
+    # its key, never a scan of either growing table.
+    import sqlite3
+
+    from sqlalchemy import event
+
+    engine, db_path = _make_engine(tmp_path)
+    _insert_run(engine, id="run-worker", status="succeeded", session_id="ses-worker", callback_session_id="ses-pm")
+    for index in range(20):
+        _insert_definition(engine, id=f"w-removed-{index}", definition_type="watch", session_id="ses-worker", deleted_at=_NOW)
+    captured: list[tuple[str, object]] = []
+
+    def capture(conn, cursor, statement, parameters, context, executemany):
+        if "json_extract" in statement and "agent_runs" in statement:
+            captured.append((statement, parameters))
+
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        with engine.connect() as conn:
+            derive_session_harness_activities(conn, "ses-pm")
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+
+    [(statement, parameters)] = captured
+    raw = sqlite3.connect(str(db_path))
+    try:
+        plan = "\n".join(row[-1] for row in raw.execute("EXPLAIN QUERY PLAN " + statement, parameters))
+    finally:
+        raw.close()
+    assert "SEARCH run_definitions USING INDEX ix_run_definitions_live (definition_type=? AND enabled=?)" in plan, plan
+    assert "SEARCH agent_runs USING INDEX sqlite_autoindex_agent_runs_1 (id=?)" in plan, plan
+    assert "SCAN" not in plan.replace("USE TEMP B-TREE", ""), plan
+
+
 def test_items_derive_from_db_so_banner_survives_restart(tmp_path: Path):
     # The registry is process-local and empty after a restart; harness items must
     # come from the durable store. Simulate a restart by disposing the engine and

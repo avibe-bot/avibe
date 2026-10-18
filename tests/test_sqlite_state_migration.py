@@ -38,7 +38,7 @@ from vibe.message_types import build_partial_index_predicate
 pytestmark = pytest.mark.no_sqlite_template
 
 
-HEAD_REVISION = "20261016_0069"
+HEAD_REVISION = "20261018_0070"
 PREVIOUS_HEAD_REVISION = "20261016_0068"
 _SCOPE_ID_DRIFT_TABLES = ("messages", "agent_events", "media_objects")
 # ``storage.models`` builds a bare ``MetaData()``, so its foreign keys are unnamed and
@@ -3770,7 +3770,8 @@ def test_scope_id_nullability_repair_is_noop_on_correct_schema(
             "pragma schema_version"
         ).fetchone()[0]
 
-    run_migrations(db_path)
+    # Only 0069 itself: a later revision may change the schema on purpose.
+    run_migrations(db_path, revision="20261016_0069")
 
     with sqlite3.connect(db_path) as conn:
         after = conn.execute(
@@ -3786,7 +3787,7 @@ def test_scope_id_nullability_repair_is_noop_on_correct_schema(
 
     assert after == before
     assert after_schema_version == before_schema_version
-    assert version == (HEAD_REVISION,)
+    assert version == ("20261016_0069",)
 
 
 def test_scope_id_nullability_repair_replays_after_head_shape_stamp(
@@ -4002,6 +4003,7 @@ def test_run_migrations_repairs_head_indexes_before_stamping_head(tmp_path: Path
         conn.execute("drop index if exists ix_message_deliveries_message")
         conn.execute("drop index if exists ix_agent_sessions_scope_status_activity")
         conn.execute("drop index if exists ix_agent_sessions_agent_status")
+        conn.execute("drop index if exists ix_run_definitions_live")
         conn.execute("drop index if exists ix_messages_session_created_id")
         conn.execute("drop index if exists ix_messages_session_type_created_id")
         conn.execute("drop index if exists ix_messages_platform_session_created_id")
@@ -4020,6 +4022,7 @@ def test_run_migrations_repairs_head_indexes_before_stamping_head(tmp_path: Path
         assert "context_seq is null" in _index_sql(conn, "ix_messages_vibey_recovery_input")
         assert "message_id is not null" in _index_sql(conn, "ix_message_deliveries_message")
         assert "(agent_status, status)" in _index_sql(conn, "ix_agent_sessions_agent_status")
+        assert "deleted_at is null" in _index_sql(conn, "ix_run_definitions_live")
 
     run_migrations(db_path)
 
