@@ -1996,6 +1996,12 @@ both health surfaces in 7.4 seconds. It adds bounded cold-start margin without
 claiming an unobserved internal engine phase or introducing a retry loop. If
 readiness is not established, Avibe terminates the child and preserves the
 existing runtime failure contract.
+The engine answers before its file watcher has registered the auth directory's
+OAuth grants, and until then lists each grant with no model and routes none of
+them (#2756). So a start also waits, within the 5-second config reload bound,
+until every grant the engine loaded (except a disabled one) lists a model. A
+grant still listing nothing then is logged and left to its own state; the start
+succeeds. API-key Sources are registered before the engine answers.
 CLIProxyAPI stdout and stderr are directed to the operating system's null sink
 when the process is created. Child bytes therefore never enter Avibe's Python
 memory or service logs and cannot create pipe backpressure. Startup diagnostics

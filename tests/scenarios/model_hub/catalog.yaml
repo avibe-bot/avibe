@@ -1134,11 +1134,13 @@ scenarios:
     missing_layer: scenario
     test: tests/test_model_hub_runtime.py::test_mh_runtime_001_service_restart_reports_installed_engine_as_not_started
   - id: MH-RUNTIME-005
-    name: First CLIProxyAPI cold start remains pending until both health surfaces are ready
+    name: First CLIProxyAPI cold start remains pending until both health surfaces are ready and, within a bound, each OAuth grant it loaded lists its models
     status: covered
     kind: recovery
     layer: unit
     test: tests/test_model_hub_runtime.py::test_mh_runtime_005_first_cold_start_waits_for_readiness_within_bounded_budget
+    related_tests:
+      - tests/test_model_hub_runtime.py::test_a_started_engine_is_ready_once_it_lists_the_models_of_each_oauth_grant_it_loaded
   - id: MH-RUNTIME-006
     name: CLIProxyAPI readiness timeout stops the child, discards its output, and leaves bounded structured diagnostics
     status: covered

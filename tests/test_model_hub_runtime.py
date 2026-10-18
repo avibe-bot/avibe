@@ -3055,6 +3055,7 @@ def _write_mock_engine(
     reload_delay: float = 0.0,
     drop_reload_ack: bool = False,
     lose_config_on_reload: str | None = None,
+    grants_load_after: float = 0.0,
 ) -> None:
     script = f"""#!{sys.executable}
 import json
@@ -3089,6 +3090,7 @@ exit_before_ready = {exit_before_ready!r}
 if exit_before_ready is not None:
     raise SystemExit(exit_before_ready)
 time.sleep({startup_delay!r})
+answering_since = time.monotonic()
 health_surfaces = set()
 defaulted = False
 
@@ -3133,8 +3135,14 @@ class Handler(BaseHTTPRequestHandler):
             mark_health_surface('management')
             self._json(200, {{'host': config['host']}})
             return
+        if self.path == '/v0/management/auth-files' and self.headers.get('X-Management-Key') == management:
+            grants = sorted(os.listdir(config['auth-dir'])) if os.path.isdir(config['auth-dir']) else []
+            self._json(200, {{'files': [{{'name': name}} for name in grants if name.endswith('.json')]}})
+            return
         if self.path.startswith('/v0/management/auth-files/models'):
-            self._json(200, {{'models': [{{'id': 'model-a'}}]}})
+            # CPA answers before its watcher loads the auth directory, listing each grant with no model until then.
+            loaded = time.monotonic() - answering_since >= {grants_load_after!r}
+            self._json(200, {{'models': [{{'id': 'model-a'}}] if loaded else []}})
             return
         self._json(401, {{'error': {{'type': 'unauthorized'}}}})
 
@@ -3312,6 +3320,7 @@ def _fixture_supervisor(
     reload_delay: float = 0.0,
     drop_reload_ack: bool = False,
     lose_config_on_reload: str | None = None,
+    grants_load_after: float = 0.0,
 ) -> tuple[EngineSupervisor, EngineStateStore]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     binary = tmp_path / "mock-engine"
@@ -3325,6 +3334,7 @@ def _fixture_supervisor(
         reload_delay=reload_delay,
         drop_reload_ack=drop_reload_ack,
         lose_config_on_reload=lose_config_on_reload,
+        grants_load_after=grants_load_after,
     )
     installer = _FixtureInstaller(binary, tmp_path / "versions" / "install-1")
     store = EngineStateStore(tmp_path / "state")
@@ -4663,6 +4673,21 @@ def test_supervisor_process_exit_discards_all_child_output(
         len(child_payload) * 2
     )
     assert not (instance_dir / "health-surfaces-complete").exists()
+
+
+def test_a_started_engine_is_ready_once_it_lists_the_models_of_each_oauth_grant_it_loaded(tmp_path: Path) -> None:
+    """MH-RUNTIME-005 (#2756): the engine answers before it loads its auth directory, and lists each grant with no
+    model until then; a refresh or turn right after the start must not find a grant that offers nothing."""
+
+    supervisor, store = _fixture_supervisor(tmp_path, grants_load_after=0.5)
+    auth_name = "antigravity-account.json"
+    store.write_oauth_auth_file(auth_name, {"type": "antigravity", "access_token": "oauth-fixture"})
+    try:
+        connection = supervisor.ensure_running()
+        listing = EngineClient(connection).management_request("GET", "/auth-files/models", query={"name": auth_name})
+        assert listing["models"] == [{"id": "model-a"}]
+    finally:
+        supervisor.stop()
 
 
 def test_mh_runtime_006_timeout_stops_engine_with_bounded_structured_diagnostics(
