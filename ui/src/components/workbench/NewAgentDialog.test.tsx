@@ -40,6 +40,7 @@ vi.mock('../../context/ApiContext', async (importOriginal) => ({
 type FakeModelCatalog = {
   models: string[];
   reasoningOptions?: Record<string, { value: string; label: string }[]>;
+  effortMenus?: Record<string, { omitted: string[]; not_on: Record<string, string[]> }>;
 };
 let modelCatalog: FakeModelCatalog = { models: [] };
 let modelCatalogReads = 0;
@@ -232,6 +233,38 @@ describe('NewAgentDialog', () => {
     expect(screen.getByText('opus')).toBeTruthy();
     expect(medium().disabled).toBe(false);
     expect(create().disabled).toBe(false);
+  });
+
+  it("MH-EFFORT-MENU-004: creates only an effort Model Hub still offers at Create, not just when the dialog opened", async () => {
+    modelCatalog = {
+      models: [],
+      reasoningOptions: { sonnet: [{ value: 'medium', label: 'medium' }, { value: 'high', label: 'high' }] },
+      effortMenus: { sonnet: { omitted: [], not_on: {} } },
+    };
+    const { createVibeAgent } = renderDialog();
+    // While the dialog stays open, a turn records that every hop refuses `high`.
+    const row = (efforts: string[], omitted: string[]) => ({
+      backend: 'claude', mode: 'hub',
+      catalog_models: [{ id: 'sonnet', routeable: true, reasoning_efforts: efforts, effort_menu: { omitted, not_on: {} } }],
+    });
+    apiRef.current!.readModelHubAgentCatalogForModelPicker = vi.fn().mockResolvedValue(row(['medium'], ['high']));
+
+    fireEvent.change(screen.getByPlaceholderText('agents.create.namePlaceholder'), { target: { value: 'router' } });
+    chooseModel('sonnet');
+    fireEvent.click(screen.getByRole('button', { name: 'high', exact: true }));
+    submit();
+
+    await waitFor(() => expect(screen.getByText('agents.create.effortRefused:{"effort":"high"}')).toBeTruthy());
+    expect(createVibeAgent).not.toHaveBeenCalled();
+    // The menu now follows that answer, so the effort moved to one it offers.
+    expect(screen.queryByRole('button', { name: 'high', exact: true })).toBeNull();
+    // The refused Create has settled when its button takes clicks again.
+    const create = screen.getByRole('button', { name: /agents\.create\.submit/ }) as HTMLButtonElement;
+    await waitFor(() => expect(create.disabled).toBe(false));
+    submit();
+    await waitFor(() => expect(createVibeAgent).toHaveBeenCalledWith(expect.objectContaining({
+      model: 'sonnet', reasoning_effort: 'medium',
+    })));
   });
 
   it('creates with no effort when the catalog says the model has none', async () => {

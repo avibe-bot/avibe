@@ -84,6 +84,21 @@ const hubCatalogModels = (agent: PickerAgentCatalog | null, backend: string): Ba
 export const supersedesHubAnswer = (result: BackendModels, knownHub: boolean): boolean =>
   !knownHub || result.effortMenus !== undefined || result.hubUnread !== true;
 
+/**
+ * Model Hub's catalog answer for a backend, or null when Hub does not serve it
+ * or did not answer. It starts no CLI.
+ *
+ * A Hub effort menu follows capability evidence that any turn can change, so an
+ * effort is committed only against an answer read for that commit (#2606). The
+ * route picker and the Agents page read as their menu opens or is approached,
+ * and their effort controls wait, disabled, until that read lands. The New Agent
+ * dialog commits on Create, so Create reads this answer again and creates only an
+ * effort it still offers.
+ */
+export async function readHubBackendModels(api: ApiContextType, backend: string): Promise<BackendModels | null> {
+  return hubCatalogModels(await api.readModelHubAgentCatalogForModelPicker(backend), backend);
+}
+
 // Single source of truth for "list the selectable models for a backend",
 // shared by ChatPage, the Agents detail panel, and the New Agent dialog so a
 // new backend (or a fix like OpenCode's provider-prefixing) lands in one place.

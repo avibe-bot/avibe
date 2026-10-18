@@ -2152,16 +2152,22 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
   // A Hub catalog's effort menu follows capability evidence, which a turn in any
   // session can change while this panel stays open. Like the route picker, which
   // reads it as its menu opens, read it again as the user turns to the effort
-  // field, the moment it is chosen from; the last answer shows until it lands.
+  // field, the moment it is chosen from; the last answer shows until it lands,
+  // its efforts held until then (`readHubBackendModels`).
   const effortRefreshRef = useRef<(() => void) | null>(null);
   // One read per approach: a read still out answers for this one too. Dropping a
   // read does not stop its request, so restarting would only add requests.
   const effortRefreshOutRef = useRef(false);
+  const [effortRefreshOut, setEffortRefreshOut] = useState(false);
   const refreshEffortMenus = useCallback(() => {
     if (!surfaceActive || !hubKnownRef.current || effortRefreshOutRef.current) return;
     effortRefreshOutRef.current = true;
+    setEffortRefreshOut(true);
     const backend = agent.backend;
-    const settle = () => { effortRefreshOutRef.current = false; };
+    const settle = () => {
+      effortRefreshOutRef.current = false;
+      setEffortRefreshOut(false);
+    };
     effortRefreshRef.current = loadBackendModelsWithRefresh(
       api,
       backend,
@@ -2178,6 +2184,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
     effortRefreshRef.current?.();
     effortRefreshRef.current = null;
     effortRefreshOutRef.current = false;
+    setEffortRefreshOut(false);
     // A new activation or backend starts without knowing which catalog serves it.
     hubKnownRef.current = false;
   }, [agent.backend, api, surfaceActive]);
@@ -2543,7 +2550,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
               <button
                 key={opt}
                 type="button"
-                disabled={!canEdit || !effortsAnswered}
+                disabled={!canEdit || !effortsAnswered || effortRefreshOut}
                 title={canEdit ? undefined : t('agents.remoteReadOnlyHint')}
                 onClick={() => {
                   markFieldEdit('effort');

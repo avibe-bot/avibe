@@ -232,7 +232,8 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   // under Settings reads again as it is uncovered. A Hub catalog is read again on
   // every open: its effort menu follows capability evidence, which any turn can
   // change, and the read is the persisted catalog, which starts no CLI. The last
-  // answer shows until the new one lands.
+  // answer shows until the new one lands, its efforts held until then: an effort
+  // is committed only against the answer read for it (`readHubBackendModels`).
   useEffect(() => {
     const loadedBackends = loadedModelBackendsRef.current;
     if (!open || !surfaceActive || !backend || loadedBackends.has(backend)) return;
@@ -268,6 +269,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
     );
     return () => {
       cancel();
+      setLoadingModels(false);
       if (reloadOnNextOpen) loadedBackends.delete(backend);
     };
   }, [open, surfaceActive, backend, api]);
@@ -545,6 +547,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
                   <RouteItem
                     key={opt}
                     active={opt === currentEffort}
+                    disabled={loadingModels}
                     onClick={() => applyPatch({ reasoning_effort: opt })}
                   >
                     <span className="flex min-w-0 flex-1 flex-col">
@@ -588,13 +591,15 @@ const PickerExitButton: React.FC<{ label: string; onClick: () => void }> = ({ la
 // so it inherits the design system's focus/disabled behavior.
 const RouteItem: React.FC<{
   active: boolean;
+  disabled?: boolean;
   onClick: () => void;
   children: React.ReactNode;
-}> = ({ active, onClick, children }) => (
+}> = ({ active, disabled, onClick, children }) => (
   <Button
     type="button"
     variant="ghost"
     size="sm"
+    disabled={disabled}
     onClick={onClick}
     className={clsx(
       'h-auto w-full justify-start gap-2 rounded px-2 py-1.5 text-left text-[12px] font-normal',

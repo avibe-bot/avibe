@@ -15,6 +15,7 @@ capability:
     - ui/src/lib/backendModels.test.ts
     - ui/src/components/workbench/AgentRoutePicker.test.tsx
     - ui/src/components/workbench/AgentsPage.test.tsx
+    - ui/src/components/workbench/NewAgentDialog.test.tsx
     - tests/agent_core/ai/test_hosted_requests.py
     - tests/agent_core/ai/test_hosted_parsing.py
     - tests/agent_core/ai/test_hosted_transform.py
@@ -329,6 +330,15 @@ scenarios:
     test:
       - ui/src/components/workbench/AgentRoutePicker.test.tsx::MH-EFFORT-MENU-003
       - ui/src/components/workbench/AgentsPage.test.tsx::MH-EFFORT-MENU-003
+  - id: MH-EFFORT-MENU-004
+    name: An effort is committed only against the effort menu read for that commit; the route picker and the Agents page hold their efforts while a re-read is out, and the New Agent dialog reads again at Create and creates only an effort the answer still offers
+    status: covered
+    kind: observation
+    layer: unit
+    test:
+      - ui/src/components/workbench/AgentRoutePicker.test.tsx::MH-EFFORT-MENU-004
+      - ui/src/components/workbench/AgentsPage.test.tsx::MH-EFFORT-MENU-004
+      - ui/src/components/workbench/NewAgentDialog.test.tsx::MH-EFFORT-MENU-004
   - id: MH-HOSTED-VIBEY-001
     name: Vibey declares a search tool natively, verbatim with its include values, exactly when the hop's facts assume it, and pins that request to the hop's Source
     status: covered

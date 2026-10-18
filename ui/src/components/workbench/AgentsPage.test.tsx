@@ -1731,6 +1731,39 @@ describe('AgentsPage reconnect reconciliation', () => {
     await waitFor(() => expect(screen.queryByRole('button', { name: 'xhigh', exact: true })).toBeNull());
   });
 
+  it('MH-EFFORT-MENU-004: holds the effort buttons while that read is out, so a click cannot write an effort its answer removes', async () => {
+    modelCatalog = {
+      models: [],
+      reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }, { value: 'xhigh', label: 'xhigh' }] },
+      effortMenus: { 'reasoning-model': { omitted: [], not_on: {} } },
+    };
+    const initial = { ...brief('agent-a', 'description'), model: 'reasoning-model', reasoning_effort: 'medium' };
+    const updateVibeAgent = vi.fn().mockResolvedValue({ ok: true, agent: fullAgent(initial, 'prompt') });
+    const api = makeApi(
+      vi.fn().mockResolvedValue(listResult(initial)), vi.fn().mockResolvedValue(fullAgent(initial, 'prompt')),
+      undefined, undefined, updateVibeAgent,
+    );
+    renderPage(api, { canManageAgents: true });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'xhigh', exact: true })).toBeTruthy());
+
+    // Another session's turn records that every hop refuses `xhigh`; the re-read is still out.
+    modelCatalog = {
+      models: [],
+      reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }] },
+      effortMenus: { 'reasoning-model': { omitted: ['xhigh'], not_on: {} } },
+    };
+    deferModelReads = true;
+    fireEvent.pointerEnter(document.querySelector('[data-effort-field]') as HTMLElement);
+    const xhigh = screen.getByRole('button', { name: 'xhigh', exact: true }) as HTMLButtonElement;
+    expect(xhigh.disabled).toBe(true);
+    fireEvent.click(xhigh);
+    expect(updateVibeAgent).not.toHaveBeenCalled();
+
+    act(() => pendingModelReads.shift()!());
+    expect(screen.queryByRole('button', { name: 'xhigh', exact: true })).toBeNull();
+    expect((screen.getByRole('button', { name: 'medium', exact: true }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it('keeps the last Hub effort menu when a refresh falls back to the native list, and asks Hub again next time', async () => {
     const hub = {
       models: [],

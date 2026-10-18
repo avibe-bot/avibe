@@ -61,6 +61,7 @@ capabilities:
       - ui/src/lib/backendModels.test.ts
       - ui/src/components/workbench/AgentRoutePicker.test.tsx
       - ui/src/components/workbench/AgentsPage.test.tsx
+      - ui/src/components/workbench/NewAgentDialog.test.tsx
       - tests/agent_core/ai/test_hosted_requests.py
       - tests/agent_core/ai/test_hosted_parsing.py
       - tests/agent_core/ai/test_hosted_transform.py

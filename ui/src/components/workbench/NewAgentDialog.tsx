@@ -5,7 +5,7 @@ import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
 import type { VibeAgentFull } from '../../context/ApiContext';
-import { loadBackendModelsWithRefresh, modelOptionLabel, useAddModelExit } from '../../lib/backendModels';
+import { loadBackendModelsWithRefresh, modelOptionLabel, readHubBackendModels, useAddModelExit } from '../../lib/backendModels';
 import { resolveEffortOptions } from '../../lib/effortOptions';
 import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { estimateTokens } from '../../lib/tokenEstimate';
@@ -57,6 +57,9 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
   // (a backend switch, or a Settings visit). Until it has, nothing the dialog
   // offers is confirmed against it.
   const [catalogAnswered, setCatalogAnswered] = useState(false);
+  // Whether that answer was Model Hub's, whose effort menu can change while the
+  // dialog stays open, so Create reads it again.
+  const [hubAnswered, setHubAnswered] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
   const openAddModel = useAddModelExit(backend, open);
   const surfaceActive = useRouteSurfaceActive();
@@ -87,9 +90,10 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
     const cancel = loadBackendModelsWithRefresh(
       api,
       backend,
-      ({ models, modelLabels, reasoningOptions: opts }) => {
+      ({ models, modelLabels, reasoningOptions: opts, effortMenus }) => {
         setModelOptions(models.map((m) => ({ value: m, label: modelOptionLabel(m, modelLabels) })));
         setReasoningOptions(opts ?? {});
+        setHubAnswered(effortMenus !== undefined);
         setCatalogAnswered(true);
       },
       () => {
@@ -97,12 +101,14 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
         // unknown model, never the efforts read before the visit.
         setModelOptions([]);
         setReasoningOptions({});
+        setHubAnswered(false);
         setCatalogAnswered(true);
       },
     );
     return () => {
       cancel();
       setModelOptions([]);
+      setHubAnswered(false);
       setCatalogAnswered(false);
     };
   }, [backend, open, api, surfaceActive]);
@@ -142,6 +148,17 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
     setError(null);
     setSubmitting(true);
     try {
+      if (hubAnswered) {
+        // Create commits the effort, so it is checked against Model Hub's answer
+        // now, not the one read when the dialog opened (`readHubBackendModels`).
+        const fresh = await readHubBackendModels(api, backend);
+        if (fresh && effort !== null && !resolveEffortOptions(backend, model, fresh.reasoningOptions).includes(effort)) {
+          // The menu follows the answer, which moves the effort to one it offers.
+          setReasoningOptions(fresh.reasoningOptions ?? {});
+          setError(t('agents.create.effortRefused', { effort }));
+          return;
+        }
+      }
       const result = await api.createVibeAgent({
         name: name.trim(),
         backend,

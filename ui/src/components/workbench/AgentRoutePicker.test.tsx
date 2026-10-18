@@ -338,6 +338,29 @@ describe('AgentRoutePicker', () => {
     expect(effortColumn().queryByRole('button', { name: /chat\.picker\.effortOptions\.high/ })).toBeNull();
   });
 
+  it('MH-EFFORT-MENU-004: holds the efforts of the last answer while the reopened menu reads again', async () => {
+    hubMode = 'hub';
+    catalogReasoning = { sonnet: [{ value: 'low', label: 'low' }, { value: 'high', label: 'high' }] };
+    const onChange = vi.fn();
+    const user = userEvent.setup();
+    render(<HubPicker role="owner" onChange={onChange} />);
+    await openMenu(user);
+    await user.keyboard('{Escape}');
+
+    // A turn recorded that every hop refuses `high`, and the reopened menu's read is still out.
+    catalogReasoning = { sonnet: [{ value: 'low', label: 'low' }] };
+    catalogMenus = { sonnet: { omitted: ['high'], not_on: {} } };
+    deferReads = true;
+    await openMenu(user);
+    const high = effortColumn().getByRole('button', { name: /chat\.picker\.effortOptions\.high/ }) as HTMLButtonElement;
+    expect(high.disabled).toBe(true);
+    await user.click(high);
+    expect(onChange).not.toHaveBeenCalled();
+
+    act(() => pendingReads.shift()!());
+    expect(effortColumn().queryByRole('button', { name: /chat\.picker\.effortOptions\.high/ })).toBeNull();
+  });
+
   it('keeps the last Hub answer, and reads Hub again, when one open falls back to the native list', async () => {
     // Hub: every hop refuses the route's `low`.
     hubMode = 'hub';
