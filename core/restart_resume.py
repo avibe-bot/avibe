@@ -94,14 +94,15 @@ def _initial_run_ended(conn: Connection, turn_id: str) -> bool:
 def restart_resume_plan(conn: Connection, turn: dict[str, Any]) -> Plan:
     """How recovery settles an accepted Vibey Turn a restart cut.
 
-    ``"wait"``: a steer into it is still unsettled (its receipt could not be
-    materialized yet); the Turn stays open and recovery retries, so the steer joins
+    ``"unavailable"``: it keeps the restart notice (start not accepted, Stop or
+    replacement requested, a Run cancelled or already ended, Session archived or
+    system, Agent off Vibey, or the loop bound reached). Decided first: a steer still
+    unsettled then settles against the ended Turn, as before a rerun existed.
+    ``"wait"``: a Turn that would rerun has a steer still unsettled (its receipt could
+    not be materialized yet); it stays open and recovery retries, so the steer joins
     the Turn before it reruns.
     ``"rerun"``: the Turn reruns in place from its committed transcript. One whose
     final response was committed ends there, as its live run would have.
-    ``"unavailable"``: it keeps the restart notice (start not accepted, Stop or
-    replacement requested, a Run cancelled or already ended, Session archived or
-    system, Agent off Vibey, or the loop bound reached).
     """
     if (
         turn.get("backend") != "vibey"
@@ -109,8 +110,6 @@ def restart_resume_plan(conn: Connection, turn: dict[str, Any]) -> Plan:
         or turn.get("start_receipt_outcome") != "accepted"
     ):
         return "unavailable"
-    if deliveries.turn_has_unresolved_steer(conn, str(turn["id"])):
-        return "wait"
     session = conn.execute(
         select(agent_sessions.c.status, agent_sessions.c.visibility, agent_sessions.c.agent_backend).where(
             agent_sessions.c.id == turn["session_id"]
@@ -126,4 +125,6 @@ def restart_resume_plan(conn: Connection, turn: dict[str, Any]) -> Plan:
         or restart_streak(conn, turn)[0] >= RESTART_RESUME_LIMIT
     ):
         return "unavailable"
+    if deliveries.turn_has_unresolved_steer(conn, str(turn["id"])):
+        return "wait"
     return "rerun"

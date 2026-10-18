@@ -438,10 +438,15 @@ def test_a_cut_vibey_turn_that_no_longer_qualifies_keeps_the_restart_notice(isol
         assert notice["metadata"]["turn_id"] == cut.turn_id
 
 
-def test_a_turn_waiting_for_its_steer_keeps_its_running_command_for_the_rerun(isolated_state, tmp_path, monkeypatch):
+@pytest.mark.parametrize("then", ["rerun", "stopped"])
+def test_a_turn_waiting_for_its_steer_keeps_its_running_command_for_the_rerun(
+    isolated_state, tmp_path, monkeypatch, then
+):
     """MESSAGE-DELIVERY-330: while the Turn waits open for a steer receipt startup could not
     materialize, its running command stays with it: the retry only recovers again, and the rerun
-    gets the command, with no handover in between."""
+    gets the command, with no handover in between. A Turn a Stop was asked of never reruns, so it
+    does not wait for the steer: it settles with the notice at once and its command ends
+    (MESSAGE-DELIVERY-329)."""
     from core.agent_core.tools.base import JobStatus
     from core.session_turns import SessionTurnManager
     from tests.agent_core.fakes import FakeJobHost
@@ -480,22 +485,82 @@ def test_a_turn_waiting_for_its_steer_keeps_its_running_command_for_the_rerun(is
 
     cut.manager._finish_steer = lost_once
     cut.manager._active_identity = lambda *_args: None
+    if then == "stopped":
+        _request_stop(cut.engine, cut.session_id, cut.turn_id)
 
     async def startup():
         assert await cut.manager.controller.vibey_recovery.start() == []
         await cut.manager.recover_durable_delivery_state(service_restart=True)
         assert cut.starts == [] and lost and jobs.watches == {}
+        if then == "stopped":
+            with cut.engine.connect() as conn:
+                turn = message_deliveries.get_turn(conn, cut.turn_id)
+            assert (turn["state"], turn["terminal_evidence_kind"]) == ("terminal", "restart_runtime_missing")
+            assert jobs.killed == ["job_1"] and len(_notices(cut.engine, cut.session_id)) == 1
+            return
         for _ in range(100):
             if cut.starts:
                 break
             await asyncio.sleep(0.02)
 
     asyncio.run(startup())
+    if then == "stopped":
+        assert cut.starts == [] and jobs.watches == {}
+        return
 
     assert cut.starts == [(cut.session_id, "")]
     assert jobs.watches == {}
     with cut.engine.connect() as conn:
         assert message_deliveries.get_delivery(conn, steer["id"])["turn_id"] == cut.turn_id
+
+
+def test_concurrent_recovery_passes_rerun_a_cut_turn_once(isolated_state, tmp_path):
+    """MESSAGE-DELIVERY-327: two recovery passes over the same cut Turn (a held rerun's transport
+    callback and its retry) both decide to rerun it; one rotates and reruns it, and the other,
+    whose rotation lands after that rerun bound its generation, releases nothing and starts
+    nothing."""
+    import threading
+
+    cut = _accepted_turn(tmp_path, backend="vibey")
+    _previous_process("tool")(cut.engine, cut.session_id, cut.turn_id)
+    bound, calls, lock = threading.Event(), [], threading.Lock()
+    rotate = cut.manager._rotate_for_rerun
+
+    def second_after_the_first_bound(*args):
+        with lock:
+            calls.append(args)
+            later = len(calls) > 1
+        if later:
+            assert bound.wait(5)  # the other pass's rerun has bound its generation
+        return rotate(*args)
+
+    async def accepted(sid, ctx, text, **_kwargs):
+        # The rerun's native start binds this process's generation, as Vibey's does.
+        cut.starts.append((sid, text))
+        cut.manager.on_native_start(
+            ctx, backend="vibey", runtime_key=f"runtime:{sid}", runtime_turn_id=f"runtime-turn:{sid}"
+        )
+        bound.set()
+
+    cut.manager.controller._session_id_from_context = lambda ctx: (ctx.platform_specific or {}).get(
+        "agent_session_id"
+    )
+    cut.manager._rotate_for_rerun = second_after_the_first_bound
+    cut.manager._run = accepted
+    cut.manager._active_identity = lambda *_args: None
+    cut.manager._transport_can_deliver = lambda _platform: True
+
+    async def two_passes():
+        await asyncio.gather(
+            *(cut.manager.recover_durable_delivery_state(cut.session_id, service_restart=True) for _ in range(2))
+        )
+
+    asyncio.run(two_passes())
+
+    assert len(calls) == 2 and cut.starts == [(cut.session_id, "")]
+    with cut.engine.connect() as conn:
+        turn = message_deliveries.get_turn(conn, cut.turn_id)
+    assert turn["state"] == "active" and turn["runtime_key"] == f"runtime:{cut.session_id}"
 
 
 def test_a_rerun_whose_setup_fails_is_retried_not_settled(isolated_state, tmp_path, monkeypatch):

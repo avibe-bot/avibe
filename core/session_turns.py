@@ -7335,7 +7335,7 @@ class SessionTurnManager:
             if (session_id, turn_id) not in held:
                 held.append((session_id, turn_id))
             return "held"
-        if not await asyncio.to_thread(self._rotate_for_rerun, turn_id, attempt_id):
+        if not await asyncio.to_thread(self._rotate_for_rerun, turn_id, attempt_id, int(turn["version"])):
             return "wait"  # it changed meanwhile: the retry decides again
         try:
             started = await self._rerun_turn(turn_id)
@@ -7345,9 +7345,11 @@ class SessionTurnManager:
             return "wait"
         return "rerun" if started else "unavailable"
 
-    def _rotate_for_rerun(self, turn_id: str, attempt_id: str) -> bool:
+    def _rotate_for_rerun(self, turn_id: str, attempt_id: str, decided_version: int) -> bool:
         """The rerun's writer transaction, off the controller loop: the restart streak, and
-        the dead runtime generation released, while the Turn still qualifies."""
+        the dead runtime generation released, while the Turn is still as the decision read
+        it. A concurrent recovery pass that rotated it first (and whose rerun may have bound
+        its own generation since) moved its version, so this one releases nothing."""
 
         from core.restart_resume import PROCESS_TOKEN, restart_resume_plan, restart_streak
 
@@ -7356,6 +7358,7 @@ class SessionTurnManager:
             turn = delivery_store.get_turn(conn, turn_id)
             if (
                 turn is None
+                or int(turn["version"]) != decided_version
                 or str(turn.get("start_attempt_id") or "") != attempt_id
                 or restart_resume_plan(conn, turn) != "rerun"
             ):

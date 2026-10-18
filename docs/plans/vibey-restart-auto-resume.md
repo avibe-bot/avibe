@@ -90,7 +90,8 @@ exists; "handled" names where the in-place design still owns it.
 2. **What continues.** The same Turn. It stays `active` with its accepted
    start; recovery clears its runtime generation (the dead process's runtime
    and native ids) and records the restart streak in one writer transaction,
-   then reruns the Turn through the ordinary runner with `vibey_resume`, once
+   fenced on the Turn as the decision read it (a concurrent recovery pass that
+   rotated it first leaves this one nothing to release), then reruns the Turn through the ordinary runner with `vibey_resume`, once
    the Turn's surface can deliver (its transport ready: recovery runs before
    external transports connect, so the rerun waits as the restart notice does,
    and that transport's ready callback starts it), with
@@ -111,8 +112,10 @@ exists; "handled" names where the in-place design still owns it.
    held for the Turn are dispatched when they can join it. The Turn's accepted inputs,
    steers included, are pinned as for Retry. A steer whose acceptance receipt
    the dead process recorded but did not materialize is reconciled into the
-   Turn first; while any steer into the Turn is still unsettled, the Turn stays
-   open and recovery retries before it completes or reruns.
+   Turn first; while any steer into a Turn that would rerun is still
+   unsettled, the Turn stays open and recovery retries before it reruns. A
+   Turn that no longer qualifies settles at once, and the steer then settles
+   against it, as before this change.
 3. **Tool calls.** A rerun treats a job that survived the restart as its live
    call would. Startup's T2 pass leaves a running job of a Turn still open to
    the Turn owner; the rerun's own T2, before its first projection, waits for
