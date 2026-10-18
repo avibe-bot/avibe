@@ -74,6 +74,7 @@ from storage.background import (
     TERMINAL_RUN_STATUSES,
     normalize_run_status,
 )
+from storage.messages_service import canonical_message_timestamp
 from vibe.i18n import t as i18n_t
 from vibe.message_types import TRANSCRIPT_COPY_KEY
 
@@ -426,7 +427,7 @@ class ConsolidatedMessageDispatcher:
         # token. A Turn that ends on a silent reply makes this row its result
         # (``promote_turn_text_to_result``). Every lifecycle-terminal emit takes
         # the entry, so it never outlives its Turn.
-        self._turn_visible_text: dict[str, tuple[str, str]] = {}
+        self._turn_visible_text: dict[str, tuple[str, str, Optional[tuple[str, str]]]] = {}
         # Harness deliveries whose prompt has already been echoed to IM, kept as a
         # bounded FIFO (see ``emit_harness_prompt``). Per-process only: a restart
         # replay writes a new Delivery anyway, and a duplicated echo is cosmetic
@@ -2786,14 +2787,27 @@ class ConsolidatedMessageDispatcher:
     def _remember_turn_text(self, context: MessageContext, row: Optional[dict]) -> None:
         """Record a persisted row as its Turn's latest visible text.
 
-        Only a row whose Turn is identified: without a token, a later Turn's
-        silent final could not tell this row apart from its own.
+        The record is the Turn's last *persisted* visible text: promotion edits
+        history, and a text whose row was never written is not in it. A row that
+        sits earlier in the transcript than the one held (a retried earlier
+        output) never displaces it; the order is the transcript's own
+        (``messages_service.transcript_order_value``: when the row entered the
+        transcript, then its id). Only a row whose Turn is identified: without a
+        token, a later Turn's silent final could not tell this row apart from its
+        own.
         """
 
         row_id = (row or {}).get("id")
         turn_token = (context.platform_specific or {}).get("turn_token")
-        if row_id and turn_token:
-            self._turn_visible_text[resolve_turn_sink_key(self.controller, context)] = (turn_token, row_id)
+        if not (row_id and turn_token):
+            return
+        key = resolve_turn_sink_key(self.controller, context)
+        entered = canonical_message_timestamp(row.get("delivered_at") or row.get("created_at"))
+        order = (entered, str(row_id)) if entered else None
+        held = self._turn_visible_text.get(key)
+        if held is not None and held[0] == turn_token and order and held[2] and held[2] > order:
+            return
+        self._turn_visible_text[key] = (turn_token, row_id, order)
 
     def _take_turn_text(self, context: MessageContext) -> Optional[str]:
         """Remove and return the row recorded for this context's Turn, if any."""
@@ -3191,6 +3205,10 @@ class ConsolidatedMessageDispatcher:
             break
         if accepted_message:
             logger.info("Skipping duplicate agent output %s", native_output_id)
+            # A dispatcher that never saw the first emit (a recovery replay) learns
+            # the row here; an older output's retry keeps the newer row recorded.
+            if remembers_turn_text:
+                self._remember_turn_text(context, accepted_message)
             accepted_output_semantics = self._output_with_accepted_provenance(
                 output_semantics,
                 accepted_message,

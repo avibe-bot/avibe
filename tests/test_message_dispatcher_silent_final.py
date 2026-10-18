@@ -255,6 +255,49 @@ class SilentFinalTurnResultTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.agent_rows(), [("result", REPORT)])
             self.assertEqual(len(controller.committed_turns), 1)
 
+    async def test_a_replayed_output_is_recorded_without_displacing_newer_text(self):
+        """Scenario: MESSAGE-DELIVERY-325.
+
+        An output replayed through the accepted-receipt short-circuit is recorded
+        by a dispatcher that never saw its first emit, and a retry of an older
+        output leaves the newer row recorded.
+        """
+
+        def phase(key: str) -> MessageOutput:
+            return MessageOutput(completes_turn=False, completes_run=False, idempotency_key=key)
+
+        with self.subTest("a fresh dispatcher replays the output"), self.state():
+            await _Controller("avibe").emit_agent_message(self.context(), "output", REPORT, output=phase("p1"))
+            recovered = _Controller("avibe")
+            await recovered.emit_agent_message(self.context(), "output", REPORT, output=phase("p1"))
+            await _Agent(recovered).emit_result_message(self.context(), "<silent>noted</silent>")
+
+            self.assertEqual(self.agent_rows(), [("result", REPORT)])
+
+        with self.subTest("a local-only output is replayed visibly after a newer one"), self.state():
+            # The replayed row keeps its creation time but enters the transcript
+            # now (``delivered_at``), after the newer output: it is the text shown last.
+            controller = _Controller("avibe")
+            background = self.context()
+            background.platform_specific["suppress_delivery"] = True
+            await controller.emit_agent_message(background, "output", REPORT, output=phase("p1"))
+            await controller.emit_agent_message(self.context(), "output", "Second report.", output=phase("p2"))
+            await controller.emit_agent_message(self.context(), "output", REPORT, output=phase("p1"))
+            await _Agent(controller).emit_result_message(self.context(), "<silent>noted</silent>")
+
+            self.assertEqual(
+                sorted(self.agent_rows()), [("output", "Second report."), ("result", REPORT)]
+            )
+
+        with self.subTest("an older output is retried after a newer one"), self.state():
+            controller = _Controller("avibe")
+            await controller.emit_agent_message(self.context(), "output", REPORT, output=phase("p1"))
+            await controller.emit_agent_message(self.context(), "output", "Second report.", output=phase("p2"))
+            await controller.emit_agent_message(self.context(), "output", REPORT, output=phase("p1"))
+            await _Agent(controller).emit_result_message(self.context(), "<silent>noted</silent>")
+
+            self.assertEqual(self.agent_rows(), [("output", REPORT), ("result", "Second report.")])
+
     async def test_nothing_else_promotes_earlier_text(self):
         """Scenario: MESSAGE-DELIVERY-325."""
         request = SimpleNamespace(output=None)
