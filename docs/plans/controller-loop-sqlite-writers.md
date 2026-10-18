@@ -144,17 +144,25 @@ What it shows:
 
 **Before and after the fixes** (the same host). The rc2 shutdown summary closes Soak 3. It covers about 12 h, from 05:40 to 17:51, and counted 45926 writes at 33 sites. Both sites the fixes target were still there:
 
-| Site | rc2, about 12 h | gh-v3.2.2rc4, from 17:52 |
+| Site | rc2, about 12 h | gh-v3.2.2rc4, about 16 h |
 | --- | --- | --- |
-| `drain_delivery_queue <- recover_runtime_delivery_observation` (#2781) | 37551 writes, 220 s total, 2981 ms max | not seen |
-| `settings_service.save_state <- v2_settings.save` (#2789, #2791) | 4 writes, 6.5 s total, 3530 ms max | not seen |
+| `drain_delivery_queue <- recover_runtime_delivery_observation` (#2781) | 37551 writes, 220 s total, 2981 ms max | 0 writes |
+| `settings_service.save_state <- v2_settings.save` (#2789, #2791) | 4 writes, 6.5 s total, 3530 ms max | 0 writes |
+| All sites | 45926 writes at 33 sites | 1375 writes at 26 sites, about 9 s total, 388 ms max |
 
 Without those two sites, rc2's loop writes come to about 60 s over 12 h, and no single write took a second. The largest were:
 - `on_native_start`: 334 writes, 10 s, 505 ms max;
 - `persist_agent_message`: about 4,100 writes, 14 s;
 - `upsert_activity`: 887 writes, 7.2 s.
 
-None of these calls for action unless a stall points at it. The rc4 column so far rests on the census's first-seen lines from its first minutes; a longer rc4 reading will replace it.
+None of these calls for action unless a stall points at it.
+
+The rc4 column is the summary of 2026-10-18 10:07, after about 16 h on the host from 17:52; neither target site was ever logged as a first-seen site. The leading rc4 sites are:
+- `on_native_start`: 79 writes, 2.5 s, 388 ms max;
+- `_terminalize_durable_turn`: 79 writes, 1.7 s, 211 ms max;
+- `persist_agent_message` across its call sites: about 650 writes, 2.9 s, 378 ms max.
+
+In the same window the watchdog reported one 2.3 s stall, at 22:54. Its stack of the event-loop thread sat in `selectors.select`, so the loop was idle and no loop code was running; nothing in the log precedes it. There was no `database is locked`.
 
 The per-Turn admissions all hold the boundary inside the transaction, so they are loop-side boundary holders and fall under B's split analysis:
 - `_admit_p0`, `_admit_p1`, `_admit_p3`, `_promote_fifo_head`;
