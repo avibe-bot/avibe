@@ -3056,6 +3056,8 @@ def _write_mock_engine(
     drop_reload_ack: bool = False,
     lose_config_on_reload: str | None = None,
     grants_load_after: float = 0.0,
+    grant_listing_delay: float = 0.0,
+    auth_files_status: int = 200,
 ) -> None:
     script = f"""#!{sys.executable}
 import json
@@ -3137,9 +3139,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == '/v0/management/auth-files' and self.headers.get('X-Management-Key') == management:
             grants = sorted(os.listdir(config['auth-dir'])) if os.path.isdir(config['auth-dir']) else []
-            self._json(200, {{'files': [{{'name': name}} for name in grants if name.endswith('.json')]}})
+            self._json({auth_files_status!r}, {{'files': [{{'name': name}} for name in grants if name.endswith('.json')]}})
             return
         if self.path.startswith('/v0/management/auth-files/models'):
+            time.sleep({grant_listing_delay!r})
             # CPA answers before its watcher loads the auth directory, listing each grant with no model until then.
             loaded = time.monotonic() - answering_since >= {grants_load_after!r}
             self._json(200, {{'models': [{{'id': 'model-a'}}] if loaded else []}})
@@ -3321,6 +3324,8 @@ def _fixture_supervisor(
     drop_reload_ack: bool = False,
     lose_config_on_reload: str | None = None,
     grants_load_after: float = 0.0,
+    grant_listing_delay: float = 0.0,
+    auth_files_status: int = 200,
 ) -> tuple[EngineSupervisor, EngineStateStore]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     binary = tmp_path / "mock-engine"
@@ -3335,6 +3340,8 @@ def _fixture_supervisor(
         drop_reload_ack=drop_reload_ack,
         lose_config_on_reload=lose_config_on_reload,
         grants_load_after=grants_load_after,
+        grant_listing_delay=grant_listing_delay,
+        auth_files_status=auth_files_status,
     )
     installer = _FixtureInstaller(binary, tmp_path / "versions" / "install-1")
     store = EngineStateStore(tmp_path / "state")
@@ -4688,6 +4695,34 @@ def test_a_started_engine_is_ready_once_it_lists_the_models_of_each_oauth_grant_
         assert listing["models"] == [{"id": "model-a"}]
     finally:
         supervisor.stop()
+
+
+def test_the_wait_for_oauth_grants_is_bounded_as_a_whole_however_many_grants_answer_slowly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MH-RUNTIME-005 (#2756): one deadline covers every grant request, so slow grants cannot stretch the start."""
+
+    monkeypatch.setattr(supervisor_module, "MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS", 1.0)
+    supervisor, store = _fixture_supervisor(tmp_path, grants_load_after=60.0, grant_listing_delay=0.4)
+    for number in range(12):
+        store.write_oauth_auth_file(f"account-{number}.json", {"type": "antigravity", "access_token": "oauth-fixture"})
+    try:
+        started = time.monotonic()
+        supervisor.ensure_running()
+        # One pass over twelve grants at 0.4 s each would take 4.8 s; the start's own spawn and health check get the rest.
+        assert time.monotonic() - started < 3.5
+    finally:
+        supervisor.stop()
+
+
+def test_a_start_whose_grant_listing_fails_is_not_ready(tmp_path: Path) -> None:
+    """MH-RUNTIME-005 (#2756): an engine that answers its health check but refuses the grant listing never starts
+    as ready; the start fails like any that never becomes ready, and stops it."""
+
+    supervisor, store = _fixture_supervisor(tmp_path, startup_timeout=1.0, auth_files_status=404)
+    with pytest.raises(EngineUnavailableError):
+        supervisor.ensure_running()
+    assert supervisor.status()["status"]["health"] != "ok"
 
 
 def test_mh_runtime_006_timeout_stops_engine_with_bounded_structured_diagnostics(

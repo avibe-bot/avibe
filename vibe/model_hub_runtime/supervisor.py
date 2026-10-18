@@ -587,7 +587,9 @@ class EngineSupervisor:
                 except Exception as exc:
                     self._stop_locked()
                     raise EngineUnavailableError("models.engine.unsafe_permissions") from exc
-                self._await_oauth_grants_locked(connection)
+                if not self._oauth_grants_listed_locked(connection, deadline):
+                    time.sleep(min(_STARTUP_POLL_INTERVAL_SECONDS, max(0.0, deadline - time.monotonic())))
+                    continue
                 self._last_check = _utc_now()
                 self._verified_at = time.monotonic()
                 self._engine_answered = True
@@ -613,44 +615,63 @@ class EngineSupervisor:
         )
         raise EngineUnavailableError("models.engine.health_failed", os_errno=os_errno)
 
-    def _await_oauth_grants_locked(self, connection: EngineConnection) -> None:
+    def _oauth_grants_listed_locked(self, connection: EngineConnection, startup_deadline: float) -> bool:
         """Wait, bounded, until a started engine lists a model for each OAuth grant it loaded.
 
         CPA answers before its watcher has registered the auth directory's
         grants, and until then lists each with no model and routes none of its
         models: a refresh or turn in that window finds a grant that offers
-        nothing (#2756). API-key Sources are registered before it answers. The
-        bound is that watcher's reload bound; a grant still listing nothing then
-        is left to its own state, as the engine is up.
+        nothing (#2756). API-key Sources are registered before it answers. One
+        deadline, that watcher's reload bound, covers the whole wait and every
+        request in it; a grant still listing nothing then is left to its own
+        state, as the engine is up. A listing that fails is not readiness: the
+        start checks the engine again, and fails like any start that never
+        becomes ready.
         """
 
-        client = EngineClient(connection, timeout=1.0)
-        deadline = time.monotonic() + MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS
+        client = EngineClient(connection)
+        deadline = min(time.monotonic() + MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS, startup_deadline)
+
+        def listing(path: str, query: dict[str, str] | None = None) -> dict[str, Any] | None:
+            # A timeout proves nothing about the engine (see _disowns_config_locked): the wait goes on.
+            try:
+                return client.management_request(
+                    "GET", path, query=query, timeout=min(1.0, max(0.01, deadline - time.monotonic())),
+                )
+            except EngineClientError as exc:
+                if exc.error_type == "TimeoutError":
+                    return None
+                raise
+
+        pending: list[str] | None = None
         try:
-            files = client.management_request("GET", "/auth-files").get("files")
-            pending = sorted(
-                item["name"] for item in (files if isinstance(files, list) else ())
-                if isinstance(item, dict) and isinstance(item.get("name"), str) and item["name"]
-                and item.get("disabled") is not True
-            )
-            while pending:
-                pending = [
-                    name for name in pending
-                    if not client.management_request("GET", "/auth-files/models", query={"name": name}).get("models")
-                ]
-                if not pending or time.monotonic() >= deadline:
-                    break
-                time.sleep(_STARTUP_POLL_INTERVAL_SECONDS)
-        except EngineClientError as exc:
-            logger.warning(
-                "Model Hub engine startup: OAuth grant listing failed http_status=%s; not awaited", exc.status_code,
-            )
-            return
-        if pending:
-            logger.warning(
-                "Model Hub engine startup: %d OAuth grant(s) listed no model within %.1fs",
-                len(pending), MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS,
-            )
+            while deadline - time.monotonic() > 0:
+                if pending is None and (inventory := listing("/auth-files")) is not None:
+                    files = inventory.get("files")
+                    pending = sorted(
+                        item["name"] for item in (files if isinstance(files, list) else ())
+                        if isinstance(item, dict) and isinstance(item.get("name"), str) and item["name"]
+                        and item.get("disabled") is not True
+                    )
+                listed = set()
+                for name in pending or ():
+                    if deadline - time.monotonic() <= 0:
+                        break
+                    models = listing("/auth-files/models", {"name": name})
+                    if models is not None and models.get("models"):
+                        listed.add(name)
+                if pending is not None:
+                    pending = [name for name in pending if name not in listed]
+                    if not pending:
+                        return True
+                time.sleep(min(_STARTUP_POLL_INTERVAL_SECONDS, max(0.0, deadline - time.monotonic())))
+        except EngineClientError:
+            return False
+        logger.warning(
+            "Model Hub engine startup: OAuth grants unlisted=%s listed_no_model=%d within %.1fs",
+            pending is None, len(pending or ()), MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS,
+        )
+        return True
 
     def _healthy_locked(self) -> bool:
         if not self._is_running_locked() or self._connection is None:
