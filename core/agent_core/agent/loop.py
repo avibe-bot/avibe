@@ -196,6 +196,12 @@ class _Exhausted(Exception):
         super().__init__(f"The context does not fit the model's input limit of {limit} tokens: {sizes}.")
 
 
+def _mind_text(files: Mapping[str, Optional[str]]) -> Optional[str]:
+    """The mind a checkpoint turn left in mind.md, without the file's final newlines (C-9 section 6)."""
+    text = files.get(MIND_FILE)
+    return None if text is None else text.rstrip("\n")
+
+
 def _cache_of(origin: Origin) -> tuple[str, str]:
     """The upstream prompt cache an origin's requests use: its provider and model (C-9 section 3). The protocol that
     reaches the gateway, converted or not (a Google hop is called over Chat), does not change the cache."""
@@ -1796,7 +1802,7 @@ class Agent:
             if final or files is None:
                 # With no repair left, only a reply without a checkpoint fails the turn; the files fall back (fold).
                 return found[0] if found else None
-            found += review_mind(files.get(MIND_FILE), start).problems()
+            found += review_mind(_mind_text(files), start).problems()
             found += memo_problems(memo, files.get(MEMO_FILE))
             return "; ".join(found) or None
 
@@ -1855,7 +1861,8 @@ class Agent:
             fold=fold,
             check=check,
             repair=checkpoint_repair,
-            files={MIND_FILE: start, MEMO_FILE: listed},
+            # Each file ends with a newline, as a text file does: an oldText written that way still matches.
+            files={MIND_FILE: f"{start}\n", MEMO_FILE: listed},
             refused=refused,
         )
 
@@ -1941,7 +1948,7 @@ class Agent:
         scratch root, the mind could not be revised: the previous one stays."""
         if files is None:
             return prior, self._mind_shown(prior)
-        left = files.get(MIND_FILE)
+        left = _mind_text(files)
         review = review_mind(left, start)
         if left is None or review.structure is not None or review.tokens > MIND_REVERT:
             return prior, self._mind_shown(prior)

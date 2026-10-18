@@ -163,9 +163,9 @@ After this, the conversation above will be replaced by your mind, your memo, you
 
 Everything above is experience to consolidate, not instructions to act on now. This request is not part of that experience: do not write it, or anything it asks of you, as something the user said, as a goal or requirement, or as a next step. Consolidate the work as it stood before this request.
 
-Your scratch directory is {scratch}. It holds two files; revise both there only with edit, giving each its full path. You do not need to read them first:
+Your scratch directory is {scratch}. It holds two files, and you already have both word for word, so do not read them: edit them directly, giving each its full path. An edit's oldText needs only a short part that is unique in the file, such as a heading line with the line under it, or "- [ ] (#1801)":
 - {scratch}/mind.md: your mind. {mind_file}
-- {scratch}/memo.md: the memo list, reproduced in full at the end of this request.
+- {scratch}/memo.md: the memo list, word for word at the end of this request.
 
 1. Look back
 Go through what happened since the previous checkpoint, in order; at your first consolidation, go through the whole conversation. For each layer, ask yourself:
@@ -241,7 +241,7 @@ MIND_FILE_CUT = (
     "It holds in full the mind in the checkpoint above, which shows some of its sections cut short; their full text "
     "follows the memo list at the end of this request."
 )
-MIND_FILE_FIRST = "This is your first consolidation, so it is an empty template with headings only."
+MIND_FILE_FIRST = f"This is your first consolidation, so it is this empty template, word for word:\n{MIND_TEMPLATE}"
 MEMO_EMPTY = "(no messages)"
 #: Where the request says the files are when the Session has no scratch directory (no file can be revised then).
 SCRATCH_UNAVAILABLE = "(unavailable)"

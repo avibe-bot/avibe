@@ -544,7 +544,7 @@ async def test_a_threshold_checkpoint_may_read_while_the_window_has_room_and_nev
     # A response that leaves under 1,000 tokens of room still gets the policy's fixed text, never a cut of it:
     # a truncation note would tell the model to read again, and another call fails the turn.
     long = AssistantMessage(
-        (ThinkingBlock(tokens(6_000)), ToolCallBlock("peek", "read", {"path": "f"})), assistant().origin, "tool_use"
+        (ThinkingBlock(tokens(5_900)), ToolCallBlock("peek", "read", {"path": "f"})), assistant().origin, "tool_use"
     )
     model = Model(reads(4), [[Done(long)], [Done(assistant(CHECKPOINT))]])
     tool = sized_reader(6_000, 6_000, 6_000, 2_000)
@@ -2309,3 +2309,16 @@ async def test_a_mind_copy_is_published_whole_or_not_at_all(tmp_path, monkeypatc
     (row,) = [row for row in await store.load("session") if row.kind == "compaction"]
     (copy,) = (tmp_path / "checkpoints").iterdir()
     assert copy.read_text() == row.payload["mind"] and row.payload["mind_truncated"]
+
+
+async def test_the_turn_is_given_its_files_word_for_word_and_an_edit_written_as_a_text_file_matches(tmp_path):
+    # A replay of a real Session read both files before editing, because the request described the template instead
+    # of giving it, and its first edit missed: it ended the whole template with a newline, which the file lacked.
+    scratch = tmp_path / "scratch"
+    whole = _batch(_edit("m", scratch / MIND_FILE, (MIND_TEMPLATE + "\n", FIRST_MIND + "\n")))
+    (model,), (row,), _ = await _consolidate(tmp_path, [[whole, [Done(assistant(CHECKPOINT))]]])
+    request = _request(model)
+    assert "you already have both word for word, so do not read them" in request
+    assert f"so it is this empty template, word for word:\n{MIND_TEMPLATE}\n" in request
+    edited = [m for m in model.checkpoint_requests[-1].messages if isinstance(m, ToolResultMessage)][-1]
+    assert not edited.is_error and row.payload["mind"] == FIRST_MIND  # stored without the file's final newline
