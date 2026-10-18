@@ -255,6 +255,48 @@ class SilentFinalTurnResultTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.agent_rows(), [("result", REPORT)])
             self.assertEqual(len(controller.committed_turns), 1)
 
+    async def test_the_record_follows_the_text_the_user_was_last_shown(self):
+        """Scenario: MESSAGE-DELIVERY-325.
+
+        The record names the row of the text the user saw last, whichever path
+        showed it: a later text the user saw without a row clears it, a later text
+        that never reached the user leaves it, and a replayed output is recorded
+        by a dispatcher that never saw the first emit.
+        """
+
+        async def unmirrored(controller, context):
+            with mock.patch("core.message_dispatcher.persist_agent_message", return_value=None):
+                await controller.emit_agent_message(context, "output", "Second report.", output=PHASE)
+
+        async def undelivered(controller, context):
+            with mock.patch.object(
+                controller.im_client, "send_message", side_effect=RuntimeError("channel unavailable")
+            ):
+                await controller.emit_agent_message(context, "output", "Second report.", output=PHASE)
+
+        replayed = MessageOutput(completes_turn=False, completes_run=False, idempotency_key="phase-1")
+        cases = {
+            "a later text shown without a row": ("slack", unmirrored, [("output", REPORT)]),
+            "a later text no send delivered": ("slack", undelivered, [("result", REPORT)]),
+        }
+        for name, (platform, later, expected_rows) in cases.items():
+            with self.subTest(name), self.state():
+                controller = _Controller(platform)
+                context = self.context(platform)
+                await controller.emit_agent_message(context, "output", REPORT, output=PHASE)
+                await later(controller, context)
+                await _Agent(controller).emit_result_message(context, "<silent>noted</silent>")
+
+                self.assertEqual(self.agent_rows(), expected_rows)
+
+        with self.subTest("a replayed output on a fresh dispatcher"), self.state():
+            await _Controller("avibe").emit_agent_message(self.context(), "output", REPORT, output=replayed)
+            recovered = _Controller("avibe")
+            await recovered.emit_agent_message(self.context(), "output", REPORT, output=replayed)
+            await _Agent(recovered).emit_result_message(self.context(), "<silent>noted</silent>")
+
+            self.assertEqual(self.agent_rows(), [("result", REPORT)])
+
     async def test_nothing_else_promotes_earlier_text(self):
         """Scenario: MESSAGE-DELIVERY-325."""
         request = SimpleNamespace(output=None)
