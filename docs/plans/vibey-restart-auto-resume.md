@@ -133,7 +133,9 @@ exists; "handled" names where the in-place design still owns it.
    Watches and offers no Retry. While no Watch can take its command yet, that
    Turn stays open and its owner retries (T2 before T4); a Stop still settles
    it, and then T2 ends the command (a command whose Turn was canceled is
-   ended, as the Stop would have ended it live, never handed to a Watch).
+   ended, as the Stop would have ended it live, never handed to a Watch, and
+   so is one whose Turn has a Stop or replacement the dead process recorded
+   and never settled).
 4. **Runs follow the work.** Runs never leave the Turn: the rerun settles them
    with its own outcome and output, and callbacks fire once, from that outcome.
    At shutdown, `release_for_service_shutdown` and the scheduled-task teardown
@@ -274,6 +276,11 @@ Scenario IDs in `tests/scenarios/message_delivery/catalog.yaml`:
   - a failure in the rerun's own T2 or T3 before its run fails the Turn with
     the notice and Retry, as at the start of any live run. A command whose
     result was not committed keeps its job's output for the next resume.
+- A Turn whose initial Run already settled from its result, in the moment
+  before the Turn's own terminal write, cannot rerun (the runner refuses a
+  Turn whose initial Run ended). It keeps today's restart settlement, as on
+  every backend: the Run keeps its result and owes no notice, and the Turn is
+  recorded as interrupted.
 - A rerun whose transport never becomes ready stays open, as a scheduled Run
   waits for its transport; a Stop ends it.
 - A rerun's final that cites sources is displayed again from its message, so

@@ -2765,7 +2765,10 @@ async def test_a_restart_rerun_ends_with_the_final_its_cut_run_committed(
 
 @pytest.mark.parametrize(
     "case",
-    ["exits", "window_passed", "watch_unavailable", "stop", "cancelled", "cancelled_at_shutdown", "stopped_left_open"],
+    [
+        "exits", "window_passed", "watch_unavailable", "stop", "cancelled", "cancelled_at_shutdown", "stopped_left_open",
+        "stop_pending",
+    ],
 )
 async def test_a_restart_rerun_waits_for_its_surviving_command_as_the_live_call_would(
     engine, session, tmp_path, published, monkeypatch, case
@@ -2775,9 +2778,10 @@ async def test_a_restart_rerun_waits_for_its_surviving_command_as_the_live_call_
     window, counted from its launch, before it binds its native start, so its real output is the
     result the reply (and a Run, MESSAGE-DELIVERY-328) settles from. A window the downtime spent
     hands it over; with no Watch to take it, it stays in the foreground until it ends; a Stop ends
-    the wait and the command, as does one that settles the Turn while it is left open, and so does
-    a cancellation outside a shutdown (the backend disabled or refreshed); a shutdown leaves the
-    command for the next start. It never starts again."""
+    the wait and the command, as does one that settles the Turn while it is left open, or one the
+    dead process recorded and never settled, and so does a cancellation outside a shutdown (the
+    backend disabled or refreshed); a shutdown leaves the command for the next start. It never
+    starts again."""
     import core.watches as watches_module
     from core.scheduled_tasks import TaskExecutionStore
     from core.watches import ManagedWatchStore
@@ -2814,17 +2818,28 @@ async def test_a_restart_rerun_waits_for_its_surviving_command_as_the_live_call_
             launched = datetime.fromisoformat(meta["created_at"].replace("Z", "+00:00")) - timedelta(minutes=3)
             meta["created_at"] = launched.isoformat(timespec="milliseconds").replace("+00:00", "Z")
             meta_path.write_text(json.dumps(meta))
+        if case == "stop_pending":
+            # The user pressed Stop as the service went down; the Stop never settled the Turn,
+            # which will not rerun. Startup's T2 ends the command, as that Stop would have.
+            with engine.begin() as conn:
+                turn = message_deliveries.get_turn(conn, cut_turn)
+                assert message_deliveries.cas_turn(
+                    conn, cut_turn, expected_version=int(turn["version"]), expected_states=("active",),
+                    values={"control_mode": "stop_only"},
+                )
         harness.new_agent()
         assert await harness.agent.recover_runtime_state() == []
         assert ManagedWatchStore().find_job_watch(job_id) is None
-        if case == "stopped_left_open":
-            # The Turn stays open (its fallback waits for a Watch) and a Stop settles it with no
-            # runtime holding it: the next T2 ends the command, as the Stop would have.
-            with engine.begin() as conn:
-                message_deliveries.terminalize_turn(
-                    conn, cut_turn, outcome="canceled", settled_by="adapter_not_active", evidence_kind="stop_not_active"
-                )
-            assert await harness.agent.recover_runtime_state() == []
+        if case in {"stopped_left_open", "stop_pending"}:
+            if case == "stopped_left_open":
+                # The Turn stays open (its fallback waits for a Watch) and a Stop settles it with no
+                # runtime holding it: the next T2 ends the command, as the Stop would have.
+                with engine.begin() as conn:
+                    message_deliveries.terminalize_turn(
+                        conn, cut_turn, outcome="canceled", settled_by="adapter_not_active",
+                        evidence_kind="stop_not_active",
+                    )
+                assert await harness.agent.recover_runtime_state() == []
             [result] = [entry for entry in await harness.context_rows() if entry.kind == "tool_result"]
             assert "Stopped by the user" in result.message.content[0].text
             assert suite.jobs.status(job_id).state != "running" and ManagedWatchStore().find_job_watch(job_id) is None

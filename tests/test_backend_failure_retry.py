@@ -635,7 +635,7 @@ def test_restart_notice_names_the_watch_running_the_command_and_offers_no_retry(
     jobs.states["job_1"] = JobStatus("running")
     # Startup's pass leaves the command to the Turn's owner, which hands it over before its notice.
     session_id, notice = _restart_failure_notice(
-        tmp_path, backend="vibey", jobs=jobs, before_restart=_then(_previous_process("running"), _request_stop)
+        tmp_path, backend="vibey", jobs=jobs, before_restart=_then(_previous_process("running"), _switch_off_vibey)
     )
     assert jobs.watches == {"job_1": "watch_job_1"}
 
@@ -675,7 +675,7 @@ def test_a_restart_notice_waits_until_its_running_command_is_handed_over(isolate
     monkeypatch.setattr(SessionTurnManager, "RESTART_RECOVERY_RETRY_DELAYS", (0.05,))
     monkeypatch.setattr(SessionTurnManager, "RESTART_RECOVERY_RETRY_PERIOD", 0.05)
     cut = _accepted_turn(tmp_path, backend="vibey", jobs=jobs)
-    _then(_previous_process("running"), _request_stop)(cut.engine, cut.session_id, cut.turn_id)
+    _then(_previous_process("running"), _switch_off_vibey)(cut.engine, cut.session_id, cut.turn_id)
     cut.manager._active_identity = lambda *_args: None
 
     async def startup():
