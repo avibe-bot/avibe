@@ -429,6 +429,8 @@ scenarios:
     test:
       - tests/test_backend_failure_retry.py::test_restart_reruns_a_cut_vibey_turn_in_place_without_a_notice
       - tests/test_backend_failure_retry.py::test_a_rerun_that_exits_before_dispatching_fails_its_turn
+      - tests/test_backend_failure_retry.py::test_a_rerun_whose_setup_fails_is_retried_not_settled
+      - tests/test_backend_failure_retry.py::test_a_stop_arriving_while_a_committed_final_settles_loses_the_race
       - tests/test_backend_failure_retry.py::test_restart_completes_a_cut_vibey_turn_whose_final_reply_was_committed
       - tests/test_processing_indicator_reaction.py::QueuedReactionLifecycleTests::test_a_restart_rerun_owns_the_running_reaction_its_dead_process_left
       - tests/test_agent_transcript.py::test_the_restart_reads_of_a_turns_context_tail_stay_bounded

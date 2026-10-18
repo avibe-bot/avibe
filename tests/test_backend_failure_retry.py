@@ -105,8 +105,13 @@ def _accepted_turn(tmp_path, *, backend, delivery="ready", native_message_id=Non
 def _restart(turn, before_restart=None):
     """``before_restart(engine, session_id, turn_id)`` writes what the previous process
     and the startup steps before Turn recovery left behind."""
+    import secrets
+
+    from core import restart_resume
+
     if before_restart is not None:
         before_restart(turn.engine, turn.session_id, turn.turn_id)
+    restart_resume.PROCESS_TOKEN = secrets.token_hex(8)  # a new process starts
     turn.manager._active_identity = lambda *_args: None
     turn.manager._transport_can_deliver = lambda _platform: turn.delivery != "unready"
     recovery = getattr(turn.manager.controller, "vibey_recovery", None)
@@ -387,7 +392,8 @@ def test_restart_completes_a_cut_vibey_turn_whose_final_reply_was_committed(
 
     monkeypatch.setattr(message_mirror, "promote_turn_text_to_result", promote_where)
     followup_writes_on_loop = []
-    for name in ("save", "done", "failed"):
+    # The record commits inside the Turn's terminal write; each later bookkeeping write is its own.
+    for name in ("done", "failed"):
 
         def where(*args, _write=getattr(restart_followups, name), **kwargs):
             try:
@@ -414,11 +420,9 @@ def test_restart_completes_a_cut_vibey_turn_whose_final_reply_was_committed(
         cut.manager.controller.session_turns = cut.manager = manager
         cut.delivery = "ready"
         _restart(cut)
-    # The promotion and the follow-up records take SQLite's write lock: off the controller loop,
-    # as the dispatcher runs the promotion.
+    # The promotion and the follow-up bookkeeping take SQLite's write lock: off the controller
+    # loop, as the dispatcher runs the promotion.
     assert promoted_on_loop == {"silent_final": [False], "silent_final_retried": [False, False]}.get(final, [])
-    assert True not in followup_writes_on_loop
-    assert followup_writes_on_loop or not (origin or final.startswith("silent_final"))
     if delivery in {"unready", "failing"}:
         assert clear.await_count == (1 if delivery == "failing" else 0)
         cut.manager._transport_can_deliver = lambda _platform: True
@@ -430,6 +434,8 @@ def test_restart_completes_a_cut_vibey_turn_whose_final_reply_was_committed(
     assert cut.manager._pending_orphan_reaction_clears.get("avibe", []) == []
     with cut.engine.connect() as conn:
         assert restart_followups.pending(conn) == {}
+    assert True not in followup_writes_on_loop
+    assert followup_writes_on_loop or not (origin or final.startswith("silent_final"))
 
     with cut.engine.connect() as conn:
         turn = message_deliveries.get_turn(conn, cut.turn_id)
@@ -571,6 +577,84 @@ def test_a_turn_waiting_for_its_steer_keeps_its_running_command_for_the_rerun(is
     assert jobs.watches == {}
     with cut.engine.connect() as conn:
         assert message_deliveries.get_delivery(conn, steer["id"])["turn_id"] == cut.turn_id
+
+
+def test_a_rerun_whose_setup_fails_is_retried_not_settled(isolated_state, tmp_path, monkeypatch):
+    """MESSAGE-DELIVERY-327: a transient failure setting the rerun up (its routing context, here)
+    is not the Turn's: the Turn stays open, recovery retries and reruns it, and the restart counts
+    once in its streak."""
+    from core.session_turns import SessionTurnManager
+
+    monkeypatch.setattr(SessionTurnManager, "RESTART_RECOVERY_RETRY_DELAYS", (0.05,))
+    monkeypatch.setattr(SessionTurnManager, "RESTART_RECOVERY_RETRY_PERIOD", 0.05)
+    cut = _accepted_turn(tmp_path, backend="vibey")
+    _previous_process("tool")(cut.engine, cut.session_id, cut.turn_id)
+    build, failed = cut.manager._delivery_context, []
+
+    def locked_once(session_id):
+        if not failed:
+            failed.append(session_id)
+            raise RuntimeError("database is locked")
+        return build(session_id)
+
+    cut.manager._delivery_context = locked_once
+    cut.manager._active_identity = lambda *_args: None
+
+    async def startup():
+        await cut.manager.recover_durable_delivery_state(service_restart=True)
+        assert cut.starts == [] and failed and _notices(cut.engine, cut.session_id) == []
+        for _ in range(100):
+            if cut.starts:
+                break
+            await asyncio.sleep(0.02)
+
+    asyncio.run(startup())
+
+    assert cut.starts == [(cut.session_id, "")]
+    with cut.engine.connect() as conn:
+        turn = message_deliveries.get_turn(conn, cut.turn_id)
+    assert turn["state"] == "active" and json.loads(turn["start_receipt_json"])["restart_streak"] == 1
+    assert _notices(cut.engine, cut.session_id) == []
+
+
+def test_a_stop_arriving_while_a_committed_final_settles_loses_the_race(isolated_state, tmp_path):
+    """MESSAGE-DELIVERY-327: once recovery finds the final committed, the Turn settles from it with
+    its follow-ups in one write, so a Stop that arrives meanwhile finds it settled, as live."""
+    from storage import restart_followups
+
+    cut = _accepted_turn(tmp_path, backend="vibey", native_message_id="1760000000.000100")
+    cut.manager.controller.processing_indicator = SimpleNamespace(
+        clear_orphaned_running_reaction=AsyncMock(return_value=True)
+    )
+    save, loop = restart_followups.save, []
+
+    def save_then_stop(conn, turn_id, followups):
+        if followups and loop:
+            # A Stop lands now; it settles whatever is still open when it runs.
+            loop[0].call_soon_threadsafe(
+                lambda: cut.manager._terminalize_durable_turn(
+                    turn_id, "canceled", settled_by="adapter_not_active", evidence_kind="stop_not_active"
+                )
+            )
+        return save(conn, turn_id, followups)
+
+    restart_followups.save = save_then_stop
+    try:
+        _previous_process("final")(cut.engine, cut.session_id, cut.turn_id)
+        cut.manager._active_identity = lambda *_args: None
+
+        async def startup():
+            loop.append(asyncio.get_running_loop())
+            await cut.manager.recover_durable_delivery_state(service_restart=True)
+            await asyncio.sleep(0.05)
+
+        asyncio.run(startup())
+    finally:
+        restart_followups.save = save
+
+    with cut.engine.connect() as conn:
+        turn = message_deliveries.get_turn(conn, cut.turn_id)
+    assert (turn["terminal_outcome"], turn["settled_by"]) == ("completed", "terminal_result")
 
 
 def test_a_rerun_that_exits_before_dispatching_fails_its_turn(isolated_state, tmp_path):

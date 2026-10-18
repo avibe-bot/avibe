@@ -57,7 +57,7 @@ exists; "handled" names where the in-place design still owns it.
 | A continuation requeued, then retired (backend change) or left unclaimed, after its source settled | Removed. There is no continuation Delivery. A rerun that fails ends its Turn through the ordinary runner, with the failure notice and Retry. |
 | A Model Hub refusal at the continuation's preflight | Handled. The rerun is the accepted Turn continuing, so the refusal fails that Turn with its notice and Retry, as a refusal at any later model call of a live Turn does; the work stays in the transcript. |
 | Another restart during the T2 wait | Handled. The Turn is still accepted and active, so the next start reruns it again, within the loop bound; its startup T2 leaves the job to it. |
-| The orphaned 👀 clear after a committed final | Handled durably. A `runtime_records` row written before the Turn's terminal write and deleted once done; startup rescans it, and the clear waits for its transport. |
+| The orphaned 👀 clear after a committed final | Handled durably. A `runtime_records` row written in the Turn's terminal transaction and deleted once done; startup rescans it, and the clear waits for its transport. |
 | The silent-final promotion (off the controller loop; a failed write) | Handled durably by the same row: the promotion runs off the loop, and a row not yet `result` keeps it for the next pass. |
 | Retry-loop failures; a Stop while the Turn waits open | Handled. One retry per Turn that survives a failed pass and ends when the Turn reruns or settles; a Stop that settles a waiting Turn has T2 end its command. |
 | Continuation admission recheck | Removed with the continuation. |
@@ -140,8 +140,10 @@ exists; "handled" names where the in-place design still owns it.
    the existing steer path.
 6. **Loop bound.** The Turn's start receipt carries its restart streak: the
    restarts in a row that cut it with no committed model response in between.
-   A committed response resets the streak. The third restart in a row falls
-   back to item 1's notice, which keeps Retry.
+   A committed response resets the streak, and a restart counts once however
+   often its recovery is retried (a failure setting the rerun up keeps the Turn
+   open for a retry). The third restart in a row falls back to item 1's
+   notice, which keeps Retry.
 7. **Presentation.** No notice, no ⚠️ reaction, no interruption copy, and no
    second Harness prompt echo (the rerun dispatches no prompt). The session
    shows the rerunning Turn as running.
@@ -151,8 +153,9 @@ exists; "handled" names where the in-place design still owns it.
    on its IM message, so the Turn's own end retires it. A Turn completed from
    its committed final loses that 👀 once its transport can deliver (a platform
    without reaction indicators has none); that and the silent-final promotion
-   are recorded durably before the Turn settles, so another restart before
-   they run loses neither. A follow-up that keeps failing (a platform reports a
+   are recorded durably with the Turn's terminal write, so another restart
+   before they run loses neither, and a Stop arriving meanwhile finds the Turn
+   already settled from its final. A follow-up that keeps failing (a platform reports a
    reaction already gone as a failed removal) is dropped after five attempts.
 
 ## Ownership and touch points

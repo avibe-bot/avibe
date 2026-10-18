@@ -1226,7 +1226,7 @@ def bind_native_start(
 
 #: Start-receipt keys of a Turn rerun in place after restarts: the restarts in a row
 #: that cut it, and the context sequence of the last model response then committed.
-RESTART_STREAK_KEYS = ("restart_streak", "restart_response_seq")
+RESTART_STREAK_KEYS = ("restart_streak", "restart_response_seq", "restart_process")
 
 
 def _start_receipt(turn: dict[str, Any]) -> dict[str, Any]:
@@ -1262,6 +1262,7 @@ def rotate_restart_generation(
     expected_version: int,
     streak: int,
     response_seq: int | None,
+    process: str | None = None,
 ) -> dict[str, Any] | None:
     """Release an accepted Turn from the runtime generation a restart killed, to rerun it.
 
@@ -1278,7 +1279,7 @@ def rotate_restart_generation(
     ):
         return None
     receipt = _start_receipt(turn)
-    receipt.update({"restart_streak": streak, "restart_response_seq": response_seq})
+    receipt.update({"restart_streak": streak, "restart_response_seq": response_seq, "restart_process": process})
     return cas_turn(
         conn,
         turn_id,

@@ -5019,7 +5019,13 @@ class SessionTurnManager:
         retire_unwritten_delivery_ids: set[str] | None = None,
         retire_unwritten_attempt_outcome: str = "invalid_input",
         resume_successors: bool = True,
+        on_settled: Callable[[Connection], None] | None = None,
     ) -> dict[str, Any]:
+        """Settle one durable Turn and start what follows it.
+
+        ``on_settled`` writes in the same transaction once this call settles the Turn,
+        so its record commits with the terminal row or not at all.
+        """
         if not self._durable_schema_available():
             return {
                 "changed": False,
@@ -5268,6 +5274,8 @@ class SessionTurnManager:
                         "defer_queue_resume": False,
                     }
                 else:
+                    if on_settled is not None:
+                        on_settled(conn)
                     # A never-called steer has definitive negative evidence once
                     # its exact target Turn settles. In-flight and unknown attempts
                     # remain untouched because they may already have written.
@@ -7397,7 +7405,7 @@ class SessionTurnManager:
         still unsettled stays open for a retry; anything else keeps today's notice.
         """
 
-        from core.restart_resume import restart_resume_plan, restart_streak
+        from core.restart_resume import PROCESS_TOKEN, restart_resume_plan, restart_streak
 
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
@@ -7413,6 +7421,7 @@ class SessionTurnManager:
                     expected_version=int(turn["version"]),
                     streak=streak,
                     response_seq=response_seq,
+                    process=PROCESS_TOKEN,
                 ) is None:
                     return "unavailable"
         if plan == "final" and final is not None:
@@ -7423,8 +7432,9 @@ class SessionTurnManager:
         try:
             started = await self._rerun_turn(turn_id)
         except Exception:
-            logger.exception("restart rerun could not start Turn=%s", turn_id)
-            started = False
+            # Setting up the rerun failed, not the Turn: it stays open and recovery retries.
+            logger.exception("restart rerun could not start Turn=%s; retrying", turn_id)
+            return "wait"
         return "rerun" if started else "unavailable"
 
     async def _complete_from_committed_final(
@@ -7436,7 +7446,7 @@ class SessionTurnManager:
 
         A successful silent final leaves the Turn's last visible text its result; a
         failed final keeps its own error. The promotion and the removal of the 👀 the
-        dead process left are recorded before the Turn's terminal write, so another
+        dead process left are recorded with the Turn's terminal write, so another
         restart before they run loses neither.
         """
 
@@ -7468,8 +7478,7 @@ class SessionTurnManager:
         origin = self._turn_origin_native_message_id(turn_id)
         if origin:
             followups["clear_reaction"] = origin
-        if followups:
-            await self._write_restart_followups(restart_followups.save, turn_id, {"session_id": session_id, **followups})
+        record = {"session_id": session_id, **followups}
         run_ids = self.accepted_agent_run_ids_for_turn(turn_id)
         terminal = self._terminalize_durable_turn(
             turn_id,
@@ -7483,11 +7492,11 @@ class SessionTurnManager:
                 "message_id": result_id,
             },
             expected_start_attempt_id=str(turn.get("start_attempt_id") or ""),
+            # The follow-ups commit with the terminal row: nothing yields between the
+            # committed-final decision and this write, so a later Stop cannot settle first.
+            on_settled=(lambda conn: restart_followups.save(conn, turn_id, record)) if followups else None,
         )
         if not terminal.get("changed"):
-            if followups:
-                # Another owner settled the Turn; its own path presents it.
-                await self._write_restart_followups(restart_followups.save, turn_id, {})
             return
         if run_ids:
             with self._sqlite_engine().connect() as conn:

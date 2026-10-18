@@ -8,6 +8,7 @@ Session's context tail, since recovery runs it on the controller loop.
 
 from __future__ import annotations
 
+import secrets
 from typing import Any, Literal
 
 from sqlalchemy import select
@@ -20,6 +21,8 @@ from storage.models import agent_runs, agent_sessions
 #: The restart that would be the third in a row to cut a Turn with no committed model
 #: response in between falls back to the restart notice.
 RESTART_RESUME_LIMIT = 3
+#: This process: a restart is counted once, however often its recovery retries.
+PROCESS_TOKEN = secrets.token_hex(8)
 _PENDING_CONTROL_STATES = frozenset({"pending", "interrupting", "waiting_terminal", "reconciling"})
 
 Plan = Literal["wait", "final", "rerun", "unavailable"]
@@ -31,10 +34,13 @@ def restart_streak(conn: Connection, turn: dict[str, Any]) -> tuple[int, int | N
     The mark is the context sequence of the Session's last committed model response.
     A response committed since the previous restart resets the streak to this one.
     """
-    responded = agent_transcript.last_response(conn, str(turn["session_id"]))
-    response_seq = responded.context_seq if responded is not None else None
     previous = deliveries.restart_receipt(turn)
     streak = int(previous.get("restart_streak") or 0)
+    if streak and previous.get("restart_process") == PROCESS_TOKEN:
+        # This process already counted this restart (its recovery is being retried).
+        return streak, previous.get("restart_response_seq")
+    responded = agent_transcript.last_response(conn, str(turn["session_id"]))
+    response_seq = responded.context_seq if responded is not None else None
     if streak and previous.get("restart_response_seq") != response_seq:
         streak = 0
     return streak + 1, response_seq
