@@ -13,8 +13,9 @@ Base:
 
 Carried over from the v8.0.28 set: patches 1 to 5, byte-identical; they apply
 to v8.0.30 with hunk offsets only. New in this set: patch 6, the xAI over-limit
-item IDs, and patches 7 and 8, private copies of router-for-me/CLIProxyAPI#6701
-and #6700, carried until upstream releases them. Patches 7 and 8 are
+item IDs; patches 7 and 8, private copies of router-for-me/CLIProxyAPI#6701
+and #6700, carried until upstream releases them; and patch 9, upstream's own
+fix a43026d7 from v8.0.33, backported. Patches 7, 8 and 9 are
 `git format-patch` output; `git apply` reads them as the diffs they contain.
 
 Each contract was re-measured on v8.0.30: the stock engine fails the check the
@@ -345,6 +346,38 @@ Source cooldown through the real engine) fails on stock v8.0.30 and passes
 with the patch.
 
 Drop when upstream merges #6700 and Avibe adopts a release that contains it.
+
+## `gemini-schema-content-keywords.patch`
+
+Upstream's a43026d7 (router-for-me/CLIProxyAPI#6699, first in v8.0.33),
+applied as published. Since v8.0.28 (a0fd8448) the Gemini and Antigravity
+tool-schema cleaners keep a multi-branch `anyOf`/`oneOf` union instead of
+collapsing it to one branch. A `contentMediaType` or `contentEncoding`
+annotation that the collapse used to drop now reaches the backend, which
+rejects the whole request with 400 `Unknown name "contentMediaType"`. Avibe's
+Gemini subscription is an Antigravity grant, and MCP tool schemas carry these
+annotations. The patch adds both keywords to the cleaners' unsupported list.
+
+Upstream's `TestCleanJSONSchema_RemovesContentMediaTypeKeyword_Issue6699`
+covers every cleaner (Gemini, Gemini JSON schema, Antigravity, its tool,
+Claude-tool and response variants): on stock v8.0.30 each keeps both keywords
+at the root, in `anyOf[1]` and in a property; with the patch they are
+stripped, and properties named after the keywords survive. Dropping
+`contentMediaType` from the list fails the test.
+
+Drop at the next bump to v8.0.33 or later, which contains a43026d7.
+
+## Known risk: model registration superseded mid-flight (#6718)
+
+v8.0.29 (08e5762a) fences model registration with epochs. A registration that
+is superseded mid-flight by another update of the same auth's attributes, where
+that update does not register models itself, leaves the auth with no models
+(router-for-me/CLIProxyAPI#6718; reproduced with a synthetic openai-compat
+auth). Avibe does not take that path: its prefix PATCH re-registers
+synchronously, and config reloads and watcher events each register. Upstream
+fixed it in v8.0.33 (f75ea073), a +556/-60 change that does not apply to this
+tree; the next bump resolves it. Revisit if Model Hub reports models vanishing
+right after a Source edit or an OAuth login.
 
 ## Dropped earlier: `codex-sse-per-event-parsing.patch`
 

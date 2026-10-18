@@ -1,0 +1,124 @@
+From a43026d751969f0d98b196b3296ff33f2d8df944 Mon Sep 17 00:00:00 2001
+From: Luis Pater <webmaster@idotorg.org>
+Date: Sat, 17 Oct 2026 14:18:55 +0800
+Subject: [PATCH] feat(gemini): strip unsupported contentMediaType and
+ contentEncoding JSON schema keywords
+
+- Add `contentMediaType` and `contentEncoding` to the list of schema metadata fields unsupported by Gemini.
+- Ensure these keywords are stripped during schema cleaning while preserving valid schema structures and legitimate property names.
+
+Closes: #6699
+---
+ internal/util/gemini_schema.go      |  2 +-
+ internal/util/gemini_schema_test.go | 85 +++++++++++++++++++++++++++++
+ 2 files changed, 86 insertions(+), 1 deletion(-)
+
+diff --git a/internal/util/gemini_schema.go b/internal/util/gemini_schema.go
+index 32f1addf..acfe332c 100644
+--- a/internal/util/gemini_schema.go
++++ b/internal/util/gemini_schema.go
+@@ -1512,7 +1512,7 @@ func removeUnsupportedKeywords(jsonStr string, options jsonSchemaCleanOptions) s
+ 		"dependentRequired", "dependentSchemas", "dependencies",
+ 		"if", "then", "else",
+ 		"$comment", "enumDescriptions", "enumTitles", "prefill", "deprecated", "encrypted", "discriminator", // Schema metadata fields unsupported by Gemini
+-		"additionalItems", "unevaluatedProperties", "unevaluatedItems", "contentSchema",
++		"additionalItems", "unevaluatedProperties", "unevaluatedItems", "contentSchema", "contentMediaType", "contentEncoding",
+ 	)
+ 	if options.antigravitySemantics {
+ 		keywords = append(keywords, "not")
+diff --git a/internal/util/gemini_schema_test.go b/internal/util/gemini_schema_test.go
+index 79f5652d..2dd8721c 100644
+--- a/internal/util/gemini_schema_test.go
++++ b/internal/util/gemini_schema_test.go
+@@ -3708,3 +3708,88 @@ func TestCleanJSONSchema_RemovesDiscriminatorKeyword_Issue6639(t *testing.T) {
+ 		})
+ 	}
+ }
++
++// TestCleanJSONSchema_RemovesContentMediaTypeKeyword_Issue6699 covers Issue #6699:
++// JSON Schema Content Vocabulary annotations ("contentMediaType" and "contentEncoding")
++// inside nested anyOf/oneOf branches, on property schemas, or at the schema root are
++// rejected by the Gemini/Antigravity backend with 400 INVALID_ARGUMENT
++// ("Unknown name \"contentMediaType\" ... Cannot find field") and must be stripped
++// while preserving the anyOf branches and any legitimate property named
++// "contentMediaType" or "contentEncoding".
++func TestCleanJSONSchema_RemovesContentMediaTypeKeyword_Issue6699(t *testing.T) {
++	input := `{
++		"type": "object",
++		"contentMediaType": "application/json",
++		"contentEncoding": "utf-8",
++		"properties": {
++			"value": {
++				"anyOf": [
++					{ "type": "object", "properties": {} },
++					{ "type": "string", "contentMediaType": "application/json", "contentEncoding": "base64" }
++				]
++			},
++			"directPayload": {
++				"type": "string",
++				"contentMediaType": "application/json",
++				"contentEncoding": "base64"
++			},
++			"contentMediaType": {
++				"type": "string",
++				"contentMediaType": "text/plain",
++				"description": "Legitimate property named contentMediaType"
++			},
++			"contentEncoding": {
++				"type": "string",
++				"contentEncoding": "base64",
++				"description": "Legitimate property named contentEncoding"
++			}
++		}
++	}`
++
++	cleaners := map[string]func(string) string{
++		"Antigravity":           CleanJSONSchemaForAntigravity,
++		"AntigravityTool":       func(s string) string { return CleanJSONSchemaForAntigravityTool(s, false) },
++		"AntigravityClaudeTool": func(s string) string { return CleanJSONSchemaForAntigravityClaudeTool(s, false) },
++		"AntigravityResponse":   CleanJSONSchemaForAntigravityResponse,
++		"Gemini":                CleanJSONSchemaForGemini,
++		"GeminiJSONSchema":      CleanJSONSchemaForGeminiJSONSchema,
++	}
++
++	for name, clean := range cleaners {
++		t.Run(name, func(t *testing.T) {
++			got := clean(input)
++			parsed := gjson.Parse(got)
++
++			for _, forbiddenPath := range []string{
++				"contentMediaType",
++				"contentEncoding",
++				"properties.value.anyOf.1.contentMediaType",
++				"properties.value.anyOf.1.contentEncoding",
++				"properties.directPayload.contentMediaType",
++				"properties.directPayload.contentEncoding",
++				"properties.contentMediaType.contentMediaType",
++				"properties.contentEncoding.contentEncoding",
++			} {
++				if parsed.Get(forbiddenPath).Exists() {
++					t.Errorf("[%s] %s was not removed: %s", name, forbiddenPath, got)
++				}
++			}
++
++			if name != "AntigravityClaudeTool" {
++				if gotBranches := len(parsed.Get("properties.value.anyOf").Array()); gotBranches != 2 {
++					t.Errorf("[%s] properties.value.anyOf branch count = %d, want 2: %s", name, gotBranches, got)
++				}
++				if gotType := parsed.Get("properties.value.anyOf.1.type").String(); gotType != "string" {
++					t.Errorf("[%s] properties.value.anyOf.1.type = %q, want \"string\": %s", name, gotType, got)
++				}
++			}
++
++			if !parsed.Get("properties.contentMediaType").Exists() {
++				t.Errorf("[%s] legitimate property \"contentMediaType\" was removed: %s", name, got)
++			}
++			if !parsed.Get("properties.contentEncoding").Exists() {
++				t.Errorf("[%s] legitimate property \"contentEncoding\" was removed: %s", name, got)
++			}
++		})
++	}
++}
+-- 
+2.50.1 (Apple Git-155)
+
