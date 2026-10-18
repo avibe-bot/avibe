@@ -1227,20 +1227,35 @@ export const SettingsModelsPage: React.FC = () => {
     read: chains[modelChainKey(routeTarget.agent.backend, routeTarget.modelId)],
     available: supplyRead.kind !== 'ready' || currentRouteAgent !== null,
   } : null;
+  // Focus moves to the route's destination only after the commit that closed the
+  // dialog asking for it. A close that comes from an effect or a promise renders
+  // later than a frame can fire, and a frame that fires first focuses into a dialog
+  // still trapping focus, which then unmounts and drops focus on the body.
+  const routeFocusRequestRef = React.useRef<{ target: RouteTarget; preserveCurrentFocus: boolean } | null>(null);
+  const [routeFocusEpoch, setRouteFocusEpoch] = React.useState(0);
   const focusRouteDestination = React.useCallback((
     target: RouteTarget,
     preserveCurrentFocus = false,
   ) => {
-    requestAnimationFrame(() => {
+    routeFocusRequestRef.current = { target, preserveCurrentFocus };
+    setRouteFocusEpoch((epoch) => epoch + 1);
+  }, []);
+  React.useEffect(() => {
+    const request = routeFocusRequestRef.current;
+    if (!request) return;
+    routeFocusRequestRef.current = null;
+    const frame = requestAnimationFrame(() => {
       focusModelHubProjection({
         root: pageRef.current,
-        activeTarget: target.opener,
-        backend: target.agent.backend,
-        modelId: target.modelId,
-        preserveCurrentFocus,
+        activeTarget: request.target.opener,
+        backend: request.target.agent.backend,
+        modelId: request.target.modelId,
+        preserveCurrentFocus: request.preserveCurrentFocus,
       });
     });
-  }, []);
+    // A newer request, or leaving the page, supersedes this one.
+    return () => cancelAnimationFrame(frame);
+  }, [routeFocusEpoch]);
   const refocusPendingRouteDestination = React.useCallback(() => {
     const report = routeCommitStatusRef.current?.report;
     if (!report || !pendingRouteOpenersRef.current.has(report)) return;
