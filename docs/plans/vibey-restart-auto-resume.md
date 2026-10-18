@@ -87,10 +87,14 @@ exists; "handled" names where the in-place design still owns it.
 2. **What continues.** The same Turn. It stays `active` with its accepted
    start; recovery clears its runtime generation (the dead process's runtime
    and native ids) and records the restart streak in one writer transaction,
-   then reruns the Turn through the ordinary runner with `vibey_resume`. Vibey
-   resumes its committed transcript (`Agent.resume`, no input consumed, no
-   visible `continue`, no replay of a committed tool call), and the rerun's
-   native start binds this process's generation. The Turn's accepted inputs,
+   then reruns the Turn through the ordinary runner with `vibey_resume`, with
+   the Vibe Agent that ran it (the author of its committed responses, while
+   that Agent still runs on Vibey): a Session's switch to another Agent reaches
+   the next Turn, as it does for a live one. Vibey resumes its committed
+   transcript (`Agent.resume`, no input consumed, no visible `continue`, no
+   replay of a committed tool call), and the rerun's native start binds this
+   process's generation where any run's does, once its Agent exists, so steers
+   held for the Turn are dispatched when they can join it. The Turn's accepted inputs,
    steers included, are pinned as for Retry. A steer whose acceptance receipt
    the dead process recorded but did not materialize is reconciled into the
    Turn first; while any steer into the Turn is still unsettled, the Turn stays
@@ -100,9 +104,9 @@ exists; "handled" names where the in-place design still owns it.
    the Turn owner; the rerun's own T2, before its first projection, waits for
    it until it exits, until the call's foreground window (`bash`'s, 120 s by
    default) passes, counted from the job's launch (`meta.created_at`), or until
-   a Stop, which ends the command as in a live Turn. The rerun's input was
-   written before the restart, so it marks its dispatch attempted before that
-   wait. An exited job gives its real output; only a job still running then is
+   a Stop, which ends the command as in a live Turn: the Turn is durably
+   active, so a Stop reaches the adapter's own Stop during the wait. An exited
+   job gives its real output; only a job still running then is
    handed to a Watch, with the ordinary handover result; a window the downtime
    already spent hands over at once. A handover that fails is retried once,
    and with no Watch to take it the job stays in the foreground until it ends,
@@ -132,10 +136,12 @@ exists; "handled" names where the in-place design still owns it.
    shows the rerunning Turn as running.
    The fallback notices of item 1 point to Retry where the notice shows it, or
    to sending `continue`, instead of asking for a resend (copy fix in both
-   languages). A Turn completed from its committed final loses the 👀 the dead
-   process left on its IM message, once that transport can deliver; that and
-   the silent-final promotion are recorded durably before the Turn settles, so
-   another restart before they run loses neither.
+   languages). A rerun's processing indicator owns the 👀 the dead process left
+   on its IM message, so the Turn's own end retires it. A Turn completed from
+   its committed final loses that 👀 once its transport can deliver (a platform
+   without reaction indicators has none); that and the silent-final promotion
+   are recorded durably before the Turn settles, so another restart before
+   they run loses neither.
 
 ## Ownership and touch points
 

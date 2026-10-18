@@ -664,6 +664,8 @@ class ProcessingIndicatorService:
 
         if not message_id:
             return False
+        if not self._capabilities(context).supports_reaction_indicator:
+            return True  # no running reaction can exist here
         try:
             await self._get_im_client(context).remove_reaction(context, message_id, ACK_REACTION_EMOJI)
         except Exception as err:
@@ -740,6 +742,15 @@ class ProcessingIndicatorService:
             return
         if handle.ack_reaction_emoji == ACK_REACTION_EMOJI:
             return
+        if not handle.ack_reaction_emoji and (handle.context.platform_specific or {}).get("vibey_resume") is True:
+            # A Turn rerun after a restart answers a message that still wears the 👀 its
+            # dead process added: own that one, so this Turn's own end retires it.
+            target = self._reaction_target_message_id(handle.context)
+            if target:
+                handle.ack_reaction_message_id = target
+                handle.ack_reaction_emoji = ACK_REACTION_EMOJI
+                self._sync_reaction_to_request(handle, request)
+                return
         if handle.ack_reaction_emoji == QUEUED_REACTION_EMOJI and handle.ack_reaction_message_id:
             removed = False
             try:

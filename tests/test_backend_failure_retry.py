@@ -256,9 +256,9 @@ def _respond(engine, session_id, turn_id):
 @pytest.mark.parametrize("step", ["tool", "handover", "partial", "running"])
 def test_restart_reruns_a_cut_vibey_turn_in_place_without_a_notice(isolated_state, tmp_path, step):
     """MESSAGE-DELIVERY-327 / MESSAGE-DELIVERY-330: the same Turn reruns as a transcript resume of
-    itself: no Delivery, no successor Turn, no notice. A committed handover does not stop it, a
-    command still running is left to it, not handed over at startup, and a failed stream's partial
-    text is not a final reply."""
+    itself, with the Agent it ran with: no Delivery, no successor Turn, no notice. A committed
+    handover does not stop it, a command still running is left to it, not handed over at startup,
+    and a failed stream's partial text is not a final reply."""
     from core.agent_core.tools.base import JobStatus
     from tests.agent_core.fakes import FakeJobHost
 
@@ -266,10 +266,22 @@ def test_restart_reruns_a_cut_vibey_turn_in_place_without_a_notice(isolated_stat
     if step == "running":
         jobs = FakeJobHost()
         jobs.states["job_1"] = JobStatus("running")
+    from core.vibe_agents import VibeAgent
+
     cut = _accepted_turn(tmp_path, backend="vibey", jobs=jobs)
     before = _deliveries(cut.engine, cut.session_id)
+    agents = {
+        name: VibeAgent(id=f"agt_{name}", name=name, normalized_name=name, backend="vibey")
+        for name in ("worker", "reviewer")
+    }
+    cut.manager.controller.vibe_agent_store = SimpleNamespace(get=agents.get)
 
-    _restart(cut, _previous_process(step))
+    def switch_agent(engine, session_id, _turn_id):
+        # The Session moved to another Vibey Agent while the Turn ran: that reaches the next Turn.
+        with engine.begin() as conn:
+            conn.execute(update(agent_sessions).where(agent_sessions.c.id == session_id).values(agent_name="reviewer"))
+
+    _restart(cut, _then(_previous_process(step), switch_agent))
 
     if jobs is not None:
         assert jobs.watches == {}
@@ -286,6 +298,10 @@ def test_restart_reruns_a_cut_vibey_turn_in_place_without_a_notice(isolated_stat
     assert started.platform_specific["vibey_resume"] is True
     assert started.platform_specific["vibey_source_turn_id"] == cut.turn_id
     assert started.platform_specific["delivery_id"] == before[0]
+    if step != "running":  # a Turn cut before any response keeps the Session's binding
+        assert (started.platform_specific["vibe_agent_name"], started.platform_specific["vibe_agent_id"]) == (
+            "worker", "agt_worker",
+        )
     assert _deliveries(cut.engine, cut.session_id) == before
     with cut.engine.connect() as conn:
         turn = message_deliveries.get_turn(conn, cut.turn_id)

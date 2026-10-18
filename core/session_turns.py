@@ -69,7 +69,7 @@ from core.services.agent_steering import (
 )
 from storage import loop_writers, messages_service
 from storage import message_deliveries as delivery_store
-from storage.agent_transcript import last_turn_text, recovered_watch_ids
+from storage.agent_transcript import last_response, last_turn_text, recovered_watch_ids
 from storage.agent_session_rows import reserve_write_lock
 from storage.db import get_cached_sqlite_engine
 from storage.background import (
@@ -4802,6 +4802,11 @@ class SessionTurnManager:
         self._append_accepted_agent_run_ids(
             resolved.platform_specific, self.accepted_agent_run_ids_for_turn(turn_id)
         )
+        agent = self._turn_vibe_agent(session_id, turn_id)
+        if agent is not None:
+            # The Turn keeps the Agent it ran with, as a live Turn does when the
+            # Session's Agent changes: the change reaches the next Turn.
+            resolved.platform_specific.update({"vibe_agent_name": agent.name, "vibe_agent_id": agent.id})
         await self._run(
             session_id,
             resolved,
@@ -4813,6 +4818,18 @@ class SessionTurnManager:
             lifecycle_snapshot=lifecycle_snapshot if source == SOURCE_HUMAN else None,
         )
         return True
+
+    def _turn_vibe_agent(self, session_id: str, turn_id: str) -> Any:
+        """The Vibe Agent that ran a Turn, from its committed responses, while it still runs on Vibey."""
+
+        with self._sqlite_engine().connect() as conn:
+            response = last_response(conn, session_id)
+        name = response.agent_name if response is not None and response.turn_id == turn_id else None
+        store = getattr(self.controller, "vibe_agent_store", None)
+        agent = store.get(name) if name and store is not None else None
+        if agent is None or agent.backend != "vibey" or not agent.enabled or agent.archived_at:
+            return None
+        return agent
 
     def begin_computer_use_request(
         self,

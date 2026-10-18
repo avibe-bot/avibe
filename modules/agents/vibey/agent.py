@@ -334,10 +334,6 @@ class VibeyAgent(BaseAgent):
         # A transcript resume (a Turn rerun after a restart) gives a job that survived the restart
         # the foreground wait its live call would have, so its real output becomes the call's result.
         resuming = (context.platform_specific or {}).get("vibey_resume") is True
-        if resuming:
-            # A resume writes no input: its work was accepted before, so it binds this process's
-            # runtime generation before that wait, and steers reach it while it waits.
-            self._accept_native_start(request, session_id)
         await self._resume(runtime, stop=turn.stop_event if resuming else None)
         if turn.stop_requested:
             return await self._settle_stopped(turn)
@@ -361,9 +357,9 @@ class VibeyAgent(BaseAgent):
         message = await self._render_input(session_id, request.message, request.files, request.input_metadata)
         if turn.stop_requested:
             return await self._settle_stopped(turn)
-        if not resuming:
-            # Native acceptance materializes the input row the loop consumes.
-            self._accept_native_start(request, session_id)
+        # Native acceptance materializes the input row the loop consumes, and binds this
+        # process's generation: steers held for the Turn are dispatched once its Agent exists.
+        self._accept_native_start(request, session_id)
         indicator = getattr(self.controller, "processing_indicator", None)
         if indicator is not None:
             # The ack message goes once the native write is accepted, as for the other backends.

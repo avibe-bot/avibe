@@ -2672,14 +2672,13 @@ async def test_a_restart_rerun_waits_for_its_surviving_command_as_the_live_call_
     engine, session, tmp_path, published, monkeypatch, case
 ) -> None:
     """MESSAGE-DELIVERY-330: startup leaves a running command to the Turn it reruns, and so does a
-    second startup before that rerun ran; the rerun, bound to this process before it waits, waits
-    for it within the call's foreground window, counted from its launch, so its real output is the
+    second startup before that rerun ran; the rerun waits for it within the call's foreground
+    window, counted from its launch, before it binds its native start, so its real output is the
     result the reply (and a Run, MESSAGE-DELIVERY-328) settles from. A window the downtime spent
     hands it over; with no Watch to take it, it stays in the foreground until it ends; a Stop ends
     the wait and the command, as does one that settles the Turn while it is left open. It never
     starts again."""
     import core.watches as watches_module
-    from core.native_dispatch_phase import backend_dispatch_attempted
     from core.scheduled_tasks import TaskExecutionStore
     from core.watches import ManagedWatchStore
 
@@ -2736,6 +2735,7 @@ async def test_a_restart_rerun_waits_for_its_surviving_command_as_the_live_call_
             assert message_deliveries.rotate_restart_generation(
                 conn, cut_turn, expected_version=int(turn["version"]), streak=1, response_seq=response.context_seq
             )
+        native_starts = list(harness.controller.started)
         # Another restart before the rerun ran: the command is still the Turn's.
         harness.new_agent()
         assert await harness.agent.recover_runtime_state() == []
@@ -2753,11 +2753,9 @@ async def test_a_restart_rerun_waits_for_its_surviving_command_as_the_live_call_
             await _until(lambda: harness.agent._run_for(SESSION, cut_turn) is not None, "the rerun never ran")
             await asyncio.sleep(0.3)
             assert not resumed.done()
-            # Bound to this process before it waits: an exit now is the accepted Turn's failure,
-            # and steers and the Stop reach the live run.
-            with engine.connect() as conn:
-                assert message_deliveries.get_turn(conn, cut_turn)["native_turn_id"]
-            assert backend_dispatch_attempted(resume.context) is True
+            # Its native start, which releases the steers held for the Turn, waits for the Agent
+            # that takes them; the durably active Turn still routes this Stop to ``handle_stop``.
+            assert harness.controller.started == native_starts
             assert await harness.agent.handle_stop(resume)
         await asyncio.wait_for(resumed, timeout=20)
 

@@ -773,6 +773,7 @@ class CommittedResponse:
     text: str
     has_tool_calls: bool
     stop_reason: str
+    agent_name: Optional[str] = None
 
 
 def last_response(conn: Connection, session_id: str) -> Optional[CommittedResponse]:
@@ -785,6 +786,7 @@ def last_response(conn: Connection, session_id: str) -> Optional[CommittedRespon
             messages.c.content_text,
             messages.c.content_json,
             messages.c.metadata_json,
+            messages.c.author_name,
         )
         .where(
             messages.c.session_id == session_id,
@@ -816,6 +818,7 @@ def last_response(conn: Connection, session_id: str) -> Optional[CommittedRespon
             isinstance(block, dict) and block.get("type") == "tool_call" for block in blocks or ()
         ),
         stop_reason=stop_reason,
+        agent_name=str(row["author_name"]) if row["author_name"] else None,
     )
 
 

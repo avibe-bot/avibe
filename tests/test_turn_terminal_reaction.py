@@ -291,6 +291,16 @@ class OrphanedTerminalReactionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(cleared)
         self.assertEqual(im.calls, [("remove", "m1", ACK_REACTION_EMOJI)])
 
+    async def test_a_platform_without_reaction_indicators_has_no_running_reaction_to_clear(self):
+        # WeChat shows typing instead: done at once, so no follow-up waits on it.
+        im = _FakeIM()
+        svc = _svc(im)
+        context = _ctx()
+        context.platform = "wechat"
+
+        self.assertTrue(await svc.clear_orphaned_running_reaction(context, "m1"))
+        self.assertEqual(im.calls, [])
+
     async def test_noop_without_a_message_id(self):
         im = _FakeIM()
         svc = _svc(im)
