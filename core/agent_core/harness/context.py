@@ -143,11 +143,17 @@ MIND_TEMPLATE = "\n\n".join(
 #: and the previous mind is kept (section 10).
 MIND_BUDGET = sum(limit for _, limit, _ in MIND_SECTIONS)
 MIND_REVERT = 2 * MIND_BUDGET
+#: The mind's limits and the memo's budget hold whole on a route of this window and up, and shrink with the window
+#: below it (``scaled_limit``, section 7): their full 9,000 tokens would not fit under a small route's threshold.
+BUDGET_FULL_WINDOW = 192_000
 #: The memo (section 7): the checked messages' total, one message's share, and a candidate's preview in characters,
 #: longer for one the conversation above no longer shows.
 MEMO_BUDGET = 3_000
 MEMO_ITEM = 300
 MEMO_PREVIEW = 40
+#: The least of its text a memo message keeps when the memo is past its budget: about a preview's 40 characters. When
+#: every message at this share, with the lines that frame it, is still past the budget, fewer messages are kept.
+MEMO_SHARE_FLOOR = 10
 MEMO_EXCERPT = 200
 #: The skills a checkpoint carries back (section 7), as Claude Code does after its compaction: each cut to this many
 #: tokens, together at most the smaller of ``SKILLS_TOTAL`` and the window over ``SKILLS_WINDOW_DIVISOR``.
@@ -785,26 +791,50 @@ def rolling_cut(
 # --- the checkpoint (context.md sections 6 and 7) ----------------------------------
 
 
+def scaled_limit(limit: int, window: Optional[int]) -> int:
+    """``limit`` on a route of ``window`` tokens (section 7): whole from ``BUDGET_FULL_WINDOW`` up (or when the window
+    is not given), shrunk in proportion below it, at least one token."""
+    if window is None or window >= BUDGET_FULL_WINDOW:
+        return limit
+    return max(1, limit * window // BUDGET_FULL_WINDOW)
+
+
+def mind_limits(window: Optional[int] = None) -> tuple[int, ...]:
+    """Each mind section's limit on a route of ``window`` tokens, in ``MIND_SECTIONS`` order."""
+    return tuple(scaled_limit(limit, window) for _, limit, _ in MIND_SECTIONS)
+
+
+def mind_revert(window: Optional[int] = None) -> int:
+    """Past this, after the repair, a mind is piled up rather than condensed: twice its limits' sum (section 10)."""
+    return 2 * sum(mind_limits(window))
+
+
+def memo_budget(window: Optional[int] = None) -> int:
+    return scaled_limit(MEMO_BUDGET, window)
+
+
 def checkpoint_request(
     memo: Sequence[str] = (),
     *,
     mind: Literal["previous", "first", "cut"] = "first",
     cut_sections: Sequence[str] = (),
     scratch: Optional[str] = None,
+    window: Optional[int] = None,
 ) -> UserMessage:
     """The checkpoint request (section 11). ``memo`` is memo.md's lines (``MemoList.lines``); ``mind`` says what
     mind.md holds: the previous checkpoint's mind, the template at a first v5 checkpoint, or a mind the previous
     checkpoint showed cut short, whose cut sections ``cut_sections`` gives whole. ``scratch`` is the absolute path of
-    the Session's scratch directory, where the two files are (``SCRATCH_UNAVAILABLE`` without one)."""
+    the Session's scratch directory, where the two files are (``SCRATCH_UNAVAILABLE`` without one). The limits it states
+    are those of a route of ``window`` tokens (``mind_limits``, ``memo_budget``)."""
     note = {"previous": MIND_FILE_PREVIOUS, "first": MIND_FILE_FIRST, "cut": MIND_FILE_CUT}[mind]
-    limits = {f"limit_{index}": limit for index, (_, limit, _) in enumerate(MIND_SECTIONS, start=1)}
+    limits = {f"limit_{index}": limit for index, limit in enumerate(mind_limits(window), start=1)}
     truncated = f"\n\n{TRUNCATED_LEAD}\n" + "\n\n".join(cut_sections) if cut_sections else ""
     body = CHECKPOINT_REQUEST.format(
         scratch=scratch or SCRATCH_UNAVAILABLE,
         mind_file=note,
         memo="\n".join(memo) if memo else MEMO_EMPTY,
         truncated=truncated,
-        memo_budget=MEMO_BUDGET,
+        memo_budget=memo_budget(window),
         **limits,
     )
     return UserMessage((text(f"{body}\n{CHECKPOINT_REQUEST_END}"),))
@@ -997,11 +1027,17 @@ def _section_title(top: str) -> str:
     return top.split(". ", 1)[-1]
 
 
-def _sections(preamble: str, blocks: Sequence[MindBlock]) -> list[tuple[str, int, list[MindBlock]]]:
-    """Each top-level section of ``MIND_SECTIONS`` with its limit and its own blocks. Text before the first heading
-    counts toward the first section, as a block with no heading line: it is bounded like any of its text."""
+def _sections(
+    preamble: str, blocks: Sequence[MindBlock], window: Optional[int] = None
+) -> list[tuple[str, int, list[MindBlock]]]:
+    """Each top-level section of ``MIND_SECTIONS`` with its limit on a route of ``window`` tokens and its own blocks.
+    Text before the first heading counts toward the first section, as a block with no heading line: it is bounded like
+    any of its text."""
     own = dict(blocks)
-    sections = [(top, limit, [(name, own[name]) for name in (top, *subs)]) for top, limit, subs in MIND_SECTIONS]
+    sections = [
+        (top, limit, [(name, own[name]) for name in (top, *subs)])
+        for (top, _, subs), limit in zip(MIND_SECTIONS, mind_limits(window))
+    ]
     if preamble.strip():
         top, limit, first = sections[0]
         sections[0] = (top, limit, [("", tuple(_lines(preamble))), *first])
@@ -1044,9 +1080,9 @@ class MindReview:
         return found
 
 
-def review_mind(text: Optional[str], previous: str) -> MindReview:
+def review_mind(text: Optional[str], previous: str, window: Optional[int] = None) -> MindReview:
     """The mind the checkpoint turn left in mind.md (``None``: no readable file), checked against ``previous``, the
-    mind it started from (section 10)."""
+    mind it started from, and the limits of a route of ``window`` tokens (section 10)."""
     if text is None:
         return MindReview(structure="it is not a readable file")
     parsed, problem = mind_blocks(text)
@@ -1061,7 +1097,7 @@ def review_mind(text: Optional[str], previous: str) -> MindReview:
         )
     over = tuple(
         (_section_title(top), size, limit)
-        for top, limit, own in _sections(preamble, blocks)
+        for top, limit, own in _sections(preamble, blocks, window)
         if (size := text_tokens(_block_text(own))) > limit
     )
     return MindReview(empty=_normalized(text) == _normalized(MIND_TEMPLATE), over=over, tokens=text_tokens(text))
@@ -1081,7 +1117,7 @@ def _head_lines(lines: Sequence[str], room: int) -> tuple[list[str], bool]:
     return kept, False
 
 
-def fit_mind(text: str, marker: str) -> tuple[str, list[str]]:
+def fit_mind(text: str, marker: str, window: Optional[int] = None) -> tuple[str, list[str]]:
     """``text`` (a mind with its structure intact) with each section past its limit cut to it (section 10): every
     heading line kept, the head of what is under each one kept until the section's room runs out, and ``marker`` where
     something was cut. The cut sections' whole text, for the next checkpoint request (section 11), comes second."""
@@ -1092,7 +1128,7 @@ def fit_mind(text: str, marker: str) -> tuple[str, list[str]]:
     out: list[str] = []
     cut_sections: list[str] = []
     note = _utf8(marker) + 1
-    for _, limit, own in _sections(preamble, blocks):
+    for _, limit, own in _sections(preamble, blocks, window):
         whole = _block_text(own)
         if text_tokens(whole) <= limit:
             out.append(whole)
@@ -1172,39 +1208,58 @@ class MemoList:
 
 
 def memo_tokens(items: Sequence[MemoItem]) -> int:
-    return sum(text_tokens(item.text) for item in items)
+    """What ``items`` take in the checkpoint: each entry as it is shown, its ``(#seq)`` line and cut note included."""
+    return sum(_memo_entry_tokens(item) for item in items)
 
 
-def memo_problems(memo: MemoList, content: Optional[str]) -> list[str]:
-    """What the validator found in the memo.md the checkpoint turn left (section 10)."""
+def _memo_entry_tokens(item: MemoItem) -> int:
+    return text_tokens("\n".join(_memo_lines((item,))[1:]) + "\n")
+
+
+def memo_problems(memo: MemoList, content: Optional[str], window: Optional[int] = None) -> list[str]:
+    """What the validator found in the memo.md the checkpoint turn left, on a route of ``window`` tokens (section 10)."""
     checked = memo.read(content)
     if checked is None:
         return ["memo.md was changed beyond its checkboxes: change only a [ ] to [x] or back, and nothing else"]
-    size = memo_tokens(memo.select(checked))
-    if size > MEMO_BUDGET:
+    size, budget = memo_tokens(memo.select(checked)), memo_budget(window)
+    if size > budget:
         return [
-            f"the checked memo messages total about {size:,} tokens, at most {MEMO_BUDGET:,}: uncheck the ones that "
+            f"the checked memo messages total about {size:,} tokens, at most {budget:,}: uncheck the ones that "
             "were superseded or done, or that your mind already holds"
         ]
     return []
 
 
 def fit_memo(items: Sequence[MemoItem], budget: int = MEMO_BUDGET) -> tuple[MemoItem, ...]:
-    """``items`` within ``budget`` tokens (section 10): the longest cut to one common share, water-filling, each head
-    kept and marked; no item is dropped, though past ``budget`` items a share may be no text at all (the item still
-    says where its whole message is)."""
-    sizes = [text_tokens(item.text) for item in items]
-    if sum(sizes) <= budget:
+    """``items`` within ``budget`` tokens as the checkpoint shows them, their framing lines included (section 10): the
+    longest cut to one common share, water-filling, each head kept and marked. When even ``MEMO_SHARE_FLOOR`` each
+    would not fit, the first message and the newest that fit at that share are kept; the others stay in the earlier
+    record under their ``#seq``."""
+    if memo_tokens(items) <= budget:
         return tuple(items)
-    low, high = 0, max(sizes)  # the largest share whose total fits
+
+    def cut(share: int) -> list[MemoItem]:
+        return [
+            item if text_tokens(item.text) <= share else MemoItem(item.seq, _within(item.text, 4 * share).rstrip(), True)
+            for item in kept
+        ]
+
+    kept = list(items)
+    floor = min(MEMO_SHARE_FLOOR, max(text_tokens(item.text) for item in items))
+    if memo_tokens(cut(floor)) > budget:
+        costs = [_memo_entry_tokens(item) for item in cut(floor)]
+        room, newest = budget - costs[0], len(kept)
+        while newest > 1 and costs[newest - 1] <= room:
+            newest -= 1
+            room -= costs[newest]
+        kept = [kept[0], *kept[newest:]]
+        if memo_tokens(cut(floor)) > budget:
+            floor = 0  # one message past the budget even at the floor: its entry names it
+    low, high = floor, max(text_tokens(item.text) for item in kept) + 1  # the largest share whose entries fit
     while high - low > 1:
         middle = (low + high) // 2
-        low, high = (middle, high) if sum(min(size, middle) for size in sizes) <= budget else (low, middle)
-    share = low
-    return tuple(
-        item if size <= share else MemoItem(item.seq, _within(item.text, 4 * share).rstrip(), True)
-        for item, size in zip(items, sizes)
-    )
+        low, high = (middle, high) if memo_tokens(cut(middle)) <= budget else (low, middle)
+    return tuple(cut(low))
 
 
 def _memo_lines(items: Sequence[MemoItem]) -> list[str]:
@@ -1238,7 +1293,8 @@ class CarriedSkill:
 def skill_candidates(view: ContextView, cut: int) -> list[tuple[str, float]]:
     """The skills a checkpoint at ``cut`` would take out of the context, the most recently loaded first, with the time
     of each one's latest real load: those the previous checkpoint carried, and those the summarized rows loaded,
-    minus those whose load result the kept rows still hold. A carry is not a load, so a skill not loaded again sinks.
+    minus those whose load result the kept rows still hold whole (one a ``context_edit`` cleared or cut to fit no longer
+    holds it). A carry is not a load, so a skill not loaded again sinks.
     A ``checkpoint-v4`` row lists names only, most recent first, loaded before it was written."""
     row = view.compaction
     previous = row.payload if row is not None else {}
@@ -1257,7 +1313,9 @@ def skill_candidates(view: ContextView, cut: int) -> list[tuple[str, float]]:
                 loaded[name] = (entry.created_at or 0.0, order := order + 1)
     for unit in view.units[cut:]:
         for entry, _ in unit.entries[1:]:
-            for name in _skills(entry) if entry is not None else ():
+            if entry is None or entry.row_id in view.edited:
+                continue
+            for name in _skills(entry):
                 loaded.pop(name, None)
     ranked = sorted(loaded.items(), key=lambda item: item[1], reverse=True)
     return [(name, at) for name, (at, _) in ranked]

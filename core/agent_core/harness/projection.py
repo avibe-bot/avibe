@@ -86,6 +86,9 @@ class ContextView:
     pinned: int = 0
     #: The opaque payloads, by (Source identity, kind), a provider refused in this Session (``replay_refusal`` rows).
     opaque_refused: frozenset[tuple[Optional[str], str]] = frozenset()
+    #: Row ids of tool results a ``context_edit`` replaced, cleared or cut to fit: their projection no longer holds
+    #: their whole original content.
+    edited: frozenset[str] = frozenset()
 
     @property
     def messages(self) -> tuple[Message, ...]:
@@ -377,6 +380,7 @@ def context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] =
         state=deepcopy(state),
         pinned=len(kept),
         opaque_refused=frozenset(refused),
+        edited=frozenset(reasons),
     )
 
 

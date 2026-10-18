@@ -391,13 +391,22 @@ is written, so projection stays a pure function of the rows:
   | `# 3. Key decisions` | | 1,500 tokens |
   | `# 4. Lessons` | | 1,500 tokens |
 
+  These limits, the memo's below, and twice the mind's sum (§10) hold whole on a route of 192,000 tokens and up;
+  below it each is scaled with the window, `limit * W // 192,000` (at least 1), `W` the route the checkpoint is
+  planned on, the way the shown files grow with it: on a 32,000-token route the mind's sections are 166, 333, 250
+  and 250 and the memo 500, on an 8,000-token route 41, 83, 62, 62 and 125. Their full 9,000 tokens would take most
+  of a small route's `T` (175% of it on 8,000 tokens), so a checkpoint there could leave no less than it found. A
+  mind kept whole on a larger route is shown cut to the smaller route's limits, with its read-only copy, a drop's as
+  well; the request states the route's limits.
+
   The template has "(none)" under each heading that holds text. The model revises what is under the headings, never
   the lines themselves, and may add headings of its own beneath them. Text before the first heading counts toward the
   first section's limit and is cut with it. A mind still the template keeps no mind
   (`mind` is empty), and the next checkpoint starts from the template again. My identity and the Session's id are the
   system prompt's; the mind never restates them.
 - **The memo** (`memo`: `{seq, text, truncated}`, in `context_seq` order): the messages a person typed that the next
-  context carries verbatim, each cut to 300 tokens (head kept), at most 3,000 tokens together. Its list, `memo.md`,
+  context carries verbatim, each cut to 300 tokens (head kept), at most 3,000 tokens together, counted as the
+  checkpoint shows them, each entry's `(#<seq>)` line and cut note included. Its list, `memo.md`,
   has one line per candidate, `- [x] (#<seq>) <preview>` or `- [ ] (#<seq>) <preview>`: the messages the latest
   checkpoint's memo carries, checked; then each input this cut takes out of the context that a person typed (the
   host says which, §9), that no memo offered before, and that the cut does not keep (§5), unchecked. The inputs a
@@ -421,7 +430,8 @@ is written, so projection stays a pure function of the rows:
 - **Skills** (`skills_carried`: `{name, revision, loaded_at, content, truncated}`; `skills` names them): as Claude
   Code does after its compaction, a checkpoint carries back the text of the skills this cut takes out of the context,
   as they read when it is written. The candidates are those the latest checkpoint carried and those the summarized
-  rows loaded (§9's marks), minus those whose load result the kept rows still hold, the most recently loaded first.
+  rows loaded (§9's marks), minus those whose load result the kept rows still hold whole (one a `context_edit`
+  cleared or cut to fit no longer holds it), the most recently loaded first.
   `loaded_at` is the commit time of the result that last really loaded one (a carry is not a load, so a skill not
   loaded again sinks; a `checkpoint-v4` row's names count as loaded when it was written). In that order, each is
   rendered by the host now (one that no longer resolves is skipped), cut to 5,000 tokens with its head kept and
@@ -472,8 +482,9 @@ once the request fits:
   a memo that keeps every candidate (§7: the carried messages and every one this cut moves out, no one choosing
   among them, within the memo's budget, §10), and the `<earlier-record>` pointer; `checkpoint` is empty when there
   was none, and with nothing to carry the message has no framing text. All of that is kept only if the minimal
-  request (§3) carrying it can fit: a checkpoint written on a larger route may not fit a smaller fallback. Otherwise
-  the row carries none of it, and when the previous checkpoint had anything, its message says, in
+  request (§3) carrying it can fit: a checkpoint written on a larger route may not fit a smaller fallback; nor when
+  it cannot be gathered (the host cannot say which inputs a person typed, or the mind's copy cannot be written):
+  the drop must still free the room. Otherwise the row carries none of it, and when the previous checkpoint had anything, its message says, in
   place of the framing, "An earlier checkpoint was too large for this model and was omitted; see the earlier
   record." (the pointer clause only when there is an `<earlier-record>`); the history stays retrievable there.
   Repeated while the request still does not fit.
@@ -578,11 +589,11 @@ ends the run `context_exhausted`, as in P1. The adapter supplies the following; 
   | --- | --- |
   | `mind.md` lost its structure: a heading line of the template missing, repeated, or out of order; fewer Mission entries (top-level bullets or numbered items) than the mind it started from; not a readable file | the latest checkpoint's mind is kept as it was |
   | a mind section past its limit (§7) | the whole mind is kept in the row, and `summary` shows each such section cut to its limit: every heading line, the head of what is under each heading while the section has room, then `[This section continues; the whole of it is in <path>.]`. The path is a read-only copy of the whole mind (`checkpoint_dir`, named by the SHA-256 of its text, published whole before the row commits: a private temporary file, synced, then renamed onto the name, so a failed write leaves nothing there); without `checkpoint_dir` the line is `[This section is cut short here.]`. The next checkpoint request gives the cut sections whole (§11) |
-  | the mind past 12,000 tokens (twice its 6,000), however its sections stand: piled up, not condensed | the latest checkpoint's mind is kept as it was |
+  | the mind past twice its limits' sum (12,000 tokens; scaled below a 192,000-token route, §7), however its sections stand: piled up, not condensed | the latest checkpoint's mind is kept as it was |
   | the template untouched | no mind is kept (no repair is asked) |
   | `memo.md` changed beyond its checkboxes: a line not one of the two the harness wrote for its candidate, a line added or missing, or not a readable file | every candidate is kept: more of the user's words, never fewer |
   | `memo.md` as the harness wrote it, in a turn whose tool budget closed on a call (its room or rounds ran out, §6): it may never have had room to check it | every candidate is kept |
-  | the checked messages past 3,000 tokens | every checked message is kept, the longest cut to one common share, water-filling, each marked as cut: none is dropped. Past 3,000 messages the share can be no text at all; the entry still names its message |
+  | the checked messages past the memo's budget (3,000 tokens; scaled below a 192,000-token route, §7) | every checked message is kept, the longest cut to one common share, water-filling, each marked as cut. The entries' own lines count: when every message at a floor share of 10 tokens (about a preview) would still not fit, the first message and the newest that fit are kept, and the others stay in the earlier record under their `#<seq>` |
 
   A failure of the host's part after the model answered (state, lookup, skills, the mind's copy) is a failed
   checkpoint, counted (invariant 4).

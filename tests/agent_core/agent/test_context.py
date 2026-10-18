@@ -50,6 +50,8 @@ from core.agent_core.harness.context import (
     memo_item,
     memo_problems,
     memo_tokens,
+    MEMO_SHARE_FLOOR,
+    _memo_lines,
     mind_blocks,
     mission_entries,
     review_mind,
@@ -1229,11 +1231,26 @@ def test_the_memo_keeps_every_message_within_its_budget_by_cutting_the_longest_f
     assert [item.seq for item in fitted] == [item.seq for item in items] and memo_tokens(fitted) <= MEMO_BUDGET
     assert fitted[-1] == MemoItem(20, "keep the API stable") and all(item.truncated for item in fitted[:-1])
     assert fit_memo(items[-1:]) == tuple(items[-1:])
-    # Past the budget in items, a share may be no text at all: every item stays, each saying where its message is.
+    # The budget counts each entry as shown, its "(#seq)" line and cut note too: what the checkpoint carries fits.
+    rendered = lambda items: text_tokens("\n".join(_memo_lines(items)[1:]))  # noqa: E731
+    assert rendered(fitted) <= memo_tokens(fitted) <= MEMO_BUDGET
+    fitted = fit_memo(items, 500)  # a 32,000-token route's budget: every message, each at least the floor share
+    assert rendered(fitted) <= 500 and [item.seq for item in fitted] == [item.seq for item in items]
+    assert all(len(item.text) >= 4 * MEMO_SHARE_FLOOR for item in fitted if item.truncated)
+    fitted = fit_memo(items, 125)  # an 8,000-token route's: the first message and the newest that fit
+    assert rendered(fitted) <= 125 and [item.seq for item in fitted] == [1, 10, 11, 12, 20]
+    assert all(len(item.text) >= 4 * MEMO_SHARE_FLOOR for item in fitted if item.truncated)
+    # More messages than their entries' lines can hold, even at the floor share: the first and the newest are kept,
+    # whole when they are short; the others stay in the earlier record under their #seq.
     many = [MemoItem(seq, "word") for seq in range(1, 3_200)]
     fitted = fit_memo(many)
-    assert len(fitted) == len(many) and memo_tokens(fitted) <= MEMO_BUDGET
-    assert fitted[0] == MemoItem(1, "", True)
+    assert rendered(fitted) <= MEMO_BUDGET and fitted[0] == many[0] and fitted[-1] == many[-1]
+    assert 2 < len(fitted) < len(many) and [item.seq for item in fitted[1:]] == list(range(3_200 - len(fitted) + 1, 3_200))
+    assert not any(item.truncated for item in fitted)
+    long = [MemoItem(seq, "y" * 2_000) for seq in range(1, 200)]
+    fitted = fit_memo(long, 500)
+    assert rendered(fitted) <= 500 and fitted[0].seq == 1 and fitted[-1].seq == 199
+    assert all(item.truncated and len(item.text) >= 4 * MEMO_SHARE_FLOOR for item in fitted)
 
 
 def test_a_checkpoint_carries_its_mind_memo_now_files_and_skills_and_pins_the_split_turn_input():
@@ -1338,6 +1355,24 @@ def test_a_checkpoint_carries_its_mind_memo_now_files_and_skills_and_pins_the_sp
     # Nothing carried and no lookup hint: no framing text, no pointer.
     assert second["summary"].startswith("<context-checkpoint>\n<artifacts>\n")
     assert "<earlier-record>" not in second["summary"]
+
+
+@pytest.mark.parametrize("edit", ["clear", "fit"])
+def test_a_skill_whose_kept_load_result_was_cleared_or_cut_is_still_a_candidate(edit):
+    # The kept unit loaded t again, but a context_edit later replaced that result: the projection no longer holds t's
+    # instructions, so a checkpoint must carry t back rather than count it as still in the context.
+    rows = Rows()
+    rows.input("work")
+    rows.tool("bash", "t body", call_id="s1", command="vibe skill load t", skills=("t",))
+    rows.tool("read", "c", call_id="r1", path="c.py")
+    rows.tool("bash", "t again", call_id="s2", command="vibe skill load t", skills=("t",))
+    again = [row for row in rows.rows if row.kind == "tool_result"][-1]
+    view = context_view(rows.rows)
+    assert skill_candidates(view, 2) == []  # held whole after the cut: not a candidate
+    rows.add("context_edit", payload=_edit_of(again) if edit == "clear" else fit_edit(again, "t ag" + TOOL_TRUNCATED))
+    view = context_view(rows.rows)
+    assert again.row_id in view.edited
+    assert [name for name, _ in skill_candidates(view, 2)] == ["t"]
 
 
 def test_skills_are_carried_as_they_read_now_within_their_share_and_the_window_s_budget():

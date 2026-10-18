@@ -94,7 +94,6 @@ from core.agent_core.harness.context import (
     MIND_CUT,
     MIND_CUT_UNSTORED,
     MIND_FILE,
-    MIND_REVERT,
     MIND_TEMPLATE,
     Anchor,
     Budget,
@@ -122,8 +121,10 @@ from core.agent_core.harness.context import (
     fit_result,
     half_cut,
     last_anchor,
+    memo_budget,
     memo_item,
     memo_problems,
+    mind_revert,
     message_tokens,
     messages_tokens,
     normal_cut,
@@ -1537,7 +1538,7 @@ class Agent:
             return request, plan  # nothing can move out
         cut = len(view.units) - 1
         hosted = await self._hosted(view, cut)
-        dropped = self._dropped(view, cut, carry=carry)
+        dropped = self._dropped(view, cut, carry=carry, window=plan.window)
         payload, after = await self._compaction(request, view, plan, cut, **dropped, hosted=hosted)
         minimal, _ = self._built(system, selected, messages=self._carried(after))
         return minimal, budget(minimal, selected.capabilities, transcript=after.messages)
@@ -1546,7 +1547,7 @@ class Agent:
         """What a conversation request carries for ``view``: the rehydrated state, then the projected context."""
         return (*self._rehydrated(), *view.messages)
 
-    def _dropped(self, view: ContextView, cut: int, *, carry: bool) -> dict[str, Any]:
+    def _dropped(self, view: ContextView, cut: int, *, carry: bool, window: int) -> dict[str, Any]:
         """A dropped row's fields (section 8 c): no model call. When ``carry``, the previous checkpoint as it was (its
         now, mind, and skills) and a memo that keeps every message, the new ones included, no one choosing among
         them; otherwise all of it left out, and said so."""
@@ -1564,8 +1565,8 @@ class Agent:
             mind = previous.get("mind") or ""
             fields.update(
                 mind=mind,
-                mind_shown=self._mind_shown(mind),
-                memo=fit_memo(self._memo_list(view, cut).select(None)),
+                mind_shown=self._mind_shown(mind, window),
+                memo=fit_memo(self._memo_list(view, cut).select(None), memo_budget(window)),
                 skills=tuple(CarriedSkill(**skill) for skill in previous.get("skills_carried", ())),
             )
         return fields
@@ -1581,10 +1582,17 @@ class Agent:
     ) -> bool:
         """Whether a drop keeps the previous checkpoint and the user's messages it moves out (section 8 c): only when
         the request the drop would leave, carrying them, can fit this route. A checkpoint written on a larger route
-        may not."""
+        may not. When what it carries cannot be gathered (the host could not say which inputs a person typed), the
+        drop leaves it out rather than stop the run: the ladder must still free the room."""
         if len(view.units) < 2:
             return True  # nothing moves out
-        return (await self._minimal(system, selected, request, view, plan, carry=True))[1].can_fit
+        try:
+            return (await self._minimal(system, selected, request, view, plan, carry=True))[1].can_fit
+        except (_Aborted, asyncio.CancelledError):
+            raise
+        except Exception:
+            logger.warning("Cannot gather what a drop would carry; dropping without it", exc_info=True)
+            return False
 
     async def _shrink(
         self,
@@ -1777,7 +1785,8 @@ class Agent:
         previous = view.compaction.payload if view.compaction is not None else {}
         prior: str = previous.get("mind") or ""
         start = prior or MIND_TEMPLATE
-        cut_sections = fit_mind(prior, MIND_CUT_UNSTORED)[1] if prior and previous.get("mind_truncated") else []
+        window = plan.window
+        cut_sections = fit_mind(prior, MIND_CUT_UNSTORED, window)[1] if prior and previous.get("mind_truncated") else []
         refused = None
         try:
             memo = self._memo_list(view, cut)
@@ -1794,6 +1803,7 @@ class Agent:
             mind="first" if not prior else ("cut" if cut_sections else "previous"),
             cut_sections=cut_sections,
             scratch=os.path.abspath(self.context.scratch_dir) if self.context and self.context.scratch_dir else None,
+            window=window,
         )
 
         def check(message: AssistantMessage, files: Files, final: bool) -> Optional[str]:
@@ -1802,8 +1812,8 @@ class Agent:
             if final or files is None:
                 # With no repair left, only a reply without a checkpoint fails the turn; the files fall back (fold).
                 return found[0] if found else None
-            found += review_mind(_mind_text(files), start).problems()
-            found += memo_problems(memo, files.get(MEMO_FILE))
+            found += review_mind(_mind_text(files), start, window).problems()
+            found += memo_problems(memo, files.get(MEMO_FILE), window)
             return "; ".join(found) or None
 
         async def fold(reply: SideReply) -> Folded:
@@ -1818,7 +1828,7 @@ class Agent:
             left = reply.files
             try:
                 hosted = await self._hosted(view, cut)
-                mind, shown = await self._settled_mind(left, start, prior)
+                mind, shown = await self._settled_mind(left, start, prior, window)
                 skills = await self._carried_skills(view, cut, plan.window)
             except (_Aborted, asyncio.CancelledError):
                 raise
@@ -1845,7 +1855,7 @@ class Agent:
                 hosted=hosted,
                 mind=mind,
                 mind_shown=shown,
-                memo=fit_memo(memo.select(checked)),
+                memo=fit_memo(memo.select(checked), memo_budget(window)),
                 skills=skills,
             )
             (row,) = await self._commit_context([("compaction", payload)])
@@ -1941,29 +1951,38 @@ class Agent:
             raise RuntimeError("the memo asked for inputs the stage did not prefetch")
         return {entry.row_id: typed for entry in entries if (typed := self._typed.get(entry.row_id)) is not None}
 
-    async def _settled_mind(self, files: Files, start: str, prior: str) -> tuple[str, str]:
+    async def _settled_mind(self, files: Files, start: str, prior: str, window: int) -> tuple[str, str]:
         """The mind a checkpoint keeps, and what it shows of it (section 10), from the mind.md the turn left: with
         its structure lost, or past ``MIND_REVERT``, the previous mind; still the template, none; past a section's
         limit, the whole kept and the section shown cut to it, pointing to a read-only copy of the whole. With no
         scratch root, the mind could not be revised: the previous one stays."""
         if files is None:
-            return prior, self._mind_shown(prior)
+            return prior, await self._kept_mind(prior, window)
         left = _mind_text(files)
-        review = review_mind(left, start)
-        if left is None or review.structure is not None or review.tokens > MIND_REVERT:
-            return prior, self._mind_shown(prior)
+        review = review_mind(left, start, window)
+        if left is None or review.structure is not None or review.tokens > mind_revert(window):
+            return prior, await self._kept_mind(prior, window)
         if review.empty:
             return "", ""
         if not review.over:
             return left, left
         marker = await self._mind_copy(left)
-        return left, fit_mind(left, marker)[0]
+        return left, fit_mind(left, marker, window)[0]
 
-    def _mind_shown(self, mind: str) -> str:
-        """What a checkpoint shows of a kept mind: cut to its sections' limits, as when it was first written."""
-        if not mind or not review_mind(mind, mind).over:
+    async def _kept_mind(self, mind: str, window: int) -> str:
+        """What a checkpoint shows of the previous mind it keeps; its copy is written when this route cuts it."""
+        shown = self._mind_shown(mind, window)
+        if shown != mind:
+            await self._mind_copy(mind)
+        return shown
+
+    def _mind_shown(self, mind: str, window: int) -> str:
+        """What a checkpoint shows of a kept mind on a route of ``window`` tokens: cut to its sections' limits there.
+        A mind kept whole on a large route is cut here on a small one; its copy was written when it was first cut,
+        or is written now (``_mind_copy`` is called by the fold; a drop only points)."""
+        if not mind or not review_mind(mind, mind, window).over:
             return mind
-        return fit_mind(mind, self._mind_marker(mind))[0]
+        return fit_mind(mind, self._mind_marker(mind), window)[0]
 
     def _mind_path(self, mind: str) -> Optional[str]:
         """Where the read-only copy of ``mind`` is, named by the SHA-256 of its text; None without ``checkpoint_dir``."""
@@ -2275,7 +2294,15 @@ class Agent:
         fit (``_carries``)."""
         await emit(CompactionStarted, reason="overflow")
         hosted = await self._hosted(view, cut)
-        payload, _ = await self._compaction(request, view, plan, cut, **self._dropped(view, cut, carry=carry), hosted=hosted)
+        dropped = self._dropped(view, cut, carry=carry, window=plan.window)
+        if dropped.get("mind_shown", "") != dropped.get("mind", ""):
+            # This route cuts the mind the drop carries: its copy must exist, or the mind is not carried.
+            try:
+                await self._mind_copy(dropped["mind"])
+            except OSError:
+                logger.warning("Cannot write the mind's copy; dropping without the checkpoint", exc_info=True)
+                dropped = self._dropped(view, cut, carry=False, window=plan.window)
+        payload, _ = await self._compaction(request, view, plan, cut, **dropped, hosted=hosted)
         (row,) = await self._commit_context([("compaction", payload)])
         await emit(
             CompactionFinished,

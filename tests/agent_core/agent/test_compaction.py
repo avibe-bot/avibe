@@ -49,11 +49,16 @@ from core.agent_core.harness.context import (
     MIND_FILE_CUT,
     MIND_FILE_FIRST,
     MIND_FILE_PREVIOUS,
-    MIND_REVERT,
     MIND_TEMPLATE,
     SKILLS_LEAD_CARRIED,
     TRUNCATED_LEAD,
     text_tokens,
+    MemoItem,
+    memo_tokens,
+    review_mind,
+    memo_budget,
+    mind_limits,
+    mind_revert,
     CHECKPOINT_FRAMING,
     CHECKPOINT_REQUEST,
     CHECKPOINT_TRUNCATED,
@@ -2021,8 +2026,10 @@ async def test_a_mind_that_lost_its_structure_gets_one_repair_and_then_the_previ
 
 
 async def test_a_mind_past_a_section_limit_is_kept_whole_shown_cut_and_given_whole_to_the_next_checkpoint(tmp_path):
+    # On ROOMY's 32,000-token window the limits are a sixth of the user's (section 7): Goals 333 tokens, revert 2,000.
+    assert mind_limits(32_000) == (166, 333, 250, 250) and mind_revert(32_000) == 1_998
     scratch = tmp_path / "scratch"
-    workstreams = "\n".join(f"- workstream {index}: " + "w" * 200 for index in range(60))
+    workstreams = "\n".join(f"- workstream {index}: " + "w" * 60 for index in range(30))  # ~600 tokens
     grown = [
         _batch(_edit("m", scratch / MIND_FILE, ("## Workstreams\n(none)", f"## Workstreams\n{workstreams}"))),
         [Done(assistant(CHECKPOINT))],
@@ -2032,23 +2039,23 @@ async def test_a_mind_past_a_section_limit_is_kept_whole_shown_cut_and_given_who
     again = [[Done(assistant(CHECKPOINT))], [Done(assistant(CHECKPOINT))]]
     models, (_, second, third), _ = await _consolidate(tmp_path, [_fill_mind(tmp_path), grown, again])
     repair = models[1].checkpoint_requests[-1].messages[-1].content[0].text
-    assert "mind.md is over its length limits: Goals is about" in repair
+    assert "mind.md is over its length limits: Goals is about" in repair and "at most 333" in repair
     whole = FIRST_MIND.replace("## Workstreams\n(none)", f"## Workstreams\n{workstreams}")
     assert (second.payload["mind"], second.payload["mind_truncated"]) == (whole, True)
     copies = list((tmp_path / "checkpoints").iterdir())
     assert len(copies) == 1 and copies[0].read_text() == whole and not os.access(copies[0], os.W_OK)
     summary = second.payload["summary"]
-    assert MIND_CUT.format(path=str(copies[0])) in summary and "- workstream 59" not in summary and MISSION in summary
+    assert MIND_CUT.format(path=str(copies[0])) in summary and "- workstream 29" not in summary and MISSION in summary
     # The next turn starts from the whole mind, and its request gives the cut section whole.
     request = _request(models[2])
     assert MIND_FILE_CUT in request and f"{TRUNCATED_LEAD}\n# 2. Goals\n## Mission\n{MISSION}" in request
-    assert "- workstream 59: " in request and third.payload["mind"] == whole
+    assert "- workstream 29: " in request and third.payload["mind"] == whole
 
 
 async def test_a_mind_piled_past_twice_its_budget_is_not_kept(tmp_path):
     scratch = tmp_path / "scratch"
     lessons = "\n".join(f"- lesson {index}: " + "l" * 400 for index in range(130))  # ~13,000 tokens
-    assert text_tokens(lessons) > MIND_REVERT
+    assert text_tokens(lessons) > mind_revert()  # past twice the user's 6,000, on any window
     piled = [
         _batch(_edit("m", scratch / MIND_FILE, ("# 4. Lessons\n(none)", f"# 4. Lessons\n{lessons}"))),
         [Done(assistant(CHECKPOINT))],
@@ -2084,11 +2091,13 @@ async def test_checked_messages_past_the_memo_budget_are_all_kept_each_cut_to_a_
     model = Model([[Done(assistant("after"))]], [check, [Done(assistant(CHECKPOINT))], [Done(assistant(CHECKPOINT))]])
     await run(make_agent(model, store=store, selection=ROOMY, context=context), tokens(29_000), row="cross")
     repair = model.checkpoint_requests[-1].messages[-1].content[0].text
-    assert "the checked memo messages total about 3,600 tokens, at most 3,000" in repair
+    # The memo's budget on ROOMY's 32,000-token window: a sixth of the user's 3,000 (section 7). Twelve messages cut to
+    # 300 tokens each, 3,600, and their entries' lines: what the checkpoint would show.
+    assert f"the checked memo messages total about 3,816 tokens, at most {memo_budget(32_000):,}" in repair
     (row,) = [row for row in await store.load("session") if row.kind == "compaction"]
     memo = row.payload["memo"]
     assert [item["seq"] for item in memo] == seqs and all(item["truncated"] for item in memo)
-    assert sum(text_tokens(item["text"]) for item in memo) <= 3_000
+    assert memo_tokens([MemoItem(**item) for item in memo]) <= memo_budget(32_000) == 500
     assert all(item["text"].startswith(f"rule {index}: ") for index, item in enumerate(memo))
 
 
@@ -2147,6 +2156,23 @@ async def test_a_host_that_cannot_say_who_typed_what_fails_the_checkpoint_before
     (failed,) = [event for event in events if isinstance(event, CompactionFailed)]
     assert "the host failed: RuntimeError: messages table locked" in failed.error
     assert [audit["outcome"] for _, _, audit in store.audits] == ["failed"]
+
+
+async def test_a_host_that_cannot_say_who_typed_what_still_lets_the_ladder_drop(tmp_path):
+    # The context cannot fit and the checkpoint fails on the host; the ladder's drop cannot gather the memo it would
+    # carry, so it drops without it rather than stop the run (section 8 c).
+    class Blind(Host):
+        def user_messages(self, row_ids):
+            raise RuntimeError("messages table locked")
+
+    store = InMemoryTranscriptStore()
+    await _history_on_a_large_window(store, [5_000] * 12)
+    model = Model([[Done(assistant("done"))]], [])
+    events = await run(make_agent(model, store=store, context=_v5(tmp_path, Blind())))
+    assert not model.checkpoint_requests and events[-1].reason == "completed"
+    assert any(isinstance(event, CompactionFailed) for event in events)
+    drops = [row for row in await store.load("session") if row.kind == "compaction"]
+    assert drops and all(row.payload["mode"] == "dropped" and row.payload["memo"] == [] for row in drops)
 
 
 async def test_the_skills_a_checkpoint_takes_out_come_back_as_they_read_now(tmp_path):
@@ -2256,7 +2282,7 @@ async def test_a_mind_copy_is_published_whole_or_not_at_all(tmp_path, monkeypatc
     # A copy that fails mid-write leaves nothing at its name, so a later checkpoint of the same mind never points to a
     # partial copy (section 10).
     scratch = tmp_path / "scratch"
-    workstreams = "\n".join(f"- workstream {index}: " + "w" * 200 for index in range(60))
+    workstreams = "\n".join(f"- workstream {index}: " + "w" * 60 for index in range(30))  # past Goals' 333 on ROOMY
     grown = [
         _batch(_edit("m", scratch / MIND_FILE, ("## Workstreams\n(none)", f"## Workstreams\n{workstreams}"))),
         [Done(assistant(CHECKPOINT))],
@@ -2322,3 +2348,54 @@ async def test_the_turn_is_given_its_files_word_for_word_and_an_edit_written_as_
     assert f"so it is this empty template, word for word:\n{MIND_TEMPLATE}\n" in request
     edited = [m for m in model.checkpoint_requests[-1].messages if isinstance(m, ToolResultMessage)][-1]
     assert not edited.is_error and row.payload["mind"] == FIRST_MIND  # stored without the file's final newline
+
+
+#: A 32,000-token window answering 4,096: T = 23,904 (section 1).
+SMALL32 = ModelSelection(ENDPOINT, replace(SELECTION.capabilities, context_window=32_000, input_limit=None))
+
+
+async def test_on_a_small_route_a_checkpoint_leaves_the_context_much_smaller(tmp_path):
+    # A Session whose last checkpoint was written on a large route, its mind and memo at the user's full limits
+    # (6,000 and 3,000 tokens), moves to a 32,000-token route. Its next checkpoint fits them to this route's limits
+    # (section 7), so the context it leaves is well under the threshold: no ineffective checkpoint, no loop.
+    store = InMemoryTranscriptStore()
+    typed = {f"turn{index}": f"rule {index}: " + "z" * 1_196 for index in range(10)}
+    context = _v5(tmp_path, Host(typed=typed))
+    for index in range(10):
+        await run(make_agent(Model([[Done(assistant("ok"))]]), store=store, context=context), "t", f"turn{index}")
+    view = context_view(await store.load("session"))
+    lines = lambda n, width: "\n".join(f"- item {i}: " + "m" * width for i in range(n))  # noqa: E731
+    mind = (
+        MIND_TEMPLATE.replace("## Agreements\n(none)", f"## Agreements\n{lines(12, 300)}")
+        .replace("## Mission\n(none)", f"## Mission\n{MISSION}\n{lines(20, 350)}")
+        .replace("# 3. Key decisions\n(none)", f"# 3. Key decisions\n{lines(18, 300)}")
+        .replace("# 4. Lessons\n(none)", f"# 4. Lessons\n{lines(18, 300)}")
+    )
+    assert review_mind(mind, mind).over == () and text_tokens(mind) > 5_000  # within the user's limits
+    memo = tuple(MemoItem(unit.seq, typed[unit.lead.row_id]) for unit in view.units if unit.lead.kind == "input")
+    large = compaction_payload(
+        view, len(view.units) - 1, mode="normal", reason="threshold", checkpoint=CHECKPOINT_BODY, state=(),
+        earlier_record=None, tokens_before=1, threshold=2, window=1_000_000, summarizer=None, usage=None,
+        mind=mind, memo=memo,
+    )
+    assert sum(text_tokens(item["text"]) for item in large["memo"]) >= 2_990
+    await store.append_payloads("session", [("compaction", large)])
+    # On the small route two turns stay under T; the third crosses it, and its checkpoint moves the two out.
+    for row in ("mid1", "mid2"):
+        await run(make_agent(Model([[Done(assistant("ok"))]]), store=store, selection=SMALL32, context=context), tokens(6_500), row)
+    model = Model([[Done(assistant("after"))]], [[Done(assistant(CHECKPOINT))], [Done(assistant(CHECKPOINT))]])
+    events = await run(make_agent(model, store=store, selection=SMALL32, context=context), tokens(3_000), "cross")
+    (finished,) = [event for event in events if isinstance(event, CompactionFinished)]
+    threshold = 23_904
+    assert finished.tokens_before >= threshold and events[-1].reason == "completed"
+    after = context_view(await store.load("session"))
+    shown = message_tokens(after.checkpoint)
+    # The checkpoint itself takes a small part of this route's threshold, and the context it leaves is far below the
+    # ineffective line (0.75 * T): the next requests have room, and no checkpoint follows at once.
+    assert shown < 0.15 * threshold and finished.tokens_after_estimate < 0.5 * threshold
+    row = [row for row in await store.load("session") if row.kind == "compaction"][-1]
+    assert row.payload["mind"] == mind and row.payload["mind_truncated"]  # kept whole, shown cut to this route
+    assert memo_tokens([MemoItem(**item) for item in row.payload["memo"]]) <= memo_budget(32_000)
+    assert [item["seq"] for item in row.payload["memo"]] == [item.seq for item in memo]  # every message kept
+    repair = model.checkpoint_requests[-1].messages[-1].content[0].text
+    assert "mind.md is over its length limits" in repair and "at most 1,000" not in repair  # per section, scaled
