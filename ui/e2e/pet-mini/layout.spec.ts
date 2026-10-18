@@ -497,3 +497,20 @@ for (const pose of ['idle', 'ready', 'sleeping']) {
     expect(new Set(await playStates())).toEqual(new Set(['running']));
   });
 }
+
+test('the reply bubble tail starts on the bubble border instead of poking above it', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal');
+  const bubble = page.locator('.pet-mini-reply-bubble');
+  await expect(bubble).toBeVisible();
+  const tail = await bubble.evaluate((node) => {
+    const style = getComputedStyle(node, '::after');
+    return { bottom: parseFloat(style.bottom), height: parseFloat(style.height), clip: style.clipPath, transform: style.transform };
+  });
+  // Rotated 45deg, the square's anti-diagonal is the horizontal line through
+  // its centre, where both strokes end. That centre must sit on the top edge of
+  // the bubble's bottom border (the padding edge `bottom` is measured from),
+  // and only the half below it may paint.
+  expect(tail.transform).not.toBe('none');
+  expect(tail.bottom).toBe(-tail.height / 2);
+  expect(tail.clip).toBe('polygon(100% 0px, 100% 100%, 0px 100%)');
+});
