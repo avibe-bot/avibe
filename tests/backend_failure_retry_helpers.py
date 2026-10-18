@@ -120,7 +120,8 @@ def previous_process(step):
     ``partial``: the text a failed stream carried, committed as a non-final response;
     ``running``: a bash command left running, its call still open (startup T2 has not run);
     ``final``: the Turn's final reply;
-    ``silent_final``: delivered narration, then a final with nothing to show.
+    ``silent_final``: delivered narration, then a final with nothing to show;
+    ``failed_final``: delivered narration, then a final that fails with nothing to show.
     """
     from core.agent_core.agent.recovery import settle_open_calls
     from core.agent_core.messages import ToolCallBlock, UserMessage, text
@@ -147,7 +148,7 @@ def previous_process(step):
             if step == "final":
                 await store.append_response(session_id, assistant("全部完成"), final=True)
                 return
-            if step == "silent_final":
+            if step in {"silent_final", "failed_final"}:
                 # The narration the dispatcher delivered and persisted, then the silent final.
                 with engine.begin() as conn:
                     messages_service.append(
@@ -155,8 +156,11 @@ def previous_process(step):
                         source="agent", message_type="interim",
                         text="日志读完了。\n缓存被两个写者共享。\n锁已加上。\n已验证。",
                     )
-                # A final whose reply is all ``<silent>``: it replies, and shows nothing.
-                await store.append_response(session_id, assistant(""), final=True, replied=True)
+                # A final whose reply is all ``<silent>`` replies and shows nothing; one that does
+                # not reply at all (an empty response) failed.
+                await store.append_response(
+                    session_id, assistant(""), final=True, replied=step == "silent_final"
+                )
                 return
             if step == "partial":
                 await store.append_response(session_id, assistant("先读完日志", stop_reason="error"), final=False)

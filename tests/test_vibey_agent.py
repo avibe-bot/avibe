@@ -2667,18 +2667,20 @@ async def test_a_run_the_service_stop_cut_leaves_its_turn_open_for_the_restart_c
         await running
 
 
-@pytest.mark.parametrize("case", ["exits", "window_passed", "watch_unavailable", "stop"])
+@pytest.mark.parametrize("case", ["exits", "window_passed", "watch_unavailable", "stop", "stopped_left_open"])
 async def test_a_restart_continuation_waits_for_its_surviving_command_as_the_live_call_would(
     engine, session, tmp_path, published, monkeypatch, case
 ) -> None:
-    """MESSAGE-DELIVERY-330: startup leaves a running command to the Turn it continues; the
-    continuation waits for it within the call's foreground window, counted from its launch, so
-    its real output is the result the reply (and a Run, MESSAGE-DELIVERY-328) settles from. A
-    window the downtime spent hands it over; with no Watch to take it, it stays in the
-    foreground until it ends; a Stop ends the wait and the command. It never starts again."""
+    """MESSAGE-DELIVERY-330: startup leaves a running command to the Turn it continues, and so does
+    a second startup before that continuation ran; the continuation, accepted before it waits,
+    waits for it within the call's foreground window, counted from its launch, so its real output
+    is the result the reply (and a Run, MESSAGE-DELIVERY-328) settles from. A window the downtime
+    spent hands it over; with no Watch to take it, it stays in the foreground until it ends; a
+    Stop ends the wait and the command, as does one that settles the Turn while it is left open.
+    It never starts again."""
     import core.watches as watches_module
     from core.backend_failure_retry import reserve_restart_resume
-    from core.native_dispatch_phase import mark_prewrite_user_stop
+    from core.native_dispatch_phase import backend_dispatch_attempted
     from core.scheduled_tasks import TaskExecutionStore
     from core.watches import ManagedWatchStore
 
@@ -2717,6 +2719,18 @@ async def test_a_restart_continuation_waits_for_its_surviving_command_as_the_liv
         harness.new_agent()
         assert await harness.agent.recover_runtime_state() == []
         assert ManagedWatchStore().find_job_watch(job_id) is None
+        if case == "stopped_left_open":
+            # The Turn stays open (its fallback waits for a Watch) and a Stop settles it with no
+            # runtime holding it: the next T2 ends the command, as the Stop would have.
+            with engine.begin() as conn:
+                message_deliveries.terminalize_turn(
+                    conn, cut_turn, outcome="canceled", settled_by="adapter_not_active", evidence_kind="stop_not_active"
+                )
+            assert await harness.agent.recover_runtime_state() == []
+            [result] = [entry for entry in await harness.context_rows() if entry.kind == "tool_result"]
+            assert "Stopped by the user" in result.message.content[0].text
+            assert suite.jobs.status(job_id).state != "running" and ManagedWatchStore().find_job_watch(job_id) is None
+            return
         with engine.begin() as conn:
             [continuation] = reserve_restart_resume(conn, message_deliveries.get_turn(conn, cut_turn))
             message_deliveries.terminalize_turn(
@@ -2726,6 +2740,10 @@ async def test_a_restart_continuation_waits_for_its_surviving_command_as_the_liv
             message_deliveries.claim_start_batch(
                 conn, turn_id=resumed_turn, session_id=SESSION, backend="vibey", deliveries=[continuation], dispatch_text=""
             )
+        # Another restart before the continuation ran: its work is still the continuation's.
+        harness.new_agent()
+        assert await harness.agent.recover_runtime_state() == []
+        assert ManagedWatchStore().find_job_watch(job_id) is None
         context = _context("avibe", SESSION, turn_id=resumed_turn, delivery_id=continuation["id"])
         context.platform_specific.update(
             {"vibey_resume": True, "vibey_source_turn_id": cut_turn, "accepted_agent_run_ids": [run.id]}
@@ -2737,14 +2755,13 @@ async def test_a_restart_continuation_waits_for_its_surviving_command_as_the_liv
             await _until(lambda: harness.agent._run_for(SESSION, resumed_turn) is not None, "the continuation never ran")
             await asyncio.sleep(0.3)
             assert not resumed.done()
-            # Nothing is dispatched yet, so the Turn owner's Stop is the pre-write one: it
-            # publishes the Stop on the context and cancels the task (``_cancel_prewrite_durable_turn``).
-            mark_prewrite_user_stop(resume.context)
-            resumed.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await asyncio.wait_for(resumed, timeout=20)
-        else:
-            await asyncio.wait_for(resumed, timeout=20)
+            # Accepted before it waits, so the Turn owner routes a Stop to ``handle_stop`` (an
+            # active Turn, dispatch attempted), and a restart now would continue it again.
+            with engine.connect() as conn:
+                assert message_deliveries.get_turn(conn, resumed_turn)["state"] == "active"
+            assert backend_dispatch_attempted(resume.context) is True
+            assert await harness.agent.handle_stop(resume)
+        await asyncio.wait_for(resumed, timeout=20)
 
         [result] = [entry for entry in await harness.context_rows() if entry.kind == "tool_result"]
         body = result.message.content[0].text
@@ -2759,11 +2776,12 @@ async def test_a_restart_continuation_waits_for_its_surviving_command_as_the_liv
             assert watch_id and f"now Watch {watch_id}" in body
             assert suite.jobs.status(job_id).state == "running"
         else:
-            # Stopped before the continuation was dispatched: no model call, no hidden row.
+            # Stopped before the continuation's model call: none was made.
             assert "Stopped by the user" in body and watch_id is None
             assert suite.jobs.status(job_id).state != "running" and harness.provider.requests == []
         assert len(harness.rows("user")) == 1
-        assert [row["context_seq"] for row in harness.rows("agent_initiated")] == ([] if case == "stop" else [None])
+        # The continuation's hidden ownership row: accepted, never consumed as an input.
+        assert [row["context_seq"] for row in harness.rows("agent_initiated")] == [None]
     finally:
         if suite.jobs.status(job_id).state == "running":
             await suite.jobs.kill(job_id)

@@ -403,6 +403,17 @@ def consecutive_prewrite_start_failures(delivery: dict[str, Any]) -> int:
     return count
 
 
+def latest_turn(conn: Connection, session_id: str) -> dict[str, Any] | None:
+    """The Session's newest Turn, settled or not."""
+    return _one(
+        conn,
+        select(session_turns)
+        .where(session_turns.c.session_id == session_id)
+        .order_by(session_turns.c.created_at.desc(), session_turns.c.id.desc())
+        .limit(1),
+    )
+
+
 def active_turn(conn: Connection, session_id: str) -> dict[str, Any] | None:
     return _one(
         conn,

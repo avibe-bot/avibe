@@ -261,6 +261,10 @@ class FakeJobHost:
     def status(self, job_id) -> JobStatus:
         return self.states.get(job_id, JobStatus("gone"))
 
+    def meta(self, job_id) -> dict:
+        """No launch record: a surviving job's foreground window counts as already spent."""
+        return {}
+
     async def wait(self, job_id, *, deadline_s) -> JobStatus:
         while self.status(job_id).state == "running":
             self.changed.clear()

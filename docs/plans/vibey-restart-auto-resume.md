@@ -47,8 +47,8 @@ This replaces recovery invariant T4 for Vibey (`agent-core-contracts/recovery.md
      completed (`terminal_result`), with no continuation and no notice, before
      any of the other conditions apply: a Stop or a Session change after the
      final loses the race, as it does in a live Turn. Its result is that final,
-     or, for a silent final, the Turn's last visible text, promoted to the
-     result as the live dispatcher does;
+     or, for a successful silent final, the Turn's last visible text, promoted
+     to the result as the live dispatcher does; a failed final keeps its error;
    - the continuation bound is not exhausted (item 6).
    Anything else keeps today's behavior: the Turn settles as interrupted, its
    Runs settle without result, and the user gets today's notice.
@@ -70,8 +70,12 @@ This replaces recovery invariant T4 for Vibey (`agent-core-contracts/recovery.md
    projection, waits for it until it exits, until the call's foreground window
    (`bash`'s, 120 s by default) passes, counted from the job's launch
    (`meta.created_at`), or until a Stop, which ends the command as in a live
-   Turn (the wait precedes dispatch, so this is the Turn owner's pre-write Stop,
-   which cancels the run after publishing the Stop on its context). An exited job gives its real output; only a job still running then is
+   Turn. The continuation writes no input, so it is accepted before it waits:
+   a Stop reaches the adapter's own Stop, and another restart during the wait
+   finds an accepted Turn to continue (within item 6's bound). Startup leaves
+   the job to the continuation even then: an open call whose Turn was
+   `restart_resumed` belongs to the Session's newest Turn while that is
+   unsettled. An exited job gives its real output; only a job still running then is
    handed to a Watch, with the ordinary handover result; a window the downtime
    already spent hands over at once. A handover that fails is retried once, and
    with no Watch to take it the job stays in the foreground until it ends, as
@@ -84,7 +88,9 @@ This replaces recovery invariant T4 for Vibey (`agent-core-contracts/recovery.md
    That rule stays for the manual notice only. While no Watch can take its
    command yet, that Turn stays open and its owner retries (T2 before T4): no
    notice without the Watch, and no Run failed under a running command; a Stop
-   still settles it.
+   still settles it, and then T2 ends the command (a command whose Turn was
+   canceled is ended, as the Stop would have ended it live, never handed to a
+   Watch).
 4. **Runs follow the work.** The cut Turn settles with
    `settled_by = restart_resumed`, which is not a settlement without result, so
    none of its Runs is failed or owes a notice. The Runs' Delivery link moves to

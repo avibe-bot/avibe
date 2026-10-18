@@ -541,12 +541,13 @@ async def test_a_reply_pending_input_superseded_commits_as_a_visible_reply(engin
 
 async def test_the_restart_reads_of_a_turns_context_tail_stay_bounded(engine) -> None:
     """MESSAGE-DELIVERY-327: restart recovery decides each cut Turn (``restart_resume_plan``) and a
-    silent final's result synchronously on the controller loop. Every read is an indexed SEARCH
-    keyed by the Turn, a row id, the Session's context tail, or the Turn's own time window: no scan,
-    and a temporary sort only over the Turn's own Deliveries, never over the growing history."""
+    silent final's result, and every start of a continuation rechecks its admission, synchronously
+    on the controller loop. Every read is an indexed SEARCH keyed by the Turn, a row id, the
+    Session's context tail or newest Turn, or the Turn's own time window: no scan, and a temporary
+    sort only over the Turn's own Deliveries, never over the growing history."""
     from sqlalchemy import event
 
-    from core.backend_failure_retry import restart_resume_plan
+    from core.backend_failure_retry import admission_denial, reserve_restart_resume, restart_resume_plan
     from storage.agent_transcript import last_turn_text
 
     with engine.begin() as conn:
@@ -575,6 +576,18 @@ async def test_the_restart_reads_of_a_turns_context_tail_stay_bounded(engine) ->
             last_turn_text(conn, "ses_main", since="2026-01-01T00:00:00.000000Z")
     finally:
         event.remove(engine, "before_cursor_execute", capture)
+    with engine.begin() as conn:
+        [continuation] = reserve_restart_resume(conn, message_deliveries.get_turn(conn, "turn_cut"))
+        message_deliveries.terminalize_turn(
+            conn, "turn_cut", outcome="completed", settled_by="restart_resumed", evidence_kind="restart_resume"
+        )
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        with engine.connect() as conn:
+            # The continuation's admission: its cut Turn must still be the Session's newest.
+            assert admission_denial(conn, message_deliveries.get_delivery(conn, continuation["id"])) is None
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
 
     raw = sqlite3.connect(str(get_sqlite_state_path()))
     try:
@@ -585,6 +598,8 @@ async def test_the_restart_reads_of_a_turns_context_tail_stay_bounded(engine) ->
     bounded = re.compile(
         r"SEARCH \w+ USING (?:COVERING )?INDEX \w+ \((?:id=\?|delivery_id=\?|turn_id=\?|current_target_turn_id=\?"
         r"|session_id=\? AND context_seq>\?|session_id=\? AND type=\? AND created_at>\?)\)"
+        # The Session's newest Turn: its index's order, so LIMIT 1 reads one row.
+        r"|SEARCH session_turns USING (?:COVERING )?INDEX \w+ \(session_id=\?\)"
     )
     for (sql, _params), plan in zip(statements, plans):
         searches = [step for step in plan if step.startswith(("SEARCH", "SCAN"))]

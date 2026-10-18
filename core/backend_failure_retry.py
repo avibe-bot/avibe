@@ -501,12 +501,7 @@ def _restart_resume_denial(
         or source["settled_by"] != SETTLED_BY_RESTART_RESUMED
     ):
         return "restart_resume_unavailable"
-    latest = conn.execute(
-        select(session_turns.c.id)
-        .where(session_turns.c.session_id == session_id)
-        .order_by(session_turns.c.created_at.desc(), session_turns.c.id.desc())
-        .limit(1)
-    ).scalar_one_or_none()
-    if latest != source["id"]:
+    latest = deliveries.latest_turn(conn, session_id)
+    if latest is None or latest["id"] != source["id"]:
         return "restart_resume_stale"
     return None

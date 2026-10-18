@@ -6871,12 +6871,13 @@ class SessionTurnManager:
             logger.warning("Vibey settlement failed for session=%s", session_id, exc_info=True)
             return False
 
-    def _retry_restart_fallback(self, session_id: str) -> None:
+    def _retry_restart_fallback(self, session_id: str, turn_id: str) -> None:
         """Recover a cut Vibey Turn startup had to leave open, until it is settled.
 
         What it waits on (T2 handing its running command to a Watch, or a steer
-        receipt still to be materialized) is retried by recovering the Session again,
-        for as long as the same Turn stays open; a Stop or another owner ends it.
+        receipt still to be materialized) is retried by recovering the Session again
+        while the Turn stays open. A Stop that settles it meanwhile ends its running
+        command too, as it would in a live Turn.
         """
 
         existing = self._restart_fallback_retries.get(session_id)
@@ -6896,16 +6897,14 @@ class SessionTurnManager:
                     )
                     try:
                         with self._sqlite_engine().connect() as conn:
-                            live = delivery_store.active_turn(conn, session_id)
-                        if live is None or live.get("backend") != "vibey":
-                            return  # a Stop or another owner settled it meanwhile
-                        if not await self._settle_vibey_session(session_id):
-                            continue
-                        await self.recover_durable_delivery_state(session_id, service_restart=True)
-                        with self._sqlite_engine().connect() as conn:
-                            after = delivery_store.active_turn(conn, session_id)
-                        if after is None or after["id"] != live["id"]:
+                            turn = delivery_store.get_turn(conn, turn_id)
+                        if turn is None or turn["state"] not in delivery_store.TURN_OWNER_STATES:
+                            if turn is not None and turn.get("terminal_outcome") == "canceled":
+                                # Stopped while it waited: Vibey's T2 ends its command with it.
+                                await self._settle_vibey_session(session_id)
                             return
+                        if await self._settle_vibey_session(session_id):
+                            await self.recover_durable_delivery_state(session_id, service_restart=True)
                     except Exception:
                         # A failed pass is retried like what it waited on: this task is the
                         # Session's only retry, so it must outlive one.
@@ -7258,14 +7257,21 @@ class SessionTurnManager:
             plan, final = (
                 restart_resume_plan(conn, turn) if turn is not None else ("unavailable", None)
             )
-            # A silent final leaves the Turn's last visible text its result, as live.
+            # A silent final leaves the Turn's last visible text its result, as live; a failed
+            # final keeps its own error.
             visible = (
                 last_turn_text(
                     conn,
                     str(turn["session_id"]),
                     since=str(turn.get("started_at") or turn["created_at"]),
                 )
-                if plan == "final" and final is not None and turn is not None and not final.text.strip()
+                if (
+                    plan == "final"
+                    and final is not None
+                    and turn is not None
+                    and final.message_type != "error"
+                    and not final.text.strip()
+                )
                 else None
             )
             initial = (
@@ -7309,7 +7315,7 @@ class SessionTurnManager:
                 # Promoted by the async caller, off the controller loop, as the dispatcher does.
                 "promote_turn_text": (
                     (result_id, suppress_delivery)
-                    if terminal.get("changed") and visible is not None and not failed
+                    if terminal.get("changed") and visible is not None
                     else None
                 ),
             }
@@ -7524,7 +7530,7 @@ class SessionTurnManager:
                 if continued is not None and continued.get("restart_wait"):
                     # A steer the dead run may have accepted is not settled yet: its Run
                     # must join the Turn before the Turn completes or moves on.
-                    self._retry_restart_fallback(target_session)
+                    self._retry_restart_fallback(target_session, turn_id)
                     continue
                 if continued is not None:
                     if continued.get("changed"):
@@ -7549,7 +7555,7 @@ class SessionTurnManager:
                 # could take it yet. T2 before T4: the Turn stays open until it is handed over,
                 # so its notice names the Watch and its Runs are not failed under a running
                 # command. A Stop still settles it.
-                self._retry_restart_fallback(target_session)
+                self._retry_restart_fallback(target_session, turn_id)
                 continue
             # Read Run attribution BEFORE terminalizing: the notice below is owed
             # only to a turn that has none, and terminalization retires the

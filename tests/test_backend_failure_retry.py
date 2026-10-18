@@ -32,6 +32,7 @@ def _with_vibey_recovery(controller, engine, tmp_path, jobs):
     """The registered Vibey adapter over ``jobs`` and its single recovery owner, as at startup."""
     from core.agent_core.messages import text
     from core.agent_core.tools.base import ToolResult
+    from core.agent_core.tools.bash import settle_in_foreground
     from modules.agents.vibey import VibeyAgent
     from modules.agents.vibey.recovery import VibeyRecovery
     from modules.agents.vibey.tools import ToolSuite
@@ -42,6 +43,7 @@ def _with_vibey_recovery(controller, engine, tmp_path, jobs):
     suite = ToolSuite(
         jobs=jobs, create_tools=lambda *_args: [], render_recovered=handed_over,
         find_job=lambda call: "job_1" if call.tool_call_id == "call_bash" else None,
+        wait_recovered=lambda call, job_id, stop: settle_in_foreground(jobs, call, job_id, stop=stop),
     )
     controller.agent_service.agents["vibey"] = VibeyAgent(
         controller, engine=engine, tool_suite=suite, state_dir=tmp_path / "agent_core"
@@ -300,6 +302,7 @@ def test_restart_continues_a_cut_vibey_turn_from_its_transcript_without_a_notice
         ("1760000000.000100", "failing", False, "final"),
         (None, "ready", True, "final"),
         (None, "ready", False, "silent_final"),
+        (None, "ready", False, "failed_final"),
     ],
 )
 def test_restart_completes_a_cut_vibey_turn_whose_final_reply_was_committed(
@@ -308,7 +311,8 @@ def test_restart_completes_a_cut_vibey_turn_whose_final_reply_was_committed(
     """MESSAGE-DELIVERY-327: nothing is left to continue, and nothing failed, even when a Stop
     landed after the final (it loses the race, as live). The 👀 the dead process left on an IM
     message is retired once its transport can deliver, and a failed attempt is kept for the next.
-    A silent final leaves the Turn's narration before it as the result, as live."""
+    A silent final leaves the Turn's narration before it as the result, as live; a failed final
+    with nothing to show keeps its own error and promotes nothing."""
     from core import message_mirror
 
     cut = _accepted_turn(tmp_path, backend="vibey", delivery=delivery, native_message_id=origin)
@@ -345,10 +349,16 @@ def test_restart_completes_a_cut_vibey_turn_whose_final_reply_was_committed(
             for row in messages_service.list_session_messages(conn, session_id=cut.session_id)["messages"]
             if row["author"] == "agent" and row["type"] != "assistant"
         ]
-    assert (turn["terminal_outcome"], turn["settled_by"]) == ("completed", "terminal_result")
-    answer = "全部完成" if final == "final" else "日志读完了。\n缓存被两个写者共享。\n锁已加上。\n已验证。"
-    assert json.loads(turn["terminal_evidence_json"])["result_text"] == answer
-    assert replies == [("result", answer)]
+    narration = "日志读完了。\n缓存被两个写者共享。\n锁已加上。\n已验证。"
+    if final == "failed_final":
+        assert (turn["terminal_outcome"], turn["settled_by"]) == ("failed", "terminal_result")
+        assert json.loads(turn["terminal_evidence_json"])["result_text"] == ""
+        assert replies == [("interim", narration), ("error", "")]
+    else:
+        assert (turn["terminal_outcome"], turn["settled_by"]) == ("completed", "terminal_result")
+        answer = "全部完成" if final == "final" else narration
+        assert json.loads(turn["terminal_evidence_json"])["result_text"] == answer
+        assert replies == [("result", answer)]
     assert cut.starts == []
     assert _continuations(cut.engine, cut.session_id) == []
     assert _notices(cut.engine, cut.session_id) == []
@@ -482,10 +492,11 @@ def test_restart_notice_names_the_watch_running_the_command_and_offers_no_retry(
     dispatch.assert_not_awaited()
 
 
-def test_a_restart_notice_waits_until_its_running_command_is_handed_over(isolated_state, tmp_path, monkeypatch):
+@pytest.mark.parametrize("then", ["handed_over", "stopped"])
+def test_a_restart_notice_waits_until_its_running_command_is_handed_over(isolated_state, tmp_path, monkeypatch, then):
     """MESSAGE-DELIVERY-322: with no Watch to take the command yet, the Turn stays open (T2 before
     T4): no notice without the Watch, nothing failed under a running command; the retry hands it
-    over and the notice then names it."""
+    over and the notice then names it. A Stop that settles the waiting Turn ends the command."""
     from core.agent_core.tools.base import JobStatus
     from core.session_turns import SessionTurnManager
     from tests.agent_core.fakes import FakeJobHost
@@ -497,12 +508,13 @@ def test_a_restart_notice_waits_until_its_running_command_is_handed_over(isolate
 
     async def locked_once(job_id):
         attempts.append(job_id)
-        if len(attempts) == 1:
+        if len(attempts) == 1 or then == "stopped":
             raise RuntimeError("the Watch store is locked")
         return await hand_over(job_id)
 
     jobs.hand_over = locked_once
     monkeypatch.setattr(SessionTurnManager, "RESTART_FALLBACK_RETRY_DELAYS", (0.05,))
+    monkeypatch.setattr(SessionTurnManager, "RESTART_FALLBACK_RETRY_PERIOD", 0.05)
     cut = _accepted_turn(tmp_path, backend="vibey", jobs=jobs)
     _then(_previous_process("running"), _request_stop)(cut.engine, cut.session_id, cut.turn_id)
     cut.manager._active_identity = lambda *_args: None
@@ -513,13 +525,25 @@ def test_a_restart_notice_waits_until_its_running_command_is_handed_over(isolate
         with cut.engine.connect() as conn:
             assert message_deliveries.get_turn(conn, cut.turn_id)["state"] == "active"
         assert _notices(cut.engine, cut.session_id) == []
+        if then == "stopped":
+            # The user stops the Turn while it waits; no runtime holds it, so the Stop settles it.
+            with cut.engine.begin() as conn:
+                message_deliveries.terminalize_turn(
+                    conn, cut.turn_id, outcome="canceled", settled_by="adapter_not_active",
+                    evidence_kind="stop_not_active",
+                )
         for _ in range(100):
-            if _notices(cut.engine, cut.session_id):
+            if _notices(cut.engine, cut.session_id) or jobs.killed:
                 break
             await asyncio.sleep(0.02)
 
     asyncio.run(startup())
 
+    if then == "stopped":
+        # Ended as the Stop would end it, never left running as a Watch, and no notice owed.
+        assert jobs.killed == ["job_1"] and jobs.watches == {}
+        assert _notices(cut.engine, cut.session_id) == []
+        return
     [notice] = _notices(cut.engine, cut.session_id)
     assert notice["metadata"]["watch_ids"] == ["watch_job_1"] and jobs.watches == {"job_1": "watch_job_1"}
     with cut.engine.connect() as conn:
