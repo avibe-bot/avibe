@@ -24,17 +24,19 @@ def hold_markdown_escapes(
     converts the text locally, turning
     ``[a\\*b\\*.example](https://a*b*.example/x)`` into
     ``a*b*.example (https://a*b*.example/x)``, so an escaped bracket or star is
-    a syntax question for that conversion too. Discord and Feishu were measured
-    here only as local pass-through - what their renderers show for a stray
-    backslash has not been observed on those platforms. So the escape is
-    resolved here, before a platform formatter runs, and the character it
-    protected is held behind a placeholder until that formatter is done - which
-    is the same reason it was escaped upstream, honoured in the dialect that is
-    actually about to parse the text.
+    a syntax question for that conversion too. Feishu's card Markdown keeps the
+    backslash of an escape in a link label or address, and documents HTML
+    entities as its way to show a syntax character. Discord, Slack's ``markdown`` block and the Web read CommonMark escapes
+    themselves and are handed the text as it is. So the escape is resolved
+    here, before a platform formatter runs, and the character it protected is
+    held behind a placeholder until that formatter is done - which is the same
+    reason it was escaped upstream, honoured in the dialect that is actually
+    about to parse the text.
 
     ``render`` is how the platform wants the character to come back: Telegram
-    needs it HTML-escaped, the others want it verbatim. Restore with
-    ``restore_held`` once the platform pass is finished.
+    needs it HTML-escaped, Feishu as a numeric entity, Slack's mrkdwn with its
+    three delimiters encoded, WeChat verbatim. Restore with ``restore_held``
+    once the platform pass is finished.
     """
     held: Dict[str, str] = {}
 
@@ -90,6 +92,15 @@ def hold_links(
         cursor = link.end
     parts.append(text[cursor:])
     return "".join(parts), held
+
+
+# The characters that are markup somewhere a message is delivered when they
+# stand inside a line: emphasis, strikethrough and code; link brackets; table
+# and Slack link bars; autolinks, HTML and Slack mentions; character references;
+# and the backslash itself. CommonMark lets any ASCII punctuation be escaped,
+# and every transport resolves exactly that grammar, so escaping a character
+# outside this set would only clutter the text.
+_LITERAL_MARKUP = frozenset("\\`*_~|[]<>&")
 
 
 def _placeholder() -> str:
@@ -217,10 +228,18 @@ class BaseMarkdownFormatter(ABC):
         """Format hyperlink - platform specific"""
         pass
 
-    @abstractmethod
     def escape_special_chars(self, text: str) -> str:
-        """Escape platform-specific special characters"""
-        pass
+        """Text that must reach the reader exactly as written: a query, a path, a tool name, an error.
+
+        The one literal-text operation. A message is Markdown until its transport
+        spells it in its own dialect, so the text is written once as CommonMark
+        backslash escapes, and each transport resolves them into its own literal:
+        Discord, Slack's ``markdown`` block and the Web read the escapes
+        natively, and Telegram, Feishu, WeChat and Slack's mrkdwn resolve them
+        through ``hold_markdown_escapes``. Not for code spans, whose content is
+        already literal and where a backslash is shown as written.
+        """
+        return "".join(f"\\{character}" if character in _LITERAL_MARKUP else character for character in text)
 
     # High-level message composition methods
     def format_message(self, *lines) -> str:
@@ -363,13 +382,11 @@ class BaseMarkdownFormatter(ABC):
     # Convenience methods that combine formatting
     def format_tool_name(self, tool_name: str, emoji: str = "🔧") -> str:
         """Format tool name with emoji and styling"""
-        escaped_name = self.escape_special_chars(tool_name)
-        return f"{emoji} {self.format_bold('Tool')}: {self.format_code_inline(escaped_name)}"
+        return f"{emoji} {self.format_bold('Tool')}: {self.format_code_inline(tool_name)}"
 
     def format_file_path(self, path: str, emoji: str = "📁") -> str:
         """Format file path with emoji"""
-        escaped_path = self.escape_special_chars(path)
-        return f"{emoji} File: {self.format_code_inline(escaped_path)}"
+        return f"{emoji} File: {self.format_code_inline(path)}"
 
     def format_command(self, command: str) -> str:
         """Format shell command"""
@@ -377,8 +394,7 @@ class BaseMarkdownFormatter(ABC):
         if "\n" in command or len(command) > 80:
             return f"💻 Command:\n{self.format_code_block(command, 'bash')}"
         else:
-            escaped_cmd = self.escape_special_chars(command)
-            return f"💻 Command: {self.format_code_inline(escaped_cmd)}"
+            return f"💻 Command: {self.format_code_inline(command)}"
 
     def format_error(self, error_text: str) -> str:
         """Format error message"""
@@ -696,7 +712,9 @@ class BaseMarkdownFormatter(ABC):
             label = f"🔧 {tool_name}: {detail}"
         else:
             label = f"🔧 {tool_name}"
-        return _truncate_status(label, max_len)
+        # Shortened first, so the cut can never split an escape; the label is the
+        # tool's own words, shown as written.
+        return self.escape_special_chars(_truncate_status(label, max_len))
 
     @staticmethod
     def _clean_label_value(value: str) -> str:

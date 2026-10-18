@@ -35,9 +35,6 @@ class TelegramFormatter(BaseMarkdownFormatter):
     def format_link(self, text: str, url: str) -> str:
         return f"[{text}]({url})"
 
-    def escape_special_chars(self, text: str) -> str:
-        return text
-
     @staticmethod
     def _find_link_url_end(text: str, start: int) -> int | None:
         depth = 0

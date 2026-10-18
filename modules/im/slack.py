@@ -68,6 +68,28 @@ _SOFT_LINE_BREAK_RE = re.compile(r"[ \t]*(?:\r\n|\r|\n)[ \t]*")
 _EVENT_TASK_SHUTDOWN_DRAIN_TIMEOUT_SECONDS = 70.0
 
 
+# Invisible, and enough to keep mrkdwn from reading the delimiter after it as
+# markup (U+034F COMBINING GRAPHEME JOINER).
+_MRKDWN_INERT = "\u034f"
+
+
+def _shown_in_mrkdwn(character: str) -> str:
+    """A character a backslash escape protected, spelled so mrkdwn shows it as written.
+
+    mrkdwn has no escape. ``&``, ``<`` and ``>`` have entities, and a bare one
+    is markup (``<!channel>`` is a mention). A paired ``*``, ``_``, ``~`` or
+    backtick has no spelling at all: measured by posting and reading the
+    message back as rich text, a zero-width space, word joiner or zero-width
+    (non-)joiner beside it still formats, and a combining grapheme joiner
+    written before it does not. Every other character is not markup in mrkdwn.
+    """
+    if character in "&<>":
+        return encode_slack_delimiters(character)
+    if character in "*_~`":
+        return _MRKDWN_INERT + character
+    return character
+
+
 class SlackBot(BaseIMClient):
     """Slack implementation of the IM client"""
 
@@ -477,7 +499,12 @@ class SlackBot(BaseIMClient):
             # them. A placeholder left inside a wrapper would come back as a
             # raw character with nothing able to encode it any more.
             converted_text = restore_held(converted_text, links)
-            return restore_held(converted_text, escaped)
+            # Outside a link, an escaped character comes back the way mrkdwn
+            # shows it as written (``_shown_in_mrkdwn``).
+            return restore_held(
+                converted_text,
+                {token: _shown_in_mrkdwn(character) for token, character in escaped.items()},
+            )
         except Exception as e:
             logger.warning(f"Error converting markdown to mrkdwn: {e}, using original text")
             # Fallback to original text if conversion fails
@@ -662,6 +689,15 @@ class SlackBot(BaseIMClient):
             },
         }
 
+    def _markdown_block_fallback(self, text: str) -> str:
+        """The top-level ``text`` beside a ``markdown`` block: what notifications and screen readers get.
+
+        Slack reads that field as mrkdwn, not Markdown, so it is the block's text
+        converted the way every mrkdwn message is (escapes resolved, links
+        re-spelled), never the Markdown as written.
+        """
+        return self._get_visible_text(self._convert_markdown_to_slack_mrkdwn(text))
+
     @staticmethod
     def _build_markdown_block(text: str) -> Dict[str, Any]:
         return {
@@ -749,7 +785,7 @@ class SlackBot(BaseIMClient):
         blocks.append(self._build_context_footer_block(subtext, parse_mode=parse_mode))
         if keyboard:
             blocks.extend(self._build_actions_blocks(keyboard))
-        fallback_text = self._get_visible_text(body) if (body and body.strip()) else (subtext or "").strip()
+        fallback_text = self._markdown_block_fallback(body) if (body and body.strip()) else (subtext or "").strip()
         return blocks, fallback_text
 
     @staticmethod
@@ -1027,7 +1063,7 @@ class SlackBot(BaseIMClient):
 
         kwargs = {
             "channel": context.channel_id,
-            "text": self._get_visible_text(text),
+            "text": self._markdown_block_fallback(text),
             "blocks": blocks,
         }
 

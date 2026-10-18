@@ -502,20 +502,64 @@ class WeChatConsumerTests(PlatformConsumerTests):
 
 
 class PassThroughConsumerTests(unittest.TestCase):
-    """Discord and Feishu render Markdown themselves and are handed it as-is.
+    """Discord renders Markdown itself and is handed it as-is.
 
-    That is all this measures: the adapter changes nothing. What those two
-    platforms then draw is not observable from here, and no message is sent.
+    That is all this measures: the adapter changes nothing. What Discord then
+    draws is not observable from here, and no message is sent.
     """
 
     def setUp(self):
         self.discord = DiscordBot(DiscordConfig(bot_token="test-token"))
-        self.feishu = FeishuBot(LarkConfig(app_id="app-id", app_secret="app-secret"))
 
     def test_the_adapter_hands_the_body_over_unchanged(self):
         for row in CASES:
             with self.subTest(case=row["key"]):
                 self.assertEqual(self.discord.format_markdown(row["im_text"]), row["im_text"])
+
+
+class FeishuConsumerTests(unittest.TestCase):
+    """Feishu's card Markdown, as Feishu itself parses it.
+
+    Read back from Feishu's parsed card (``card_msg_content_type=raw_card_content``),
+    a backslash escape in a link label is shown with its backslash, and one in a
+    link destination stays in the address. So the adapter writes each escape as a
+    numeric entity and each address unescaped, its parentheses spelled. Every
+    expected body below was posted and read back: each label reads as the
+    characters, and each link opens its address.
+    """
+
+    def setUp(self):
+        self.feishu = FeishuBot(LarkConfig(app_id="app-id", app_secret="app-secret"))
+
+    def test_a_label_shows_its_characters_and_the_link_opens_its_address(self):
+        expected = {
+            "star_host": "Cited. [a&#42;b&#42;.example](https://a*b*.example/x)",
+            "entity_host": "Cited. [a&#38;copy;.example](https://a%26copy%3B.example/x)",
+            "ipv6_port": "Cited. [&#91;::1&#93;](https://[::1]:8443/x?q=1)",
+            "paren_path": (
+                "One [en.wikipedia.org](https://en.wikipedia.org/wiki/Foo_%28bar%29), "
+                "two [example.com](https://example.com/a_%28b?q=c%29d), "
+                "three [example.com](https://example.com/a%28b%29), "
+                "four [&#91;::1&#93;](https://[::1]:8443/x%28y)."
+            ),
+            "multi_source": "First [example.com](https://example.com/x), second [a&#42;b&#42;.example](https://a*b*.example/y).",
+        }
+        for key, body in expected.items():
+            with self.subTest(case=key):
+                self.assertEqual(self.feishu.format_markdown(case(key)["im_text"]), body)
+
+    def test_an_escaped_address_is_the_one_a_markdown_reader_resolves(self):
+        """``\\%`` resolves to ``%``, so ``a\\%20b`` names ``a%20b``: the escape it spells is kept, not encoded again."""
+        self.assertEqual(
+            self.feishu.format_markdown(r"[x](https://example.com/a\%20b) and [y](<https://example.com/a\_b c>)"),
+            "[x](https://example.com/a%20b) and [y](https://example.com/a_b%20c)",
+        )
+
+    def test_a_body_with_no_escape_is_handed_over_unchanged(self):
+        for row in CASES:
+            if "\\" in row["im_text"]:
+                continue
+            with self.subTest(case=row["key"]):
                 self.assertEqual(self.feishu.format_markdown(row["im_text"]), row["im_text"])
 
 
