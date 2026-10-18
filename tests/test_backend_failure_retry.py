@@ -308,7 +308,23 @@ def test_restart_reruns_a_cut_vibey_turn_in_place_without_a_notice(isolated_stat
             conn.execute(update(agent_sessions).where(agent_sessions.c.id == session_id).values(agent_name="reviewer"))
         agents["agt_worker"] = VibeAgent(id="agt_worker", name="builder", normalized_name="builder", backend="vibey")
 
-    _restart(cut, _then(_previous_process(step), switch_agent))
+    rotate, rotated_on_loop = message_deliveries.rotate_restart_generation, []
+
+    def rotate_where(*args, **kwargs):
+        try:
+            asyncio.get_running_loop()
+            rotated_on_loop.append(True)
+        except RuntimeError:
+            rotated_on_loop.append(False)
+        return rotate(*args, **kwargs)
+
+    message_deliveries.rotate_restart_generation = rotate_where
+    try:
+        _restart(cut, _then(_previous_process(step), switch_agent))
+    finally:
+        message_deliveries.rotate_restart_generation = rotate
+    # Its writer transaction takes SQLite's write lock: off the controller loop.
+    assert rotated_on_loop == [False]
 
     if jobs is not None:
         assert jobs.watches == {}
@@ -659,6 +675,73 @@ def test_a_stop_arriving_while_a_committed_final_settles_loses_the_race(isolated
     with cut.engine.connect() as conn:
         turn = message_deliveries.get_turn(conn, cut.turn_id)
     assert (turn["terminal_outcome"], turn["settled_by"]) == ("completed", "terminal_result")
+
+
+def test_a_rerun_cancelled_before_its_adapter_owns_the_command_still_ends_it(isolated_state, tmp_path):
+    """MESSAGE-DELIVERY-330: the rerun is published before Vibey takes the command its restart
+    left running; a backend disable that cancels it in that interval still ends the command with
+    the canceled Turn, never leaving it running unowned."""
+    from core.agent_core.tools.base import JobStatus
+    from core.run_settlement import SETTLED_BY_BACKEND_DISABLED
+    from core.session_turns import Turn
+    from tests.agent_core.fakes import FakeJobHost
+    from tests.test_internal_server import _bind_test_native_start
+
+    jobs = FakeJobHost()
+    jobs.states["job_1"] = JobStatus("running")
+    cut = _accepted_turn(tmp_path, backend="vibey", jobs=jobs)
+
+    async def published_not_yet_adapted(sid, ctx, text, **_kwargs):
+        # ``_run`` publishes the in-flight Turn; the adapter has not started yet.
+        cut.starts.append((sid, text))
+        _bind_test_native_start(cut.engine, ctx)
+        cut.manager.in_flight[sid] = Turn(
+            task=asyncio.ensure_future(asyncio.Event().wait()), context=ctx,
+            logical_turn_id=ctx.platform_specific["turn_token"],
+        )
+
+    cut.manager._run = published_not_yet_adapted
+    _previous_process("running")(cut.engine, cut.session_id, cut.turn_id)
+    cut.manager._active_identity = lambda *_args: None
+
+    async def startup():
+        assert await cut.manager.controller.vibey_recovery.start() == []
+        await cut.manager.recover_durable_delivery_state(service_restart=True)
+        assert cut.starts == [(cut.session_id, "")] and jobs.killed == []
+        # The backend is disabled: its Turns are settled and their tasks cancelled.
+        cut.manager._terminalize_durable_turn(
+            cut.turn_id, "canceled", settled_by=SETTLED_BY_BACKEND_DISABLED, evidence_kind="backend_disabled"
+        )
+        cut.manager.in_flight.pop(cut.session_id).task.cancel()
+        for _ in range(100):
+            if jobs.killed:
+                break
+            await asyncio.sleep(0.02)
+
+    asyncio.run(startup())
+
+    assert jobs.killed == ["job_1"] and jobs.watches == {}
+
+
+def test_a_committed_final_starts_its_successor_even_when_its_follow_ups_fail(isolated_state, tmp_path, monkeypatch):
+    """MESSAGE-DELIVERY-331: input queued behind a Turn completed from its committed final starts
+    at once; its follow-ups are durable and a failure in them holds nothing, startup included."""
+    cut = _accepted_turn(tmp_path, backend="vibey", native_message_id="1760000000.000100")
+
+    async def store_unavailable(*_args, **_kwargs):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(cut.manager, "_run_restart_followups", store_unavailable)
+
+    def queue_input(engine, session_id, _turn_id):
+        with engine.begin() as conn:
+            message_deliveries.enqueue_queued(conn, scope_id=None, session_id=session_id, text="然后再看看日志")
+
+    _restart(cut, _then(_previous_process("final"), queue_input))
+
+    assert cut.starts == [(cut.session_id, "然后再看看日志")]
+    with cut.engine.connect() as conn:
+        assert message_deliveries.get_turn(conn, cut.turn_id)["terminal_outcome"] == "completed"
 
 
 def test_a_rerun_that_exits_before_dispatching_fails_its_turn(isolated_state, tmp_path):

@@ -116,7 +116,8 @@ exists; "handled" names where the in-place design still owns it.
    a Stop, which ends the command as in a live Turn: the Turn is durably
    active, so a Stop reaches the adapter's own Stop during the wait. A
    cancellation outside a shutdown (the backend disabled or refreshed) ends the
-   command too; a shutdown leaves it for the next start's rerun. An exited
+   command too, also before the adapter took it; a shutdown leaves it for the
+   next start's rerun. An exited
    job gives its real output; only a job still running then is
    handed to a Watch, with the ordinary handover result; a window the downtime
    already spent hands over at once. A handover that fails is retried once,
@@ -150,8 +151,9 @@ exists; "handled" names where the in-place design still owns it.
    shows the rerunning Turn as running.
    The fallback notices of item 1 point to Retry where the notice shows it, or
    to sending `continue`, instead of asking for a resend (copy fix in both
-   languages). A rerun's processing indicator owns the 👀 the dead process left
-   on its IM message, so the Turn's own end retires it. A Turn completed from
+   languages). A rerun's processing indicator runs as any Turn's does, and its
+   end also retires the 👀 the dead process may have left on its IM message
+   (there may be none, so a failed removal withholds no receipt). A Turn completed from
    its committed final loses that 👀 once its transport can deliver (a platform
    without reaction indicators has none); that and the silent-final promotion
    are recorded durably with the Turn's terminal write, so another restart

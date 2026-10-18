@@ -4824,7 +4824,23 @@ class SessionTurnManager:
             durable_preallocated=True,
             lifecycle_snapshot=lifecycle_snapshot if source == SOURCE_HUMAN else None,
         )
+        projected = self.in_flight.get(session_id)
+        if projected is not None and projected.logical_turn_id == turn_id:
+            projected.task.add_done_callback(partial(self._after_rerun, session_id))
         return True
+
+    def _after_rerun(self, session_id: str, task: "asyncio.Task[None]") -> None:
+        """A rerun cancelled outside a shutdown (a Stop, the backend disabled or refreshed)
+        may end before its adapter owns the command the restart left running: Vibey's T2
+        then ends it with the canceled Turn, rather than leaving it running unowned."""
+
+        if not task.cancelled() or getattr(self.controller, "shutdown_requested", False) is True:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._settle_vibey_session(session_id), name=f"vibey-rerun-cancelled:{session_id}")
 
     def _turn_vibe_agent(self, session_id: str, turn_id: str, execution: dict[str, Any]) -> tuple[Optional[bool], Any]:
         """``(known, agent)``: the Agent that ran a Turn, while it still runs on Vibey.
@@ -7407,30 +7423,22 @@ class SessionTurnManager:
         still unsettled stays open for a retry; anything else keeps today's notice.
         """
 
-        from core.restart_resume import PROCESS_TOKEN, restart_resume_plan, restart_streak
+        from core.restart_resume import restart_resume_plan
 
-        with self._sqlite_engine().begin() as conn:
-            reserve_write_lock(conn)
+        # A bounded read: the final path reaches its terminal write with nothing awaited in
+        # between, so a Stop cannot settle the Turn after its final was found.
+        with self._sqlite_engine().connect() as conn:
             turn = delivery_store.get_turn(conn, turn_id)
             if turn is None or str(turn.get("start_attempt_id") or "") != attempt_id:
                 return "unavailable"
             plan, final = restart_resume_plan(conn, turn)
-            if plan == "rerun":
-                streak, response_seq = restart_streak(conn, turn)
-                if delivery_store.rotate_restart_generation(
-                    conn,
-                    turn_id,
-                    expected_version=int(turn["version"]),
-                    streak=streak,
-                    response_seq=response_seq,
-                    process=PROCESS_TOKEN,
-                ) is None:
-                    return "unavailable"
         if plan == "final" and final is not None:
             await self._complete_from_committed_final(turn, final)
             return "final"
         if plan != "rerun":
             return plan
+        if not await asyncio.to_thread(self._rotate_for_rerun, turn_id, attempt_id):
+            return "wait"  # it changed meanwhile: the retry decides again
         try:
             started = await self._rerun_turn(turn_id)
         except Exception:
@@ -7438,6 +7446,34 @@ class SessionTurnManager:
             logger.exception("restart rerun could not start Turn=%s; retrying", turn_id)
             return "wait"
         return "rerun" if started else "unavailable"
+
+    def _rotate_for_rerun(self, turn_id: str, attempt_id: str) -> bool:
+        """The rerun's writer transaction, off the controller loop: the restart streak, and
+        the dead runtime generation released, while the Turn still qualifies."""
+
+        from core.restart_resume import PROCESS_TOKEN, restart_resume_plan, restart_streak
+
+        with self._sqlite_engine().begin() as conn:
+            reserve_write_lock(conn)
+            turn = delivery_store.get_turn(conn, turn_id)
+            if (
+                turn is None
+                or str(turn.get("start_attempt_id") or "") != attempt_id
+                or restart_resume_plan(conn, turn)[0] != "rerun"
+            ):
+                return False
+            streak, response_seq = restart_streak(conn, turn)
+            return (
+                delivery_store.rotate_restart_generation(
+                    conn,
+                    turn_id,
+                    expected_version=int(turn["version"]),
+                    streak=streak,
+                    response_seq=response_seq,
+                    process=PROCESS_TOKEN,
+                )
+                is not None
+            )
 
     async def _complete_from_committed_final(
         self,
@@ -7505,11 +7541,15 @@ class SessionTurnManager:
                 settled = delivery_store.get_turn(conn, turn_id)
             if settled is not None:
                 self._settle_agent_run_ids_from_terminal_turn(run_ids, settled)
-        if followups:
-            await self._run_restart_followups(turn_id)
         successor_turn_id = str(terminal.get("successor_turn_id") or "")
         if successor_turn_id:
             await self._start_persisted_turn(successor_turn_id)
+        if followups:
+            # Durable and retried at the next start: a failure here never holds anything.
+            try:
+                await self._run_restart_followups(turn_id)
+            except Exception:
+                logger.exception("restart follow-ups of Turn=%s deferred to the next start", turn_id)
 
     async def recover_durable_delivery_state(
         self,
@@ -7525,7 +7565,10 @@ class SessionTurnManager:
 
         if service_restart and session_id is None:
             # What an earlier process recorded for Turns it completed and did not finish.
-            await self._run_restart_followups()
+            try:
+                await self._run_restart_followups()
+            except Exception:
+                logger.exception("restart follow-ups deferred to the next start")
         with self._sqlite_engine().connect() as conn:
             turns = delivery_store.recovery_turns(conn, session_id)
         pending_interrupts: list[tuple[str, str]] = []
