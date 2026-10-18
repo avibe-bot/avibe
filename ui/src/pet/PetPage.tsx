@@ -1145,11 +1145,13 @@ const MainDetail: React.FC<MainDetailProps> = (props) => {
   const firstCurrent = props.messages.findIndex((message) => message.id === props.exchange.user?.id || props.exchange.results.some((result) => result.id === message.id));
   const history = props.messages.slice(0, Math.max(0, firstCurrent))
     .filter((message) => message.type === 'user' || message.type === 'result').slice(-6);
+  const currentUser = props.exchange.user && <div className="pet-mini-detail-user"><Markdown content={props.exchange.user.text} references={(props.exchange.user.content as { references?: MentionReference[] })?.references} softBreaks /></div>;
   return (
     <div className="pet-mini-detail-inner">
       {history.map((message) => <div key={message.id} className={message.author === 'user' ? 'pet-mini-detail-user' : 'pet-mini-detail-result'}><Markdown content={message.text} references={(message.content as { references?: MentionReference[] })?.references} softBreaks /></div>)}
-      {props.exchange.user && <div className="pet-mini-detail-user"><Markdown content={props.exchange.user.text} references={(props.exchange.user.content as { references?: MentionReference[] })?.references} softBreaks /></div>}
+      {!props.exchange.answersEarlierInput && currentUser}
       {props.exchange.results.map((message, index) => <div ref={index === props.exchange.results.length - 1 ? lastResultRef : undefined} key={message.id} className="pet-mini-detail-result"><Markdown content={message.text} references={(message.content as { references?: MentionReference[] })?.references} softBreaks /></div>)}
+      {props.exchange.answersEarlierInput && currentUser}
       {props.failure && (
         <div className="pet-mini-detail-notice" role="status">
           <p>{props.failure.text}</p>

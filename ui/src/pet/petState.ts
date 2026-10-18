@@ -150,6 +150,11 @@ export const latestExchange = (
   /** False when unread results may reach past the loaded tail, so the pet
    *  must not mark read and sends the user to the Workbench instead. */
   unreadComplete: boolean;
+  /** True when the results answer an input before `user`: the latest input was
+   *  answered by silence, so its Turn's earlier text became the result where it
+   *  stood (`metadata.promoted_from`). The panel draws them before `user`,
+   *  right after the input they answer. */
+  answersEarlierInput: boolean;
 } => {
   const transcript = messages.filter((message) => isTranscriptMessage(message));
   let user: WorkbenchMessage | null = null;
@@ -161,15 +166,29 @@ export const latestExchange = (
   }
   const results = transcript.filter(isAgentResult);
   const unread = results.filter((message) => message.read_at === null);
+  // Only a promoted result: any other result before the latest input keeps
+  // being shown after it, as before.
+  const answersEarlierInput = (shown: WorkbenchMessage[]) => {
+    const last = shown[shown.length - 1];
+    return Boolean(
+      user && last && last.metadata?.promoted_from && transcript.indexOf(last) < transcript.indexOf(user),
+    );
+  };
   if (unread.length === 0) {
     const last = results[results.length - 1];
+    const shown = last ? [last] : [];
     // Inbox says something is unread, but the tail has no unread result: those
     // replies sit past the loaded window. A fully-loaded session treats a
     // leftover count as stale.
-    return { user, results: last ? [last] : [], unreadComplete: unreadCount <= 0 || !hasOlder };
+    return {
+      user,
+      results: shown,
+      unreadComplete: unreadCount <= 0 || !hasOlder,
+      answersEarlierInput: answersEarlierInput(shown),
+    };
   }
   // Unread rows reach past the tail when the oldest loaded result is itself
   // unread, or when the inbox count is ahead of the unread results we have.
   const unreadComplete = !hasOlder || (results[0].read_at !== null && unread.length >= unreadCount);
-  return { user, results: unread, unreadComplete };
+  return { user, results: unread, unreadComplete, answersEarlierInput: answersEarlierInput(unread) };
 };

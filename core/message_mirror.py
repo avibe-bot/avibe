@@ -37,7 +37,7 @@ from core.services import sessions as workbench_sessions_service
 from modules.im.base import MessageContext
 from storage import agent_events_service, messages_service, settings_service
 from storage.db import get_cached_sqlite_engine
-from vibe.message_types import activity_role_for, spec_for
+from vibe.message_types import PROMOTED_FROM_KEY, activity_role_for, spec_for
 
 logger = logging.getLogger(__name__)
 
@@ -791,23 +791,32 @@ def promote_turn_text_to_result(row_id: str, *, suppress_delivery: bool = False)
                 messages.c.author == "agent",
                 messages.c.type.in_(_TURN_TEXT_TYPES),
             )
-            stored = conn.execute(select(messages.c.content_json).where(*turn_text)).first()
+            stored = conn.execute(
+                select(messages.c.type, messages.c.content_json, messages.c.metadata_json).where(*turn_text)
+            ).first()
             if stored is None:
                 return None
+
+            def stored_object(raw: Optional[str]) -> dict:
+                try:
+                    value = json.loads(raw or "{}")
+                except (TypeError, ValueError):
+                    return {}
+                return value if isinstance(value, dict) else {}
+
             # ``content.kind`` names the type the row was persisted as; it moves
-            # with the type, as every persist path keeps the two together.
-            try:
-                content = json.loads(stored[0] or "{}")
-            except (TypeError, ValueError):
-                content = {}
-            if not isinstance(content, dict):
-                content = {}
+            # with the type, as every persist path keeps the two together. The
+            # metadata keeps the type it had, so the Activity timeline still sees
+            # the row mid-Turn (``PROMOTED_FROM_KEY``).
             promoted = conn.execute(
                 update(messages)
                 .where(*turn_text)
                 .values(
                     type="result",
-                    content_json=json.dumps({**content, "kind": "result"}),
+                    content_json=json.dumps({**stored_object(stored.content_json), "kind": "result"}),
+                    metadata_json=json.dumps(
+                        {**stored_object(stored.metadata_json), PROMOTED_FROM_KEY: stored.type}
+                    ),
                     updated_at=messages_service.canonical_message_timestamp(_now()),
                 )
             ).rowcount

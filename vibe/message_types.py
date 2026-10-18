@@ -150,11 +150,21 @@ def is_detached_completion(message_type: str, metadata: Any = None) -> bool:
 TRANSCRIPT_COPY_KEY = "transcript_copy"
 
 
+# Metadata on a ``result`` promoted from Turn text when its Turn ended on a silent
+# reply (``core.message_mirror.promote_turn_text_to_result``): the type it was
+# persisted as. The row renders and notifies as a result, but keeps that text's
+# place in the Activity timeline, because it stays mid-Turn.
+PROMOTED_FROM_KEY = "promoted_from"
+
+
 def activity_role_for(message_type: str, metadata: Any = None) -> str:
     """Resolve one row's role in the current Turn's Activity timeline."""
 
-    spec = spec_for(message_type)
     values = metadata if isinstance(metadata, Mapping) else {}
+    promoted_from = values.get(PROMOTED_FROM_KEY)
+    if isinstance(promoted_from, str) and promoted_from in _TYPE_SPECS:
+        message_type = promoted_from
+    spec = spec_for(message_type)
     if is_detached_completion(message_type, values):
         return "none"
     if values.get(TRANSCRIPT_COPY_KEY):

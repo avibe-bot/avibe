@@ -2131,6 +2131,20 @@ describe('Personal Agent review: history and lifecycle', () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it('draws a promoted result after the input it answered and before a later input answered by silence', async () => {
+    // Scenario: MESSAGE-DELIVERY-325.
+    tails.S = [
+      message('ask', 'S', { author: 'user', type: 'user', text: 'Check CI' }),
+      message('report', 'S', { text: 'CI is green', read_at: null, metadata: { promoted_from: 'output' } }),
+      message('steer', 'S', { author: 'user', type: 'user', text: 'Also the docs' }),
+    ];
+    render(<PetPage />); await showDetail();
+    const text = document.querySelector('.pet-mini-detail')?.textContent ?? '';
+    expect(text.indexOf('Check CI')).toBeGreaterThanOrEqual(0);
+    expect(text.indexOf('Check CI')).toBeLessThan(text.indexOf('CI is green'));
+    expect(text.indexOf('CI is green')).toBeLessThan(text.indexOf('Also the docs'));
+  });
+
   it('renders reference sidecars in current and historical Markdown', async () => {
     const reference = (id: string, title: string) => ({ references: [{ kind: 'session', session_id: id, title }] });
     tails.S = [
