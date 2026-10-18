@@ -687,6 +687,12 @@ test('the history opens at the bottom and stays pinned there only while the read
   await expect.poll(height).toBeGreaterThan(grown);
   expect(await history.evaluate((node) => node.scrollTop)).toBe(0);
   expect(await page.evaluate(() => window.petFixtureMarkReads)).toEqual([]);
+
+  // A new latest input is a new place to read from: it re-opens at the end
+  // even for a reader who had scrolled up.
+  await page.evaluate(() => window.petFixtureMessage({ id: 'live_input', author: 'user', type: 'user', text: '再看看文档' }));
+  await expect(history).toContainText('再看看文档');
+  await expect.poll(gap).toBeLessThanOrEqual(1);
 });
 
 test('a latest reply taller than the history opens at its end', async ({ page }) => {
