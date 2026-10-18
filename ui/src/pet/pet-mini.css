@@ -761,9 +761,15 @@ to {
   border:1px solid color-mix(in srgb,var(--pet-ink) 10%,transparent);
   border-radius:22px;
   background:var(--pet-card)}
+/* The tail is a square rotated 45deg with its two lower edges stroked. Its
+   anti-diagonal becomes the horizontal line through its centre, so the clip
+   keeps only the half below it, and that centre sits exactly on the top edge
+   of the bubble's bottom border (bottom = -half the side). The strokes then
+   start on the border line instead of overshooting it, and the fill covers
+   the border across the opening. */
 .pet-mini-reply-bubble:after {
   position:absolute;
-  bottom:-6px;
+  bottom:-7px;
   left:calc(50% - 7px);
   width:14px;
   height:14px;
@@ -772,6 +778,7 @@ to {
   border-radius:0 0 3px 0;
   background:inherit;
   content:"";
+  clip-path:polygon(100% 0,100% 100%,0 100%);
   transform:rotate(45deg);
   pointer-events:none}
 .pet-mini-reply-toggle {
