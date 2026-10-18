@@ -338,7 +338,7 @@ describe('AgentRoutePicker', () => {
     expect(effortColumn().queryByRole('button', { name: /chat\.picker\.effortOptions\.high/ })).toBeNull();
   });
 
-  it('MH-EFFORT-MENU-004: holds the efforts of the last answer while the reopened menu reads again', async () => {
+  it('MH-EFFORT-MENU-004: holds the efforts and models of the last answer while the reopened menu reads again', async () => {
     hubMode = 'hub';
     catalogReasoning = { sonnet: [{ value: 'low', label: 'low' }, { value: 'high', label: 'high' }] };
     const onChange = vi.fn();
@@ -355,6 +355,10 @@ describe('AgentRoutePicker', () => {
     const high = effortColumn().getByRole('button', { name: /chat\.picker\.effortOptions\.high/ }) as HTMLButtonElement;
     expect(high.disabled).toBe(true);
     await user.click(high);
+    // A model choice keeps or clears the effort, so it waits for the answer too.
+    const opus = screen.getByRole('button', { name: 'opus' }) as HTMLButtonElement;
+    expect(opus.disabled).toBe(true);
+    await user.click(opus);
     expect(onChange).not.toHaveBeenCalled();
 
     act(() => pendingReads.shift()!());

@@ -4329,6 +4329,7 @@
       "modelPlaceholder": "e.g. claude-sonnet-4-6",
       "effort": "Effort",
       "effortRefused": "No Source accepts {{effort}} now, so the agent was not created. Check the effort and create it again.",
+      "effortUnconfirmed": "Model Hub could not confirm the effort just now, so the agent was not created. Try again.",
       "systemPrompt": "System prompt",
       "systemPromptHint": "Optional",
       "systemPromptPlaceholder": "Optional. Prepended to every conversation that uses this agent.",

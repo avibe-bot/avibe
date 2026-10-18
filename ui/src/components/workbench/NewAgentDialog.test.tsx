@@ -267,6 +267,47 @@ describe('NewAgentDialog', () => {
     })));
   });
 
+  it('creates nothing when Model Hub cannot answer at Create, and says to try again', async () => {
+    modelCatalog = {
+      models: [],
+      reasoningOptions: { sonnet: [{ value: 'medium', label: 'medium' }] },
+      effortMenus: { sonnet: { omitted: [], not_on: {} } },
+    };
+    const { createVibeAgent } = renderDialog();
+    apiRef.current!.readModelHubAgentCatalogForModelPicker = vi.fn().mockResolvedValue(null);
+    fireEvent.change(screen.getByPlaceholderText('agents.create.namePlaceholder'), { target: { value: 'router' } });
+    chooseModel('sonnet');
+    submit();
+
+    await waitFor(() => expect(screen.getByText('agents.create.effortUnconfirmed')).toBeTruthy());
+    expect(createVibeAgent).not.toHaveBeenCalled();
+  });
+
+  it('drops a Create still checking the effort when the backend changes meanwhile', async () => {
+    modelCatalog = {
+      models: [],
+      reasoningOptions: { sonnet: [{ value: 'medium', label: 'medium' }, { value: 'high', label: 'high' }] },
+      effortMenus: { sonnet: { omitted: [], not_on: {} } },
+    };
+    const { createVibeAgent } = renderDialog();
+    let answer: (value: unknown) => void = () => {};
+    apiRef.current!.readModelHubAgentCatalogForModelPicker = vi.fn(() => new Promise((resolve) => { answer = resolve; }));
+    fireEvent.change(screen.getByPlaceholderText('agents.create.namePlaceholder'), { target: { value: 'router' } });
+    chooseModel('sonnet');
+    fireEvent.click(screen.getByRole('button', { name: 'high', exact: true }));
+    submit();
+
+    fireEvent.click(screen.getByRole('button', { name: /Codex/ }));
+    await act(async () => answer({
+      backend: 'claude', mode: 'hub',
+      catalog_models: [{ id: 'sonnet', routeable: true, reasoning_efforts: ['medium'], effort_menu: { omitted: ['high'], not_on: {} } }],
+    }));
+
+    // The answer was for the Claude form: the Codex one shows no refusal, and nothing was created.
+    expect(screen.queryByText('agents.create.effortRefused:{"effort":"high"}')).toBeNull();
+    expect(createVibeAgent).not.toHaveBeenCalled();
+  });
+
   it('creates with no effort when the catalog says the model has none', async () => {
     // `medium` is only a starting suggestion. Sending it for a model whose
     // catalog row states no efforts would create an Agent whose very first

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ArrowRight, Maximize2, X } from 'lucide-react';
 import clsx from 'clsx';
@@ -60,6 +60,12 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
   // Whether that answer was Model Hub's, whose effort menu can change while the
   // dialog stays open, so Create reads it again.
   const [hubAnswered, setHubAnswered] = useState(false);
+  // The form a Create was made from: a backend switch or a close starts another,
+  // and a Create still checking an earlier one then changes nothing.
+  const formRef = useRef(0);
+  useEffect(() => {
+    formRef.current += 1;
+  }, [backend, open]);
   const [editorOpen, setEditorOpen] = useState(false);
   const openAddModel = useAddModelExit(backend, open);
   const surfaceActive = useRouteSurfaceActive();
@@ -147,11 +153,17 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
     if (!canSubmit) return;
     setError(null);
     setSubmitting(true);
+    const form = formRef.current;
     try {
       if (hubAnswered) {
-        // Create commits the effort, so it is checked against Model Hub's answer
+        // Create writes the effort, so it is checked against Model Hub's answer
         // now, not the one read when the dialog opened (`readHubBackendModels`).
         const fresh = await readHubBackendModels(api, backend);
+        if (form !== formRef.current) return;
+        if (fresh === 'unread') {
+          setError(t('agents.create.effortUnconfirmed'));
+          return;
+        }
         if (fresh && effort !== null && !resolveEffortOptions(backend, model, fresh.reasoningOptions).includes(effort)) {
           // The menu follows the answer, which moves the effort to one it offers.
           setReasoningOptions(fresh.reasoningOptions ?? {});

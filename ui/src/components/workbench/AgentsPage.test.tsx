@@ -1757,6 +1757,8 @@ describe('AgentsPage reconnect reconciliation', () => {
     const xhigh = screen.getByRole('button', { name: 'xhigh', exact: true }) as HTMLButtonElement;
     expect(xhigh.disabled).toBe(true);
     fireEvent.click(xhigh);
+    // A model choice keeps or falls back from the effort, so it waits for the answer too.
+    expect((screen.getByRole('combobox') as HTMLButtonElement).disabled).toBe(true);
     expect(updateVibeAgent).not.toHaveBeenCalled();
 
     act(() => pendingModelReads.shift()!());

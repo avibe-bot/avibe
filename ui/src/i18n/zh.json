@@ -4329,6 +4329,7 @@
       "modelPlaceholder": "例如 claude-sonnet-4-6",
       "effort": "Effort",
       "effortRefused": "当前没有供应商支持 {{effort}}，Agent 未创建。请确认 Effort 后重新创建。",
+      "effortUnconfirmed": "模型网关暂时无法确认 Effort，Agent 未创建。请重试。",
       "systemPrompt": "系统提示词",
       "systemPromptHint": "可选",
       "systemPromptPlaceholder": "可选。会拼接到使用本 Agent 的每一段对话前。",
