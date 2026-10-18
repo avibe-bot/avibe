@@ -662,7 +662,9 @@ class EngineSupervisor:
             except EngineClientError as exc:
                 if self._disowns_config_locked(exc.status_code, local_os_errno(exc)):
                     raise
-                failure = str(exc.status_code or exc.error_type)
+                # The request the deadline cut short times out whatever the engine does: an answer says more.
+                if failure is None or exc.error_type != "TimeoutError":
+                    failure = str(exc.status_code or exc.error_type)
                 return None
 
         pending: list[str] | None = None
@@ -696,7 +698,7 @@ class EngineSupervisor:
             return False
         logger.warning(
             "Model Hub engine startup: OAuth grant listing degraded after %.1fs: "
-            "inventory_read=%s grants_without_models=%d last_failure=%s",
+            "inventory_read=%s grants_without_models=%d failure=%s",
             MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS, pending is not None, len(pending or ()), failure,
         )
         return True

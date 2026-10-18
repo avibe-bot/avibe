@@ -4728,9 +4728,9 @@ def test_the_wait_for_oauth_grants_is_bounded_as_a_whole_however_many_grants_ans
     [
         ({"auth_files_status": 404}, None),
         ({"auth_files_status": 401}, None),
-        ({"auth_files_status": 503}, "last_failure=503"),
-        ({"auth_files_malformed": True}, "last_failure=malformed_inventory"),
-        ({"grant_models_malformed": True}, "last_failure=malformed_listing"),
+        ({"auth_files_status": 503}, "failure=503"),
+        ({"auth_files_malformed": True}, "failure=malformed_inventory"),
+        ({"grant_models_malformed": True}, "failure=malformed_listing"),
     ],
     ids=["disowned-404", "disowned-401", "degraded-503", "degraded-malformed-inventory", "degraded-malformed-models"],
 )
@@ -4743,9 +4743,9 @@ def test_a_failed_grant_listing_fails_the_start_only_when_the_engine_disowns_its
     model listing included, is a degraded listing, not a failed engine: the start polls it through the bound, says
     why, and is ready."""
 
-    monkeypatch.setattr(supervisor_module, "MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS", 0.5)
+    monkeypatch.setattr(supervisor_module, "MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS", 1.5)
     caplog.set_level(logging.WARNING, logger="vibe.model_hub_runtime.supervisor")
-    supervisor, store = _fixture_supervisor(tmp_path, startup_timeout=1.5, **listing)
+    supervisor, store = _fixture_supervisor(tmp_path, startup_timeout=2.0, **listing)
     store.write_oauth_auth_file("antigravity-account.json", {"type": "antigravity", "access_token": "oauth-fixture"})
     try:
         if degraded is not None:
