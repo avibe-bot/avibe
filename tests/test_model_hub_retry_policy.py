@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+from dataclasses import replace
 from datetime import datetime, timedelta
 from email.utils import format_datetime
 from types import SimpleNamespace
@@ -228,6 +229,39 @@ def test_fallback_success_does_not_clear_primary_and_eligibility_is_not_recovery
         assert clock.delays == []
         assert first.id in service.recovery._sources
         assert not any(event["kind"] == "recover" for event in service.events.list())
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(("advice", "waited"), [("120", []), ("119", [118.95])], ids=["at-the-window-end", "inside"])
+def test_a_retry_the_window_cannot_admit_ends_the_request_at_once(tmp_path, advice, waited):
+    """MH-RETRY-WINDOW-001: the window opens at the refusal, after the response its Retry-After counts from, so advice
+    equal to the window lands just inside it. Waiting for it would end the window as the retry fell due, with no
+    retry; the request ends at once instead, keeping the cooldown. Advice a second shorter is waited for and tried."""
+
+    async def run():
+        refused = replace(
+            _outcome(RawOutcomeKind.HTTP_ERROR, status=429, source_id="src_recovery01"),
+            retry_after=advice, response_received_at=NOW - timedelta(seconds=0.05),
+        )
+        service, clock = clock_service(tmp_path, outcomes=[
+            refused, _outcome(RawOutcomeKind.SUCCESS, source_id="src_recovery01", stream_started=True),
+        ])
+
+        async def late_sleep(seconds):
+            # A real wake lands after its timer: the loop, then the lock, before the attempt is admitted.
+            await clock.sleep(seconds)
+            clock.advance(0.1)
+
+        service.recovery.sleep = late_sleep
+        if waited:
+            result = await service.resolve_with_recovery(backend="codex", model_id="shared-model", request={})
+            assert result.source_id == "src_recovery01"
+        else:
+            with pytest.raises(ModelHubError) as raised:
+                await service.resolve_with_recovery(backend="codex", model_id="shared-model", request={})
+            assert raised.value.code == RECOVERY_EXHAUSTED_CODE
+        assert clock.delays == pytest.approx(waited)
+        assert len(service.adapter.invocations) == 1 + len(waited)
     asyncio.run(run())
 
 

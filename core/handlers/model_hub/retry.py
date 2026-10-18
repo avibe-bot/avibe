@@ -19,6 +19,11 @@ from .resolver import SourceRecoveryAnnotation, parse_model_hub_timestamp
 
 logger = logging.getLogger(__name__)
 RECOVERY_WINDOW_SECONDS = 120.0
+# A wait must end with time left to attempt inside the window. Retry-After has one-second resolution, and the window
+# opens at the refusal, after the response its advice counts from: advice equal to the window lands a few
+# milliseconds inside it, and the attempt it was waited for would find the window closed. So a retry due within the
+# window's last second is one the window does not admit.
+RECOVERY_ADMISSION_MARGIN_SECONDS = 1.0
 RECOVERY_EXHAUSTED_CODE = "model_hub_recovery_exhausted"
 RECOVERY_EXHAUSTED_MESSAGE = "Automatic recovery has ended. Try again or choose another model."
 RETRY_DELAYS = {
