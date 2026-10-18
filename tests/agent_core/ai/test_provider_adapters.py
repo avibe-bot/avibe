@@ -3350,13 +3350,15 @@ async def test_shared_driver_bounds_each_wait_on_a_silent_provider(
     error = events[-1]
     assert isinstance(error, ProviderError)
     assert error.kind == "stalled"
+    assert error.retryable is False
     if phase == "after_output":
         # Output already reached the user: the stall ends the request with what streamed.
-        assert error.retryable is False
+        assert error.continuable is True
         assert error.partial is not None
         assert [block.text for block in error.partial.content] == ["partial"]
     else:
-        assert error.retryable is True
+        # The whole bound passed without output: sent again, it would wait as long again.
+        assert error.continuable is False
         assert error.partial is None
     if phase == "first_byte":
         assert first_byte_stream.closed.is_set()
@@ -3405,6 +3407,66 @@ async def test_slow_but_alive_provider_is_bounded_per_silence_not_per_stream(
     done = events[-1]
     assert isinstance(done, Done)
     assert done.message.content[0].text == "".join(words)
+
+
+_RECOVERY_EXHAUSTED_BY_NETWORK = {
+    "type": "error",
+    "error": {"type": "model_hub_recovery_exhausted", "code": "model_hub_recovery_exhausted", "cause": "network"},
+}
+_ANSWERED = {
+    "anthropic": (
+        'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":"ok"}}\n\n'
+        'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\n'
+        'data: {"type":"message_stop"}\n\n'
+    ),
+    "openai_chat": (
+        'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}\n\n'
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+        "data: [DONE]\n\n"
+    ),
+    "openai_responses": (
+        'data: {"type":"response.output_text.delta","delta":"ok"}\n\n'
+        'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+    ),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("adapter_type", "protocol"),
+    [(OpenAIResponsesAdapter, "openai_responses"), (OpenAIChatAdapter, "openai_chat"), (AnthropicAdapter, "anthropic")],
+)
+@pytest.mark.parametrize(
+    ("answer", "bounds_waited", "continuable"),
+    [("served", 4, None), ("exhausted", 4, False), ("exhausted", 0, True)],
+)
+async def test_the_gateway_bounds_the_wait_for_headers_and_a_failure_that_outwaited_the_bound_is_final(
+    monkeypatch: pytest.MonkeyPatch, adapter_type, protocol: str, answer: str, bounds_waited: int, continuable: bool | None,
+) -> None:
+    """Model Hub sends response headers at the first model output, so a model thinking without streaming its thinking
+    holds them back for as long as it thinks. The gateway sees the upstream's bytes meanwhile and bounds that wait
+    itself; the driver does not. A failure that comes back only after the whole silence bound without output is not
+    sent again: it would most likely take as long again."""
+    import core.agent_core.ai._common as common
+
+    bound = 0.05
+    monkeypatch.setattr(common, "PROVIDER_SILENCE_TIMEOUT_S", bound)
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(bound * bounds_waited)
+        if answer == "exhausted":
+            return httpx.Response(424, json=_RECOVERY_EXHAUSTED_BY_NETWORK)
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=_ANSWERED[protocol])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await asyncio.wait_for(_events(adapter_type(client, gateway=True), _request(protocol)), timeout=5)
+
+    terminal = events[-1]
+    if answer == "served":
+        assert isinstance(terminal, Done)
+        return
+    assert isinstance(terminal, ProviderError)
+    assert (terminal.kind, terminal.retryable, terminal.continuable) == ("network", False, continuable)
 
 
 @pytest.mark.asyncio
@@ -3456,7 +3518,6 @@ async def test_non_cooperative_stream_cancellation_join_does_not_block_driver(
     error = events[-1]
     assert isinstance(error, ProviderError)
     assert error.kind == "stalled"
-    assert error.retryable is True
     assert stream.cancel_seen.is_set()
     assert stream.cancel_count == 1
     assert stream.closed.is_set()

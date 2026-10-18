@@ -344,8 +344,9 @@ which agrees with the `openai` row.
   started. With the bound at 120 s that does not happen, because the error
   comes at least 120 s after the last byte. After text or a tool call the error
   is terminal (C-2). It now comes 120 s after the last byte instead of 600 s.
-- **Vibey's 600 s silence bound** stays as the outer guard. It now fires only
-  for the unbounded Sources above, or if the gateway itself stops.
+- **Vibey's 600 s silence bound** covers each chunk after the response
+  headers. The wait for the headers belongs to the engine read; see
+  [Vibey's wait before output](#vibeys-wait-before-output-2026-10-18).
 - **Native callers.** Their own bounds (Codex 300 s between events, Claude
   Code's first-byte and idle watchdogs) are longer and remain unchanged.
 - **Engine patches 4 and 5 stay.** They bound a dead path in about 45 s on
@@ -365,3 +366,49 @@ which agrees with the `openai` row.
 - The vendor is the Source's declared vendor. A relay declared `openai` that
   serves a model which buffers tool calls, as xAI does, would be cut at 120 s
   on a tool call longer than that.
+
+## Vibey's wait before output (2026-10-18)
+
+### Problem
+
+On 2026-10-17 a Vibey turn on Claude Opus 5.5 at `xhigh` effort, asked for a
+long piece of writing through an `anthropic` API-key relay, failed after
+20 minutes as `stalled`: two engine requests, each cut by Vibey at 600 s. The
+gateway's 120 s bound never fired, so the engine kept receiving bytes, the
+Anthropic pings. From Claude Opus 4.7 on, `thinking.display` defaults to
+`omitted`, so a thinking phase streams no thinking deltas. The gateway withholds
+the response headers and every byte until the first content block, and Vibey's
+own bound also covered the wait for those headers, so it counted the model's
+whole thinking time as silence. Claude Code is not affected: its streams commit
+early and carry keepalives (`_EARLY_STREAM_COMMIT_SECONDS`).
+
+Two alternatives were rejected. Requesting `display: "summarized"` would make
+thinking count as output, but would move the upstream request away from Claude
+Code's default shape (owner decision, 2026-10-18). Committing Vibey's streams
+early, as Claude Code's are, would drop the `x-avibe-served-hop` header Vibey
+reads with the headers to verify the origin of replayed signatures, and the
+HTTP status its error handling keys on.
+
+### Contract
+
+- Through the gateway, Vibey does not bound the wait for response headers.
+  Once they arrive, its 600 s bound covers each next chunk as before.
+- The engine read holds the bound for every attempt of a Vibey stream: the
+  120 s idle bound on the measured Sources above, and Vibey's 600 s silence
+  bound on every other stream. Every byte restarts either one, so a model that
+  thinks behind a pinging upstream is never cut, and a silent stream on an
+  unmeasured Source is cut at 600 s and recovered like any other timeout.
+- A failure that reaches Vibey before any model output, at least 600 s after
+  its request was sent, ends the turn: it is neither replayed nor continued.
+  Sent again, the request would most likely wait as long again, and Model Hub
+  has already retried what its recovery window allows.
+
+### Residuals
+
+- A stuck upstream behind a relay that keeps pinging holds a Vibey turn until
+  Stop, as it holds a Claude Code turn. Elapsed time alone is not failure.
+- On an unmeasured Source, after output, the engine read's 600 s bound and
+  Vibey's own coincide, and the engine read usually ends first, so such a stall
+  reaches Vibey as `interrupted` rather than `stalled`.
+- A persistently silent unmeasured Source still costs about two 600 s attempts
+  (Model Hub recovery), as before (Vibey's own stall and one continuation).

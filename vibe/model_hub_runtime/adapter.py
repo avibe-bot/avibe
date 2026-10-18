@@ -18,6 +18,7 @@ from typing import Any, Callable, Literal, Mapping, Sequence, TypeVar
 import aiohttp
 
 from config.v2_config import normalize_model_hub_base_url
+from core.agent_core.ai._common import PROVIDER_SILENCE_TIMEOUT_S
 from core.handlers.model_hub.adapter import (
     DiscoveredModel,
     EngineEnsureResult,
@@ -2907,6 +2908,9 @@ class CLIProxyEngineAdapter:
                 request_headers=getattr(request, "headers", None),
                 on_transport_done=release,
                 on_request_sent=request_sent,
+                # Vibey waits on the gateway without a bound of its own until the
+                # response headers, which the gateway sends at the first model output.
+                silence_bound_s=PROVIDER_SILENCE_TIMEOUT_S if origin == "vibey" else None,
             )
             if handle.outcome_available and engine_disowned_call(await handle.outcome()):
                 # The engine's last health check vouches for it no longer: the
