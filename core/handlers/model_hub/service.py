@@ -237,7 +237,14 @@ from .resolver import (
     source_runnable,
 )
 from .revocations import CredentialRevocationJournal
-from .retry import RECOVERY_EXHAUSTED_CODE, RecoveryPolicy, RecoveryRequest, RETRY_DELAYS, source_identity
+from .retry import (
+    RECOVERY_ADMISSION_MARGIN_SECONDS,
+    RECOVERY_EXHAUSTED_CODE,
+    RecoveryPolicy,
+    RecoveryRequest,
+    RETRY_DELAYS,
+    source_identity,
+)
 from .usage import (
     USAGE_DEFAULT_WINDOW_DAYS,
     USAGE_WINDOW_KEYS,
@@ -10956,7 +10963,7 @@ class ModelHubService:
                     pending.source_id = hop.source_id
                     annotation = annotations.get(hop.source_id)
                     pending.reason = annotation.reason if annotation else pending.reason
-                    if delay >= pending.remaining:
+                    if delay >= pending.remaining - RECOVERY_ADMISSION_MARGIN_SECONDS:
                         # Another admitted owner can still wake this request early.
                         if not any(hop.recovery == "in_flight" for hop in waitable):
                             raise self._recovery_exhausted(exc, pending.reason) from exc
