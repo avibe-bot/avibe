@@ -16,7 +16,7 @@ import pytest
 
 import core.agent_core.ai._common as common_module
 from core.agent_core.ai._common import OutputBudgetExceeded, StreamAssembler
-from core.agent_core.ai.hosted import anthropic_hosted_block, reported_counts, responses_hosted_block
+from core.agent_core.ai.hosted import anthropic_hosted_block, reported_cost, reported_counts, responses_hosted_block
 from core.agent_core.ai.provider import Done, HostedToolRoute, ModelEndpoint, ModelRequest
 from core.agent_core.ai.registry import create_adapter
 from core.agent_core.cancel import CancelToken
@@ -235,6 +235,32 @@ async def test_xai_x_searches_keep_their_variants_and_the_answer_cites_each_post
     assert summary.counts == {"x_search_calls": 2, "x_posts_fetched": 20}
     assert summary.cited_sources == (HostedSource(url=post), HostedSource(url=other_post))
     assert summary.cost.usd == pytest.approx(0.11272688)
+
+
+async def test_an_xai_response_reporting_a_number_past_its_bound_completes_without_that_number():
+    """MH-HOSTED-VIBEY-002 (#2572): a malformed relay's cost or counter past its bound is no figure, never an error
+    that fails the turn."""
+    usage = {
+        "input_tokens": 22965,
+        "output_tokens": 1402,
+        "cost_in_usd_ticks": 10**400,
+        "server_side_tool_usage_details": {"web_search_calls": 1, "x_posts_fetched": 10**400},
+    }
+
+    message = await _message("openai_responses", _responses([WEB_SEARCH_CALL, ANSWER_ITEM], usage))
+
+    assert message.stop_reason == "stop"
+    assert message.hosted_summary.counts == {"web_search_calls": 1}
+    assert message.hosted_summary.cost is None
+
+
+def test_xai_cost_ticks_are_a_cost_only_as_a_whole_number_within_the_bound():
+    """MH-PRICE-020: xAI reports cost in 1e-10 USD ticks; Vibey's native call and a proxied one read it here."""
+
+    assert reported_cost({"cost_in_usd_ticks": 1127268800}).usd == pytest.approx(0.11272688)
+    assert reported_cost({"cost_in_usd_ticks": 10**18}).usd == pytest.approx(10**8)
+    for ticks in (-1, True, "9", 1.5, 10**18 + 1, 10**400):
+        assert reported_cost({"cost_in_usd_ticks": ticks}) is None
 
 
 @pytest.mark.parametrize(

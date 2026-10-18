@@ -55,6 +55,7 @@ from core.agent_core.ai.provider import (
 )
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
+    MAX_HOSTED_COUNT,
     AssistantMessage,
     HostedToolBlock,
     ImageBlock,
@@ -272,6 +273,7 @@ class AnthropicAdapter(ProviderAdapter):
         paused = False
         offset = next_index = 0
         response_usage: Usage | None = None
+        # Exact totals, unbounded: a counter past the bound in any response stays past it however later ones add.
         carried_counts: dict[str, int] = {}
         response_counts: dict[str, int] = {}
 
@@ -390,8 +392,8 @@ class AnthropicAdapter(ProviderAdapter):
                         assembler.set_usage(response_usage)
                         start_usage = message.get("usage")
                         if isinstance(start_usage, Mapping) and "server_tool_use" in start_usage:
-                            response_counts = reported_counts(start_usage.get("server_tool_use"))
-                            assembler.set_hosted_facts(counts=_summed(carried_counts, response_counts))
+                            response_counts = reported_counts(start_usage.get("server_tool_use"), bound=None)
+                            assembler.set_hosted_facts(counts=_bounded(_summed(carried_counts, response_counts)))
                     elif event_type == "content_block_start":
                         index = block_index(chunk)
                         if index is None:
@@ -766,8 +768,8 @@ class AnthropicAdapter(ProviderAdapter):
                         response_usage = _anthropic_usage(usage, current=response_usage)
                         assembler.set_usage(response_usage)
                         if isinstance(usage, Mapping) and "server_tool_use" in usage:
-                            response_counts = reported_counts(usage.get("server_tool_use"))
-                            assembler.set_hosted_facts(counts=_summed(carried_counts, response_counts))
+                            response_counts = reported_counts(usage.get("server_tool_use"), bound=None)
+                            assembler.set_hosted_facts(counts=_bounded(_summed(carried_counts, response_counts)))
                     elif event_type == "error":
                         shape_error = _error_event_shape_error(chunk)
                         if shape_error is not None:
@@ -1264,6 +1266,12 @@ def _summed(counts: Mapping[str, int], more: Mapping[str, int]) -> dict[str, int
     for name, value in more.items():
         summed[name] = summed.get(name, 0) + value
     return summed
+
+
+def _bounded(counts: Mapping[str, int]) -> dict[str, int]:
+    """The counters a summary keeps of a response's exact totals: one past the bound is no count."""
+
+    return {name: value for name, value in counts.items() if value <= MAX_HOSTED_COUNT}
 
 
 def _normalize_stop_reason(value: Any) -> str:

@@ -20,7 +20,15 @@ from core.agent_core.ai.anthropic import MAX_PAUSE_CONTINUATIONS, PAUSE_LIMIT_ME
 from core.agent_core.ai.provider import Done, HostedToolRoute, ModelEndpoint, ModelRequest, ProviderError
 from core.agent_core.ai.registry import create_adapter
 from core.agent_core.cancel import CancelToken
-from core.agent_core.messages import HostedToolBlock, ImageBlock, TextBlock, ThinkingBlock, Usage, UserMessage
+from core.agent_core.messages import (
+    MAX_HOSTED_COUNT,
+    HostedToolBlock,
+    ImageBlock,
+    TextBlock,
+    ThinkingBlock,
+    Usage,
+    UserMessage,
+)
 from core.agent_core.tools.hosted import hosted_tool_spec
 
 SOURCE = "src_served00001"
@@ -160,6 +168,36 @@ async def test_a_paused_response_continues_as_one_response_pinned_to_its_source_
     assert message.usage == Usage(input_tokens=300, output_tokens=20)
     assert dict(message.hosted_summary.counts) == {"web_search_requests": 2}
     assert not [event for event in events if isinstance(event, ProviderError)]
+
+
+@pytest.mark.parametrize(
+    "searches",
+    [
+        (MAX_HOSTED_COUNT, MAX_HOSTED_COUNT, 1),
+        (10**400, 1),
+    ],
+    ids=["total-past-the-bound", "one-response-past-the-bound"],
+)
+async def test_a_counter_past_the_bound_in_any_pause_stays_absent_and_the_response_completes(searches):
+    """MH-HOSTED-VIBEY-006 (#2572): each response's counts are bounded, but not their total across pauses. A counter
+    whose total passes the bound, in one response or summed over several, is no count, and a later pause cannot bring
+    back a smaller one; it never fails the turn."""
+
+    def answer(number: int) -> httpx.Response:
+        if number < len(searches):
+            body = _response(
+                _use(), stop_reason="pause_turn", input_tokens=100, output_tokens=10, searches=searches[number - 1]
+            )
+        else:
+            body = _response([{"type": "content_block_start", "content_block": RESULT}], _text("v8 is out"),
+                             stop_reason="end_turn", input_tokens=300, output_tokens=20, searches=searches[-1])
+        return httpx.Response(200, headers=_served(), text=body)
+
+    sent, events = await _stream(answer)
+
+    assert len(sent) == len(searches)
+    assert isinstance(events[-1], Done) and events[-1].message.stop_reason == "stop"
+    assert dict(events[-1].message.hosted_summary.counts) == {}
 
 
 async def test_a_continuation_that_reports_no_usage_leaves_the_message_without_the_paused_requests():
