@@ -594,20 +594,26 @@ for (const theme of ['light', 'dark']) {
     await expect(history.getByRole('button', { name: '在 Avibe 中打开', exact: true })).toHaveCount(0);
     expect(await history.evaluate((node) => getComputedStyle(node).scrollbarWidth)).toBe('none');
 
-    const box = (await history.boundingBox())!;
     const pinned = (await icon.boundingBox())!;
     expect(pinned.width).toBeGreaterThanOrEqual(28);
     expect(pinned.height).toBeGreaterThanOrEqual(28);
-    expect(pinned.y - box.y).toBeGreaterThanOrEqual(4);
-    expect(pinned.y - box.y).toBeLessThanOrEqual(12);
-    expect(box.x + box.width - (pinned.x + pinned.width)).toBeGreaterThanOrEqual(8);
-    expect(box.x + box.width - (pinned.x + pinned.width)).toBeLessThanOrEqual(20);
+    // Inset equally from the bubble's visible edge on the top and the right.
+    const bubble = page.locator('.pet-mini-reply-bubble');
+    const insets = async () => {
+      const [outer, button] = [(await bubble.boundingBox())!, (await icon.boundingBox())!];
+      return { top: button.y - outer.y, right: outer.x + outer.width - (button.x + button.width) };
+    };
 
     // It stays put while the history scrolls, and at the top of the scroll it
     // covers none of the content.
-    for (const top of [0, 1e6]) {
-      await history.evaluate((node, top) => { node.scrollTop = top; }, top);
+    for (const top of ['top', 'middle', 'bottom'] as const) {
+      await history.evaluate((node, top) => {
+        node.scrollTop = top === 'top' ? 0 : top === 'bottom' ? node.scrollHeight : (node.scrollHeight - node.clientHeight) / 2;
+      }, top);
       await expect.poll(() => icon.boundingBox()).toEqual(pinned);
+      const { top: above, right } = await insets();
+      expect(Math.abs(above - right)).toBeLessThanOrEqual(0.5);
+      expect(above).toBeGreaterThanOrEqual(6);
     }
     await history.evaluate((node) => { node.scrollTop = 0; });
     const first = (await history.locator('.pet-mini-detail-inner > *').first().boundingBox())!;

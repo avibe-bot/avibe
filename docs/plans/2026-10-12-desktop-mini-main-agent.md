@@ -179,6 +179,8 @@ follow it at the end of the detail, right above the toggle row. Collapsed shows 
 
 Open in Avibe is an icon-only button (the card's `ExternalLink` open button,
 28px, on a solid surface) pinned to the top-right corner of the open history,
+8px from the bubble's outer edge on both the top and the right, which centres
+it on the 22px corner arc,
 outside the scroll box: it stays put while the history scrolls, is never faded
 by the edge mask, and exists only while the history is open. Its accessible name
 and tooltip are "Open in Avibe". The history's top padding reserves that corner,

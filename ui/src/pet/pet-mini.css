@@ -852,15 +852,18 @@ to {
 .pet-mini-bubble-history::-webkit-scrollbar {
   display:none}
 /* The top padding reserves the corner for the pinned Open in Avibe button
-   (6px inset + 28px + 6px), so at the top of the scroll it covers no text. */
+   (8px inset + 28px + 4px), so at the top of the scroll it covers no text. */
 .pet-mini-bubble-history .pet-mini-detail-inner { padding:40px 14px 8px }
 /* Open in Avibe for the main history: the card open button's look on a solid
    surface, so it stays legible over the top fade and over scrolled text. */
 .pet-mini-history-open {
   position:absolute;
   z-index:3;
-  top:6px;
-  right:12px;
+  /* 8px from the bubble's outer edge on both sides (7px here, inside its 1px
+     border). That centres the 28px circle on the 22px corner arc, so the gap
+     to the border is the same 8px along the top, the side and the curve. */
+  top:7px;
+  right:7px;
   width:28px;
   height:28px;
   background:color-mix(in srgb,var(--pet-ink) 8%,var(--pet-card))}
