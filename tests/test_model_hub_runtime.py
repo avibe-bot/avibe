@@ -3055,6 +3055,11 @@ def _write_mock_engine(
     reload_delay: float = 0.0,
     drop_reload_ack: bool = False,
     lose_config_on_reload: str | None = None,
+    grants_load_after: float = 0.0,
+    grant_listing_delay: float = 0.0,
+    auth_files_status: int = 200,
+    auth_files_malformed: bool = False,
+    grant_models_malformed: bool = False,
 ) -> None:
     script = f"""#!{sys.executable}
 import json
@@ -3089,6 +3094,7 @@ exit_before_ready = {exit_before_ready!r}
 if exit_before_ready is not None:
     raise SystemExit(exit_before_ready)
 time.sleep({startup_delay!r})
+answering_since = time.monotonic()
 health_surfaces = set()
 defaulted = False
 
@@ -3133,8 +3139,17 @@ class Handler(BaseHTTPRequestHandler):
             mark_health_surface('management')
             self._json(200, {{'host': config['host']}})
             return
+        if self.path == '/v0/management/auth-files' and self.headers.get('X-Management-Key') == management:
+            grants = sorted(os.listdir(config['auth-dir'])) if os.path.isdir(config['auth-dir']) else []
+            files = [{{'name': name}} for name in grants if name.endswith('.json')]
+            self._json({auth_files_status!r}, {{'files': {{}} if {auth_files_malformed!r} else files}})
+            return
         if self.path.startswith('/v0/management/auth-files/models'):
-            self._json(200, {{'models': [{{'id': 'model-a'}}]}})
+            time.sleep({grant_listing_delay!r})
+            # CPA answers before its watcher loads the auth directory, listing each grant with no model until then.
+            loaded = time.monotonic() - answering_since >= {grants_load_after!r}
+            models = ([{{}}] if {grant_models_malformed!r} else [{{'id': 'model-a'}}]) if loaded else []
+            self._json(200, {{'models': models}})
             return
         self._json(401, {{'error': {{'type': 'unauthorized'}}}})
 
@@ -3312,6 +3327,11 @@ def _fixture_supervisor(
     reload_delay: float = 0.0,
     drop_reload_ack: bool = False,
     lose_config_on_reload: str | None = None,
+    grants_load_after: float = 0.0,
+    grant_listing_delay: float = 0.0,
+    auth_files_status: int = 200,
+    auth_files_malformed: bool = False,
+    grant_models_malformed: bool = False,
 ) -> tuple[EngineSupervisor, EngineStateStore]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     binary = tmp_path / "mock-engine"
@@ -3325,6 +3345,11 @@ def _fixture_supervisor(
         reload_delay=reload_delay,
         drop_reload_ack=drop_reload_ack,
         lose_config_on_reload=lose_config_on_reload,
+        grants_load_after=grants_load_after,
+        grant_listing_delay=grant_listing_delay,
+        auth_files_status=auth_files_status,
+        auth_files_malformed=auth_files_malformed,
+        grant_models_malformed=grant_models_malformed,
     )
     installer = _FixtureInstaller(binary, tmp_path / "versions" / "install-1")
     store = EngineStateStore(tmp_path / "state")
@@ -4663,6 +4688,91 @@ def test_supervisor_process_exit_discards_all_child_output(
         len(child_payload) * 2
     )
     assert not (instance_dir / "health-surfaces-complete").exists()
+
+
+def test_a_started_engine_is_ready_once_it_lists_the_models_of_each_oauth_grant_it_loaded(tmp_path: Path) -> None:
+    """MH-RUNTIME-005 (#2756): the engine answers before it loads its auth directory, and lists each grant with no
+    model until then; a refresh or turn right after the start must not find a grant that offers nothing."""
+
+    supervisor, store = _fixture_supervisor(tmp_path, grants_load_after=0.5)
+    auth_name = "antigravity-account.json"
+    store.write_oauth_auth_file(auth_name, {"type": "antigravity", "access_token": "oauth-fixture"})
+    try:
+        connection = supervisor.ensure_running()
+        listing = EngineClient(connection).management_request("GET", "/auth-files/models", query={"name": auth_name})
+        assert listing["models"] == [{"id": "model-a"}]
+    finally:
+        supervisor.stop()
+
+
+def test_the_wait_for_oauth_grants_is_bounded_as_a_whole_however_many_grants_answer_slowly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MH-RUNTIME-005 (#2756): one deadline covers every grant request, so slow grants cannot stretch the start."""
+
+    monkeypatch.setattr(supervisor_module, "MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS", 1.0)
+    supervisor, store = _fixture_supervisor(tmp_path, grants_load_after=60.0, grant_listing_delay=0.4)
+    for number in range(12):
+        store.write_oauth_auth_file(f"account-{number}.json", {"type": "antigravity", "access_token": "oauth-fixture"})
+    try:
+        started = time.monotonic()
+        supervisor.ensure_running()
+        # One pass over twelve grants at 0.4 s each would take 4.8 s; the start's own spawn and health check get the rest.
+        assert time.monotonic() - started < 3.5
+    finally:
+        supervisor.stop()
+
+
+@pytest.mark.parametrize(
+    ("listing", "degraded"),
+    [
+        ({"auth_files_status": 404}, None),
+        ({"auth_files_status": 401}, None),
+        ({"auth_files_status": 503}, "failure=503"),
+        ({"auth_files_malformed": True}, "failure=malformed_inventory"),
+        ({"grant_models_malformed": True}, "failure=malformed_listing"),
+    ],
+    ids=["disowned-404", "disowned-401", "degraded-503", "degraded-malformed-inventory", "degraded-malformed-models"],
+)
+def test_a_failed_grant_listing_fails_the_start_only_when_the_engine_disowns_its_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    listing: dict, degraded: str | None,
+) -> None:
+    """MH-RUNTIME-005 (#2756): an engine that answers its health check but refuses the grant listing as a credential
+    or route it does not hold never starts as ready, and is stopped. Any other failure, a malformed inventory or
+    model listing included, is a degraded listing, not a failed engine: the start polls it through the bound, says
+    why, and is ready."""
+
+    monkeypatch.setattr(supervisor_module, "MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS", 1.5)
+    caplog.set_level(logging.WARNING, logger="vibe.model_hub_runtime.supervisor")
+    supervisor, store = _fixture_supervisor(tmp_path, startup_timeout=2.0, **listing)
+    store.write_oauth_auth_file("antigravity-account.json", {"type": "antigravity", "access_token": "oauth-fixture"})
+    try:
+        if degraded is not None:
+            supervisor.ensure_running()
+            assert supervisor.status()["status"]["health"] == "ok"
+            assert any(degraded in record.getMessage() for record in caplog.records), caplog.text
+        else:
+            with pytest.raises(EngineUnavailableError):
+                supervisor.ensure_running()
+            assert supervisor.status()["status"]["health"] != "ok"
+    finally:
+        supervisor.stop()
+
+
+def test_a_start_ready_late_in_its_budget_still_waits_the_full_bound_for_its_grants(tmp_path: Path) -> None:
+    """MH-RUNTIME-005 (#2756): the grant wait always gets its full bound after the health check, however little of
+    the startup budget is left, so a start that is healthy late still waits for its grants."""
+
+    supervisor, store = _fixture_supervisor(tmp_path, startup_timeout=3.0, startup_delay=2.0, grants_load_after=1.5)
+    auth_name = "antigravity-account.json"
+    store.write_oauth_auth_file(auth_name, {"type": "antigravity", "access_token": "oauth-fixture"})
+    try:
+        connection = supervisor.ensure_running()
+        listing = EngineClient(connection).management_request("GET", "/auth-files/models", query={"name": auth_name})
+        assert listing["models"] == [{"id": "model-a"}]
+    finally:
+        supervisor.stop()
 
 
 def test_mh_runtime_006_timeout_stops_engine_with_bounded_structured_diagnostics(
