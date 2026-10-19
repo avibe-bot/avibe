@@ -3984,9 +3984,9 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-deep-link"
-version = "2.6.1"
+version = "2.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ac7a92a46ab5c88f44532ca50906d6e448a948d4ddf8c5376ab125e3260f736"
+checksum = "1b3c64e24ebcbc63aaa2d88a9c51e2507084b46620baf39ecb0baa0738a08bb4"
 dependencies = [
  "dunce",
  "plist",
@@ -4005,9 +4005,9 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-dialog"
-version = "2.8.2"
+version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3dca325d6e66e9170f2e1b9631722e4e544bcbc51781575d266abdaba697bd51"
+checksum = "b7461aaacf1901915ea7b9f5cd74f8224a351ed96af0a62c07fce934003cb34b"
 dependencies = [
  "log",
  "raw-window-handle",
@@ -4062,9 +4062,9 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-notification"
-version = "2.6.0"
+version = "2.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8cf3cce3ea492b3a8a7f431a4e5dd5d31dc41b2a4a243faa660cbe8095a577bd"
+checksum = "b939d7b19c8af1381a72ef8474b3aba2b56c1ddac2c23f0c8e96abbcf86b198b"
 dependencies = [
  "log",
  "notify-rust",
@@ -4082,9 +4082,9 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-opener"
-version = "2.7.1"
+version = "2.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85dead674ee41937d042ee855d785f07ee67206f19402200c12b9255964d5ac8"
+checksum = "53810be1b4fed22bb6ac3f4cab5a2b80d9391d1af436bda145607532bc0bb219"
 dependencies = [
  "dunce",
  "glob",
@@ -4372,9 +4372,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.53.2"
+version = "1.53.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e95f91fcc7a621e8b030f6aa23c71fe9838ae2fb4d8118b75602a328f5144044"
+checksum = "ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e"
 dependencies = [
  "bytes",
  "libc",
