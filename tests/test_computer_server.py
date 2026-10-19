@@ -222,6 +222,72 @@ class FakeUpstream:
         self.alive = False
 
 
+_DRIVER_LIFECYCLE_TOOLS = frozenset(
+    {"start_session", "end_session", "get_session", "list_sessions"}
+)
+
+
+def driver_session_ended_refusal(tool: str, session: str) -> dict[str, Any]:
+    """The exact wire result cua-driver 0.31.0 returns for an ended name.
+
+    ``serve.rs`` refuses the call before dispatch, and the proxy wraps the
+    daemon error through ``tool_error_result`` + ``conforming_error_envelope``.
+    """
+
+    return {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        f"session has ended; tool call '{tool}' was rejected. "
+                        f"Call start_session with session '{session}' to start "
+                        "it again, or use a new session label."
+                    ),
+                }
+            ],
+            "isError": True,
+            "structuredContent": {
+                "exit_code": 1,
+                "code": "tool_invocation_failed",
+            },
+        },
+    }
+
+
+class DriverSessionUpstream(FakeUpstream):
+    """FakeUpstream with Cua's named-session tombstones.
+
+    The real driver retires a named session after five idle minutes
+    (``DEFAULT_SESSION_IDLE_TTL``) or on ``end_session``; afterwards only
+    ``start_session`` revives the name and every other call is refused before
+    it is dispatched.
+    """
+
+    def __init__(self, *, revivable: bool = True) -> None:
+        super().__init__()
+        self.blocked_tools = set()
+        self.ended: set[str] = set()
+        self.revivable = revivable
+
+    def expire_idle(self, session: str) -> None:
+        self.ended.add(session)
+
+    async def request(self, method: str, params: Mapping[str, Any]) -> dict[str, Any]:
+        name = params.get("name")
+        session = (params.get("arguments") or {}).get("session")
+        if name == "start_session" and self.revivable:
+            self.ended.discard(session)
+        elif name == "end_session":
+            self.ended.add(session)
+        elif name not in _DRIVER_LIFECYCLE_TOOLS and session in self.ended:
+            self.calls.append((method, json.loads(json.dumps(params))))
+            return driver_session_ended_refusal(str(name), str(session))
+        return await super().request(method, params)
+
+
 class _TestStdin:
     def __init__(self) -> None:
         self.writes: list[bytes] = []
@@ -1273,6 +1339,161 @@ async def test_named_sessions_start_independently_and_revive_after_end(
         ("end_session", "ses-b"),
         ("start_session", "ses-a"),
         ("list_apps", "ses-a"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_driver_idle_retired_session_is_started_again_once(
+    tmp_path: Path,
+) -> None:
+    """A Session idle past the driver TTL keeps working instead of dying."""
+
+    state_path, state = _state(tmp_path)
+    upstream = DriverSessionUpstream()
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+    )
+
+    first = await server.call_tool("list_apps", {"session": "ses-a"})
+    upstream.expire_idle("ses-a")
+    second = await server.call_tool("list_apps", {"session": "ses-a"})
+    third = await server.call_tool("list_apps", {"session": "ses-a"})
+
+    assert first.get("isError") is not True
+    assert second.get("isError") is not True
+    assert third.get("isError") is not True
+    names = [params["name"] for _method, params in upstream.calls]
+    assert names == [
+        "start_session",
+        "list_apps",
+        "list_apps",
+        "start_session",
+        "list_apps",
+        "list_apps",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_driver_retired_session_drops_observations_before_input(
+    tmp_path: Path,
+) -> None:
+    """The driver retires the ended episode's tokens, so input must re-observe."""
+
+    state_path, state = _state(tmp_path)
+    upstream = DriverSessionUpstream()
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+    )
+    target = {"session": "ses-a", "pid": 7, "window_id": 9}
+    await server.call_tool("get_window_state", target)
+    before = await server.call_tool("click", {**target, "x": 1, "y": 2})
+    upstream.expire_idle("ses-a")
+    refused = await server.call_tool("click", {**target, "x": 1, "y": 2})
+    await server.call_tool("get_window_state", target)
+    after = await server.call_tool("click", {**target, "x": 1, "y": 2})
+
+    assert before.get("isError") is not True
+    assert refused["structuredContent"]["code"] == "observe_first"
+    assert refused["structuredContent"]["dispatched"] is False
+    assert after.get("isError") is not True
+    names = [params["name"] for _method, params in upstream.calls]
+    assert names == [
+        "start_session",
+        "get_window_state",
+        "click",
+        "click",
+        "start_session",
+        "get_window_state",
+        "click",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_driver_session_refused_after_fresh_start_is_not_dispatched(
+    tmp_path: Path,
+) -> None:
+    """Revival is bounded to one start, and the final refusal is unambiguous."""
+
+    state_path, state = _state(tmp_path)
+    upstream = DriverSessionUpstream(revivable=False)
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+    )
+
+    await server.call_tool("list_apps", {"session": "ses-a"})
+    upstream.expire_idle("ses-a")
+    refused = await server.call_tool("list_apps", {"session": "ses-a"})
+
+    assert refused["isError"] is True
+    assert refused["structuredContent"]["code"] == "tool_invocation_failed"
+    assert refused["structuredContent"]["dispatched"] is False
+    assert refused["structuredContent"]["detail"].startswith("session has ended;")
+    names = [params["name"] for _method, params in upstream.calls]
+    assert names == [
+        "start_session",
+        "list_apps",
+        "list_apps",
+        "start_session",
+        "list_apps",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_in_tool_session_ended_refusal_also_starts_the_session_again(
+    tmp_path: Path,
+) -> None:
+    """The driver's in-tool admission refusal has a second, unstructured shape."""
+
+    state_path, state = _state(tmp_path)
+    upstream = DriverSessionUpstream()
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+    )
+    refusals = 0
+    base_request = upstream.request
+
+    async def request(method: str, params: Mapping[str, Any]) -> dict[str, Any]:
+        nonlocal refusals
+        if params.get("name") == "list_windows" and refusals == 0:
+            refusals += 1
+            upstream.calls.append((method, json.loads(json.dumps(params))))
+            return {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "content": [{"type": "text", "text": "session has ended"}],
+                    "isError": True,
+                    "structuredContent": {
+                        "status": "refused",
+                        "refusal": {
+                            "code": "session_ended",
+                            "message": "session has ended",
+                        },
+                    },
+                },
+            }
+        return await base_request(method, params)
+
+    upstream.request = request  # type: ignore[method-assign]
+    await server.call_tool("list_apps", {"session": "ses-a"})
+    result = await server.call_tool("list_windows", {"session": "ses-a"})
+
+    assert result.get("isError") is not True
+    names = [params["name"] for _method, params in upstream.calls]
+    assert names == [
+        "start_session",
+        "list_apps",
+        "list_windows",
+        "start_session",
+        "list_windows",
     ]
 
 

@@ -57,6 +57,15 @@ _UPSTREAM_DETAIL_LIMIT = 2048
 _UPSTREAM_DIAGNOSTIC_SCAN_LIMIT = 8192
 _UPSTREAM_DIAGNOSTIC_LOG_LIMIT = 20
 _ADMISSION_RETRY_LIMIT = 1
+# Cua retires a named session after five idle minutes and then refuses every
+# ordinary call for that label before dispatching it; only ``start_session``
+# revives the name. The daemon gate reports it as ``tool_invocation_failed``
+# and the in-tool admission as an unstructured refusal, both with this text.
+_DRIVER_SESSION_ENDED_CODES = frozenset({"tool_invocation_failed", "upstream_tool_error"})
+_DRIVER_SESSION_ENDED_DETAIL = "session has ended"
+_SESSION_LIFECYCLE_TOOLS = frozenset(
+    {"start_session", "end_session", "get_session", "list_sessions"}
+)
 _NO_SCRIPT_HANDLE = object()
 _PROXY_PROCESS_ENV_KEYS = (
     "HOME",
@@ -106,6 +115,26 @@ class UpstreamUnavailable(RuntimeError):
 
 class _DaemonGenerationChanged(RuntimeError):
     """The desktop state changed before this call could be admitted."""
+
+
+class _DriverSessionEnded(RuntimeError):
+    """The driver refused a call because it had already retired the session."""
+
+
+def _driver_session_ended(result: Mapping[str, Any]) -> bool:
+    """Whether the driver refused this call, undispatched, as an ended session."""
+
+    if result.get("isError") is not True:
+        return False
+    structured = result.get("structuredContent")
+    if not isinstance(structured, Mapping):
+        return False
+    detail = structured.get("detail")
+    return (
+        structured.get("code") in _DRIVER_SESSION_ENDED_CODES
+        and isinstance(detail, str)
+        and detail.startswith(_DRIVER_SESSION_ENDED_DETAIL)
+    )
 
 
 class Upstream(Protocol):
@@ -1165,8 +1194,13 @@ class ComputerUseServer:
             except ComputerServerError as exc:
                 return _error_result(exc.code, str(exc), dispatched=False)
 
-            for admission_attempt in range(_ADMISSION_RETRY_LIMIT + 1):
+            admission_attempt = 0
+            # Revive a driver-retired session at most once per call. A second
+            # refusal right after a successful start is returned as-is.
+            revival_available = name not in _SESSION_LIFECYCLE_TOOLS
+            while True:
                 upstream: Upstream | None = None
+                session_state: _SessionState | None = None
                 pre_forward = True
                 try:
                     status = await asyncio.to_thread(self._status_reader)
@@ -1206,11 +1240,14 @@ class ComputerUseServer:
                             }
                             if discovery_tool not in self._upstream_accepts_session:
                                 forwarded_discovery.pop("session", None)
-                            return await self._upstream_call(
+                            discovered = await self._upstream_call(
                                 upstream,
                                 discovery_tool,
                                 forwarded_discovery,
                             )
+                            if revival_available and _driver_session_ended(discovered):
+                                raise _DriverSessionEnded(discovery_tool)
+                            return discovered
 
                         try:
                             validation_error = await validate_handle_is_current(
@@ -1244,6 +1281,13 @@ class ComputerUseServer:
                             name,
                             forwarded,
                         )
+                        if _driver_session_ended(result):
+                            if revival_available:
+                                raise _DriverSessionEnded(name)
+                            # Still refused after a fresh start: the driver
+                            # ran nothing, so say so instead of leaving the
+                            # outcome ambiguous.
+                            return _not_dispatched_error_result(result)
 
                     if name in _OBSERVE_TOOLS and not result.get("isError"):
                         self._record_observation(arguments, result, session_state)
@@ -1258,10 +1302,23 @@ class ComputerUseServer:
                         self._commit_session_ended(session_state)
                         self._sessions.pop(session, None)
                     return result
+                except _DriverSessionEnded:
+                    # The driver ran nothing. Its element tokens and snapshots
+                    # for the ended episode are retired, so drop the matching
+                    # Controller observations and start the name again.
+                    if session_state is not None:
+                        self._commit_session_ended(session_state)
+                    revival_available = False
+                    logger.info(
+                        "computer-use driver retired session %s; starting it again",
+                        session,
+                    )
+                    continue
                 except _DaemonGenerationChanged:
                     if upstream is not None:
                         await self._discard_upstream(upstream)
                     if admission_attempt < _ADMISSION_RETRY_LIMIT:
+                        admission_attempt += 1
                         continue
                     return _error_result(
                         "computer_use_unavailable",
@@ -1307,8 +1364,6 @@ class ComputerUseServer:
                         dispatched=False if pre_forward else None,
                         error_type=type(exc).__name__,
                     )
-
-            raise AssertionError("computer-use admission loop exhausted")
 
     async def end_session_if_active(self, session: str) -> dict[str, Any]:
         """Retire a session created by an earlier call without creating one."""
