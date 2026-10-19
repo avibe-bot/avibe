@@ -109,13 +109,15 @@ The user has an Anthropic API key and a DeepSeek API key, adds Tavily, and chang
 
 ### 3.2 Settings
 
-`model_hub.hosted_tools.web_search` gains two optional fields:
+`model_hub.hosted_tools.web_search` gains four optional fields (`prefer_native`, `services`, `service_order` and
+`executor_order_kinds`):
 
 ```json
 "web_search": {
   "enabled": true,
   "prefer_native": true,
   "executor_order": ["src_…", "src_…"],
+  "executor_order_kinds": {"src_…": "service", "src_…": "model"},
   "services": {"src_…": {"results": 5, "content": false, "enabled": true}},
   "service_order": ["src_…", "src_…"]
 }
@@ -125,6 +127,7 @@ The user has an Anthropic API key and a DeepSeek API key, adds Tavily, and chang
 | --- | --- |
 | `prefer_native` | boolean; absent means `true` (decision 3) |
 | `service_order` | the automatic order of tool-only `search` Sources: the server appends a Source's id when it is created and drops it when the Source is removed; the user never edits it directly (a reorder saves `executor_order`). Ids that no longer name a Source are skipped. |
+| `executor_order_kinds` | written by the server with every `executor_order` save: each named Source id mapped to `service` or `model`, its role at that save. Absent (a released order) means every entry was saved as `model`; an id the order does not name is ignored. The client never writes it. |
 | `services` | per search-capable Source: `results` (1 to the vendor's maximum, default 5), `content` (page text, default `false`, only where the vendor returns page text) and `enabled` (default `true`; `false` takes the Source out of the search order without removing it, which is how a DeepSeek Source keeps its models but stops searching). Absent means defaults. An entry for a Source that no longer exists is ignored. The catalog limits are enforced on write; on load a saved value the current catalog no longer allows is read as the nearest allowed one (`results` clamped to the maximum, `content: true` read as `false` where the vendor no longer returns page text) and kept as saved until the next write, so a catalog change never fails loading. |
 
 - `executor_order` keeps its rule (hosted tools §3.3) and now lists search-capable Sources beside model executors.
@@ -624,7 +627,7 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 
 | PR | Lane | Work | Depends on |
 | --- | --- | --- | --- |
-| **S1** Catalog, Sources, settings | foundation | search vendors in the catalog; `protocol: "search"` Sources and their exclusions (the credential store accepts the protocol, the engine config renderer skips it); the create and replace branch with free checks; `prefer_native`, `services` and `service_order`; the adapter's search call and free-check operation with custody and transport rules; the Tools read and PUT; the version event | — |
+| **S1** Catalog, Sources, settings | foundation | search vendors in the catalog; `protocol: "search"` Sources and their exclusions (the credential store accepts the protocol, the engine config renderer skips it); the create and replace branch with free checks; `prefer_native`, `services`, `service_order` and `executor_order_kinds` (loaded, written with each order save, and kept across a restart); the adapter's search call and free-check operation with custody and transport rules; the Tools read and PUT; the version event | — |
 | **S2** Chain and records | gateway | candidates, automatic order and the saved-order placement rule, limits, per-vendor request and result mapping with field bounds, outcome classes into fenced Source health, positive evidence, record with `attempts[]`, cost and metering, `prefer_native` in hop facts, the no-candidate reason, the `hosted_activity` projection | S1 |
 | **S3** Model text | Vibey | `content` in the model-facing text and its bounds; the card's executor label | S2's record |
 | **S4** Tools, dialog, Sources | UI | §6 with en and zh copy | S1's read; S2 for live states |
@@ -656,7 +659,7 @@ Hermetic, against stub vendor servers; no live upstream and no real keys.
 | Layer | Cases |
 | --- | --- |
 | Create | the search branch skips observation and discovery; free-check pass saves verified, a DeepSeek balance with `is_available: false` saves verified in the balance state, 401 saves nothing, other failures and no-check vendors save pending and the first success clears it; replacement keeps the old key on 401 and on `unknown`, and a committed replacement clears the old balance or limit blocker |
-| Config | `protocol: "search"` accepted only in its combination; `prefer_native` and `services` round-trip and default; a release-before loader ignores the new `hosted_tools` fields |
+| Config | `protocol: "search"` accepted only in its combination; `prefer_native`, `services` and `executor_order_kinds` round-trip and default, and a mixed service/model order keeps its placement across a restart; a release-before loader ignores the new `hosted_tools` fields |
 | Custody | the adapter call attaches the key, refuses redirects and non-catalog hosts, caps the body, and returns no key material; nothing outside the adapter reads the key |
 | Chain | automatic and saved order, and the read-time placement of unnamed search-capable Sources before the first model executor (including one qualified by a catalog upgrade, with no config write) and a named entry whose role changed (a catalog upgrade, a retarget, a released order naming an official DeepSeek Source) re-placed through `executor_order_kinds`; service cooldown from `Retry-After` (a longer deadline is not shortened) and doubling backoff, scoped to (Source, service), with a DeepSeek model route unaffected, and not written by an attempt that started before a key replacement; the terminal reason for every mix of skips (a disabled Source decides it only when every candidate is disabled), with `record.attempts[]` present when nothing executed and a blocked model executor showing its own remedy; `services.<id>.enabled: false` takes a DeepSeek Source out of the order and keeps its models; query-length skip; each outcome row of §4.2; one deadline; metering, `failed_attempts` and `attempts`; DeepSeek official versus relay; settings changed mid-turn do not apply until the next turn; re-enable with and without a free check, a second press joining the in-flight check, only one request admitted while a re-enable trial is pending, and a restart before the trial leaves the Source blocked; a long cooldown is shown with `cooldown_until` and cleared by "立即重试"; a reported cost above the ceiling falls back to the list price; a Tavily `key.limit: null` is unlimited |
 | Usage | service rows add known costs to the totals without the lower-bound flag; only sent requests are metered; DeepSeek's empty results, non-200 responses, timeouts and failures before sending cost nothing, while an unreadable 200, or a lost connection or stop after sending (and a timeout for a vendor that does not declare it unbilled) records no cost, adds to `uncertain_requests` and sets the lower bound; a default Exa call is listed at the search price alone (highlights included); a tool-only Source appears only in `services[]` and validates against the closed schema; an Exa content call without a reported cost keeps its page surcharge across a restart; a non-200 attempt records $0, and so does a received non-200 whose body read then failed; a pre-send failure is a `failed` attempt with $0 and no metering; a superseded failure, from any fence or from a repair after it settled, shows no repair; the skip classification order; a service no longer in the catalog stays in `services[]` unpriced, with the lower-bound flag, and its saved Source still loads and is no candidate; `service_order` survives a reload and decides the automatic order; a reported cost survives a restart through the ledger; a price change revalues list-priced quantities under the new table date; a released ledger row without the new fields loads; an impossible counter set is repaired, orphaned pages or reported dollars included; a pre-send failure on the only service projects as that service with $0, and after a billable model attempt the total keeps that attempt's cost; a removed page-text price leaves old page quantities unpriced with the lower-bound flag; a saved `results` above a lowered maximum loads clamped |
