@@ -534,8 +534,11 @@ These rules are C-1 rows in `cross-provider.md` and per-protocol rows in `conver
     number of calls one native response's figure covers. With no priced attempt to sum, the cost is unknown rather
     than "at least $0". No attempt count is shown: the producer lists billable attempts only and does not say whether
     the last attempt was billed, so any count would be inferred, and the total already says what the call cost.
-  - The executor request is a short model request because no vendor exposes search without a model: Anthropic,
-    OpenAI's public API, xAI and Google all run search inside a model call.
+  - The executor request is a short model request for vendors that expose search only inside a model call:
+    Anthropic, OpenAI's public API, xAI and Google. DeepSeek also has standalone Search/Fetch HTTP APIs; an eligible
+    `deepseek` API-key Source is a **direct executor** for `web_search` and `web_fetch`, calling those endpoints with
+    the key from Avibe Vault and making no model call. Its candidate carries `direct: true` and a label, and its
+    execution is `mode: "direct"`.
 - **The result is the canonical record** (v1's rules, unchanged): a `HostedRecord` with `sources[]` in the
   executor's order, a snippet from the answer text each citation covers (Anthropic keeps `cited_text`), X search
   listing the cited posts, and the `ProxyExecution` naming the executor Source, model and billing. Every outcome of
