@@ -128,6 +128,45 @@ describe('no-unused-vars still errors on genuinely dead bindings', () => {
   });
 });
 
+// The dependency migration must preserve real enforcement, not just configured
+// rule names. In particular Hooks 7.1 reports multiple compiler errors and sees
+// synchronous effect setters that 7.0.1 missed. A snapshot alone cannot prove
+// either behavior; these probes exercise the same config as the lint gate.
+describe('the upgraded lint presets enforce their behavioral contract', () => {
+  it.each([
+    ['react-hooks/rules-of-hooks', 'import {useState} from "react"; export function C({ready}: {ready: boolean}) { if (ready) { const [n] = useState(0); return <div>{n}</div>; } return null; }'],
+    ['react-hooks/static-components', 'export function Parent({value}: {value: string}) { function Child() { return <div>{value}</div>; } return <Child/>; }'],
+    ['react-hooks/immutability', 'export function C({value}: {value: {name: string}}) { value.name="changed"; return <div>{value.name}</div>; }'],
+    ['react-hooks/purity', 'export function C() { return <div>{Date.now()}</div>; }'],
+    ['no-unassigned-vars', 'export function f() { let value; return value; }'],
+    ['no-useless-assignment', 'export function f() { let n=1; n=2; return n; }'],
+    ['preserve-caught-error', 'export function f() { try { JSON.parse("x"); } catch (error) { throw new Error(String(error)); } }'],
+    ['no-shadow-restricted-names', 'export function f(globalThis: string) { return globalThis; }'],
+  ])('errors on %s violations', async (rule, source) => {
+    expect(await errorRuleIdsFor(source, TSX_PROBE)).toContain(rule);
+  });
+
+  it('reports both a synchronous effect setter and a render ref read, not just the first compiler error', async () => {
+    const code =
+      'import {useEffect,useRef,useState} from "react";\n' +
+      'export function C({value}: {value: string}) {\n' +
+      '  const ref=useRef(0); const [text,setText]=useState("");\n' +
+      '  useEffect(()=>{setText(value);},[value]);\n' +
+      '  return <div>{text}{ref.current}</div>;\n}\n';
+    expect(await errorRuleIdsFor(code, TSX_PROBE)).toEqual(
+      expect.arrayContaining(['react-hooks/set-state-in-effect', 'react-hooks/refs']),
+    );
+  });
+
+  it.each([
+    ['react-hooks/static-components', 'function Child({value}: {value: string}) { return <div>{value}</div>; } export function Parent({value}: {value: string}) { return <Child value={value}/>; }'],
+    ['react-hooks/set-state-in-effect', 'import {useState} from "react"; export function C() { const [text,setText]=useState(""); return <button onClick={()=>setText("clicked")}>{text}</button>; }'],
+    ['preserve-caught-error', 'export function f() { try { JSON.parse("x"); } catch (error) { throw new Error("Invalid JSON", {cause: error}); } }'],
+  ])('does not report %s for its valid counterpart', async (rule, source) => {
+    expect(await ruleIdsFor(source, TSX_PROBE)).not.toContain(rule);
+  });
+});
+
 // `src/lib/useLatestRef.ts` carries the only `react-hooks/refs` exemption that is
 // not a per-site judgement call. That is defensible only while the rule still
 // applies everywhere else: switching it off in the shared config, or dropping it

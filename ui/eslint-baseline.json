@@ -1,14 +1,28 @@
 {
-  "$comment": "Explicit ledger of the lint violations that predate the UI lint cleanup and are not fixed by it. `npm run lint` fails on anything not recorded here, on a recorded entry that grows, and on a recorded entry that shrinks without being re-recorded. See scripts/lint-baseline.mjs. Regenerate with `npm run lint:baseline`; raising a count needs a reviewer to agree in the PR.",
+  "$comment": "Explicit ledger of existing lint debt, remeasured on unchanged source during the ESLint 10 migration (docs/maintenance/eslint-10-migration.md). `npm run lint` fails on anything not recorded here, on a recorded entry that grows, and on a recorded entry that shrinks without being re-recorded. See scripts/lint-baseline.mjs. Regenerate with `npm run lint:baseline`; raising a count needs a reviewer to agree in the PR.",
   "rationale": {
     "@typescript-eslint/no-explicit-any": "The untyped edge of the Python API. Each one is a response body, an SSE event payload or a third-party callback that reaches the UI as `any`. Typing them is a per-endpoint contract change against the backend, not a lint fix, and doing it as one sweep would produce a diff nobody can review. The ratchet's job here is to stop a NEW endpoint from landing untyped; the recorded ones come down endpoint by endpoint.",
     "react-hooks/set-state-in-effect": "Legitimate-looking `reset derived state when the subject changes` and prop-mirroring effects in components with no test coverage. Each rewrite changes when a render happens, so each needs its own regression test first; batching them behind a lint deadline is how a subtle render-order bug ships.",
     "react-hooks/preserve-manual-memoization": "Advice for adopting the React Compiler, not a defect. `babel-plugin-react-compiler` is not in this project's Vite plugin list, so no shipped behaviour depends on these; they become actionable in the change that turns the compiler on.",
     "react-refresh/only-export-components": "`src/context/ApiContext.tsx` only. Every other context module in the UI now splits its handle from its provider, but this one is 3142 lines with ~78 consumers, and the split means relocating the ~1200-line provider in the single most contended file in the repository (36 unmerged branches currently modify it). The cost is a merge conflict for everyone else, and the benefit is hot-reload for one file — so it belongs in a change that owns ApiContext, not in a lint cleanup.",
     "react-hooks/exhaustive-deps": "Inline `eslint-disable` comments predating this cleanup. Each one also opts its component out of the compiler-backed hook analysis, so the suppressed count is a direct measure of the UI the other react-hooks rules cannot see: removing all 43 raises the error count rather than lowering it. Frozen here so that area cannot grow while it is retired component by component.",
-    "react-hooks/refs": "Inline suppressions of the render-phase ref rule, in the same unanalysable area as the exhaustive-deps ones above. Frozen so no new render-phase ref access can be hidden behind a comment."
+    "react-hooks/refs": "Render-phase ref access and existing inline suppressions. Hooks 7.1.1 reports violations that 7.0.1 skipped after an earlier compiler diagnostic. Replacing these latest-value bridges changes render/commit timing and needs consumer-specific tests. The ESLint 10 migration remeasures unchanged source, not additional suppressions; both counts remain frozen. See docs/maintenance/eslint-10-migration.md.",
+    "react-hooks/immutability": "Hooks 7.1.1 now reports existing forward references in effects/callbacks and a render-phase mutation through a ref passed to a hook. These are compiler-analysis restrictions, not proof that the callbacks execute before initialization. Source is unchanged in the migration; fixes belong with the affected component's lifecycle tests.",
+    "react-hooks/purity": "Three existing render-time Date.now reads used by expiry/countdown displays, newly visible with Hooks 7.1.1. Moving time into state requires an explicit ticking and cleanup contract; the migration freezes these sites rather than changing display timing.",
+    "react-hooks/static-components": "ChannelList's existing render-local Wrapper component is newly reported when the compiler continues past earlier diagnostics. Hoisting it and preserving state/props is a separate component change, not part of the lint-tool upgrade.",
+    "no-useless-assignment": "Ten existing overwritten initial values detected by the new ESLint 10 recommended rule. They are recorded on unchanged source for this tool-only migration, not permission for new dead assignments; each later cleanup must reduce its per-file count.",
+    "preserve-caught-error": "One backend-enablement recovery diagnostic throws a new error inside an outer catch without carrying that caught error as its cause. ESLint 10 newly recommends cause preservation. The diagnostic describes a separate failed readback, so changing its error provenance belongs with the recovery-path tests; this migration records the existing shape without changing runtime behavior."
   },
   "violations": {
+    "e2e/support/api.ts": {
+      "no-useless-assignment": 1
+    },
+    "e2e/support/gateway.ts": {
+      "no-useless-assignment": 1
+    },
+    "src/App.tsx": {
+      "react-hooks/set-state-in-effect": 1
+    },
     "src/components/AppShell.tsx": {
       "@typescript-eslint/no-explicit-any": 2,
       "react-hooks/set-state-in-effect": 1
@@ -16,11 +30,36 @@
     "src/components/InstallHint.tsx": {
       "react-hooks/set-state-in-effect": 1
     },
+    "src/components/RemoteAccess.tsx": {
+      "react-hooks/purity": 1,
+      "react-hooks/set-state-in-effect": 2
+    },
+    "src/components/VersionBadge.tsx": {
+      "react-hooks/immutability": 2
+    },
     "src/components/Wizard.tsx": {
-      "@typescript-eslint/no-explicit-any": 1
+      "@typescript-eslint/no-explicit-any": 1,
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/apps/AppWindow.tsx": {
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/apps/windowChords.ts": {
+      "no-useless-assignment": 1
+    },
+    "src/components/onboarding/BackendConnectionDialog.tsx": {
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/settings/BackendLifecycleChip.tsx": {
+      "react-hooks/refs": 2,
+      "react-hooks/set-state-in-effect": 2
+    },
+    "src/components/settings/OpencodeProviderTestPanel.tsx": {
+      "react-hooks/set-state-in-effect": 1
     },
     "src/components/settings/SettingsBackendsPage.tsx": {
-      "@typescript-eslint/no-explicit-any": 1
+      "@typescript-eslint/no-explicit-any": 1,
+      "react-hooks/set-state-in-effect": 1
     },
     "src/components/settings/SettingsMessagingPage.tsx": {
       "@typescript-eslint/no-explicit-any": 2,
@@ -32,11 +71,72 @@
     "src/components/settings/SettingsServicePage.tsx": {
       "@typescript-eslint/no-explicit-any": 4
     },
-    "src/components/settings/shared/useBackendRuntime.ts": {
-      "@typescript-eslint/no-explicit-any": 1
+    "src/components/settings/models/BackendModelCatalogDialog.tsx": {
+      "react-hooks/refs": 1,
+      "react-hooks/set-state-in-effect": 2
     },
-    "src/components/settings/shared/useOAuthFlowLock.ts": {
-      "react-hooks/preserve-manual-memoization": 1
+    "src/components/settings/models/BackendModelEditorDialog.tsx": {
+      "react-hooks/set-state-in-effect": 2
+    },
+    "src/components/settings/models/BackendModelPickerDialog.tsx": {
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/settings/models/BackendSupplyModeCard.tsx": {
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/settings/models/MigrationDialog.tsx": {
+      "react-hooks/set-state-in-effect": 2
+    },
+    "src/components/settings/models/OAuthConnectDialog.tsx": {
+      "react-hooks/purity": 1,
+      "react-hooks/refs": 3,
+      "react-hooks/set-state-in-effect": 2
+    },
+    "src/components/settings/models/RouteCandidatePopover.tsx": {
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/settings/models/RouteChainDialog.tsx": {
+      "react-hooks/refs": 35,
+      "react-hooks/set-state-in-effect": 2
+    },
+    "src/components/settings/models/SettingsModelsPage.tsx": {
+      "react-hooks/preserve-manual-memoization": 4,
+      "react-hooks/refs": 9,
+      "react-hooks/set-state-in-effect": 5
+    },
+    "src/components/settings/models/SourceDetailPanel.test.tsx": {
+      "react-hooks/refs": 1
+    },
+    "src/components/settings/models/SourceOrderDrawer.tsx": {
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/settings/models/SourceTestDialog.tsx": {
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/settings/models/UsageTab.tsx": {
+      "react-hooks/set-state-in-effect": 5
+    },
+    "src/components/settings/models/modelsApi.ts": {
+      "no-useless-assignment": 1
+    },
+    "src/components/settings/models/recordedTurn.ts": {
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/settings/oauth/useBackendOAuth.ts": {
+      "react-hooks/purity": 1,
+      "react-hooks/refs": 1
+    },
+    "src/components/settings/providers/BackendConnectionForm.tsx": {
+      "react-hooks/refs": 3,
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/settings/providers/OpencodeProviderConfig.tsx": {
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/settings/shared/useBackendRuntime.ts": {
+      "@typescript-eslint/no-explicit-any": 1,
+      "preserve-caught-error": 1,
+      "react-hooks/refs": 3
     },
     "src/components/shared/RoutingConfigPanel.tsx": {
       "@typescript-eslint/no-explicit-any": 2,
@@ -46,75 +146,221 @@
       "@typescript-eslint/no-explicit-any": 3
     },
     "src/components/steps/ChannelList.tsx": {
-      "@typescript-eslint/no-explicit-any": 28
+      "@typescript-eslint/no-explicit-any": 28,
+      "react-hooks/immutability": 1,
+      "react-hooks/set-state-in-effect": 3,
+      "react-hooks/static-components": 1
     },
     "src/components/steps/DiscordConfig.tsx": {
-      "@typescript-eslint/no-explicit-any": 6
+      "@typescript-eslint/no-explicit-any": 6,
+      "react-hooks/set-state-in-effect": 3
     },
     "src/components/steps/DoctorPanel.tsx": {
-      "@typescript-eslint/no-explicit-any": 4
+      "@typescript-eslint/no-explicit-any": 4,
+      "react-hooks/set-state-in-effect": 1
     },
     "src/components/steps/LarkConfig.tsx": {
-      "@typescript-eslint/no-explicit-any": 6
+      "@typescript-eslint/no-explicit-any": 6,
+      "react-hooks/set-state-in-effect": 3
+    },
+    "src/components/steps/LogsPanel.tsx": {
+      "react-hooks/set-state-in-effect": 1
     },
     "src/components/steps/ModeSelection.tsx": {
       "@typescript-eslint/no-explicit-any": 2
     },
     "src/components/steps/PlatformSelection.tsx": {
-      "@typescript-eslint/no-explicit-any": 10
+      "@typescript-eslint/no-explicit-any": 10,
+      "react-hooks/refs": 1,
+      "react-hooks/set-state-in-effect": 1
     },
     "src/components/steps/SlackConfig.tsx": {
-      "@typescript-eslint/no-explicit-any": 4
+      "@typescript-eslint/no-explicit-any": 4,
+      "react-hooks/immutability": 1,
+      "react-hooks/set-state-in-effect": 2
     },
     "src/components/steps/Summary.tsx": {
       "@typescript-eslint/no-explicit-any": 5
     },
     "src/components/steps/TelegramConfig.tsx": {
-      "@typescript-eslint/no-explicit-any": 4
+      "@typescript-eslint/no-explicit-any": 4,
+      "react-hooks/set-state-in-effect": 2
     },
     "src/components/steps/UserList.tsx": {
-      "@typescript-eslint/no-explicit-any": 2
+      "@typescript-eslint/no-explicit-any": 2,
+      "react-hooks/set-state-in-effect": 2
     },
     "src/components/steps/WeChatConfig.tsx": {
-      "@typescript-eslint/no-explicit-any": 4
+      "@typescript-eslint/no-explicit-any": 4,
+      "react-hooks/immutability": 1,
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/steps/Welcome.tsx": {
+      "react-hooks/immutability": 1
+    },
+    "src/components/ui/confirm-dialog.tsx": {
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/ui/editor-dialog.tsx": {
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/ui/file-preview.tsx": {
+      "no-useless-assignment": 1,
+      "react-hooks/set-state-in-effect": 6
     },
     "src/components/ui/secret-request-card.tsx": {
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/ui/vault-approval-card.tsx": {
       "react-hooks/set-state-in-effect": 1
     },
     "src/components/ui/vault-chat-requests.tsx": {
       "react-hooks/set-state-in-effect": 1
     },
-    "src/components/workbench/ChatPage.tsx": {
-      "@typescript-eslint/no-explicit-any": 1,
+    "src/components/ui/vault-secret-form.tsx": {
+      "react-hooks/refs": 1,
+      "react-hooks/set-state-in-effect": 4
+    },
+    "src/components/ui/vault-settings-dialog.tsx": {
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/workbench/AgentGraphDetail.tsx": {
+      "react-hooks/refs": 2,
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/workbench/AgentGraphTab.tsx": {
+      "react-hooks/preserve-manual-memoization": 1,
       "react-hooks/set-state-in-effect": 3
     },
+    "src/components/workbench/AgentGraphTriggerDetail.tsx": {
+      "react-hooks/refs": 2,
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/workbench/AgentRoutePicker.tsx": {
+      "react-hooks/set-state-in-effect": 2
+    },
+    "src/components/workbench/AgentsPage.tsx": {
+      "no-useless-assignment": 1,
+      "react-hooks/immutability": 1,
+      "react-hooks/preserve-manual-memoization": 1,
+      "react-hooks/refs": 5,
+      "react-hooks/set-state-in-effect": 4
+    },
+    "src/components/workbench/AppsFileBrowserPage.tsx": {
+      "no-useless-assignment": 1,
+      "react-hooks/immutability": 1,
+      "react-hooks/preserve-manual-memoization": 9,
+      "react-hooks/set-state-in-effect": 4
+    },
+    "src/components/workbench/ArchiveSessionDialog.tsx": {
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/workbench/ChatPage.tsx": {
+      "@typescript-eslint/no-explicit-any": 1,
+      "react-hooks/immutability": 1,
+      "react-hooks/preserve-manual-memoization": 7,
+      "react-hooks/refs": 6,
+      "react-hooks/set-state-in-effect": 11
+    },
+    "src/components/workbench/Composer.tsx": {
+      "react-hooks/set-state-in-effect": 3
+    },
+    "src/components/workbench/EditorApp.tsx": {
+      "react-hooks/immutability": 1,
+      "react-hooks/preserve-manual-memoization": 1,
+      "react-hooks/set-state-in-effect": 2
+    },
+    "src/components/workbench/EditorSearchView.tsx": {
+      "react-hooks/set-state-in-effect": 2
+    },
+    "src/components/workbench/FailureDetails.tsx": {
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/workbench/FileEditorPane.tsx": {
+      "react-hooks/refs": 1,
+      "react-hooks/set-state-in-effect": 2
+    },
+    "src/components/workbench/FilePicker.tsx": {
+      "react-hooks/set-state-in-effect": 2
+    },
     "src/components/workbench/FileTree.tsx": {
+      "react-hooks/refs": 1,
+      "react-hooks/set-state-in-effect": 3
+    },
+    "src/components/workbench/GlobalPromptsDialog.tsx": {
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/workbench/HarnessPage.tsx": {
+      "react-hooks/set-state-in-effect": 7
+    },
+    "src/components/workbench/NewAgentDialog.tsx": {
+      "react-hooks/set-state-in-effect": 3
+    },
+    "src/components/workbench/ProjectAgentsMdDialog.tsx": {
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/workbench/QueuedAttachments.tsx": {
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/workbench/QuickReplies.tsx": {
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/workbench/ShowPageShareControl.tsx": {
+      "no-useless-assignment": 1,
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/workbench/ShowPageSharingSettings.tsx": {
+      "react-hooks/refs": 1,
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/workbench/SkillsPage.tsx": {
       "react-hooks/set-state-in-effect": 2
     },
     "src/components/workbench/TerminalView.tsx": {
       "react-hooks/set-state-in-effect": 1
     },
     "src/components/workbench/VaultsPage.tsx": {
+      "react-hooks/immutability": 1,
+      "react-hooks/set-state-in-effect": 4
+    },
+    "src/components/workbench/WebPushControl.tsx": {
       "react-hooks/set-state-in-effect": 1
     },
     "src/components/workbench/harnessLifecycle.test.ts": {
       "@typescript-eslint/no-explicit-any": 1
     },
+    "src/components/workbench/skills/BrowseRegistryDialog.tsx": {
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/workbench/useSessionActions.tsx": {
+      "react-hooks/refs": 5,
+      "react-hooks/set-state-in-effect": 1
+    },
     "src/context/ApiContext.tsx": {
       "@typescript-eslint/no-explicit-any": 48,
       "react-refresh/only-export-components": 1
-    },
-    "src/context/DockProvider.tsx": {
-      "react-hooks/preserve-manual-memoization": 5
     },
     "src/context/StatusContext.ts": {
       "@typescript-eslint/no-explicit-any": 3
     },
     "src/context/StatusProvider.tsx": {
-      "@typescript-eslint/no-explicit-any": 1
+      "@typescript-eslint/no-explicit-any": 1,
+      "no-useless-assignment": 1
+    },
+    "src/context/WorkbenchInboxProvider.tsx": {
+      "react-hooks/refs": 8
+    },
+    "src/context/WorkbenchProjectsProvider.tsx": {
+      "react-hooks/refs": 4
     },
     "src/context/apiErrorParse.ts": {
       "@typescript-eslint/no-explicit-any": 1
+    },
+    "src/features/permissions/PermissionsPage.tsx": {
+      "react-hooks/refs": 2
+    },
+    "src/features/permissions/api.ts": {
+      "no-useless-assignment": 1
     },
     "src/lib/platforms.ts": {
       "@typescript-eslint/no-explicit-any": 12
@@ -125,8 +371,13 @@
     "src/lib/useMessageSearch.ts": {
       "react-hooks/set-state-in-effect": 1
     },
-    "src/lib/usePendingVaultRequests.ts": {
-      "react-hooks/preserve-manual-memoization": 1
+    "src/lib/useNewSession.ts": {
+      "react-hooks/refs": 1,
+      "react-hooks/set-state-in-effect": 1
+    },
+    "src/pet/PetPage.tsx": {
+      "react-hooks/preserve-manual-memoization": 3,
+      "react-hooks/set-state-in-effect": 6
     }
   },
   "suppressions": {
