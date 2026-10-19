@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/button';
 import { Markdown } from '@/components/ui/markdown';
 import { QuickReplies } from '@/components/workbench/QuickReplies';
 import { isComposingKey } from '@/lib/imeComposition';
-import { usePageActive } from '@/lib/pageActivity';
+import { useDocumentVisible, usePageActive } from '@/lib/pageActivity';
 import { usePendingVaultRequests } from '@/lib/usePendingVaultRequests';
 import { useVaultRequestRefresh } from '@/lib/useVaultRequestRefresh';
 import { vaultRequestType } from '@/lib/vaultRequestPlacement';
@@ -20,6 +20,7 @@ import { VoiceTranscriptionError } from '@/lib/voiceTranscription';
 
 import { PetAvatar, type PetPose } from './PetAvatar';
 import { PetOpenButton } from './PetOpenButton';
+import { REPLY_LINGER_RESUME_MS, useReplyLinger } from './useReplyLinger';
 import { onPetHover, petBridge, sessionLink, vaultRequestLink } from './petBridge';
 import { usePetPanel } from './petPanel';
 import { petComposer, usePetComposer } from './petComposer';
@@ -276,8 +277,7 @@ const PetSurface: React.FC = () => {
     // Typing and dictation keep the speech slot, and the draft, as they are.
     if (composing || voice.listening) return;
     if (!binding || resolvingMain || (data.messages.length === 0 && !optimisticTitle)) return;
-    setDetailOpen(true);
-    void setPanel(true);
+    openHistory();
   };
   const [composing, setComposing] = useState(false);
   const [presentations, setPresentations] = useState<Record<string, CardPresentation>>({});
@@ -648,20 +648,61 @@ const PetSurface: React.FC = () => {
     && (historyOpen || data.running || optimisticTitle || exchange.user || exchange.results.length > 0 || failure || uncertain
       || queued || vaultRequests.length > 0 || quickReplies),
   );
-  // Whether it is drawn (spec §4.2): only while the main session is active —
-  // Vibey is working, a send is pending, Vibey needs the user, or the history
-  // is open — and hidden the moment none holds, the turn's result included.
-  // Unread replies only light Vibey's badge; a Vibey click opens the history.
-  // Every input is the current epoch's own state, so nothing carries a bubble
-  // over from a previous session.
+  // Whether it is drawn (spec §4.2): while the main session is active — Vibey
+  // is working, a send is pending, Vibey needs the user, or the history is
+  // open — and then for a short on-screen linger of a fresh reply. Unread
+  // replies only light Vibey's badge. Every input is the current epoch's own
+  // state, so nothing carries a bubble over from a previous session.
   const needsYou = Boolean((!data.running && failure) || uncertain || queued || vaultRequests.length > 0);
-  const showReplyBubble = hasBubbleContent && Boolean(data.running || optimisticTitle || needsYou || historyOpen);
-  const toggleHistory = () => { setDetailOpen(!detailOpen); void setPanel(!detailOpen); };
+  const held = Boolean(data.running || optimisticTitle || needsYou || historyOpen);
+  // The reply lingers only when it is news to this epoch (arrived live, or was
+  // not in its first tail read), derived here in render: when the turn ends in
+  // the same render its result lands, the bubble never closes in between.
+  const latestResultId = exchange.results.at(-1)?.id ?? null;
+  const freshResultId = latestResultId !== null && data.isFresh(latestResultId) ? latestResultId : null;
+  // The speech slot is drawing this bubble rather than the input or the
+  // dictation marquee; only then is the linger's time on screen.
+  const slotShowsBubble = hasBubbleContent && Boolean(binding) && !voice.listening && !(composing && canChat && !uncertain);
+  const documentVisible = useDocumentVisible();
+  const [pointerOverBubble, setPointerOverBubble] = useState(false);
+  const bubbleRef = useRef<HTMLDivElement>(null);
+  const { lingeringId, expire: expireReply, keepAtLeast } = useReplyLinger({
+    scope: epoch,
+    candidateId: freshResultId,
+    counting: documentVisible && slotShowsBubble && !pointerOverBubble,
+    keyboardHeld: () => {
+      const node = bubbleRef.current;
+      const active = document.activeElement;
+      return Boolean(node && active && node.contains(active) && active.matches(':focus-visible'));
+    },
+  });
+  const showReplyBubble = hasBubbleContent && (held || lingeringId !== null);
+  // A hidden bubble cannot be under the pointer; a stale reading would pause
+  // the next reply.
+  if (!showReplyBubble && pointerOverBubble) setPointerOverBubble(false);
+  // Looking at the history is looking at the reply: once it closes, the reply
+  // does not linger again.
+  function openHistory() {
+    if (lingeringId !== null) expireReply(lingeringId);
+    setDetailOpen(true);
+    void setPanel(true);
+  }
+  const toggleHistory = () => {
+    if (detailOpen) { setDetailOpen(false); void setPanel(false); } else openHistory();
+  };
+  const avatarRef = useRef<HTMLButtonElement>(null);
+  useLayoutEffect(() => {
+    // Focus inside a bubble that goes away moves to Vibey rather than to nowhere.
+    if (showReplyBubble) return;
+    const node = bubbleRef.current;
+    if (node && document.activeElement && node.contains(document.activeElement)) avatarRef.current?.focus();
+  }, [showReplyBubble]);
 
   const avatar = (
     <div className={clsx('pet-mini-avatar-wrap', voice.listening && 'is-listening', hovered && 'is-hovered')} data-pet-hover>
       {voice.listening && <span className="pet-mini-listen-ring" aria-hidden />}
       <button
+        ref={avatarRef}
         type="button"
         className="pet-mini-avatar-button"
         // A click opens or closes Vibey's recent turns (§5.1).
@@ -791,6 +832,15 @@ const PetSurface: React.FC = () => {
           </>
           ) : hasBubbleContent && binding ? (
             // Still drawn while the slot closes, so it fades out rather than vanishing.
+            <div
+              ref={bubbleRef}
+              onPointerEnter={() => setPointerOverBubble(true)}
+              onPointerLeave={() => {
+                // Leaving gives the reader a moment before it goes.
+                keepAtLeast(REPLY_LINGER_RESUME_MS);
+                setPointerOverBubble(false);
+              }}
+            >
             <MainReplyBubble
               open={historyOpen}
               onToggle={toggleHistory}
@@ -811,6 +861,7 @@ const PetSurface: React.FC = () => {
               uncertain={uncertain}
               onInspect={() => { void petBridge.open(sessionLink(binding)).then(() => { if (epoch.isCurrent()) setUncertain(binding, false); }).catch(() => undefined); }}
             />
+            </div>
           ) : resolvingMain || !binding ? (
             <div className="pet-mini-reply-bubble pet-mini-detail-inner" data-pet-hit role="status">
               <p className="pet-mini-detail-muted">{t(data.canChat === null ? 'common.loading' : 'pet.vibeyUnavailable')}</p>

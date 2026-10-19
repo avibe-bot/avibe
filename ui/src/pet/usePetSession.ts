@@ -46,7 +46,15 @@ export type PetSessionData = {
   noteSent: (message: WorkbenchMessage | null) => void;
   /** Re-read the tail from the server. */
   refreshTail: () => void;
+  /**
+   * Whether a row is new to this epoch: it reached the pet live (`message.new`),
+   * whenever that was, or it was missing from the epoch's first successful
+   * tail read. Rows that read already had are history, not news.
+   */
+  isFresh: (messageId: string) => boolean;
 };
+
+type Freshness = { identity: unknown; baseline: ReadonlySet<string> | null; live: ReadonlySet<string> };
 
 // `loaded`: a tail read has applied. Until then the rows are only what live
 // events merged, so they cannot be read as a complete window.
@@ -105,6 +113,9 @@ export function usePetSession(sessionId: string | null): PetSessionData {
   // A local send stays Running for the registration grace.
   const [inGrace, setInGrace] = useState(false);
   const [sendCount, setSendCount] = useState(0);
+  // What this epoch's first tail read held, and what arrived live. Keyed by the
+  // epoch's identity, so a new session or authorization starts with neither.
+  const [freshness, setFreshness] = useState<Freshness>(() => ({ identity, baseline: null, live: new Set() }));
 
   // Reset during render so a switch never paints the previous session's rows.
   const [displayed, setDisplayed] = useState(sessionId);
@@ -134,6 +145,11 @@ export function usePetSession(sessionId: string | null): PetSessionData {
       read: (key) => api.listSessionMessages(key, { tail: true, cache: false, limit: PET_TAIL_LIMIT }),
       apply: (_key, value) => {
         setTail({ messages: value.messages, hasOlder: Boolean(value.next_before_id), loaded: true });
+        const owner = currentIdentity.current;
+        setFreshness((current) => {
+          const scoped = current.identity === owner ? current : { identity: owner, baseline: null, live: new Set<string>() };
+          return scoped.baseline ? scoped : { ...scoped, baseline: new Set(value.messages.map((row) => row.id)) };
+        });
       },
     }),
     turn: new FencedSource<string, SessionRuntimeState>({
@@ -142,7 +158,7 @@ export function usePetSession(sessionId: string | null): PetSessionData {
         if (value.foreground !== 'unknown') setTurn(value);
       },
     }),
-  }), [api]);
+  }), [api, currentIdentity]);
 
   // A live event can only patch rows a read has supplied. Until one has (the
   // first read failed, say, while the stream stayed up), the event is the
@@ -181,6 +197,11 @@ export function usePetSession(sessionId: string | null): PetSessionData {
       onConnected: refreshAll,
       onMessageNew: (row) => {
         if (!mine(row.session_id)) return;
+        const owner = currentIdentity.current;
+        setFreshness((current) => {
+          const scoped = current.identity === owner ? current : { identity: owner, baseline: null, live: new Set<string>() };
+          return { ...scoped, live: new Set([...scoped.live, row.id]) };
+        });
         sources.tail.noteLiveMerge();
         setTail((current) => mergeRow(current, row));
         if (!tailLoadedRef.current) sources.tail.refresh();
@@ -246,7 +267,7 @@ export function usePetSession(sessionId: string | null): PetSessionData {
       onRunsUpdated: () => sources.turn.refresh(),
       onDefinitionsUpdated: () => sources.turn.refresh(),
     });
-  }, [api, sessionId, resolved, authorizationGeneration, sources, refreshAll, sessionRef, tailLoadedRef]);
+  }, [api, sessionId, resolved, authorizationGeneration, sources, refreshAll, sessionRef, tailLoadedRef, currentIdentity]);
 
   // The window coming back is a gap too.
   useEffect(() => {
@@ -291,6 +312,10 @@ export function usePetSession(sessionId: string | null): PetSessionData {
   }, [sources, sessionId, epoch]);
 
   const refreshTail = useCallback(() => { if (epoch.isCurrent()) sources.tail.refresh(); }, [sources, epoch]);
+  const ownFreshness = freshness.identity === identity ? freshness : null;
+  const isFresh = useCallback((messageId: string) => Boolean(ownFreshness && (
+    ownFreshness.live.has(messageId) || (ownFreshness.baseline !== null && !ownFreshness.baseline.has(messageId))
+  )), [ownFreshness]);
 
   return {
     epoch,
@@ -302,5 +327,6 @@ export function usePetSession(sessionId: string | null): PetSessionData {
     running: working,
     noteSent,
     refreshTail,
+    isFresh,
   };
 }

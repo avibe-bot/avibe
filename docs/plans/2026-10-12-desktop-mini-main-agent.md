@@ -169,17 +169,40 @@ slot above the avatar: thinking, delegated-to (only when provenance is known),
 then the latest reply. The bubble names Vibey in its existing localized spelling.
 It remains available with either the collapsed or expanded stack.
 
-**When it shows.** Only while Vibey's conversation is active: the turn is
-running or thinking, or a send is pending; Vibey needs the user (a pending
-Vault handoff, a failure notice, an uncertain-send notice, or a queued
-notice); or the history is open. Composing and dictating take the slot as
-before (§5.2). The moment none of these holds, the turn's result arriving
-included, the bubble hides with the speech slot's transition (instant under
-reduced motion), taking no space and no clicks: there is no linger. Unread
-replies only light Vibey's badge, and quick replies stay in the history; to
-read a reply, click Vibey (§5.1). On first load an old, finished exchange
-starts hidden. A new running turn, a new needs-you state or a Vibey click
-that opens the history shows it at once.
+**When it shows.** While Vibey's conversation is active: the turn is running
+or thinking, or a send is pending; Vibey needs the user (a pending Vault
+handoff, a failure notice, an uncertain-send notice, or a queued notice); or
+the history is open. Composing and dictating take the slot as before (§5.2).
+Then, when a turn's result arrives, the bubble shows the reply summary for
+**10 seconds of on-screen time** before it hides with the speech slot's
+transition (instant under reduced motion), taking no space and no clicks.
+
+- **Fresh replies only.** A reply lingers when it is news to the current epoch
+  (binding and authorization): it arrived live, at any time, including before
+  the epoch's first tail read, or it was missing from that first read. A reply
+  the first read already held is history, so on first load an old, finished
+  exchange starts hidden. A new epoch starts with nothing lingering.
+- **No closed frame.** Freshness is derived while rendering, so when the turn
+  ends in the same render its result lands, the bubble stays open throughout.
+  The only state is which replies have expired; nothing reopens the slot.
+- **On-screen time.** The 10s count only while the document is visible, the
+  slot is drawing this bubble (not the input, the dictation marquee, or the
+  loading and unavailable notices) and the pointer is not over the bubble.
+  Typing or dictating pauses it, and the rest plays when the bubble is back.
+  Leaving the bubble with the pointer leaves at least 3s. One timer, rescheduled
+  whenever these change.
+- **Keyboard focus** is read when the time runs out, not tracked: focus on a
+  focus-visible control inside the bubble keeps the reply and is looked at
+  again a second later. A pointer click never pins it. If the bubble goes
+  while focus is inside, focus moves to Vibey's button.
+- **Looked at means done.** Opening the history from a lingering reply (a
+  Vibey click or its toggle row) ends that reply's linger, so closing the
+  history hides the bubble. A new running turn holds the bubble again, and its
+  own result lingers anew.
+
+Unread replies only light Vibey's badge and never hold the bubble; quick
+replies stay in the history. A new running turn, a new needs-you state or a
+Vibey click that opens the history shows the bubble at once.
 
 Click the bubble to expand recent turns from the loaded tail. Preserve all
 previous main detail behavior:

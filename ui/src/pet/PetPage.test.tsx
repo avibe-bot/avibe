@@ -2453,7 +2453,8 @@ describe('PetPage IME composition', () => {
 });
 
 describe('Vibey bubble visibility (spec §4.2)', () => {
-  const bubbleOpen = () => document.querySelector('.pet-mini-reply-bubble')?.closest('.pet-mini-slot')?.classList.contains('is-open') ?? false;
+  // Vibey's own bubble (its toggle row), not the loading notice that shares the slot.
+  const bubbleOpen = () => document.querySelector('.pet-mini-reply-toggle')?.closest('.pet-mini-slot')?.classList.contains('is-open') ?? false;
 
   it('starts hidden for an old, finished exchange, quick replies and unread included', async () => {
     tails.S = [
@@ -2466,27 +2467,109 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
     expect(bubbleOpen()).toBe(false);
   });
 
-  it('shows while Vibey works, and hides as soon as the result arrives', async () => {
+  // A turn that is running, then ends with `text` as its result; returns the
+  // slot's class at every commit after the result lands.
+  const runToResult = async (text = 'All done') => {
+    // Fake time that still moves on its own, so waitFor keeps polling while the
+    // linger's own timer is under the test's control from the start.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'], shouldAdvanceTime: true });
     tails.S = [message('u', 'S', { author: 'user', type: 'user', text: 'hello' })];
     let running = true;
     api.getTurnState.mockImplementation(async () => (running ? { ...idleTurn, in_flight: true, foreground: 'running' as const } : idleTurn));
-    try {
-      mainSession('S');
-      render(<PetPage />);
-      await waitFor(() => expect(bubbleOpen()).toBe(true));
-      // The turn ends with its result: the server tail now holds it.
-      const result = message('r', 'S', { text: 'All done', read_at: null });
-      tails.S = [...tails.S, result];
-      running = false;
-      await emit((h) => {
-        h.onMessageNew?.(result);
-        h.onTurnEnd?.({ session_id: 'S' });
-      });
-      await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('All done'));
-      await waitFor(() => expect(bubbleOpen()).toBe(false));
-    } finally {
-      api.getTurnState.mockImplementation(async () => idleTurn);
-    }
+    mainSession('S');
+    render(<PetPage />);
+    await waitFor(() => expect(bubbleOpen()).toBe(true));
+    const slot = document.querySelector('.pet-mini-reply-toggle')!.closest('.pet-mini-slot')!;
+    const classes: string[] = [];
+    const observer = new MutationObserver(() => classes.push(slot.className));
+    observer.observe(slot, { attributes: true, attributeFilter: ['class'] });
+    const result = message('r', 'S', { text, read_at: null });
+    tails.S = [...tails.S, result];
+    running = false;
+    await emit((h) => {
+      h.onMessageNew?.(result);
+      h.onTurnEnd?.({ session_id: 'S' });
+    });
+    await waitFor(() => expect(api.getTurnState).toHaveBeenCalled());
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    observer.disconnect();
+    return classes;
+  };
+  const bubbleWrap = () => document.querySelector('.pet-mini-reply-bubble')!.parentElement!;
+  afterEach(() => {
+    vi.useRealTimers();
+    api.getTurnState.mockImplementation(async () => idleTurn);
+  });
+
+  it('keeps the bubble open from running to its result, then shows the reply for 10s', async () => {
+    const classes = await runToResult();
+    // No closed frame between the running bubble and the reply.
+    expect(classes.every((value) => value.includes('is-open'))).toBe(true);
+    expect(bubbleOpen()).toBe(true);
+    expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('All done');
+    act(() => { vi.advanceTimersByTime(9_900); });
+    expect(bubbleOpen()).toBe(true);
+    act(() => { vi.advanceTimersByTime(200); });
+    expect(bubbleOpen()).toBe(false);
+  });
+
+  it('counts a reply that arrives live before the first tail read as fresh', async () => {
+    const reply = message('r', 'S', { text: 'Early reply', read_at: null });
+    tails.S = [message('u', 'S', { author: 'user', type: 'user' }), reply];
+    const read = deferred<{ messages: WorkbenchMessage[]; next_after_id: null; next_before_id: null }>();
+    api.listSessionMessages.mockImplementationOnce(() => read.promise);
+    mainSession('S');
+    render(<PetPage />);
+    await waitFor(() => expect(api.listSessionMessages).toHaveBeenCalled());
+    await emit((h) => h.onMessageNew?.(reply));
+    // The read that was already on its way includes it: it is still news.
+    await act(async () => read.resolve({ messages: [message('u', 'S', { author: 'user', type: 'user' }), reply], next_after_id: null, next_before_id: null }));
+    await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('Early reply'));
+    expect(bubbleOpen()).toBe(true);
+  });
+
+  it('drops a lingering reply when the epoch changes', async () => {
+    await runToResult();
+    expect(bubbleOpen()).toBe(true);
+    // A new authorization is a new epoch: its first read is the baseline.
+    await resolveMainAs('S');
+    await waitFor(() => expect(bubbleOpen()).toBe(false));
+  });
+
+  it('pauses while typing takes the slot, then plays the rest', async () => {
+    await runToResult();
+    act(() => { vi.advanceTimersByTime(4_000); });
+    summon('listen');
+    await screen.findByLabelText('pet.inputPlaceholder');
+    act(() => { vi.advanceTimersByTime(60_000); });
+    act(() => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); });
+    expect(screen.queryByLabelText('pet.inputPlaceholder')).toBeNull();
+    expect(bubbleOpen()).toBe(true);
+    act(() => { vi.advanceTimersByTime(5_900); });
+    expect(bubbleOpen()).toBe(true);
+    act(() => { vi.advanceTimersByTime(200); });
+    expect(bubbleOpen()).toBe(false);
+  });
+
+  it('holds while the pointer is over it, and leaves at least 3s after', async () => {
+    await runToResult();
+    act(() => { vi.advanceTimersByTime(9_000); });
+    fireEvent.pointerEnter(bubbleWrap());
+    act(() => { vi.advanceTimersByTime(60_000); });
+    expect(bubbleOpen()).toBe(true);
+    fireEvent.pointerLeave(bubbleWrap());
+    act(() => { vi.advanceTimersByTime(2_900); });
+    expect(bubbleOpen()).toBe(true);
+    act(() => { vi.advanceTimersByTime(200); });
+    expect(bubbleOpen()).toBe(false);
+  });
+
+  it('does not linger again once its history has been opened and closed', async () => {
+    await runToResult();
+    await userEvent.click(screen.getByLabelText('pet.recentTurns'));
+    await waitFor(() => expect(document.querySelector('.pet-mini-detail.is-open')).not.toBeNull());
+    await userEvent.click(screen.getByLabelText('pet.recentTurns'));
+    await waitFor(() => expect(bubbleOpen()).toBe(false));
   });
 
   it('stays shown while a failure needs the user', async () => {

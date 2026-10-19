@@ -976,15 +976,111 @@ test('an old, finished exchange starts with the bubble hidden, and takes no spac
   await expect.poll(() => bubbleIsRegion(page)).toBe(false);
 });
 
-test('a running turn shows the bubble, and it hides as soon as the result arrives', async ({ page }) => {
+// The reply lingers for 10s of on-screen time after the turn ends (spec §4.2).
+// It waits for the first tail read first: a reply that lands before that read
+// and without a live event is, by design, part of the baseline.
+const finishTurn = async (page: import('@playwright/test').Page, text = '做完了。') => {
+  await expect(page.locator('.pet-mini-reply-bubble')).toContainText('检查桌宠 mini 的交互');
+  await page.evaluate((text) =>
+    window.petFixtureFinishTurn({ id: 'live_reply', author: 'agent', type: 'result', text, read_at: null }), text);
+};
+// Tab (Option+Tab in WebKit, whose Tab skips buttons) until the toggle row has
+// keyboard focus; with no cards it is the first stop.
+const tabToToggle = async (page: import('@playwright/test').Page, browserName: string) => {
+  const toggle = page.locator('.pet-mini-reply-toggle');
+  for (let step = 0; step < 6 && !(await toggle.evaluate((node) => node === document.activeElement)); step += 1) {
+    await page.keyboard.press(browserName === 'webkit' ? 'Alt+Tab' : 'Tab');
+  }
+  await expect(toggle).toBeFocused();
+  expect(await toggle.evaluate((node) => node.matches(':focus-visible'))).toBe(true);
+  return toggle;
+};
+
+for (const theme of ['light', 'dark']) {
+  test(`a running turn shows thinking, then its reply for 10s on screen (${theme})`, async ({ page }) => {
+    await page.clock.install();
+    await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&running=1&asr=1');
+    await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
+    await page.clock.runFor(500);
+    await expect(bubbleShown(page)).toBeVisible();
+    await expect(page.locator('.pet-mini-reply-toggle')).toContainText('思考中');
+    await finishTurn(page);
+    await page.clock.runFor(100);
+    await expect(bubbleShown(page)).toBeVisible();
+    await expect(page.locator('.pet-mini-reply-toggle')).toContainText('已回复：做完了。');
+    await page.clock.runFor(9_500);
+    await expect(bubbleShown(page)).toBeVisible();
+    await page.clock.runFor(1_000);
+    await expect(bubbleShown(page)).toHaveCount(0);
+    await settleMotion(page);
+    await page.clock.runFor(100);
+    await expect.poll(() => bubbleIsRegion(page)).toBe(false);
+  });
+}
+
+test('the pointer over the lingering reply holds it, and leaving leaves at least 3s', async ({ page }) => {
+  await page.clock.install();
   await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&running=1');
+  await page.clock.runFor(500);
+  await finishTurn(page);
+  await page.clock.runFor(9_000);
+  await page.locator('.pet-mini-reply-toggle').hover();
+  await page.clock.runFor(60_000);
   await expect(bubbleShown(page)).toBeVisible();
-  await expect.poll(() => bubbleIsRegion(page)).toBe(true);
-  // The turn ends with its result, announced the way the event stream does.
-  await page.evaluate(() => window.petFixtureFinishTurn({ id: 'live_reply', author: 'agent', type: 'result', text: '做完了。', read_at: null }));
-  await expect(page.locator('.pet-mini-reply-bubble')).toContainText('做完了。');
+  await page.mouse.move(2, 2);
+  await page.clock.runFor(2_800);
+  await expect(bubbleShown(page)).toBeVisible();
+  await page.clock.runFor(400);
   await expect(bubbleShown(page)).toHaveCount(0);
-  await expect.poll(() => bubbleIsRegion(page)).toBe(false);
+});
+
+test('keyboard focus in the lingering reply keeps it until focus moves on', async ({ page, browserName }) => {
+  await page.clock.install();
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&running=1&activities=0');
+  await page.clock.runFor(500);
+  await finishTurn(page);
+  await page.clock.runFor(100);
+  await tabToToggle(page, browserName);
+  await page.clock.runFor(30_000);
+  await expect(bubbleShown(page)).toBeVisible();
+  // Focus moves on: the next look finds nothing holding it, and it goes.
+  await page.locator('.pet-mini-avatar-button').focus();
+  await page.clock.runFor(1_500);
+  await expect(bubbleShown(page)).toHaveCount(0);
+});
+
+test('a Vibey click on the lingering reply opens its history, which does not linger after', async ({ page }) => {
+  await page.clock.install();
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&running=1');
+  await page.clock.runFor(500);
+  await finishTurn(page);
+  await page.clock.runFor(2_000);
+  const avatar = page.locator('.pet-mini-avatar-button');
+  await avatar.click();
+  await page.clock.runFor(300);
+  await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).toHaveClass(/is-open/);
+  await expect.poll(() => page.locator('.pet-mini-bubble-history').evaluate((node) => Math.abs(node.scrollHeight - node.clientHeight - node.scrollTop))).toBeLessThanOrEqual(1);
+  await avatar.click();
+  await page.clock.runFor(300);
+  await expect(bubbleShown(page)).toHaveCount(0);
+});
+
+test('the lingering reply\'s toggle row opens its history; closing it hides the bubble and hands focus to Vibey', async ({ page, browserName }) => {
+  await page.clock.install();
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&running=1&activities=0');
+  await page.clock.runFor(500);
+  await finishTurn(page);
+  await page.clock.runFor(1_000);
+  // From the keyboard, so focus is inside the bubble as it goes (WebKit does
+  // not focus a button on a mouse click).
+  await tabToToggle(page, browserName);
+  await page.keyboard.press('Enter');
+  await page.clock.runFor(300);
+  await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).toHaveClass(/is-open/);
+  await page.keyboard.press('Enter');
+  await page.clock.runFor(300);
+  await expect(bubbleShown(page)).toHaveCount(0);
+  await expect(page.locator('.pet-mini-avatar-button')).toBeFocused();
 });
 
 for (const [name, query] of [['a running turn', 'running=1'], ['a pending Vault handoff', 'history=actions']] as const) {
