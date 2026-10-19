@@ -99,13 +99,15 @@ The user has an Anthropic API key and a DeepSeek API key, adds Tavily, and chang
   "enabled": true,
   "prefer_native": true,
   "executor_order": ["src_…", "src_…"],
-  "services": {"src_…": {"results": 5, "content": false, "enabled": true}}
+  "services": {"src_…": {"results": 5, "content": false, "enabled": true}},
+  "service_order": ["src_…", "src_…"]
 }
 ```
 
 | Field | Rule |
 | --- | --- |
 | `prefer_native` | boolean; absent means `true` (decision 3) |
+| `service_order` | the automatic order of tool-only `search` Sources: the server appends a Source's id when it is created and drops it when the Source is removed; the user never edits it directly (a reorder saves `executor_order`). Ids that no longer name a Source are skipped. |
 | `services` | per search-capable Source: `results` (1 to the vendor's maximum, default 5), `content` (page text, default `false`, only where the vendor returns page text) and `enabled` (default `true`; `false` takes the Source out of the search order without removing it, which is how a DeepSeek Source keeps its models but stops searching). Absent means defaults. An entry for a Source that no longer exists is ignored. |
 
 - `executor_order` keeps its rule (hosted tools §3.3) and now lists search-capable Sources beside model executors.
@@ -119,7 +121,9 @@ The user has an Anthropic API key and a DeepSeek API key, adds Tavily, and chang
 - The key stays in Model Hub's own credential store, like every API-key Source. It is not copied to Vault, the
   engine config, the turn environment, Vibey, a log or the model.
 - The call is made inside the Model Hub adapter, which is already the custody boundary (`adapter.py`: no credential
-  material crosses it). A new adapter operation sends one search request for a `credential_ref` and returns status,
+  material crosses it). A second new operation runs a catalog free check for a `credential_ref` and returns only
+  its outcome (`pass`, `balance`, `invalid`, `unknown`), under the same transport rules; create, replace, the
+  DeepSeek add path and "重新启用" call it. A new adapter operation sends one search request for a `credential_ref` and returns status,
   a bounded header subset and the body; it reads the key from the state store (`read_api_key`, as credential
   retargeting does today) only for the duration of the request.
 - Transport rules: HTTPS only, host pinned to the catalog endpoint, redirects refused, environment proxies ignored
@@ -162,7 +166,7 @@ Hosted tools §6 holds, with these changes:
 - **Candidates** are the model executors of hosted tools §6 plus every search-capable Source: a `search` Source, or a
   model Source whose vendor lists a search API and whose endpoint is official. A Source with `services.<id>.enabled:
   false` stays in the list as a `disabled` entry at the end; it is never requested.
-- **Automatic order** (no `executor_order`): `search` Sources in creation order, then model Sources with a search API
+- **Automatic order** (no `executor_order`): `search` Sources in `service_order` (§3.2), then model Sources with a search API
   in Vibey's Source order, then model executors as today. A saved `executor_order` is used as saved; candidates it
   does not name follow in automatic order. Adding a search-capable Source while an order is saved inserts it
   immediately before the saved order's first model executor, or at the end when the order names none. It then runs
@@ -171,7 +175,9 @@ Hosted tools §6 holds, with these changes:
   (an official DeepSeek Source in a saved order).
 - **Argument check.** Before any candidate, the gateway rejects a query that is empty or only whitespace with the
   canonical tool's argument error, which the model can correct; no Source is tried or recorded.
-- **Skips.** A candidate can be skipped without a request, for one of five reasons: `blocked` (its Source is in
+- **Skips.** A candidate is classified once, by the first reason that applies in the order `unavailable`,
+  `disabled`, `blocked`, `cooling`, `query_too_long`, so `query_too_long` names only a Source a shorter query would
+  reach. A candidate can be skipped without a request, for one of five reasons: `blocked` (its Source is in
   `needs_action` or in a persistent `error`, the states admission already suppresses), `cooling` (a service cooldown, §4.2), `query_too_long` (the query exceeds what the service
   accepts, DeepSeek 128 characters) or `unavailable` (the Source was removed, re-identified or refused by final
   admission after the turn froze its candidates, hosted tools §6) or `disabled` (a search-capable Source with
@@ -275,9 +281,9 @@ Hosted tools §6 holds, with these changes:
     so a model executor or a DeepSeek Source gets its own repair (re-authorize, replace the key, top up, raise the
     limit), and only a tool-only `search` Source in a balance or limit state adds "重新启用". A `disabled` entry's
     remedy is turning "用于网页搜索" back on;
-  - `superseded: true` marks a failed entry whose settlement the fence dropped because the key was replaced or the
-    Source removed while it ran. The surfaces say "使用旧密钥的请求失败" for it and show no repair, since the current
-    key is not the one that failed;
+  - `superseded: true` marks a failed entry whose settlement any fence dropped (a newer attempt, a key replacement,
+    a removal or "重新启用"). The surfaces say "这次请求失败，状态已由之后的操作更新" for it and show no repair, since
+    the Source's current state is not the one this failure would have set;
   - `label` is the Source's display name when the chain reached it, bounded to 64 characters. The projection shows
     the Source's current name and falls back to `label` for a Source removed since.
 
@@ -407,7 +413,8 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 
 - `source.schema.json` and `source-create.schema.json`: `protocol: "search"` and its combination rule (§3.1).
 - The protocol vocabulary's authorities: `model-hub-contracts/README.md` (the "exactly" list) and
-  `adapter-interface.py`'s `SOURCE_PROTOCOLS`, plus the adapter's search operation in `adapter-interface.py`. The
+  `adapter-interface.py`'s `SOURCE_PROTOCOLS`, plus the adapter's search and free-check operations in
+  `adapter-interface.py`. The
   structure guards that check them are updated in the same event.
 - `api.md`'s Source create and credential replace sections: the search branch (§3.1), with its outcomes in
   `api-response.schema.json`.
@@ -438,7 +445,7 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 
 | PR | Lane | Work | Depends on |
 | --- | --- | --- | --- |
-| **S1** Catalog, Sources, settings | foundation | search vendors in the catalog; `protocol: "search"` Sources and their exclusions (the credential store accepts the protocol, the engine config renderer skips it); the create and replace branch with free checks; `prefer_native` and `services`; the adapter's search call with custody and transport rules; the Tools read and PUT; the version event | — |
+| **S1** Catalog, Sources, settings | foundation | search vendors in the catalog; `protocol: "search"` Sources and their exclusions (the credential store accepts the protocol, the engine config renderer skips it); the create and replace branch with free checks; `prefer_native`, `services` and `service_order`; the adapter's search call and free-check operation with custody and transport rules; the Tools read and PUT; the version event | — |
 | **S2** Chain and records | gateway | candidates, automatic order and insertion into a saved order, limits, per-vendor request and result mapping with field bounds, outcome classes into fenced Source health, positive evidence, record with `attempts[]`, cost and metering, `prefer_native` in hop facts, the no-candidate reason, the `hosted_activity` projection | S1 |
 | **S3** Model text | Vibey | `content` in the model-facing text and its bounds; the card's executor label | S2's record |
 | **S4** Tools, dialog, Sources | UI | §6 with en and zh copy | S1's read; S2 for live states |
@@ -473,7 +480,7 @@ Hermetic, against stub vendor servers; no live upstream and no real keys.
 | Config | `protocol: "search"` accepted only in its combination; `prefer_native` and `services` round-trip and default; a release-before loader ignores the new `hosted_tools` fields |
 | Custody | the adapter call attaches the key, refuses redirects and non-catalog hosts, caps the body, and returns no key material; nothing outside the adapter reads the key |
 | Chain | automatic and saved order, and insertion before the first model executor in a saved order; service cooldown from `Retry-After` (a longer deadline is not shortened) and doubling backoff, scoped to (Source, service), with a DeepSeek model route unaffected, and not written by an attempt that started before a key replacement; the terminal reason for every mix of skips, with `record.attempts[]` present when nothing executed and a blocked model executor showing its own remedy; `services.<id>.enabled: false` takes a DeepSeek Source out of the order and keeps its models; query-length skip; each outcome row of §4.2; one deadline; metering, `failed_attempts` and `attempts`; DeepSeek official versus relay; settings changed mid-turn do not apply until the next turn; re-enable with and without a free check |
-| Usage | only sent requests are metered, and DeepSeek's empty or failed requests cost nothing; an Exa content call without a reported cost keeps its page surcharge across a restart; a non-200 attempt records $0; a superseded failure shows no repair; a reported cost survives a restart through the ledger; a released ledger row without the new fields loads |
+| Usage | only sent requests are metered, and DeepSeek's empty or failed requests cost nothing; an Exa content call without a reported cost keeps its page surcharge across a restart; a non-200 attempt records $0; a superseded failure, from any fence, shows no repair; the skip classification order; `service_order` survives a reload and decides the automatic order; a reported cost survives a restart through the ledger; a released ledger row without the new fields loads |
 | Mapping | one recorded response per vendor maps to the canonical record with bounds; an empty results array is `completed` and ends the chain; unreadable bodies; a released native `HostedSource` row longer than the new bounds still loads |
 | Hop facts | `prefer_native` off declares the function on a native-capable hop, and a native result in history replays in the synthetic form |
 | UI | the card states, add dialog, service detail, Sources rows, copy in both locales |
