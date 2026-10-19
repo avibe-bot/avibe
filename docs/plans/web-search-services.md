@@ -334,7 +334,7 @@ Hosted tools §6 holds, with these changes:
   bound ("至少"). A service attempt is
   billable only when it answered 200. Every service attempt the catalog does not bill records an explicit
   `cost: {usd: 0, basis: "list"}`, so the card shows $0 rather than an unknown cost (a zero is exact: it never makes
-  a chain total approximate, so the total's basis is chosen from its non-zero figures only): a non-200 response, DeepSeek's
+  a chain total approximate, so the total's basis is chosen from its non-zero figures only, and an all-zero total is `{usd: 0, basis: "list"}`, rendered "$0" like any exact zero): a non-200 response, DeepSeek's
   empty answer, a failure before the request was sent (connect failure), and an outcome the catalog row's billing
   rule declares unbilled (DeepSeek: timeouts, per its Search & Fetch billing rule, 2026-10-20). The adapter's
   structured outcome carries the HTTP status once one arrived, so a body-read failure, timeout or stop after the
