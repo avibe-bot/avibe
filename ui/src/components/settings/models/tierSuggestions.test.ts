@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest';
 import { EFFORT_BY_BACKEND, REASONING_EFFORTS } from '@/lib/effortOptions';
 
 import { TIER_SUGGESTIONS } from './tierSuggestions';
-import { SOURCE_PROTOCOLS } from './types';
+import { MODEL_PROTOCOLS } from './types';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BACKEND_MODELS = resolve(HERE, '../../../../..', 'vibe/data/backend_models.json');
@@ -50,7 +50,7 @@ describe('unified reasoning-effort vocabulary', () => {
   });
 
   it('offers one suggestion list per source protocol, drawn from the vocabulary in its order', () => {
-    expect(new Set(Object.keys(TIER_SUGGESTIONS))).toEqual(new Set(SOURCE_PROTOCOLS));
+    expect(new Set(Object.keys(TIER_SUGGESTIONS))).toEqual(new Set(MODEL_PROTOCOLS));
 
     for (const [protocol, tiers] of Object.entries(TIER_SUGGESTIONS)) {
       if (protocol === 'google') expect(tiers).toEqual([]);

@@ -16,7 +16,7 @@ from core.handlers.model_hub.adapter import (
     ObservationOutcome,
     RawCallOutcome,
     RawOutcomeKind,
-    SOURCE_PROTOCOLS,
+    MODEL_PROTOCOLS,
     SourceObservation,
 )
 from core.handlers.model_hub.service import ModelHubError, V2ModelHubConfigStore
@@ -39,8 +39,8 @@ def _draft(**changes):
 
 @pytest.mark.parametrize(
     "owner",
-    [{"vendor": entry.id} for entry in api_key_vendor_catalog()]
-    + [{"vendor": "custom", "protocol": protocol} for protocol in SOURCE_PROTOCOLS],
+    [{"vendor": entry.id} for entry in api_key_vendor_catalog() if entry.protocol in MODEL_PROTOCOLS]
+    + [{"vendor": "custom", "protocol": protocol} for protocol in MODEL_PROTOCOLS],
 )
 def test_save_first_uses_declared_owner_despite_unavailable_inventory(tmp_path, owner):
     service, store, adapter = _service(tmp_path)

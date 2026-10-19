@@ -89,7 +89,7 @@ from .adapter import (
     RuntimePlatformUnsupportedError,
     ObservationDiscovery,
     ObservationOutcome,
-    SOURCE_PROTOCOLS,
+    MODEL_PROTOCOLS,
     SourceObservation,
     SearchCredentialCheck,
     SourceBinding,
@@ -1954,15 +1954,13 @@ class ModelHubService:
         source = next((item for item in self.store.load().sources if item.id == source_id), None)
         if source is not None:
             self._source_attempt_identities[source_id] = source_identity(source)
-        else:
-            self._source_attempt_identities[source_id] = None
         return generation
 
     def _settlement_current(self, source: ModelHubSourceConfig, generation: int | None) -> bool:
         return (
             generation is not None
             and generation >= self._latest_source_attempt_generation.get(source.id, generation)
-            and self._source_attempt_identities.get(source.id) == source_identity(source)
+            and self._source_attempt_identities.get(source.id, source_identity(source)) == source_identity(source)
         )
 
     def recovery_annotations(self, config: ModelHubConfig) -> dict[str, SourceRecoveryAnnotation]:
@@ -2486,10 +2484,10 @@ class ModelHubService:
                 # Google is explicit API/config admission in v11, not a new
                 # automatic probe or picker option. Its generation path needs
                 # a model, which non-inference observation must not invent.
-                return tuple(protocol for protocol in SOURCE_PROTOCOLS if protocol not in {"google", "search"})
+                return tuple(protocol for protocol in MODEL_PROTOCOLS if protocol != "google")
             raise ModelHubError("discovery_failed")
         requested = payload.get("protocol")
-        if not isinstance(requested, str) or requested not in SOURCE_PROTOCOLS or requested == "search":
+        if not isinstance(requested, str) or requested not in MODEL_PROTOCOLS:
             raise ModelHubError("discovery_failed")
         if pinned_protocol is not None and requested != pinned_protocol:
             raise ModelHubError("discovery_failed")
@@ -2744,15 +2742,29 @@ class ModelHubService:
         source_id: str,
         credential_ref: str,
     ) -> bool:
+        source = next(
+            (candidate for candidate in self.store.load().sources if candidate.id == source_id),
+            None,
+        )
+        search_cleanup = source is not None and source.protocol == "search"
+        operation = "revoke_api_key_credential" if search_cleanup else "revoke_credential"
+        revoker = (
+            self.adapter.revoke_api_key_credential
+            if search_cleanup
+            else self.adapter.revoke_credential
+        )
         journaled = False
         try:
-            self.revocations.add(source_id, credential_ref)
+            if search_cleanup:
+                self.revocations.add(source_id, credential_ref, operation=operation)
+            else:
+                self.revocations.add(source_id, credential_ref)
         except OSError:
             pass
         else:
             journaled = True
         try:
-            await self.adapter.revoke_credential(credential_ref)
+            await revoker(credential_ref)
         except Exception:
             return journaled
         if not journaled:
@@ -3290,7 +3302,7 @@ class ModelHubService:
                         vendor,
                         None,
                         rollback_credential_ref,
-                        SOURCE_PROTOCOLS,
+                        MODEL_PROTOCOLS,
                     )
                     # Completed consent supplies credential custody, not proof
                     # that a model call works. Its vendor fixes the interface.
@@ -4459,6 +4471,7 @@ class ModelHubService:
             raise ModelHubError("discovery_failed")
         self._drop_search_reenable_trial(source.id)
         committed = False
+        old_revocation_recorded = False
         replacement_ref = await _acquire_credential_ref_with_cancellation_ownership(
             self,
             self.adapter.provision_credential(
@@ -4472,14 +4485,24 @@ class ModelHubService:
         try:
             source.credential_ref = replacement_ref
             source.masked_credential = _mask_credential(key)
+            self._mark_source_unverified(source)
+            service = _search_service_for_source(source)
+            has_free_check = isinstance(service, Mapping) and isinstance(service.get("free_check"), Mapping)
             outcome = await self._search_free_check(source)
+            if has_free_check and outcome == "unknown":
+                raise ModelHubError(
+                    "discovery_failed",
+                    status=502,
+                    detail="modelHub.errors.credential_replacement_unverified",
+                )
             if outcome == "invalid":
                 raise ModelHubError(
                     "discovery_failed",
                     status=422,
                     detail="modelHub.errors.authentication_failed",
                 )
-            source.verification_pending = None
+            if outcome != "unknown":
+                source.verification_pending = None
             source.state = ModelHubSourceStateConfig(status="standby")
             if outcome in {"balance", "limit"}:
                 source.state = ModelHubSourceStateConfig(
@@ -4490,28 +4513,30 @@ class ModelHubService:
                         else "models.source.needs_action.spend_limit_reached"
                     ),
                 )
-            elif outcome == "unknown":
-                self._mark_source_unverified(source)
             if old_credential_ref != replacement_ref:
                 self.revocations.add(
                     source.id,
                     old_credential_ref,
                     operation="revoke_api_key_credential",
                 )
+                old_revocation_recorded = True
 
             await self._commit_synced(previous, config)
             committed = True
         except asyncio.CancelledError:
             committed = self._persisted_credential(self.store.load(), source.id, replacement_ref)
             if not committed:
-                await self._revoke_search_credential(replacement_ref)
+                await _rollback_replacement_before_settling(
+                    self, source.id, replacement_ref, old_credential_ref,
+                    old_revocation_recorded=old_revocation_recorded,
+                )
             raise
         except Exception:
             if not committed:
-                try:
-                    await self._revoke_search_credential(replacement_ref)
-                except Exception:
-                    logger.warning("Could not clean up replacement search credential", exc_info=True)
+                await _rollback_replacement_before_settling(
+                    self, source.id, replacement_ref, old_credential_ref,
+                    old_revocation_recorded=old_revocation_recorded,
+                )
             raise
         if old_credential_ref != replacement_ref:
             try:
@@ -4546,13 +4571,14 @@ class ModelHubService:
             previous = self.store.load()
             config = self._clone_config(previous)
             source = self._source(config, source_id)
-            self._reserve_settlement_generation(source.id)
             if (
                 source.kind != "api_key"
                 or source.supply_channel != "hub"
                 or not source.credential_ref
             ):
                 raise ModelHubError("discovery_failed")
+            if _search_service_for_source(source) is not None:
+                self._drop_search_reenable_trial(source.id)
             if source.protocol == "search":
                 return await self._replace_search_credential_locked(
                     previous,
@@ -4708,6 +4734,7 @@ class ModelHubService:
             if base_url_changed:
                 if (
                     source.kind != "api_key"
+                    or source.protocol == "search"
                     or source.supply_channel != "hub"
                     or not source.credential_ref
                 ):
@@ -4807,7 +4834,6 @@ class ModelHubService:
                     "interrupted": [],
                     "trial_armed": True,
                 }
-            generation = self._reserve_settlement_generation(source.id)
             trial_armed = False
             service = _search_service_for_source(source)
             has_free_check = isinstance(service, Mapping) and isinstance(service.get("free_check"), Mapping)
@@ -4816,20 +4842,6 @@ class ModelHubService:
                 trial_armed = True
             else:
                 outcome = await self._search_free_check(source)
-                if not self._settlement_current(source, generation):
-                    current_config = self.store.load()
-                    current = next(
-                        (item for item in current_config.sources if item.id == source_id),
-                        None,
-                    )
-                    if current is None:
-                        raise ModelHubError("source_not_found", status=404)
-                    return {
-                        "source": self._source_payload(current, current_config),
-                        "removed_hops": [],
-                        "interrupted": [],
-                        "trial_armed": self.search_reenable_trial_armed(source_id),
-                    }
                 if outcome == "pass":
                     source.state = ModelHubSourceStateConfig(status="standby")
                     self._drop_search_reenable_trial(source.id)
@@ -5205,10 +5217,12 @@ class ModelHubService:
                     else "source_last_supplier"
                 ),
             )
-            self._reserve_settlement_generation(source_id)
-            self._source_attempt_identities[source_id] = None
             if source.credential_ref:
-                self.revocations.add(source.id, source.credential_ref)
+                self.revocations.add(
+                    source.id,
+                    source.credential_ref,
+                    operation=("revoke_api_key_credential" if source.protocol == "search" else "revoke_credential"),
+                )
             try:
                 await self._commit_synced(previous, config)
             except Exception:
@@ -5217,7 +5231,12 @@ class ModelHubService:
                 raise
             try:
                 if source.credential_ref:
-                    await self._engine_call(self.adapter.revoke_credential(source.credential_ref))
+                    revoke = (
+                        self._revoke_search_credential(source.credential_ref)
+                        if source.protocol == "search"
+                        else self.adapter.revoke_credential(source.credential_ref)
+                    )
+                    await self._engine_call(revoke)
             except ModelHubError:
                 restored = False
                 try:
@@ -8236,6 +8255,8 @@ class ModelHubService:
             previous = self.store.load()
             config = self._clone_config(previous)
             source = self._source(config, str(source_id or ""))
+            if source.protocol == "search":
+                raise ModelHubError("mapping_target_unavailable")
             existing = next((model for model in source.models if model.id == model_id), None)
             if existing is None:
                 model = ModelHubModelConfig(

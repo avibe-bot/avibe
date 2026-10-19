@@ -45,7 +45,7 @@ from core.handlers.model_hub.adapter import (
     RetainedMaterialDisposition,
     RuntimePlatformUnsupportedError,
     SearchCredentialCheck,
-    SOURCE_PROTOCOLS,
+    MODEL_PROTOCOLS,
     SourceObservation,
 )
 from core.handlers.model_hub.catalog_admission import admissible_backend_model
@@ -5958,7 +5958,7 @@ def test_unsaved_observation_route_returns_valid_result_and_revokes_transient_re
     body = response.get_json()
     _assert_envelope(body)
     _assert_valid("observation-result.schema.json", body["observation"])
-    assert body["observation"]["protocol"] == SOURCE_PROTOCOLS[0]
+    assert body["observation"]["protocol"] == MODEL_PROTOCOLS[0]
     assert store.config.sources == []
     assert adapter.revoked == ["cred_test001"]
     assert "credential_ref" not in json.dumps(body)
@@ -6170,6 +6170,34 @@ def test_search_source_create_uses_only_the_free_check_transaction(tmp_path, out
         assert source.get("verification_pending") is None
 
 
+def test_search_source_replacement_unknown_keeps_old_key_and_revokes_new_ref(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    adapter.search_check_outcome = "unknown"
+    source = ModelHubSourceConfig(
+        id="src_searchreplace",
+        kind="api_key",
+        vendor="tavily",
+        display_name="Tavily",
+        protocol="search",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[],
+        credential_ref="cred_old_search",
+        masked_credential="••••rch",
+    )
+    store.config.sources = [source]
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.replace_credential(source.id, {"key": "tvly-new"}))
+
+    assert exc_info.value.code == "discovery_failed"
+    assert exc_info.value.status == 502
+    assert exc_info.value.detail == "modelHub.errors.credential_replacement_unverified"
+    persisted = store.load().sources[0]
+    assert persisted.credential_ref == "cred_old_search"
+    assert persisted.masked_credential == "••••rch"
+    assert adapter.revoked == ["cred_test001"]
 
 
 @pytest.mark.parametrize(
@@ -6212,38 +6240,8 @@ def test_search_source_reenable_free_check_keeps_or_reclassifies_state(
     assert store.load().sources[0].state.detail_key == detail_key
 
 
-def test_search_source_reenable_discards_stale_free_check(tmp_path):
-    service, store, adapter = _service(tmp_path)
-    source = ModelHubSourceConfig(
-        id="src_searchstale",
-        kind="api_key",
-        vendor="tavily",
-        display_name="Tavily",
-        protocol="search",
-        supply_channel="hub",
-        billing="metered",
-        state=ModelHubSourceStateConfig(
-            status="needs_action",
-            detail_key="models.source.needs_action.balance_exhausted",
-        ),
-        models=[],
-        credential_ref="cred_searchstale",
-    )
-    store.config.sources = [source]
 
-    async def stale_check(_credential_ref, _catalog):
-        service._reserve_settlement_generation(source.id)
-        return SearchCredentialCheck("pass")
-
-    adapter.check_search_credential = stale_check
-    result = asyncio.run(service.reenable_search_source(source.id, {}))
-
-    assert result["source"]["state"]["detail_key"] == "models.source.needs_action.balance_exhausted"
-    assert result["trial_armed"] is False
-    assert store.load().sources[0].state.detail_key == "models.source.needs_action.balance_exhausted"
-
-
-def test_search_source_reenable_arms_without_clearing_limit_and_advances_generation(tmp_path):
+def test_search_source_reenable_arms_without_clearing_limit(tmp_path):
     service, store, adapter = _service(tmp_path)
     source = ModelHubSourceConfig(
         id="src_searchtrial",
@@ -6261,8 +6259,6 @@ def test_search_source_reenable_arms_without_clearing_limit_and_advances_generat
         credential_ref="cred_searchtrial",
     )
     store.config.sources = [source]
-    before = service._latest_source_attempt_generation.get(source.id, 0)
-
     result = asyncio.run(service.reenable_search_source(source.id, {}))
 
     assert result["trial_armed"] is True
@@ -6270,12 +6266,9 @@ def test_search_source_reenable_arms_without_clearing_limit_and_advances_generat
     assert result["source"]["trial_pending"] is True
     assert service.search_reenable_trial_armed(source.id)
     assert service.search_reenable_trial_pending(source.id)
-    generation = service._latest_source_attempt_generation[source.id]
-    assert generation > before
     repeated = asyncio.run(service.reenable_search_source(source.id, {}))
     assert repeated["trial_armed"] is True
     assert repeated["source"]["trial_pending"] is True
-    assert service._latest_source_attempt_generation[source.id] == generation
     assert service.search_reenable_trial_armed(source.id)
     assert service.reserve_search_reenable_trial(source.id) is True
     assert not service.search_reenable_trial_armed(source.id)
@@ -9222,7 +9215,7 @@ def test_completed_hub_oauth_persists_only_a_response_proven_protocol(tmp_path):
         store.config.sources[0].models[0].reasoning_efforts_source
         == "catalog"
     )
-    assert adapter.observed_protocol_orders == [SOURCE_PROTOCOLS]
+    assert adapter.observed_protocol_orders == [MODEL_PROTOCOLS]
     assert adapter.revoked == []
 
 

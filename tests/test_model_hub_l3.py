@@ -46,7 +46,7 @@ from core.handlers.model_hub.adapter import (
     EngineStatus,
     RawCallOutcome,
     RawOutcomeKind,
-    SOURCE_PROTOCOLS,
+    MODEL_PROTOCOLS,
     SourceBinding,
 )
 from core.handlers.model_hub.classification import ResolutionDecision, classify_outcome
@@ -142,7 +142,7 @@ NOW = datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc)
 CATALOG_API_KEY_VENDOR_PROTOCOL_CASES = tuple(
     pytest.param(entry.id, entry.protocol, id=entry.id)
     for entry in api_key_vendor_catalog()
-    if entry.protocol != "search"
+    if entry.protocol in MODEL_PROTOCOLS
 )
 
 
@@ -9511,8 +9511,7 @@ def test_probe_2xx_native_auth_error_uses_classified_blocker_detail(
             "anthropic",
             {"model", "max_tokens", "messages"},
         )
-        for source_protocol in SOURCE_PROTOCOLS
-        if source_protocol != "search"
+        for source_protocol in MODEL_PROTOCOLS
     ]
     + [
         (
@@ -9521,8 +9520,7 @@ def test_probe_2xx_native_auth_error_uses_classified_blocker_detail(
             "openai_responses",
             {"model", "max_output_tokens", "input"},
         )
-        for source_protocol in SOURCE_PROTOCOLS
-        if source_protocol != "search"
+        for source_protocol in MODEL_PROTOCOLS
     ]
     + [
         (
@@ -9536,8 +9534,7 @@ def test_probe_2xx_native_auth_error_uses_classified_blocker_detail(
                 else {"model", "max_tokens", "messages"}
             ),
         )
-        for source_protocol in SOURCE_PROTOCOLS
-        if source_protocol != "search"
+        for source_protocol in MODEL_PROTOCOLS
     ],
 )
 def test_probe_request_matches_live_backend_protocol_matrix(

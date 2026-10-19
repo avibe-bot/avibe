@@ -1,6 +1,6 @@
 import type { ReasoningEffort } from '@/lib/effortOptions';
 
-import type { SourceProtocol } from './types';
+import type { ModelProtocol } from './types';
 
 /**
  * The effort vocabulary for a source's protocol family.
@@ -27,9 +27,8 @@ import type { SourceProtocol } from './types';
  * becomes data only when the user clicks it, through the same add path typing it
  * would take.
  */
-export const TIER_SUGGESTIONS: Readonly<Record<SourceProtocol, readonly ReasoningEffort[]>> = {
+export const TIER_SUGGESTIONS: Readonly<Record<ModelProtocol, readonly ReasoningEffort[]>> = {
   google: [], // No Google family ladder is claimed by Model Hub.
-  search: [], // Search Sources do not supply model reasoning tiers.
   anthropic: ['low', 'medium', 'high', 'xhigh', 'max'],
   openai_responses: ['minimal', 'low', 'medium', 'high', 'xhigh'],
   openai_chat: ['minimal', 'low', 'medium', 'high', 'xhigh'],

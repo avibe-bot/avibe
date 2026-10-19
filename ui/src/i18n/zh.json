@@ -2803,6 +2803,7 @@
   },
   "modelHub": {
     "errors": {
+      "credential_replacement_unverified": "暂时无法验证新密钥，原密钥未改动，请稍后重试",
       "source_model_tiers_managed": "这个模型的档位是自动确定的，这次改动没有保存"
     }
   },

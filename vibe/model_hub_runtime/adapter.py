@@ -35,7 +35,7 @@ from core.handlers.model_hub.adapter import (
     RuntimePlatformUnsupportedError,
     SearchCredentialCheck,
     SearchResponse,
-    SOURCE_PROTOCOLS,
+    MODEL_PROTOCOLS,
     SourceObservation,
     SourceBinding,
     make_source_observation,
@@ -184,17 +184,37 @@ def _search_check_matches(body: object, rule: Mapping[str, Any]) -> bool:
 
 
 def _search_limit_outcome(body: object, rule: Mapping[str, Any]) -> Literal["pass", "limit", "unknown"]:
+    """Classify a complete Tavily quota report without treating absent data as proof."""
     pairs = rule.get("pairs")
     if not isinstance(pairs, list) or not isinstance(body, Mapping):
         return "unknown"
     missing = object()
-    saw_pair = False
+    values: dict[str, tuple[float, float | None] | None] = {
+        "key": None,
+        "plan": None,
+        "paygo": None,
+    }
+    paths = {
+        "key": ("key.usage", "key.limit"),
+        "plan": ("account.plan_usage", "account.plan_limit"),
+        "paygo": ("account.paygo_usage", "account.paygo_limit"),
+    }
     for pair in pairs:
         if not isinstance(pair, Mapping):
             return "unknown"
         usage_path = pair.get("usage")
         limit_path = pair.get("limit")
         if not isinstance(usage_path, str) or not isinstance(limit_path, str):
+            return "unknown"
+        role = next(
+            (
+                name
+                for name, expected in paths.items()
+                if expected == (usage_path, limit_path)
+            ),
+            None,
+        )
+        if role is None:
             return "unknown"
         usage: object = body
         limit: object = body
@@ -212,19 +232,38 @@ def _search_limit_outcome(body: object, rule: Mapping[str, Any]) -> Literal["pas
             continue
         if (
             usage is missing
-            or limit is missing
             or isinstance(usage, bool)
             or not isinstance(usage, (int, float))
             or not math.isfinite(float(usage))
+        ):
+            return "unknown"
+        if role == "key" and limit is None:
+            values[role] = (float(usage), None)
+            continue
+        if (
+            limit is missing
             or isinstance(limit, bool)
             or not isinstance(limit, (int, float))
             or not math.isfinite(float(limit))
         ):
             return "unknown"
-        saw_pair = True
-        if float(usage) >= float(limit):
-            return "limit"
-    return "pass" if saw_pair else "unknown"
+        values[role] = (float(usage), float(limit))
+
+    if not any(value is not None for value in values.values()):
+        return "unknown"
+    key = values["key"]
+    plan = values["plan"]
+    paygo = values["paygo"]
+    if key is not None and key[1] is not None and key[0] >= key[1]:
+        return "limit"
+    if plan is None and paygo is None:
+        return "unknown"
+    key_has_headroom = key is None or key[1] is None or key[0] < key[1]
+    account_has_headroom = (
+        (plan is not None and plan[0] < plan[1])
+        or (paygo is not None and paygo[0] < paygo[1])
+    )
+    return "pass" if key_has_headroom and account_has_headroom else "limit"
 _INSTALL_RECOVERY_WAIT_SECONDS = 30.0
 _INSTALL_RECOVERY_INITIAL_DELAY_SECONDS = 0.25
 _INSTALL_RECOVERY_MAX_DELAY_SECONDS = 4.0
@@ -2018,6 +2057,7 @@ class CLIProxyEngineAdapter:
         payload: Mapping[str, Any] | None = None,
         timeout_total: float = _SEARCH_TIMEOUT_SECONDS,
         connect_timeout: float | None = None,
+        on_sent: Callable[[], None] | None = None,
     ) -> SearchResponse:
         """Call only the immutable catalog endpoint for one search operation."""
         vendor, service = self._search_catalog_parts(catalog)
@@ -2056,8 +2096,24 @@ class CLIProxyEngineAdapter:
         else:
             headers["Authorization"] = f"Bearer {key}"
         timeout = aiohttp.ClientTimeout(total=timeout_total, connect=connect_timeout)
+        trace = aiohttp.TraceConfig()
+        callback_called = False
+
+        async def request_connection_ready(*_args: Any, **_kwargs: Any) -> None:
+            nonlocal callback_called
+            if callback_called or on_sent is None:
+                return
+            callback_called = True
+            on_sent()
+
+        trace.on_connection_create_end.append(request_connection_ready)
+        trace.on_connection_reuseconn.append(request_connection_ready)
         try:
-            async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
+            async with aiohttp.ClientSession(
+                timeout=timeout,
+                trust_env=False,
+                trace_configs=[trace],
+            ) as session:
                 async with session.request(
                     method,
                     configured_endpoint,
@@ -2135,6 +2191,8 @@ class CLIProxyEngineAdapter:
         service_id: str,
         credential_ref: str,
         request: Mapping[str, Any],
+        *,
+        on_sent: Callable[[], None] | None = None,
     ) -> SearchResponse:
         service = search_service(vendor, "search" if vendor in {"tavily", "exa"} else "openai_chat")
         if service is None or service.get("service_id") != service_id:
@@ -2146,6 +2204,7 @@ class CLIProxyEngineAdapter:
             method="POST",
             endpoint=str(service.get("endpoint") or ""),
             payload=request,
+            on_sent=on_sent,
         )
 
     async def revoke_search_credential(self, credential_ref: str) -> None:
@@ -2418,9 +2477,11 @@ class CLIProxyEngineAdapter:
 
     async def revoke_api_key_credential(self, credential_ref: str) -> None:
         await asyncio.to_thread(self.state_store.assert_credential_unbound, credential_ref)
-        metadata = await asyncio.to_thread(self.state_store.credential_metadata, credential_ref)
-        await asyncio.to_thread(self.state_store.credential_auth_scheme, credential_ref)
-        if metadata.get("protocol") != "search":
+        is_search = await asyncio.to_thread(
+            self.state_store.api_key_credential_is_search,
+            credential_ref,
+        )
+        if not is_search:
             await asyncio.to_thread(self.supervisor.invalidate_configs)
         await asyncio.to_thread(self.state_store.revoke_api_key_credential, credential_ref)
 
@@ -2647,7 +2708,7 @@ class CLIProxyEngineAdapter:
         response_evidence_by_protocol: dict[str, _ProtocolEvidence] = {}
         ruled_out_protocols: set[str] = set()
         for protocol in protocol_order:
-            if protocol not in SOURCE_PROTOCOLS:
+            if protocol not in MODEL_PROTOCOLS:
                 raise EngineStateError("unsupported source protocol")
             owner_scoped_protocol = _protocol_is_persistable_without_shape_proof(
                 credential_kind=str(credential_kind),

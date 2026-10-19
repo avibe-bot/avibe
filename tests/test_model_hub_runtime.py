@@ -31,6 +31,7 @@ from core.handlers.model_hub.adapter import (
     EngineHealth,
     OAuthSubmissionRejectedError,
     OriginNotAllowedError,
+    MODEL_PROTOCOLS,
     RawCallOutcome,
     RawOutcomeKind,
     RetainedMaterialDisposition,
@@ -114,7 +115,7 @@ API_KEY_VENDOR_RUNTIME_CASES = tuple(
         *[
             pytest.param(entry.id, entry.protocol, entry.official_base_url, id=entry.id)
             for entry in api_key_vendor_catalog()
-            if entry.protocol != "search"
+            if entry.protocol in MODEL_PROTOCOLS
         ],
         pytest.param("codex", "openai_responses", "https://api.openai.com/v1", id="codex"),
     ]
@@ -2260,8 +2261,6 @@ def test_a_persisted_key_source_survives_a_repin_of_its_vendor(tmp_path: Path) -
     ]
 
 
-
-
 def test_search_free_check_uses_bounded_catalog_transport(monkeypatch):
     calls: dict[str, object] = {}
     caller_thread = threading.current_thread().name
@@ -2277,8 +2276,7 @@ def test_search_free_check_uses_bounded_catalog_transport(monkeypatch):
 
     class ResponseContent:
         async def iter_chunked(self, _chunk_size):
-            yield b'{"is_available": '
-            yield b'true}'
+            yield b'{"key":{"usage": 1, "limit": 10}, "account":{"plan_usage": 1, "plan_limit": 10}}'
 
     class Response:
         status = 200
@@ -2316,6 +2314,11 @@ def test_search_free_check_uses_bounded_catalog_transport(monkeypatch):
             "method": "GET",
             "endpoint": "https://api.tavily.com/usage",
             "pass": {"status": 200},
+            "limit": {"pairs": [
+                {"usage": "key.usage", "limit": "key.limit"},
+                {"usage": "account.plan_usage", "limit": "account.plan_limit"},
+                {"usage": "account.paygo_usage", "limit": "account.paygo_limit"},
+            ]},
             "invalid_statuses": [401],
         },
     }
@@ -2337,13 +2340,79 @@ def test_search_free_check_uses_bounded_catalog_transport(monkeypatch):
     assert calls["metadata_thread"] != caller_thread
 
 
+def test_search_on_sent_fires_once_after_connection_ready_before_write(monkeypatch):
+    calls: list[str] = []
+
+    class Store:
+        def read_api_key(self, _credential_ref):
+            return "tvly-secret"
+
+        def credential_metadata(self, _credential_ref):
+            return {"vendor": "tavily"}
+
+    class ResponseContent:
+        async def iter_chunked(self, _chunk_size):
+            yield b'{"results": []}'
+
+    class Response:
+        status = 200
+        headers = {}
+        content = ResponseContent()
+
+    class Request:
+        def __init__(self, traces):
+            self.traces = traces
+
+        async def __aenter__(self):
+            for trace in self.traces:
+                for callback in trace.on_connection_create_end:
+                    await callback(None, None, None)
+                for callback in trace.on_connection_reuseconn:
+                    await callback(None, None, None)
+            calls.append("write")
+            return Response()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Session:
+        def __init__(self, *, trace_configs, **_kwargs):
+            self.traces = trace_configs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def request(self, _method, _endpoint, **_kwargs):
+            return Request(self.traces)
+
+    monkeypatch.setattr(runtime_adapter_module.aiohttp, "ClientSession", Session)
+    adapter = CLIProxyEngineAdapter(supervisor=object(), state_store=Store())  # type: ignore[arg-type]
+
+    response = asyncio.run(
+        adapter.search(
+            "src_search",
+            "tavily",
+            "tavily/search",
+            "cred_search",
+            {"query": "hello", "max_results": 1},
+            on_sent=lambda: calls.append("sent"),
+        )
+    )
+
+    assert response.http_status == 200
+    assert calls == ["sent", "write"]
+
+
 def test_tavily_free_check_classifies_reported_usage_limit(monkeypatch):
     adapter = CLIProxyEngineAdapter(supervisor=object(), state_store=object())  # type: ignore[arg-type]
     service = search_service("tavily", "search")
     assert service is not None
 
     async def response(**_kwargs):
-        return SearchResponse(200, {}, b'{"usage": 10, "limit": 10}')
+        return SearchResponse(200, {}, b'{"key":{"usage": 10, "limit": 10}, "account":{"plan_usage": 1, "plan_limit": 20}}')
 
     monkeypatch.setattr(adapter, "_search_http", response)
     outcome = asyncio.run(
@@ -2357,10 +2426,37 @@ def test_tavily_free_check_classifies_reported_usage_limit(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ({"key": {"usage": 1, "limit": 10}}, "unknown"),
+        ({"key": {"usage": 1, "limit": None}}, "unknown"),
+        ({"key": {"usage": 1, "limit": None}, "account": {"plan_usage": 1, "plan_limit": 10}}, "pass"),
+        ({"account": {"plan_usage": 1, "plan_limit": 10}}, "pass"),
+        ({"account": {"plan_usage": 10, "plan_limit": 10, "paygo_usage": 1, "paygo_limit": 10}}, "pass"),
+        ({"key": {"usage": 1, "limit": 10}, "account": {"plan_usage": 10, "plan_limit": 10}}, "limit"),
+    ],
+)
+def test_tavily_free_check_requires_account_headroom(monkeypatch, body, expected):
+    adapter = CLIProxyEngineAdapter(supervisor=object(), state_store=object())  # type: ignore[arg-type]
+    service = search_service("tavily", "search")
+    assert service is not None
+
+    async def response(**_kwargs):
+        return SearchResponse(200, {}, json.dumps(body).encode("utf-8"))
+
+    monkeypatch.setattr(adapter, "_search_http", response)
+    outcome = asyncio.run(
+        adapter.check_search_credential(
+            "cred_search",
+            {"vendor": "tavily", **service},
+        )
+    )
+    assert outcome.outcome == expected
+
+@pytest.mark.parametrize(
     "body",
     [
-        {"usage": "10", "limit": 20},
-        {"usage": 10, "limit": None},
+        {"key": {"usage": "10", "limit": 20}},
         {"account": {"plan_usage": 10, "plan_limit": 20, "paygo_usage": "10"}},
     ],
 )
@@ -2383,6 +2479,7 @@ def test_tavily_free_check_returns_unknown_for_invalid_reported_usage_fields(mon
     assert outcome.outcome == "unknown"
 
 
+def test_source_record_requires_valid_reasoning_state() -> None:
     payload = {
         "source_id": "src_fixture123",
         "vendor": "anthropic",
@@ -2577,7 +2674,7 @@ def test_openai_compatibility_engine_base_url_uses_configured_api_root(
     [
         pytest.param(entry.official_base_url, entry.protocol, id=entry.id)
         for entry in api_key_vendor_catalog()
-        if entry.protocol != "search"
+        if entry.protocol in MODEL_PROTOCOLS
     ],
 )
 def test_catalog_official_base_url_composes_one_probe_endpoint(
@@ -9404,9 +9501,7 @@ def test_every_oauth_start_vendor_binds_by_exactly_one_route(
             return {"status_code": 200, "body": json.dumps({"type": "message"})}
 
     observed: set[str] = set()
-    for protocol in SOURCE_PROTOCOLS:
-        if protocol == "search":
-            continue
+    for protocol in MODEL_PROTOCOLS:
         client = Client()
         try:
             runtime_adapter_module._probe_oauth_protocol_response(
@@ -9430,7 +9525,7 @@ def test_every_oauth_start_vendor_binds_by_exactly_one_route(
         f"{vendor} must bind by exactly one of a response probe or an engine-declared pin"
     )
     if pinned is not None:
-        assert pinned in SOURCE_PROTOCOLS
+        assert pinned in MODEL_PROTOCOLS
 
 
 def test_oauth_model_discovery_accepts_engine_definition_fields(tmp_path: Path) -> None:

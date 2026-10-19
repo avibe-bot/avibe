@@ -168,9 +168,9 @@
         "pass": {"status": 200},
         "limit": {
           "pairs": [
-            {"usage": "usage", "limit": "limit"},
-            {"usage": "plan_usage", "limit": "plan_limit"},
-            {"usage": "paygo_usage", "limit": "paygo_limit"}
+            {"usage": "key.usage", "limit": "key.limit"},
+            {"usage": "account.plan_usage", "limit": "account.plan_limit"},
+            {"usage": "account.paygo_usage", "limit": "account.paygo_limit"}
           ]
         },
         "balance": null,
@@ -193,13 +193,14 @@
         "method": "POST",
         "query": "query",
         "results": "numResults",
-        "content": "contents.text"
+        "content": "contents.text",
+        "highlights": "contents.highlights"
       },
       "result": {
         "results": "results",
         "url": "url",
         "title": "title",
-        "snippet": "text",
+        "snippet": "highlights",
         "content": "text",
         "page_age": "publishedDate",
         "reported_cost": "costDollars.total"
@@ -216,7 +217,7 @@
           {"unit": "page", "usd_per_1k": 1.0, "when": "content"}
         ],
         "as_of": "2026-10-19",
-        "url": "https://exa.ai/pricing"
+        "url": "https://exa.ai/blog/exa-3"
       },
       "free_check": null,
       "service_refused_statuses": [400],

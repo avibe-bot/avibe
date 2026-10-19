@@ -17,13 +17,14 @@ export const PROBE_RESULT_CONTRACT_VERSION = CONTRACT_VERSION;
 
 // ── source.schema.json ──────────────────────────────────────────────────
 export type SourceKind = 'subscription' | 'api_key';
-export const SOURCE_PROTOCOLS = [
+export const MODEL_PROTOCOLS = [
   'anthropic',
   'openai_responses',
   'openai_chat',
   'google',
-  'search',
 ] as const;
+export type ModelProtocol = (typeof MODEL_PROTOCOLS)[number];
+export const SOURCE_PROTOCOLS = [...MODEL_PROTOCOLS, 'search'] as const;
 export type SourceProtocol = (typeof SOURCE_PROTOCOLS)[number];
 // Google is API/config-only until its picker frame is approved.
 export const SELECTABLE_SOURCE_PROTOCOLS = ['anthropic', 'openai_responses', 'openai_chat'] as const;
@@ -647,7 +648,7 @@ export type RecordedAttempt = {
   channel: SupplyChannel;
   stripped_reasoning_efforts?: string[];
   declared_reasoning_efforts?: string[];
-  origin?: { provider: string; api: SourceProtocol; model: string };
+  origin?: { provider: string; api: ModelProtocol; model: string };
 };
 export type TurnProvenance = {
   contract_version: (typeof PERSISTED_TURN_CONTRACT_VERSIONS)[number];
@@ -664,7 +665,7 @@ export type TurnProvenance = {
     configured_model_id: string | null;
     channel: SupplyChannel | null;
     local_error_detail?: string;
-    origin?: { provider: string; api: SourceProtocol; model: string };
+    origin?: { provider: string; api: ModelProtocol; model: string };
     stripped_reasoning_efforts?: string[];
     declared_reasoning_efforts?: string[];
   } & ({
@@ -1165,7 +1166,7 @@ export type SourceObservation = {
   outcome: ObservationOutcome;
   reachable: boolean | null;
   authenticated: ObservationAuthentication;
-  protocol: SourceProtocol | null;
+  protocol: ModelProtocol | null;
   discovery: ObservationDiscovery;
   models: string[];
 };
@@ -1176,13 +1177,13 @@ export type ApiKeySourceObservation = {
   base_url?: string | null;
   key: string;
   /** Omission auto-detects; a value restricts observation to this protocol. */
-  protocol?: SourceProtocol;
+  protocol?: ModelProtocol;
 };
 
 export type SourceProbeResult = {
   source_id: string;
   model_id: string;
-  protocol: SourceProtocol;
+  protocol: ModelProtocol;
   reachable: boolean;
   latency_ms: number;
   error: string | null;

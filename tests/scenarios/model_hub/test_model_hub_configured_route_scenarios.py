@@ -18,6 +18,7 @@ from config.v2_config import (
 )
 from core.handlers.model_hub.adapter import (
     DiscoveredModel,
+    MODEL_PROTOCOLS,
     SOURCE_PROTOCOLS,
     ObservationDiscovery,
     ObservationOutcome,
@@ -643,7 +644,7 @@ def test_mh_protocol_001_saved_protocol_is_response_observed_and_transient_state
         )
     )
 
-    assert observed["observation"]["protocol"] in SOURCE_PROTOCOLS
+    assert observed["observation"]["protocol"] in MODEL_PROTOCOLS
     assert observed["observation"]["authenticated"] == "authenticated"
     assert store.load().sources == []
     assert adapter.revoked == adapter.provisioned_transient

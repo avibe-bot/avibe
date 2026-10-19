@@ -63,7 +63,7 @@ const replacementToast = (source: Source, gaps: SupplyGap[] = []) =>
 type ReplacePhase =
   | { kind: 'edit' }
   | { kind: 'submitting' }
-  | { kind: 'failure'; failureClass: ModelHubFailureClass };
+  | { kind: 'failure'; failureClass: ModelHubFailureClass; messageKey?: string | null };
 
 type AddApiKeyDialogProps = {
   open: boolean;
@@ -144,10 +144,11 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
     seq: ContinuationTicket,
     failureClass: ModelHubFailureClass,
     settle?: () => Promise<SourceMutationLanding>,
+    messageKey?: string | null,
   ) => {
     continuation.settle(seq, () => {
       setGuard(null);
-      setReplacePhase({ kind: 'failure', failureClass });
+      setReplacePhase({ kind: 'failure', failureClass, messageKey });
     });
     if (settle) void settle().catch(() => undefined);
   }, [continuation]);
@@ -232,7 +233,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
             return;
           }
         } else settlement.release();
-        publishReplacementFailure(seq, failureClass);
+        publishReplacementFailure(seq, failureClass, undefined, failure?.detail);
       }
     });
   }, [apiKey, continuation, props, publishReplacementEvidence, publishReplacementFailure, replacePhase.kind]);
@@ -358,7 +359,8 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
               >
                 <TriangleAlert className="model-hub-add-key-error-ink size-3.5 shrink-0" />
                 <span className="model-hub-add-key-error-ink model-hub-add-key-strip-title">
-                  {t(REPLACE_FAILURE_KEY[replacePhase.failureClass])}
+                  {serverText(t, replacePhase.messageKey, REPLACE_FAILURE_KEY[replacePhase.failureClass])
+                    ?? t(REPLACE_FAILURE_KEY[replacePhase.failureClass])}
                 </span>
               </div>
             )}

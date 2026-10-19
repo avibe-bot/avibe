@@ -37,6 +37,7 @@ from core.handlers.model_hub.adapter import (
     OBSERVATION_TERMINAL_RULES,
     ObservationDiscovery,
     ObservationOutcome,
+    MODEL_PROTOCOLS,
     SOURCE_PROTOCOLS,
     SourceObservation,
     validate_source_observation,
@@ -88,7 +89,7 @@ def test_auto_detect_asks_for_responses_before_chat():
     """
 
     auto_sequence = ModelHubService._observation_protocols("custom", {})
-    assert set(auto_sequence) == set(SOURCE_PROTOCOLS) - {"google", "search"}
+    assert set(auto_sequence) == set(MODEL_PROTOCOLS) - {"google"}
     assert ModelHubService._observation_protocols("custom", {"protocol": "google"}) == ("google",)
     assert len(auto_sequence) == len(set(auto_sequence))
     assert auto_sequence.index("openai_responses") < auto_sequence.index("openai_chat")
@@ -115,7 +116,7 @@ def test_observation_terminal_authority_and_schema_accept_the_same_products():
     schema = Draft7Validator(_schema("observation-result.schema.json"))
     reachable_domain = frozenset({True, False, None})
     authenticated_domain = frozenset({True, False, None})
-    protocol_domain = frozenset({None, *(set(SOURCE_PROTOCOLS) - {"search"})})
+    protocol_domain = frozenset({None, *MODEL_PROTOCOLS})
     discovery_domain = frozenset(ObservationDiscovery)
 
     def payload(observation: SourceObservation) -> dict:
@@ -3107,6 +3108,34 @@ def test_backend_model_modalities_match_the_contract_directions():
 
     with pytest.raises(ValueError, match="output_modalities"):
         ModelHubBackendModelConfig.from_payload({"id": "custom-model", "output_modalities": ["pdf"]})
+
+
+def test_config_reload_preserves_search_source_when_catalog_vendor_is_missing(tmp_path):
+    payload = api.config_to_payload(default_config())
+    saved_source = ModelHubSourceConfig(
+        id="src_searchmissing",
+        kind="api_key",
+        vendor="retired-search-vendor",
+        display_name="Retired Search Vendor",
+        protocol="search",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[],
+        credential_ref="cred_searchmissing",
+        masked_credential="••••sing",
+    )
+    payload["model_hub"]["sources"] = [saved_source.to_payload()]
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=path)
+
+    assert loaded.load_warnings == ()
+    assert loaded.recovered_sections == ()
+    assert loaded.model_hub.sources[0].vendor == "retired-search-vendor"
+    assert loaded.model_hub.sources[0].protocol == "search"
+    assert loaded.model_hub.sources[0].models == []
 
 
 def test_config_reload_preserves_legacy_routes_without_seeding_missing_models(tmp_path):

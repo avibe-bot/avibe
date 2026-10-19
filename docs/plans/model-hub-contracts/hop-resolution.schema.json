@@ -9,7 +9,7 @@
   "properties": {
     "backend": { "const": "vibey" },
     "requested_model": { "type": "string" },
-    "protocol": { "$ref": "source.schema.json#/properties/protocol" },
+    "protocol": { "$ref": "source-probe-result.schema.json#/properties/protocol" },
     "base_url": { "type": "string", "format": "uri" },
     "token": { "type": "string" },
     "runtime_model": { "type": "string" },

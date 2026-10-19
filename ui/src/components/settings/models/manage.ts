@@ -28,7 +28,10 @@ export const manageActions = (): ManageKind[] => Object.keys(MANAGE_DESTINATION)
 
 /** Only Avibe-held API-key sources own an endpoint that this editor can change. */
 export const canEditSourceEndpoint = (source: Source): boolean =>
-  source.kind === 'api_key' && source.supply_channel === 'hub' && Boolean(source.credential_ref);
+  source.kind === 'api_key'
+  && source.protocol !== 'search'
+  && source.supply_channel === 'hub'
+  && Boolean(source.credential_ref);
 
 export type SourceEditDraft = {
   displayName: string;

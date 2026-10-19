@@ -207,23 +207,9 @@ def normalize_model_hub_vendor_id(value: object) -> str:
 
 
 def validate_model_hub_protocol_vendor(vendor: str, protocol: str) -> None:
-    """Validate new protocol/vendor admission without rewriting old persisted Sources."""
+    """Validate protocol/vendor combinations that are intrinsic to persisted shapes."""
     if protocol == "google" and vendor != "custom":
         raise ValueError("Google Sources require the custom vendor")
-    from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_entry
-
-    entry = api_key_vendor_entry(vendor)
-    tool_only = entry is not None and entry.protocol == "search"
-    if protocol == "search":
-        if not tool_only:
-            raise ValueError("Search Sources require a tool-only catalog vendor")
-        return
-    # Before search vendors were catalog-pinned, a user could persist an
-    # explicitly declared model protocol under an otherwise arbitrary vendor id
-    # such as ``tavily`` or ``exa``. Keep those released shapes readable; new
-    # admission still consults the catalog pin in the service's observation path.
-    if tool_only:
-        return
 
 
 def model_hub_fixed_menu_ids(backend: str) -> tuple[str, ...]:

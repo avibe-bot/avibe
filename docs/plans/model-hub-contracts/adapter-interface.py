@@ -3,7 +3,10 @@
 This file is the canonical adapter boundary and must remain byte-identical to
 ``core/handlers/model_hub/adapter.py``. The adapter owns one-Source operations:
 credential custody, protocol observation, model discovery, OAuth, invocation,
-and cleanup. It never chooses or reorders Route hops, classifies cross-Source
+and cleanup. Model protocol operations use ``MODEL_PROTOCOLS`` (the four invocable
+wire protocols); ``SOURCE_PROTOCOLS`` adds the tool-only ``search`` value only for
+stored/created Source shapes. It never chooses or reorders Route hops, classifies
+cross-Source
 fallthrough, or exposes credential material. Contract changes route through the
 orchestrator and land with every affected consumer on the same tested head.
 """
@@ -19,7 +22,10 @@ from typing import Any, AsyncIterator, Callable, Final, Literal, Mapping, Protoc
 from .stream_wire import ProtocolSSEState, ProtocolUsageReport
 
 ENGINE_TRANSPORT_TIMEOUT_SECONDS: Final = 60.0
-SOURCE_PROTOCOLS = ("anthropic", "openai_responses", "openai_chat", "google", "search")
+# Model invocation/observation is a narrower domain than stored Sources.
+MODEL_PROTOCOLS = ("anthropic", "openai_responses", "openai_chat", "google")
+# Source persistence/admission adds the tool-only search protocol.
+SOURCE_PROTOCOLS = MODEL_PROTOCOLS + ("search",)
 SEARCH_RESPONSE_MAX_BYTES: Final = 8 * 1024 * 1024
 SEARCH_TRANSPORT_TIMEOUT_SECONDS: Final = 30.0
 OBSERVATION_OUTCOMES = (
@@ -279,7 +285,7 @@ OBSERVATION_TERMINAL_RULES: Mapping[
     ObservationOutcome.OBSERVED: ObservationTerminalRule(
         reachable=frozenset({True}),
         authenticated=frozenset({True}),
-        protocols=frozenset(set(SOURCE_PROTOCOLS) - {"search"}),
+        protocols=frozenset(MODEL_PROTOCOLS),
         discoveries=frozenset(
             {
                 ObservationDiscovery.SUCCEEDED,
@@ -569,8 +575,15 @@ class EngineAdapter(Protocol):
         service_id: str,
         credential_ref: str,
         request: Mapping[str, Any],
+        *,
+        on_sent: Callable[[], None] | None = None,
     ) -> SearchResponse:
-        """Make exactly one catalog-host search request from Model Hub custody."""
+        """Make exactly one catalog-host search request from Model Hub custody.
+
+        ``on_sent`` fires once after the connection (including TLS) is ready and
+        immediately before aiohttp writes this request. A callback failure stops
+        the request before any request bytes are sent.
+        """
         ...
 
     async def revoke_search_credential(self, credential_ref: str) -> None:

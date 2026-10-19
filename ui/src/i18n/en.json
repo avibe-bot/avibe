@@ -2803,6 +2803,7 @@
   },
   "modelHub": {
     "errors": {
+      "credential_replacement_unverified": "The new key could not be verified yet. Your old key is unchanged; please try again later.",
       "source_model_tiers_managed": "This model's tiers are set automatically, so the change was not saved"
     }
   },

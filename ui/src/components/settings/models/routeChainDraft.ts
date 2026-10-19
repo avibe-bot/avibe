@@ -75,6 +75,7 @@ export function validateRouteDraft(
     const source = available.get(hop.source_id);
     const admitted = source && hop.model_id.trim().length > 0
       && hop.model_id === hop.model_id.trim()
+      && source.protocol !== 'search'
       && (source.kind === 'api_key' || source.models.some((model) => model.id === hop.model_id))
       && !source.models.some((model) => model.id === hop.model_id && model.retired === true);
     return counts.get(key)! > 1 || (!unchanged.has(key) && !admitted)

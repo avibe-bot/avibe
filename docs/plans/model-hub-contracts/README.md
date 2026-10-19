@@ -97,7 +97,11 @@ commit is not evidence that the complete final protocol has landed.
   inherited routing through the same Restore/Undo/Save flow, never empty Manual.
 - A hop whose upstream `model_id` differs from its menu model is an explicit configured
   mapping. There is no separate mapping object or runtime mapping event.
-- The protocol vocabulary is exactly `anthropic | openai_responses | openai_chat | google | search`.
+- The Source protocol vocabulary is `anthropic | openai_responses | openai_chat | google | search`.
+`MODEL_PROTOCOLS` is the four invocable model-wire protocols (`anthropic | openai_responses |
+openai_chat | google`); `SOURCE_PROTOCOLS` is that tuple plus the tool-only `search` protocol.
+Model observation, probes, discovery, auto-detection, provider overlays, and hop schemas use
+`MODEL_PROTOCOLS`; only persisted Source and Source-create shapes use `SOURCE_PROTOCOLS`.
   `base_url` distinguishes official endpoints from relays and self-hosted gateways.
   Google is explicitly declared through API/config; the three-option UI picker and
   custom Auto-detection set remain unchanged.
@@ -269,8 +273,10 @@ persisted-shape rule that governs config files. It therefore accepts the release
 as a set ending at the terminal one, and nothing branches on which member a record
 carries.
 
-The five-value protocol closure includes `source.schema.json`, `adapter-interface.py`,
-and the byte-identical `core/handlers/model_hub/adapter.py` on the same tested head.
+The five-value Source protocol closure includes `source.schema.json`, `source-create.schema.json`,
+and the storage/admission constants. The model-only closure is the four-value
+`source-probe-result.schema.json` protocol and its `MODEL_PROTOCOLS` consumers; search is not
+admitted by observation, probes, discovery, auto-detection, provider overlays, or hop schemas.
 
 After implementation lands, these contracts are read-only for downstream lanes. An
 implementation-discovered mismatch is reported to the orchestrator for a targeted
