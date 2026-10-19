@@ -148,7 +148,8 @@ window.fetch = async (input, init) => {
       background_activities: [], pending_activity_output_count: 0, connection: 'connected',
     },
     '/api/vault/requests': { ok: true, requests: requests.filter((request) => !url.searchParams.get('session') || request.session.id === url.searchParams.get('session')) },
-    '/api/asr/status': { available: false },
+    // `asr=1`: voice input is available, so the dock shows its mic.
+    '/api/asr/status': { available: params.get('asr') === '1' },
     '/api/running-agents': { ok: true, agents, counts: { total: agents.length, active: agents.length, idle: 0, orphan: 0, by_backend: {} } },
     '/api/sessions': { sessions: [session], next_before_id: null },
     '/api/inbox': { ok: true, sessions: [], unread_by_session: unread, total_unread: Object.values(unread).reduce((a, b) => a + b, 0), next_before_id: null },

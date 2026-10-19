@@ -1118,3 +1118,15 @@ for (const cards of [1, 3]) {
     await fits();
   });
 }
+
+for (const asr of [true, false]) {
+  test(`the dock reads history, ${asr ? 'mic, ' : ''}keyboard, with a hairline between each (voice ${asr ? 'available' : 'unavailable'})`, async ({ page }) => {
+    await page.goto(`/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&idle=1${asr ? '&asr=1' : ''}`);
+    await page.locator('.pet-mini-avatar-button').hover();
+    const dock = page.locator('.pet-mini-dock');
+    await expect(dock).toHaveCSS('opacity', '1');
+    if (asr) await expect(dock.getByRole('button', { name: '语音输入', exact: true })).toBeVisible();
+    const order = await dock.evaluate((node) => [...node.children].map((child) => child.tagName === 'BUTTON' ? child.getAttribute('aria-label') : child.classList.contains('pet-mini-dock-divider') ? '|' : null).filter(Boolean));
+    expect(order).toEqual(asr ? ['最近几轮', '|', '语音输入', '|', '输入消息'] : ['最近几轮', '|', '输入消息']);
+  });
+}
