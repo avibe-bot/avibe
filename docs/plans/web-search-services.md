@@ -127,7 +127,9 @@ The user has an Anthropic API key and a DeepSeek API key, adds Tavily, and chang
   its outcome (`pass`, `balance`, `limit`, `invalid`, `unknown`), under the same transport rules and a 10 s total deadline
   (5 s to connect); expiry is `unknown`; create, replace, the
   DeepSeek add path and "重新启用" call it. A new adapter operation sends one search request for a `credential_ref` and returns status,
-  a bounded header subset and the body; it reads the key from the state store (`read_api_key`, as credential
+  a bounded header subset and the body. Like the invocation contract's `on_admitted`, it takes an `on_sent`
+  callback that it calls exactly once just before writing the request, after connect and TLS succeed; a failure or
+  cancellation before that call is pre-send ($0), and one after it is billing-unknown (§4.3). It reads the key from the state store (`read_api_key`, as credential
   retargeting does today) only for the duration of the request.
 - Transport rules: HTTPS only, host pinned to the catalog endpoint, redirects refused, environment proxies ignored
   as the engine's own upstream requests ignore them, response body capped at 8 MiB. The credential file read happens
@@ -294,8 +296,9 @@ Hosted tools §6 holds, with these changes:
   `basis: "reported"`. Any other value is ignored and the list price applies.
   Otherwise it is the catalog's list price for the request plus its per-returned-page parts (Exa: $1 / 1k pages of
   `contents.highlights`, always requested, and $1 / 1k pages of `contents.text` when content is on), with
-  `basis: "list"`. When a per-page part applies but the page count cannot be read (an unreadable 200 with no valid
-  reported cost, which for Exa is every such call), the cost is the search part marked as a lower bound
+  `basis: "list"`. The page count is the length of a readable `results` array before the local bounds drop entries,
+  so a response whose every row was rejected locally is still priced from it. When a per-page part applies but
+  the array is missing or unreadable and no valid reported cost exists, the cost is the search part marked as a lower bound
   ("至少 $0.007") through the new `HostedCost.lower_bound`, and the ledger row carries `lower_bound: true` into the
   Usage aggregate. When the vendor bills only
   non-empty results (DeepSeek), a 200 whose `results` array is non-empty is billed even if every item fails the
@@ -353,12 +356,12 @@ Hosted tools §6 holds, with these changes:
 - Every candidate that sent a request is metered on its Source; a skip is never metered. The Usage tab therefore
   shows real search requests per service. A service request reaches no model, so the usage ledger gains a service
   row: the Source, the catalog's `service_id` in place of a model, `requests` (sent), `billable_requests` (those
-  the catalog's billing rule charges: DeepSeek only a 200 with results, the others any 200), `reported_usd` and
-  `reported_requests` (the reported costs and the requests they cover), and the list-priced quantities of the other
-  billable requests: `list_requests` and `list_pages` per content type (Exa: `highlights`, `text`). Usage values the
-  quantities at the current price table, as it values model tokens, so `api_cost_usd` keeps one
-  `price_table_date`. Reported costs are the vendor's own figures and are exposed separately as
-  `service_reported_usd`; the total is the two added together. A request whose billing is unknown (DeepSeek's unreadable 200) adds to
+  the catalog's billing rule charges: DeepSeek only a 200 with results, the others any 200), the list-priced quantities of every billable request
+  whose quantities are known: `list_requests` and `list_pages` per content type (Exa: `highlights`, `text`), and,
+  in parallel, `reported_usd` and `reported_requests` for the requests the vendor priced itself. Usage values the
+  quantities at the current price table, as it values model tokens, so `api_cost_usd` is one list valuation with
+  one `price_table_date`. Reported costs are the vendor's own figures, exposed beside it as `service_reported_usd`
+  and never added to it. A request whose billing is unknown (DeepSeek's unreadable 200) adds to
   `requests` and to a separate `uncertain_requests`, never to `billable_requests`, so the counts stay exact and
   the uncertainty is visible. Released ledger rows without these fields load as zero.
 - `usage-summary` keeps every model shape unchanged and gives service usage its own closed branch, so a service is
@@ -368,14 +371,15 @@ Hosted tools §6 holds, with these changes:
     `list_pages` (`highlights`, `text`), `reported_usd`, `reported_requests`, and the optional `api_cost_usd` and
     `api_cost_lower_bound`.
   - A new top-level `services[]` (`ServiceUsage`) has one entry per (Source, `service_id`) with those counters,
-    `label` (the Source's), `service_label` (the catalog's) and `last_metered_at`, busiest first. A tool-only Source
+    `label` (the Source's; null once the Source is removed, folded into the same "Removed providers" identity as
+    model usage), `service_label` (the catalog's) and `last_metered_at`, busiest first. A tool-only Source
     appears only there, never in `sources[]`, whose `models` stay non-empty; a DeepSeek Source keeps its model usage
     in `sources[]` and its search usage in `services[]`.
   - `totals` and each `days[]` entry keep counting model calls. Their `api_cost_usd` adds the services' list
     valuation, the new `service_reported_usd` holds the reported costs, and `api_cost_lower_bound` is set when a
     service row has `lower_bound: true` (an unreadable content call, above).
   - The Usage tab shows a "搜索服务" table from `services[]` (requests, billable requests, cost) below the Source
-    table, and the total cost line includes both. The label comes from
+    table; the total cost line is `api_cost_usd`, with the reported figure shown beside it. The label comes from
   the catalog, not from model inventory (§8).
 
 ## 5. Catalog: first batch
@@ -396,7 +400,7 @@ includes, so the recorded list price stays exact.
 | Vendor | Request | Auth | Results | Content | List price (2026-10) | Free check |
 | --- | --- | --- | --- | --- | --- | --- |
 | DeepSeek | `POST https://api.deepseek.com/v1/tools/search` `{query, count, need_content}` | Bearer | 1–50 | `need_content` | $0.75 / 1k successful requests; empty results and failures not billed | `GET /user/balance`: 200 with `is_available: true` is `pass`, with `false` is `balance`; 401 is `invalid` |
-| Tavily | `POST https://api.tavily.com/search` | Bearer | 1–20 | `include_raw_content` | $8 / 1k basic searches | `GET https://api.tavily.com/usage`: a 200 needs at least one numeric usage/limit pair (`key.usage`/`key.limit`, `account.plan_usage`/`account.plan_limit`, `account.paygo_usage`/`account.paygo_limit`), and each recognized pair must be wholly absent or have both members as valid numbers, otherwise the result is `unknown`. It is `pass` when the key pair, if present, has headroom and the account can still pay: the plan pair or the pay-as-you-go pair has headroom (pay-as-you-go continues after the plan allowance). Otherwise it is `limit`; 401 is `invalid` |
+| Tavily | `POST https://api.tavily.com/search` | Bearer | 1–20 | `include_raw_content` | $8 / 1k basic searches | `GET https://api.tavily.com/usage`: a 200 needs at least one numeric usage/limit pair (`key.usage`/`key.limit`, `account.plan_usage`/`account.plan_limit`, `account.paygo_usage`/`account.paygo_limit`), and each recognized pair must be wholly absent or have both members as valid numbers, otherwise the result is `unknown`. A present key pair at its limit is `limit`. Otherwise, with no account pair the answer proves nothing about payment and is `unknown`; with one, it is `pass` when the plan pair or the pay-as-you-go pair has headroom (pay-as-you-go continues after the plan allowance) and `limit` when none does; 401 is `invalid` |
 | Exa | `POST https://api.exa.ai/search` | `x-api-key` | 1–10 (the base price includes 10) | always `contents.highlights` (the `snippet` source, since a base result has no excerpt); `content: true` adds `contents.text`; each is +$1 / 1k pages | $7 / 1k plus the always-on highlights surcharge, shown as one price; the response's `costDollars` is used when present | none known |
 
 - DeepSeek facts that shape the UI (DeepSeek's Search & Fetch guide, 2026-10-19): the query is 1–128 characters and
@@ -455,7 +459,8 @@ Status (latest success, or the Source's current health detail with its existing 
 tool-only `search` Source in a balance or limit state, §4.2, and the existing Source repair for DeepSeek), key (masked; "更换密钥",
 or for DeepSeek "使用供应商「DeepSeek」的 Key", managed under 供应商与路由), settings (results; page content only where
 the vendor returns page text, with its effect on price and on what the model reads), this month's requests and the
-persisted cost (reported costs plus list-priced quantities at the current table, labelled "按服务报告与 API 标价估算") with a link to Usage, and remove. A model Source with a search API (DeepSeek) has no remove here: it has a
+persisted cost (list-priced quantities at the current table, labelled "按 API 标价估算", with the service-reported
+figure beside it when there is one) with a link to Usage, and remove. A model Source with a search API (DeepSeek) has no remove here: it has a
 "用于网页搜索" switch (`services.<id>.enabled`), and its models stay.
 
 ### 6.4 Sources
@@ -519,7 +524,8 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 - C-1 (`agent-core-contracts/message.schema.json`): the optional `HostedSource.content` (§4.3; the read shape
   gains no new limits);
   `HostedRecord.attempts[]` with `source_id`, `outcome`, `label`, `error_code`, `skipped`, `needs_action` and
-  `superseded`; `HostedCost.lower_bound` with its `core/hosted_activity` projection ("至少"); and
+  `superseded`; `HostedCost.lower_bound` with its `core/hosted_activity` projection ("至少"), and a cost of exactly 0 rendered as
+  "$0" without "≈" by that projection, `HostedToolRow` and the IM line, since a zero is never an estimate; and
   their reader and writer types, and the six `service_*` codes in `HOSTED_ERROR_CODES`, with copy on every surface; an
   `executor_origin` that names a search service (`provider` = vendor, `model` = service id, and an `api` value for
   search APIs, which the contract lane names).
