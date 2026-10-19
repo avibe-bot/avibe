@@ -52,9 +52,11 @@ The user has an Anthropic API key and a DeepSeek API key, adds Tavily, and chang
   - **search service** (new): one HTTPS request to a search API, through a Source's key.
 - **Search service vendors are catalog rows.** Each names its endpoint, auth scheme, request mapping, result mapping,
   per-request limits, list price and an optional free credential check (§5). A vendor is one of:
-  - **tool-only** (Tavily, Exa, Brave, Bocha): its Source has `protocol: "search"` and no models;
+  - **tool-only** (Tavily, Exa, Bocha): its Source has `protocol: "search"` and no models;
   - **model vendor with a search API** (DeepSeek): an ordinary model Source whose catalog row also lists a search
     API. The Source qualifies only on the vendor's official endpoint; a relay base URL does not serve the search API.
+- **Page content is a vendor capability.** A row says whether the vendor can return page text. A summary or extra
+  snippets are not page text, so a vendor without page text has no content setting.
 - **The canonical schema stays `{query}`** (hosted tools §2). Result count and page content are service settings,
   never model arguments, as Anthropic's `max_uses` and OpenAI's actions are declaration settings today.
 
@@ -87,7 +89,7 @@ The user has an Anthropic API key and a DeepSeek API key, adds Tavily, and chang
 | Field | Rule |
 | --- | --- |
 | `prefer_native` | boolean; absent means `true` (decision 3) |
-| `services` | per search-capable Source: `results` (1 to the vendor's maximum, default 5) and `content` (page content, default `false`). Absent means defaults. An entry for a Source that no longer exists is ignored. |
+| `services` | per search-capable Source: `results` (1 to the vendor's maximum, default 5) and `content` (page text, default `false`, only where the vendor returns page text). Absent means defaults. An entry for a Source that no longer exists is ignored. |
 
 - `executor_order` keeps its rule (hosted tools §3.3) and now lists search-capable Sources beside model executors.
 - Releases before this feature ignore both fields with a warning: the existing loader rule for unknown fields.
@@ -109,8 +111,10 @@ The user has an Anthropic API key and a DeepSeek API key, adds Tavily, and chang
 
 ### 3.4 Hop facts
 
-- `prefer_native: false` makes `web_search` `native: "unsupported"` on every hop. It writes no evidence and does not
-  change `replay`, so native results already in history still replay where they did.
+- `prefer_native: false` makes `web_search` `native: "unsupported"` and `replay: "unsupported"` on every hop. It
+  writes no evidence. Native results already in history then replay in the synthetic text form (hosted tools §5), as
+  on any hop that does not declare the tool natively, so no request carries a native result without its
+  declaration.
 - With `prefer_native: true`, facts are hosted tools §3.4 unchanged.
 
 ### 3.5 The Tools read
@@ -122,7 +126,8 @@ The user has an Anthropic API key and a DeepSeek API key, adds Tavily, and chang
   catalog's service id (for example `tavily/search`), `price` in the existing unit form with unit `search`, its
   `settings {results, content}`, and the Source's health so the row can say "密钥无效 · 已跳过";
 - `service_vendors[]`: the catalog's search vendors, for the add dialog: id, name, list price, free tier, facts,
-  the maximum `results`, whether `content` changes the price, and whether a Source of the user already provides it.
+  the maximum `results`, whether the vendor returns page text and whether that changes the price, and whether a
+  Source of the user already provides it.
 
 The PUT body gains `prefer_native` and `services` as per-field writes, the existing pattern.
 
@@ -150,7 +155,8 @@ Hosted tools §6 holds, with these changes:
 | 200 with results | ends with a `completed` record | none |
 | 200 with no results | ends with a `completed` record with no sources | none |
 | 401, or 403 that the catalog maps to the credential | next candidate | `needs_action`, invalid key (model-hub.md `credential.static_unauthorized`) |
-| 402, or a vendor's quota code (Tavily 432/433) | next candidate | `needs_action`, balance (model-hub.md `credential.account_classified`) |
+| 402 (balance exhausted) | next candidate | `needs_action`, balance (model-hub.md `credential.account_classified`) |
+| a plan or spending limit the catalog names (Tavily 432 plan limit, 433 pay-as-you-go limit) | next candidate | `needs_action`, a new detail: limit reached, remedy "raise the limit or upgrade in the vendor's dashboard" |
 | 408, 429, 5xx, timeout, connection failure | next candidate | none |
 | other 4xx (a query the service refuses) | next candidate | none |
 | a body the mapping cannot read | next candidate | none |
@@ -173,6 +179,11 @@ Hosted tools §6 holds, with these changes:
   the catalog's list price for the request, `basis: "list"`. A vendor that bills only non-empty results (DeepSeek)
   costs zero for an empty answer. Earlier billable attempts are `failed_attempts[]` as today; a service attempt is
   billable only when it answered 200.
+- `execution.attempts[]` (new) lists every earlier attempt of the call in order, billable or not, as
+  `{source_id, error_code}`. `error_code` is one of `service_key_invalid`, `service_balance`, `service_limit`,
+  `service_unavailable`, `service_refused` and `service_unreadable`, each with en and zh copy. Model executors' failed
+  attempts use the codes the chain already writes. This is what the switch note reads ("Tavily 密钥无效，已改用
+  DeepSeek"; with two or more, "Tavily、Exa 失败，已改用 DeepSeek"); `failed_attempts[]` keeps its cost role.
 - Every attempt is metered on its Source, so the Usage tab shows search requests per service.
 
 ## 5. Catalog: first batch
@@ -180,20 +191,24 @@ Hosted tools §6 holds, with these changes:
 The catalog row is the single source for each vendor's wire shape and price. The implementation lane verifies every
 field against the vendor's current documentation and records the date and link beside the price.
 
+A vendor enters the catalog only when its terms allow what every search does: keeping the returned titles, URLs,
+excerpts and page text in the Session transcript and showing them to the user.
+
 | Vendor | Request | Auth | Results | Content | List price (2026-10) | Free check |
 | --- | --- | --- | --- | --- | --- | --- |
 | DeepSeek | `POST https://api.deepseek.com/v1/tools/search` `{query, count, need_content}` | Bearer | 1–50 | `need_content` | $0.75 / 1k successful requests; empty results and failures not billed | `GET /user/balance` |
 | Tavily | `POST https://api.tavily.com/search` | Bearer | 1–20 | `include_raw_content` | $8 / 1k basic searches | a usage endpoint, if documented |
 | Exa | `POST https://api.exa.ai/search` | `x-api-key` | 1–100 | `contents.text` | $7 / 1k | none known |
-| Brave Search | `GET https://api.search.brave.com/res/v1/web/search` | `X-Subscription-Token` | 1–20 | extra snippets | $5 / 1k | none |
-| Bocha | `POST https://api.bochaai.com/v1/web-search` | Bearer | 1–50 | summary | about ¥0.036 per request | none known |
+| Bocha | `POST https://api.bochaai.com/v1/web-search` | Bearer | 1–50 | none (its `summary` is an excerpt, mapped to `snippet`) | about ¥0.036 per request | none known |
 
 - DeepSeek facts that shape the UI (DeepSeek's Search & Fetch guide, 2026-10-19): the query is 1–128 characters and
-  supports operators (`site:`, `lang:`, `after:`, quoted phrases); account limits are 100 QPS for Search and 25 for
-  Fetch; requests made through DeepSeek's own server-side tools already hit this API and are billed from
-  2026-11-01.
+  supports operators (`site:`, `lang:`, `after:`, quoted phrases); requests made through DeepSeek's own server-side
+  tools already hit this API and are billed from 2026-11-01. Rate limits are account-level and have changed since
+  launch, so the catalog and the UI do not state them; a 429 is a transient outcome (§4.2).
 - **Second batch:** Perplexity Search, Parallel, Zhipu Web Search, Alibaba Cloud web search, and self-hosted SearXNG
   (a URL instead of a key; needs the custom-endpoint rule this phase leaves out).
+- **Needs other terms first:** Brave Search. Its API help prohibits retaining any data received through the API
+  without a separate arrangement, and the transcript keeps every result.
 - **Not supported:** the Bing Search APIs (retired 2025-08-11), Google's Custom Search JSON API (closed to new
   customers, ends 2027-01-01) and Google results-page scrapers.
 
@@ -232,8 +247,8 @@ states interactively.
 ### 6.3 Service detail
 
 Status (latest success, or the failure that put it in `needs_action` with time and HTTP status), key (masked; "更换密钥",
-or for DeepSeek "使用供应商「DeepSeek」的 Key", managed under 供应商与路由), settings (results; page content, with
-its effect on price where the vendor charges for it, and on what the model reads), this month's requests and list
+or for DeepSeek "使用供应商「DeepSeek」的 Key", managed under 供应商与路由), settings (results; page content only where
+the vendor returns page text, with its effect on price and on what the model reads), this month's requests and list
 cost with a link to Usage, and remove.
 
 ### 6.4 Sources
@@ -264,11 +279,15 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 - `source.schema.json` and `source-create.schema.json`: `protocol: "search"` and its combination rule (§3.1).
 - `hosted-tools-status.schema.json`: `prefer_native`, `services`, `executor_candidates[].kind` and settings,
   `service_vendors[]` (§3.5); the PUT body.
-- `capability-evidence.schema.json`: `mode: "service"`.
+- `capability-evidence.schema.json`, and `status.latest_ok.mode` and `status.verified[].mode` in
+  `hosted-tools-status.schema.json` with the UI's types: `mode: "service"`.
+- The Source health detail for a reached plan or spending limit, with its remedy, in `source.schema.json` and the
+  classification registry of `model-hub.md`.
 - The vendor catalog (`vibe/data/api_key_vendors.json` and its schema): search vendors and DeepSeek's search API row.
 - `api.md`: the read and PUT changes.
-- C-1 (`agent-core-contracts/message.schema.json`): `HostedSource.content` (bounded, §4.3); a `ProxyExecution`
-  whose `executor_origin` names a search service (`provider` = vendor, `model` = service id, and an `api` value for
+- C-1 (`agent-core-contracts/message.schema.json`): `HostedSource.content` (bounded, §4.3);
+  `ProxyExecution.attempts[]` and the six `service_*` codes in `HOSTED_ERROR_CODES`, with copy on every surface; an
+  `executor_origin` that names a search service (`provider` = vendor, `model` = service id, and an `api` value for
   search APIs, which the contract lane names).
 - V2 config: `model_hub.hosted_tools.web_search` as §3.2.
 
@@ -292,9 +311,10 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
    added or replaced.
 4. Automatic order is search services, then model executors; a saved order is honored; with `prefer_native` off,
    every hop declares the function.
-5. Invalid-key and balance failures put the Source in `needs_action` and skip it until cleared; transient failures
-   change no state; an empty answer ends the chain.
-6. Each call yields one canonical record; the card and the IM line name the service and say when it switched.
+5. Invalid-key, balance and limit failures put the Source in `needs_action` and skip it until cleared; transient
+   failures change no state; an empty answer ends the chain.
+6. Each call yields one canonical record; the card and the IM line name the service and, from `attempts[]`, say
+   which services failed before it.
 7. A `search` Source never appears as a model route candidate, in discovery, in a model probe or in engine config.
 8. A DeepSeek API-key Source on the official endpoint is a candidate with no extra setup; on a relay it is not.
 
@@ -306,9 +326,9 @@ Hermetic, against stub vendor servers; no live upstream and no real keys.
 | --- | --- |
 | Config | `protocol: "search"` accepted only in its combination; `prefer_native` and `services` round-trip and default; a release-before loader ignores the new `hosted_tools` fields |
 | Custody | the adapter call attaches the key, refuses redirects and non-catalog hosts, caps the body, and returns no key material; nothing outside the adapter reads the key |
-| Chain | automatic and saved order; query-length skip; each outcome row of §4.2; one deadline; metering and `failed_attempts`; DeepSeek official versus relay |
+| Chain | automatic and saved order; query-length skip; each outcome row of §4.2; one deadline; metering, `failed_attempts` and `attempts`; DeepSeek official versus relay |
 | Mapping | one recorded response per vendor maps to the canonical record with bounds; empty results; unreadable bodies |
-| Hop facts | `prefer_native` off declares the function on a native-capable hop and leaves replay alone |
+| Hop facts | `prefer_native` off declares the function on a native-capable hop, and a native result in history replays in the synthetic form |
 | UI | the card states, add dialog, service detail, Sources rows, copy in both locales |
 
 ## 12. Known by design
@@ -319,6 +339,7 @@ Hermetic, against stub vendor servers; no live upstream and no real keys.
 2. **No custom endpoints in phase 1.** Search services use the catalog endpoint only, so relays and self-hosted
    SearXNG wait for a custom-endpoint rule.
 3. **Settings are per service, not per call.** The model cannot ask for more results or for page content.
+   Vendors without page text have no content setting.
 4. **No paid test search.** A key without a free check is confirmed by its first real search.
 5. **Result quality differs between services.** The order is the user's control; the gateway does not judge results.
 6. **`web_fetch` is phase 2**, and other backends are not covered.
