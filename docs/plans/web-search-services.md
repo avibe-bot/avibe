@@ -229,8 +229,9 @@ Hosted tools §6 holds, with these changes:
   mapping, not to the C-1 read shape, so released `HostedSource` rows from native and model-executor calls still
   load unchanged. `url` is at most 2,048 characters, and a result
   with a longer or non-HTTP(S) URL is dropped. `title` is cut to 300, `snippet` to 1,000 and `page_age` to 64. A
-  record keeps at most the configured number of results. A response that leaves no valid result is
-  `service_unreadable`.
+  record keeps at most the configured number of results. An empty results array is a valid answer: a `completed`
+  record with no sources (§4.2). `service_unreadable` is a body without a results array, or a non-empty array in
+  which no result survives the bounds.
 - With `content` on, each source gains `content`, bounded to 4,000 characters per source and 20,000 per record.
   Vibey renders it in the model-facing text with the same renderer as today.
 - `execution` is a `ProxyExecution` naming the Source, `executor_billing: "metered"` and the attempt's `cost`. When
@@ -239,9 +240,13 @@ Hosted tools §6 holds, with these changes:
   $1 / 1k pages of `contents.text`), with `basis: "list"`. A vendor that bills only non-empty results (DeepSeek)
   costs zero for an empty answer. Earlier billable attempts are `failed_attempts[]` as today; a service attempt is
   billable only when it answered 200.
-- `execution.attempts[]` (new) lists every earlier candidate of the call in order, billable or not, as
-  `{source_id, label, error_code?, skipped?}`. `skipped` is `blocked`, `cooling` or `query_too_long` for a candidate
-  that sent no request. A `blocked` entry also carries `repair`: `replace_key` or `reenable`. `label` is the Source's display name when the attempt started, bounded to 64
+- `record.attempts[]` (new, on the `HostedRecord`, so it exists when nothing executed) lists every earlier
+  candidate of the call in order, billable or not, as `{source_id, label, error_code?, skipped?, needs_action?}`.
+  `skipped` is `blocked`, `cooling` or `query_too_long` for a candidate that sent no request. A `blocked` entry
+  carries `needs_action`: the Source's existing health detail key at that moment (for example
+  `models.source.needs_action.credential_revoked`, `oauth_expired` or `spend_limit_reached`). The renderer shows that
+  detail's existing remedy, so a model executor gets its own repair (re-authorize, replace the key, top up, raise the
+  limit), and a `search` Source in a balance or limit state adds "重新启用". `label` is the Source's display name when the attempt started, bounded to 64
   characters. The projection shows the Source's current name and falls back to `label` for a Source removed since.
   A failed search-service request always sets `error_code`: one of `service_key_invalid`,
   `service_balance`, `service_limit`, `service_unavailable`, `service_refused` and `service_unreadable`, each with en
@@ -250,7 +255,7 @@ Hosted tools §6 holds, with these changes:
   naming failed requests and `blocked` skips; `cooling` and `query_too_long` skips are left out of it
   ("Tavily 密钥无效，已改用 DeepSeek"; with two or more, "Tavily、Exa 失败，已改用 DeepSeek"). `failed_attempts[]`
   keeps its cost role.
-- `core/hosted_activity` projects `attempts[]`, with the Sources' current names, skips and repairs, into the
+- `core/hosted_activity` projects `attempts[]`, with the Sources' current names, skips and remedies, into the
   shared activity payload (`HostedActivity.to_payload`). Its localized line renderer writes both the switch note
   and, for `search_sources_blocked`, the per-Source repair ("Tavily 需要更换密钥，Exa 需要在 模型 › 工具 中重新启用").
   The Web card (`HostedToolRow`) and the IM line read that one projection; the fixed copy of a known code never
@@ -379,11 +384,11 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 - `api.md`: the read and PUT changes, and the "重新启用" action for a `search` Source in `needs_action` (§4.2), with
   its `api-response.schema.json` branch.
 - The turn trace's `hosted_tools`: the frozen `prefer_native` and per-candidate `results` and `content` (§3.2).
-- `core/hosted_activity`'s payload: the projected `attempts` with Source names, codes, skips and repairs, and the
+- `core/hosted_activity`'s payload: the projected `attempts` with Source names, codes, skips and remedies, and the
   executor kind (§4.3).
 - C-1 (`agent-core-contracts/message.schema.json`): the optional `HostedSource.content` (§4.3; the read shape
   gains no new limits);
-  `ProxyExecution.attempts[]` with `skipped` and `repair`, and the six `service_*` codes in `HOSTED_ERROR_CODES`, with copy on every surface; an
+  `HostedRecord.attempts[]` with `skipped` and `needs_action`, and the six `service_*` codes in `HOSTED_ERROR_CODES`, with copy on every surface; an
   `executor_origin` that names a search service (`provider` = vendor, `model` = service id, and an `api` value for
   search APIs, which the contract lane names).
 - V2 config: `model_hub.hosted_tools.web_search` as §3.2.
@@ -426,8 +431,8 @@ Hermetic, against stub vendor servers; no live upstream and no real keys.
 | Create | the search branch skips observation and discovery; free-check pass saves verified, a DeepSeek balance with `is_available: false` saves verified in the balance state, 401 saves nothing, other failures and no-check vendors save pending and the first success clears it; replacement keeps the old key on 401 |
 | Config | `protocol: "search"` accepted only in its combination; `prefer_native` and `services` round-trip and default; a release-before loader ignores the new `hosted_tools` fields |
 | Custody | the adapter call attaches the key, refuses redirects and non-catalog hosts, caps the body, and returns no key material; nothing outside the adapter reads the key |
-| Chain | automatic and saved order, and insertion before the first model executor in a saved order; service cooldown from `Retry-After` (a longer deadline is not shortened) and doubling backoff, scoped to (Source, service), with a DeepSeek model route unaffected, and not written by an attempt that started before a key replacement; the terminal reason for every mix of skips; `services.<id>.enabled: false` takes a DeepSeek Source out of the order and keeps its models; query-length skip; each outcome row of §4.2; one deadline; metering, `failed_attempts` and `attempts`; DeepSeek official versus relay; settings changed mid-turn do not apply until the next turn; re-enable with and without a free check |
-| Mapping | one recorded response per vendor maps to the canonical record with bounds; empty results; unreadable bodies; a released native `HostedSource` row longer than the new bounds still loads |
+| Chain | automatic and saved order, and insertion before the first model executor in a saved order; service cooldown from `Retry-After` (a longer deadline is not shortened) and doubling backoff, scoped to (Source, service), with a DeepSeek model route unaffected, and not written by an attempt that started before a key replacement; the terminal reason for every mix of skips, with `record.attempts[]` present when nothing executed and a blocked model executor showing its own remedy; `services.<id>.enabled: false` takes a DeepSeek Source out of the order and keeps its models; query-length skip; each outcome row of §4.2; one deadline; metering, `failed_attempts` and `attempts`; DeepSeek official versus relay; settings changed mid-turn do not apply until the next turn; re-enable with and without a free check |
+| Mapping | one recorded response per vendor maps to the canonical record with bounds; an empty results array is `completed` and ends the chain; unreadable bodies; a released native `HostedSource` row longer than the new bounds still loads |
 | Hop facts | `prefer_native` off declares the function on a native-capable hop, and a native result in history replays in the synthetic form |
 | UI | the card states, add dialog, service detail, Sources rows, copy in both locales |
 
@@ -437,7 +442,7 @@ Hermetic, against stub vendor servers; no live upstream and no real keys.
    - adding a `search` Source, because a release before this feature rejects `protocol: "search"` and cannot load
      Model Hub's Sources;
    - any search-service call, including one through an auto-enrolled DeepSeek Source, because the persisted result
-     carries C-1 values (`executor_origin` for a search API, `HostedSource.content`, `execution.attempts`) that an
+     carries C-1 values (`executor_origin` for a search API, `HostedSource.content`, `record.attempts`) that an
      older release's strict reader rejects, so that Session no longer loads there.
 
    Removing Sources does not repair a transcript. This matches the existing boundary for downgrades after an
