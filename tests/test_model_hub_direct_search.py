@@ -275,6 +275,22 @@ async def test_a_provider_parameter_error_does_not_fall_through(monkeypatch, ser
     assert attempt.moves_on is False
 
 
+async def test_a_rate_limit_is_transient_and_an_auth_error_is_forever(monkeypatch, service) -> None:
+    rate = json.dumps({"error": {"message": "slow down, retry in 401ms", "code": "rate_limit_error"}}).encode()
+    attempt, _, _, _ = await _attempt(
+        monkeypatch, service, "web_search", {"query": "q"}, rate, returncode=1,
+    )
+    assert attempt.record["error_code"] == "provider_unavailable"
+    assert attempt.moves_on is True
+
+    auth = json.dumps({"error": {"message": "invalid key", "code": "authentication_error"}}).encode()
+    attempt, _, _, _ = await _attempt(
+        monkeypatch, service, "web_search", {"query": "q"}, auth, returncode=1,
+    )
+    assert attempt.record["error_code"] == "provider_refused"
+    assert attempt.moves_on is False
+
+
 async def test_an_oversized_direct_response_is_a_failure(monkeypatch, service) -> None:
     attempt, _, _, _ = await _attempt(
         monkeypatch, service, "web_search", {"query": "q"}, b"x" * (4 * 1024 * 1024 + 1),

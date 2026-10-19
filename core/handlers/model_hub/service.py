@@ -959,6 +959,68 @@ def _hosted_url(value: object) -> str | None:
     return url
 
 
+def _vault_error_code(body: bytes) -> str:
+    """The structured error code/type a Vault response carried, never a number from its prose."""
+    text = (body or b"").decode("utf-8", "replace").strip()
+    if not text:
+        return ""
+    try:
+        payload = json.loads(text)
+    except (ValueError, TypeError):
+        return ""
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(error, dict):
+        return ""
+    for key in ("code", "type"):
+        value = error[key] if key in error else None
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()
+    return ""
+
+
+def _direct_record(call: ExecutorCall, stdout: bytes, say: Callable[..., str]) -> dict[str, Any]:
+    """Parse and shape one direct API answer off the event loop."""
+    try:
+        body = json.loads(stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return failed_record(Failure(say("modelHub.hostedTools.unreadable"), "provider_unreadable"))
+    if call.tool == "web_fetch":
+        content = _hosted_text(body.get("content") if isinstance(body, dict) else None, 20_000)
+        if content is None:
+            return failed_record(Failure(say("modelHub.hostedTools.didNotRun", tool=call.tool), "search_not_run"))
+        fetch_url = _hosted_url(call.arguments["url"])
+        if fetch_url is None:
+            return failed_record(Failure(say("modelHub.hostedTools.didNotRun", tool=call.tool), "search_not_run"))
+        return {
+            "status": "completed",
+            "sources": [{
+                "url": fetch_url,
+                "title": _hosted_text(body.get("title"), 500) or "",
+                "snippet": content,
+            }],
+        }
+    results = body.get("results") if isinstance(body, dict) else None
+    if not isinstance(results, list):
+        return failed_record(Failure(say("modelHub.hostedTools.unreadable"), "provider_unreadable"))
+    sources = []
+    for item in results[:10]:
+        if not isinstance(item, dict):
+            continue
+        url = _hosted_url(item.get("url"))
+        if url is None:
+            continue
+        source_row = {"url": url}
+        for key in ("title", "snippet"):
+            value = _hosted_text(item.get(key), 500)
+            if value is not None:
+                source_row[key] = value
+        date = _hosted_text(item.get("date"), 100)
+        if date is not None:
+            source_row["page_age"] = date
+        sources.append(source_row)
+    return {"status": "completed", "sources": sources}
+
+
 def _vault_error(stderr: bytes) -> str:
     """The reason a Vault subprocess failed: its JSON error, or its last non-empty line."""
     text = (stderr or b"").decode("utf-8", "replace").strip()
@@ -6977,7 +7039,8 @@ class ModelHubService:
                     )
 
                 stdout, stderr = await asyncio.wait_for(read_both(), timeout=timeout)
-                await process.wait()
+                remaining = max(0.1, deadline - asyncio.get_running_loop().time())
+                await asyncio.wait_for(process.wait(), timeout=remaining)
             except _DirectTooLarge:
                 await stop()
                 stdout, stderr = b"", b""
@@ -6992,13 +7055,18 @@ class ModelHubService:
             if failure_reason is None and process.returncode != 0:
                 detail = _vault_error(stdout) or _vault_error(stderr) or f"exited {process.returncode}"
                 logger.warning("DeepSeek direct search Vault call failed: %s", detail)
-                lowered = detail.lower()
-                if any(token in lowered for token in (
-                    "invalid_request_error", "invalid_parameter", " 400", "400 ", "401", "402", "403", "404", "413",
-                )):
+                code = _vault_error_code(stdout) or _vault_error_code(stderr)
+                if code in {
+                    "invalid_request_error", "invalid_parameter", "not_found_error",
+                    "authentication_error", "permission_error", "insufficient_quota",
+                    "invalid_api_key", "account_deactivated", "insufficient_balance",
+                }:
                     failure_reason = Failure(say("modelHub.hostedTools.providerRefused", detail=detail), "provider_refused")
                     failure_moves_on = False
-                elif "429" in detail or "rate limit" in lowered:
+                elif code in {
+                    "rate_limit_error", "rate_limit_exceeded", "quota_exceeded",
+                    "server_error", "overloaded_error", "api_error",
+                }:
                     failure_reason = Failure(say("modelHub.hostedTools.providerUnavailable", detail=detail), "provider_unavailable")
                 else:
                     failure_reason = Failure(say("modelHub.hostedTools.unreachable"), "provider_unreachable")
@@ -7009,45 +7077,8 @@ class ModelHubService:
                     failure_reason = Failure(say("modelHub.hostedTools.unreadable"), "provider_unreadable")
         if failure_reason is not None:
             record = failed_record(failure_reason)
-        elif call.tool == "web_fetch":
-            content = _hosted_text(body.get("content") if isinstance(body, dict) else None, 20_000)
-            if content is None:
-                record = failed_record(Failure(say("modelHub.hostedTools.didNotRun", tool=call.tool), "search_not_run"))
-            else:
-                fetch_url = _hosted_url(call.arguments["url"])
-                if fetch_url is None:
-                    record = failed_record(Failure(say("modelHub.hostedTools.didNotRun", tool=call.tool), "search_not_run"))
-                else:
-                    record = {
-                        "status": "completed",
-                        "sources": [{
-                            "url": fetch_url,
-                            "title": _hosted_text(body.get("title"), 500) or "",
-                            "snippet": content,
-                        }],
-                    }
         else:
-            results = body.get("results") if isinstance(body, dict) else None
-            if not isinstance(results, list):
-                record = failed_record(Failure(say("modelHub.hostedTools.unreadable"), "provider_unreadable"))
-            else:
-                sources = []
-                for item in results[:10]:
-                    if not isinstance(item, dict):
-                        continue
-                    url = _hosted_url(item.get("url"))
-                    if url is None:
-                        continue
-                    source_row = {"url": url}
-                    for key in ("title", "snippet"):
-                        value = _hosted_text(item.get(key), 500)
-                        if value is not None:
-                            source_row[key] = value
-                    date = _hosted_text(item.get("date"), 100)
-                    if date is not None:
-                        source_row["page_age"] = date
-                    sources.append(source_row)
-                record = {"status": "completed", "sources": sources}
+            record = await asyncio.to_thread(_direct_record, call, stdout, say)
         completed = record["status"] == "completed"
         # DeepSeek bills Search only when it returns a non-empty list; an empty result is free.
         billable = completed and (call.tool == "web_fetch" or bool(record.get("sources")))
