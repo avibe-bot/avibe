@@ -91,6 +91,7 @@ class SearchResponse:
     body: bytes | None
     error: Literal["", "timeout", "connection", "redirect", "body_too_large", "invalid_endpoint", "cancelled"] = ""
     on_sent_fired: bool = False
+    response_received_at: datetime | None = None
 
 
 @dataclass(frozen=True)

@@ -2413,6 +2413,7 @@ def test_search_response_retains_wire_facts_after_body_read_failure(
 
     assert response.http_status == 503
     assert response.headers == {"Content-Type": "application/json", "Retry-After": "2"}
+    assert response.response_received_at is not None
     assert response.error == expected_error
     assert response.on_sent_fired is True
     assert calls == ["sent", "write"]

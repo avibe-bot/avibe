@@ -2100,6 +2100,7 @@ class CLIProxyEngineAdapter:
         callback_called = False
         response_status: int | None = None
         response_headers: dict[str, str] = {}
+        response_received_at: datetime | None = None
 
         async def request_connection_ready(*_args: Any, **_kwargs: Any) -> None:
             nonlocal callback_called
@@ -2124,6 +2125,7 @@ class CLIProxyEngineAdapter:
                     allow_redirects=False,
                 ) as response:
                     response_status = response.status
+                    response_received_at = datetime.now(timezone.utc)
                     response_headers = {
                         name: value
                         for name, value in response.headers.items()
@@ -2137,6 +2139,7 @@ class CLIProxyEngineAdapter:
                             None,
                             "body_too_large",
                             on_sent_fired=callback_called,
+                            response_received_at=response_received_at,
                         )
                     assert body is not None
                     if 300 <= response_status < 400:
@@ -2146,12 +2149,14 @@ class CLIProxyEngineAdapter:
                             body,
                             "redirect",
                             on_sent_fired=callback_called,
+                            response_received_at=response_received_at,
                         )
                     return SearchResponse(
                         response_status,
                         response_headers,
                         body,
                         on_sent_fired=callback_called,
+                        response_received_at=response_received_at,
                     )
         except asyncio.CancelledError:
             return SearchResponse(
@@ -2160,6 +2165,7 @@ class CLIProxyEngineAdapter:
                 None,
                 "cancelled",
                 on_sent_fired=callback_called,
+                response_received_at=response_received_at,
             )
         except asyncio.TimeoutError:
             return SearchResponse(
@@ -2168,6 +2174,7 @@ class CLIProxyEngineAdapter:
                 None,
                 "timeout",
                 on_sent_fired=callback_called,
+                response_received_at=response_received_at,
             )
         except (aiohttp.ClientError, OSError, ValueError):
             return SearchResponse(
@@ -2176,6 +2183,7 @@ class CLIProxyEngineAdapter:
                 None,
                 "connection",
                 on_sent_fired=callback_called,
+                response_received_at=response_received_at,
             )
 
     async def check_search_credential(
