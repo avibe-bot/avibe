@@ -83,8 +83,12 @@ The user has an Anthropic API key and a DeepSeek API key, adds Tavily, and chang
     the `spend_limit_reached` state;
   - `invalid`: nothing is saved, and the existing invalid-key create error answers (for a replacement, the old key
     stays);
-  - `unknown`, or no free check: the Source is saved with `verification_pending`, presented as "已保存" like an
-    unverified API-key save, and the first successful search clears it.
+  - `unknown`: a create saves the Source with `verification_pending`, presented as "已保存" like an unverified
+    API-key save, and the first successful search clears it. A replacement treats it as a pre-commit failure under
+    `api.md`'s strict replacement rule: the old key stays, the replacement material is revoked, and the normal safe
+    error answers ("暂时无法验证新密钥，原密钥未改动，请稍后重试");
+  - no free check (Exa): create and replacement both save with `verification_pending`, since nothing could verify
+    the key before a search; the first successful search clears it.
 
   The response is the existing Source envelope.
 - **DeepSeek from the add dialog** uses the ordinary API-key create with the catalog's free check run before commit,
@@ -203,7 +207,7 @@ Hosted tools §6 holds, with these changes:
 | 200 with no results | ends with a `completed` record with no sources | none |
 | 401, or 403 that the catalog maps to the credential | next candidate | `needs_action`, invalid key (model-hub.md `credential.static_unauthorized`) |
 | 402 (balance exhausted) | next candidate | `needs_action`, balance (model-hub.md `credential.account_classified`) |
-| a plan or spending limit the catalog names (Tavily 432 plan limit, 433 pay-as-you-go limit) | next candidate | `needs_action`, the existing `models.source.needs_action.spend_limit_reached` detail; the catalog row adds a vendor remedy line naming both repairs (Tavily: "在 Tavily 后台升级套餐（432）或提高按量上限（433）"), so no new state is needed |
+| a plan or spending limit the catalog names (Tavily 432 plan limit, 433 pay-as-you-go limit) | next candidate | `needs_action`, the existing `models.source.needs_action.spend_limit_reached` detail; the catalog row adds a vendor remedy line naming both repairs (Tavily: "在 Tavily 后台升级套餐或提高该密钥的用量上限（432），或提高按量上限（433）", since Tavily's 432 is either the key's limit or the plan's), so no new state is needed |
 | 408, 429, 5xx, timeout, connection failure | next candidate | none; a service cooldown (below) |
 | 3xx (the redirect is refused, §3.3) | next candidate, `service_unavailable` | none |
 | a 4xx the catalog row names as query-specific (for example a malformed query) | next candidate, `service_refused` | none |
@@ -246,10 +250,10 @@ Hosted tools §6 holds, with these changes:
   a search API (DeepSeek) recovers through the existing model Source paths.
 - **Every state an attempt writes is fenced.** Source health uses the Source-global attempt-start settlement
   generation (`model-hub.md`). The service cooldown uses its own generation per (Source, service id), which only
-  search attempts, key replacement, Source removal, "重新启用" and "立即重试" (`clear_service_cooldown`) advance; a
-  model call on the same Source does not.
-  A response whose generation is no longer current writes nothing. Replacing the key or removing the Source also
-  clears its cooldowns and retires any armed or reserved re-enable trial, so a trial authorized for the old key is
+  search attempts, key replacement, a base-URL retarget (a DeepSeek relay made official or the reverse), Source
+  removal, "重新启用" and "立即重试" (`clear_service_cooldown`) advance; a model call on the same Source does not.
+  A response whose generation is no longer current writes nothing. Replacing the key, retargeting the base URL or
+  removing the Source also clears its cooldowns and retires any armed or reserved re-enable trial, so a trial authorized for the old key is
   never spent on the new one.
 - **"重新启用" advances the Source's settlement generation** without interrupting anything, as an attempt start
   does. A search that was already in flight when the user pressed it cannot put the Source back in `needs_action`;
@@ -575,7 +579,7 @@ Hermetic, against stub vendor servers; no live upstream and no real keys.
 
 | Layer | Cases |
 | --- | --- |
-| Create | the search branch skips observation and discovery; free-check pass saves verified, a DeepSeek balance with `is_available: false` saves verified in the balance state, 401 saves nothing, other failures and no-check vendors save pending and the first success clears it; replacement keeps the old key on 401 |
+| Create | the search branch skips observation and discovery; free-check pass saves verified, a DeepSeek balance with `is_available: false` saves verified in the balance state, 401 saves nothing, other failures and no-check vendors save pending and the first success clears it; replacement keeps the old key on 401 and on `unknown` |
 | Config | `protocol: "search"` accepted only in its combination; `prefer_native` and `services` round-trip and default; a release-before loader ignores the new `hosted_tools` fields |
 | Custody | the adapter call attaches the key, refuses redirects and non-catalog hosts, caps the body, and returns no key material; nothing outside the adapter reads the key |
 | Chain | automatic and saved order, and insertion before the first model executor in a saved order; service cooldown from `Retry-After` (a longer deadline is not shortened) and doubling backoff, scoped to (Source, service), with a DeepSeek model route unaffected, and not written by an attempt that started before a key replacement; the terminal reason for every mix of skips (a disabled Source decides it only when every candidate is disabled), with `record.attempts[]` present when nothing executed and a blocked model executor showing its own remedy; `services.<id>.enabled: false` takes a DeepSeek Source out of the order and keeps its models; query-length skip; each outcome row of §4.2; one deadline; metering, `failed_attempts` and `attempts`; DeepSeek official versus relay; settings changed mid-turn do not apply until the next turn; re-enable with and without a free check, a second press joining the in-flight check, only one request admitted while a re-enable trial is pending, and a restart before the trial leaves the Source blocked; a long cooldown is shown with `cooldown_until` and cleared by "立即重试"; a reported cost above the ceiling falls back to the list price; a Tavily `key.limit: null` is unlimited |
