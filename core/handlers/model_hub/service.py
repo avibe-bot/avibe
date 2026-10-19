@@ -6825,6 +6825,8 @@ class ModelHubService:
 
         source = candidate.source
         base = (source.base_url or "https://api.deepseek.com").rstrip("/")
+        if base.endswith("/v1"):
+            base = base[:-3]
         url = base + candidate.path
         if call.tool == "web_fetch":
             payload = {"url": call.arguments["url"]}
@@ -6918,16 +6920,17 @@ class ModelHubService:
                         source_row["page_age"] = item["date"]
                     sources.append(source_row)
                 record = {"status": "completed", "sources": sources}
+        completed = record["status"] == "completed"
         cost = None
-        if candidate.price is not None:
+        if completed and candidate.price is not None:
             cost = HostedCost(basis="list", usd=round(candidate.price.usd_per_1k / 1000, 6))
         return _ExecutorAttempt(
             source=source,
             model_id="deepseek",
             record=record,
             cost=cost,
-            billable=True,
-            moves_on=False,
+            billable=completed,
+            moves_on=not completed,
             direct=True,
             label=candidate.label,
         )

@@ -115,3 +115,22 @@ async def test_a_vault_failure_is_the_record_error(monkeypatch, service) -> None
     )
     assert attempt.record["status"] == "failed"
     assert "no secret" in attempt.record["error"]
+    assert attempt.cost is None
+    assert attempt.billable is False
+    assert attempt.moves_on is True
+
+
+async def test_a_base_url_ending_in_v1_does_not_double_the_prefix(monkeypatch, service) -> None:
+    from dataclasses import replace
+
+    global SOURCE
+    original = SOURCE
+    SOURCE = replace(SOURCE, base_url="https://api.deepseek.com/v1")
+    try:
+        _, calls = await _attempt(
+            monkeypatch, service, "web_search", {"query": "q"}, json.dumps({"results": []}).encode(),
+        )
+    finally:
+        SOURCE = original
+    assert "https://api.deepseek.com/v1/tools/search" in calls[0]
+    assert "/v1/v1/" not in " ".join(calls[0])
