@@ -85,9 +85,10 @@ The user has an Anthropic API key and a DeepSeek API key, adds Tavily, and chang
     unverified API-key save, and the first successful search clears it.
 
   The response is the existing Source envelope.
-- **DeepSeek from the add dialog** goes through the ordinary API-key create, which already rejects an invalid key.
-  After the save, the catalog's free check runs once; a `balance` outcome sets the Source's balance state, which its
-  models share.
+- **DeepSeek from the add dialog** uses the ordinary API-key create with the catalog's free check run before commit,
+  inside the same create transaction: `invalid` saves nothing and answers the existing invalid-key create error;
+  `balance` saves the Source in its balance state, which its models share; `pass` saves it verified; `unknown`
+  falls back to the ordinary unverified save.
 
 ### 3.2 Settings
 
@@ -165,10 +166,13 @@ Hosted tools §6 holds, with these changes:
   in Vibey's Source order, then model executors as today. A saved `executor_order` is used as saved; candidates it
   does not name follow in automatic order. Adding a search-capable Source while an order is saved inserts it
   immediately before the saved order's first model executor, or at the end when the order names none. It then runs
-  before every model executor, and the user's other entries keep their order.
-- **Skips.** A candidate can be skipped without a request, for one of three reasons: `blocked` (its Source is in
-  `needs_action` or in a persistent `error`, the states admission already suppresses), `cooling` (a service cooldown, §4.2) or `query_too_long` (the query exceeds what the service
-  accepts, DeepSeek 128 characters). A skip costs nothing, writes no state, and is recorded in `attempts[]` (§4.3).
+  before every model executor, and the user's other entries keep their order. The same insertion applies once, in
+  the version event's config migration, to an existing Source that becomes search-capable through the new catalog
+  (an official DeepSeek Source in a saved order).
+- **Skips.** A candidate can be skipped without a request, for one of four reasons: `blocked` (its Source is in
+  `needs_action` or in a persistent `error`, the states admission already suppresses), `cooling` (a service cooldown, §4.2), `query_too_long` (the query exceeds what the service
+  accepts, DeepSeek 128 characters) or `unavailable` (the Source was removed, re-identified or refused by final
+  admission after the turn froze its candidates, hosted tools §6). A skip costs nothing, writes no state, and is recorded in `attempts[]` (§4.3).
 - **One attempt** sends the catalog's request for the canonical query, the turn's frozen `results` and `content`, and
   waits at most 30 s, inside the chain's single 180 s deadline.
 
@@ -216,7 +220,8 @@ Hosted tools §6 holds, with these changes:
      once and reach that candidate;
   2. a `blocked` skip: `search_sources_blocked`; the user repairs a Source;
   3. a sent request's failure: the last one, as today;
-  4. a `cooling` skip: `service_unavailable`; wait.
+  4. a `cooling` or `unavailable` skip: `service_unavailable`; wait, or the Source changed and the next turn uses
+     the new configuration.
 
   Every case keeps the per-candidate list in `attempts[]`, so the surfaces can name each Source and its repair. None
   suggests adding a Source while candidates exist.
@@ -236,15 +241,15 @@ Hosted tools §6 holds, with these changes:
 - With `content` on, each source gains `content`, bounded to 4,000 characters per source and 20,000 per record.
   Vibey renders it in the model-facing text with the same renderer as today.
 - `execution` is a `ProxyExecution` naming the Source, `executor_billing: "metered"` and the attempt's `cost`. When
-  the response reports its own cost (Exa's `costDollars`) as a finite non-negative number, the cost is that figure
-  with `basis: "reported"`; any other value is ignored.
+  the response reports its own cost as a finite non-negative number at the catalog's cost path (Exa:
+  `costDollars.total`), the cost is that figure with `basis: "reported"`; any other value is ignored.
   Otherwise it is the catalog's list price for the request plus any per-returned-page part for content (Exa:
   $1 / 1k pages of `contents.text`), with `basis: "list"`. A vendor that bills only non-empty results (DeepSeek)
   costs zero for an empty answer. Earlier billable attempts are `failed_attempts[]` as today; a service attempt is
   billable only when it answered 200.
 - `record.attempts[]` (new, on the `HostedRecord`, so it exists when nothing executed) lists every earlier
   candidate of the call in order, billable or not, as `{source_id, label, error_code?, skipped?, needs_action?}`.
-  `skipped` is `blocked`, `cooling` or `query_too_long` for a candidate that sent no request. A `blocked` entry
+  `skipped` is `blocked`, `cooling`, `query_too_long` or `unavailable` for a candidate that sent no request. A `blocked` entry
   carries `needs_action`: the Source's existing health detail key at that moment, a `needs_action` or `error` detail
   (for example `models.source.needs_action.credential_revoked`, `oauth_expired`, `spend_limit_reached` or
   `models.source.error.unclassified`). The renderer shows that detail's existing remedy, so a model executor, or a
@@ -255,7 +260,7 @@ Hosted tools §6 holds, with these changes:
   `service_balance`, `service_limit`, `service_unavailable`, `service_refused` and `service_unreadable`, each with en
   and zh copy. A model executor sets it only when its failure already carries a code (`FAILURE_CODES`); a provider's
   free-text failure leaves it absent, and the note then says "失败" for that Source. The switch note reads this list,
-  naming failed requests and `blocked` skips; `cooling` and `query_too_long` skips are left out of it
+  naming failed requests and `blocked` skips; the other skips are left out of it
   ("Tavily 密钥无效，已改用 DeepSeek"; with two or more, "Tavily、Exa 失败，已改用 DeepSeek"). `failed_attempts[]`
   keeps its cost role.
 - `core/hosted_activity` projects `attempts[]`, with the Sources' current names, skips and remedies, into the
