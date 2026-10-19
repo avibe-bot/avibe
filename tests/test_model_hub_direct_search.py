@@ -291,6 +291,55 @@ async def test_a_rate_limit_is_transient_and_an_auth_error_is_forever(monkeypatc
     assert attempt.moves_on is False
 
 
+async def test_cancellation_during_parse_still_meters(monkeypatch, service) -> None:
+    import threading
+
+    started = threading.Event()
+
+    def slow_record(*_args):
+        started.set()
+        time.sleep(0.2)
+        return {"status": "completed", "sources": [{"url": "https://e"}]}
+
+    monkeypatch.setattr(service_module, "_direct_record", slow_record)
+    monkeypatch.setattr(service_module.asyncio, "create_subprocess_exec", lambda *a, **k: _async_value(_Process()))
+    service.record_hosted_success = _noop
+    service.now = lambda: datetime.datetime.now(datetime.timezone.utc)
+
+    class _UsageWriter:
+        def __init__(self):
+            self.calls = []
+
+        def record(self, **kwargs):
+            self.calls.append(kwargs)
+            return object()
+
+        async def wait_recorded(self, _future):
+            return None
+
+    service.usage_writer = _UsageWriter()
+    candidate = direct_search_candidate(SOURCE, "web_search")
+    task = asyncio.create_task(service._direct_search_attempt(
+        ExecutorCall("web_search", {"query": "q"}), candidate,
+        deadline=time.monotonic() + 10, say=lambda key, **params: key,
+    ))
+    while not started.is_set():
+        await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0.5)
+    assert service.usage_writer.calls
+
+
+async def _noop(*_args, **_kwargs):
+    return None
+
+
+async def _async_value(value):
+    return value
+
+
 async def test_an_oversized_direct_response_is_a_failure(monkeypatch, service) -> None:
     attempt, _, _, _ = await _attempt(
         monkeypatch, service, "web_search", {"query": "q"}, b"x" * (4 * 1024 * 1024 + 1),
