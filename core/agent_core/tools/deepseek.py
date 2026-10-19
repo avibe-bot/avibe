@@ -339,7 +339,8 @@ def _search_text(results: Sequence[Mapping[str, Any]]) -> str:
     if not results:
         return "No results found."
     blocks: list[str] = []
-    used = 0
+    header = f"Found {len(results)} result(s):"
+    used = len(header)
     omitted = 0
     for index, item in enumerate(results, 1):
         lines = [
