@@ -2450,3 +2450,70 @@ describe('PetPage IME composition', () => {
     await waitFor(() => expect(screen.queryByLabelText('pet.inputPlaceholder')).toBeNull());
   });
 });
+
+describe('Vibey bubble visibility (spec §4.2)', () => {
+  const bubbleOpen = () => document.querySelector('.pet-mini-reply-bubble')?.closest('.pet-mini-slot')?.classList.contains('is-open') ?? false;
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('starts hidden for an old, finished exchange, quick replies and unread included', async () => {
+    tails.S = [
+      message('u', 'S', { author: 'user', type: 'user', text: 'hello' }),
+      message('r', 'S', { text: 'Done already', read_at: null, content: { quick_replies: ['Yes', 'No'] } }),
+    ];
+    mainSession('S');
+    render(<PetPage />);
+    await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('Done already'));
+    expect(bubbleOpen()).toBe(false);
+  });
+
+  it('stays shown while a failure needs the user', async () => {
+    tails.S = [
+      message('u', 'S', { author: 'user', type: 'user', text: 'hello' }),
+      message('n', 'S', {
+        type: 'notify',
+        text: 'No model source yet.',
+        metadata: { event: 'backend_failure', failure_id: 'f', turn_id: 't', failure_next_step: 'models' },
+      }),
+    ];
+    mainSession('S');
+    render(<PetPage />);
+    expect(await screen.findByText('pet.failedPrefix No model source yet.')).toBeTruthy();
+    expect(bubbleOpen()).toBe(true);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    act(() => { vi.advanceTimersByTime(120_000); });
+    expect(bubbleOpen()).toBe(true);
+  });
+
+  it('stays shown while a send may have been admitted', async () => {
+    tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('q', 'S')];
+    api.sendSessionMessage.mockRejectedValueOnce(new ApiError('dispatch pending', 504, null));
+    mainSession('S');
+    render(<PetPage />);
+    summon('listen');
+    const input = await screen.findByLabelText('pet.inputPlaceholder') as HTMLTextAreaElement;
+    await waitFor(() => expect(api.getSessionResult).toHaveBeenCalledWith('S'));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+    await userEvent.type(input, 'deploy{Enter}');
+    expect(await screen.findByText('newSession.sendUncertain')).toBeTruthy();
+    expect(bubbleOpen()).toBe(true);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    act(() => { vi.advanceTimersByTime(120_000); });
+    expect(bubbleOpen()).toBe(true);
+  });
+
+  it('shows a reply that arrives after load, then folds it away after 30s', async () => {
+    tails.S = [message('u', 'S', { author: 'user', type: 'user', text: 'hello' }), message('r1', 'S', { text: 'Old reply' })];
+    mainSession('S');
+    render(<PetPage />);
+    await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('Old reply'));
+    expect(bubbleOpen()).toBe(false);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    await emit((h) => h.onMessageNew?.(message('r2', 'S', { text: 'New reply' })));
+    expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('New reply');
+    expect(bubbleOpen()).toBe(true);
+    act(() => { vi.advanceTimersByTime(29_000); });
+    expect(bubbleOpen()).toBe(true);
+    act(() => { vi.advanceTimersByTime(1_000); });
+    expect(bubbleOpen()).toBe(false);
+  });
+});

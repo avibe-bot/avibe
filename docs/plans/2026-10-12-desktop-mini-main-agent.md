@@ -168,6 +168,21 @@ slot above the avatar: thinking, delegated-to (only when provenance is known),
 then the latest reply. The bubble names Vibey in its existing localized spelling.
 It remains available with either the collapsed or expanded stack.
 
+**When it shows.** The bubble is shown while Vibey's turn is running or a send
+is pending; while Vibey needs the user (a pending Vault handoff, a failure
+notice, an uncertain-send notice, or a queued notice); and while the history is
+open. Composing and dictating take the slot as before (§5.2). When none of
+these holds any more, or a new reply arrives, the bubble shows the reply
+summary and lingers for **30 seconds of on-screen time**: the time counts only
+while the pet document is visible and the pointer is not over the bubble and
+keyboard focus is not in it. Then it folds away with the speech slot's
+transition (instant under reduced motion) and takes no space and no clicks;
+only the cards, Vibey and the dock remain. Unread replies and quick replies do
+not hold it: Vibey's unread badge carries "something new", and the quick
+replies stay in the history. On first load an old, finished exchange starts
+hidden. A new reply, a new running turn or a new needs-you state brings it back
+at once. The dock's history button (§5.1) opens it with the history.
+
 Click the bubble to expand recent turns from the loaded tail. Preserve all
 previous main detail behavior:
 
@@ -282,8 +297,14 @@ Known data limitations for P1:
     dictation ends.
 - **Dock:** a pill under Vibey's feet that overlaps the image by 12px.
   - Background `#2a2a2e`, padding 4px, border 1px `white / 8%`, no shadow.
-  - Two 32px buttons with a 4px gap and a 1px × 16px `white / 10%` hairline
-    between them:
+  - Three 32px buttons with a 4px gap and a 1px × 16px `white / 10%` hairline
+    between each pair:
+    - **history** (clock icon), leftmost, opens Vibey's bubble with its history
+      (scrolled to the bottom) when it is hidden or showing the summary, and
+      closes the history when it is open, after which the summary lingers
+      (§4.2). Its accessible name and pet tooltip are "Recent turns", and
+      `aria-expanded` reflects the open history; while open it uses the same
+      background as the button hover state;
     - **mic** starts or stops dictation; while dictating, it uses the same
       background as the button hover state with a stop square icon;
     - **keyboard** opens or closes the input bubble; while the bubble is open,
@@ -299,7 +320,7 @@ Known data limitations for P1:
     cursor poller (§9.2) sends `avibe:pet-hover { hover }` when the cursor
     enters or leaves them, and the page shows the dock while it is set. CSS
     `:hover` still applies where the webview does see hover.
-  - It stays visible while dictating or typing, and is always visible on
+  - It stays visible while dictating, typing or the history is open, and is always visible on
     devices without hover (`@media (hover: none)`).
 
 ### 5.2 Speech slot

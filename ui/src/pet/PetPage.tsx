@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, useLayoutEffect, type CSSProperties, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
-import { ChevronUp, KeyRound, X } from 'lucide-react';
+import { ChevronUp, History, KeyRound, X } from 'lucide-react';
 
 import { ApiError, useApi, type InboxSession, type RunningAgent, type VaultRequest, type WorkbenchMessage } from '@/context/ApiContext';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/button';
 import { Markdown } from '@/components/ui/markdown';
 import { QuickReplies } from '@/components/workbench/QuickReplies';
 import { isComposingKey } from '@/lib/imeComposition';
-import { usePageActive } from '@/lib/pageActivity';
+import { useDocumentVisible, usePageActive } from '@/lib/pageActivity';
 import { usePendingVaultRequests } from '@/lib/usePendingVaultRequests';
 import { useVaultRequestRefresh } from '@/lib/useVaultRequestRefresh';
 import { vaultRequestType } from '@/lib/vaultRequestPlacement';
@@ -20,6 +20,8 @@ import { VoiceTranscriptionError } from '@/lib/voiceTranscription';
 
 import { PetAvatar, type PetPose } from './PetAvatar';
 import { PetOpenButton } from './PetOpenButton';
+import { usePetTooltip } from './PetTooltip';
+import { useLinger } from './useLinger';
 import { onPetHover, petBridge, sessionLink, vaultRequestLink } from './petBridge';
 import { petPanel, usePetPanel } from './petPanel';
 import { petComposer, usePetComposer } from './petComposer';
@@ -642,11 +644,41 @@ const PetSurface: React.FC = () => {
 
   const queued = (data.turn?.pending_input_count ?? 0) > 0;
   const resolvingMain = data.canChat === null;
-  const showReplyBubble = Boolean(
+  const historyOpen = detailOpen && expanded;
+  // What the bubble would draw: any exchange, or a state worth a word.
+  const hasBubbleContent = Boolean(
     binding && !resolvingMain
-    && (data.running || optimisticTitle || exchange.user || exchange.results.length > 0 || failure || uncertain
+    && (historyOpen || data.running || optimisticTitle || exchange.user || exchange.results.length > 0 || failure || uncertain
       || queued || vaultRequests.length > 0 || quickReplies),
   );
+  // Whether it is drawn (spec §4.2): while Vibey is working or needs the user,
+  // or the history is open; then for a short on-screen linger, so a finished,
+  // seen exchange does not hold desktop space. Unread replies and quick replies
+  // do not hold it: Vibey's badge and the history carry those.
+  const needsYou = Boolean((!data.running && failure) || uncertain || queued || vaultRequests.length > 0);
+  const bubbleHeld = Boolean(data.running || optimisticTitle || needsYou || historyOpen);
+  const [lingerKey, setLingerKey] = useState(0);
+  const lastReplyId = exchange.results.at(-1)?.id ?? null;
+  const replySeen = useRef<{ epoch: PetSurfaceEpoch; id: string | null } | null>(null);
+  useEffect(() => {
+    // The first tail read is the baseline, so an old exchange starts hidden;
+    // a reply after it is new and brings the bubble back.
+    if (!data.tailLoaded) return;
+    const seen = replySeen.current;
+    replySeen.current = { epoch, id: lastReplyId };
+    if (seen?.epoch === epoch && seen.id !== lastReplyId && lastReplyId) setLingerKey((key) => key + 1);
+  }, [data.tailLoaded, lastReplyId, epoch]);
+  const heldBefore = useRef(bubbleHeld);
+  useEffect(() => {
+    // Whatever held it open has ended: the bubble stays a while, then goes.
+    if (heldBefore.current && !bubbleHeld) setLingerKey((key) => key + 1);
+    heldBefore.current = bubbleHeld;
+  }, [bubbleHeld]);
+  const documentVisible = useDocumentVisible();
+  const [bubbleEngaged, setBubbleEngaged] = useState(false);
+  const lingering = useLinger(lingerKey, !documentVisible || bubbleEngaged);
+  const showReplyBubble = hasBubbleContent && (bubbleHeld || lingering);
+  const toggleHistory = () => { setDetailOpen(!detailOpen); void setPanel(!detailOpen); };
 
   const avatar = (
     <div className={clsx('pet-mini-avatar-wrap', voice.listening && 'is-listening', hovered && 'is-hovered')} data-pet-hover>
@@ -709,6 +741,16 @@ const PetSurface: React.FC = () => {
         <PetAvatar pose={voice.listening ? 'listening' : pose} badge={unreadCount + cardUnread} />
       </button>
       <MiniDock
+        historyEnabled={Boolean(binding) && !resolvingMain}
+        historyOpen={historyOpen}
+        onHistory={() => {
+          if (!historyOpen) {
+            // The history takes the speech slot, as the input does for typing.
+            voice.stop(true);
+            if (composing) closeComposer();
+          }
+          toggleHistory();
+        }}
         enabled={canChat && Boolean(binding)}
         listening={voice.listening}
         typing={composing}
@@ -779,10 +821,12 @@ const PetSurface: React.FC = () => {
             </div>
           </form>
           </>
-          ) : showReplyBubble && binding ? (
+          ) : hasBubbleContent && binding ? (
+            // Still drawn while the slot closes, so it fades out rather than vanishing.
+            <BubbleEngagement onEngaged={setBubbleEngaged}>
             <MainReplyBubble
-              open={detailOpen && expanded}
-              onToggle={() => { setDetailOpen(!detailOpen); void setPanel(!detailOpen); }}
+              open={historyOpen}
+              onToggle={toggleHistory}
               epoch={epoch}
               voiceNeedsCloud={voice.cloudRequired}
               canChat={canChat}
@@ -800,6 +844,7 @@ const PetSurface: React.FC = () => {
               uncertain={uncertain}
               onInspect={() => { void petBridge.open(sessionLink(binding)).then(() => { if (epoch.isCurrent()) setUncertain(binding, false); }).catch(() => undefined); }}
             />
+            </BubbleEngagement>
           ) : resolvingMain || !binding ? (
             <div className="pet-mini-reply-bubble pet-mini-detail-inner" data-pet-hit role="status">
               <p className="pet-mini-detail-muted">{t(data.canChat === null ? 'common.loading' : 'pet.vibeyUnavailable')}</p>
@@ -1007,8 +1052,46 @@ const Marquee: React.FC<{ text: string; listeningLabel: string }> = ({ text, lis
   );
 };
 
-const MiniDock: React.FC<{ enabled: boolean; listening: boolean; typing: boolean; showMic: boolean; onMic: () => void; onKeyboard: () => void; t: (key: string) => string }> = ({ enabled, listening, typing, showMic, onMic, onKeyboard, t }) => (
-  <div className={clsx('pet-mini-dock', (listening || typing) && 'is-active')} data-pet-hit>
+/**
+ * Reports whether the pointer is over the reply bubble or keyboard focus is in
+ * it, which holds the bubble and pauses its linger. Pointer focus from a click
+ * does not count: it would hold the bubble until something else took focus.
+ */
+const BubbleEngagement: React.FC<{ onEngaged: (engaged: boolean) => void; children: ReactNode }> = ({ onEngaged, children }) => {
+  const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const engaged = hovered || focused;
+  useEffect(() => { onEngaged(engaged); }, [engaged, onEngaged]);
+  useEffect(() => () => onEngaged(false), [onEngaged]);
+  return (
+    <div
+      onPointerEnter={() => setHovered(true)}
+      onPointerLeave={() => setHovered(false)}
+      onFocus={(event) => setFocused((event.target as Element).matches(':focus-visible'))}
+      onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocused(false); }}
+    >
+      {children}
+    </div>
+  );
+};
+
+/** Dock button for Vibey's recent turns: opens the bubble with its history, or closes it. */
+const DockHistoryButton: React.FC<{ enabled: boolean; open: boolean; onToggle: () => void; label: string }> = ({ enabled, open, onToggle, label }) => {
+  const { ref, triggerProps, tooltip } = usePetTooltip(label, 'start');
+  return (
+    <>
+      <button ref={ref} type="button" className={clsx(open && 'is-open')} disabled={!enabled} onClick={onToggle} title="" aria-label={label} aria-expanded={open} {...triggerProps}>
+        <History className="size-4" strokeWidth={1.5} aria-hidden />
+      </button>
+      {tooltip}
+    </>
+  );
+};
+
+const MiniDock: React.FC<{ historyEnabled: boolean; historyOpen: boolean; onHistory: () => void; enabled: boolean; listening: boolean; typing: boolean; showMic: boolean; onMic: () => void; onKeyboard: () => void; t: (key: string) => string }> = ({ historyEnabled, historyOpen, onHistory, enabled, listening, typing, showMic, onMic, onKeyboard, t }) => (
+  <div className={clsx('pet-mini-dock', (listening || typing || historyOpen) && 'is-active')} data-pet-hit>
+    <DockHistoryButton enabled={historyEnabled} open={historyOpen} onToggle={onHistory} label={t('pet.recentTurns')} />
+    <span className="pet-mini-dock-divider" aria-hidden />
     {showMic && <button type="button" className={clsx(listening && 'is-listening')} onClick={onMic} aria-pressed={listening} aria-label={listening ? t('pet.voice.stop') : t('pet.voice.open')}>{listening ? <StopIcon /> : <MicIcon />}</button>}
     {showMic && <span className="pet-mini-dock-divider" aria-hidden />}
     <button type="button" className={clsx(typing && 'is-typing')} disabled={!enabled} onClick={onKeyboard} aria-pressed={typing} aria-label={typing ? t('pet.keyboard.close') : t('pet.keyboard.open')}><KeyboardIcon /></button>

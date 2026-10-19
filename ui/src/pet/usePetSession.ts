@@ -39,6 +39,7 @@ export type PetSessionData = {
   /** Rows before `messages` may exist: the tail was trimmed, or no tail read
    *  has landed yet, so live rows alone say nothing about what came before. */
   hasOlder: boolean;
+  tailLoaded: boolean;
   turn: SessionRuntimeState | null;
   /** Running per the server, or a local send inside the registration grace. */
   running: boolean;
@@ -298,6 +299,8 @@ export function usePetSession(sessionId: string | null): PetSessionData {
     canChat,
     messages: tail.messages,
     hasOlder: tail.hasOlder || !tail.loaded,
+    /** The bound session's tail has been read at least once. */
+    tailLoaded: tail.loaded,
     turn,
     running: working,
     noteSent,

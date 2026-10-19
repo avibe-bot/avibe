@@ -81,6 +81,12 @@ const messages = hasMain ? [...earlier, {
   metadata: {}, content: historyActions ? { quick_replies: ['继续', '稍后'] } : {}, read_at: historyLong && params.get('unread') !== '0' ? null : '2026-10-12T00:00:01Z',
   created_at: '2026-10-12T00:00:01Z', updated_at: '2026-10-12T00:00:01Z',
 }] : [];
+// By default the latest reply has just arrived: the first tail read predates
+// it and it lands live, which is when Vibey's bubble shows (and lingers).
+// `idle=1` loads it with the tail instead, as an old, finished exchange, which
+// starts with the bubble hidden.
+const freshReply = params.get('idle') !== '1' ? messages.pop() : undefined;
+let freshReplyPending = Boolean(freshReply);
 const agents = Array.from({ length: Number(params.get('activities') ?? layers + 1) }, (_, i) => ({
   backend: i === 1 ? 'claude' : 'codex', state: personal && i === 2 ? 'idle' : 'active',
   session_id: `ses_fixture_${i}`, base_session_id: `native_${i}`, composite_key: null,
@@ -135,9 +141,10 @@ window.fetch = async (input, init) => {
     '/api/config': { mode: 'self_host', setup_state: { needs_setup: false } },
     '/api/session': { remote: false, instance_kind: 'personal', capabilities: OWNER_INSTANCE_CAPABILITIES },
     '/api/sessions/ses_main': session,
-    '/api/sessions/ses_main/messages': { messages, next_after_id: null, next_before_id: null },
+    '/api/sessions/ses_main/messages': { messages: [...messages], next_after_id: null, next_before_id: null },
     '/api/sessions/ses_main/turn-state': {
-      foreground: 'idle', in_flight: false, native_turn_started: false, pending_input_count: 0,
+      // `running=1`: Vibey's own turn is in progress.
+      foreground: params.get('running') === '1' ? 'running' : 'idle', in_flight: params.get('running') === '1', native_turn_started: false, pending_input_count: 0,
       background_activities: [], pending_activity_output_count: 0, connection: 'connected',
     },
     '/api/vault/requests': { ok: true, requests: requests.filter((request) => !url.searchParams.get('session') || request.session.id === url.searchParams.get('session')) },
@@ -147,6 +154,16 @@ window.fetch = async (input, init) => {
     '/api/inbox': { ok: true, sessions: [], unread_by_session: unread, total_unread: Object.values(unread).reduce((a, b) => a + b, 0), next_before_id: null },
   };
   if (!(path in payloads)) throw new Error(`Unexpected pet fixture request: ${path}`);
+  if (path === '/api/sessions/ses_main/messages' && freshReplyPending && freshReply) {
+    // Served without it once; from now on the tail includes it, and it lands live.
+    freshReplyPending = false;
+    messages.push(freshReply);
+    window.setTimeout(() => {
+      for (const stream of streams) {
+        stream.dispatchEvent(new MessageEvent('message.new', { data: JSON.stringify({ type: 'message.new', data: freshReply }) }));
+      }
+    }, 150);
+  }
   return json(payloads[path]);
 };
 // Fixture-owned real EventTarget: exercise the provider's reconnect path.
