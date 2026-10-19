@@ -28,7 +28,7 @@ Status: ready for implementation, v2 (2026-10-12). Supersedes v1 of this file.
    stack**. The front card is the **main agent card**: the user's last message
    to the main agent, and below it what the agent is doing ("Thinking").
    Thin layers under it show that more cards exist.
-2. The user clicks Vibey or the stack. The stack **expands upward** into a
+2. The user clicks the stack. The stack **expands upward** into a
    fixed-height, scrollable list. Under the main agent card are the main
    agent's **sub-task cards**: delegated runs, watches and scheduled tasks.
    Vibey does not move.
@@ -337,8 +337,8 @@ Known data limitations for P1:
   progress, history, a notice, quick replies or a pending authorization.
   Only the highest-priority content is interactive or eligible for mark-read.
 - **Mutually exclusive expansion.** Opening "Recent turns" collapses the cards
-  into their layered stack. Opening the card stack or clicking Vibey expands
-  the cards and closes history. Closing history returns to the collapsed mini.
+  into their layered stack. Opening the card stack expands the cards and closes
+  history. Closing history returns to the collapsed mini.
   Both transitions reuse the v2 height/content motion (§7.1, §7.4); reduced
   motion switches directly. There is no separate 48–120px history cap.
 - **No margin of its own.** The last card's row spacing plus the panel's 6px
