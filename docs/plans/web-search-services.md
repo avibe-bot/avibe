@@ -292,7 +292,9 @@ Hosted tools §6 holds, with these changes:
   bounds, so it is recorded at the list price. Only a 200 whose `results` array is missing or unreadable leaves the
   charge unknown: the attempt records no cost (unpriced), and the ledger row adds nothing to `list_usd` but sets
   `lower_bound: true`. A vendor that bills only non-empty results (DeepSeek)
-  costs zero for an empty answer. Earlier billable attempts are `failed_attempts[]` as today; a service attempt is
+  costs zero for an empty answer. Earlier billable attempts are `failed_attempts[]` as today, and so is an earlier attempt that may have been
+  billed (a read timeout after sending): it is listed with no `cost`, which already makes the chain total a lower
+  bound ("至少"). A service attempt is
   billable only when it answered 200. Every service attempt the catalog does not bill records an explicit
   `cost: {usd: 0, basis: "list"}`, so the card shows $0 rather than an unknown cost: a non-200 response, DeepSeek's
   empty answer, and a failure before the request was sent (connect failure). A read timeout or a connection lost
@@ -369,7 +371,7 @@ includes, so the recorded list price stays exact.
 | --- | --- | --- | --- | --- | --- | --- |
 | DeepSeek | `POST https://api.deepseek.com/v1/tools/search` `{query, count, need_content}` | Bearer | 1–50 | `need_content` | $0.75 / 1k successful requests; empty results and failures not billed | `GET /user/balance`: 200 with `is_available: true` is `pass`, with `false` is `balance`; 401 is `invalid` |
 | Tavily | `POST https://api.tavily.com/search` | Bearer | 1–20 | `include_raw_content` | $8 / 1k basic searches | `GET https://api.tavily.com/usage`: a 200 needs at least one numeric usage/limit pair (`key.usage`/`key.limit`, `account.plan_usage`/`account.plan_limit`, `account.paygo_usage`/`account.paygo_limit`), and each recognized pair must be wholly absent or have both members as valid numbers, otherwise the result is `unknown`; otherwise every pair below its limit is `pass` and any at or above it is `limit`; 401 is `invalid` |
-| Exa | `POST https://api.exa.ai/search` | `x-api-key` | 1–10 (the base price includes 10) | `contents.text`, +$1 / 1k pages | $7 / 1k; the response's `costDollars` is used when present | none known |
+| Exa | `POST https://api.exa.ai/search` | `x-api-key` | 1–10 (the base price includes 10) | always `contents.highlights` (the `snippet` source, since a base result has no excerpt); `content: true` adds `contents.text`; each is +$1 / 1k pages | $7 / 1k plus the always-on highlights surcharge, shown as one price; the response's `costDollars` is used when present | none known |
 
 - DeepSeek facts that shape the UI (DeepSeek's Search & Fetch guide, 2026-10-19): the query is 1–128 characters and
   supports operators (`site:`, `lang:`, `after:`, quoted phrases). The catalog records the list price only. Any
@@ -457,8 +459,10 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 
 - `source.schema.json` and `source-create.schema.json`: `protocol: "search"` and its combination rule (§3.1).
 - The protocol vocabulary's authorities: `model-hub-contracts/README.md` (the "exactly" list) and
-  `adapter-interface.py`'s `SOURCE_PROTOCOLS`, plus the adapter's search and free-check operations in
-  `adapter-interface.py`. The
+  `adapter-interface.py`, which splits it in two. `MODEL_PROTOCOLS` keeps the four invocable wire protocols that
+  observation, probes, discovery and the hop schemas (`hop-resolution`, `served-hop`, `hop-origin`) use, unchanged.
+  `SOURCE_PROTOCOLS` is `MODEL_PROTOCOLS` plus `search`, used only where a Source is stored or created. The adapter's
+  search and free-check operations are also added to `adapter-interface.py`. The
   structure guards that check them are updated in the same event.
 - `api.md`'s Source create and credential replace sections: the search branch (§3.1), with its outcomes in
   `api-response.schema.json`.
