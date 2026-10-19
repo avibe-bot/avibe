@@ -75,14 +75,19 @@ The user has an Anthropic API key and a DeepSeek API key, adds Tavily, and chang
 - **Create and replace branch.** `POST /api/models/sources` and `PUT /api/models/sources/<id>/credential` with
   `protocol: "search"` skip protocol observation and inventory discovery; `save_unverified` and
   `accept_unavailable_inventory` do not apply. The server provisions the key and runs the catalog's free check where
-  one exists:
-  - pass: the Source is saved verified;
-  - 401, or a 403 the catalog maps to the credential: nothing is saved, and the existing invalid-key create error
-    answers (for a replacement, the old key stays);
-  - any other failure, or no free check: the Source is saved with `verification_pending`, presented as "已保存" like
-    an unverified API-key save, and the first successful search clears it.
+  one exists. Its result is one of the four free-check outcomes (§5):
+  - `pass`: the Source is saved verified;
+  - `balance`: the key is valid but the account cannot pay for a request. The Source is saved verified and in the
+    balance `needs_action` state, so the UI asks for a top-up before any query goes to it;
+  - `invalid`: nothing is saved, and the existing invalid-key create error answers (for a replacement, the old key
+    stays);
+  - `unknown`, or no free check: the Source is saved with `verification_pending`, presented as "已保存" like an
+    unverified API-key save, and the first successful search clears it.
 
   The response is the existing Source envelope.
+- **DeepSeek from the add dialog** goes through the ordinary API-key create, which already rejects an invalid key.
+  After the save, the catalog's free check runs once; a `balance` outcome sets the Source's balance state, which its
+  models share.
 
 ### 3.2 Settings
 
@@ -93,14 +98,14 @@ The user has an Anthropic API key and a DeepSeek API key, adds Tavily, and chang
   "enabled": true,
   "prefer_native": true,
   "executor_order": ["src_…", "src_…"],
-  "services": {"src_…": {"results": 5, "content": false}}
+  "services": {"src_…": {"results": 5, "content": false, "enabled": true}}
 }
 ```
 
 | Field | Rule |
 | --- | --- |
 | `prefer_native` | boolean; absent means `true` (decision 3) |
-| `services` | per search-capable Source: `results` (1 to the vendor's maximum, default 5) and `content` (page text, default `false`, only where the vendor returns page text). Absent means defaults. An entry for a Source that no longer exists is ignored. |
+| `services` | per search-capable Source: `results` (1 to the vendor's maximum, default 5), `content` (page text, default `false`, only where the vendor returns page text) and `enabled` (default `true`; `false` takes the Source out of the search order without removing it, which is how a DeepSeek Source keeps its models but stops searching). Absent means defaults. An entry for a Source that no longer exists is ignored. |
 
 - `executor_order` keeps its rule (hosted tools §3.3) and now lists search-capable Sources beside model executors.
 - Releases before this feature ignore both fields with a warning: the existing loader rule for unknown fields.
@@ -137,7 +142,9 @@ The user has an Anthropic API key and a DeepSeek API key, adds Tavily, and chang
 - `prefer_native` (saved, `true` when absent);
 - `executor_candidates[]` entries gain `kind: "service" | "model"`. A service entry carries `model_id` = the
   catalog's service id (for example `tavily/search`), `price` in the existing unit form with unit `search`, its
-  `settings {results, content}`, and the Source's health so the row can say "密钥无效 · 已跳过";
+  `settings {results, content, enabled}`, and the Source's health so the row can say "密钥无效 · 已跳过". A
+  search-capable Source with `enabled: false` is listed last, reads "未用于搜索" and opens its detail, where the
+  switch turns it back on;
 - `service_vendors[]`: the catalog's search vendors, for the add dialog: id, name, list price, free tier, facts,
   the maximum `results`, whether the vendor returns page text and whether that changes the price, and whether a
   Source of the user already provides it.
@@ -151,15 +158,16 @@ The PUT body gains `prefer_native` and `services` as per-field writes, the exist
 Hosted tools §6 holds, with these changes:
 
 - **Candidates** are the model executors of hosted tools §6 plus every search-capable Source: a `search` Source, or a
-  model Source whose vendor lists a search API and whose endpoint is official. A search-capable Source in
-  `needs_action` is skipped.
+  model Source whose vendor lists a search API and whose endpoint is official, unless `services.<id>.enabled` is
+  `false`.
 - **Automatic order** (no `executor_order`): `search` Sources in creation order, then model Sources with a search API
   in Vibey's Source order, then model executors as today. A saved `executor_order` is used as saved; candidates it
   does not name follow in automatic order. Adding a search-capable Source while an order is saved inserts it
   immediately before the saved order's first model executor, or at the end when the order names none. It then runs
   before every model executor, and the user's other entries keep their order.
-- **Per-service limits are checked before the call.** A query longer than the service accepts (DeepSeek: 128
-  characters) skips that service for this call with no state and no cost.
+- **Skips.** A candidate can be skipped without a request, for one of three reasons: `blocked` (its Source is in
+  `needs_action`), `cooling` (a service cooldown, §4.2) or `query_too_long` (the query exceeds what the service
+  accepts, DeepSeek 128 characters). A skip costs nothing, writes no state, and is recorded in `attempts[]` (§4.3).
 - **One attempt** sends the catalog's request for the canonical query, the turn's frozen `results` and `content`, and
   waits at most 30 s, inside the chain's single 180 s deadline.
 
@@ -181,11 +189,11 @@ Hosted tools §6 holds, with these changes:
   writes the Source's health exactly as a model call would. Its 403 is a security-policy refusal of the query, so the
   catalog maps it to `service_refused` with no state.
 - **Service cooldown.** A transient failure puts that (Source, service id) on an in-memory cooldown that only the
-  search chain reads. A model route through the same Source (DeepSeek) is unaffected. A 429 waits for its
-  `Retry-After`, bounded to 1–300 s and 30 s when absent; a 408, 5xx, timeout, connection failure or refused redirect
-  waits 30 s, doubling on each consecutive failure up to 300 s. While cooling down, the candidate is skipped like a
-  query-length skip; a call that skips every candidate for cooldown is `failed` with `service_unavailable`. A success
-  resets the cooldown, and a restart forgets it. It writes no Source health and shows nowhere but the call's record.
+  search chain reads. A model route through the same Source (DeepSeek) is unaffected. A 429's `Retry-After` is read
+  by the Model Hub retry coordinator's advice parser (seconds or HTTP date) and honored in full, never shortened;
+  without advice, and for a 408, 5xx, timeout, connection failure or refused redirect, the cooldown is 30 s,
+  doubling on each consecutive failure up to 300 s. A success resets it, and a restart forgets it. It writes no
+  Source health.
 - **Recovery.** Replacing the key clears an invalid-key state, as for every Source. A `search` Source in the balance
   or limit state gets "重新启用" in its detail. For a balance state it runs the catalog's free check where one
   exists and clears the state when the check passes. A free check only proves the key, and Tavily's `/usage` answers
@@ -193,27 +201,33 @@ Hosted tools §6 holds, with these changes:
   cleared directly: the next real search tries the Source once and puts it back in `needs_action` if the same
   failure returns. Nothing retries on its own. A model Source with
   a search API (DeepSeek) recovers through the existing model Source paths.
-- **Health writes are fenced** like every other Source attempt (`model-hub.md`, attempt-start settlement
-  generation). A service attempt reserves the generation when it starts. A response that settles after the key was
-  replaced or the Source was removed writes no health, so a superseded key cannot block a repaired Source.
+- **Every state an attempt writes is fenced** by the attempt-start settlement generation (`model-hub.md`), for
+  Source health and the service cooldown alike. A response that settles after the key was replaced or the Source
+  was removed writes neither, and replacing the key or removing the Source also clears that Source's cooldowns, so a
+  superseded key cannot block or delay a repaired Source.
 - A search service writes no hosted-tool refusal evidence: its failures are Source health, not tool support.
 - A completed attempt writes positive evidence with `mode: "service"`, keyed by (Source, service id, `web_search`),
   through the same in-memory and hourly-file rule (hosted tools §3.2).
-- With no candidate, the `failed` record names both remedies: add a search service, or an API key from a vendor
-  that offers search. When candidates exist but every one is skipped for `needs_action`, the record is `failed` with
-  `error_code: "search_sources_blocked"`. It names those Sources and their repairs ("更换密钥" or "重新启用", in
-  模型 › 工具), never suggesting a new Source.
-- When the query's length skipped every candidate that was not tried, and no attempt failed, the record is `failed`
-  with `error_code: "search_query_too_long"`. The text names the shortest limit ("搜索词超过 128 个字符，请缩短后重试"),
-  so the model can retry with a shorter query; it never suggests adding a Source. When attempts also failed, the last
-  failure is the reason, as today.
+- **The terminal reason of a failed call** follows one rule:
+  1. no candidate at all: `failed` naming both remedies, add a search service or an API key from a vendor that
+     offers search (today's no-provider reason);
+  2. at least one request was sent: the last request's failure, as today;
+  3. otherwise every candidate was skipped, and the code is the most actionable skip reason present:
+     `query_too_long` gives `search_query_too_long` ("搜索词超过 128 个字符，请缩短后重试", which the model can fix
+     at once); else `blocked` gives `search_sources_blocked` (the user repairs a Source); else `cooling` gives
+     `service_unavailable` (wait).
+
+  Every case keeps the per-candidate list in `attempts[]`, so the surfaces can name each Source and its repair. None
+  suggests adding a Source while candidates exist.
 
 ### 4.3 The record and cost
 
 - The result is the canonical `HostedRecord` (hosted tools §6). `sources[]` follows the service's ranking: `url`,
   `title`, `snippet` and `page_age` from the catalog's mapping, `snippet` taken from the vendor's model-oriented
   field (DeepSeek `summary`).
-- **Every persisted field is bounded before the record is written.** `url` is at most 2,048 characters, and a result
+- **Every field a service mapping writes is bounded before the record is written.** The bounds belong to the
+  mapping, not to the C-1 read shape, so released `HostedSource` rows from native and model-executor calls still
+  load unchanged. `url` is at most 2,048 characters, and a result
   with a longer or non-HTTP(S) URL is dropped. `title` is cut to 300, `snippet` to 1,000 and `page_age` to 64. A
   record keeps at most the configured number of results. A response that leaves no valid result is
   `service_unreadable`.
@@ -225,17 +239,22 @@ Hosted tools §6 holds, with these changes:
   $1 / 1k pages of `contents.text`), with `basis: "list"`. A vendor that bills only non-empty results (DeepSeek)
   costs zero for an empty answer. Earlier billable attempts are `failed_attempts[]` as today; a service attempt is
   billable only when it answered 200.
-- `execution.attempts[]` (new) lists every earlier attempt of the call in order, billable or not, as
-  `{source_id, label, error_code?}`. `label` is the Source's display name when the attempt started, bounded to 64
-  characters. The projection shows the Source's current name and falls back to `label` for a Source removed since. A search service always sets `error_code`: one of `service_key_invalid`,
+- `execution.attempts[]` (new) lists every earlier candidate of the call in order, billable or not, as
+  `{source_id, label, error_code?, skipped?}`. `skipped` is `blocked`, `cooling` or `query_too_long` for a candidate
+  that sent no request. A `blocked` entry also carries `repair`: `replace_key` or `reenable`. `label` is the Source's display name when the attempt started, bounded to 64
+  characters. The projection shows the Source's current name and falls back to `label` for a Source removed since.
+  A failed search-service request always sets `error_code`: one of `service_key_invalid`,
   `service_balance`, `service_limit`, `service_unavailable`, `service_refused` and `service_unreadable`, each with en
   and zh copy. A model executor sets it only when its failure already carries a code (`FAILURE_CODES`); a provider's
-  free-text failure leaves it absent, and the note then says "失败" for that Source. The switch note reads this list
+  free-text failure leaves it absent, and the note then says "失败" for that Source. The switch note reads this list,
+  naming failed requests and `blocked` skips; `cooling` and `query_too_long` skips are left out of it
   ("Tavily 密钥无效，已改用 DeepSeek"; with two or more, "Tavily、Exa 失败，已改用 DeepSeek"). `failed_attempts[]`
   keeps its cost role.
-- `core/hosted_activity` projects `attempts[]` with the Sources' current names into the shared activity payload
-  (`HostedActivity.to_payload`). Its localized line renderer writes the note, so the Web card and the IM line read
-  one projection, as they do for cost.
+- `core/hosted_activity` projects `attempts[]`, with the Sources' current names, skips and repairs, into the
+  shared activity payload (`HostedActivity.to_payload`). Its localized line renderer writes both the switch note
+  and, for `search_sources_blocked`, the per-Source repair ("Tavily 需要更换密钥，Exa 需要在 模型 › 工具 中重新启用").
+  The Web card (`HostedToolRow`) and the IM line read that one projection; the fixed copy of a known code never
+  replaces it.
 - The projection also carries the executor kind, `service` or `model`, taken from `executor_origin.api`. For a
   service it leaves `model` empty, so the Web card (`HostedToolRow`) and the IM line (`_ran`) render "通过 Tavily"
   without the catalog's service id. Model executors keep "via Anthropic API key · claude-haiku-5-5".
@@ -248,6 +267,10 @@ Hosted tools §6 holds, with these changes:
 The catalog row is the single source for each vendor's wire shape and price. The implementation lane verifies every
 field against the vendor's current documentation and records the date and link beside the price.
 
+A row's free check maps the vendor's answer to one of four outcomes: `pass` (the key works and the account can pay),
+`balance` (the key works but the account cannot pay), `invalid` (401, or a 403 the row maps to the credential) and
+`unknown` (anything else: transport failures, 5xx, unreadable bodies).
+
 A vendor enters the catalog only when its terms allow what every search does: keeping the returned titles, URLs,
 excerpts and page text in the Session transcript and showing them to the user, with no screening duty Avibe does not
 perform. Prices are in USD. A vendor whose price grows with the result count is capped at the count its base price
@@ -255,8 +278,8 @@ includes, so the recorded list price stays exact.
 
 | Vendor | Request | Auth | Results | Content | List price (2026-10) | Free check |
 | --- | --- | --- | --- | --- | --- | --- |
-| DeepSeek | `POST https://api.deepseek.com/v1/tools/search` `{query, count, need_content}` | Bearer | 1–50 | `need_content` | $0.75 / 1k successful requests; empty results and failures not billed | `GET /user/balance` |
-| Tavily | `POST https://api.tavily.com/search` | Bearer | 1–20 | `include_raw_content` | $8 / 1k basic searches | `GET https://api.tavily.com/usage`: 200 passes, 401 is an invalid key |
+| DeepSeek | `POST https://api.deepseek.com/v1/tools/search` `{query, count, need_content}` | Bearer | 1–50 | `need_content` | $0.75 / 1k successful requests; empty results and failures not billed | `GET /user/balance`: 200 with `is_available: true` is `pass`, with `false` is `balance`; 401 is `invalid` |
+| Tavily | `POST https://api.tavily.com/search` | Bearer | 1–20 | `include_raw_content` | $8 / 1k basic searches | `GET https://api.tavily.com/usage`: 200 is `pass` for the key (it does not prove the plan limit, §4.2); 401 is `invalid` |
 | Exa | `POST https://api.exa.ai/search` | `x-api-key` | 1–10 (the base price includes 10) | `contents.text`, +$1 / 1k pages | $7 / 1k; the response's `costDollars` is used when present | none known |
 
 - DeepSeek facts that shape the UI (DeepSeek's Search & Fetch guide, 2026-10-19): the query is 1–128 characters and
@@ -313,7 +336,8 @@ Status (latest success, or the failure that put it in `needs_action` with time a
 balance or limit state, §4.2), key (masked; "更换密钥",
 or for DeepSeek "使用供应商「DeepSeek」的 Key", managed under 供应商与路由), settings (results; page content only where
 the vendor returns page text, with its effect on price and on what the model reads), this month's requests and list
-cost with a link to Usage, and remove.
+cost with a link to Usage, and remove. A model Source with a search API (DeepSeek) has no remove here: it has a
+"用于网页搜索" switch (`services.<id>.enabled`), and its models stay.
 
 ### 6.4 Sources
 
@@ -355,10 +379,11 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 - `api.md`: the read and PUT changes, and the "重新启用" action for a `search` Source in `needs_action` (§4.2), with
   its `api-response.schema.json` branch.
 - The turn trace's `hosted_tools`: the frozen `prefer_native` and per-candidate `results` and `content` (§3.2).
-- `core/hosted_activity`'s payload: the projected `attempts` with Source names and codes, and the executor kind
-  (§4.3).
-- C-1 (`agent-core-contracts/message.schema.json`): `HostedSource.content` and the field bounds (§4.3);
-  `ProxyExecution.attempts[]` and the six `service_*` codes in `HOSTED_ERROR_CODES`, with copy on every surface; an
+- `core/hosted_activity`'s payload: the projected `attempts` with Source names, codes, skips and repairs, and the
+  executor kind (§4.3).
+- C-1 (`agent-core-contracts/message.schema.json`): the optional `HostedSource.content` (§4.3; the read shape
+  gains no new limits);
+  `ProxyExecution.attempts[]` with `skipped` and `repair`, and the six `service_*` codes in `HOSTED_ERROR_CODES`, with copy on every surface; an
   `executor_origin` that names a search service (`provider` = vendor, `model` = service id, and an `api` value for
   search APIs, which the contract lane names).
 - V2 config: `model_hub.hosted_tools.web_search` as §3.2.
@@ -386,7 +411,7 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 5. Invalid-key, balance and limit failures put the Source in `needs_action` and skip it until the key is replaced
    or the user re-enables it; transient failures change no state; an empty answer ends the chain.
 6. Each call yields one canonical record; the card and the IM line name the service and, from `attempts[]`, say
-   which services failed before it.
+   which services failed or were blocked before it, and how to repair a blocked one.
 7. A `search` Source never appears as a model route candidate, in discovery, in a model probe or in engine config.
 8. A DeepSeek API-key Source on the official endpoint is a candidate with no extra setup; on a relay it is not.
 9. A settings change never alters a running turn: `prefer_native`, `results` and `content` are frozen at the turn's
@@ -398,11 +423,11 @@ Hermetic, against stub vendor servers; no live upstream and no real keys.
 
 | Layer | Cases |
 | --- | --- |
-| Create | the search branch skips observation and discovery; free-check pass saves verified, 401 saves nothing, other failures and no-check vendors save pending and the first success clears it; replacement keeps the old key on 401 |
+| Create | the search branch skips observation and discovery; free-check pass saves verified, a DeepSeek balance with `is_available: false` saves verified in the balance state, 401 saves nothing, other failures and no-check vendors save pending and the first success clears it; replacement keeps the old key on 401 |
 | Config | `protocol: "search"` accepted only in its combination; `prefer_native` and `services` round-trip and default; a release-before loader ignores the new `hosted_tools` fields |
 | Custody | the adapter call attaches the key, refuses redirects and non-catalog hosts, caps the body, and returns no key material; nothing outside the adapter reads the key |
-| Chain | automatic and saved order, and insertion before the first model executor in a saved order; service cooldown from `Retry-After` and doubling backoff, scoped to (Source, service), with a DeepSeek model route unaffected; query-length skip; each outcome row of §4.2; one deadline; metering, `failed_attempts` and `attempts`; DeepSeek official versus relay; settings changed mid-turn do not apply until the next turn; re-enable with and without a free check |
-| Mapping | one recorded response per vendor maps to the canonical record with bounds; empty results; unreadable bodies |
+| Chain | automatic and saved order, and insertion before the first model executor in a saved order; service cooldown from `Retry-After` (a longer deadline is not shortened) and doubling backoff, scoped to (Source, service), with a DeepSeek model route unaffected, and not written by an attempt that started before a key replacement; the terminal reason for every mix of skips; `services.<id>.enabled: false` takes a DeepSeek Source out of the order and keeps its models; query-length skip; each outcome row of §4.2; one deadline; metering, `failed_attempts` and `attempts`; DeepSeek official versus relay; settings changed mid-turn do not apply until the next turn; re-enable with and without a free check |
+| Mapping | one recorded response per vendor maps to the canonical record with bounds; empty results; unreadable bodies; a released native `HostedSource` row longer than the new bounds still loads |
 | Hop facts | `prefer_native` off declares the function on a native-capable hop, and a native result in history replays in the synthetic form |
 | UI | the card states, add dialog, service detail, Sources rows, copy in both locales |
 
