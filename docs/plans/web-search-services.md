@@ -205,8 +205,9 @@ Hosted tools §6 holds, with these changes:
   403 is listed for Fetch), so a Search 403 is an undocumented status: `service_unavailable` with a cooldown, and no
   Source state.
 - **Service cooldown.** A transient failure puts that (Source, service id) on an in-memory cooldown that only the
-  search chain reads. A model route through the same Source (DeepSeek) is unaffected. A 429's `Retry-After` is read
-  by the Model Hub retry coordinator's advice parser (seconds or HTTP date) and honored in full, never shortened;
+  search chain reads. A model route through the same Source (DeepSeek) is unaffected. A 429's or 503's `Retry-After`
+  is read by the Model Hub retry coordinator's advice parser (seconds or HTTP date) and honored in full, never
+  shortened;
   without advice, and for a 408, 5xx, timeout, connection failure, refused redirect or unreadable body, the
   cooldown is 30 s, doubling on each consecutive failure up to 300 s. A success resets it, and a restart forgets
   it. It writes no Source health. A cooldown longer than 60 s is visible: the Tools read's candidate carries
@@ -220,7 +221,9 @@ Hosted tools §6 holds, with these changes:
   200 while the account is still over its limit, so a limit state, and a balance state with no free check, are
   not cleared at once. The persisted `needs_action` state stays, and the press arms an in-memory one-shot trial:
   the Source admits exactly one search request, reserved by the first search that reaches it, while every other
-  search skips it as `blocked`. A trial that completes clears the persisted state; one that fails keeps it. A restart
+  search skips it as `blocked`. A trial that completes clears the persisted state. A trial that fails is settled by the outcome table: a
+  classified failure (401, 402, a limit code) replaces the blocker with its own state, so a revoked key asks for a
+  new key. A transient or unreadable failure keeps the current blocker. A restart
   drops an unused trial, so the Source stays blocked and the user can press again. This fails closed. Nothing retries on its own. A model Source with
   a search API (DeepSeek) recovers through the existing model Source paths.
 - **Every state an attempt writes is fenced.** Source health uses the Source-global attempt-start settlement
@@ -288,6 +291,8 @@ Hosted tools §6 holds, with these changes:
     so a model executor or a DeepSeek Source gets its own repair (re-authorize, replace the key, top up, raise the
     limit), and only a tool-only `search` Source in a balance or limit state adds "重新启用". A `disabled` entry's
     remedy is turning "用于网页搜索" back on;
+  - a skipped entry's remedy is checked against the Source's current state when the record is projected: a Source
+    since repaired, re-enabled or removed shows no remedy (the entry still says it was skipped);
   - `superseded: true` marks a failed entry whose settlement any fence dropped (a newer attempt, a key replacement,
     a removal or "重新启用"). The projection also treats an entry as superseded when the Source's current health no
     longer matches it, for example a key replaced after the failure settled but before the call ended. The surfaces
