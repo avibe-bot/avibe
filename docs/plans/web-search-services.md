@@ -229,7 +229,8 @@ Hosted tools §6 holds, with these changes:
   the Source admits exactly one search request, reserved by the first search that reaches it, while every other
   search skips it as `blocked`. A trial that completes clears the persisted state. A trial that fails is settled by the outcome table: a
   classified failure (401, 402, a limit code) replaces the blocker with its own state, so a revoked key asks for a
-  new key. A transient or unreadable failure keeps the current blocker. A restart
+  new key. Any other failure, whether transient, unreadable or a query-specific `service_refused`, keeps the
+  current blocker. Every outcome ends the reservation, so the user can arm a new trial. A restart
   drops an unused trial, so the Source stays blocked and the user can press again. This fails closed. While a
   trial is armed or in flight, "重新启用" is disabled (the read reports `trial_pending`), and a repeated request is
   answered with the current trial without arming another or advancing the generation. Nothing retries on its own. A model Source with
@@ -334,7 +335,9 @@ Hosted tools §6 holds, with these changes:
   the catalog's billing rule charges: DeepSeek only a 200 with results, the others any 200), `reported_usd` and
   `reported_requests` (the reported costs and the requests they cover), and `list_usd` (the sum of the list-priced
   costs recorded at call time, page surcharges included). The row's cost is `reported_usd + list_usd`; nothing is
-  revalued from counts later. Released ledger rows without these fields load as zero. In `usage-summary`
+  revalued from counts later. A request whose billing is unknown (DeepSeek's unreadable 200) adds to
+  `requests` and to a separate `uncertain_requests`, never to `billable_requests`, so the counts stay exact and
+  the uncertainty is visible. Released ledger rows without these fields load as zero. In `usage-summary`
   aggregates, a service row adds that cost to the Source's and the total `api_cost_usd` as a known cost, and sets
   the lower-bound flag only when the row has `lower_bound: true` (an unreadable content call, above). The label comes from
   the catalog, not from model inventory (§8).
@@ -357,7 +360,7 @@ includes, so the recorded list price stays exact.
 | Vendor | Request | Auth | Results | Content | List price (2026-10) | Free check |
 | --- | --- | --- | --- | --- | --- | --- |
 | DeepSeek | `POST https://api.deepseek.com/v1/tools/search` `{query, count, need_content}` | Bearer | 1–50 | `need_content` | $0.75 / 1k successful requests; empty results and failures not billed | `GET /user/balance`: 200 with `is_available: true` is `pass`, with `false` is `balance`; 401 is `invalid` |
-| Tavily | `POST https://api.tavily.com/search` | Bearer | 1–20 | `include_raw_content` | $8 / 1k basic searches | `GET https://api.tavily.com/usage`: a 200 needs at least one valid numeric usage/limit pair (`usage`/`limit`, `plan_usage`/`plan_limit`, `paygo_usage`/`paygo_limit`); with every valid pair below its limit it is `pass`, with any at or above it `limit`, and with no valid pair `unknown`; 401 is `invalid` |
+| Tavily | `POST https://api.tavily.com/search` | Bearer | 1–20 | `include_raw_content` | $8 / 1k basic searches | `GET https://api.tavily.com/usage`: a 200 needs at least one numeric usage/limit pair (`key.usage`/`key.limit`, `account.plan_usage`/`account.plan_limit`, `account.paygo_usage`/`account.paygo_limit`), and any of these fields that is present but not a valid number makes the result `unknown`; otherwise every pair below its limit is `pass` and any at or above it is `limit`; 401 is `invalid` |
 | Exa | `POST https://api.exa.ai/search` | `x-api-key` | 1–10 (the base price includes 10) | `contents.text`, +$1 / 1k pages | $7 / 1k; the response's `costDollars` is used when present | none known |
 
 - DeepSeek facts that shape the UI (DeepSeek's Search & Fetch guide, 2026-10-19): the query is 1–128 characters and
@@ -452,7 +455,7 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
   `api-response.schema.json`.
 - `hosted-tools-status.schema.json`: `prefer_native`, `services`, `executor_candidates[].kind` and settings,
   `service_vendors[]`, `ListPrice.extra[]`'s `page` unit and `when` (§3.5), and a candidate's `cooldown_until`
-  (§4.2); the PUT body.
+  and `trial_pending` (§4.2), with their UI types; the PUT body.
 - `capability-evidence.schema.json`, and `status.latest_ok.mode` and `status.verified[].mode` in
   `hosted-tools-status.schema.json` with the UI's types: `mode: "service"`.
 - No new Source health detail: plan and spending limits reuse `models.source.needs_action.spend_limit_reached`.
@@ -461,7 +464,7 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 - The vendor catalog (`vibe/data/api_key_vendors.json` and its schema): search vendors and DeepSeek's search API row.
 - Usage (`usage-summary.schema.json`, `api.md`'s Usage section, and the on-disk usage ledger): a service row keyed
   by Source and `service_id`, counting requests rather than model calls, with the additive `billable_requests`,
-  `reported_usd`, `reported_requests`, `list_usd` and `lower_bound` fields and load fixtures for released rows that lack them (§4.3).
+  `reported_usd`, `reported_requests`, `list_usd`, `uncertain_requests` and `lower_bound` fields and load fixtures for released rows that lack them (§4.3).
 - `HOSTED_ERROR_CODES`: `search_query_too_long` and `search_sources_blocked`, with copy on every surface.
 - `api.md`: the read and PUT changes, the "立即重试" cooldown clear (§4.2), and the "重新启用" action for a `search` Source in `needs_action` (§4.2), with
   its `api-response.schema.json` branch.
