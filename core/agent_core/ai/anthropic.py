@@ -19,6 +19,7 @@ import httpx
 
 from core.agent_core.ai.claude_thinking import uses_adaptive_thinking
 from core.agent_core.ai.hosted import anthropic_hosted_block, citation, reported_counts
+from core.agent_core.ai.image_limits import LoadedImage
 from core.agent_core.ai._common import (
     ServedHopResolver,
     WireRequest,
@@ -967,7 +968,7 @@ def build_messages_payload(
     request: ModelRequest,
     messages: tuple[Any, ...],
     *,
-    loaded_images: Mapping[str, tuple[str, str]] | None = None,
+    loaded_images: Mapping[str, LoadedImage] | None = None,
     prefix_ttl: str | None = None,
 ) -> dict[str, Any]:
     """Build the Anthropic Messages request body.
@@ -1044,7 +1045,7 @@ def wire_request(
     messages: tuple[Any, ...],
     *,
     gateway: bool,
-    loaded_images: Mapping[str, tuple[str, str]] | None = None,
+    loaded_images: Mapping[str, LoadedImage] | None = None,
 ) -> WireRequest:
     """The Messages request for already prepared ``messages``, as the adapter sends it."""
 
@@ -1058,7 +1059,7 @@ def wire_request(
 def _message_to_anthropic(
     message: Any,
     supports_images: bool,
-    loaded_images: Mapping[str, tuple[str, str]] | None = None,
+    loaded_images: Mapping[str, LoadedImage] | None = None,
 ) -> dict[str, Any] | None:
     if isinstance(message, UserMessage):
         content = _anthropic_user_content(message.content, supports_images, loaded_images)
@@ -1101,7 +1102,7 @@ def _message_to_anthropic(
 def _anthropic_user_content(
     content: tuple[Any, ...],
     supports_images: bool,
-    loaded_images: Mapping[str, tuple[str, str]] | None = None,
+    loaded_images: Mapping[str, LoadedImage] | None = None,
 ) -> list[dict[str, Any]]:
     parts = content_parts(content, include_images=supports_images, loaded_images=loaded_images)
     result: list[dict[str, Any]] = []

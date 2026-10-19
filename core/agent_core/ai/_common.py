@@ -26,6 +26,7 @@ from core.agent_core.ai.errors import (
     redact_provider_text,
 )
 from core.agent_core.ai.hosted import MAX_HOSTED_COUNTERS
+from core.agent_core.ai.image_limits import LoadedImage, fit_image
 from core.agent_core.ai.sse import SSEEvent, SSEParseError, SSEParser
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
@@ -2133,7 +2134,7 @@ async def prepare_messages(
     media_loader: MediaLoader | None,
     cancel: CancelToken,
     endpoint: ModelEndpoint | None = None,
-) -> tuple[tuple[Any, ...], dict[str, tuple[str, str]]] | ProviderError:
+) -> tuple[tuple[Any, ...], dict[str, LoadedImage]] | ProviderError:
     """Transform history and resolve immutable media snapshots as one safe boundary."""
 
     try:
@@ -2210,8 +2211,8 @@ async def load_images(
     messages: tuple[Any, ...],
     media_loader: MediaLoader | None,
     cancel: CancelToken,
-) -> dict[str, tuple[str, str]]:
-    """Load every image token once for a request."""
+) -> dict[str, LoadedImage]:
+    """Load every image token once for a request, fitted to the providers' per-image size limit (``image_limits``)."""
 
     if media_loader is None:
         return {}
@@ -2221,10 +2222,10 @@ async def load_images(
         for block in content:
             if isinstance(block, ImageBlock) and block.media_token not in tokens:
                 tokens.append(block.media_token)
-    loaded: dict[str, tuple[str, str]] = {}
+    loaded: dict[str, LoadedImage] = {}
     for token in tokens:
         raw, mime_type = await _await_injected(media_loader.load(token), cancel)
-        loaded[token] = (base64.b64encode(raw).decode("ascii"), mime_type)
+        loaded[token] = await _await_injected(asyncio.to_thread(fit_image, raw, mime_type), cancel)
     return loaded
 
 
@@ -2240,7 +2241,7 @@ def content_parts(
     content: tuple[UserContent, ...],
     *,
     include_images: bool = True,
-    loaded_images: Mapping[str, tuple[str, str]] | None = None,
+    loaded_images: Mapping[str, LoadedImage] | None = None,
 ) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for block in content:
@@ -2248,8 +2249,12 @@ def content_parts(
             if block.text:
                 result.append({"type": "text", "text": block.text})
         elif isinstance(block, ImageBlock) and include_images:
-            data, mime_type = (loaded_images or {}).get(block.media_token, (image_data(block), block.mime_type))
-            result.append({"type": "image", "mime_type": mime_type, "data": data, "media_token": block.media_token})
+            loaded = (loaded_images or {}).get(block.media_token) or LoadedImage(image_data(block), block.mime_type)
+            if loaded.data is not None:
+                image = {"type": "image", "mime_type": loaded.mime_type, "data": loaded.data}
+                result.append({**image, "media_token": block.media_token})
+            if loaded.note:
+                result.append({"type": "text", "text": loaded.note})
     return result
 
 
