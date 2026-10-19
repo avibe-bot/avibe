@@ -538,7 +538,8 @@ These rules are C-1 rows in `cross-provider.md` and per-protocol rows in `conver
     Anthropic, OpenAI's public API, xAI and Google. DeepSeek also has standalone Search/Fetch HTTP APIs; an eligible
     `deepseek` API-key Source is a **direct executor** for `web_search` and `web_fetch`, calling those endpoints with
     the key from Avibe Vault and making no model call. Its candidate carries `direct: true` and a label, and its
-    execution is `mode: "direct"`.
+    execution is `mode: "direct"`. An empty Search result is completed without a price and without a usage charge;
+    a failed direct call has no cost and passes to the next executor.
 - **The result is the canonical record** (v1's rules, unchanged): a `HostedRecord` with `sources[]` in the
   executor's order, a snippet from the answer text each citation covers (Anthropic keeps `cited_text`), X search
   listing the cited posts, and the `ProxyExecution` naming the executor Source, model and billing. Every outcome of

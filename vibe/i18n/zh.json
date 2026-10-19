@@ -1171,8 +1171,8 @@
     "hostedTools": {
       "noExecutor": {
         "web_search": {
-          "one": "当前没有能运行网页搜索的供应商。请在 模型 › 供应商与路由 中把 {vendors} 的 API Key 添加为供应商；存在 Vaults 里的密钥不会用于这里。",
-          "several": "当前没有能运行网页搜索的供应商。请在 模型 › 供应商与路由 中把 {vendors} 其中一家的 API Key 添加为供应商；存在 Vaults 里的密钥不会用于这里。"
+          "one": "当前没有能运行网页搜索的供应商。请在 模型 › 供应商与路由 中把 {vendors} 的 API Key 添加为供应商；DeepSeek 供应商使用 Vault 中的 DEEPSEEK_API_KEY。",
+          "several": "当前没有能运行网页搜索的供应商。请在 模型 › 供应商与路由 中把 {vendors} 其中一家的 API Key 添加为供应商；DeepSeek 供应商使用 Vault 中的 DEEPSEEK_API_KEY。"
         },
         "x_search": {
           "one": "当前没有能运行 X 搜索的供应商。请在 模型 › 供应商与路由 中把 {vendors} 的 API Key 添加为供应商；存在 Vaults 里的密钥不会用于这里。",

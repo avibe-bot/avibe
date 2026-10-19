@@ -1171,8 +1171,8 @@
     "hostedTools": {
       "noExecutor": {
         "web_search": {
-          "one": "No Source can run web search right now. Add an API key from {vendors} as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.",
-          "several": "No Source can run web search right now. Add an API key from one of {vendors} as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this."
+          "one": "No Source can run web search right now. Add an API-key Source from {vendors} in Models › Sources & gateway. A DeepSeek Source uses DEEPSEEK_API_KEY from Vault.",
+          "several": "No Source can run web search right now. Add an API-key Source from one of {vendors} in Models › Sources & gateway. A DeepSeek Source uses DEEPSEEK_API_KEY from Vault."
         },
         "x_search": {
           "one": "No Source can run X search right now. Add an API key from {vendors} as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.",

@@ -40,8 +40,9 @@ direct executor does not change the engine's Source health or the turn's model h
 - Search `query` is the canonical one-field argument; Fetch `url` is validated as HTTP/HTTPS, at most 8192 characters.
 - The direct call has the chain's 180 s deadline. Search results are capped at 10 sources and each snippet is bounded
   by the existing record rules; Fetch content is capped at 20,000 characters in the record.
-- The direct call is metered as a list-price attempt on the DeepSeek Source. A failed or empty result is not billed by
-  DeepSeek, but the local cost line still reports the list price for the attempt.
+- The direct call is metered as one request on the DeepSeek Source. DeepSeek bills Search only when it returns a
+  non-empty list and Fetch when it returns page content; an empty Search is completed with no cost line and is not
+  metered. A failed call has no cost and moves on to the next executor.
 
 ## Tests
 
