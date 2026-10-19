@@ -48,6 +48,8 @@ TOOL_SNIPPETS: dict[str, str] = {
     "powershell": "Execute PowerShell commands (Get-ChildItem, Select-String, etc.)",
     "edit": "Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
     "write": "Create or overwrite files",
+    "deepseek_web_search": "Search the live web through DeepSeek's standalone Search API",
+    "deepseek_fetch": "Fetch one web page as Markdown through DeepSeek's standalone Fetch API",
 }
 TOOL_GUIDELINES: dict[str, tuple[str, ...]] = {
     "read": ("Use read to examine files instead of cat or sed.",),
@@ -61,8 +63,12 @@ TOOL_GUIDELINES: dict[str, tuple[str, ...]] = {
         "unchanged regions.",
     ),
     "write": ("Use write only for new files or complete rewrites.",),
+    "deepseek_web_search": (
+        "Use deepseek_web_search for live web search; it works on every model and returns URLs to cite.",
+    ),
+    "deepseek_fetch": ("Use deepseek_fetch when a search result needs its full page.",),
 }
-TOOL_ORDER = ("read", "bash", "powershell", "edit", "write")
+TOOL_ORDER = ("read", "bash", "powershell", "edit", "write", "deepseek_web_search", "deepseek_fetch")
 FINAL_REPLY_RULE = "Only your final reply is reliably shown to the user; put anything the user must see in it"
 #: Avibe's: the loop runs a response's neighbouring read and bash calls at the same time (C-3 loop-control.md section 2).
 CONCURRENT_CALLS_RULE = (

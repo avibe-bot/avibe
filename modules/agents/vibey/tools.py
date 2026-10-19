@@ -40,6 +40,7 @@ from core.agent_core.messages import (
     message_from_dict,
 )
 from core.agent_core.tools.base import CallInstance, JobHost, JobStatus, Tool, ToolContext, ToolResult, ToolSpec
+from core.agent_core.tools.deepseek import DeepSeekFetchTool, DeepSeekSearchTool, deepseek_tools_enabled
 from core.agent_core.tools.hosted import MAX_IMAGES, hosted_tool_spec, image_generate_spec, size_form
 from core.agent_core.tools.read import MAX_INLINE_IMAGE_BYTES, ImageUnreadable, read_image
 from core.agent_core.tools.truncate import format_size
@@ -102,7 +103,10 @@ def local_tool_suite(jobs_dir: Optional[str] = None, *, route: Optional[HandOver
     host = LocalJobHost(str(jobs_dir or agent_jobs_dir()), on_hand_over=hand_over)
 
     def create_tools(jobs: JobHost, image_sink: Optional[ImageSink]) -> Sequence[Tool]:
-        return create_coding_tools(jobs, image_sink=image_sink, shell=host.shell)
+        tools = create_coding_tools(jobs, image_sink=image_sink, shell=host.shell)
+        if not deepseek_tools_enabled():
+            return tools
+        return (*tools, DeepSeekSearchTool(), DeepSeekFetchTool())
 
     async def render(call: Any, job_id: str, status: Any, watch_id: Optional[str]) -> Any:
         return await recovered_result(host, job_id, status, watch_id)
