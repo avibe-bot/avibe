@@ -217,6 +217,30 @@ class ReplyAndTurnEndTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((run["status"], run["result_text"]), ("succeeded", FIRST))
                 self.assertEqual([entry["text"] for entry in run["result_payload"]["outputs"]], [FIRST])
 
+    async def test_a_reply_or_a_failure_keeps_its_type_attached_or_detached(self):
+        """Scenario: MESSAGE-DELIVERY-334.
+
+        Lifecycle authority never decides the type: a failure is ``error`` whether it
+        ends the current Turn or reports detached work, and a detached completion
+        keeps ``result`` (its provenance, not its type, says it is detached).
+        """
+        detached = MessageOutput(completes_turn=False, completes_run=False, detached=True)
+        cases = {
+            "an attached failure": (terminal_turn_output(), True, "error"),
+            "a detached completion": (detached, False, "result"),
+            "a detached failure": (detached, True, "error"),
+        }
+        for name, (output, is_error, expected) in cases.items():
+            with self.subTest(name), self.state():
+                controller = _Controller("avibe")
+                await controller.emit_agent_message(
+                    self.context(), "result", FIRST, output=output, is_error=is_error
+                )
+
+                self.assertEqual(self.agent_rows(), [(expected, FIRST)])
+                [row] = [payload for event, payload in self.published if event == "message.new"]
+                self.assertIs(bool(row["metadata"].get("detached")), output.detached)
+
     async def test_only_a_reply_is_a_completed_turns_answer(self):
         """Scenario: MESSAGE-DELIVERY-334.
 

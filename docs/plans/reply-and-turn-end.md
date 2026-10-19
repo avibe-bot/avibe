@@ -140,6 +140,24 @@ visible `agentMessage`, OpenCode's superseded replies as `assistant`, and the
 rest of the promotion (`promote_turn_text_to_result`, `resumed_turn_text`, the
 dispatcher's legacy `output` record).
 
+## Transition from PR 1 to PR 2
+
+PR 1 keeps one transitional patch, approved by the orchestrator on
+2026-10-20 as contract-preserving: a silent final still promotes a stored
+legacy `output` in a Turn that has no `result` reply. It exists only because
+Claude's pre-steer phase emits `output` until PR 2. PR 2 must delete it in the
+same change as Claude's pre-steer `output` branch:
+
+- [ ] `core/message_dispatcher.py`: `_turn_visible_text`, `_remember_turn_text`,
+  `_take_turn_text`, `remembers_turn_text`, and the promotion block of the
+  content-free Turn end;
+- [ ] `core/message_mirror.py`: `promote_turn_text_to_result`,
+  `resumed_turn_text`;
+- [ ] `tests/test_message_dispatcher_silent_final.py` and
+  `MESSAGE-DELIVERY-325` (retired in favour of `MESSAGE-DELIVERY-334`);
+- [ ] keep reading `PROMOTED_FROM_KEY` / `PROMOTED_FROM_TYPES` for released
+  promoted rows (`storage/agent_activity_service.py`).
+
 ## Compatibility
 
 - Rows written by released versions keep their type: `output` renders muted,
