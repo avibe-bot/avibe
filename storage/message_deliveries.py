@@ -2675,15 +2675,6 @@ def pending_steer_for_turn(conn: Connection, turn_id: str) -> dict[str, Any] | N
     )
 
 
-def turn_has_human_input(conn: Connection, turn_id: str) -> bool:
-    """Whether a person's input is part of this Turn: one it started with, one
-    steered into it, or one still being steered into it."""
-    return any(
-        execution_delivery_payload(conn, row).get("source") == "user"
-        for row in deliveries_for_turn(conn, turn_id)
-    )
-
-
 def turn_has_delivery_owner(conn: Connection, turn_id: str) -> bool:
     turn = get_turn(conn, turn_id)
     return bool(turn and get_delivery(conn, str(turn["initial_delivery_id"])))

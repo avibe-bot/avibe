@@ -145,9 +145,7 @@ _TaskStoreResult = TypeVar("_TaskStoreResult")
 
 AGENT_RUN_DELIVERY_STEER = "steer"
 AGENT_RUN_DELIVERY_QUEUE = "queue"
-# Stored as given: P1 like the default, and explicit, so it also steers a Turn a
-# person's input is part of, which a default P1 Run queues behind.
-AGENT_RUN_DELIVERY_SEND_NOW = "send_now"
+LEGACY_AGENT_RUN_DELIVERY_SEND_NOW = "send_now"
 AGENT_RUN_DELIVERY_INTENTS = frozenset(
     {
         AGENT_RUN_DELIVERY_STEER,
@@ -2847,8 +2845,6 @@ class TaskExecutionStore:
             if existing is not None:
                 return TaskExecutionRequest.from_dict(existing)
         normalized_delivery_intent = normalize_agent_run_delivery_intent(delivery_intent)
-        if str(delivery_intent or "").strip().lower() == AGENT_RUN_DELIVERY_SEND_NOW:
-            normalized_delivery_intent = AGENT_RUN_DELIVERY_SEND_NOW
         run_metadata = dict(metadata or {})
         run_metadata[AGENT_RUN_DELIVERY_INTENT_METADATA_KEY] = normalized_delivery_intent
         request = TaskExecutionRequest(
@@ -9577,7 +9573,7 @@ class ScheduledTaskService:
                 failure_code=FAILURE_CODE_SESSION_TURN_GATE_UNAVAILABLE,
             )
         if session_id and gate is not None:
-            if raw_delivery_intent == AGENT_RUN_DELIVERY_SEND_NOW:
+            if raw_delivery_intent == LEGACY_AGENT_RUN_DELIVERY_SEND_NOW:
                 state = await gate.submit_scheduled(
                     session_id,
                     context,

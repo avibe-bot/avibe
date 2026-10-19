@@ -9549,9 +9549,9 @@ def test_busy_avibe_agent_run_send_now_keeps_transferred_owner_running(monkeypat
     assert run.get("started_at") is not None
     assert run.get("completed_at") is None
     assert "workbench_queue_holds_run" not in (run.get("metadata") or {})
-    assert run["metadata"]["delivery_intent"] == "send_now"
+    assert run["metadata"]["delivery_intent"] == "steer"
     assert submitted == [
-        (session_id, "run behind active workbench turn", request.id, "send_now")
+        (session_id, "run behind active workbench turn", request.id, "steer")
     ]
     assert handler_calls == []
 
@@ -9690,7 +9690,7 @@ def test_send_now_runtime_uses_shared_delivery_for_im_session(monkeypatch, tmp_p
     assert stored["error"] is None
     assert direct_calls == []
     submit_scheduled.assert_awaited_once()
-    assert submit_scheduled.await_args.kwargs == {"delivery_intent": "send_now"}
+    assert submit_scheduled.await_args.kwargs == {}
 
 
 def test_busy_avibe_agent_run_requeue_preserves_session_fork_metadata(monkeypatch, tmp_path) -> None:

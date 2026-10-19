@@ -389,21 +389,6 @@ scenarios:
     test:
       - tests/test_backend_failure_retry.py::test_restart_notice_names_the_watch_running_the_command_and_offers_no_retry
       - tests/test_backend_failure_retry.py::test_a_restart_notice_waits_until_its_running_command_is_handed_over
-  - id: MESSAGE-DELIVERY-323
-    name: A scheduled Harness P1 input queues behind a Turn a person's input is part of and runs as its own Turn
-    status: covered
-    kind: concurrency
-    layer: contract
-    test:
-      - tests/test_session_delivery_fsm.py::test_a_harness_p1_input_steers_only_a_turn_no_persons_input_is_part_of
-      - tests/test_session_delivery_fsm.py::test_harness_inputs_behind_a_persons_turn_each_run_as_their_own_turn_in_queue_order
-      - tests/test_internal_server.py::test_an_agent_run_report_queues_behind_a_persons_turn_and_runs_as_the_next_turn
-  - id: MESSAGE-DELIVERY-324
-    name: A Harness report during a person's Vibey Turn leaves the answer its result and runs as the next Turn
-    status: covered
-    kind: regression
-    layer: scenario
-    test: tests/test_vibey_agent.py::test_a_harness_input_during_a_persons_turn_leaves_the_answer_its_result_and_runs_next
   - id: MESSAGE-DELIVERY-325
     name: A silent final reply makes the Turn's last visible text its result, rendered and notified once
     status: covered

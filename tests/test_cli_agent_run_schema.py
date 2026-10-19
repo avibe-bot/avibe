@@ -535,14 +535,12 @@ def test_agent_run_send_now_is_explicit_p1_on_an_existing_session(
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    # Stored as given, not folded into the default: an explicit send-now also
-    # steers a Turn a person's input is part of, which a default Run queues behind.
-    assert payload["delivery_intent"] == "send_now"
-    assert payload["run"]["delivery_intent"] == "send_now"
+    assert payload["delivery_intent"] == "steer"
+    assert payload["run"]["delivery_intent"] == "steer"
     stored = request_store.get_run(payload["run_id"])
     assert stored is not None
     assert stored["session_id"] == session_id
-    assert stored["metadata"]["delivery_intent"] == "send_now"
+    assert stored["metadata"]["delivery_intent"] == "steer"
 
 
 def test_agent_run_send_now_rejects_a_new_session(capsys) -> None:
@@ -715,10 +713,10 @@ def test_agent_run_send_now_accepts_an_im_backed_session(
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["session_id"] == session["id"]
-    assert payload["delivery_intent"] == "send_now"
+    assert payload["delivery_intent"] == "steer"
     stored = request_store.get_run(payload["run_id"])
     assert stored is not None
-    assert stored["metadata"]["delivery_intent"] == "send_now"
+    assert stored["metadata"]["delivery_intent"] == "steer"
 
 
 def test_agent_run_async_self_target_defaults_to_no_callback(
