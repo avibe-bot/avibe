@@ -119,6 +119,8 @@ export type ModelsApi = {
   /** Replace the credential of a hub-channel api_key source. The normal guarded
    *  mutation tail reports every route hop removed and model interrupted. */
   replaceCredential(id: string, body: CredentialReplace): Promise<CredentialReplacement>;
+  /** Re-check a blocked search Source and arm a trial when it has no free check. */
+  reenableSearchSource(id: string): Promise<Source>;
   /** Start re-authorization for a subscription source. Irreversible once it
    *  begins, which is why the acknowledgement is sent unconditionally — the
    *  server rejects a native source without it (`reauth_confirmation_required`).
@@ -616,6 +618,7 @@ export const modelsApi: ModelsApi = {
   createApiKeySource: (draft) => call<SourceCreatedResponse>('/api/models/sources', jsonInit('POST', draft)).then(created),
   patchSource: (id, patch) => call<SourcePatchedResponse>(`/api/models/sources/${encodeURIComponent(id)}`, jsonInit('PATCH', patch)).then(sourcePatched),
   refreshSource: (id, confirmation) => call<SourceRefresh>(`/api/models/sources/${encodeURIComponent(id)}/refresh`, jsonInit('POST', confirmation ?? {})),
+  reenableSearchSource: (id) => call<{ source: Source }>(`/api/models/sources/${encodeURIComponent(id)}/reenable`, jsonInit('POST', {})).then((r) => r.source),
   probeSource: (id, model) => call<{ probe: SourceProbeResult }>(
     `/api/models/sources/${encodeURIComponent(id)}/probe`, jsonInit('POST', { model }),
   ).then((r) => r.probe),

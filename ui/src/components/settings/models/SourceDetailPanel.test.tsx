@@ -1291,14 +1291,16 @@ describe('SourceDetailPanel', () => {
       ...NEEDS_ACTION_DETAIL_KEYS,
       ...ERROR_DETAIL_KEYS,
     ];
-    const shapes = SOURCE_STATUSES.flatMap((status) => causes.flatMap((detail_key) => kinds.flatMap(
+    const protocols: SourceProtocol[] = ['anthropic', 'search'];
+    const shapes = protocols.flatMap((protocol) => SOURCE_STATUSES.flatMap((status) => causes.flatMap((detail_key) => kinds.flatMap(
       (kind) => channels.map((supply_channel): Source => ({
         ...source,
         kind,
+        protocol,
         supply_channel,
         state: { status, retry_at: null, detail_key },
       })),
-    )));
+    ))));
     const reached = new Set<RepairKind>();
 
     for (const shape of shapes) {
@@ -1327,6 +1329,30 @@ describe('SourceDetailPanel', () => {
     // Still bounded well below a hung render.
   }, 15_000);
 
+  it('runs the dedicated re-enable action for a blocked search Source', async () => {
+    const blockedSearch: Source = {
+      ...source,
+      protocol: 'search',
+      base_url: null,
+      models: [],
+      state: {
+        status: 'needs_action',
+        retry_at: null,
+        detail_key: 'models.source.needs_action.balance_exhausted',
+      },
+    };
+    const answer = { ...blockedSearch, state: { status: 'standby' as const, retry_at: null, detail_key: null } };
+    const reenable = vi.spyOn(modelsApi, 'reenableSearchSource').mockResolvedValue(answer);
+    const onSource = vi.fn().mockResolvedValue(undefined);
+    const trackMutation: TrackSourceMutation = (work) => work(blockedSearch, settlement({ source: onSource }));
+
+    render(<I18nextProvider i18n={i18n}><CommittedPanel source={blockedSearch} trackMutation={trackMutation} onReauth={noReauth} /></I18nextProvider>);
+
+    await userEvent.click(screen.getByRole('button', { name: /^Check again$|^重新检查$/i }));
+
+    await waitFor(() => expect(reenable).toHaveBeenCalledWith(blockedSearch.id));
+    expect(onSource).toHaveBeenCalledWith(answer);
+  });
   it('opens key replacement from the revoked hub credential repair tap', async () => {
     render(
       <I18nextProvider i18n={i18n}>

@@ -2207,6 +2207,8 @@ class CLIProxyEngineAdapter:
         )
         if response.http_status in set(check.get("invalid_statuses") or ()):
             return SearchCredentialCheck("invalid")
+        if response.error == "cancelled":
+            raise asyncio.CancelledError
         if response.error or response.http_status is None:
             return SearchCredentialCheck("unknown")
         if response.http_status != 200 or response.body is None:

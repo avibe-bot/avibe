@@ -2486,6 +2486,24 @@ def test_search_on_sent_fires_once_after_connection_ready_before_write(monkeypat
     assert calls == ["sent", "write"]
 
 
+def test_search_free_check_propagates_cancelled_transport(monkeypatch):
+    adapter = CLIProxyEngineAdapter(supervisor=object(), state_store=object())  # type: ignore[arg-type]
+    service = search_service("tavily", "search")
+    assert service is not None
+
+    async def response(**_kwargs):
+        return SearchResponse(503, {"Retry-After": "2"}, None, "cancelled", True)
+
+    monkeypatch.setattr(adapter, "_search_http", response)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            adapter.check_search_credential(
+                "cred_search",
+                {"vendor": "tavily", **service},
+            )
+        )
+
+
 def test_tavily_free_check_classifies_reported_usage_limit(monkeypatch):
     adapter = CLIProxyEngineAdapter(supervisor=object(), state_store=object())  # type: ignore[arg-type]
     service = search_service("tavily", "search")

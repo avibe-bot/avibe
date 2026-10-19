@@ -2317,6 +2317,7 @@
         "reauth": "Sign in",
         "replaceKey": "Replace key",
         "retest": "Retry",
+        "reenable": "Check again",
         "reauthTitle": "Sign in to “{{name}}” again?",
         "reauthBody": {
           "immediate": "The old sign-in stops working as soon as you start, and every source using it goes unavailable. Finishing restores only this one — the others need their own sign-in.",
