@@ -188,7 +188,7 @@ Hosted tools §6 holds, with these changes:
 | 408, 429, 5xx, timeout, connection failure | next candidate | none; a service cooldown (below) |
 | 3xx (the redirect is refused, §3.3) | next candidate, `service_unavailable` | none |
 | other 4xx (a query the service refuses) | next candidate | none |
-| a body the mapping cannot read | next candidate | none |
+| a body the mapping cannot read (`service_unreadable`) | next candidate | none; a service cooldown, because a 200 may be billed |
 
 - **A model Source with a search API (DeepSeek)** shares its key and balance with its models, so a search 401 or 402
   writes the Source's health exactly as a model call would. Its 403 is a security-policy refusal of the query, so the
@@ -196,8 +196,8 @@ Hosted tools §6 holds, with these changes:
 - **Service cooldown.** A transient failure puts that (Source, service id) on an in-memory cooldown that only the
   search chain reads. A model route through the same Source (DeepSeek) is unaffected. A 429's `Retry-After` is read
   by the Model Hub retry coordinator's advice parser (seconds or HTTP date) and honored in full, never shortened;
-  without advice, and for a 408, 5xx, timeout, connection failure or refused redirect, the cooldown is 30 s,
-  doubling on each consecutive failure up to 300 s. A success resets it, and a restart forgets it. It writes no
+  without advice, and for a 408, 5xx, timeout, connection failure, refused redirect or unreadable body, the
+  cooldown is 30 s, doubling on each consecutive failure up to 300 s. A success resets it, and a restart forgets it. It writes no
   Source health.
 - **Recovery.** Replacing the key clears an invalid-key state, as for every Source. A `search` Source in the balance
   or limit state gets "重新启用" in its detail. For a balance state it runs the catalog's free check where one
@@ -206,10 +206,14 @@ Hosted tools §6 holds, with these changes:
   cleared directly: the next real search tries the Source once and puts it back in `needs_action` if the same
   failure returns. Nothing retries on its own. A model Source with
   a search API (DeepSeek) recovers through the existing model Source paths.
-- **Every state an attempt writes is fenced** by the attempt-start settlement generation (`model-hub.md`), for
-  Source health and the service cooldown alike. A response that settles after the key was replaced or the Source
-  was removed writes neither, and replacing the key or removing the Source also clears that Source's cooldowns, so a
-  superseded key cannot block or delay a repaired Source.
+- **Every state an attempt writes is fenced.** Source health uses the Source-global attempt-start settlement
+  generation (`model-hub.md`). The service cooldown uses its own generation per (Source, service id), which only
+  search attempts, key replacement, Source removal and "重新启用" advance; a model call on the same Source does not.
+  A response whose generation is no longer current writes nothing. Replacing the key or removing the Source also
+  clears its cooldowns.
+- **"重新启用" advances the Source's settlement generation** without interrupting anything, as an attempt start
+  does. A search that was already in flight when the user pressed it cannot put the Source back in `needs_action`;
+  only a search started after the action can.
 - A search service writes no hosted-tool refusal evidence: its failures are Source health, not tool support.
 - A completed attempt writes positive evidence with `mode: "service"`, keyed by (Source, service id, `web_search`),
   through the same in-memory and hourly-file rule (hosted tools §3.2).
@@ -296,8 +300,9 @@ includes, so the recorded list price stays exact.
 | Exa | `POST https://api.exa.ai/search` | `x-api-key` | 1–10 (the base price includes 10) | `contents.text`, +$1 / 1k pages | $7 / 1k; the response's `costDollars` is used when present | none known |
 
 - DeepSeek facts that shape the UI (DeepSeek's Search & Fetch guide, 2026-10-19): the query is 1–128 characters and
-  supports operators (`site:`, `lang:`, `after:`, quoted phrases); requests made through DeepSeek's own server-side
-  tools already hit this API and are billed from 2026-11-01. Rate limits are account-level and have changed since
+  supports operators (`site:`, `lang:`, `after:`, quoted phrases). The catalog records the list price only. Any
+  free period or billing start date stays with DeepSeek's documentation, which has stated a date for its own
+  server-side tools. The UI never claims a call is free or charged by date. Rate limits are account-level and have changed since
   launch, so the catalog and the UI do not state them; a 429 is a transient outcome (§4.2).
 - **Second batch:** Perplexity Search, Parallel, Zhipu Web Search, Alibaba Cloud web search, and self-hosted SearXNG
   (a URL instead of a key; needs the custom-endpoint rule this phase leaves out).
@@ -378,6 +383,9 @@ The tool card and the IM line are hosted tools §8.3 with the service as the exe
 One coordinated Model Hub version event under the freeze protocol (`model-hub-contracts/README.md`).
 
 - `source.schema.json` and `source-create.schema.json`: `protocol: "search"` and its combination rule (§3.1).
+- The protocol vocabulary's authorities: `model-hub-contracts/README.md` (the "exactly" list) and
+  `adapter-interface.py`'s `SOURCE_PROTOCOLS`, plus the adapter's search operation in `adapter-interface.py`. The
+  structure guards that check them are updated in the same event.
 - `api.md`'s Source create and credential replace sections: the search branch (§3.1), with its outcomes in
   `api-response.schema.json`.
 - `hosted-tools-status.schema.json`: `prefer_native`, `services`, `executor_candidates[].kind` and settings,
