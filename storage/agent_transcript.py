@@ -876,29 +876,39 @@ def committed_final(conn: Connection, session_id: str, turn_id: str) -> Optional
 
 
 def last_turn_reply(conn: Connection, session_id: str, turn_id: str) -> Optional[str]:
-    """The text of the last visible reply the agent wrote for ``turn_id``.
+    """The text of the last reply the agent delivered for ``turn_id``.
 
-    What a Turn rerun after a restart ends on when its final is silent: the reply
-    the process that died delivered (``result``, or ``output`` as released versions
-    typed one). Only the Turn's own rows count: a detached completion is another
-    Turn's work, even when it lands in the Session while this one runs. The read
-    seeks the Turn's rows by ``ix_messages_turn_id`` (forced, so no SQLite version
-    walks a growing index instead) and sorts only those; the author and the
-    Session are checked on the row it returns.
+    What a Turn rerun after a restart ends on when its final is silent: the last
+    reply the process that died delivered (``result``, or ``output`` as released
+    versions typed one). Delivered is ``messages_service.display_delivered``, the
+    evidence ``delivered_committed_row`` reads too: a reply committed but never
+    dispatched before the crash does not count, and the one delivered before it
+    does. Only the Turn's own rows count: a detached completion is another Turn's
+    work, even when it lands in the Session while this one runs. The read seeks
+    the Turn's rows by ``ix_messages_turn_id`` (forced, so no SQLite version walks
+    a growing index instead) and sorts only those; the author, the Session and the
+    delivery evidence are checked on those rows, newest first.
     """
-    row = conn.execute(
+    rows = conn.execute(
         text(
-            "select session_id, author, content_text from messages INDEXED BY ix_messages_turn_id "
+            "select session_id, author, content_text, content_json from messages "
+            "INDEXED BY ix_messages_turn_id "
             f"where {MESSAGE_TURN_ID_SQL} = :turn_id and type in ('result', 'output') "
             "and coalesce(CASE WHEN (json_valid(metadata_json) = 1) "
             "THEN json_extract(metadata_json, '$.detached') END, 0) != 1 "
-            "order by created_at desc, id desc limit 1"
+            "order by created_at desc, id desc"
         ),
         {"turn_id": turn_id},
-    ).first()
-    if row is None or row.session_id != session_id or row.author != "agent":
-        return None
-    return str(row.content_text or "").strip() or None
+    )
+    for row in rows:
+        try:
+            content = json.loads(row.content_json or "{}")
+        except (TypeError, ValueError):
+            continue
+        if row.session_id != session_id or row.author != "agent" or not messages_service.display_delivered(content):
+            continue
+        return str(row.content_text or "").strip() or None
+    return None
 
 
 def fork_link(conn: Connection, session_id: str) -> Optional[tuple[str, int]]:

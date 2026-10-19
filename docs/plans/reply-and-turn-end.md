@@ -106,7 +106,11 @@ part is delivered and typed exactly as a non-terminal reply would be.
 - Where `settle_text` comes from:
   - Vibey: the last reply a steer superseded whose dispatch succeeded. A Turn
     rerun after a restart reads the Turn's own `result`/`output` rows
-    (`last_turn_reply`, a forced `ix_messages_turn_id` SEARCH, off the loop).
+    (`last_turn_reply`, a forced `ix_messages_turn_id` SEARCH, off the loop) and
+    takes the newest one with delivery evidence
+    (`messages_service.display_delivered`, the same check
+    `delivered_committed_row` makes), so a reply committed but never dispatched
+    before the crash is skipped.
   - Claude: its completed pre-steer phase is now a non-terminal `result` that
     records its Run output; once dispatched it becomes the request's
     `last_reply_text`, which every content-free branch of `emit_result_message`

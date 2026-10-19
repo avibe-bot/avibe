@@ -596,8 +596,9 @@ async def test_the_restart_reads_of_a_turns_context_tail_stay_bounded(engine) ->
             cut_turn = message_deliveries.get_turn(conn, "turn_cut")
             assert restart_resume_plan(conn, cut_turn) == "rerun"
             assert committed_final(conn, "ses_cut", "turn_cut") is None
-            # A silent final's settle text: the last reply the Turn delivered, from its own rows.
-            assert last_turn_reply(conn, "ses_main", "turn_main") == "两个文件。"
+            # A silent final's settle text: the last reply the Turn delivered, from its own
+            # rows. This final was committed but never delivered, so it is not one.
+            assert last_turn_reply(conn, "ses_main", "turn_main") is None
         # The rerun's end, on the loop: the final's delivery.
         assert delivered_committed_row(rerun, final.row_id, outward=True) is None
         with engine.begin() as conn:

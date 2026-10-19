@@ -2631,9 +2631,10 @@ async def test_a_restart_rerun_ends_with_the_final_its_cut_run_committed(
     """MESSAGE-DELIVERY-333: the run a restart cut had committed the Turn's final, so the rerun
     ends with that row through the live end, with no model call. A final that process never sent
     to IM is delivered once, with the image that run generated; one whose delivery the dispatcher
-    recorded is not sent again; a silent final settles with the reply that process showed, read
-    from the Turn's rows, and promotes nothing, not even a phase a released version stored as
-    ``output`` (MESSAGE-DELIVERY-334)."""
+    recorded is not sent again; a silent final settles with the last reply that process
+    delivered, read from the Turn's rows (not one it committed and never dispatched), and
+    promotes nothing, not even a phase a released version stored as ``output``
+    (MESSAGE-DELIVERY-334)."""
     from dataclasses import replace
 
     from core.message_output import MessageOutput, terminal_output_for
@@ -2662,6 +2663,9 @@ async def test_a_restart_rerun_ends_with_the_final_its_cut_run_committed(
             output=MessageOutput(completes_turn=False, completes_run=False, persisted_row_id=shown.row_id),
         )
         [shown] = harness.rows("result")
+        # A later reply that process committed but died before dispatching: never shown,
+        # so not what the Turn settles with (Codex: require delivery evidence).
+        await harness.agent.store.append_response(SESSION, assistant("Never shown."), final=False, superseded=True)
     image = tmp_path / "lighthouse.jpg"
     image.write_bytes(_JPEG)
     final = await harness.agent.store.append_response(
@@ -2695,7 +2699,8 @@ async def test_a_restart_rerun_ends_with_the_final_its_cut_run_committed(
 
     assert harness.provider.requests == [] and harness.controller.hub_calls == []
     assert harness.controller.terminals[-1] == {"turn": cut_turn, "is_error": False, "settled_by": "terminal_result"}
-    [result] = harness.rows("result")
+    [result, *undelivered] = harness.rows("result")
+    assert [row["content_text"] for row in undelivered] == (["Never shown."] if case == "silent" else [])
     if case == "silent":
         assert (result["id"], result["content_text"]) == (shown["id"], reply)
         assert [row["content_text"] for row in harness.rows("output")] == ["An earlier phase."]
