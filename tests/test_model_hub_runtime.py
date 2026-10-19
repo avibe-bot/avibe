@@ -35,6 +35,7 @@ from core.handlers.model_hub.adapter import (
     RawOutcomeKind,
     RetainedMaterialDisposition,
     RuntimePlatformUnsupportedError,
+    SearchResponse,
     SOURCE_PROTOCOLS,
     SourceBinding,
 )
@@ -56,7 +57,11 @@ from vibe.model_hub_runtime import client as client_module
 from vibe.model_hub_runtime import installer as runtime_installer_module
 from vibe.model_hub_runtime import supervisor as supervisor_module
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
-from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_catalog, official_models_dev_provider
+from vibe.model_hub_runtime.api_key_vendors import (
+    api_key_vendor_catalog,
+    official_models_dev_provider,
+    search_service,
+)
 from vibe.model_hub_runtime.client import (
     EngineClient,
     EngineClientError,
@@ -109,6 +114,7 @@ API_KEY_VENDOR_RUNTIME_CASES = tuple(
         *[
             pytest.param(entry.id, entry.protocol, entry.official_base_url, id=entry.id)
             for entry in api_key_vendor_catalog()
+            if entry.protocol != "search"
         ],
         pytest.param("codex", "openai_responses", "https://api.openai.com/v1", id="codex"),
     ]
@@ -1359,7 +1365,7 @@ def test_manifest_resolution_drives_admission_persistence_and_schema(
         installer=manager,
         state_store=EngineStateStore(tmp_path / "state"),
     )
-    projected = {"contract_version": 16, **supervisor.status()}
+    projected = {"contract_version": 17, **supervisor.status()}
     schema = json.loads(
         Path("docs/plans/model-hub-contracts/runtime-dependency.schema.json").read_text(
             encoding="utf-8"
@@ -2254,7 +2260,128 @@ def test_a_persisted_key_source_survives_a_repin_of_its_vendor(tmp_path: Path) -
     ]
 
 
-def test_source_record_requires_valid_reasoning_state() -> None:
+
+
+def test_search_free_check_uses_bounded_catalog_transport(monkeypatch):
+    calls: dict[str, object] = {}
+    caller_thread = threading.current_thread().name
+
+    class Store:
+        def read_api_key(self, credential_ref):
+            calls["read_thread"] = threading.current_thread().name
+            return "tvly-secret"
+
+        def credential_metadata(self, credential_ref):
+            calls["metadata_thread"] = threading.current_thread().name
+            return {"vendor": "tavily"}
+
+    class ResponseContent:
+        async def read(self, _limit):
+            return b'{"is_available": true}'
+
+    class Response:
+        status = 200
+        headers = {"Content-Type": "application/json", "X-Leak": "must-not-cross"}
+        content = ResponseContent()
+
+    class Request:
+        async def __aenter__(self):
+            return Response()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Session:
+        def __init__(self, **kwargs):
+            calls["session_kwargs"] = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def request(self, method, endpoint, **kwargs):
+            calls["request"] = (method, endpoint, kwargs)
+            return Request()
+
+    monkeypatch.setattr(runtime_adapter_module.aiohttp, "ClientSession", Session)
+    adapter = CLIProxyEngineAdapter(supervisor=object(), state_store=Store())  # type: ignore[arg-type]
+    catalog = {
+        "vendor": "tavily",
+        "endpoint": "https://api.tavily.com/search",
+        "auth": "bearer",
+        "free_check": {
+            "method": "GET",
+            "endpoint": "https://api.tavily.com/usage",
+            "pass": {"status": 200},
+            "invalid_statuses": [401],
+        },
+    }
+
+    outcome = asyncio.run(adapter.check_search_credential("cred_search", catalog))
+
+    assert outcome.outcome == "pass"
+    timeout = calls["session_kwargs"]["timeout"]
+    assert timeout.total == 10.0
+    assert timeout.connect == 5.0
+    assert calls["session_kwargs"]["trust_env"] is False
+    assert calls["request"][2]["allow_redirects"] is False
+    assert calls["request"][2]["headers"] == {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Authorization": "Bearer tvly-secret",
+    }
+    assert calls["read_thread"] != caller_thread
+    assert calls["metadata_thread"] != caller_thread
+
+
+def test_tavily_free_check_classifies_reported_usage_limit(monkeypatch):
+    adapter = CLIProxyEngineAdapter(supervisor=object(), state_store=object())  # type: ignore[arg-type]
+    service = search_service("tavily", "search")
+    assert service is not None
+
+    async def response(**_kwargs):
+        return SearchResponse(200, {}, b'{"usage": 10, "limit": 10}')
+
+    monkeypatch.setattr(adapter, "_search_http", response)
+    outcome = asyncio.run(
+        adapter.check_search_credential(
+            "cred_search",
+            {"vendor": "tavily", **service},
+        )
+    )
+
+    assert outcome.outcome == "limit"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"usage": "10", "limit": 20},
+        {"usage": 10, "limit": None},
+        {"account": {"plan_usage": 10, "plan_limit": 20, "paygo_usage": "10"}},
+    ],
+)
+def test_tavily_free_check_returns_unknown_for_invalid_reported_usage_fields(monkeypatch, body):
+    adapter = CLIProxyEngineAdapter(supervisor=object(), state_store=object())  # type: ignore[arg-type]
+    service = search_service("tavily", "search")
+    assert service is not None
+
+    async def response(**_kwargs):
+        return SearchResponse(200, {}, json.dumps(body).encode("utf-8"))
+
+    monkeypatch.setattr(adapter, "_search_http", response)
+    outcome = asyncio.run(
+        adapter.check_search_credential(
+            "cred_search",
+            {"vendor": "tavily", **service},
+        )
+    )
+
+    assert outcome.outcome == "unknown"
+
+
     payload = {
         "source_id": "src_fixture123",
         "vendor": "anthropic",
@@ -2449,6 +2576,7 @@ def test_openai_compatibility_engine_base_url_uses_configured_api_root(
     [
         pytest.param(entry.official_base_url, entry.protocol, id=entry.id)
         for entry in api_key_vendor_catalog()
+        if entry.protocol != "search"
     ],
 )
 def test_catalog_official_base_url_composes_one_probe_endpoint(
@@ -9276,6 +9404,8 @@ def test_every_oauth_start_vendor_binds_by_exactly_one_route(
 
     observed: set[str] = set()
     for protocol in SOURCE_PROTOCOLS:
+        if protocol == "search":
+            continue
         client = Client()
         try:
             runtime_adapter_module._probe_oauth_protocol_response(

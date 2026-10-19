@@ -29,6 +29,7 @@ import type { SourceProtocol } from './types';
  */
 export const TIER_SUGGESTIONS: Readonly<Record<SourceProtocol, readonly ReasoningEffort[]>> = {
   google: [], // No Google family ladder is claimed by Model Hub.
+  search: [], // Search Sources do not supply model reasoning tiers.
   anthropic: ['low', 'medium', 'high', 'xhigh', 'max'],
   openai_responses: ['minimal', 'low', 'medium', 'high', 'xhigh'],
   openai_chat: ['minimal', 'low', 'medium', 'high', 'xhigh'],

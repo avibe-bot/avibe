@@ -150,6 +150,12 @@ class ModelHubRemoteService:
             },
         )
 
+    async def reenable_search_source(self, source_id: str) -> dict:
+        return await _rpc(
+            "reenable_search_source",
+            {"source_id": source_id},
+        )
+
     def list_agents(self, *, refresh_cli_presence: bool = False) -> list[dict]:
         return _rpc_sync(
             "list_agents",

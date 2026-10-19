@@ -44,6 +44,7 @@ from core.handlers.model_hub.adapter import (
     RawOutcomeKind,
     RetainedMaterialDisposition,
     RuntimePlatformUnsupportedError,
+    SearchCredentialCheck,
     SOURCE_PROTOCOLS,
     SourceObservation,
 )
@@ -211,6 +212,7 @@ class FakeAdapter:
         self.retargeted_credentials: list[tuple[str, str, str, str | None, str]] = []
         self.refreshable_credential_refs: set[str] = set()
         self.discovery_credential_refs: list[str] = []
+        self.search_check_outcome = "unknown"
 
     async def ensure_installed(self, *, force=False, offline=False):
         self.ensure_calls.append(force)
@@ -285,6 +287,9 @@ class FakeAdapter:
         self.secret_lengths.append(len(secret))
         self.credential_count += 1
         return f"cred_test{self.credential_count:03d}"
+
+    async def check_search_credential(self, credential_ref, catalog):
+        return SearchCredentialCheck(self.search_check_outcome)
 
     async def revoke_credential(self, credential_ref):
         self.revoked.append(credential_ref)
@@ -588,6 +593,21 @@ def _seed_response_conformance_service(tmp_path: Path) -> ModelHubService:
             state=ModelHubSourceStateConfig(status="standby"),
             models=[],
             credential_ref="cred_delete0001",
+        ),
+        ModelHubSourceConfig(
+            id="src_searchbalance",
+            kind="api_key",
+            vendor="tavily",
+            display_name="Search balance source",
+            protocol="search",
+            supply_channel="hub",
+            billing="metered",
+            state=ModelHubSourceStateConfig(
+                status="needs_action",
+                detail_key="models.source.needs_action.balance_exhausted",
+            ),
+            models=[],
+            credential_ref="cred_searchbalance",
         ),
         ModelHubSourceConfig(
             id="src_subscribe01",
@@ -1031,7 +1051,7 @@ def test_runtime_start_is_explicit_and_returns_v4_status(tmp_path):
     assert adapter.start_calls == 1
     assert store.config.enabled is True
     assert runtime["enabled"] is True
-    assert runtime["contract_version"] == 16
+    assert runtime["contract_version"] == 17
     assert runtime["status"]["health"] == "ok"
     _assert_valid("runtime-dependency.schema.json", runtime)
 
@@ -1338,7 +1358,7 @@ def test_runtime_start_crosses_the_controller_rpc_boundary(monkeypatch):
 
     async def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"contract_version": 16, "status": {"health": "ok"}}
+        return {"contract_version": 17, "status": {"health": "ok"}}
 
     monkeypatch.setattr(model_hub_client, "_rpc", rpc)
 
@@ -1355,7 +1375,7 @@ def test_runtime_stop_crosses_the_controller_rpc_boundary(monkeypatch):
 
     async def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"contract_version": 16, "status": {"health": "not_started"}}
+        return {"contract_version": 17, "status": {"health": "not_started"}}
 
     monkeypatch.setattr(model_hub_client, "_rpc", rpc)
 
@@ -1372,7 +1392,7 @@ def test_runtime_install_crosses_the_controller_rpc_boundary(monkeypatch):
 
     async def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"contract_version": 16, "status": {"health": "installing"}}
+        return {"contract_version": 17, "status": {"health": "installing"}}
 
     monkeypatch.setattr(model_hub_client, "_rpc", rpc)
 
@@ -1390,7 +1410,7 @@ def test_runtime_dependency_ensure_crosses_the_controller_rpc_boundary(monkeypat
     def rpc(operation, payload=None):
         calls.append((operation, payload))
         return {
-            "contract_version": 16,
+            "contract_version": 17,
             "changed": True,
             "status": {"health": "not_started", "verified": True},
         }
@@ -1406,6 +1426,38 @@ def test_runtime_dependency_ensure_crosses_the_controller_rpc_boundary(monkeypat
     assert calls == [
         ("runtime_ensure_dependency", {"force": True, "offline": True})
     ]
+
+
+def test_reenable_client_and_controller_rpc_forward_payload(monkeypatch):
+    from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
+    from vibe import model_hub_client
+
+    calls = []
+
+    async def rpc(operation, payload=None):
+        calls.append((operation, payload))
+        return {"source": {"id": "src_search01"}}
+
+    monkeypatch.setattr(model_hub_client, "_rpc", rpc)
+    result = asyncio.run(ModelHubRemoteService().reenable_search_source("src_search01"))
+
+    assert result == {"source": {"id": "src_search01"}}
+    assert calls == [("reenable_search_source", {"source_id": "src_search01"})]
+
+    dispatched = []
+
+    async def service_reenable(source_id, payload=None):
+        dispatched.append((source_id, payload))
+        return {"source": {"id": source_id}}
+
+    service = object.__new__(type("ServiceStub", (), {}))
+    service.reenable_search_source = service_reenable
+    result = asyncio.run(dispatch_model_hub_rpc(service, "reenable_search_source", {
+        "source_id": "src_search01",
+    }))
+
+    assert result == {"source": {"id": "src_search01"}}
+    assert dispatched == [("src_search01", None)]
 
 
 def test_reorder_client_preserves_explicit_null_order(monkeypatch):
@@ -4810,7 +4862,7 @@ def test_agent_models_route_returns_only_picker_catalog_fields(monkeypatch):
     assert response.status_code == 200
     assert response.get_json() == {
         "ok": True,
-        "contract_version": 16,
+        "contract_version": 17,
         "agent": {
             "backend": "codex",
             "mode": "hub",
@@ -6061,6 +6113,7 @@ def test_create_source_defaults_catalog_display_names_for_all_shipped_api_key_ve
                 "kind": "api_key",
                 "vendor": vendor,
                 "key": f"sk-test-create-{vendor}",
+                **({"protocol": "search"} if expected_protocol == "search" else {}),
             },
         )
     )
@@ -6071,8 +6124,170 @@ def test_create_source_defaults_catalog_display_names_for_all_shipped_api_key_ve
     assert store.config.sources[0].display_name == expected_display_name
     assert store.config.sources[0].protocol == expected_protocol
     assert store.config.sources[0].base_url is None
-    assert adapter.observed_protocol_orders == [(expected_protocol,)]
-    assert adapter.revoked == ["cred_test001"]
+    assert adapter.observed_protocol_orders == ([] if expected_protocol == "search" else [(expected_protocol,)])
+    assert adapter.revoked == ([] if expected_protocol == "search" else ["cred_test001"])
+
+
+
+
+@pytest.mark.parametrize("outcome", ["pass", "balance", "limit", "unknown", "invalid"])
+def test_search_source_create_uses_only_the_free_check_transaction(tmp_path, outcome: str):
+    service, store, adapter = _service(tmp_path)
+    adapter.search_check_outcome = outcome
+
+    if outcome == "invalid":
+        with pytest.raises(ModelHubError) as exc_info:
+            asyncio.run(
+                service.create_source(
+                    {"kind": "api_key", "vendor": "tavily", "protocol": "search", "key": "tvly-test"}
+                )
+            )
+        assert exc_info.value.detail == "modelHub.errors.authentication_failed"
+        assert store.config.sources == []
+        assert adapter.revoked == ["cred_test001"]
+        return
+
+    source = asyncio.run(
+        _create_source(
+            service,
+            {"kind": "api_key", "vendor": "tavily", "protocol": "search", "key": "tvly-test"},
+        )
+    )
+    assert source["models"] == []
+    assert source["base_url"] is None
+    assert store.config.hosted_tools["web_search"].service_order == (source["id"],)
+    if outcome in {"balance", "limit"}:
+        assert source["state"]["status"] == "needs_action"
+        assert source["state"]["detail_key"] == (
+            "models.source.needs_action.balance_exhausted"
+            if outcome == "balance"
+            else "models.source.needs_action.spend_limit_reached"
+        )
+        assert source.get("verification_pending") is None
+    elif outcome == "unknown":
+        assert source["verification_pending"] is not None
+    else:
+        assert source.get("verification_pending") is None
+
+
+
+
+@pytest.mark.parametrize(
+    ("outcome", "detail_key"),
+    [
+        ("balance", "models.source.needs_action.balance_exhausted"),
+        ("limit", "models.source.needs_action.spend_limit_reached"),
+        ("unknown", "models.source.needs_action.balance_exhausted"),
+    ],
+)
+def test_search_source_reenable_free_check_keeps_or_reclassifies_state(
+    tmp_path,
+    outcome: str,
+    detail_key: str,
+):
+    service, store, adapter = _service(tmp_path)
+    adapter.search_check_outcome = outcome
+    source = ModelHubSourceConfig(
+        id="src_searchbalance",
+        kind="api_key",
+        vendor="tavily",
+        display_name="Tavily",
+        protocol="search",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(
+            status="needs_action",
+            detail_key="models.source.needs_action.balance_exhausted",
+        ),
+        models=[],
+        credential_ref="cred_searchbalance",
+    )
+    store.config.sources = [source]
+
+    result = asyncio.run(service.reenable_search_source(source.id, {}))
+
+    assert result["trial_armed"] is False
+    assert result["source"]["state"]["detail_key"] == detail_key
+    assert not service.search_reenable_trial_armed(source.id)
+    assert store.load().sources[0].state.detail_key == detail_key
+
+
+def test_search_source_reenable_discards_stale_free_check(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_searchstale",
+        kind="api_key",
+        vendor="tavily",
+        display_name="Tavily",
+        protocol="search",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(
+            status="needs_action",
+            detail_key="models.source.needs_action.balance_exhausted",
+        ),
+        models=[],
+        credential_ref="cred_searchstale",
+    )
+    store.config.sources = [source]
+
+    async def stale_check(_credential_ref, _catalog):
+        service._reserve_settlement_generation(source.id)
+        return SearchCredentialCheck("pass")
+
+    adapter.check_search_credential = stale_check
+    result = asyncio.run(service.reenable_search_source(source.id, {}))
+
+    assert result["source"]["state"]["detail_key"] == "models.source.needs_action.balance_exhausted"
+    assert result["trial_armed"] is False
+    assert store.load().sources[0].state.detail_key == "models.source.needs_action.balance_exhausted"
+
+
+def test_search_source_reenable_arms_without_clearing_limit_and_advances_generation(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_searchtrial",
+        kind="api_key",
+        vendor="exa",
+        display_name="Exa",
+        protocol="search",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(
+            status="needs_action",
+            detail_key="models.source.needs_action.spend_limit_reached",
+        ),
+        models=[],
+        credential_ref="cred_searchtrial",
+    )
+    store.config.sources = [source]
+    before = service._latest_source_attempt_generation.get(source.id, 0)
+
+    result = asyncio.run(service.reenable_search_source(source.id, {}))
+
+    assert result["trial_armed"] is True
+    assert result["source"]["state"]["detail_key"] == "models.source.needs_action.spend_limit_reached"
+    assert result["source"]["trial_pending"] is True
+    assert service.search_reenable_trial_armed(source.id)
+    assert service.search_reenable_trial_pending(source.id)
+    generation = service._latest_source_attempt_generation[source.id]
+    assert generation > before
+    repeated = asyncio.run(service.reenable_search_source(source.id, {}))
+    assert repeated["trial_armed"] is True
+    assert repeated["source"]["trial_pending"] is True
+    assert service._latest_source_attempt_generation[source.id] == generation
+    assert service.search_reenable_trial_armed(source.id)
+    assert service.reserve_search_reenable_trial(source.id) is True
+    assert not service.search_reenable_trial_armed(source.id)
+    assert service.search_reenable_trial_pending(source.id)
+    assert service.list_sources()[0]["trial_pending"] is True
+    repeated_inflight = asyncio.run(service.reenable_search_source(source.id, {}))
+    assert repeated_inflight["source"]["trial_pending"] is True
+    service.settle_search_reenable_trial(source.id)
+    assert not service.search_reenable_trial_pending(source.id)
+    assert service.list_sources()[0]["trial_pending"] is False
+    assert store.load().sources[0].state.detail_key == "models.source.needs_action.spend_limit_reached"
+    assert adapter.search_check_outcome == "unknown"
 
 
 def test_create_source_rejects_wrong_protocol_for_a_catalog_vendor(tmp_path):
@@ -9678,7 +9893,7 @@ def test_runtime_start_route_requires_csrf_before_starting_engine(monkeypatch, t
     assert accepted.status_code == 200
     runtime = accepted.get_json()["runtime"]
     assert adapter.start_calls == 1
-    assert runtime["contract_version"] == 16
+    assert runtime["contract_version"] == 17
     _assert_valid("runtime-dependency.schema.json", runtime)
 
 

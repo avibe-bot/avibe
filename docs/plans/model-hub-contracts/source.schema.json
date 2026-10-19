@@ -29,6 +29,10 @@
       "pattern": "^vp_[0-9a-f]{32}$",
       "description": "Opaque, non-secret identity of the Source's latest credential or endpoint change: the verification marker that change minted, kept after verification clears verification_pending. The Source identity that evidence, retry state, a turn's native-content pin and opaque-payload binding follow includes it instead of verification_pending, so verification changes no identity and an identity never returns to one an earlier credential had, even when OAuth reauthentication keeps the credential's handle. Absent on a verified Source no such change has touched since the field existed; a Source still pending from before the field takes its verification_pending as its generation. Either way a released Source's identity is unchanged."
     },
+    "trial_pending": {
+      "type": "boolean",
+      "description": "Response-only search recovery state: true while the one-shot re-enable trial is armed or its admitted request is in flight. Never persisted in model_hub.sources."
+    },
     "id": {
       "type": "string",
       "pattern": "^src_[a-z0-9]{8,}$"
@@ -75,7 +79,8 @@
         "anthropic",
         "openai_responses",
         "openai_chat",
-        "google"
+        "google",
+        "search"
       ]
     },
     "base_url": {
@@ -492,7 +497,7 @@
         "string",
         "null"
       ],
-      "description": "Opaque handle into the engine-owned credential store; secret material never appears in a payload. Null for native_cli Sources because their credential stays in the sanctioned CLI store, and non-null for hub Sources. Re-authenticating native_cli refreshes that CLI store and leaves this null; re-authenticating a hub Source replaces the engine-held grant behind its handle."
+      "description": "Opaque handle into the Model Hub credential store; secret material never appears in a payload. Null for native_cli Sources because their credential stays in the sanctioned CLI store, and non-null for hub Sources. Re-authenticating native_cli refreshes that CLI store and leaves this null; re-authenticating a hub Source replaces the Model Hub-held grant behind its handle."
     },
     "account_label": {
       "type": [
@@ -510,6 +515,19 @@
     }
   },
   "allOf": [
+    {
+      "if": { "properties": { "protocol": { "const": "search" } }, "required": ["protocol"] },
+      "then": {
+        "properties": {
+          "kind": { "const": "api_key" },
+          "vendor": { "enum": ["tavily", "exa"] },
+          "supply_channel": { "const": "hub" },
+          "billing": { "const": "metered" },
+          "base_url": { "type": "null" },
+          "models": { "maxItems": 0 }
+        }
+      }
+    },
     {
       "if": { "properties": { "protocol": { "const": "google" } } },
       "then": { "properties": { "vendor": { "const": "custom" } } }
@@ -538,7 +556,7 @@
       }
     },
     {
-      "$comment": "v2 (07-29, review round 4): the api_key shape. `supply_channel: hub` is not a default here but the only possibility — `native_cli` means the sanctioned CLI holds an OAuth credential in its own store (README 07-23 ruling), and a pasted key is provisioned into the engine-owned store instead, which is the hub channel by definition. `projected_exhaust_at` is pinned null for the reason at the field itself.",
+      "$comment": "v2 (07-29, review round 4): the api_key shape. `supply_channel: hub` is not a default here but the only possibility — `native_cli` means the sanctioned CLI holds an OAuth credential in its own store (README 07-23 ruling), and a pasted key is provisioned into the Model Hub credential store instead, which is the hub channel by definition. `projected_exhaust_at` is pinned null for the reason at the field itself.",
       "if": {
         "properties": {
           "kind": {

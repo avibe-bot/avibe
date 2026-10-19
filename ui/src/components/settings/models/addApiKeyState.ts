@@ -2,6 +2,7 @@ import type { TranslationKey } from '@/i18n/types';
 import type { SourceProtocol } from './types';
 
 export const PROTOCOL_COPY_KEYS: Record<SourceProtocol, TranslationKey> = {
+  search: 'settings.models.addKey.protocol.search',
   google: 'settings.models.addKey.protocol.google',
   anthropic: 'settings.models.addKey.protocol.anthropicMessages',
   openai_responses: 'settings.models.addKey.protocol.openaiResponses',

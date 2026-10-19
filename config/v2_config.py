@@ -210,6 +210,12 @@ def validate_model_hub_protocol_vendor(vendor: str, protocol: str) -> None:
     """Keep Google's v11 explicit custom admission consistent across consumers."""
     if protocol == "google" and vendor != "custom":
         raise ValueError("Google Sources require the custom vendor")
+    from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_entry
+
+    entry = api_key_vendor_entry(vendor)
+    tool_only = entry is not None and entry.protocol == "search"
+    if (protocol == "search") != tool_only:
+        raise ValueError("Search Sources require a tool-only catalog vendor")
 
 
 def model_hub_fixed_menu_ids(backend: str) -> tuple[str, ...]:
@@ -2329,7 +2335,7 @@ class ModelHubSourceConfig:
     kind: Literal["subscription", "api_key"]
     vendor: str
     display_name: str
-    protocol: Literal["anthropic", "openai_responses", "openai_chat", "google"]
+    protocol: Literal["anthropic", "openai_responses", "openai_chat", "google", "search"]
     supply_channel: Literal["native_cli", "hub"]
     billing: Literal["monthly", "metered"]
     state: ModelHubSourceStateConfig
@@ -2400,6 +2406,7 @@ class ModelHubSourceConfig:
             "openai_responses",
             "openai_chat",
             "google",
+            "search",
         }:
             raise ValueError("Config 'model_hub.sources.protocol' is invalid")
         validate_model_hub_protocol_vendor(vendor, protocol)
@@ -2453,6 +2460,11 @@ class ModelHubSourceConfig:
             raise ValueError("Config 'model_hub.sources.account_label' is invalid")
         if masked_credential is not None and not isinstance(masked_credential, str):
             raise ValueError("Config 'model_hub.sources.masked_credential' is invalid")
+        if protocol == "search" and (
+            kind != "api_key" or supply_channel != "hub" or billing != "metered"
+            or models or base_url is not None
+        ):
+            raise ValueError("Search Sources are tool-only metered hub API keys without a base URL")
         if kind == "subscription" and (base_url is not None or masked_credential is not None):
             raise ValueError("Config subscription Sources cannot carry API-key fields")
         if kind == "api_key" and supply_channel != "hub":
@@ -3091,6 +3103,18 @@ def model_hub_executor_order(value: object, *, tool: str) -> tuple[str, ...]:
     return tuple(value)
 
 
+def model_hub_service_order(value: object, *, tool: str) -> tuple[str, ...]:
+    """A server-owned automatic order for tool-only search Sources."""
+
+    if (
+        not isinstance(value, list)
+        or not all(is_model_hub_source_id(item) for item in value)
+        or len(set(value)) != len(value)
+    ):
+        raise ValueError(f"Config 'model_hub.hosted_tools.{tool}.service_order' must be distinct Source ids")
+    return tuple(value)
+
+
 @dataclass(frozen=True)
 class ModelHubImageModelChoice:
     """The image model a user chose as ``image_generate``'s default."""
@@ -3118,12 +3142,14 @@ class ModelHubHostedToolConfig:
     """One hosted tool's user settings (``vibey-hosted-tools.md`` §3.3).
 
     ``enabled`` defaults to on. ``executor_order`` (search tools) is the Source order the user wants executors
-    tried in, None for automatic; ``default_image`` (``image_generate``, persisted as ``default_model``) is the
+    tried in, None for automatic; ``service_order`` (``web_search``) is the server-owned automatic order of
+    tool-only search Sources; ``default_image`` (``image_generate``, persisted as ``default_model``) is the
     chosen default image model, None for the catalog default. Both are saved values, never resolved ones.
     """
 
     enabled: bool = True
     executor_order: Optional[tuple[str, ...]] = None
+    service_order: Optional[tuple[str, ...]] = None
     default_image: Optional[ModelHubImageModelChoice] = None
 
     @classmethod
@@ -3132,7 +3158,11 @@ class ModelHubHostedToolConfig:
 
         if not isinstance(payload, dict):
             raise ValueError(f"Config 'model_hub.hosted_tools.{tool}' must be an object")
-        known = {"enabled"} | ({"executor_order"} if tool in MODEL_HUB_SEARCH_TOOLS else {"default_model"})
+        known = {"enabled"} | (
+            ({"executor_order", "service_order"} if tool == "web_search" else {"executor_order"})
+            if tool in MODEL_HUB_SEARCH_TOOLS
+            else {"default_model"}
+        )
         unknown = set(payload) - known
         if unknown:
             logger.warning("Config 'model_hub.hosted_tools.%s' ignores unknown fields %s", tool, sorted(unknown))
@@ -3142,10 +3172,12 @@ class ModelHubHostedToolConfig:
         # Only the fields this tool knows are read; another tool's field was ignored above. A field is decided by its
         # presence: the writer omits an unset one, so a present null is damage and goes through the grammar.
         has_order = "executor_order" in known and "executor_order" in payload
+        has_service_order = "service_order" in known and "service_order" in payload
         has_default = "default_model" in known and "default_model" in payload
         return cls(
             enabled=enabled,
             executor_order=model_hub_executor_order(payload["executor_order"], tool=tool) if has_order else None,
+            service_order=model_hub_service_order(payload["service_order"], tool=tool) if has_service_order else None,
             default_image=(
                 ModelHubImageModelChoice.from_payload(payload["default_model"], tool=tool) if has_default else None
             ),
@@ -3155,6 +3187,8 @@ class ModelHubHostedToolConfig:
         out: dict[str, Any] = {"enabled": self.enabled}
         if self.executor_order is not None:
             out["executor_order"] = list(self.executor_order)
+        if self.service_order is not None:
+            out["service_order"] = list(self.service_order)
         if self.default_image is not None:
             out["default_model"] = self.default_image.to_payload()
         return out
@@ -3234,7 +3268,7 @@ class ModelHubConfig:
         source: ModelHubSourceConfig,
         backend: str,
     ) -> bool:
-        if backend not in MODEL_HUB_BACKENDS:
+        if backend not in MODEL_HUB_BACKENDS or source.protocol == "search":
             return False
         if source.supply_channel == "hub":
             return True

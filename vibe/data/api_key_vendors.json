@@ -29,7 +29,47 @@
     "label": "DeepSeek",
     "official_base_url": "https://api.deepseek.com",
     "protocol": "openai_chat",
-    "models_dev_provider": "deepseek"
+    "models_dev_provider": "deepseek",
+    "search": {
+      "service_id": "deepseek/search",
+      "endpoint": "https://api.deepseek.com/v1/tools/search",
+      "auth": "bearer",
+      "request": {
+        "method": "POST",
+        "query": "query",
+        "results": "count",
+        "content": "need_content"
+      },
+      "result": {
+        "results": "results",
+        "url": "url",
+        "title": "title",
+        "snippet": "summary",
+        "content": "content",
+        "page_age": null
+      },
+      "limits": {
+        "results_min": 1,
+        "results_max": 50,
+        "query_max_chars": 128
+      },
+      "price": {
+        "unit": "search",
+        "usd_per_1k": 0.75,
+        "extra": [],
+        "as_of": "2026-10-19",
+        "url": "https://api-docs.deepseek.com/guides/search-tool"
+      },
+      "free_check": {
+        "method": "GET",
+        "endpoint": "https://api.deepseek.com/user/balance",
+        "pass": {"status": 200, "path": "is_available", "equals": true},
+        "balance": {"status": 200, "path": "is_available", "equals": false},
+        "invalid_statuses": [401]
+      },
+      "service_refused_statuses": [400],
+      "tool_only": false
+    }
   },
   {
     "id": "qwen",
@@ -86,5 +126,101 @@
     "official_base_url": "https://api.fireworks.ai/inference/v1",
     "protocol": "openai_chat",
     "models_dev_provider": "fireworks-ai"
+  },
+  {
+    "id": "tavily",
+    "label": "Tavily",
+    "official_base_url": "https://api.tavily.com",
+    "protocol": "search",
+    "search": {
+      "service_id": "tavily/search",
+      "endpoint": "https://api.tavily.com/search",
+      "auth": "bearer",
+      "request": {
+        "method": "POST",
+        "query": "query",
+        "results": "max_results",
+        "content": "include_raw_content"
+      },
+      "result": {
+        "results": "results",
+        "url": "url",
+        "title": "title",
+        "snippet": "content",
+        "content": "raw_content",
+        "page_age": "published_date"
+      },
+      "limits": {
+        "results_min": 1,
+        "results_max": 20,
+        "query_max_chars": null
+      },
+      "price": {
+        "unit": "search",
+        "usd_per_1k": 8.0,
+        "extra": [],
+        "as_of": "2026-10-19",
+        "url": "https://www.tavily.com/pricing"
+      },
+      "free_check": {
+        "method": "GET",
+        "endpoint": "https://api.tavily.com/usage",
+        "pass": {"status": 200},
+        "limit": {
+          "pairs": [
+            {"usage": "usage", "limit": "limit"},
+            {"usage": "plan_usage", "limit": "plan_limit"},
+            {"usage": "paygo_usage", "limit": "paygo_limit"}
+          ]
+        },
+        "balance": null,
+        "invalid_statuses": [401]
+      },
+      "service_refused_statuses": [400],
+      "tool_only": true
+    }
+  },
+  {
+    "id": "exa",
+    "label": "Exa",
+    "official_base_url": "https://api.exa.ai",
+    "protocol": "search",
+    "search": {
+      "service_id": "exa/search",
+      "endpoint": "https://api.exa.ai/search",
+      "auth": "x-api-key",
+      "request": {
+        "method": "POST",
+        "query": "query",
+        "results": "numResults",
+        "content": "contents.text"
+      },
+      "result": {
+        "results": "results",
+        "url": "url",
+        "title": "title",
+        "snippet": "text",
+        "content": "text",
+        "page_age": "publishedDate",
+        "reported_cost": "costDollars.total"
+      },
+      "limits": {
+        "results_min": 1,
+        "results_max": 10,
+        "query_max_chars": null
+      },
+      "price": {
+        "unit": "search",
+        "usd_per_1k": 7.0,
+        "extra": [
+          {"unit": "page", "usd_per_1k": 1.0, "when": "content"}
+        ],
+        "as_of": "2026-10-19",
+        "url": "https://exa.ai/pricing"
+      },
+      "free_check": null,
+      "service_refused_statuses": [400],
+      "tool_only": true
+    }
   }
 ]

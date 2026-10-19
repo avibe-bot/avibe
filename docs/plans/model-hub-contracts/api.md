@@ -8,11 +8,11 @@ credential redaction and supply-impact confirmation rules still apply; unknown
 API siblings retain the Owner default.
 
 
-Status: **Normative, `contract_version` 16** — Model Hub implementations must conform, and the response conformance guard enumerates this route table and validates one real server response for every route.
+Status: **Normative, `contract_version` 17** — Model Hub implementations must conform, and the response conformance guard enumerates this route table and validates one real server response for every route.
 
-Success envelope: `{ok: true, contract_version: 16, ...}`.
+Success envelope: `{ok: true, contract_version: 17, ...}`.
 Failure envelope:
-`{ok: false, contract_version: 16, error: <machine_code>, detail?: <i18n_key>}`.
+`{ok: false, contract_version: 17, error: <machine_code>, detail?: <i18n_key>}`.
 `detail` is always a string. Structured error data lives in a named sibling.
 Guarded mutation refusals specialize that envelope through
 `guard-refusal.schema.json`; both report arrays are required and together form the plan
@@ -24,7 +24,7 @@ table. The contract guard requires the two endpoint sets to be identical, requir
 exercised HTTP response for every registry entry, and validates that response against
 the route's named schema.
 
-The shared envelope and every versioned nested contract carry `contract_version` 16, the
+The shared envelope and every versioned nested contract carry `contract_version` 17, the
 terminal value. Supported persisted config shapes and historical TurnProvenance
 remain readable; ephemeral envelopes use only the terminal version.
 
@@ -47,6 +47,7 @@ runtime open. Once models are configured it participates in the runtime Stop gua
 | POST `/api/models/sources/<id>/reauth` | `{acknowledge_irreversible?: true}` → `{flow: OAuthFlow}` | Both Hub OAuth and `native_cli` Sources require the acknowledgement before OAuth starts. Missing or false acknowledgement returns `reauth_confirmation_required` before any adapter call. See repair rules. |
 | DELETE `/api/models/sources/<id>?force=<bool>` | `{would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409` or `{removed_hops, interrupted}` | A confirmed delete removes the Source from every backend Source order and Route chain in one transaction. A nonempty destructive plan commits only when the body exactly echoes the current refusal plan. |
 | POST `/api/models/sources/<id>/refresh` | `{force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded Source-mutation envelope | The sole saved connectivity/discovery/recovery mutation. |
+| POST `/api/models/sources/<id>/reenable` | `{}` → `{source: Source, removed_hops: [], interrupted: [], trial_armed?: boolean}` | Tool-only `search` Source recovery. It advances the Source settlement generation without interrupting work. With a free check, `pass` clears the state, `invalid` moves to the existing invalid-key state, and `balance`, `limit` or `unknown` keep or reclassify the current state without arming a trial. A Source without a free check keeps persisted `needs_action` and arms a process-local one-shot trial, reported as `trial_armed: true`; `Source.trial_pending` is true while that trial is armed or in flight, and a repeated request returns the current trial without advancing the generation. S2's search gate owns its admission and settlement. No paid search is sent. |
 | POST `/api/models/sources/<id>/probe` | `{model}` → `{probe: SourceProbeResult}` | Explicit API-key test through the managed invocation adapter, using this exact Source/model/protocol. The model must be a non-retired saved inventory row. No Agent routing, fallback, discovery, credential refresh or Source-health change. Only a successful matching credential invocation clears pending verification. Usage is metered; the total invocation deadline is 60 seconds. |
 | POST `/api/models/sources/<source_id>/models` | `{model_id, display_name?, reasoning_efforts}` → `{source: Source}` | Creates one user-authored model entry. The Source identity comes only from the path. |
 | PATCH `/api/models/sources/<source_id>/models/<model_id>` | `{reasoning_efforts}` → `{source: Source}` | Replaces the complete capability list only when `reasoning_efforts_source` is `user` or null, without changing identity, origin, or Routes. An `upstream` or `catalog` declaration returns HTTP 409 `source_model_tiers_managed` with its provenance in the `reasoning_efforts_source` sibling. |
@@ -82,7 +83,7 @@ runtime open. Once models are configured it participates in the runtime Stop gua
 | POST `/api/models/migration/scan` | → `{scan: MigrationScan}` | Read-only. |
 | POST `/api/models/migration/apply` | `{item_ids: string[], clean_api_keys?: boolean}` → `{applied, sources, added_to}` | Applies one grouped, server-owned custody transaction. It checks saved configuration and custody locally, copies API keys without upstream validation, upgrades an existing native subscription Source in place when present, and commits Source/Routes/backend mode atomically. API-key originals are kept unless cleanup was selected. Pre-exposure failure is reversible; post-exposure recovery is forward-only and keeps the backend blocked until terminalized. |
 | GET `/api/models/turns/<turn_id>/provenance` | → `{provenance: TurnProvenance}` or documented absence error | Debug read for exactly attributed Hub turns. |
-| GET `/api/models/runtime/status` | → `{runtime: RuntimeDependency}` | Read-only managed engine status. The nested object carries `contract_version` 16 and persisted user intent in `enabled`; `not_started` is installed lazy-start idleness, not an alarm. |
+| GET `/api/models/runtime/status` | → `{runtime: RuntimeDependency}` | Read-only managed engine status. The nested object carries `contract_version` 17 and persisted user intent in `enabled`; `not_started` is installed lazy-start idleness, not an alarm. |
 | POST `/api/models/runtime/install` | → `{runtime: RuntimeDependency}` | Idempotently starts server-owned installation. It returns and persists `installing`; reload reads the same state. Uses the existing mutation authentication and CSRF guards. |
 | POST `/api/models/runtime/start` | → `{runtime: RuntimeDependency}` | Persists `enabled: true` and explicitly starts the managed engine. Service startup restores this intent; runtime availability has no separate enable-confirmation step. Uses the existing mutation authentication and CSRF guards; status reads never start it. |
 | POST `/api/models/runtime/stop` | → `{runtime: RuntimeDependency}` | Explicitly stops the managed engine, persists `enabled: false`, and returns it to `not_started`. The mutation is rejected with `runtime_in_use` while any native backend is configured for Hub mode or Avibe has catalog models, so disabling the shared runtime cannot strand a configured route. An empty Avibe catalog does not keep the runtime open. |
@@ -235,6 +236,10 @@ successful call using the same current credential and marker clears it through a
 fresh cross-process config transaction. Newer same-credential attempts do not negate
 success. Credential/endpoint replacement generates a new marker, including same-handle
 OAuth reauthentication; old calls and failed calls cannot verify that replacement.
+For `protocol: "search"`, the Source is tool-only and its create transaction never performs a model observation or invocation. The catalog supplies the service endpoint and mapping; the key is provisioned into the Model Hub credential store, and a free credential check is the only upstream check. `invalid` rolls back the new credential and returns the existing create authentication failure without saving a Source; `balance` saves the Source with `state.status: "needs_action"` and `detail_key: "models.source.needs_action.balance_exhausted"`; `limit` saves it verified with `detail_key: "models.source.needs_action.spend_limit_reached"`; `pass` saves it verified; `unknown` uses the ordinary unverified-save projection. Search Sources always have `models: []`, `base_url: null`, and are absent from model routing, discovery, probes, and engine bindings. The check is never billable and is performed before the commit point.
+
+DeepSeek remains an ordinary `openai_chat` Source. Its catalog search capability is not a `search` Source and does not change the model Source's protocol, inventory, or engine binding; after a successful DeepSeek Source create, the service performs the catalog's free check before returning the committed Source. The check may save a balance or spending-limit health state, but never invokes a paid search request.
+
 Existing Sources lacking the optional marker retain their existing state.
 
 Completed Hub OAuth consent can likewise retain its bound credential under the fixed
@@ -640,7 +645,7 @@ The terminal result of both ordinary API-key creation and OAuth creation is:
 ```json
 {
   "ok": true,
-  "contract_version": 16,
+  "contract_version": 17,
   "source": {
     "id": "src_anthkey01",
     "kind": "api_key",
@@ -750,7 +755,7 @@ Every guarded Source/inventory mutation uses the §4.5 envelope matrix and the c
 ```json
 {
   "ok": false,
-  "contract_version": 16,
+  "contract_version": 17,
   "error": "source_last_supplier",
   "would_remove_hops": [],
   "would_interrupt": [
@@ -805,7 +810,10 @@ nonempty, and no refused branch removes a hop.
 Success returns the exact envelope selected by the authoritative matrix and the
 byte-identical `RouteHopRef` array from the accepted plan.
 
+For an API-key credential replacement on a tool-only `search` Source, the replacement check is performed before the commit point. Invalid replacement material preserves the existing Source and credential; all other outcomes follow the ordinary pending-state replacement rules while the new opaque reference becomes current only after commit. The old credential reference is revoked after the replacement commit, and a pre-commit failure revokes only the new reference.
+
 ## Credential replacement and reauth
+
 
 The commit point is the single durable write that makes the replacement source state
 live. Hub OAuth has an earlier credential-irreversibility boundary when new grant
@@ -886,7 +894,7 @@ API-key success:
 ```json
 {
   "ok": true,
-  "contract_version": 16,
+  "contract_version": 17,
   "source": {
     "id": "src_relay9c1x",
     "kind": "api_key",
@@ -896,6 +904,10 @@ API-key success:
   "interrupted": []
 }
 ```
+
+## Tool-only Source recovery
+
+`POST /api/models/sources/<id>/reenable` is the recovery mutation for a tool-only `search` Source. It advances the Source's settlement generation without interrupting work. When a free check exists, `pass` clears the state, `invalid` moves it to the existing invalid-key state, and `balance`, `limit` or `unknown` keep or reclassify the current state without arming a trial. A Source without a free check preserves persisted `needs_action` and arms an in-memory one-shot trial; `Source.trial_pending` is true while the trial is armed or in flight, and a repeated request returns the current trial without advancing the generation. The response carries `trial_armed: true` when the trial is armed, and S2's search gate admits and settles it. No paid test search is sent.
 
 ## Source refresh and blocked-source recovery
 
@@ -977,7 +989,7 @@ Status and submit return the same terminal shape:
 ```json
 {
   "ok": true,
-  "contract_version": 16,
+  "contract_version": 17,
   "flow": {
     "flow_id": "oaf_claude01",
     "client_nonce": "ofn_01j5w8z7p4n6q2rt",
@@ -1050,9 +1062,9 @@ a valid `interrupted` chain.
 ```json
 {
   "ok": true,
-  "contract_version": 16,
+  "contract_version": 17,
   "chain": {
-    "contract_version": 16,
+    "contract_version": 17,
     "backend": "codex",
     "model_id": "gpt-5.6",
     "manual_override": null,
@@ -1079,7 +1091,7 @@ In Direct mode both chain and probe refuse with:
 ```json
 {
   "ok": false,
-  "contract_version": 16,
+  "contract_version": 17,
   "error": "direct_mode",
   "detail": "models.hub.direct_mode"
 }
@@ -1093,9 +1105,9 @@ A successful probe nests its result:
 ```json
 {
   "ok": true,
-  "contract_version": 16,
+  "contract_version": 17,
   "probe": {
-    "contract_version": 16,
+    "contract_version": 17,
     "backend": "claude",
     "channel": "hub",
     "reachable": false,
@@ -1118,7 +1130,7 @@ not-ready carries the closed i18n key `models.probe.native_cli_unavailable`.
 
 ```json
 {
-  "contract_version": 16,
+  "contract_version": 17,
   "backend": "codex",
   "channel": "native_cli",
   "reachable": true,
@@ -1131,7 +1143,7 @@ not-ready carries the closed i18n key `models.probe.native_cli_unavailable`.
 
 ```json
 {
-  "contract_version": 16,
+  "contract_version": 17,
   "backend": "codex",
   "channel": "native_cli",
   "reachable": false,
@@ -1147,7 +1159,7 @@ No candidate is an API error with a typed model-scoped state:
 ```json
 {
   "ok": false,
-  "contract_version": 16,
+  "contract_version": 17,
   "error": "probe_no_candidate",
   "detail": "models.probe.no_candidate.waiting",
   "supply": {
@@ -1338,7 +1350,7 @@ The store retains at most 500 exactly attributed settled turns with its existing
 writes. Ambiguous attribution remains excluded; this is not a log of every upstream
 request. Null means no matching retained record, including eviction. A newer served,
 canceled or other record without a terminal error supersedes older error display.
-Success uses exactly `{ok: true, contract_version: 16, provenance: TurnProvenance | null}`;
+Success uses exactly `{ok: true, contract_version: 17, provenance: TurnProvenance | null}`;
 there is no `success` field or envelope exception.
 
 Local `engine_down` records may also contain `local_error_detail`, an OS-generated
@@ -1432,7 +1444,7 @@ ambiguous absence are explicit and distinguishable from an unknown turn:
 ```json
 {
   "ok": false,
-  "contract_version": 16,
+  "contract_version": 17,
   "error": "provenance_unavailable",
   "detail": "models.provenance.direct_mode"
 }
@@ -1441,7 +1453,7 @@ ambiguous absence are explicit and distinguishable from an unknown turn:
 ```json
 {
   "ok": false,
-  "contract_version": 16,
+  "contract_version": 17,
   "error": "provenance_unavailable",
   "detail": "models.provenance.attribution_ambiguous"
 }
@@ -1775,7 +1787,7 @@ contract harness and API-boundary tests enforce:
 <!-- authority-consumer: turn.served turn.exhausted turn.request_nonfallback turn.engine_down turn.streamed_fallback turn.no_candidate.unconfigured turn.no_candidate.unlisted turn.no_candidate.blocked turn.canceled -->
 <!-- authority-consumer: mutation.source_metadata mutation.credential_replace mutation.source_refresh mutation.model_create mutation.model_efforts mutation.model_delete mutation.source_delete mutation.route_replace mutation.route_restore mutation.default_sources -->
 <!-- authority-consumer: import.keep_native import.copy_key import.reauth import.controlled -->
-<!-- authority-consumer: protocol anthropic openai_responses openai_chat google -->
+<!-- authority-consumer: protocol anthropic openai_responses openai_chat google search -->
 <!-- authority-consumer: observation.outcome observed ambiguous unreachable authentication_failed adapter_error timeout -->
 <!-- authority-consumer: observation.discovery succeeded failed not_attempted -->
 <!-- authority-consumer: runtime.health ok degraded down not_installed installing not_started -->

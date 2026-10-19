@@ -1,5 +1,5 @@
 {
-  "contract_version": 16,
+  "contract_version": 17,
   "input_generation": {
     "mode": "same_run_live_files",
     "external_snapshot": "content_fingerprint_required"
@@ -63,12 +63,12 @@
       "allowed_property_values": [
         {
           "file": "docs/plans/model-hub-contracts/source.schema.json",
-          "property_path": ["allOf", 0, "then", "properties", "vendor"],
+          "property_path": ["allOf", 1, "then", "properties", "vendor"],
           "values": ["custom"]
         },
         {
           "file": "docs/plans/model-hub-contracts/source-create.schema.json",
-          "property_path": ["allOf", 0, "then", "properties", "vendor"],
+          "property_path": ["allOf", 1, "then", "properties", "vendor"],
           "values": ["custom"]
         }
       ],
@@ -614,13 +614,14 @@
         {
           "kind": "schema_vocabulary",
           "schema": "source-probe-result.schema.json",
-          "paths": ["/properties/protocol"]
+          "paths": ["/properties/protocol"],
+          "exclude": ["search"]
         },
         {
           "kind": "schema_vocabulary",
           "schema": "observation-result.schema.json",
           "paths": ["/properties/protocol"],
-          "exclude": [null]
+          "exclude": [null, "search"]
         }
       ]
     },

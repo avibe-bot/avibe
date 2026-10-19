@@ -271,7 +271,7 @@ def source_model_retired(source: ModelHubSourceConfig, model_id: str) -> bool:
 
 
 def source_supports_passthrough(source: ModelHubSourceConfig) -> bool:
-    return source.kind == "api_key" and source.supply_channel == "hub"
+    return source.kind == "api_key" and source.supply_channel == "hub" and source.protocol != "search"
 
 
 def effective_model_route(

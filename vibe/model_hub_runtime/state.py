@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 _CREDENTIAL_REF_RE = re.compile(r"^cred_[A-Za-z0-9_-]{6,128}$")
 _BEARER_CREDENTIAL_REF_RE = re.compile(r"^cred_auth_bearer_[0-9a-f]{32}$")
 _SOURCE_ID_RE = re.compile(r"^src_[a-z0-9]{8,}$")
-_PROTOCOLS = {"anthropic", "openai_responses", "openai_chat", "google"}
+_PROTOCOLS = {"anthropic", "openai_responses", "openai_chat", "google", "search"}
 # The engine writes its file log to ``logs`` under its working directory, the instance directory, only
 # when that directory already exists; otherwise it falls back to ``<auth-dir>/logs``, among the
 # credentials (CLIProxyAPI internal/logging/global_logger.go ResolveLogDirectory).
@@ -1658,6 +1658,8 @@ def _validate_source_target(
     """
 
     if credential_kind != "api_key":
+        return
+    if protocol == "search":
         return
     if protocol == "google":
         try:

@@ -10,8 +10,8 @@
 // and the PR records the server implementation and feature-flag activation
 // edge. The client never synthesizes a fallback payload shape.
 
-export const CONTRACT_VERSION = 16 as const;
-export const PERSISTED_TURN_CONTRACT_VERSIONS = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16] as const;
+export const CONTRACT_VERSION = 17 as const;
+export const PERSISTED_TURN_CONTRACT_VERSIONS = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17] as const;
 export const AGENT_CHAIN_CONTRACT_VERSION = CONTRACT_VERSION;
 export const PROBE_RESULT_CONTRACT_VERSION = CONTRACT_VERSION;
 
@@ -22,6 +22,7 @@ export const SOURCE_PROTOCOLS = [
   'openai_responses',
   'openai_chat',
   'google',
+  'search',
 ] as const;
 export type SourceProtocol = (typeof SOURCE_PROTOCOLS)[number];
 // Google is API/config-only until its picker frame is approved.
@@ -152,6 +153,8 @@ export type Source = {
   verification_pending?: string | null;
   /** Opaque identity of the latest credential or endpoint change; kept after verification. Not for display. */
   credential_generation?: string | null;
+  /** Response-only search recovery state; never persisted. */
+  trial_pending?: boolean;
   usage?: SourceUsage;
   /** Subscription identity for the row's mono sub-line (e.g. "me@gmail.com").
    *  Never secret material; may be null. */

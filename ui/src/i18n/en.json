@@ -1926,6 +1926,7 @@
           "openaiResponses": "OpenAI Responses",
           "openaiChatCompletions": "OpenAI Chat Completions",
           "google": "Google Gemini",
+          "search": "Search service",
           "idleHint": "Identified automatically once Base URL and API key are filled",
           "detecting": "Identifying the interface…",
           "manual": "Manually specify interface type",

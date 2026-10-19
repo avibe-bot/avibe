@@ -1,4 +1,4 @@
-"""Model Hub EngineAdapter interface. FINAL CONTRACT v16 (2026-10-16).
+"""Model Hub EngineAdapter interface. FINAL CONTRACT v17 (2026-10-19).
 
 This file is the canonical adapter boundary and must remain byte-identical to
 ``core/handlers/model_hub/adapter.py``. The adapter owns one-Source operations:
@@ -19,7 +19,9 @@ from typing import Any, AsyncIterator, Callable, Final, Literal, Mapping, Protoc
 from .stream_wire import ProtocolSSEState, ProtocolUsageReport
 
 ENGINE_TRANSPORT_TIMEOUT_SECONDS: Final = 60.0
-SOURCE_PROTOCOLS = ("anthropic", "openai_responses", "openai_chat", "google")
+SOURCE_PROTOCOLS = ("anthropic", "openai_responses", "openai_chat", "google", "search")
+SEARCH_RESPONSE_MAX_BYTES: Final = 8 * 1024 * 1024
+SEARCH_TRANSPORT_TIMEOUT_SECONDS: Final = 30.0
 OBSERVATION_OUTCOMES = (
     "observed",
     "ambiguous",
@@ -71,12 +73,31 @@ class OAuthCredentialRejectedError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class SearchResponse:
+    """Bounded response from one catalog search endpoint.
+
+    The body is opaque to this boundary. It contains no credential material;
+    the adapter reads the key from custody only while making the request.
+    """
+
+    http_status: int | None
+    headers: Mapping[str, str]
+    body: bytes | None
+    error: Literal["", "timeout", "connection", "redirect", "body_too_large", "invalid_endpoint"] = ""
+
+
+@dataclass(frozen=True)
+class SearchCredentialCheck:
+    outcome: Literal["pass", "balance", "limit", "invalid", "unknown"]
+
+
+@dataclass(frozen=True)
 class SourceBinding:
     """Engine-side registration of one hub-channel source (projection of config)."""
 
     source_id: str
     vendor: str
-    protocol: str  # "anthropic" | "openai_responses" | "openai_chat" | "google"
+    protocol: str  # "anthropic" | "openai_responses" | "openai_chat" | "google" | "search"
     base_url: str | None  # None => vendor official default
     credential_ref: str  # opaque handle; never secret material
     allowed_origins: tuple[str, ...]  # agent names allowed to draw on this
@@ -258,7 +279,7 @@ OBSERVATION_TERMINAL_RULES: Mapping[
     ObservationOutcome.OBSERVED: ObservationTerminalRule(
         reachable=frozenset({True}),
         authenticated=frozenset({True}),
-        protocols=frozenset(SOURCE_PROTOCOLS),
+        protocols=frozenset(set(SOURCE_PROTOCOLS) - {"search"}),
         discoveries=frozenset(
             {
                 ObservationDiscovery.SUCCEEDED,
@@ -519,8 +540,9 @@ class EngineAdapter(Protocol):
         auth_scheme: str | None = None,
         on_reserved: Callable[[str], None] | None = None,
     ) -> str:
-        """Store an API-key secret in the ENGINE-OWNED credential store and
-        return the opaque ``credential_ref``.
+        """Store an API-key secret in the Model Hub credential store. Search
+        Sources use this same opaque-ref custody, but are never rendered into
+        engine configuration or sent through the engine.
 
         ``secret`` is transient: the adapter must never log it; L2 must never
         persist it (config stores refs only). When supplied, ``on_reserved`` is
@@ -530,6 +552,29 @@ class EngineAdapter(Protocol):
         they are created engine-side by the OAuth flow and surfaced via
         ``OAuthFlowState.credential_ref``. ``auth_scheme`` optionally preserves
         an explicit static transport; omission retains legacy semantics."""
+        ...
+
+    async def check_search_credential(
+        self,
+        credential_ref: str,
+        catalog: Mapping[str, Any],
+    ) -> SearchCredentialCheck:
+        """Run one catalog free check without exposing its key or response."""
+        ...
+
+    async def search(
+        self,
+        source_id: str,
+        vendor: str,
+        service_id: str,
+        credential_ref: str,
+        request: Mapping[str, Any],
+    ) -> SearchResponse:
+        """Make exactly one catalog-host search request from Model Hub custody."""
+        ...
+
+    async def revoke_search_credential(self, credential_ref: str) -> None:
+        """Remove a search-only credential from Model Hub custody."""
         ...
 
     async def provision_oauth_credential(

@@ -4796,6 +4796,19 @@ async def model_hub_source_credential_put(source_id):
         return _model_hub_error(exc)
 
 
+@app.route("/api/models/sources/<source_id>/reenable", methods=["POST"])
+async def model_hub_source_reenable_post(source_id):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        if request.json not in (None, {}):
+            raise ModelHubError("discovery_failed")
+        result = await _model_hub_service().reenable_search_source(source_id)
+        return _model_hub_success(**result)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
 @app.route("/api/models/sources/<source_id>/reauth", methods=["POST"])
 async def model_hub_source_reauth_post(source_id):
     from core.handlers.model_hub import ModelHubError

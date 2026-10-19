@@ -145,6 +145,10 @@ def _append_source(
     store: EngineStateStore,
     generation: str = "0",
 ) -> None:
+    if source.protocol == "search":
+        # Tool-only Sources are owned by Model Hub's search adapter, never by
+        # CLIProxyAPI. They must not cause a provider or model registration.
+        return
     credential = store.credential_metadata(source.credential_ref)
     if credential["kind"] == "oauth":
         # OAuth credentials are engine auth files, not YAML credential values.
