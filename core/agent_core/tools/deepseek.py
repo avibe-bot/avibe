@@ -161,18 +161,26 @@ async def _post_direct(url: str, payload: Mapping[str, Any], key: str) -> Any:
     }
     try:
         async with httpx.AsyncClient(follow_redirects=False, trust_env=False, timeout=TIMEOUT_SECONDS) as client:
-            response = await client.post(url, json=payload, headers=headers)
+            async with client.stream("POST", url, json=payload, headers=headers) as response:
+                if response.status_code != 200:
+                    body = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        body.extend(chunk)
+                        if len(body) > 64 * 1024:
+                            break
+                    raise _ToolError(_http_error_message(response.status_code, bytes(body), key))
+                body = bytearray()
+                async for chunk in response.aiter_bytes():
+                    body.extend(chunk)
+                    if len(body) > MAX_RESPONSE_BYTES:
+                        raise _ToolError("DeepSeek API response exceeded the size limit")
     except httpx.TimeoutException:
         raise _ToolError(f"DeepSeek API timed out after {TIMEOUT_SECONDS:g}s") from None
     except httpx.HTTPError as error:
         raise _ToolError(f"DeepSeek API is unreachable: {type(error).__name__}") from None
-    if response.status_code != 200:
-        raise _ToolError(_http_error_message(response.status_code, response.content, key)) from None
-    if len(response.content) > MAX_RESPONSE_BYTES:
-        raise _ToolError("DeepSeek API response exceeded the size limit")
     try:
-        return response.json()
-    except ValueError:
+        return json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
         raise _ToolError("DeepSeek API returned a response that is not JSON") from None
 
 
@@ -357,10 +365,13 @@ def _search_text(results: Sequence[Mapping[str, Any]]) -> str:
             break
         blocks.append(block)
         used += len(block)
-    header = f"Found {len(results)} result(s):"
-    body = "\n".join(blocks)
+    body = "".join(blocks)
     suffix = f"\n\n[output truncated: {omitted} more result(s) omitted]" if omitted else ""
-    return f"{header}{body}{suffix}"
+    text = f"{header}{body}{suffix}"
+    if len(text) > MAX_OUTPUT_CHARS:
+        marker = "\n\n[output truncated]"
+        text = text[: max(0, MAX_OUTPUT_CHARS - len(marker))] + marker
+    return text
 
 
 class DeepSeekSearchTool:

@@ -142,6 +142,39 @@ async def test_direct_mode_refuses_redirects_instead_of_forwarding_the_key() -> 
         thread.join(timeout=5)
 
 
+async def test_direct_response_is_read_with_a_bound(monkeypatch) -> None:
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            body = b"x" * (100 * 1024)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except BrokenPipeError:
+                pass
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(deepseek, "MAX_RESPONSE_BYTES", 1024)
+    try:
+        with pytest.raises(deepseek._ToolError) as caught:
+            await deepseek._post_direct(
+                f"http://127.0.0.1:{server.server_port}/v1/tools/search", {"query": "q"}, "test-key"
+            )
+        assert "size limit" in str(caught.value)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 async def test_content_caps_are_applied(monkeypatch) -> None:
     async def post(path, payload, env):
         return {"results": [{"title": "T", "url": "https://e", "content": "c" * (deepseek.MAX_CONTENT_CHARS + 1)}]}
@@ -165,7 +198,7 @@ async def test_search_output_has_one_total_budget(monkeypatch) -> None:
     async def post(path, payload, env):
         return {
             "results": [
-                {"title": f"T{i}", "url": f"https://e/{i}", "summary": "s" * 800}
+                {"title": f"T{i}", "url": f"https://e/{i}", "summary": "s" * 2000}
                 for i in range(50)
             ]
         }
