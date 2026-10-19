@@ -226,7 +226,7 @@ Hosted tools §6 holds, with these changes:
 | 402 (balance exhausted) | next candidate | `needs_action`, balance (model-hub.md `credential.account_classified`) |
 | a plan or spending limit the catalog names (Tavily 432 plan limit, 433 pay-as-you-go limit) | next candidate | `needs_action`, the existing `models.source.needs_action.spend_limit_reached` detail; the catalog row adds a vendor remedy line naming both repairs (Tavily: "在 Tavily 后台升级套餐或提高该密钥的用量上限（432），或提高按量上限（433）", since Tavily's 432 is either the key's limit or the plan's), so no new state is needed |
 | 408, 429, 5xx, timeout, connection failure | next candidate | none; a service cooldown (below) |
-| 3xx (the redirect is refused, §3.3) | next candidate, `service_unavailable` | none |
+| 3xx (the redirect is refused, §3.3) | next candidate, `service_unavailable` | none; a service cooldown |
 | a 4xx the catalog row names as query-specific (for example a malformed query) | next candidate, `service_refused` | none |
 | any other 4xx (404, 405, 410 and the like: the endpoint or protocol, which a different query cannot fix) | next candidate, `service_unavailable` | none; a service cooldown |
 | a body the mapping cannot read (`service_unreadable`) | next candidate | none; a service cooldown, because a 200 may be billed |
@@ -289,7 +289,8 @@ Hosted tools §6 holds, with these changes:
   2. a `blocked` skip, or a `disabled` skip when every candidate is disabled: `search_sources_blocked`; the user
      repairs a Source or turns its search back on. A Source the user turned off never decides the reason while an
      enabled candidate exists, so toggling an unused Source does not change it (it still appears in `attempts[]`);
-  3. a sent request's failure: the last one, as today;
+  3. a tried candidate's failure, whether its request was sent or failed before `on_sent`: the last one, as
+     today (a pre-send transport failure gives `service_unavailable`);
   4. a `cooling` or `unavailable` skip: `service_unavailable`; wait, or the Source changed and the next turn uses
      the new configuration.
 
@@ -330,7 +331,8 @@ Hosted tools §6 holds, with these changes:
   billed (a read timeout after sending): it is listed with no `cost`, which already makes the chain total a lower
   bound ("至少"). A service attempt is
   billable only when it answered 200. Every service attempt the catalog does not bill records an explicit
-  `cost: {usd: 0, basis: "list"}`, so the card shows $0 rather than an unknown cost: a non-200 response, DeepSeek's
+  `cost: {usd: 0, basis: "list"}`, so the card shows $0 rather than an unknown cost (a zero is exact: it never makes
+  a chain total approximate, so the total's basis is chosen from its non-zero figures only): a non-200 response, DeepSeek's
   empty answer, a failure before the request was sent (connect failure), and an outcome the catalog row's billing
   rule declares unbilled (DeepSeek: timeouts, per its Search & Fetch billing rule, 2026-10-20). The adapter's
   structured outcome carries the HTTP status once one arrived, so a body-read failure, timeout or stop after the
@@ -564,7 +566,7 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
   their reader and writer types, and the six `service_*` codes in `HOSTED_ERROR_CODES`, with copy on every surface; and a
   service executor origin. `Protocol` and the assistant-message `Origin` stay unchanged (four model protocols); a
   new `ServiceExecutorOrigin` definition `{provider, api, model}` has `api` fixed to the const `"search_api"`,
-  `provider` the vendor and `model` the catalog service id, and `HostedRecord.executor_origin` becomes `oneOf` the
+  `provider` the vendor and `model` the catalog service id, and `ProxyExecution.executor_origin` (today a `$ref` to `Origin`) becomes `oneOf` the
   released `Origin` and `ServiceExecutorOrigin`. C-1 owns the definition; the Python reader and writer types in
   the agent core gain the matching variant, and the gateway writes it.
 - C-6 (`agent-core-contracts/model-hub-consumer.md`, the search-call items in §2, and its validation fixtures):
