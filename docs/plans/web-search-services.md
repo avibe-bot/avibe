@@ -433,8 +433,9 @@ Hosted tools §6 holds, with these changes:
     appears only there, never in `sources[]`, whose `models` stay non-empty; a DeepSeek Source keeps its model usage
     in `sources[]` and its search usage in `services[]`.
   - `totals` and each `days[]` entry keep counting model calls. Their `api_cost_usd` adds the services' list
-    valuation, the new `service_reported_usd` holds the reported costs, and `api_cost_lower_bound` is set when a
-    service row has `lower_bound: true` (an unreadable content call, above).
+    valuation, the new `service_reported_usd` holds the reported costs, and `api_cost_lower_bound` is set when any
+    service row it includes is a lower bound for either reason: its stored `lower_bound: true` (an unreadable
+    content call, above) or a quantity the current catalog cannot price.
   - The Usage tab shows a "搜索服务" table from `services[]` (requests, billable requests, cost) below the Source
     table; the total cost line is `api_cost_usd`, with the reported figure shown beside it. The label comes from
   the catalog, not from model inventory (§8).
