@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, useLayoutEffect, type CSSProperties, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
-import { ChevronUp, ExternalLink, KeyRound, X } from 'lucide-react';
+import { ChevronUp, KeyRound, X } from 'lucide-react';
 
 import { ApiError, useApi, type InboxSession, type RunningAgent, type VaultRequest, type WorkbenchMessage } from '@/context/ApiContext';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
@@ -19,6 +19,7 @@ import { ShowPageVoiceDictation } from '@/lib/showPageVoiceDictation';
 import { VoiceTranscriptionError } from '@/lib/voiceTranscription';
 
 import { PetAvatar, type PetPose } from './PetAvatar';
+import { PetOpenButton } from './PetOpenButton';
 import { onPetHover, petBridge, sessionLink, vaultRequestLink } from './petBridge';
 import { petPanel, usePetPanel } from './petPanel';
 import { petComposer, usePetComposer } from './petComposer';
@@ -36,7 +37,17 @@ const DISMISS_EXIT_MS = 500;
 const STOP_CONFIRM_MS = 3000;
 const STOP_LINGER_MS = 2500;
 const STACK_HEIGHT = 304; // 292px scroll box + 6px panel padding on each side.
-const FADE_PX = 32;
+/**
+ * A scroll edge fade band (spec §7.5): its full height, and the mask's alpha
+ * ramp across it as `[alpha, fraction of the band]` stops between transparent
+ * at the edge and opaque at the band's inner end.
+ */
+type FadeProfile = { size: number; ramp: readonly (readonly [number, number])[] };
+const CARD_FADE: FadeProfile = { size: 32, ramp: [] };
+// The history is denser text, so its band is taller and darker at the edge.
+const HISTORY_FADE: FadeProfile = { size: 48, ramp: [[0.12, 0.35], [0.55, 0.7]] };
+// How close to the end of the history still counts as reading at the bottom.
+const HISTORY_STICK_PX = 8;
 const MAX_COLLAPSED_LAYERS = 3;
 const MAX_COLLAPSED_COUNT = 99;
 const EMPTY_INBOX: InboxSession[] = [];
@@ -1020,14 +1031,14 @@ const CollapsedCards: React.FC<{ cards: PetCard[]; onOpen: () => void; t: (key: 
  * Scroll edge fades (spec §7.5): each edge fades only once there is content
  * past it. Recomputed on scroll and whenever the box or its content resizes.
  */
-function useScrollEdgeFade(contentKey: unknown) {
+function useScrollEdgeFade(contentKey: unknown, profile: FadeProfile) {
   const ref = useRef<HTMLDivElement>(null);
   const [edges, setEdges] = useState({ top: 0, bottom: 0 });
   const measure = useCallback(() => {
     const node = ref.current;
     if (!node) return;
-    setEdges({ top: Math.min(FADE_PX, Math.max(0, node.scrollTop)), bottom: Math.min(FADE_PX, Math.max(0, node.scrollHeight - node.clientHeight - node.scrollTop)) });
-  }, []);
+    setEdges({ top: Math.min(profile.size, Math.max(0, node.scrollTop)), bottom: Math.min(profile.size, Math.max(0, node.scrollHeight - node.clientHeight - node.scrollTop)) });
+  }, [profile.size]);
   useEffect(() => {
     const node = ref.current;
     if (!node) return undefined;
@@ -1038,12 +1049,16 @@ function useScrollEdgeFade(contentKey: unknown) {
     for (const child of node.children) observer.observe(child);
     return () => observer.disconnect();
   }, [measure, contentKey]);
-  const mask = `linear-gradient(to bottom, transparent 0, #000 ${edges.top}px, #000 calc(100% - ${edges.bottom}px), transparent 100%)`;
+  // Each band is as tall as the content past that edge, up to the profile's
+  // size, so there is no fade at the top before scrolling or at the end.
+  const top = profile.ramp.map(([alpha, at]) => `rgba(0,0,0,${alpha}) ${edges.top * at}px`);
+  const bottom = [...profile.ramp].reverse().map(([alpha, at]) => `rgba(0,0,0,${alpha}) calc(100% - ${edges.bottom * at}px)`);
+  const mask = `linear-gradient(to bottom, ${['transparent 0', ...top, `#000 ${edges.top}px`, `#000 calc(100% - ${edges.bottom}px)`, ...bottom, 'transparent 100%'].join(', ')})`;
   return { ref, measure, style: { maskImage: mask, WebkitMaskImage: mask } satisfies CSSProperties };
 }
 
 const ExpandedCards: React.FC<{ cards: PetCard[]; leaving: string[]; onReference: (card: PetCard) => void; onDismiss: (card: PetCard) => void; stops: Record<string, StopPhase>; onStop: (card: PetCard) => void; t: (key: string, options?: Record<string, unknown>) => string }> = ({ cards, leaving, onReference, onDismiss, stops, onStop, t }) => {
-  const { ref: fadeRef, measure: measureFade, style: fadeStyle } = useScrollEdgeFade(cards.length);
+  const { ref: fadeRef, measure: measureFade, style: fadeStyle } = useScrollEdgeFade(cards.length, CARD_FADE);
   return (
     <div className="pet-mini-panel">
       <div ref={fadeRef} onScroll={measureFade} className="pet-mini-scroll" style={fadeStyle}>
@@ -1095,7 +1110,7 @@ const CardBody: React.FC<{ card: PetCard; expanded: boolean; t: (key: string, op
               {phase === 'confirm' ? stopText : phase === 'stopping' ? <span className="pet-mini-spinner" aria-hidden /> : <StopIcon />}
             </button>
           ) : null}
-          {card.canOpen && <button type="button" className="pet-mini-open" onClick={() => void petBridge.open(sessionLink(card.sessionId))} aria-label={t('pet.openInAvibe')} title={t('pet.openInAvibe')}><ExternalLink className="size-3.5" /></button>}
+          {card.canOpen && <PetOpenButton link={sessionLink(card.sessionId)} placement="start" />}
         </div>
       )}
     </article>
@@ -1112,7 +1127,7 @@ const MainReplyBubble: React.FC<Omit<MainDetailProps, 'visible'> & { open: boole
         : last?.text?.trim() ? t('pet.repliedPrefix', { text: last.text.trim() })
           : t('pet.waiting');
   const detailId = useId();
-  const { ref: fadeRef, measure: measureFade, style: fadeStyle } = useScrollEdgeFade(open);
+  const { ref: fadeRef, measure: measureFade, style: fadeStyle } = useScrollEdgeFade(open, HISTORY_FADE);
   // The toggle stays first in the DOM, so focus order is unchanged, but the
   // bubble lays out bottom-up: the toggle keeps its place at the bottom and
   // the history opens above it, so expanding never moves what was clicked.
@@ -1124,6 +1139,9 @@ const MainReplyBubble: React.FC<Omit<MainDetailProps, 'visible'> & { open: boole
       </button>
       <div id={detailId} className={clsx('pet-mini-detail', open && 'is-open')}>
         <div className="pet-mini-detail-clip" inert={!open || undefined}>
+          {/* Pinned outside the scroll box, so it stays put while the history
+              scrolls and is not faded by its edge mask. */}
+          {open && <PetOpenButton link={sessionLink(props.binding)} placement="below-end" className="pet-mini-history-open" />}
           <div ref={fadeRef} onScroll={measureFade} className="pet-mini-bubble-history" style={fadeStyle}><MainDetail {...props} visible={open} /></div>
         </div>
       </div>
@@ -1134,19 +1152,32 @@ const MainReplyBubble: React.FC<Omit<MainDetailProps, 'visible'> & { open: boole
 const MainDetail: React.FC<MainDetailProps> = (props) => {
   const { t } = useTranslation();
   const lastResultRef = useRef<HTMLDivElement>(null);
+  const innerRef = useRef<HTMLDivElement>(null);
   const resultKey = `${props.binding}\u0000${props.exchange.results.at(-1)?.id ?? ''}`;
   const [seenResult, setSeenResult] = useState<{ epoch: PetSurfaceEpoch; key: string } | null>(null);
+  // Chat-style: open at the very bottom, where the end of the newest reply,
+  // its actions and notices sit right above the toggle row. While open, new
+  // content keeps a reader who is at the bottom pinned there, and leaves one
+  // who has scrolled up where they are. A different latest input, which may be
+  // drawn after a promoted result (`answersEarlierInput`), re-opens at the end.
   useLayoutEffect(() => {
-    if (!props.visible) return;
-    const result = lastResultRef.current;
-    const history = result?.closest<HTMLElement>('.pet-mini-bubble-history');
-    // Open at the end, where the newest result sits right above its actions and
-    // the toggle row. If the result and its actions do not fit, start at the
-    // result instead, just past the top edge fade, so it is read from its first
-    // line rather than from under the fade. A later input drawn after a promoted
-    // result (`answersEarlierInput`) moves the end, so a new input re-scrolls.
-    if (result && history) history.scrollTop = Math.max(0, Math.min(history.scrollHeight - history.clientHeight, result.offsetTop - FADE_PX));
-  }, [props.visible, resultKey, props.exchange.user?.id]);
+    if (!props.visible) return undefined;
+    const inner = innerRef.current;
+    const history = inner?.closest<HTMLElement>('.pet-mini-bubble-history');
+    if (!inner || !history) return undefined;
+    const toBottom = () => { history.scrollTop = history.scrollHeight - history.clientHeight; };
+    let pinned = true;
+    const onScroll = () => { pinned = history.scrollHeight - history.clientHeight - history.scrollTop <= HISTORY_STICK_PX; };
+    toBottom();
+    history.addEventListener('scroll', onScroll);
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => { if (pinned) toBottom(); });
+    observer?.observe(inner);
+    observer?.observe(history);
+    return () => {
+      history.removeEventListener('scroll', onScroll);
+      observer?.disconnect();
+    };
+  }, [props.visible, props.exchange.user?.id]);
   useEffect(() => {
     const node = lastResultRef.current;
     if (!props.visible || !node) return;
@@ -1165,7 +1196,7 @@ const MainDetail: React.FC<MainDetailProps> = (props) => {
     .filter((message) => message.type === 'user' || message.type === 'result').slice(-6);
   const currentUser = props.exchange.user && <div className="pet-mini-detail-user"><Markdown content={props.exchange.user.text} references={(props.exchange.user.content as { references?: MentionReference[] })?.references} softBreaks /></div>;
   return (
-    <div className="pet-mini-detail-inner">
+    <div ref={innerRef} className="pet-mini-detail-inner">
       {history.map((message) => <div key={message.id} className={message.author === 'user' ? 'pet-mini-detail-user' : 'pet-mini-detail-result'}><Markdown content={message.text} references={(message.content as { references?: MentionReference[] })?.references} softBreaks /></div>)}
       {!props.exchange.answersEarlierInput && currentUser}
       {props.exchange.results.map((message, index) => <div ref={index === props.exchange.results.length - 1 ? lastResultRef : undefined} key={message.id} className="pet-mini-detail-result"><Markdown content={message.text} references={(message.content as { references?: MentionReference[] })?.references} softBreaks /></div>)}
@@ -1179,11 +1210,11 @@ const MainDetail: React.FC<MainDetailProps> = (props) => {
       {props.running && <p className="pet-mini-detail-muted">{t('pet.thinking')}</p>}
       {props.voiceNeedsCloud && <p className="pet-mini-detail-muted">{t('pet.voice.cloudRequired')}</p>}
       {props.queued && <p className="pet-mini-detail-muted">{t('pet.queued')}</p>}
-      {!props.exchange.unreadComplete && <Button variant="link" size="sm" className="px-0" onClick={() => void petBridge.open(sessionLink(props.binding))}>{t('pet.moreInAvibe')}</Button>}
+      {/* The pinned Open in Avibe button is where the rest of the tail lives. */}
+      {!props.exchange.unreadComplete && <p className="pet-mini-detail-muted">{t('pet.moreInAvibe')}</p>}
       {props.vaultRequestIds.map((id) => <Button key={id} variant="outline" size="sm" className="justify-start gap-2" onClick={() => void petBridge.open(vaultRequestLink(id))}><KeyRound className="size-3.5" />{t('pet.vaultRequest')}</Button>)}
       {props.canChat && !props.uncertain && props.quickReplies && <QuickReplies key={props.quickReplies.message.id} options={props.quickReplies.options} chosen={null} onChoose={(choice) => props.onChoose(props.quickReplies!.message, choice)} />}
       {props.uncertain && <div className="pet-mini-detail-notice" role="status"><p>{t('newSession.sendUncertain')}</p><Button variant="link" size="sm" className="px-0" onClick={props.onInspect}>{t('pet.openInAvibe')}</Button></div>}
-      <Button variant="link" size="sm" className="px-0" onClick={() => void petBridge.open(sessionLink(props.binding))}><ExternalLink className="mr-1 size-3.5" />{t('pet.openInAvibe')}</Button>
     </div>
   );
 };

@@ -173,9 +173,31 @@ position in both states, so collapsing needs no mouse travel; the bubble's
 bottom edge and tail never move. The toggle stays first in the DOM, so focus
 order is unchanged; CSS places the detail above it, and the toggle's
 `aria-controls` names the detail. The divider sits between the history and the
-toggle row. On open the history shows the newest result, which is closest to
-the toggle row, with the §7.5 edge fades. Quick replies, Vault handoffs, notices and Open in
-Avibe follow it at the end of the detail, right above the toggle row. Collapsed shows an up chevron and expanded a down chevron.
+toggle row. On open the history scrolls to the very bottom, chat-style: the end
+of the newest result and the quick replies, Vault handoffs and notices that
+follow it sit right above the toggle row, with the §7.5 edge fades (no bottom
+fade, since the end is reached). While it is open, new content keeps a reader
+who is at the bottom (within 8px) pinned there and leaves one who has scrolled
+up where they are. Mark-read needs any part of the latest result in view. Collapsed shows an up chevron and expanded a down chevron.
+
+Open in Avibe is an icon-only button (the card's `ExternalLink` open button,
+28px, on a solid surface) pinned to the top-right corner of the open history,
+8px from the bubble's outer edge on both the top and the right, which centres
+it on the 22px corner arc,
+outside the scroll box: it stays put while the history scrolls, is never faded
+by the edge mask, and exists only while the history is open. Its accessible name is
+"Open in Avibe", and instead of a native `title` it shows a pet-styled tooltip
+with that text: after about 350ms of hover, at once on keyboard focus, gone on
+leave, blur or Escape (which it takes before the pet's own Escape). The tooltip
+sits below the icon, right-aligned; the activity cards' open button uses the
+same button and tooltip, placed to its left so the card scroll box cannot clip
+it. Both are portalled to the pet stage. Hover only reaches the page while the
+pet window receives hover (§5.1), which it does once opening the history or the
+cards has made it key. The history's top padding reserves that corner,
+so at the top of the scroll it covers no text. An incomplete unread tail keeps
+its "More replies in Avibe" notice as plain text; the pinned button is the way
+there. The history's scrollbar is hidden like the card list's (§3.2); the edge
+fades show there is more.
 
 Detail retains the 280ms grid / 200ms opacity transition and closes on stack
 collapse. Its own scroll region fits the existing window; opening it never
@@ -413,9 +435,14 @@ Two beats, so the exit reads before the reflow:
 
 - Mask the scroll box: `linear-gradient(to bottom, transparent 0, #000
   {top}px, #000 calc(100% − {bottom}px), transparent 100%)`.
-  - `top = min(32, scrollTop)`: no fade at the top until the user scrolls.
-  - `bottom = min(32, scrollHeight − clientHeight − scrollTop)`: no fade once
+  - `top = min(band, scrollTop)`: no fade at the top until the user scrolls.
+  - `bottom = min(band, scrollHeight − clientHeight − scrollTop)`: no fade once
     the end is reached.
+- The card list uses a 32px band with that linear ramp.
+- The reply history (§4.2) uses a taller, darker 48px band. Its ramp fades the
+  outer part of the band strongly: from the edge, `transparent 0`,
+  `rgba(0,0,0,.12)` at 35% of the band, `rgba(0,0,0,.55)` at 70%, and `#000` at
+  100%, mirrored at the bottom.
 - Recompute on scroll, and whenever the box or its content resizes
   (ResizeObserver on both).
 

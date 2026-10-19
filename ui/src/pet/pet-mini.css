@@ -847,8 +847,56 @@ to {
   max-height:min(292px,max(0px,calc(100dvh - 225px - var(--pet-collapsed-height,0px))));
   overflow:auto;
   overscroll-behavior:contain;
-  scrollbar-width:thin}
-/* The history's top edge is now the bubble's rounded top, so it gets more room
-   than the bottom edge, which meets the divider. */
-.pet-mini-bubble-history .pet-mini-detail-inner { padding:12px 14px 8px }
+  /* Hidden like the card list (§3.2); the edge fades show there is more. */
+  scrollbar-width:none}
+.pet-mini-bubble-history::-webkit-scrollbar {
+  display:none}
+/* The top padding reserves the corner for the pinned Open in Avibe button
+   (8px inset + 28px + 4px), so at the top of the scroll it covers no text. */
+.pet-mini-bubble-history .pet-mini-detail-inner { padding:40px 14px 8px }
+/* Open in Avibe for the main history: the card open button's look on a solid
+   surface, so it stays legible over the top fade and over scrolled text. */
+.pet-mini-history-open {
+  position:absolute;
+  z-index:3;
+  /* 8px from the bubble's outer edge on both sides (7px here, inside its 1px
+     border). That centres the 28px circle on the 22px corner arc, so the gap
+     to the border is the same 8px along the top, the side and the curve. */
+  top:7px;
+  right:7px;
+  width:28px;
+  height:28px;
+  background:color-mix(in srgb,var(--pet-ink) 8%,var(--pet-card))}
+.pet-mini-history-open:hover {
+  background:color-mix(in srgb,var(--pet-ink) 14%,var(--pet-card))}
+/* Pet-styled tooltip for the Open in Avibe buttons (PetOpenButton), placed in
+   viewport coordinates by the component. No shadow: the transparent window
+   would clip it (§3.2), so the ink border defines the edge. */
+.pet-mini-tooltip {
+  position:fixed;
+  z-index:50;
+  max-width:calc(100vw - 8px);
+  overflow:hidden;
+  padding:4px 8px;
+  border:1px solid color-mix(in srgb,var(--pet-ink) 14%,transparent);
+  border-radius:8px;
+  color:var(--pet-ink);
+  background:var(--pet-card);
+  font-size:12px;
+  line-height:16px;
+  white-space:nowrap;
+  text-overflow:ellipsis;
+  pointer-events:none;
+  animation:pet-mini-tooltip-in 120ms ease both}
+@keyframes pet-mini-tooltip-in {
+  from {
+  opacity:0}
+}
+@media (prefers-reduced-motion: reduce) {
+  .pet-mini-tooltip {
+  animation:none}
+}
+.pet-mini-history-open:focus-visible {
+  outline:2px solid var(--mint);
+  outline-offset:2px}
 .pet-mini-swap:has(.pet-mini-collapsed) { padding-bottom:14px }

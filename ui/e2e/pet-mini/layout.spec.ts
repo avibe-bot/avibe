@@ -364,7 +364,8 @@ for (const theme of ['light', 'dark']) {
           .map((animation) => animation.finished.catch(() => {})));
       });
       const history = page.locator('.pet-mini-bubble-history');
-      for (const name of ['在 Avibe 中打开', '需要授权，在 Avibe 中打开', '继续']) {
+      // Open in Avibe is pinned outside the scroll box; see the history test below.
+      for (const name of ['需要授权，在 Avibe 中打开', '继续']) {
         const button = history.getByRole('button', { name, exact: true });
         await expect(button).toBeVisible();
         const bounds = await button.boundingBox(), box = await history.boundingBox();
@@ -372,6 +373,7 @@ for (const theme of ['light', 'dark']) {
         expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(box!.y + box!.height + 1);
       }
       expect(await history.evaluate((node) => node.scrollHeight <= node.clientHeight + 1)).toBe(true);
+      expect(await history.evaluate((node) => Math.abs(node.scrollHeight - node.clientHeight - node.scrollTop))).toBeLessThanOrEqual(1);
       expect((await page.locator('.pet-mini-collapsed').boundingBox())!.y).toBeGreaterThanOrEqual(0);
       expect(await avatar.boundingBox()).toEqual(anchor);
       await page.locator('.pet-mini-collapsed').click();
@@ -548,15 +550,13 @@ for (const theme of ['light', 'dark']) {
     expect(box.y).toBeGreaterThanOrEqual(0);
     // The newest result is shown on open, so the earlier turns sit scrolled
     // away under the top edge fade.
-    // It must also sit clear of both edge fades, not merely inside the box.
+    // Chat-style: it opens at the very bottom, so there is no bottom fade and
+    // the newest result is in view right above the toggle row.
+    expect(await history.evaluate((node) => Math.abs(node.scrollHeight - node.clientHeight - node.scrollTop))).toBeLessThanOrEqual(1);
+    expect(await history.evaluate((node) => node.scrollTop)).toBeGreaterThan(0);
     const last = (await history.locator('.pet-mini-detail-result').last().boundingBox())!;
-    const fades = await history.evaluate((node) => ({
-      top: Math.min(32, node.scrollTop),
-      bottom: Math.min(32, node.scrollHeight - node.clientHeight - node.scrollTop),
-    }));
-    expect(fades.top).toBeGreaterThan(0);
-    expect(last.y).toBeGreaterThanOrEqual(box.y + fades.top - 1);
-    expect(last.y + last.height).toBeLessThanOrEqual(box.y + box.height - fades.bottom + 1);
+    expect(last.y + last.height).toBeGreaterThan(box.y);
+    expect(last.y).toBeLessThan(box.y + box.height);
     expect(await history.evaluate((node) => /#000 [1-9]\d*px|rgb\(0, 0, 0\) [1-9]\d*px/.test(node.style.maskImage || node.style.webkitMaskImage))).toBe(true);
     await expect(toggle.locator('svg')).not.toHaveCSS('transform', 'none');
     await expect.poll(() => page.evaluate(() => window.petFixtureMarkReads)).toEqual(['ses_main']);
@@ -565,5 +565,219 @@ for (const theme of ['light', 'dark']) {
     await expect(detail).not.toHaveClass(/is-open/);
     await settle();
     near(await toggle.boundingBox(), collapsed);
+  });
+}
+
+for (const theme of ['light', 'dark']) {
+  test(`Open in Avibe is an icon pinned to the open history's corner (${theme})`, async ({ page, browserName }) => {
+    await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long');
+    await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
+    const settle = () => page.evaluate(async () => {
+      await Promise.all(document.getAnimations()
+        .filter((animation) => animation.effect?.getTiming().iterations !== Infinity)
+        .map((animation) => animation.finished.catch(() => {})));
+    });
+    const toggle = page.locator('.pet-mini-reply-toggle');
+    const history = page.locator('.pet-mini-bubble-history');
+    const icon = page.locator('.pet-mini-reply-bubble').getByRole('button', { name: '在 Avibe 中打开', exact: true });
+    await expect(toggle).toBeVisible();
+    await expect(icon).toHaveCount(0);
+
+    await toggle.click();
+    await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).toHaveClass(/is-open/);
+    await settle();
+    await expect(icon).toBeVisible();
+    expect(await icon.getAttribute('title')).toBe('');
+    expect((await icon.innerText()).trim()).toBe('');
+    // Only the pinned icon remains: no text link inside the scrolling history.
+    await expect(history.getByRole('button', { name: '在 Avibe 中打开', exact: true })).toHaveCount(0);
+    expect(await history.evaluate((node) => getComputedStyle(node).scrollbarWidth)).toBe('none');
+
+    const pinned = (await icon.boundingBox())!;
+    expect(pinned.width).toBeGreaterThanOrEqual(28);
+    expect(pinned.height).toBeGreaterThanOrEqual(28);
+    // Inset equally from the bubble's visible edge on the top and the right.
+    const bubble = page.locator('.pet-mini-reply-bubble');
+    const insets = async () => {
+      const [outer, button] = [(await bubble.boundingBox())!, (await icon.boundingBox())!];
+      return { top: button.y - outer.y, right: outer.x + outer.width - (button.x + button.width) };
+    };
+
+    // It stays put while the history scrolls, and at the top of the scroll it
+    // covers none of the content.
+    for (const top of ['top', 'middle', 'bottom'] as const) {
+      await history.evaluate((node, top) => {
+        node.scrollTop = top === 'top' ? 0 : top === 'bottom' ? node.scrollHeight : (node.scrollHeight - node.clientHeight) / 2;
+      }, top);
+      await expect.poll(() => icon.boundingBox()).toEqual(pinned);
+      const { top: above, right } = await insets();
+      expect(Math.abs(above - right)).toBeLessThanOrEqual(0.5);
+      expect(above).toBeGreaterThanOrEqual(6);
+    }
+    await history.evaluate((node) => { node.scrollTop = 0; });
+    const first = (await history.locator('.pet-mini-detail-inner > *').first().boundingBox())!;
+    expect(first.y).toBeGreaterThanOrEqual(pinned.y + pinned.height);
+
+    // Reachable with Tab from the toggle, with a visible focus ring.
+    await toggle.focus();
+    // WebKit on macOS only tabs to buttons with Option held (Full Keyboard Access).
+    await page.keyboard.press(browserName === 'webkit' ? 'Alt+Tab' : 'Tab');
+    await expect(icon).toBeFocused();
+    await expect(icon).toHaveCSS('outline-style', 'solid');
+
+    await icon.click();
+    await expect.poll(() => page.evaluate(() => window.petFixtureOpens)).toEqual([expect.stringContaining('ses_main')]);
+
+    await toggle.click();
+    await expect(icon).toHaveCount(0);
+  });
+}
+
+test('the history fades over a taller, darker band than the card list', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long&activities=8');
+  const mask = (selector: string) => page.locator(selector).evaluate((node) => (node as HTMLElement).style.maskImage || (node as HTMLElement).style.webkitMaskImage);
+  const scrollTo = (selector: string, where: 'top' | 'middle') => page.locator(selector).evaluate((node, where) => {
+    node.scrollTop = where === 'top' ? 0 : (node.scrollHeight - node.clientHeight) / 2;
+    node.dispatchEvent(new Event('scroll'));
+    return node.scrollHeight - node.clientHeight;
+  }, where);
+
+  await page.locator('.pet-mini-collapsed').click();
+  expect(await scrollTo('.pet-mini-scroll', 'middle')).toBeGreaterThan(64);
+  await expect.poll(() => mask('.pet-mini-scroll')).toContain('rgb(0, 0, 0) 32px');
+  expect(await mask('.pet-mini-scroll')).toContain('calc(100% - 32px)');
+  expect(await mask('.pet-mini-scroll')).not.toContain('rgba');
+
+  await page.locator('.pet-mini-reply-toggle').click();
+  await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).toHaveClass(/is-open/);
+  expect(await scrollTo('.pet-mini-bubble-history', 'middle')).toBeGreaterThan(96);
+  // A 48px band that is already well faded across its outer two thirds.
+  await expect.poll(() => mask('.pet-mini-bubble-history')).toContain('rgb(0, 0, 0) 48px');
+  const middle = await mask('.pet-mini-bubble-history');
+  for (const stop of ['rgba(0, 0, 0, 0.12) 16.8px', 'rgba(0, 0, 0, 0.55) 33.6px', 'calc(100% - 48px)', 'rgba(0, 0, 0, 0.55) calc(100% - 33.6px)', 'rgba(0, 0, 0, 0.12) calc(100% - 16.8px)']) {
+    expect(middle).toContain(stop);
+  }
+  // No top fade before the history is scrolled.
+  await scrollTo('.pet-mini-bubble-history', 'top');
+  await expect.poll(() => mask('.pet-mini-bubble-history')).toContain('rgb(0, 0, 0) 0px');
+});
+
+test('the history opens at the bottom and stays pinned there only while the reader is', async ({ page }) => {
+  // Everything is read, so each live reply replaces the shown one and nothing
+  // here is about mark-read; the open-once mark-read is covered above.
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long&unread=0');
+  const history = page.locator('.pet-mini-bubble-history');
+  const gap = () => history.evaluate((node) => node.scrollHeight - node.clientHeight - node.scrollTop);
+  const height = () => history.evaluate((node) => node.scrollHeight);
+  await page.locator('.pet-mini-reply-toggle').click();
+  await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).toHaveClass(/is-open/);
+  await expect.poll(gap).toBeLessThanOrEqual(1);
+
+  // Content arriving while the reader is at the bottom keeps them there.
+  const before = await height();
+  await page.evaluate(() => window.petFixtureMessage({ id: 'live_1', author: 'agent', type: 'result', text: '新的进展。'.repeat(30) }));
+  await expect.poll(height).toBeGreaterThan(before);
+  await expect.poll(gap).toBeLessThanOrEqual(1);
+
+  // A reader who has scrolled up is left where they are.
+  await history.evaluate((node) => { node.scrollTop = 0; });
+  await expect.poll(() => history.evaluate((node) => node.scrollTop)).toBe(0);
+  const grown = await height();
+  await page.evaluate(() => window.petFixtureMessage({ id: 'live_2', author: 'agent', type: 'result', text: '又一条进展。'.repeat(60) }));
+  await expect.poll(height).toBeGreaterThan(grown);
+  expect(await history.evaluate((node) => node.scrollTop)).toBe(0);
+  expect(await page.evaluate(() => window.petFixtureMarkReads)).toEqual([]);
+
+  // A new latest input is a new place to read from: it re-opens at the end
+  // even for a reader who had scrolled up.
+  await page.evaluate(() => window.petFixtureMessage({ id: 'live_input', author: 'user', type: 'user', text: '再看看文档' }));
+  await expect(history).toContainText('再看看文档');
+  await expect.poll(gap).toBeLessThanOrEqual(1);
+});
+
+test('a latest reply taller than the history opens at its end', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&reply=long');
+  const history = page.locator('.pet-mini-bubble-history');
+  await page.locator('.pet-mini-reply-toggle').click();
+  await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).toHaveClass(/is-open/);
+  expect(await history.evaluate((node) => node.scrollHeight - node.clientHeight)).toBeGreaterThan(100);
+  await expect.poll(() => history.evaluate((node) => Math.abs(node.scrollHeight - node.clientHeight - node.scrollTop))).toBeLessThanOrEqual(1);
+  const last = (await history.locator('.pet-mini-detail-result').last().boundingBox())!;
+  const box = (await history.boundingBox())!;
+  expect(last.y + last.height).toBeGreaterThan(box.y);
+});
+
+for (const theme of ['light', 'dark']) {
+  test(`the open buttons show a pet tooltip on hover and keyboard focus (${theme})`, async ({ page, browserName }) => {
+    await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long');
+    await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
+    const tooltip = page.getByRole('tooltip');
+    // Fully on screen and on top: nothing (clip, mask, scroll box) covers it.
+    const unclipped = async () => {
+      const box = (await tooltip.boundingBox())!;
+      const viewport = page.viewportSize()!;
+      expect(box.x).toBeGreaterThanOrEqual(0);
+      expect(box.y).toBeGreaterThanOrEqual(0);
+      expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
+      expect(box.y + box.height).toBeLessThanOrEqual(viewport.height);
+      expect(await tooltip.evaluate((node) => {
+        const rect = node.getBoundingClientRect();
+        // The tooltip ignores the pointer; let hit testing see it for the check.
+        (node as HTMLElement).style.pointerEvents = 'auto';
+        const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        (node as HTMLElement).style.pointerEvents = '';
+        return hit === node;
+      })).toBe(true);
+      return box;
+    };
+
+    // History icon: below it, right-aligned.
+    await page.locator('.pet-mini-reply-toggle').click();
+    const icon = page.locator('.pet-mini-history-open');
+    await expect(icon).toBeVisible();
+    // No native tooltip applies: the nearest title on its ancestor chain, which
+    // the browser would show, is its own empty one.
+    expect(await icon.evaluate((node) => node.closest('[title]')?.getAttribute('title'))).toBe('');
+    await expect(tooltip).toHaveCount(0);
+    await icon.hover();
+    await expect(tooltip).toHaveText('在 Avibe 中打开');
+    await expect(icon).toHaveAttribute('aria-describedby', (await tooltip.getAttribute('id'))!);
+    const below = await unclipped();
+    const button = (await icon.boundingBox())!;
+    expect(below.y).toBeGreaterThanOrEqual(button.y + button.height);
+    expect(Math.abs(below.x + below.width - (button.x + button.width))).toBeLessThanOrEqual(1);
+    await page.mouse.move(2, 2);
+    await expect(tooltip).toHaveCount(0);
+    await icon.hover();
+    await expect(tooltip).toBeVisible();
+    // Escape takes the tooltip first and leaves the history open.
+    await page.keyboard.press('Escape');
+    await expect(tooltip).toHaveCount(0);
+    await expect(icon).toBeVisible();
+
+    // Keyboard focus shows it at once, without the hover delay.
+    await page.mouse.move(2, 2);
+    await page.locator('.pet-mini-reply-toggle').focus();
+    await page.keyboard.press(browserName === 'webkit' ? 'Alt+Tab' : 'Tab');
+    await expect(icon).toBeFocused();
+    await expect(tooltip).toBeVisible({ timeout: 150 });
+    await page.keyboard.press('Escape');
+    await expect(tooltip).toHaveCount(0);
+
+    // Card open button: to its left, so the card scroll box cannot clip it.
+    await page.locator('.pet-mini-collapsed').click();
+    const cardOpen = page.locator('.pet-mini-card .pet-mini-open').first();
+    await expect(cardOpen).toBeVisible();
+    // The card carries its title, which a descendant inherits unless it sets
+    // its own: an empty one suppresses that native tooltip.
+    expect(await cardOpen.evaluate((node) => node.parentElement?.closest('[title]:not([title=""])') != null)).toBe(true);
+    expect(await cardOpen.getAttribute('title')).toBe('');
+    await cardOpen.hover();
+    await expect(tooltip).toHaveText('在 Avibe 中打开');
+    const left = await unclipped();
+    const card = (await cardOpen.boundingBox())!;
+    expect(left.x + left.width).toBeLessThanOrEqual(card.x);
+    await page.mouse.move(2, 2);
+    await expect(tooltip).toHaveCount(0);
   });
 }
