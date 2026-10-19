@@ -257,7 +257,9 @@ Hosted tools §6 holds, with these changes:
   Otherwise it is the catalog's list price for the request plus any per-returned-page part for content (Exa:
   $1 / 1k pages of `contents.text`), with `basis: "list"`. A vendor that bills only non-empty results (DeepSeek)
   costs zero for an empty answer. Earlier billable attempts are `failed_attempts[]` as today; a service attempt is
-  billable only when it answered 200.
+  billable only when it answered 200. Every service attempt the catalog does not bill (any non-200, a timeout, or
+  DeepSeek's empty answer) records an explicit `cost: {usd: 0, basis: "list"}`, so the card shows $0 rather than an
+  unknown cost.
 - `record.attempts[]` (new, on the `HostedRecord`, so it exists when nothing executed) lists, in chain order,
   every candidate the chain reached, including the one `execution` names. Candidates after the one that completed
   are not reached and not listed. Each entry is `{source_id, label, outcome, error_code?, skipped?, needs_action?}`:
@@ -273,6 +275,9 @@ Hosted tools §6 holds, with these changes:
     so a model executor or a DeepSeek Source gets its own repair (re-authorize, replace the key, top up, raise the
     limit), and only a tool-only `search` Source in a balance or limit state adds "重新启用". A `disabled` entry's
     remedy is turning "用于网页搜索" back on;
+  - `superseded: true` marks a failed entry whose settlement the fence dropped because the key was replaced or the
+    Source removed while it ran. The surfaces say "使用旧密钥的请求失败" for it and show no repair, since the current
+    key is not the one that failed;
   - `label` is the Source's display name when the chain reached it, bounded to 64 characters. The projection shows
     the Source's current name and falls back to `label` for a Source removed since.
 
@@ -291,9 +296,10 @@ Hosted tools §6 holds, with these changes:
 - Every candidate that sent a request is metered on its Source; a skip is never metered. The Usage tab therefore
   shows real search requests per service. A service request reaches no model, so the usage ledger gains a service
   row: the Source, the catalog's `service_id` in place of a model, `requests` (sent), `billable_requests` (those
-  the catalog's billing rule charges: DeepSeek only a 200 with results, the others any 200), `reported_usd` (the sum
-  of reported costs) and `reported_requests` (the billable requests that sum covers). The cost is `reported_usd`
-  plus the other billable requests at list price. Released ledger rows without these fields load as zero. The label comes from
+  the catalog's billing rule charges: DeepSeek only a 200 with results, the others any 200), `reported_usd` and
+  `reported_requests` (the reported costs and the requests they cover), and `list_usd` (the sum of the list-priced
+  costs recorded at call time, page surcharges included). The row's cost is `reported_usd + list_usd`; nothing is
+  revalued from counts later. Released ledger rows without these fields load as zero. The label comes from
   the catalog, not from model inventory (§8).
 
 ## 5. Catalog: first batch
@@ -413,7 +419,7 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 - The vendor catalog (`vibe/data/api_key_vendors.json` and its schema): search vendors and DeepSeek's search API row.
 - Usage (`usage-summary.schema.json`, `api.md`'s Usage section, and the on-disk usage ledger): a service row keyed
   by Source and `service_id`, counting requests rather than model calls, with the additive `billable_requests`,
-  `reported_usd` and `reported_requests` fields and load fixtures for released rows that lack them (§4.3).
+  `reported_usd`, `reported_requests` and `list_usd` fields and load fixtures for released rows that lack them (§4.3).
 - `HOSTED_ERROR_CODES`: `search_query_too_long` and `search_sources_blocked`, with copy on every surface.
 - `api.md`: the read and PUT changes, and the "重新启用" action for a `search` Source in `needs_action` (§4.2), with
   its `api-response.schema.json` branch.
@@ -467,7 +473,7 @@ Hermetic, against stub vendor servers; no live upstream and no real keys.
 | Config | `protocol: "search"` accepted only in its combination; `prefer_native` and `services` round-trip and default; a release-before loader ignores the new `hosted_tools` fields |
 | Custody | the adapter call attaches the key, refuses redirects and non-catalog hosts, caps the body, and returns no key material; nothing outside the adapter reads the key |
 | Chain | automatic and saved order, and insertion before the first model executor in a saved order; service cooldown from `Retry-After` (a longer deadline is not shortened) and doubling backoff, scoped to (Source, service), with a DeepSeek model route unaffected, and not written by an attempt that started before a key replacement; the terminal reason for every mix of skips, with `record.attempts[]` present when nothing executed and a blocked model executor showing its own remedy; `services.<id>.enabled: false` takes a DeepSeek Source out of the order and keeps its models; query-length skip; each outcome row of §4.2; one deadline; metering, `failed_attempts` and `attempts`; DeepSeek official versus relay; settings changed mid-turn do not apply until the next turn; re-enable with and without a free check |
-| Usage | only sent requests are metered, and DeepSeek's empty or failed requests cost nothing; a reported cost survives a restart through the ledger; a released ledger row without the new fields loads |
+| Usage | only sent requests are metered, and DeepSeek's empty or failed requests cost nothing; an Exa content call without a reported cost keeps its page surcharge across a restart; a non-200 attempt records $0; a superseded failure shows no repair; a reported cost survives a restart through the ledger; a released ledger row without the new fields loads |
 | Mapping | one recorded response per vendor maps to the canonical record with bounds; an empty results array is `completed` and ends the chain; unreadable bodies; a released native `HostedSource` row longer than the new bounds still loads |
 | Hop facts | `prefer_native` off declares the function on a native-capable hop, and a native result in history replays in the synthetic form |
 | UI | the card states, add dialog, service detail, Sources rows, copy in both locales |
