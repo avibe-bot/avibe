@@ -977,8 +977,8 @@ test('an old, finished exchange starts with the bubble hidden, and takes no spac
 });
 
 // The reply lingers for 10s of on-screen time after the turn ends (spec §4.2).
-// It waits for the first tail read first: a reply that lands before that read
-// and without a live event is, by design, part of the baseline.
+// It waits until the running turn and its conversation are on screen, so the
+// turn's end is one this page watched happen.
 const finishTurn = async (page: import('@playwright/test').Page, text = '做完了。') => {
   await expect(page.locator('.pet-mini-reply-bubble')).toContainText('检查桌宠 mini 的交互');
   await page.evaluate((text) =>

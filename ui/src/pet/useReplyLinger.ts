@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { useLatestRef } from '@/lib/useLatestRef';
 
-/** How long a fresh reply stays on screen once nothing else holds the bubble. */
+/** How long a reply stays on screen after its turn ends, once nothing else holds the bubble. */
 export const REPLY_LINGER_MS = 10_000;
 /** The least time left when the pointer leaves a paused reply. */
 export const REPLY_LINGER_RESUME_MS = 3_000;
@@ -12,13 +12,13 @@ const KEYBOARD_RECHECK_MS = 1_000;
 const NONE: ReadonlySet<string> = new Set();
 
 /**
- * The on-screen linger of Vibey's latest fresh reply (spec §4.2).
+ * The on-screen linger of Vibey's reply after a turn ends (spec §4.2).
  *
- * Nothing here opens anything. `candidateId` is the latest result when it is
- * fresh, derived by the caller during render, and it lingers until it is
- * expired. Expiry is the only state: a set of result ids, scoped to `scope`
- * (the session epoch), so a new epoch starts with nothing expired and nothing
- * carried over. One timer spends the reply's budget while `counting` holds and
+ * Nothing here opens anything. `candidateId` names the ended turn whose reply
+ * may linger, derived by the caller during render, and it lingers until it is
+ * expired. Expiry is the only state: a set of ended-turn ids, scoped to
+ * `scope` (the session epoch), so a new epoch starts with nothing expired and
+ * nothing carried over. One timer spends the budget while `counting` holds and
  * is rescheduled whenever that changes; time paused is kept, not spent.
  *
  * Keyboard focus is read when the budget runs out, not tracked: if it sits on

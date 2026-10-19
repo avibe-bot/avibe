@@ -173,21 +173,21 @@ It remains available with either the collapsed or expanded stack.
 or thinking, or a send is pending; Vibey needs the user (a pending Vault
 handoff, a failure notice, an uncertain-send notice, or a queued notice); or
 the history is open. Composing and dictating take the slot as before (§5.2).
-Then, when a turn's result arrives, the bubble shows the reply summary for
+Then, when Vibey's turn ends, the bubble shows the reply summary for
 **10 seconds of on-screen time** before it hides with the speech slot's
 transition (instant under reduced motion), taking no space and no clicks.
 
-- **Fresh replies only.** A reply lingers when it is news to the current epoch
-  (binding and authorization): it arrived live, at any time, including before
-  the epoch's first tail read, or it was missing from that first read. A reply
-  arrives live as a new reply row, or as an update that promotes a row the pet
-  did not already hold as a reply (`metadata.promoted_from`); an edit to a
-  reply it already holds is not an arrival. Only replies are recorded. A reply
-  the first read already held is history, so on first load an old, finished
-  exchange starts hidden. A new epoch starts with nothing lingering.
-- **No closed frame.** Freshness is derived while rendering, so when the turn
-  ends in the same render its result lands, the bubble stays open throughout.
-  The only state is which replies have expired; nothing reopens the slot.
+- **A turn this epoch watched end.** The linger starts when the current epoch
+  (binding and authorization) sees the main session go from running to done.
+  It is derived while rendering from the last running value seen, so the
+  render that ends the turn starts the linger and the bubble never closes in
+  between; the only state is which ended turns have expired, per epoch. A turn
+  already over when the epoch first looks is history, so on first load an old,
+  finished exchange starts hidden. A reply that appears without a watched turn
+  end (a background or detached result, or a turn that starts and ends while
+  authorization is still resolving) does not linger; Vibey's badge still marks
+  it, and a Vibey click opens it. A turn that ends in failure keeps the bubble
+  shown through its failure notice (needs-you).
 - **On-screen time.** The 10s count only while the reply itself is on
   screen: the document is visible, the slot is drawing this bubble (not the
   input, the dictation marquee, or the loading and unavailable notices), its
@@ -202,7 +202,8 @@ transition (instant under reduced motion), taking no space and no clicks.
 - **Keyboard focus** is read when the time runs out, not tracked: focus on a
   focus-visible control inside the bubble keeps the reply and is looked at
   again a second later. A pointer click never pins it. If the bubble goes
-  while focus is inside, focus moves to Vibey's button.
+  while focus is inside, whether it folds away or is replaced (by the input,
+  the dictation marquee, or a loading notice), focus moves to Vibey's button.
 - **Looked at means done.** Opening the history from a lingering reply (a
   Vibey click or its toggle row) ends that reply's linger, so closing the
   history hides the bubble. A new running turn holds the bubble again, and its

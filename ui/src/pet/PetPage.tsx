@@ -655,11 +655,19 @@ const PetSurface: React.FC = () => {
   // state, so nothing carries a bubble over from a previous session.
   const needsYou = Boolean((!data.running && failure) || uncertain || queued || vaultRequests.length > 0);
   const held = Boolean(data.running || optimisticTitle || needsYou || historyOpen);
-  // The reply lingers only when it is news to this epoch (arrived live, or was
-  // not in its first tail read), derived here in render: when the turn ends in
-  // the same render its result lands, the bubble never closes in between.
-  const latestResultId = exchange.results.at(-1)?.id ?? null;
-  const freshResultId = latestResultId !== null && data.isFresh(latestResultId) ? latestResultId : null;
+  // A turn that ends while this epoch watches is what lingers: the moment the
+  // main session goes from running to done, derived during render from the
+  // last running value seen, so the render that ends the turn is the render
+  // that starts the linger and the bubble never closes in between. A turn
+  // already over when the epoch first looks is history.
+  const [turnWatch, setTurnWatch] = useState(() => ({ epoch, running: data.running, ended: 0 }));
+  let watched = turnWatch;
+  if (watched.epoch !== epoch) watched = { epoch, running: data.running, ended: 0 };
+  else if (watched.running !== data.running) {
+    watched = { ...watched, running: data.running, ended: data.running ? watched.ended : watched.ended + 1 };
+  }
+  if (watched !== turnWatch) setTurnWatch(watched);
+  const endedTurn = watched.ended > 0 ? String(watched.ended) : null;
   // The bubble is drawn: the speech slot shows it rather than the input or the
   // dictation marquee. Every input to the linger (time, pointer) means
   // something only while this holds.
@@ -670,10 +678,22 @@ const PetSurface: React.FC = () => {
   const replyOnScreen = bubbleDrawn && !data.running && !failure;
   const documentVisible = useDocumentVisible();
   const [pointerOverBubble, setPointerOverBubble] = useState(false);
-  const bubbleRef = useRef<HTMLDivElement>(null);
+  const bubbleRef = useRef<HTMLDivElement | null>(null);
+  const avatarRef = useRef<HTMLButtonElement>(null);
+  // Focus inside a bubble that is replaced (by the input, the dictation
+  // marquee, or a loading notice) moves to Vibey rather than to nowhere. The
+  // node is checked as it detaches, while it still holds the focus.
+  const attachBubble = useCallback((node: HTMLDivElement | null) => {
+    bubbleRef.current = node;
+    if (!node) return undefined;
+    return () => {
+      if (bubbleRef.current === node) bubbleRef.current = null;
+      if (node.contains(document.activeElement)) avatarRef.current?.focus();
+    };
+  }, []);
   const { lingeringId, expire: expireReply, keepAtLeast } = useReplyLinger({
     scope: epoch,
-    candidateId: freshResultId,
+    candidateId: endedTurn,
     counting: documentVisible && replyOnScreen && !pointerOverBubble,
     keyboardHeld: () => {
       const node = bubbleRef.current;
@@ -696,9 +716,8 @@ const PetSurface: React.FC = () => {
   const toggleHistory = () => {
     if (detailOpen) { setDetailOpen(false); void setPanel(false); } else openHistory();
   };
-  const avatarRef = useRef<HTMLButtonElement>(null);
   useLayoutEffect(() => {
-    // Focus inside a bubble that goes away moves to Vibey rather than to nowhere.
+    // Focus inside a bubble that folds away (still mounted) moves to Vibey too.
     if (showReplyBubble) return;
     const node = bubbleRef.current;
     if (node && document.activeElement && node.contains(document.activeElement)) avatarRef.current?.focus();
@@ -839,7 +858,10 @@ const PetSurface: React.FC = () => {
           ) : hasBubbleContent && binding ? (
             // Still drawn while the slot closes, so it fades out rather than vanishing.
             <div
-              ref={bubbleRef}
+              // Its own identity, so a notice drawn in the same place replaces
+              // it (and runs the focus handoff) instead of reusing this node.
+              key="vibey-bubble"
+              ref={attachBubble}
               onPointerEnter={() => setPointerOverBubble(true)}
               onPointerLeave={() => {
                 // Leaving gives the reader a moment before it goes.

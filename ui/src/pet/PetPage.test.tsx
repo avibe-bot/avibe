@@ -2536,48 +2536,6 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
     expect(bubbleOpen()).toBe(false);
   });
 
-  it('counts a reply that arrives live before the first tail read as fresh', async () => {
-    const reply = message('r', 'S', { text: 'Early reply', read_at: null });
-    tails.S = [message('u', 'S', { author: 'user', type: 'user' }), reply];
-    const read = deferred<{ messages: WorkbenchMessage[]; next_after_id: null; next_before_id: null }>();
-    api.listSessionMessages.mockImplementationOnce(() => read.promise);
-    mainSession('S');
-    render(<PetPage />);
-    await waitFor(() => expect(api.listSessionMessages).toHaveBeenCalled());
-    await emit((h) => h.onMessageNew?.(reply));
-    // The read that was already on its way includes it: it is still news.
-    await act(async () => read.resolve({ messages: [message('u', 'S', { author: 'user', type: 'user' }), reply], next_after_id: null, next_before_id: null }));
-    await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('Early reply'));
-    expect(bubbleOpen()).toBe(true);
-  });
-
-  it('counts a reply promoted before the first tail read as fresh', async () => {
-    const promoted = message('p', 'S', { text: 'Promoted early', read_at: null, metadata: { promoted_from: 'output' } });
-    tails.S = [message('u', 'S', { author: 'user', type: 'user' }), promoted];
-    const read = deferred<{ messages: WorkbenchMessage[]; next_after_id: null; next_before_id: null }>();
-    api.listSessionMessages.mockImplementationOnce(() => read.promise);
-    mainSession('S');
-    render(<PetPage />);
-    await waitFor(() => expect(api.listSessionMessages).toHaveBeenCalled());
-    await emit((h) => h.onMessageUpdated?.(promoted));
-    await act(async () => read.resolve({ messages: tails.S, next_after_id: null, next_before_id: null }));
-    await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('Promoted early'));
-    expect(bubbleOpen()).toBe(true);
-  });
-
-  it('counts a reply promoted after the first tail read as fresh', async () => {
-    const output = message('p', 'S', { type: 'output', text: 'Promoted later', read_at: null });
-    tails.S = [message('u', 'S', { author: 'user', type: 'user' }), output];
-    mainSession('S');
-    render(<PetPage />);
-    await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')).not.toBeNull());
-    expect(bubbleOpen()).toBe(false);
-    const promoted = { ...output, type: 'result', metadata: { promoted_from: 'output' } } as WorkbenchMessage;
-    tails.S = [tails.S[0], promoted];
-    await emit((h) => h.onMessageUpdated?.(promoted));
-    await waitFor(() => expect(bubbleOpen()).toBe(true));
-  });
-
   it('does not linger an old reply again when it is edited', async () => {
     const old = message('r', 'S', { text: 'Old reply', metadata: { promoted_from: 'output' } });
     tails.S = [message('u', 'S', { author: 'user', type: 'user' }), old];
@@ -2587,6 +2545,51 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
     await emit((h) => h.onMessageUpdated?.({ ...old, text: 'Old reply, edited' }));
     await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('edited'));
     expect(bubbleOpen()).toBe(false);
+  });
+
+  it('hands keyboard focus to Vibey when a loading notice replaces the bubble', async () => {
+    await runToResult();
+    const toggle = document.querySelector<HTMLButtonElement>('.pet-mini-reply-toggle')!;
+    act(() => { toggle.focus(); });
+    expect(document.activeElement).toBe(toggle);
+    // A new authorization resolves slowly: the loading notice takes the slot.
+    const pending = deferred<WorkbenchSessionReadResult>();
+    api.getMainSession.mockReturnValueOnce(pending.promise);
+    await emit((h) => h.onAuthorizationChanged?.({}));
+    expect(document.querySelector('.pet-mini-reply-toggle')).toBeNull();
+    expect(document.activeElement).toBe(screen.getByLabelText('pet.recentTurns'));
+    await act(async () => pending.resolve({ status: 200, session: session('S'), capabilities: { can_chat: true } }));
+  });
+
+  it('hands keyboard focus to Vibey when dictation replaces the bubble', async () => {
+    class Dictation { done = new Promise<string>(() => {}); start = async () => {}; finish = () => {}; abort = () => {}; }
+    vi.doMock('@/lib/showPageVoiceDictation', () => ({ ShowPageVoiceDictation: Dictation }));
+    const locks = Object.getOwnPropertyDescriptor(navigator, 'locks');
+    const media = Object.getOwnPropertyDescriptor(navigator, 'mediaDevices');
+    try {
+      Object.defineProperty(navigator, 'locks', { configurable: true, value: {} });
+      Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: vi.fn() } });
+      vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ available: true }) })));
+      vi.resetModules();
+      ({ PetPage } = await import('./PetPage'));
+      await runToResult();
+      await waitFor(() => expect(screen.getByLabelText('pet.voice.open')).toBeTruthy());
+      const toggle = document.querySelector<HTMLButtonElement>('.pet-mini-reply-toggle')!;
+      act(() => { toggle.focus(); });
+      // Holding the summon hotkey starts dictation: the marquee takes the slot.
+      summon('listen');
+      await waitFor(() => expect(document.querySelector('.pet-mini-reply-toggle')).toBeNull());
+      expect(document.activeElement).toBe(screen.getByLabelText('pet.recentTurns'));
+    } finally {
+      vi.doUnmock('@/lib/showPageVoiceDictation');
+      vi.unstubAllGlobals();
+      if (locks) Object.defineProperty(navigator, 'locks', locks);
+      else Reflect.deleteProperty(navigator, 'locks');
+      if (media) Object.defineProperty(navigator, 'mediaDevices', media);
+      else Reflect.deleteProperty(navigator, 'mediaDevices');
+      vi.resetModules();
+      ({ PetPage } = await import('./PetPage'));
+    }
   });
 
   it('drops a lingering reply when the epoch changes', async () => {
