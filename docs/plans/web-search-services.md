@@ -245,7 +245,8 @@ Hosted tools §6 holds, with these changes:
   search attempts, key replacement, Source removal, "重新启用" and "立即重试" (`clear_service_cooldown`) advance; a
   model call on the same Source does not.
   A response whose generation is no longer current writes nothing. Replacing the key or removing the Source also
-  clears its cooldowns.
+  clears its cooldowns and retires any armed or reserved re-enable trial, so a trial authorized for the old key is
+  never spent on the new one.
 - **"重新启用" advances the Source's settlement generation** without interrupting anything, as an attempt start
   does. A search that was already in flight when the user pressed it cannot put the Source back in `needs_action`;
   only a search started after the action can.
@@ -255,8 +256,10 @@ Hosted tools §6 holds, with these changes:
 - **The terminal reason of a failed call** follows one rule. With no candidate at all, it is today's no-provider
   reason, naming both remedies (add a search service, or an API key from a vendor that offers search). Otherwise it
   is chosen across every candidate, tried or skipped, by what can be acted on first:
-  1. a `query_too_long` skip: `search_query_too_long` ("搜索词超过 {limit} 个字符，请缩短后重试", with the largest
-     limit among the skipped candidates, so a query that short reaches at least one of them); the model can fix it at
+  1. a `query_too_long` skip: `search_query_too_long`. The record's `error` text, which the model reads, names the
+     largest limit among the skipped candidates ("query exceeds 400 characters"), so a query that short reaches at
+     least one of them. The surfaces' localized copy for the code is fixed, "搜索词太长，请缩短后重试", so the code
+     needs no stored parameter. The model can fix it at
      once and reach that candidate;
   2. a `blocked` or `disabled` skip: `search_sources_blocked`; the user repairs a Source or turns its search back
      on;
@@ -300,8 +303,9 @@ Hosted tools §6 holds, with these changes:
   bound ("至少"). A service attempt is
   billable only when it answered 200. Every service attempt the catalog does not bill records an explicit
   `cost: {usd: 0, basis: "list"}`, so the card shows $0 rather than an unknown cost: a non-200 response, DeepSeek's
-  empty answer, and a failure before the request was sent (connect failure). A read timeout or a connection lost
-  after the request was sent may still have been billed, so it is handled like an unreadable 200 whose billing is
+  empty answer, and a failure before the request was sent (connect failure). A read timeout, a connection lost
+  after the request was sent, or the turn being stopped after the request was sent may still have been billed (a
+  stop before sending costs $0), so it is handled like an unreadable 200 whose billing is
   unknown: no cost, `uncertain_requests` in the ledger, and the lower-bound flag.
 - A chain with no search-capable candidate (model executors only) writes the released record shape, without
   `attempts[]`, so a model-only search stays readable by older releases.
@@ -376,7 +380,7 @@ includes, so the recorded list price stays exact.
 | Vendor | Request | Auth | Results | Content | List price (2026-10) | Free check |
 | --- | --- | --- | --- | --- | --- | --- |
 | DeepSeek | `POST https://api.deepseek.com/v1/tools/search` `{query, count, need_content}` | Bearer | 1–50 | `need_content` | $0.75 / 1k successful requests; empty results and failures not billed | `GET /user/balance`: 200 with `is_available: true` is `pass`, with `false` is `balance`; 401 is `invalid` |
-| Tavily | `POST https://api.tavily.com/search` | Bearer | 1–20 | `include_raw_content` | $8 / 1k basic searches | `GET https://api.tavily.com/usage`: a 200 needs at least one numeric usage/limit pair (`key.usage`/`key.limit`, `account.plan_usage`/`account.plan_limit`, `account.paygo_usage`/`account.paygo_limit`), and each recognized pair must be wholly absent or have both members as valid numbers, otherwise the result is `unknown`; otherwise every pair below its limit is `pass` and any at or above it is `limit`; 401 is `invalid` |
+| Tavily | `POST https://api.tavily.com/search` | Bearer | 1–20 | `include_raw_content` | $8 / 1k basic searches | `GET https://api.tavily.com/usage`: a 200 needs at least one numeric usage/limit pair (`key.usage`/`key.limit`, `account.plan_usage`/`account.plan_limit`, `account.paygo_usage`/`account.paygo_limit`), and each recognized pair must be wholly absent or have both members as valid numbers, otherwise the result is `unknown`. It is `pass` when the key pair, if present, has headroom and the account can still pay: the plan pair or the pay-as-you-go pair has headroom (pay-as-you-go continues after the plan allowance). Otherwise it is `limit`; 401 is `invalid` |
 | Exa | `POST https://api.exa.ai/search` | `x-api-key` | 1–10 (the base price includes 10) | always `contents.highlights` (the `snippet` source, since a base result has no excerpt); `content: true` adds `contents.text`; each is +$1 / 1k pages | $7 / 1k plus the always-on highlights surcharge, shown as one price; the response's `costDollars` is used when present | none known |
 
 - DeepSeek facts that shape the UI (DeepSeek's Search & Fetch guide, 2026-10-19): the query is 1–128 characters and
