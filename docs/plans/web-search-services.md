@@ -355,7 +355,8 @@ Hosted tools §6 holds, with these changes:
   and, for `search_sources_blocked`, the per-Source repair ("Tavily 需要更换密钥，Exa 需要在 模型 › 工具 中重新启用").
   The Web card (`HostedToolRow`) and the IM line read that one projection; the fixed copy of a known code never
   replaces it.
-- The projection also carries the executor kind, `service` or `model`, taken from `executor_origin.api`. For a
+- The projection also carries the executor kind, `service` or `model`: `service` exactly when
+  `executor_origin.api` is `"search_api"` (C-1's `ServiceExecutorOrigin`, §8). For a
   service it leaves `model` empty, so the Web card (`HostedToolRow`) and the IM line (`_ran`) render "通过 Tavily"
   without the catalog's service id. Model executors keep "via Anthropic API key · claude-haiku-5-5".
 - Every candidate that sent a request is metered on its Source; a skip is never metered. The Usage tab therefore
@@ -519,7 +520,8 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 - The recovery actions run in the controller, which owns the trial gate and the cooldowns. The UI process forwards
   them over the Model Hub RPC (`ModelHubRemoteService`) as `reenable_search_source(source_id)` (S1a) and
   `clear_service_cooldown(source_id, service_id)` (S2), the path other hosted-tool writes already take. Endpoints:
-  `POST /api/models/sources/<id>/reenable` and `POST /api/models/hosted-tools/web_search/services/<id>/retry`.
+  `POST /api/models/sources/<id>/reenable` and `POST /api/models/hosted-tools/web_search/services/<source_id>/retry`, where the path names the Source and the
+  controller derives the `service_id` from its catalog row (one search service per Source).
 - `api.md`: the read and PUT changes, the "立即重试" cooldown clear (§4.2), and the "重新启用" action for a `search` Source in `needs_action` (§4.2), with
   its `api-response.schema.json` branch.
 - The turn trace's `hosted_tools`: the frozen `prefer_native`, candidate list and per-candidate `results` and
@@ -531,9 +533,12 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
   `HostedRecord.attempts[]` with `source_id`, `outcome`, `label`, `error_code`, `skipped`, `needs_action` and
   `superseded`; `HostedCost.lower_bound` with its `core/hosted_activity` projection ("至少"), and a cost of exactly 0 rendered as
   "$0" without "≈" by that projection, `HostedToolRow` and the IM line, since a zero is never an estimate; and
-  their reader and writer types, and the six `service_*` codes in `HOSTED_ERROR_CODES`, with copy on every surface; an
-  `executor_origin` that names a search service (`provider` = vendor, `model` = service id, and an `api` value for
-  search APIs, which the contract lane names).
+  their reader and writer types, and the six `service_*` codes in `HOSTED_ERROR_CODES`, with copy on every surface; and a
+  service executor origin. `Protocol` and the assistant-message `Origin` stay unchanged (four model protocols); a
+  new `ServiceExecutorOrigin` definition `{provider, api, model}` has `api` fixed to the const `"search_api"`,
+  `provider` the vendor and `model` the catalog service id, and `HostedRecord.executor_origin` becomes `oneOf` the
+  released `Origin` and `ServiceExecutorOrigin`. C-1 owns the definition; the Python reader and writer types in
+  the agent core gain the matching variant, and the gateway writes it.
 - C-6 (`agent-core-contracts/model-hub-consumer.md`, the search-call items in §2, and its validation fixtures):
   a search chain's candidate is a search-service Source (called through the adapter search operation) or a model
   Source with an executor model, in the §4.1 order with its skips; a service attempt's classified failure changes
