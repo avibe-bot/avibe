@@ -73,7 +73,7 @@ const candidate = (sourceId: string, modelId: string, over: Partial<HostedExecut
   ...over,
 });
 
-const search = (name: 'web_search' | 'x_search', over: Partial<HostedSearchToolStatus> = {}): HostedSearchToolStatus => ({
+const search = (name: 'web_search' | 'x_search' | 'web_fetch', over: Partial<HostedSearchToolStatus> = {}): HostedSearchToolStatus => ({
   name,
   enabled: true,
   status: run(),
