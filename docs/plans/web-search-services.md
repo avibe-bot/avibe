@@ -215,8 +215,9 @@ Hosted tools §6 holds, with these changes:
   exists: `pass` clears the state; `invalid` moves the Source to the existing invalid-key state, whose repair is
   replacing the key; `balance` and `unknown` keep the current state. A free check only proves the key, and Tavily's `/usage` answers
   200 while the account is still over its limit, so a limit state, and a balance state with no free check, are
-  cleared directly: the next real search tries the Source once and puts it back in `needs_action` if the same
-  failure returns. Nothing retries on its own. A model Source with
+  cleared directly into a one-shot trial: the Source admits exactly one search request, reserved by the first
+  search that reaches it, and every other search skips it as `cooling` until that request settles. If the trial
+  answers with the same failure, the Source goes back to `needs_action`; otherwise the gate opens. Nothing retries on its own. A model Source with
   a search API (DeepSeek) recovers through the existing model Source paths.
 - **Every state an attempt writes is fenced.** Source health uses the Source-global attempt-start settlement
   generation (`model-hub.md`). The service cooldown uses its own generation per (Source, service id), which only
@@ -259,7 +260,9 @@ Hosted tools §6 holds, with these changes:
   Vibey renders it in the model-facing text with the same renderer as today.
 - `execution` is a `ProxyExecution` naming the Source, `executor_billing: "metered"` and the attempt's `cost`. When
   the response reports its own cost as a finite non-negative number at the catalog's cost path (Exa:
-  `costDollars.total`), the cost is that figure with `basis: "reported"`; any other value is ignored.
+  `costDollars.total`), no larger than the catalog's per-request ceiling (100 times the row's list price for the
+  request; the bound the xAI tick parser applies for the same reason), the cost is that figure with
+  `basis: "reported"`. Any other value is ignored and the list price applies.
   Otherwise it is the catalog's list price for the request plus any per-returned-page part for content (Exa:
   $1 / 1k pages of `contents.text`), with `basis: "list"`. A vendor that bills only non-empty results (DeepSeek)
   costs zero for an empty answer. Earlier billable attempts are `failed_attempts[]` as today; a service attempt is
@@ -479,7 +482,7 @@ Hermetic, against stub vendor servers; no live upstream and no real keys.
 | Create | the search branch skips observation and discovery; free-check pass saves verified, a DeepSeek balance with `is_available: false` saves verified in the balance state, 401 saves nothing, other failures and no-check vendors save pending and the first success clears it; replacement keeps the old key on 401 |
 | Config | `protocol: "search"` accepted only in its combination; `prefer_native` and `services` round-trip and default; a release-before loader ignores the new `hosted_tools` fields |
 | Custody | the adapter call attaches the key, refuses redirects and non-catalog hosts, caps the body, and returns no key material; nothing outside the adapter reads the key |
-| Chain | automatic and saved order, and insertion before the first model executor in a saved order; service cooldown from `Retry-After` (a longer deadline is not shortened) and doubling backoff, scoped to (Source, service), with a DeepSeek model route unaffected, and not written by an attempt that started before a key replacement; the terminal reason for every mix of skips, with `record.attempts[]` present when nothing executed and a blocked model executor showing its own remedy; `services.<id>.enabled: false` takes a DeepSeek Source out of the order and keeps its models; query-length skip; each outcome row of §4.2; one deadline; metering, `failed_attempts` and `attempts`; DeepSeek official versus relay; settings changed mid-turn do not apply until the next turn; re-enable with and without a free check |
+| Chain | automatic and saved order, and insertion before the first model executor in a saved order; service cooldown from `Retry-After` (a longer deadline is not shortened) and doubling backoff, scoped to (Source, service), with a DeepSeek model route unaffected, and not written by an attempt that started before a key replacement; the terminal reason for every mix of skips, with `record.attempts[]` present when nothing executed and a blocked model executor showing its own remedy; `services.<id>.enabled: false` takes a DeepSeek Source out of the order and keeps its models; query-length skip; each outcome row of §4.2; one deadline; metering, `failed_attempts` and `attempts`; DeepSeek official versus relay; settings changed mid-turn do not apply until the next turn; re-enable with and without a free check, and only one request admitted while a re-enable trial is pending; a reported cost above the ceiling falls back to the list price |
 | Usage | only sent requests are metered, and DeepSeek's empty or failed requests cost nothing; an Exa content call without a reported cost keeps its page surcharge across a restart; a non-200 attempt records $0; a superseded failure, from any fence, shows no repair; the skip classification order; `service_order` survives a reload and decides the automatic order; a reported cost survives a restart through the ledger; a released ledger row without the new fields loads |
 | Mapping | one recorded response per vendor maps to the canonical record with bounds; an empty results array is `completed` and ends the chain; unreadable bodies; a released native `HostedSource` row longer than the new bounds still loads |
 | Hop facts | `prefer_native` off declares the function on a native-capable hop, and a native result in history replays in the synthetic form |
