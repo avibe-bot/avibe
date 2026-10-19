@@ -292,6 +292,8 @@ Hosted tools §6 holds, with these changes:
   billable only when it answered 200. Every service attempt the catalog does not bill (any non-200, a timeout, or
   DeepSeek's empty answer) records an explicit `cost: {usd: 0, basis: "list"}`, so the card shows $0 rather than an
   unknown cost.
+- A chain with no search-capable candidate (model executors only) writes the released record shape, without
+  `attempts[]`, so a model-only search stays readable by older releases.
 - `record.attempts[]` (new, on the `HostedRecord`, so it exists when nothing executed) lists, in chain order,
   every candidate the chain reached, including the one `execution` names. Candidates after the one that completed
   are not reached and not listed. Each entry is `{source_id, label, outcome, error_code?, skipped?, needs_action?}`:
@@ -360,7 +362,7 @@ includes, so the recorded list price stays exact.
 | Vendor | Request | Auth | Results | Content | List price (2026-10) | Free check |
 | --- | --- | --- | --- | --- | --- | --- |
 | DeepSeek | `POST https://api.deepseek.com/v1/tools/search` `{query, count, need_content}` | Bearer | 1–50 | `need_content` | $0.75 / 1k successful requests; empty results and failures not billed | `GET /user/balance`: 200 with `is_available: true` is `pass`, with `false` is `balance`; 401 is `invalid` |
-| Tavily | `POST https://api.tavily.com/search` | Bearer | 1–20 | `include_raw_content` | $8 / 1k basic searches | `GET https://api.tavily.com/usage`: a 200 needs at least one numeric usage/limit pair (`key.usage`/`key.limit`, `account.plan_usage`/`account.plan_limit`, `account.paygo_usage`/`account.paygo_limit`), and any of these fields that is present but not a valid number makes the result `unknown`; otherwise every pair below its limit is `pass` and any at or above it is `limit`; 401 is `invalid` |
+| Tavily | `POST https://api.tavily.com/search` | Bearer | 1–20 | `include_raw_content` | $8 / 1k basic searches | `GET https://api.tavily.com/usage`: a 200 needs at least one numeric usage/limit pair (`key.usage`/`key.limit`, `account.plan_usage`/`account.plan_limit`, `account.paygo_usage`/`account.paygo_limit`), and each recognized pair must be wholly absent or have both members as valid numbers, otherwise the result is `unknown`; otherwise every pair below its limit is `pass` and any at or above it is `limit`; 401 is `invalid` |
 | Exa | `POST https://api.exa.ai/search` | `x-api-key` | 1–10 (the base price includes 10) | `contents.text`, +$1 / 1k pages | $7 / 1k; the response's `costDollars` is used when present | none known |
 
 - DeepSeek facts that shape the UI (DeepSeek's Search & Fetch guide, 2026-10-19): the query is 1–128 characters and
@@ -466,6 +468,10 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
   by Source and `service_id`, counting requests rather than model calls, with the additive `billable_requests`,
   `reported_usd`, `reported_requests`, `list_usd`, `uncertain_requests` and `lower_bound` fields and load fixtures for released rows that lack them (§4.3).
 - `HOSTED_ERROR_CODES`: `search_query_too_long` and `search_sources_blocked`, with copy on every surface.
+- The recovery actions run in the controller, which owns the trial gate and the cooldowns. The UI process forwards
+  them over the Model Hub RPC (`ModelHubRemoteService`) as `reenable_search_source(source_id)` (S1a) and
+  `clear_service_cooldown(source_id, service_id)` (S2), the path other hosted-tool writes already take. Endpoints:
+  `POST /api/models/sources/<id>/reenable` and `POST /api/models/hosted-tools/web_search/services/<id>/retry`.
 - `api.md`: the read and PUT changes, the "立即重试" cooldown clear (§4.2), and the "重新启用" action for a `search` Source in `needs_action` (§4.2), with
   its `api-response.schema.json` branch.
 - The turn trace's `hosted_tools`: the frozen `prefer_native`, candidate list and per-candidate `results` and
@@ -474,7 +480,8 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
   executor kind (§4.3).
 - C-1 (`agent-core-contracts/message.schema.json`): the optional `HostedSource.content` (§4.3; the read shape
   gains no new limits);
-  `HostedRecord.attempts[]` with `skipped` and `needs_action`, and the six `service_*` codes in `HOSTED_ERROR_CODES`, with copy on every surface; an
+  `HostedRecord.attempts[]` with `outcome`, `label`, `error_code`, `skipped`, `needs_action` and `superseded`, and
+  their reader and writer types, and the six `service_*` codes in `HOSTED_ERROR_CODES`, with copy on every surface; an
   `executor_origin` that names a search service (`provider` = vendor, `model` = service id, and an `api` value for
   search APIs, which the contract lane names).
 - V2 config: `model_hub.hosted_tools.web_search` as §3.2.
@@ -528,7 +535,8 @@ Hermetic, against stub vendor servers; no live upstream and no real keys.
 1. **Rolling back past this feature is not supported once it has been used.** Two things cross the boundary:
    - adding a `search` Source, because a release before this feature rejects `protocol: "search"` and cannot load
      Model Hub's Sources;
-   - any search-service call, including one through an auto-enrolled DeepSeek Source, because the persisted result
+   - any search chain with a search-capable candidate, including one through an auto-enrolled DeepSeek Source,
+     whether or not that candidate was reached, because the persisted result
      carries C-1 values (`executor_origin` for a search API, `HostedSource.content`, `record.attempts`) that an
      older release's strict reader rejects, so that Session no longer loads there.
 
