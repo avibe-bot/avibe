@@ -187,6 +187,7 @@ def test_annotation_catalog_contract_is_explicit() -> None:
         "webPush": False,
         "webPushWhenEvents": (),
         "render": "annotation",
+        "agentRenderWhenEvents": (),
     }
 
 

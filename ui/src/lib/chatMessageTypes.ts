@@ -3,6 +3,21 @@ import { specFor } from './messageTypes';
 // Status pills rather than authored answers — the catalog's ``status`` render kind.
 export const isNotifyMessageType = (type: string): boolean => specFor(type).render === 'status';
 
+// A status-typed row whose ``metadata.event`` the catalog lists under
+// ``agentRenderWhenEvents``: words addressed to the owner (a Computer Use script's
+// notify or confirm prompt), drawn as the Agent's message so they are noticed
+// mid-Turn. Presentation only — the row keeps its type's lifecycle, authorship and
+// unread semantics, and every IM surface delivers it unchanged.
+export const isAgentRenderedNotice = (message: {
+  type: string;
+  metadata?: Record<string, unknown> | null;
+}): boolean => {
+  const event = message.metadata?.event;
+  return isNotifyMessageType(message.type)
+    && typeof event === 'string'
+    && specFor(message.type).agentRenderWhenEvents.includes(event);
+};
+
 // Whether a row belongs in the chat transcript — the catalog's ``transcript``
 // property, the same declaration the server filter on
 // ``GET /api/sessions/{id}/messages`` reads, so the live ``message.new`` feed

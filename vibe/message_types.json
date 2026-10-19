@@ -12,7 +12,8 @@
     "unread": false,
     "webPush": false,
     "webPushWhenEvents": [],
-    "render": "none"
+    "render": "none",
+    "agentRenderWhenEvents": []
   },
   "types": {
     "user": {
@@ -81,7 +82,11 @@
       "webPushWhenEvents": [
         "backend_failure"
       ],
-      "render": "status"
+      "render": "status",
+      "agentRenderWhenEvents": [
+        "computer_script_notify",
+        "computer_script_confirm"
+      ]
     },
     "vault": {
       "transcript": true,

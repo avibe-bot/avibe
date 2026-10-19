@@ -18,7 +18,7 @@
 // ``author`` and ``source`` still decide among the ROLE families below, which is
 // what they legitimately describe. What they no longer do is decide whether a
 // typed row is that type.
-import { isBoundaryMessage, isNotifyMessageType } from './chatMessageTypes';
+import { isAgentRenderedNotice, isBoundaryMessage, isNotifyMessageType } from './chatMessageTypes';
 import { readAnnotationView, type AnnotationView } from './annotationView';
 import { specFor } from './messageTypes';
 
@@ -35,6 +35,7 @@ export type ChatRowKind =
   | { kind: 'annotation'; annotation: AnnotationView }
   | { kind: 'boundary' }
   | { kind: 'notify' }
+  | { kind: 'agentNotice' }
   | { kind: 'agent' }
   | { kind: 'system' }
   | { kind: 'harness' }
@@ -58,6 +59,11 @@ export function chatRowKind(message: ChatRowFields): ChatRowKind {
   // A phase boundary and an ``interim`` narration share the muted Agent bubble:
   // both are the agent's words that do not end the Turn.
   if (isBoundaryMessage(message) || specFor(message.type).render === 'muted') return { kind: 'boundary' };
+  // A notification addressed to the owner (a Computer Use script's notify or
+  // confirm prompt) draws as the Agent's message: a compact pill reads as runtime
+  // status, and a confirm nobody notices times out. A family of its own rather than
+  // ``agent``, because it is not a reply — it must not own the Turn's Vault requests.
+  if (isAgentRenderedNotice(message)) return { kind: 'agentNotice' };
   // Runtime notifications and legacy error rows are compact status pills, not
   // Agent-authored answers.
   if (isNotifyMessageType(message.type)) return { kind: 'notify' };
@@ -87,6 +93,9 @@ export function chatRowKind(message: ChatRowFields): ChatRowKind {
 export function isAgentAuthored(message: Pick<ChatRowFields, 'type' | 'author'>): boolean {
   // Notify/error rows draw a status pill with no Markdown body at all; excluding
   // them keeps this identical to the pre-annotation flag rather than widening it.
+  // An ``agentNotice`` stays excluded although it draws the Agent's bubble: a
+  // script's text may quote what it read off the screen, so it must not mint a
+  // secret-input card or a local-file link.
   return !isNotifyMessageType(message.type) && message.author === 'agent';
 }
 

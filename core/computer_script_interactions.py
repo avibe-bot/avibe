@@ -13,6 +13,7 @@ from core.computer_script_sessions import (
     ComputerScriptSessionManager,
 )
 from core.delivery_target import routed_delivery_context
+from core.message_output import MessageOutput
 from core.services.dispatch import SOURCE_SCHEDULED
 from modules.agents.question_ui import PendingQuestion, Question
 from modules.im import MessageContext
@@ -25,6 +26,11 @@ MAX_MESSAGE_BYTES = 64 * 1024
 # six-byte ``\uXXXX`` escape) plus the connection token and keys, so the transport cap
 # leaves room for the worst-case envelope around a message the limit admits.
 MAX_INTERACTION_REQUEST_BYTES = 6 * MAX_MESSAGE_BYTES + 4 * 1024
+# ``notify`` row events naming a script's own words to the owner. The message-type
+# catalog lists them under ``agentRenderWhenEvents``, so the Web draws them as the
+# Agent's message instead of a runtime status pill; IM delivery reads no metadata.
+NOTIFY_EVENT = "computer_script_notify"
+CONFIRM_EVENT = "computer_script_confirm"
 _YES_ANSWERS = frozenset(
     {
         "y",
@@ -107,6 +113,7 @@ class ComputerScriptInteractionManager:
         message_id = await self._deliver(
             context,
             message,
+            event=NOTIFY_EVENT,
             failure_code="computer_script_notify_failed",
         )
         return {
@@ -166,6 +173,7 @@ class ComputerScriptInteractionManager:
             await self._deliver(
                 context,
                 self._translate("computer.cli.confirm.prompt", message=message),
+                event=CONFIRM_EVENT,
                 failure_code="confirm_prompt_failed",
             )
             record.armed = True
@@ -287,6 +295,7 @@ class ComputerScriptInteractionManager:
         context: MessageContext,
         message: str,
         *,
+        event: str,
         failure_code: str,
     ) -> str:
         """Send one notify and return its id; a missing id means not delivered."""
@@ -296,6 +305,7 @@ class ComputerScriptInteractionManager:
                 context,
                 "notify",
                 message,
+                output=MessageOutput(metadata={"event": event}),
             )
         except Exception as exc:
             logger.exception("Computer script message delivery failed")
