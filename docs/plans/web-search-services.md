@@ -170,9 +170,10 @@ Hosted tools §6 holds, with these changes:
   in Vibey's Source order, then model executors as today. A saved `executor_order` is used as saved; candidates it
   does not name follow in automatic order. Adding a search-capable Source while an order is saved inserts it
   immediately before the saved order's first model executor, or at the end when the order names none. It then runs
-  before every model executor, and the user's other entries keep their order. The same insertion applies once, in
-  the version event's config migration, to an existing Source that becomes search-capable through the new catalog
-  (an official DeepSeek Source in a saved order).
+  before every model executor, and the user's other entries keep their order. The same insertion runs whenever a
+  Source becomes search-capable without being added: once in the version event's config migration (an existing
+  official DeepSeek Source), and in any later config write that makes it qualify (a DeepSeek relay retargeted to the
+  official endpoint).
 - **Argument check.** Before any candidate, the gateway rejects a query that is empty or only whitespace with the
   canonical tool's argument error, which the model can correct; no Source is tried or recorded.
 - **Skips.** A candidate is classified once, by the first reason that applies in the order `unavailable`,
@@ -272,7 +273,9 @@ Hosted tools §6 holds, with these changes:
   request; the bound the xAI tick parser applies for the same reason), the cost is that figure with
   `basis: "reported"`. Any other value is ignored and the list price applies.
   Otherwise it is the catalog's list price for the request plus any per-returned-page part for content (Exa:
-  $1 / 1k pages of `contents.text`), with `basis: "list"`. A vendor that bills only non-empty results (DeepSeek)
+  $1 / 1k pages of `contents.text`), with `basis: "list"`. When content was requested but the page count cannot be
+  read (an unreadable 200 with no valid reported cost), the cost is the search part marked as a lower bound
+  ("至少 $0.007"), and the ledger row carries `lower_bound: true` into the Usage aggregate. A vendor that bills only non-empty results (DeepSeek)
   costs zero for an empty answer. Earlier billable attempts are `failed_attempts[]` as today; a service attempt is
   billable only when it answered 200. Every service attempt the catalog does not bill (any non-200, a timeout, or
   DeepSeek's empty answer) records an explicit `cost: {usd: 0, basis: "list"}`, so the card shows $0 rather than an
@@ -321,8 +324,8 @@ Hosted tools §6 holds, with these changes:
   `reported_requests` (the reported costs and the requests they cover), and `list_usd` (the sum of the list-priced
   costs recorded at call time, page surcharges included). The row's cost is `reported_usd + list_usd`; nothing is
   revalued from counts later. Released ledger rows without these fields load as zero. In `usage-summary`
-  aggregates, a service row adds that cost to the Source's and the total `api_cost_usd` as a known cost. It never
-  sets the lower-bound flag, which stays about model calls without a token report. The label comes from
+  aggregates, a service row adds that cost to the Source's and the total `api_cost_usd` as a known cost, and sets
+  the lower-bound flag only when the row has `lower_bound: true` (an unreadable content call, above). The label comes from
   the catalog, not from model inventory (§8).
 
 ## 5. Catalog: first batch
@@ -446,7 +449,7 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 - The vendor catalog (`vibe/data/api_key_vendors.json` and its schema): search vendors and DeepSeek's search API row.
 - Usage (`usage-summary.schema.json`, `api.md`'s Usage section, and the on-disk usage ledger): a service row keyed
   by Source and `service_id`, counting requests rather than model calls, with the additive `billable_requests`,
-  `reported_usd`, `reported_requests` and `list_usd` fields and load fixtures for released rows that lack them (§4.3).
+  `reported_usd`, `reported_requests`, `list_usd` and `lower_bound` fields and load fixtures for released rows that lack them (§4.3).
 - `HOSTED_ERROR_CODES`: `search_query_too_long` and `search_sources_blocked`, with copy on every surface.
 - `api.md`: the read and PUT changes, the "立即重试" cooldown clear (§4.2), and the "重新启用" action for a `search` Source in `needs_action` (§4.2), with
   its `api-response.schema.json` branch.
