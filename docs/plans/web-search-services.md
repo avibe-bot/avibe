@@ -72,6 +72,17 @@ The user has an Anthropic API key and a DeepSeek API key, adds Tavily, and chang
   backend's supply. It appears in the Sources list with the label "搜索服务" and "不提供模型".
 - Credential replacement, removal, masked display, `verification_pending`, `credential_generation` and Source health
   are the existing ones. Removing a search Source removes it from `executor_order` as removal does for any Source.
+- **Create and replace branch.** `POST /api/models/sources` and `PUT /api/models/sources/<id>/credential` with
+  `protocol: "search"` skip protocol observation and inventory discovery; `save_unverified` and
+  `accept_unavailable_inventory` do not apply. The server provisions the key and runs the catalog's free check where
+  one exists:
+  - pass: the Source is saved verified;
+  - 401, or a 403 the catalog maps to the credential: nothing is saved, and the existing invalid-key create error
+    answers (for a replacement, the old key stays);
+  - any other failure, or no free check: the Source is saved with `verification_pending`, presented as "已保存" like
+    an unverified API-key save, and the first successful search clears it.
+
+  The response is the existing Source envelope.
 
 ### 3.2 Settings
 
@@ -144,9 +155,9 @@ Hosted tools §6 holds, with these changes:
   `needs_action` is skipped.
 - **Automatic order** (no `executor_order`): `search` Sources in creation order, then model Sources with a search API
   in Vibey's Source order, then model executors as today. A saved `executor_order` is used as saved; candidates it
-  does not name follow in automatic order. Adding a search-capable Source while an order is saved inserts it into
-  the saved order after its last search-capable entry, so it runs before the model executors and the user's other
-  entries keep their order.
+  does not name follow in automatic order. Adding a search-capable Source while an order is saved inserts it
+  immediately before the saved order's first model executor, or at the end when the order names none. It then runs
+  before every model executor, and the user's other entries keep their order.
 - **Per-service limits are checked before the call.** A query longer than the service accepts (DeepSeek: 128
   characters) skips that service for this call with no state and no cost.
 - **One attempt** sends the catalog's request for the canonical query, the turn's frozen `results` and `content`, and
@@ -161,11 +172,20 @@ Hosted tools §6 holds, with these changes:
 | 401, or 403 that the catalog maps to the credential | next candidate | `needs_action`, invalid key (model-hub.md `credential.static_unauthorized`) |
 | 402 (balance exhausted) | next candidate | `needs_action`, balance (model-hub.md `credential.account_classified`) |
 | a plan or spending limit the catalog names (Tavily 432 plan limit, 433 pay-as-you-go limit) | next candidate | `needs_action`, the existing `models.source.needs_action.spend_limit_reached` detail and its raise-the-limit remedy |
-| 408, 429, 5xx, timeout, connection failure | next candidate | none |
+| 408, 429, 5xx, timeout, connection failure | next candidate | none; a service cooldown (below) |
 | 3xx (the redirect is refused, §3.3) | next candidate, `service_unavailable` | none |
 | other 4xx (a query the service refuses) | next candidate | none |
 | a body the mapping cannot read | next candidate | none |
 
+- **A model Source with a search API (DeepSeek)** shares its key and balance with its models, so a search 401 or 402
+  writes the Source's health exactly as a model call would. Its 403 is a security-policy refusal of the query, so the
+  catalog maps it to `service_refused` with no state.
+- **Service cooldown.** A transient failure puts that (Source, service id) on an in-memory cooldown that only the
+  search chain reads. A model route through the same Source (DeepSeek) is unaffected. A 429 waits for its
+  `Retry-After`, bounded to 1–300 s and 30 s when absent; a 408, 5xx, timeout, connection failure or refused redirect
+  waits 30 s, doubling on each consecutive failure up to 300 s. While cooling down, the candidate is skipped like a
+  query-length skip; a call that skips every candidate for cooldown is `failed` with `service_unavailable`. A success
+  resets the cooldown, and a restart forgets it. It writes no Source health and shows nowhere but the call's record.
 - **Recovery.** Replacing the key clears an invalid-key state, as for every Source. A `search` Source in the balance
   or limit state gets "重新启用" in its detail. For a balance state it runs the catalog's free check where one
   exists and clears the state when the check passes. A free check only proves the key, and Tavily's `/usage` answers
@@ -321,6 +341,8 @@ The tool card and the IM line are hosted tools §8.3 with the service as the exe
 One coordinated Model Hub version event under the freeze protocol (`model-hub-contracts/README.md`).
 
 - `source.schema.json` and `source-create.schema.json`: `protocol: "search"` and its combination rule (§3.1).
+- `api.md`'s Source create and credential replace sections: the search branch (§3.1), with its outcomes in
+  `api-response.schema.json`.
 - `hosted-tools-status.schema.json`: `prefer_native`, `services`, `executor_candidates[].kind` and settings,
   `service_vendors[]` (§3.5); the PUT body.
 - `capability-evidence.schema.json`, and `status.latest_ok.mode` and `status.verified[].mode` in
@@ -345,7 +367,7 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 
 | PR | Lane | Work | Depends on |
 | --- | --- | --- | --- |
-| **S1** Catalog, Sources, settings | foundation | search vendors in the catalog; `protocol: "search"` Sources and their exclusions; `prefer_native` and `services`; the adapter's search call with custody and transport rules; free checks on add and replace; the Tools read and PUT; the version event | — |
+| **S1** Catalog, Sources, settings | foundation | search vendors in the catalog; `protocol: "search"` Sources and their exclusions (the credential store accepts the protocol, the engine config renderer skips it); the create and replace branch with free checks; `prefer_native` and `services`; the adapter's search call with custody and transport rules; the Tools read and PUT; the version event | — |
 | **S2** Chain and records | gateway | candidates, automatic order and insertion into a saved order, limits, per-vendor request and result mapping with field bounds, outcome classes into fenced Source health, positive evidence, record with `attempts[]`, cost and metering, `prefer_native` in hop facts, the no-candidate reason, the `hosted_activity` projection | S1 |
 | **S3** Model text | Vibey | `content` in the model-facing text and its bounds; the card's executor label | S2's record |
 | **S4** Tools, dialog, Sources | UI | §6 with en and zh copy | S1's read; S2 for live states |
@@ -376,9 +398,10 @@ Hermetic, against stub vendor servers; no live upstream and no real keys.
 
 | Layer | Cases |
 | --- | --- |
+| Create | the search branch skips observation and discovery; free-check pass saves verified, 401 saves nothing, other failures and no-check vendors save pending and the first success clears it; replacement keeps the old key on 401 |
 | Config | `protocol: "search"` accepted only in its combination; `prefer_native` and `services` round-trip and default; a release-before loader ignores the new `hosted_tools` fields |
 | Custody | the adapter call attaches the key, refuses redirects and non-catalog hosts, caps the body, and returns no key material; nothing outside the adapter reads the key |
-| Chain | automatic and saved order; query-length skip; each outcome row of §4.2; one deadline; metering, `failed_attempts` and `attempts`; DeepSeek official versus relay; settings changed mid-turn do not apply until the next turn; re-enable with and without a free check |
+| Chain | automatic and saved order, and insertion before the first model executor in a saved order; service cooldown from `Retry-After` and doubling backoff, scoped to (Source, service), with a DeepSeek model route unaffected; query-length skip; each outcome row of §4.2; one deadline; metering, `failed_attempts` and `attempts`; DeepSeek official versus relay; settings changed mid-turn do not apply until the next turn; re-enable with and without a free check |
 | Mapping | one recorded response per vendor maps to the canonical record with bounds; empty results; unreadable bodies |
 | Hop facts | `prefer_native` off declares the function on a native-capable hop, and a native result in history replays in the synthetic form |
 | UI | the card states, add dialog, service detail, Sources rows, copy in both locales |
