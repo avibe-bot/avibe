@@ -178,6 +178,10 @@ Hosted tools §6 holds, with these changes:
   through the same in-memory and hourly-file rule (hosted tools §3.2).
 - With no candidate, the `failed` record names both remedies: add a search service, or an API key from a vendor
   that offers search.
+- When the query's length skipped every candidate that was not tried, and no attempt failed, the record is `failed`
+  with `error_code: "search_query_too_long"`. The text names the shortest limit ("搜索词超过 128 个字符，请缩短后重试"),
+  so the model can retry with a shorter query; it never suggests adding a Source. When attempts also failed, the last
+  failure is the reason, as today.
 
 ### 4.3 The record and cost
 
@@ -190,8 +194,10 @@ Hosted tools §6 holds, with these changes:
   `service_unreadable`.
 - With `content` on, each source gains `content`, bounded to 4,000 characters per source and 20,000 per record.
   Vibey renders it in the model-facing text with the same renderer as today.
-- `execution` is a `ProxyExecution` naming the Source, `executor_billing: "metered"` and the attempt's `cost`. Cost is
-  the catalog's list price for the request, `basis: "list"`. A vendor that bills only non-empty results (DeepSeek)
+- `execution` is a `ProxyExecution` naming the Source, `executor_billing: "metered"` and the attempt's `cost`. When
+  the response reports its own cost (Exa's `costDollars`), the cost is that figure with `basis: "reported"`.
+  Otherwise it is the catalog's list price for the request plus any per-returned-page part for content (Exa:
+  $1 / 1k pages of `contents.text`), with `basis: "list"`. A vendor that bills only non-empty results (DeepSeek)
   costs zero for an empty answer. Earlier billable attempts are `failed_attempts[]` as today; a service attempt is
   billable only when it answered 200.
 - `execution.attempts[]` (new) lists every earlier attempt of the call in order, billable or not, as
@@ -204,7 +210,9 @@ Hosted tools §6 holds, with these changes:
 - `core/hosted_activity` projects `attempts[]` with the Sources' current names into the shared activity payload
   (`HostedActivity.to_payload`). Its localized line renderer writes the note, so the Web card and the IM line read
   one projection, as they do for cost.
-- Every attempt is metered on its Source, so the Usage tab shows search requests per service.
+- Every attempt is metered on its Source, so the Usage tab shows search requests per service. A service attempt
+  reaches no model, so the usage ledger gains a service row: the Source, the catalog's `service_id` in place of a
+  model, requests and cost. The label comes from the catalog, not from model inventory (§8).
 
 ## 5. Catalog: first batch
 
@@ -220,7 +228,7 @@ includes, so the recorded list price stays exact.
 | --- | --- | --- | --- | --- | --- | --- |
 | DeepSeek | `POST https://api.deepseek.com/v1/tools/search` `{query, count, need_content}` | Bearer | 1–50 | `need_content` | $0.75 / 1k successful requests; empty results and failures not billed | `GET /user/balance` |
 | Tavily | `POST https://api.tavily.com/search` | Bearer | 1–20 | `include_raw_content` | $8 / 1k basic searches | `GET https://api.tavily.com/usage`: 200 passes, 401 is an invalid key |
-| Exa | `POST https://api.exa.ai/search` | `x-api-key` | 1–10 (the base price includes 10) | `contents.text` | $7 / 1k | none known |
+| Exa | `POST https://api.exa.ai/search` | `x-api-key` | 1–10 (the base price includes 10) | `contents.text`, +$1 / 1k pages | $7 / 1k; the response's `costDollars` is used when present | none known |
 
 - DeepSeek facts that shape the UI (DeepSeek's Search & Fetch guide, 2026-10-19): the query is 1–128 characters and
   supports operators (`site:`, `lang:`, `after:`, quoted phrases); requests made through DeepSeek's own server-side
@@ -311,6 +319,9 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 - The Source health detail for a reached plan or spending limit, with its remedy, in `source.schema.json` and the
   classification registry of `model-hub.md`.
 - The vendor catalog (`vibe/data/api_key_vendors.json` and its schema): search vendors and DeepSeek's search API row.
+- Usage (`usage-summary.schema.json`, `api.md`'s Usage section): a service row keyed by Source and `service_id`,
+  counting requests rather than model calls, with reported or list cost (§4.3).
+- `HOSTED_ERROR_CODES`: `search_query_too_long`, with copy on every surface.
 - `api.md`: the read and PUT changes, and the "重新启用" action for a `search` Source in `needs_action` (§4.2), with
   its `api-response.schema.json` branch.
 - The turn trace's `hosted_tools`: the frozen `prefer_native` and per-candidate `results` and `content` (§3.2).
