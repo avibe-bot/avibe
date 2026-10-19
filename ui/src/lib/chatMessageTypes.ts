@@ -101,6 +101,26 @@ export function isRetryableFailureNotice(
     && !(Array.isArray(metadata.watch_ids) && metadata.watch_ids.length > 0);
 }
 
+// The Retry states in which the notice's continuation is admitted: it was queued,
+// claimed, or accepted into a Turn. ``reserved`` and ``retired`` are not.
+export const ADMITTED_RETRY_STATES: readonly string[] = ['queued', 'claimed', 'accepted'];
+
+// A failure notice whose Retry was admitted. The failure no longer ends the visible
+// response: a retry continues it, and Vibey's retry writes no input row after the
+// notice (it resumes the transcript), so the notice can stay the last row while the
+// retried work runs. ``failure_retry.state`` is derived on the server from the
+// retry's Delivery, so it holds on reload as well as live.
+export function isRetriedFailureNotice(
+  message: TerminalAgentMessageCandidate & { source?: string | null; content?: unknown },
+): boolean {
+  if (!isBackendFailureNotice(message)) return false;
+  const content = message.content;
+  const action = content && typeof content === 'object'
+    ? (content as { failure_retry?: { state?: unknown } }).failure_retry
+    : undefined;
+  return typeof action?.state === 'string' && ADMITTED_RETRY_STATES.includes(action.state);
+}
+
 // A terminal reply the TRANSCRIPT shows: the catalog's terminal activity role
 // intersected with transcript visibility (``silent`` is terminal for activity
 // bookkeeping but never rendered), plus the conditional terminals that only settle

@@ -1032,6 +1032,42 @@ describe('ChatPage transcript hydration', () => {
     });
   });
 
+  describe.each([false, true])('retried failure with Activity enabled=%s', (activityEnabled) => {
+    it.each(['live', 'bootstrap'])('keeps the retried work thinking after a %s retry admission', async (delivery) => {
+      // Vibey's retry resumes the transcript and adds no row after the notice, so the
+      // notice stays the last row while the retried work runs.
+      const failure = {
+        ...projectedMessage('failure-notice', 'Vibey 因内部错误而停止'),
+        author: 'agent', source: 'agent', type: 'notify',
+        metadata: { event: 'backend_failure', turn_id: 'failed-turn', failure_id: 'failed-turn' },
+      };
+      const retried = { ...failure, content: { failure_retry: { delivery_id: 'retry', state: 'accepted' } } };
+      mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
+      mocks.api.getSessionBootstrap.mockResolvedValue({
+        ...bootstrapPayload('session-new'),
+        config: { ui: { show_agent_activity: activityEnabled } },
+        turn_state: { ...idleTurnState, foreground: 'running', in_flight: true },
+        messages: [delivery === 'bootstrap' ? retried : failure],
+      });
+      render(
+        <MemoryRouter initialEntries={['/chat/session-new']}>
+          <Routes>
+            <Route path="/chat/:sessionId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>,
+      );
+      await screen.findByText(failure.text, { exact: false });
+      if (delivery === 'live') {
+        // Before its Retry is admitted the failure still ends the visible response.
+        expect(screen.queryByText('chat.thinking')).toBeNull();
+        act(() => mocks.events?.onMessageUpdated(retried));
+        act(() => mocks.events?.onTurnStart({ session_id: 'session-new' }));
+      }
+      expect(await screen.findByText('chat.thinking')).toBeTruthy();
+      expect(mocks.composer?.busy).toBe(true);
+    });
+  });
+
   describe.each([false, true])('Computer Use script prompt with Activity enabled=%s', (activityEnabled) => {
     it('MESSAGE-DELIVERY-035 draws the confirm prompt as a visible Agent message while the Turn runs', async () => {
       // The prompt lands mid-Turn over message.new; the owner must notice it and

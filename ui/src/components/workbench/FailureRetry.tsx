@@ -3,7 +3,7 @@ import { Check, RotateCcw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import type { WorkbenchMessage } from '../../context/ApiContext';
-import { isRetryableFailureNotice } from '../../lib/chatMessageTypes';
+import { ADMITTED_RETRY_STATES, isRetryableFailureNotice } from '../../lib/chatMessageTypes';
 import { Button } from '../ui/button';
 
 export function FailureRetry({
@@ -25,7 +25,7 @@ export function FailureRetry({
   // Local success bridges the response only until a durable state is present.
   // In particular, a later retirement must unlock this same mounted row.
   const admitted = action?.state
-    ? ['queued', 'claimed', 'accepted'].includes(action.state)
+    ? ADMITTED_RETRY_STATES.includes(action.state)
     : requested;
   if (readOnly || !isRetryableFailureNotice(message)) return null;
   return (

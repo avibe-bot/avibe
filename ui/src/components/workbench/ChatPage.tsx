@@ -21,7 +21,7 @@ import { readChatViewMode, writeChatViewMode } from '../../lib/chatViewMemory';
 import { normalizeChatMessageFontSize } from '../../lib/chatDisplay';
 import { setConfigField } from '../../lib/configMutations';
 import { annotationStandIn, annotationTitleKey, readAnnotationView } from '../../lib/annotationView';
-import { isAgentActivityBoundaryMessage, isRetryableFailureNotice, isTerminalAgentMessage, isTranscriptMessage, shouldRefreshAgentActivityForMessage } from '../../lib/chatMessageTypes';
+import { isAgentActivityBoundaryMessage, isRetriedFailureNotice, isRetryableFailureNotice, isTerminalAgentMessage, isTranscriptMessage, shouldRefreshAgentActivityForMessage } from '../../lib/chatMessageTypes';
 import { chatRowKind, drawsEmptyBodyPlaceholder, isAgentAuthored } from '../../lib/chatRowKind';
 import { useIosKeyboardInset } from '../../lib/useIosKeyboardInset';
 import { isProxyMediaUrl } from '../../lib/mediaProxy';
@@ -4170,9 +4170,12 @@ export const Transcript: React.FC<TranscriptProps> = ({
   // successful ``result``, a legacy ``error``, or a structured backend-failure
   // ``notify`` all end the visible response. ``working`` itself still settles
   // only from turn.end or the authoritative turn-state poll, so a late row from
-  // an older Turn cannot clear Stop for a newer one.
+  // an older Turn cannot clear Stop for a newer one. A failure notice whose Retry
+  // was admitted no longer ends it: the retried work is the response now, and
+  // Vibey's in-place retry adds no row after the notice.
+  const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
   const lastIsAgentTerminal =
-    messages.length > 0 && isTerminalAgentMessage(messages[messages.length - 1]);
+    !!lastMessage && isTerminalAgentMessage(lastMessage) && !isRetriedFailureNotice(lastMessage);
   // The running Activity card replaces the ThinkingBubble. It renders only while a
   // turn is in flight (``working``) AND the live buffer is non-empty and current-gen
   // (round-4 clause). Gating on ``working`` makes a stale buffer — e.g. one left by
