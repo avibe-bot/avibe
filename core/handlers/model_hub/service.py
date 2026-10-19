@@ -7009,6 +7009,9 @@ class ModelHubService:
         if candidate is None:
             return None
         if candidate.direct:
+            # A Source removed or re-identified after the first admission must not start a direct call.
+            if await asyncio.to_thread(self._admitted_executor, slot, tool) is None:
+                return None
             return await self._direct_search_attempt(call, candidate, deadline=deadline, say=say)
         source = candidate.source
         request = executor_request(call, source, model_id, candidate.declaration, candidate.include)
