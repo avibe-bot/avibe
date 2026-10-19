@@ -650,23 +650,36 @@ async def test_a_finished_turns_request_is_never_credited_to_the_next_turn_on_it
 
 
 class _SettlingLiveHandle(LiveInvokeHandle):
-    """A stream already delivered in full whose settlement (its outcome) is still being read."""
+    """A stream whose terminal frame was already forwarded, while the call has not finished.
 
-    def __init__(self, outcome, chunks):
-        super().__init__(outcome, chunks)
+    ``held`` names what is still outstanding: the upstream's EOF after the terminal frame, or
+    the call's settlement (its outcome) after EOF.
+    """
+
+    def __init__(self, outcome, chunks, *, held):
         self.settle = asyncio.Event()
+        self._held = held
+        super().__init__(outcome, chunks)
+
+    async def _iterate(self, chunks):
+        for chunk in chunks:
+            yield chunk
+        if self._held == "eof":
+            await self.settle.wait()
 
     async def outcome(self):
-        await self.settle.wait()
+        if self._held == "settlement":
+            await self.settle.wait()
         return self._outcome
 
 
 @pytest.mark.asyncio
-async def test_the_next_vibey_call_takes_the_failed_over_source_while_the_last_call_settles(tmp_path):
+@pytest.mark.parametrize("held", ["eof", "settlement"])
+async def test_the_next_vibey_call_takes_the_failed_over_source_while_the_last_call_settles(tmp_path, held):
     """MH-VIBEY-010: a call that failed over to another Source does not refuse the turn's next call.
 
     Vibey stops reading a stream at its terminal event and resolves its next call at once, while the
-    gateway is still settling the last call. When that call failed over (its first Source now cooling
+    gateway may still await the upstream's EOF or settle the last call. When that call failed over (its first Source now cooling
     down), the next resolution names the other Source and replaces the turn's route; that waits for the
     finished call instead of refusing the turn as overlapping live work.
     """
@@ -674,7 +687,7 @@ async def test_the_next_vibey_call_takes_the_failed_over_source_while_the_last_c
     fallback = _source("src_fallback01", "Fallback", vendor="openai", protocol="openai_responses", model_id="gpt-x")
     answer = _body("openai_responses", True)
     settling = _SettlingLiveHandle(
-        _outcome(RawOutcomeKind.SUCCESS, source_id=fallback.id, stream_started=True), (answer,),
+        _outcome(RawOutcomeKind.SUCCESS, source_id=fallback.id, stream_started=True), (answer,), held=held,
     )
     service = _vibey_service(tmp_path, [primary, fallback], handles=[
         InvokeHandle(_outcome(RawOutcomeKind.HTTP_ERROR, status=503, code="server_error", source_id=primary.id)),
