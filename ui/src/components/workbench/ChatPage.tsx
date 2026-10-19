@@ -4164,15 +4164,15 @@ export const Transcript: React.FC<TranscriptProps> = ({
     if (needsLatestReload) setShowJump(true);
   }, [needsLatestReload]);
 
-  // The reply arrives atomically as a persisted ``result`` row (no streaming
-  // card), so the thinking bubble shows for the whole gap between send and
-  // reply. Hide it the moment the last row is a fresh agent terminal — a
-  // successful ``result``, a legacy ``error``, or a structured backend-failure
-  // ``notify`` all end the visible response. ``working`` itself still settles
-  // only from turn.end or the authoritative turn-state poll, so a late row from
-  // an older Turn cannot clear Stop for a newer one. A failure notice whose Retry
-  // was admitted no longer ends it: the retried work is the response now, and
-  // Vibey's in-place retry adds no row after the notice.
+  // A reply arrives atomically as a persisted ``result`` row (no streaming card),
+  // and a Turn may reply more than once (input steered into it is answered in the
+  // same Turn), so the thinking bubble shows until the Turn ends: ``working``
+  // settles only from turn.end or the authoritative turn-state poll, so a late
+  // row from an older Turn cannot clear Stop for a newer one. A failure terminal
+  // (a legacy ``error`` or a structured backend-failure ``notify``) hides it at
+  // once, since it is the Turn's end. A failure notice whose Retry was admitted
+  // no longer ends it: the retried work is the response now, and Vibey's
+  // in-place retry adds no row after the notice.
   const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
   const lastIsAgentTerminal =
     !!lastMessage && isTerminalAgentMessage(lastMessage) && !isRetriedFailureNotice(lastMessage);

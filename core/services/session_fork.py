@@ -32,6 +32,10 @@ TERMINAL_AGENT_OUTPUT_TYPES = {
     for message_type in types_with("activityRole")
     if spec_for(message_type)["activityRole"] == "terminal"
 }
+# Agent rows that show a Turn completed: a terminal row always, and a reply when its
+# Turn is no longer running, since a Turn may reply more than once
+# (docs/plans/reply-and-turn-end.md).
+_COMPLETION_ACTIVITY_ROLES = frozenset({"reply", "terminal"})
 SOURCE_PROGRESS_AGENT_OUTPUT_TYPES = {
     message_type
     for message_type in set(types_with("activityRole")) | set(types_with("transcript"))
@@ -137,7 +141,9 @@ class ForkSourceState:
 
     @property
     def anchor_is_terminal_agent_output(self) -> bool:
-        return self.anchor_author == "agent" and self.anchor_activity_role == "terminal"
+        # A reservation anchors on a running Turn's input, so an agent anchor is a
+        # finished Turn's reply or terminal row.
+        return self.anchor_author == "agent" and self.anchor_activity_role in _COMPLETION_ACTIVITY_ROLES
 
 
 @dataclass(frozen=True)
@@ -612,7 +618,7 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
     from storage.messages_service import transcript_order_value
-    from storage.models import messages
+    from storage.models import messages, session_turns
 
     ensure_sqlite_state(primary_platform=resolve_primary_platform_from_config(paths.get_state_dir()))
     engine = create_sqlite_engine(paths.get_sqlite_state_path())
@@ -686,13 +692,27 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
             latest_after_anchor_metadata = _load_metadata(
                 latest_after_anchor["metadata_json"] if latest_after_anchor else None
             )
-            has_terminal_agent_output_after_anchor = (
-                latest_after_anchor_author == "agent"
-                and activity_role_for(
-                    latest_after_anchor_type,
-                    latest_after_anchor_metadata,
+            latest_after_anchor_role = activity_role_for(
+                latest_after_anchor_type,
+                latest_after_anchor_metadata,
+            )
+            has_terminal_agent_output_after_anchor = latest_after_anchor_author == "agent" and (
+                latest_after_anchor_role == "terminal"
+                or (
+                    latest_after_anchor_role == "reply"
+                    # A reply ends nothing while its Turn still runs: input steered
+                    # into it is being answered. IM Turns have no durable row, so
+                    # their reply stays the latest evidence.
+                    and conn.execute(
+                        select(session_turns.c.id)
+                        .where(
+                            session_turns.c.session_id == source_session_id,
+                            session_turns.c.state.in_(("starting", "active")),
+                        )
+                        .limit(1)
+                    ).first()
+                    is None
                 )
-                == "terminal"
             )
             has_input_turn_after_anchor = (
                 conn.execute(

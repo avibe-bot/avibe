@@ -26,7 +26,10 @@ _LIST_PROPERTIES = {
     "agentRenderWhenEvents",
 }
 _ENUM_PROPERTIES = {
-    "activityRole": {"none", "turn_start", "activity", "boundary", "terminal"},
+    # ``reply``: the agent's answer, which closes the current Activity phase like a
+    # ``boundary`` but never ends the Turn; a Turn ends at its durable Turn row, the IM
+    # ``silent_terminal`` trace, or a ``terminal`` row (docs/plans/reply-and-turn-end.md).
+    "activityRole": {"none", "turn_start", "activity", "boundary", "reply", "terminal"},
     "render": {
         "none",
         "user",
@@ -155,8 +158,9 @@ TRANSCRIPT_COPY_KEY = "transcript_copy"
 
 # Metadata on a ``result`` promoted from Turn text when its Turn ended on a silent
 # reply (``core.message_mirror.promote_turn_text_to_result``): the type it was
-# persisted as, one of ``PROMOTED_FROM_TYPES``. The row is that Turn's terminal
-# output everywhere; only Activity grouping keeps it where its text was mid-Turn.
+# persisted as, one of ``PROMOTED_FROM_TYPES``. The row is a reply everywhere; only
+# Activity grouping keeps it where its text was mid-Turn. Rows released versions
+# promoted keep the marker, so it stays readable.
 PROMOTED_FROM_KEY = "promoted_from"
 # Transcript-visible agent text that does not end its Turn, and so can be promoted.
 PROMOTED_FROM_TYPES = ("output", "interim")

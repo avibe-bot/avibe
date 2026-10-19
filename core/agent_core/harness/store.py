@@ -66,7 +66,7 @@ class TranscriptStore(Protocol):
         decides. ``images`` are those the run's committed tool results generated, which a final delivers with its
         reply: its committed display carries them, so the row is a complete result even if delivery never runs.
         ``superseded``: a non-final response is a completed reply that pending input took the final word from, which
-        commits as a visible reply (``output``), so it stays one even if delivery never runs.
+        commits as a reply (``result``) like a final, so it stays one even if delivery never runs.
         """
         ...
 

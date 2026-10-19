@@ -875,9 +875,12 @@ def test_activity_after_nonterminal_output_anchors_to_that_output(isolated_state
     assert groups[0]["open"] is False
 
 
+@pytest.mark.parametrize("reply_type", ["output", "result"])
 def test_nonterminal_output_completes_prior_activity_and_anchors_later_work(
-    isolated_state,
+    isolated_state, reply_type
 ):
+    """MESSAGE-DELIVERY-334: a reply (``result``, or a legacy ``output``) closes the activity before
+    it without ending the Turn, so the work after it is the same Turn's, timed from the reply."""
     engine = create_sqlite_engine()
     sid = "ses_output_completion_boundary"
     with engine.begin() as conn:
@@ -906,7 +909,7 @@ def test_nonterminal_output_completes_prior_activity_and_anchors_later_work(
             scope,
             sid,
             mid="m_output",
-            mtype="output",
+            mtype=reply_type,
             author="agent",
             created_at="2026-06-01T10:00:02Z",
             text="primary answer",
@@ -945,6 +948,7 @@ def test_nonterminal_output_completes_prior_activity_and_anchors_later_work(
     assert groups[1]["anchor_message_id"] == "m_output"
     assert groups[1]["anchor_position"] == "after"
     assert groups[1]["open"] is False
+    assert groups[1]["started_at"] == "2026-06-01T10:00:02Z"
 
 
 @pytest.mark.parametrize(
@@ -2089,8 +2093,8 @@ def test_a_promoted_silent_final_result_keeps_the_turns_activity(isolated_state,
     with engine.connect() as conn:
         after = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
     assert after == before
-    # Everywhere else, fork recovery among them, the row is the Turn's terminal output.
-    assert activity_role_for(promoted["type"], promoted["metadata"]) == "terminal"
+    # Everywhere else, fork recovery among them, the row is a reply.
+    assert activity_role_for(promoted["type"], promoted["metadata"]) == "reply"
 
 
 def test_a_promotion_marker_counts_only_on_a_promoted_result(isolated_state):

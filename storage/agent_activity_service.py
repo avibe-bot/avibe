@@ -5,9 +5,12 @@ Composes the two persisted trace sources into per-turn groups:
 * interim ``assistant`` messages (``messages`` table, ``type='assistant'``), and
 * activity and migrated terminal events from ``agent_events``.
 
-A *turn* ends at the agent's terminal reply (``result`` / ``error`` /
-backend-failure ``notify``) or, when a new turn starts without one, is reported
-as ``interrupted``. Durable input roles and start boundaries come from the
+A *turn* ends at its durable Turn row (``session_turns``), the IM
+``silent_terminal`` trace, or a terminal row (``error`` / backend-failure
+``notify``), or, when a new turn starts without one, is reported as
+``interrupted``. A reply (``result``) closes the activity before it, like a
+phase boundary, without ending the Turn: a Turn may reply more than once
+(``docs/plans/reply-and-turn-end.md``). Durable input roles and start boundaries come from the
 Delivery-to-Turn ownership graph: an initial Delivery opens its accepted Turn,
 while accepted steer participants remain inside that Turn. Legacy/non-durable
 rows fall back to transcript chronology. Message/event rows persist whole-second
@@ -23,8 +26,8 @@ bounds the event scan.
 
 Each group is keyed by the id of its first activity row (stable across summary
 and detail reads). ``anchor_message_id`` is the transcript message the chip
-renders against: the terminal reply for done/failed turns, or the next turn's
-opening message for an interrupted turn (``None`` when the interrupted turn is
+renders against: the reply or terminal row that closed it for done/failed
+groups, or the next turn's opening message for an interrupted turn (``None`` when the interrupted turn is
 the last thing in the session — the chip trails the transcript).
 
 Reads are bounded (recent tail) so a pathological session never triggers an
@@ -59,7 +62,7 @@ MESSAGE_SCAN_LIMIT = 500
 EVENT_SCAN_LIMIT = 2000
 
 # Message types that participate in turn structure: visible or hidden turn openers,
-# terminals (result/error/notify/silent-marker), and interim assistant activity rows.
+# replies, terminals (error/notify/silent-marker), and interim assistant activity rows.
 # Hidden lifecycle rows are fetched even though they are not in TRANSCRIPT_TYPES so
 # the activity projection preserves the complete Turn boundary.
 _CONDITIONAL_TERMINAL_TYPES = types_with("terminalWhenEvents")
@@ -130,9 +133,9 @@ def _activity_role(msg_type: Any, metadata: Optional[dict]) -> str:
 
     Only Activity grouping reads the promotion marker: the row stays where its text
     was mid-Turn, so the Turn's groups are the ones that text had. Every other
-    reader, fork recovery among them, sees the Turn's terminal output it now is.
-    The marker counts only on a ``result`` and only with a type promotion writes,
-    because a client may put any metadata on its own message.
+    reader, fork recovery among them, sees the reply it now is. The marker counts
+    only on a ``result`` and only with a type promotion writes, because a client
+    may put any metadata on its own message.
     """
     message_type = msg_type if isinstance(msg_type, str) else ""
     values = metadata or {}
@@ -145,11 +148,10 @@ def _activity_role(msg_type: Any, metadata: Optional[dict]) -> str:
 def _is_terminal(msg_type: Any, author: Any, metadata: Optional[dict]) -> bool:
     """Whether an agent message legally CLOSES a turn.
 
-    Terminals: a visible ``result``/``error`` reply, a ``backend_failure`` ``notify``
-    diagnostic, OR — when the turn produced nothing user-visible (a ``<silent>``-
-    stripped/empty final, or a reply-less bookkeeping turn) — the invisible ``silent``
-    event persisted at the delivery chokepoint. Only cancel/Stop (no terminal at all)
-    stays ``interrupted``.
+    Terminals: a visible ``error`` row or a ``backend_failure`` ``notify`` diagnostic.
+    A ``result`` is a reply, not a terminal: the Turn ends at its durable Turn row
+    or the invisible ``silent`` event (added to the timeline in ``_timeline``). Only
+    cancel/Stop (no terminal at all) stays ``interrupted``.
 
     A PLAIN ``notify`` is deliberately NOT terminal: agents emit mid-turn notify rows
     that explicitly do not end the turn (e.g. Claude's model-refusal fallback), so
@@ -323,7 +325,9 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
             # A row with no text (a response that only called tools, or a hidden silent
             # final) shows nothing; other backends never persist one.
             kind = "activity" if str(msg.get("text") or "").strip() else "ignore"
-        elif activity_role == "boundary":
+        elif activity_role in {"boundary", "reply"}:
+            # A reply closes the activity before it, like a phase boundary; the
+            # Turn ends at its durable Turn row or the IM silent marker.
             kind = "boundary"
         else:
             kind = "ignore"
@@ -492,7 +496,7 @@ def _make_group(
         "id": pending[0]["id"],
         # A group is positioned relative to a transcript message that is AT OR BEFORE
         # the group's own end (never a future message): done/failed anchor to their
-        # terminal reply (rendered BEFORE it — hug the reply from above); interrupted
+        # reply or terminal row (rendered BEFORE it — hug it from above); interrupted
         # anchor to the turn's trigger / the boundary before its activity (rendered
         # AFTER it). ``open_turn`` marks the last un-terminated turn — the only group
         # the frontend may promote into the tail live card while it is still running.
@@ -663,7 +667,7 @@ def _build_groups(items: list[dict[str, Any]], *, include_rows: bool) -> list[di
                 # A silent marker is invisible in the transcript, so its DONE group
                 # anchors to the (visible) turn trigger AFTER it — never to the marker,
                 # which the frontend can't position against (#935 backward-anchor). A
-                # visible terminal (result/error/notify) anchors to itself, BEFORE it
+                # visible terminal (error/notify) anchors to itself, BEFORE it
                 # (the chip hugs the reply from above).
                 if item["is_silent"]:
                     anchor_id, anchor_position = last_boundary_id, "after"

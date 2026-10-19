@@ -1,9 +1,10 @@
-"""A silent final reply never displaces the Turn's earlier visible text.
+"""A silent final reply never displaces a legacy ``output`` reply before it.
 
-A Turn can show text that does not end it: a completed phase a later input
-joined (``output``), or substantial narration (``interim``). When the Turn then
-ends on a reply that is empty once ``<silent>`` blocks are stripped, that text
-is the Turn's result: typed, rendered, and notified as one, exactly once.
+Until every backend types its replies ``result`` (docs/plans/reply-and-turn-end.md),
+a completed phase a later input joined can still arrive as ``output``. When the
+Turn then ends on a reply that is empty once ``<silent>`` blocks are stripped,
+that reply is the Turn's result: typed, rendered, and notified as one, exactly
+once. Narration (``interim``) is never a reply, so it is never promoted.
 """
 
 from __future__ import annotations
@@ -162,8 +163,6 @@ class SilentFinalTurnResultTests(unittest.IsolatedAsyncioTestCase):
         cases = [
             # A completed phase another input joined, then a silent answer to that input.
             ("output", REPORT, "avibe", ("output", REPORT, {"output": PHASE})),
-            # Substantial narration shown as a Web bubble before the silent final.
-            ("interim", FIVE_LINES, "avibe", ("assistant", FIVE_LINES, {})),
             # IM delivered the output as a message already; its row becomes the result.
             ("output", REPORT, "slack", ("output", REPORT, {"output": PHASE})),
         ]
@@ -324,6 +323,8 @@ class SilentFinalTurnResultTests(unittest.IsolatedAsyncioTestCase):
             ),
             # A per-step preamble stays in Activity: it was never visible text.
             "narration kept in Activity": (("assistant", FOUR_LINES, {}), silent_reply, [], 0),
+            # Substantial narration has a Web bubble, and is narration all the same.
+            "a narration bubble": (("assistant", FIVE_LINES, {}), silent_reply, [("interim", FIVE_LINES)], 0),
         }
         for name, ((message_type, body, kwargs), final, expected_rows, pushes) in cases.items():
             with self.subTest(name), self.state():

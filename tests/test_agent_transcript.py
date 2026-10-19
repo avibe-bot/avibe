@@ -513,16 +513,20 @@ async def test_a_final_commits_as_the_loops_reply_decision_says(engine, replied,
 
 @pytest.mark.parametrize(
     ("superseded", "text", "row_type"),
-    [(True, "4.", "output"), (True, "<silent>later</silent>", "assistant"), (False, "4.", "assistant")],
+    [(True, "4.", "result"), (True, "<silent>later</silent>", "assistant"), (False, "4.", "assistant")],
     ids=["superseded-reply", "superseded-silent", "narration"],
 )
-async def test_a_reply_pending_input_superseded_commits_as_a_visible_reply(engine, superseded, text, row_type) -> None:
-    """MESSAGE-DELIVERY-326: the row is a visible reply from its commit, so it stays one if the process stops before
-    its delivery; one with nothing to show stays hidden, as a silent final does."""
+async def test_a_reply_pending_input_superseded_commits_as_a_reply(engine, superseded, text, row_type) -> None:
+    """MESSAGE-DELIVERY-326 / MESSAGE-DELIVERY-334: the row is a reply (``result``) from its commit, so it stays one
+    if the process stops before its delivery, and the steer after it keeps it from reading as the Turn's final; one
+    with nothing to show stays hidden, as a silent final does."""
+    from storage.agent_transcript import committed_final
+
     with engine.begin() as conn:
         home = _scope(conn, "C-home")
         _session(conn, "ses_main", home)
-        consumed = _row(conn, "ses_main", home, "2+2?")
+        consumed = _accepted_turn(conn, "ses_main", home, "2+2?", "turn_main")
+        steer = _row(conn, "ses_main", home, "thanks")
 
     def render(message, *, final, replied, images):
         body = "".join(block.text for block in message.content if isinstance(block, TextBlock) and block.text)
@@ -530,10 +534,16 @@ async def test_a_reply_pending_input_superseded_commits_as_a_visible_reply(engin
 
     store = SQLiteTranscriptStore(engine, render=render)
     await store.consume_input("ses_main", consumed, _user("2+2?"))
-    reply = await store.append_response("ses_main", _assistant(text), final=False, superseded=superseded)
+    reply = await store.append_response(
+        "ses_main", _assistant(text), final=False, superseded=superseded, turn_id="turn_main"
+    )
+    # The loop consumes the pending steer right after the reply it superseded.
+    await store.consume_input("ses_main", steer, _user("thanks"))
 
     with engine.connect() as conn:
         committed = conn.execute(select(messages.c.type).where(messages.c.id == reply.row_id)).scalar_one()
+        # A restart's rerun reads the steer after it: the reply is not the Turn's final.
+        assert committed_final(conn, "ses_main", "turn_main") is None
     assert committed == row_type
     # Whatever its type, it is context.
     assert [entry.row_id for entry in await store.load("ses_main") if entry.kind == "response"] == [reply.row_id]
@@ -549,7 +559,7 @@ async def test_the_restart_reads_of_a_turns_context_tail_stay_bounded(engine) ->
     over the growing history."""
     from sqlalchemy import event
 
-    from core.message_mirror import delivered_committed_row, resumed_turn_text
+    from core.message_mirror import delivered_committed_row, resumed_turn_reply, resumed_turn_text
     from core.restart_resume import restart_resume_plan, restart_streak
     from modules.im.base import MessageContext
     from storage.agent_transcript import committed_final, last_turn_text
@@ -586,10 +596,12 @@ async def test_the_restart_reads_of_a_turns_context_tail_stay_bounded(engine) ->
             cut_turn = message_deliveries.get_turn(conn, "turn_cut")
             assert restart_resume_plan(conn, cut_turn) == "rerun"
             assert committed_final(conn, "ses_cut", "turn_cut") is None
-            # A silent final's result: the Turn's last narration or superseded reply.
-            last_turn_text(conn, "ses_main", since="2026-01-01T00:00:00.000000Z")
-        # The rerun's end, on the loop: the final's delivery, and a silent final's result.
+            # What a silent final settles with: the Turn's last reply, or a legacy ``output``.
+            for types in (("result",), ("output",)):
+                last_turn_text(conn, "ses_main", since="2026-01-01T00:00:00.000000Z", types=types)
+        # The rerun's end, on the loop: the final's delivery, and what a silent final settles with.
         assert delivered_committed_row(rerun, final.row_id, outward=True) is None
+        assert resumed_turn_reply(rerun) == "两个文件。"
         assert resumed_turn_text(rerun) is None
         with engine.begin() as conn:
             # The rerun's writer transaction: the streak, and the released generation.

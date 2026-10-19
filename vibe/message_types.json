@@ -64,7 +64,7 @@
       "inboxActivity": true,
       "inboxPreview": true,
       "inboxSettlesReply": true,
-      "activityRole": "terminal",
+      "activityRole": "reply",
       "detachedCompletion": true,
       "unread": true,
       "webPush": true,

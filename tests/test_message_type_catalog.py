@@ -220,10 +220,14 @@ def test_activity_fetch_and_terminal_semantics_match_current_service() -> None:
                 metadata = {"detached": detached}
                 if event is not None:
                     metadata["event"] = event
+                # A ``result`` is a reply, not a Turn end (docs/plans/reply-and-turn-end.md).
                 legacy_expected = (
-                    message_type in {"result", "error"}
+                    message_type == "error"
                     or (message_type == "notify" and event == "backend_failure")
                 ) and not (detached and spec["detachedCompletion"])
+                assert (activity_role_for(message_type, metadata) == "reply") is (
+                    message_type == "result" and not detached
+                )
                 assert (
                     activity_role_for(message_type, metadata) == "terminal"
                 ) is legacy_expected
@@ -258,7 +262,7 @@ def test_replayed_failure_is_not_foreground_activity() -> None:
     assert not is_detached_completion("notify", metadata)
     assert not agent_activity_service._is_terminal("notify", "agent", metadata)
     assert activity_role_for("notify", {**metadata, "replayed": False}) == "terminal"
-    assert activity_role_for("result", metadata) == "terminal"
+    assert activity_role_for("result", metadata) == "reply"
 
 
 def test_web_push_candidate_exact_and_unread_sets_match_current_service() -> None:

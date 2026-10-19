@@ -5,9 +5,10 @@ The hook bridges the in-process dispatcher to the SSE stream exposed by
 from ``controller.active_turn_sinks`` — not off the context — so a reused
 agent session, whose long-lived receiver carries a stale per-turn context,
 still streams to the current turn. It forwards the envelope to the
-registered ``on_chunk``, swallows callback errors, and a ``result`` emit
-sets the sink's done event so ``dispatch_turn`` can close the stream. No
-sink (IM bots / CLI) => silent no-op.
+registered ``on_chunk``, swallows callback errors, and a chunk that completes its
+Turn (``completes_turn``) sets the sink's done event so ``dispatch_turn`` can close
+the stream; a reply chunk alone does not, since a Turn may reply more than once.
+No sink (IM bots / CLI) => silent no-op.
 """
 
 from __future__ import annotations
@@ -72,21 +73,24 @@ def test_forwards_envelope_to_sink_on_chunk():
     cb.assert_awaited_once_with({"text": "agent reply", "message_id": "m_42", "kind": "result"})
 
 
-def test_result_kind_sets_done_event():
+def test_only_the_turn_end_sets_done_event():
+    """MESSAGE-DELIVERY-334: a reply chunk keeps the stream open; only the Turn's end releases it."""
     controller = _ControllerDouble()
     done = asyncio.Event()
     controller.register_turn_sink("avibe::C", on_chunk=AsyncMock(), done_event=done)
-    asyncio.run(_stream_chunk(controller, _ctx(), text="final", message_id="m1", kind="result"))
-    assert done.is_set(), "a result emit must release the streaming dispatch"
+    asyncio.run(_stream_chunk(controller, _ctx(), text="first", message_id="m1", kind="result"))
+    assert not done.is_set(), "a reply that does not end its Turn must keep the stream open"
+    asyncio.run(_stream_chunk(controller, _ctx(), text="final", message_id="m2", kind="result", completes_turn=True))
+    assert done.is_set(), "the Turn's end must release the streaming dispatch"
 
 
-def test_result_kind_stamps_terminal_settlement_on_sink():
+def test_turn_end_stamps_terminal_settlement_on_sink():
     # The stamp is what tells a durable caller (an ``agent_runs`` row) that a REAL
     # terminal result arrived, so the out-of-band writer owns the terminal state.
     # Without it every honest run would be re-settled as failed.
     controller = _ControllerDouble()
     controller.register_turn_sink("avibe::C", on_chunk=AsyncMock(), done_event=asyncio.Event())
-    asyncio.run(_stream_chunk(controller, _ctx(), text="final", message_id="m1", kind="result"))
+    asyncio.run(_stream_chunk(controller, _ctx(), text="final", message_id="m1", kind="result", completes_turn=True))
     assert controller.get_turn_sink("avibe::C")["settled_by"] == SETTLED_BY_TERMINAL_RESULT
 
 
@@ -109,7 +113,7 @@ def test_result_does_not_overwrite_an_acknowledged_stop_stamp():
     sink["settled_by"] = SETTLED_BY_STOPPED
     done.set()
 
-    asyncio.run(_stream_chunk(controller, _ctx(), text="final", message_id="m1", kind="result"))
+    asyncio.run(_stream_chunk(controller, _ctx(), text="final", message_id="m1", kind="result", completes_turn=True))
 
     assert sink["settled_by"] == SETTLED_BY_STOPPED
 
@@ -130,7 +134,7 @@ def test_result_does_not_overwrite_a_contained_teardown_stamp():
     sink["settled_by"] = SETTLED_BY_BACKEND_REFRESH
     done.set()
 
-    asyncio.run(_stream_chunk(controller, _ctx(), text="final", message_id="m1", kind="result"))
+    asyncio.run(_stream_chunk(controller, _ctx(), text="final", message_id="m1", kind="result", completes_turn=True))
 
     assert sink["settled_by"] == SETTLED_BY_BACKEND_REFRESH
 
@@ -150,7 +154,7 @@ def test_result_still_upgrades_the_pessimistic_no_result_stamp():
     sink = controller.get_turn_sink("avibe::C")
     sink["settled_by"] = SETTLED_BY_NO_TERMINAL_RESULT
 
-    asyncio.run(_stream_chunk(controller, _ctx(), text="final", message_id="m1", kind="result"))
+    asyncio.run(_stream_chunk(controller, _ctx(), text="final", message_id="m1", kind="result", completes_turn=True))
 
     assert sink["settled_by"] == SETTLED_BY_TERMINAL_RESULT
 
@@ -168,7 +172,7 @@ def test_stale_result_does_not_stamp_active_turns_sink():
     # neither via the done event nor via the settlement stamp.
     controller = _ControllerDouble()
     controller.register_turn_sink("avibe::C", on_chunk=AsyncMock(), done_event=asyncio.Event(), turn_token="T2")
-    asyncio.run(_stream_chunk(controller, _ctx(turn_token="T1"), text="stale", message_id="m1", kind="result"))
+    asyncio.run(_stream_chunk(controller, _ctx(turn_token="T1"), text="stale", message_id="m1", kind="result", completes_turn=True))
     assert controller.get_turn_sink("avibe::C").get("settled_by") is None
 
 
@@ -198,7 +202,7 @@ def test_result_with_matching_turn_token_completes():
     controller = _ControllerDouble()
     done = asyncio.Event()
     controller.register_turn_sink("avibe::C", on_chunk=AsyncMock(), done_event=done, turn_token="T2")
-    asyncio.run(_stream_chunk(controller, _ctx(turn_token="T2"), text="final", message_id="m1", kind="result"))
+    asyncio.run(_stream_chunk(controller, _ctx(turn_token="T2"), text="final", message_id="m1", kind="result", completes_turn=True))
     assert done.is_set(), "a result for the active turn must release the stream"
 
 
@@ -212,7 +216,7 @@ def test_stale_result_does_not_complete_active_turn_but_still_forwards():
     done = asyncio.Event()
     cb = AsyncMock()
     controller.register_turn_sink("avibe::C", on_chunk=cb, done_event=done, turn_token="T2")
-    asyncio.run(_stream_chunk(controller, _ctx(turn_token="T1"), text="stale", message_id="m1", kind="result"))
+    asyncio.run(_stream_chunk(controller, _ctx(turn_token="T1"), text="stale", message_id="m1", kind="result", completes_turn=True))
     assert not done.is_set(), "a stale turn's result must not end the active turn"
     cb.assert_awaited_once()  # but the chunk was still forwarded
 
@@ -230,7 +234,7 @@ def test_absent_ctx_token_does_not_complete_tokened_turn():
     controller = _ControllerDouble()
     done = asyncio.Event()
     controller.register_turn_sink("avibe::C", on_chunk=AsyncMock(), done_event=done, turn_token="T2")
-    asyncio.run(_stream_chunk(controller, _ctx(turn_token=None), text="final", message_id="m1", kind="result"))
+    asyncio.run(_stream_chunk(controller, _ctx(turn_token=None), text="final", message_id="m1", kind="result", completes_turn=True))
     assert not done.is_set(), "tokenless emit must NOT complete a tokened (live) turn"
 
 

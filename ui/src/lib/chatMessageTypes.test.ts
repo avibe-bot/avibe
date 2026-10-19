@@ -57,8 +57,7 @@ describe('isNotifyMessageType', () => {
 });
 
 describe('isTerminalAgentMessage', () => {
-  it('recognizes results, legacy errors, and structured backend failures', () => {
-    expect(isTerminalAgentMessage({ author: 'agent', type: 'result' })).toBe(true);
+  it('recognizes legacy errors and structured backend failures', () => {
     expect(isTerminalAgentMessage({ author: 'agent', type: 'error' })).toBe(true);
     expect(
       isTerminalAgentMessage({
@@ -69,7 +68,9 @@ describe('isTerminalAgentMessage', () => {
     ).toBe(true);
   });
 
-  it('keeps ordinary notifications and user rows nonterminal', () => {
+  it('keeps replies, ordinary notifications and user rows nonterminal', () => {
+    // A Turn may reply more than once: a reply never ends it (docs/plans/reply-and-turn-end.md).
+    expect(isTerminalAgentMessage({ author: 'agent', type: 'result' })).toBe(false);
     expect(isTerminalAgentMessage({ author: 'agent', type: 'output' })).toBe(false);
     expect(isTerminalAgentMessage({ author: 'agent', type: 'notify' })).toBe(false);
     expect(
@@ -105,7 +106,7 @@ describe('isTerminalAgentMessage', () => {
     expect(isTerminalAgentMessage({
       ...message, metadata: { ...message.metadata, replayed: false },
     })).toBe(true);
-    expect(isTerminalAgentMessage({ author: 'agent', type: 'result', metadata: { replayed: true } })).toBe(true);
+    expect(isTerminalAgentMessage({ author: 'agent', type: 'result', metadata: { replayed: true } })).toBe(false);
   });
 });
 
@@ -126,13 +127,13 @@ describe('isBoundaryMessage', () => {
 });
 
 describe('isAgentActivityBoundaryMessage', () => {
-  it('advances Activity only for the catalog effective boundary role', () => {
+  it('advances Activity only for the catalog effective boundary and reply roles', () => {
     for (const type of messageTypeNames()) {
       const spec = specFor(type);
       for (const detached of [false, true]) {
         for (const event of [undefined, ...spec.terminalWhenEvents]) {
           const message = { type, metadata: { detached, event } };
-          const isBoundary = spec.activityRole === 'boundary'
+          const isBoundary = (spec.activityRole === 'boundary' || spec.activityRole === 'reply')
             && !(detached && spec.detachedCompletion)
             && event === undefined;
           expect(isAgentActivityBoundaryMessage({ ...message, author: 'agent' }), type).toBe(isBoundary);

@@ -43,10 +43,7 @@ def test_backend_failure_predicate_matches_legacy_type_and_event_pair() -> None:
 
 
 def test_fork_activity_sets_match_legacy_values() -> None:
-    assert session_fork.TERMINAL_AGENT_OUTPUT_TYPES == {
-        "result",
-        "error",
-    }
+    assert session_fork.TERMINAL_AGENT_OUTPUT_TYPES == {"error"}
     assert session_fork.SOURCE_PROGRESS_AGENT_OUTPUT_TYPES == {
         "assistant",
         "output",

@@ -12,7 +12,6 @@ from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.delivery_evidence import DeliveryEvidence
 from core.message_output import (
     MessageOutput,
-    communication_type_for_output,
     contained_teardown_output_for,
     stop_output_for,
 )
@@ -147,38 +146,6 @@ class _StubController:
 
 
 class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
-    def test_visible_output_type_follows_turn_authority(self):
-        self.assertEqual(
-            communication_type_for_output(
-                "result",
-                MessageOutput(completes_turn=False),
-            ),
-            "output",
-        )
-        self.assertEqual(
-            communication_type_for_output(
-                "result",
-                MessageOutput(completes_turn=True, detached=True),
-                is_error=True,
-            ),
-            "error",
-        )
-        self.assertEqual(
-            communication_type_for_output(
-                "result",
-                MessageOutput(completes_turn=True, detached=True),
-            ),
-            "result",
-        )
-        self.assertEqual(
-            communication_type_for_output(
-                "result",
-                MessageOutput(completes_turn=True),
-                is_error=True,
-            ),
-            "error",
-        )
-
     def test_terminal_snapshot_elects_fallback_after_excluding_canceled_runs(self):
         controller = _StubController(platform="slack")
         dispatcher = ConsolidatedMessageDispatcher(controller)

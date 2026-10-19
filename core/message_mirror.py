@@ -981,12 +981,12 @@ def delivered_committed_row(
     return row
 
 
-def resumed_turn_text(context: MessageContext) -> Optional[str]:
-    """The last visible text of a Turn a restart reran, from the Turn's own rows.
+def _resumed_turn_row(context: MessageContext, types: tuple[str, ...]) -> Optional[tuple[str, str]]:
+    """``(row_id, text)`` of the last row of ``types`` a Turn a restart reran wrote, from its own rows.
 
-    The dispatcher remembers each Turn's visible text as it delivers it; what a rerun
-    Turn showed before the restart was delivered by the process that died, so a
-    silent final of the rerun reads it from the transcript (``last_turn_text``).
+    The dispatcher remembers what each Turn shows as it delivers it; what a rerun
+    Turn showed before the restart was delivered by the process that died, so the
+    rerun's end reads it from the transcript (``last_turn_text``).
     """
 
     spec = context.platform_specific or {}
@@ -1001,10 +1001,24 @@ def resumed_turn_text(context: MessageContext) -> Optional[str]:
             turn = message_deliveries.get_turn(conn, turn_id)
             if turn is None or turn["session_id"] != session_id:
                 return None
-            found = last_turn_text(conn, session_id, since=str(turn.get("started_at") or turn["created_at"]))
+            since = str(turn.get("started_at") or turn["created_at"])
+            return last_turn_text(conn, session_id, since=since, types=types)
     except Exception:
-        logger.debug("resumed_turn_text: lookup failed", exc_info=True)
+        logger.debug("resumed turn lookup failed", exc_info=True)
         return None
+
+
+def resumed_turn_reply(context: MessageContext) -> Optional[str]:
+    """The last visible reply of a Turn a restart reran, which its end settles with."""
+
+    found = _resumed_turn_row(context, ("result",))
+    return found[1] if found else None
+
+
+def resumed_turn_text(context: MessageContext) -> Optional[str]:
+    """The legacy ``output`` a rerun Turn's silent final promotes (``promote_turn_text_to_result``)."""
+
+    found = _resumed_turn_row(context, ("output",))
     return found[0] if found else None
 
 

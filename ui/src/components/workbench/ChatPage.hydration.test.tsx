@@ -1032,6 +1032,44 @@ describe('ChatPage transcript hydration', () => {
     });
   });
 
+  describe.each([false, true])('reply before the Turn ends with Activity enabled=%s', (activityEnabled) => {
+    it('MESSAGE-DELIVERY-334 keeps the Turn thinking after a reply until turn.end', async () => {
+      // A Turn may reply more than once (a steered input is answered in the same
+      // Turn), so a reply is drawn as the Agent's answer and only turn.end settles.
+      mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
+      mocks.api.getSessionBootstrap.mockResolvedValue({
+        ...bootstrapPayload('session-new'),
+        config: { ui: { show_agent_activity: activityEnabled } },
+        turn_state: { ...idleTurnState, foreground: 'running', in_flight: true },
+        messages: [projectedMessage('owner-start', '修一下缓存')],
+      });
+      render(
+        <MemoryRouter initialEntries={['/chat/session-new']}>
+          <Routes>
+            <Route path="/chat/:sessionId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>,
+      );
+      await screen.findByText('chat.thinking');
+      act(() => mocks.events?.onMessageNew({
+        ...projectedMessage('first-reply', '缓存已修好。'),
+        author: 'agent', source: 'agent', type: 'result',
+        created_at: '2026-08-15T00:00:30Z',
+        metadata: { turn_id: 'current-turn' },
+      }));
+
+      const row = document.querySelector('[data-message-id="first-reply"]');
+      expect(row!.textContent).toContain('缓存已修好。');
+      // The Agent's answer, not the muted phase bubble.
+      expect(row!.querySelector('.border-mint\\/25')).not.toBeNull();
+      expect(screen.getByText('chat.thinking')).toBeTruthy();
+      expect(mocks.composer?.busy).toBe(true);
+
+      act(() => mocks.events?.onTurnEnd({ session_id: 'session-new' }));
+      expect(screen.queryByText('chat.thinking')).toBeNull();
+    });
+  });
+
   describe.each([false, true])('retried failure with Activity enabled=%s', (activityEnabled) => {
     it.each(['live', 'bootstrap'])('keeps the retried work thinking after a %s retry admission', async (delivery) => {
       // Vibey's retry resumes the transcript and adds no row after the notice, so the

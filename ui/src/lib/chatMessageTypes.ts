@@ -121,21 +121,26 @@ export function isRetriedFailureNotice(
   return typeof action?.state === 'string' && ADMITTED_RETRY_STATES.includes(action.state);
 }
 
-// A terminal reply the TRANSCRIPT shows: the catalog's terminal activity role
-// intersected with transcript visibility (``silent`` is terminal for activity
-// bookkeeping but never rendered), plus the conditional terminals that only settle
-// a turn for specific metadata events (``notify`` + ``backend_failure``).
+// A terminal row the TRANSCRIPT shows: the catalog's terminal activity role
+// intersected with transcript visibility, plus the conditional terminals that only
+// settle a turn for specific metadata events (``notify`` + ``backend_failure``). A
+// ``result`` is a reply, not a terminal: a Turn may reply more than once and ends
+// at ``turn.end`` (docs/plans/reply-and-turn-end.md).
 export const isTerminalAgentMessage = (message: TerminalAgentMessageCandidate): boolean => {
   if (message.author !== 'agent') return false;
   const spec = specFor(message.type);
   return spec.transcript && activityRoleForMessage(message) === 'terminal';
 };
 
-// A phase boundary advances the Activity group without settling the Turn.
-// Presentation's isBoundaryMessage also includes detached legacy completions,
-// which must not invalidate the foreground group's live rows or hydration.
+// A reply or a phase boundary closes the current Activity group without settling
+// the Turn. Presentation's isBoundaryMessage also includes detached legacy
+// completions, which must not invalidate the foreground group's live rows or
+// hydration; it excludes replies, which draw as the Agent's answer.
+const isActivityPhaseEnd = (role: ReturnType<typeof specFor>['activityRole']): boolean =>
+  role === 'boundary' || role === 'reply';
+
 export const isAgentActivityBoundaryMessage = (message: TerminalAgentMessageCandidate): boolean =>
-  message.author === 'agent' && activityRoleForMessage(message) === 'boundary';
+  message.author === 'agent' && isActivityPhaseEnd(activityRoleForMessage(message));
 
 // Historical failures and detached completions refresh durable Activity without
 // affecting its live generation. Only current terminal replies settle the Turn.
@@ -144,6 +149,6 @@ export const shouldRefreshAgentActivityForMessage = (
 ): boolean => {
   if (message.author !== 'agent') return false;
   const role = activityRoleForMessage(message);
-  return role === 'boundary' || role === 'terminal'
+  return isActivityPhaseEnd(role) || role === 'terminal'
     || isDetachedCompletionMessage(message) || isReplayedFailureNotice(message);
 };

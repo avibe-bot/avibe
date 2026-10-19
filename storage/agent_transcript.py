@@ -91,15 +91,15 @@ from storage.agent_session_rows import reserve_write_lock
 from storage.message_deliveries import TURN_OWNER_STATES
 from storage.models import agent_events, agent_sessions, message_deliveries, messages, scopes, session_turns
 from storage.vibey_recovery import VIBEY_RECOVERY_INPUT_PREDICATE
-from vibe.message_types import PROMOTED_FROM_TYPES
 
 INPUT_TYPES = ("user", "harness", "agent_initiated", "annotation")
 # A final response is ``result``, or ``error`` when ``final_outcome`` says it failed:
 # the row carries its outcome, as the other backends' terminal rows do. A final with
 # nothing to show (a silent reply) is the hidden response type ``assistant``: context,
 # but no transcript row, inbox reply, or unread result, as the other backends persist
-# nothing visible for it. A non-final reply that pending input superseded commits as
-# ``output``, a visible reply, which a silent final can make the Turn's ``result``.
+# nothing visible for it. A non-final reply that pending input superseded is a reply
+# all the same, ``result`` (docs/plans/reply-and-turn-end.md); released versions
+# committed it as ``output``, which stays a response type.
 FINAL_TYPES = ("result", "error")
 RESPONSE_TYPES = ("assistant", "output", *FINAL_TYPES)
 CONTEXT_VISIBILITY = "context"
@@ -145,7 +145,7 @@ def final_outcome(message: AssistantMessage, *, replied: Optional[bool] = None) 
 
 def _response_type(message: AssistantMessage, *, final: bool, display_text: str, replied: bool, superseded: bool) -> str:
     if not final:
-        return "output" if superseded and display_text.strip() else "assistant"
+        return "result" if superseded and display_text.strip() else "assistant"
     if final_outcome(message, replied=replied) == "failed":
         return "error"
     return "result" if display_text.strip() else "assistant"
@@ -830,8 +830,9 @@ def committed_final(conn: Connection, session_id: str, turn_id: str) -> Optional
     a Turn has work left unless its last committed response has no tool calls, did not
     stop with ``error`` or ``aborted`` (the partial a failed stream commits), and no
     input follows it, in the context or still waiting to enter it (an accepted steer no
-    run consumed). Every read is bounded by the Session's context tail or by the Turn's
-    own Deliveries.
+    run consumed). A reply a steer superseded is a ``result`` like a final, and that
+    steer is what follows it. Every read is bounded by the Session's context tail or by
+    the Turn's own Deliveries.
     """
     response = last_response(conn, session_id)
     if (
@@ -839,7 +840,7 @@ def committed_final(conn: Connection, session_id: str, turn_id: str) -> Optional
         or response.turn_id != turn_id
         or response.has_tool_calls
         or response.stop_reason in _UNFINISHED_STOP_REASONS
-        # A reply pending input superseded is visible, never final.
+        # Released versions committed a reply pending input superseded as ``output``.
         or response.message_type == "output"
     ):
         return None
@@ -866,17 +867,17 @@ def committed_final(conn: Connection, session_id: str, turn_id: str) -> Optional
     return None if unconsumed is not None else response
 
 
-def last_turn_text(conn: Connection, session_id: str, *, since: str) -> Optional[tuple[str, str]]:
-    """``(row_id, text)`` of the last visible text the Session's agent wrote since ``since``.
+def last_turn_text(conn: Connection, session_id: str, *, since: str, types: Sequence[str]) -> Optional[tuple[str, str]]:
+    """``(row_id, text)`` of the last visible text of ``types`` the Session's agent wrote since ``since``.
 
-    What a Turn that ends on a silent final leaves as its result
-    (``promote_turn_text_to_result``): its narration (``interim``) or a superseded
-    reply (``output``). A Session runs one Turn at a time, so with ``since`` the
-    Turn's start these are the Turn's own rows; each read is an index-keyed
-    ``SEARCH`` bounded by that window.
+    What a Turn that ends without a reply of its own settles with: its last reply
+    (``result``), or the legacy ``output`` reply a silent final promotes
+    (``promote_turn_text_to_result``). A Session runs one Turn at a time, so with
+    ``since`` the Turn's start these are the Turn's own rows; each read is an
+    index-keyed ``SEARCH`` bounded by that window.
     """
     latest: Optional[tuple[str, str, str]] = None
-    for message_type in PROMOTED_FROM_TYPES:
+    for message_type in types:
         row = conn.execute(
             select(messages.c.created_at, messages.c.id, messages.c.content_text)
             .where(

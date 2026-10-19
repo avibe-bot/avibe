@@ -1361,6 +1361,48 @@ def test_fork_source_has_agent_output_after_anchor(tmp_path: Path, monkeypatch: 
         engine.dispose()
 
 
+def test_a_reply_while_the_source_turn_runs_is_not_its_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MESSAGE-DELIVERY-334: a Turn may reply more than once (a steered input is answered in the
+    same Turn), so a reply after the fork anchor shows the source completed only once its durable
+    Turn is no longer running."""
+    from config import paths
+    from storage.importer import ensure_sqlite_state
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    db_path = paths.get_sqlite_state_path()
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(select(agent_sessions).where(agent_sessions.c.id == source_id)).mappings().one()
+            turn_id = _seed_started_delivery(conn, scope_id=row["scope_id"], session_id=source_id, text="fix it")
+            anchor = messages_service.append(
+                conn, scope_id=row["scope_id"], session_id=source_id, platform="avibe",
+                author="user", message_type="user", text="fix it",
+            )
+            messages_service.append(
+                conn, scope_id=row["scope_id"], session_id=source_id, platform="avibe",
+                author="agent", message_type="result", text="fixed; the steered question next",
+            )
+        fork = {"source_session_id": source_id, "source_message_id": anchor["id"]}
+
+        assert fork_source_has_agent_output_after_anchor(fork) is False
+
+        with engine.begin() as conn:
+            conn.execute(
+                session_turns.update()
+                .where(session_turns.c.id == turn_id)
+                .values(state="terminal", terminal_outcome="completed", terminal_at="2026-08-01T00:02:00Z")
+            )
+
+        assert fork_source_has_agent_output_after_anchor(fork) is True
+    finally:
+        engine.dispose()
+
+
 def test_fork_source_state_identifies_completed_anchor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from config import paths
     from storage.importer import ensure_sqlite_state
