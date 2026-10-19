@@ -39,6 +39,7 @@ declare global {
     setPetMainAvailable: (available: boolean) => void;
     petFixtureConnection: (connected: boolean) => void;
     petFixtureMessage: (message: Record<string, unknown>) => void;
+    petFixtureAddActivity: () => void;
   }
 }
 window.petLayoutHitRegions = [];
@@ -173,6 +174,13 @@ window.petFixtureMessage = (message) => {
   };
   for (const stream of streams) {
     stream.dispatchEvent(new MessageEvent('message.new', { data: JSON.stringify({ type: 'message.new', data }) }));
+  }
+};
+// Start one more visible activity, announced the way a run change is.
+window.petFixtureAddActivity = () => {
+  agents.push({ ...agents[0], session_id: `ses_fixture_${agents.length}`, base_session_id: `native_${agents.length}`, title: 'Another task' });
+  for (const stream of streams) {
+    stream.dispatchEvent(new MessageEvent('runs.updated', { data: JSON.stringify({ type: 'runs.updated', data: { run_id: `run_${agents.length}`, status: 'running' } }) }));
   }
 };
 

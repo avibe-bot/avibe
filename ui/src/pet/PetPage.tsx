@@ -267,6 +267,16 @@ const PetSurface: React.FC = () => {
     void setPanel(true);
   }, [setPanel]);
   const togglePanel = () => {
+    // A lone card has no stack to open (§3.3). Vibey still closes an open
+    // history, but otherwise toggles nothing: flipping the panel state here
+    // would be invisible until a second card arrived and opened the list.
+    if (singleCard) {
+      if (detailOpen) {
+        setDetailOpen(false);
+        void setPanel(false);
+      }
+      return;
+    }
     if (detailOpen) openCards();
     else void setPanel(!petPanel.want());
   };

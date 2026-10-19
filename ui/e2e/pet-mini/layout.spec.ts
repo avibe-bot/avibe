@@ -861,6 +861,49 @@ for (const theme of ['light', 'dark']) {
   });
 }
 
+test('Vibey clicks with a lone card leave no hidden expansion for a second card', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html?activities=1');
+  const avatar = page.locator('.pet-mini-avatar-button');
+  await expect(page.locator('.pet-mini-card')).toHaveCount(1);
+  await avatar.click();
+  await avatar.click();
+  await avatar.click();
+  await page.evaluate(() => window.petFixtureAddActivity());
+  await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
+  await expect(page.locator('.pet-mini-stack-count')).toHaveText('2 items');
+  await expect(page.locator('.pet-mini-scroll')).toHaveCount(0);
+  await expect(avatar).toHaveAttribute('aria-expanded', 'false');
+});
+
+test('with a lone card, Vibey closes the open history and leaves the card alone', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&activities=1');
+  const card = page.locator('.pet-mini-card');
+  const avatar = page.locator('.pet-mini-avatar-button');
+  await expect(card.locator('.pet-mini-open')).toBeVisible();
+  await page.locator('.pet-mini-reply-toggle').click();
+  await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).toHaveClass(/is-open/);
+  const size = async () => {
+    await page.evaluate(async () => {
+      await Promise.all(document.getAnimations()
+        .filter((animation) => animation.effect?.getTiming().iterations !== Infinity)
+        .map((animation) => animation.finished.catch(() => {})));
+    });
+    const box = (await card.boundingBox())!;
+    return { width: box.width, height: box.height };
+  };
+  const before = await size();
+  await avatar.click();
+  await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).not.toHaveClass(/is-open/);
+  // The card moves down with the shrinking bubble, but keeps its full form.
+  await expect(card.locator('.pet-mini-open')).toBeVisible();
+  await expect(card.locator('.pet-mini-authorize')).toBeVisible();
+  expect(await size()).toEqual(before);
+  // Nothing was left expanded behind it either.
+  await page.evaluate(() => window.petFixtureAddActivity());
+  await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
+  await expect(page.locator('.pet-mini-scroll')).toHaveCount(0);
+});
+
 test('two or more cards keep the collapsed stack that Vibey toggles', async ({ page }) => {
   await page.goto('/e2e/pet-mini/fixture.html?activities=2');
   const avatar = page.locator('.pet-mini-avatar-button');

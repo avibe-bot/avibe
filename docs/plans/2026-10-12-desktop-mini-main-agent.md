@@ -120,8 +120,9 @@ A stack needs at least **two** visible cards. **Exactly one** visible card is
 never collapsed: it is always drawn in its full expanded form (stop or
 authorize, Open in Avibe, × on hover, click to reference) at its own height,
 whatever the panel state. Clicking Vibey does not change it, so Vibey's button
-carries no `aria-expanded` then; Vibey's other click behaviour, such as closing
-the open history, is unchanged. All of the card's controls are hit regions in
+carries no `aria-expanded` then. With a lone card a Vibey click toggles no
+panel state at all, so nothing waits to appear when a second card arrives: it
+closes an open history (and the panel with it) and otherwise does nothing. All of the card's controls are hit regions in
 every panel state. Opening the history keeps the card in full beside it, and
 the history's height bound uses the card's measured height. Going between one
 and two cards follows the data with the ordinary swap transition.
