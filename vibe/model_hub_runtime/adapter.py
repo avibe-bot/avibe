@@ -2098,6 +2098,8 @@ class CLIProxyEngineAdapter:
         timeout = aiohttp.ClientTimeout(total=timeout_total, connect=connect_timeout)
         trace = aiohttp.TraceConfig()
         callback_called = False
+        response_status: int | None = None
+        response_headers: dict[str, str] = {}
 
         async def request_connection_ready(*_args: Any, **_kwargs: Any) -> None:
             nonlocal callback_called
@@ -2121,22 +2123,60 @@ class CLIProxyEngineAdapter:
                     json=dict(payload) if payload is not None else None,
                     allow_redirects=False,
                 ) as response:
-                    body, body_too_large = await _read_bounded_search_body(response.content)
-                    selected = {
+                    response_status = response.status
+                    response_headers = {
                         name: value
                         for name, value in response.headers.items()
                         if name.lower() in _SEARCH_RESPONSE_HEADERS
                     }
+                    body, body_too_large = await _read_bounded_search_body(response.content)
                     if body_too_large:
-                        return SearchResponse(response.status, selected, None, "body_too_large")
+                        return SearchResponse(
+                            response_status,
+                            response_headers,
+                            None,
+                            "body_too_large",
+                            on_sent_fired=callback_called,
+                        )
                     assert body is not None
-                    if 300 <= response.status < 400:
-                        return SearchResponse(response.status, selected, body, "redirect")
-                    return SearchResponse(response.status, selected, body)
+                    if 300 <= response_status < 400:
+                        return SearchResponse(
+                            response_status,
+                            response_headers,
+                            body,
+                            "redirect",
+                            on_sent_fired=callback_called,
+                        )
+                    return SearchResponse(
+                        response_status,
+                        response_headers,
+                        body,
+                        on_sent_fired=callback_called,
+                    )
+        except asyncio.CancelledError:
+            return SearchResponse(
+                response_status,
+                response_headers,
+                None,
+                "cancelled",
+                on_sent_fired=callback_called,
+            )
         except asyncio.TimeoutError:
-            return SearchResponse(None, {}, None, "timeout")
+            return SearchResponse(
+                response_status,
+                response_headers,
+                None,
+                "timeout",
+                on_sent_fired=callback_called,
+            )
         except (aiohttp.ClientError, OSError, ValueError):
-            return SearchResponse(None, {}, None, "connection")
+            return SearchResponse(
+                response_status,
+                response_headers,
+                None,
+                "connection",
+                on_sent_fired=callback_called,
+            )
 
     async def check_search_credential(
         self,

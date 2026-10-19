@@ -2340,6 +2340,84 @@ def test_search_free_check_uses_bounded_catalog_transport(monkeypatch):
     assert calls["metadata_thread"] != caller_thread
 
 
+@pytest.mark.parametrize(
+    ("body_error", "expected_error"),
+    [
+        (asyncio.TimeoutError(), "timeout"),
+        (ValueError("body read failed"), "connection"),
+        (asyncio.CancelledError(), "cancelled"),
+    ],
+)
+def test_search_response_retains_wire_facts_after_body_read_failure(
+    monkeypatch, body_error, expected_error
+):
+    calls: list[str] = []
+
+    class Store:
+        def read_api_key(self, _credential_ref):
+            return "tvly-secret"
+
+        def credential_metadata(self, _credential_ref):
+            return {"vendor": "tavily"}
+
+    class ResponseContent:
+        async def iter_chunked(self, _chunk_size):
+            raise body_error
+            yield b""  # pragma: no cover
+
+    class Response:
+        status = 503
+        headers = {"Content-Type": "application/json", "Retry-After": "2"}
+        content = ResponseContent()
+
+    class Request:
+        def __init__(self, traces):
+            self.traces = traces
+
+        async def __aenter__(self):
+            for trace in self.traces:
+                for callback in trace.on_connection_create_end:
+                    await callback(None, None, None)
+            calls.append("write")
+            return Response()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Session:
+        def __init__(self, *, trace_configs, **_kwargs):
+            self.traces = trace_configs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def request(self, _method, _endpoint, **_kwargs):
+            return Request(self.traces)
+
+    monkeypatch.setattr(runtime_adapter_module.aiohttp, "ClientSession", Session)
+    adapter = CLIProxyEngineAdapter(supervisor=object(), state_store=Store())  # type: ignore[arg-type]
+
+    response = asyncio.run(
+        adapter.search(
+            "src_search",
+            "tavily",
+            "tavily/search",
+            "cred_search",
+            {"query": "hello", "max_results": 1},
+            on_sent=lambda: calls.append("sent"),
+        )
+    )
+
+    assert response.http_status == 503
+    assert response.headers == {"Content-Type": "application/json", "Retry-After": "2"}
+    assert response.error == expected_error
+    assert response.on_sent_fired is True
+    assert calls == ["sent", "write"]
+
+
 def test_search_on_sent_fires_once_after_connection_ready_before_write(monkeypatch):
     calls: list[str] = []
 
@@ -2403,6 +2481,7 @@ def test_search_on_sent_fires_once_after_connection_ready_before_write(monkeypat
     )
 
     assert response.http_status == 200
+    assert response.on_sent_fired is True
     assert calls == ["sent", "write"]
 
 

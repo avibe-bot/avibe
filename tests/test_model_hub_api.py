@@ -6072,6 +6072,27 @@ def test_unsaved_observation_route_rejects_omitted_protocol_for_an_uncataloged_v
     assert adapter.revoked == []
 
 
+def test_create_source_defaults_a_search_catalog_vendor_to_search_protocol(tmp_path):
+    service, store, adapter = _service(tmp_path)
+
+    created = asyncio.run(
+        _create_source(
+            service,
+            {
+                "kind": "api_key",
+                "vendor": "tavily",
+                "key": "tvly-test-create-pinned",
+            },
+        )
+    )
+
+    assert created["protocol"] == "search"
+    assert created["models"] == []
+    assert created["base_url"] is None
+    assert store.config.sources[0].protocol == "search"
+    assert adapter.observed_protocol_orders == []
+
+
 def test_create_source_defaults_a_catalog_vendor_to_its_pinned_protocol(tmp_path):
     service, store, adapter = _service(tmp_path)
 
@@ -6129,6 +6150,34 @@ def test_create_source_defaults_catalog_display_names_for_all_shipped_api_key_ve
 
 
 
+
+def test_search_source_create_journals_cleanup_when_revocation_fails(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    adapter.search_check_outcome = "invalid"
+
+    async def fail_revocation(_credential_ref):
+        raise OSError("credential store temporarily unavailable")
+
+    adapter.revoke_api_key_credential = fail_revocation
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            service.create_source(
+                {
+                    "kind": "api_key",
+                    "vendor": "tavily",
+                    "protocol": "search",
+                    "key": "tvly-test-journal",
+                }
+            )
+        )
+
+    assert exc_info.value.detail == "modelHub.errors.authentication_failed"
+    assert store.config.sources == []
+    entries = service.revocations._read()
+    assert len(entries) == 1
+    assert entries[0].credential_ref == "cred_test001"
+    assert entries[0].operation == "revoke_api_key_credential"
 
 @pytest.mark.parametrize("outcome", ["pass", "balance", "limit", "unknown", "invalid"])
 def test_search_source_create_uses_only_the_free_check_transaction(tmp_path, outcome: str):

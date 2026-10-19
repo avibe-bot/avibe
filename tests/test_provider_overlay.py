@@ -41,7 +41,11 @@ def _fresh_overlay():
 def _validator() -> Draft7Validator:
     schemas = [
         json.loads((CONTRACTS / name).read_text(encoding="utf-8"))
-        for name in ("provider-overlay.schema.json", "source.schema.json")
+        for name in (
+            "provider-overlay.schema.json",
+            "source.schema.json",
+            "source-probe-result.schema.json",
+        )
     ]
     registry = Registry().with_resources(
         (schema["$id"], Resource.from_contents(schema)) for schema in schemas

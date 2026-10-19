@@ -239,7 +239,7 @@ from .resolver import (
     source_supports_passthrough,
     source_runnable,
 )
-from .revocations import CredentialRevocationJournal
+from .revocations import CredentialRevocationJournal, RevocationOperation
 from .retry import (
     RECOVERY_ADMISSION_MARGIN_SECONDS,
     RECOVERY_EXHAUSTED_CODE,
@@ -1218,11 +1218,18 @@ async def _rollback_credential_before_settling(
     service: "ModelHubService",
     source_id: str,
     credential_ref: str,
+    *,
+    operation: RevocationOperation | None = None,
 ) -> None:
     """Finish transient cleanup before propagating a cancellation."""
 
     rollback_task = asyncio.create_task(
-        _require_credential_cleanup(service, source_id, credential_ref)
+        _require_credential_cleanup(
+            service,
+            source_id,
+            credential_ref,
+            operation=operation,
+        )
     )
     try:
         await asyncio.shield(rollback_task)
@@ -1235,10 +1242,16 @@ async def _require_credential_cleanup(
     service: "ModelHubService",
     source_id: str,
     credential_ref: str,
+    *,
+    operation: RevocationOperation | None = None,
 ) -> None:
     """Refuse to settle when cleanup is neither complete nor durable."""
 
-    if not await service._rollback_credential(source_id, credential_ref):
+    if not await service._rollback_credential(
+        source_id,
+        credential_ref,
+        operation=operation,
+    ):
         raise CredentialCleanupUnsettledError
 
 
@@ -2741,24 +2754,33 @@ class ModelHubService:
         self,
         source_id: str,
         credential_ref: str,
+        *,
+        operation: RevocationOperation | None = None,
     ) -> bool:
         source = next(
             (candidate for candidate in self.store.load().sources if candidate.id == source_id),
             None,
         )
-        search_cleanup = source is not None and source.protocol == "search"
-        operation = "revoke_api_key_credential" if search_cleanup else "revoke_credential"
+        resolved_operation = operation or (
+            "revoke_api_key_credential"
+            if source is not None and source.protocol == "search"
+            else "revoke_credential"
+        )
         revoker = (
             self.adapter.revoke_api_key_credential
-            if search_cleanup
+            if resolved_operation == "revoke_api_key_credential"
             else self.adapter.revoke_credential
         )
         journaled = False
         try:
-            if search_cleanup:
-                self.revocations.add(source_id, credential_ref, operation=operation)
-            else:
+            if resolved_operation == "revoke_credential":
                 self.revocations.add(source_id, credential_ref)
+            else:
+                self.revocations.add(
+                    source_id,
+                    credential_ref,
+                    operation=resolved_operation,
+                )
         except OSError:
             pass
         else:
@@ -4070,15 +4092,30 @@ class ModelHubService:
                     source.verification_pending = None
                 source = ModelHubSourceConfig.from_payload(source.to_payload())
             except asyncio.CancelledError:
-                await _rollback_credential_before_settling(self, source.id, credential_ref)
+                await _rollback_credential_before_settling(
+                    self,
+                    source.id,
+                    credential_ref,
+                    operation="revoke_api_key_credential",
+                )
                 credential_cleaned = True
                 raise
             except Exception:
-                await _require_credential_cleanup(self, source.id, credential_ref)
+                await _require_credential_cleanup(
+                    self,
+                    source.id,
+                    credential_ref,
+                    operation="revoke_api_key_credential",
+                )
                 credential_cleaned = True
                 raise
             if outcome == "invalid":
-                await _require_credential_cleanup(self, source.id, credential_ref)
+                await _require_credential_cleanup(
+                    self,
+                    source.id,
+                    credential_ref,
+                    operation="revoke_api_key_credential",
+                )
                 credential_cleaned = True
                 raise ModelHubError(
                     "discovery_failed",
@@ -4098,17 +4135,24 @@ class ModelHubService:
                 and not credential_cleaned
                 and not self._persisted_credential(self.store.load(), source.id, credential_ref)
             ):
-                await self._revoke_search_credential(credential_ref)
+                await _rollback_credential_before_settling(
+                    self,
+                    source.id,
+                    credential_ref,
+                    operation="revoke_api_key_credential",
+                )
             raise
         except CredentialCleanupUnsettledError:
             release_nonce = False
             raise
         except Exception:
             if credential_ref is not None and not persisted and not credential_cleaned:
-                try:
-                    await self._revoke_search_credential(credential_ref)
-                except Exception:
-                    logger.warning("Could not clean up search credential", exc_info=True)
+                await _require_credential_cleanup(
+                    self,
+                    source.id,
+                    credential_ref,
+                    operation="revoke_api_key_credential",
+                )
             raise
         finally:
             if nonce_claimed and release_nonce:
@@ -4226,7 +4270,12 @@ class ModelHubService:
             )
         ):
             raise ModelHubError("discovery_failed")
-        if kind == "api_key" and payload.get("protocol") == "search":
+        requested_protocol = (
+            payload.get("protocol")
+            if "protocol" in payload
+            else pinned_api_key_protocol(vendor)
+        )
+        if kind == "api_key" and requested_protocol == "search":
             if (
                 base_url is not None
                 or billing != "metered"

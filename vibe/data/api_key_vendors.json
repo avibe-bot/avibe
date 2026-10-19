@@ -44,9 +44,9 @@
         "results": "results",
         "url": "url",
         "title": "title",
-        "snippet": "summary",
+        "snippet": "snippet",
         "content": "content",
-        "page_age": null
+        "page_age": "date"
       },
       "limits": {
         "results_min": 1,

@@ -628,6 +628,11 @@
           "name": "MODEL_PROTOCOLS"
         },
         {
+          "kind": "schema_vocabulary",
+          "schema": "observation-result.schema.json",
+          "paths": ["/properties/protocol"]
+        },
+        {
           "kind": "marker_tail",
           "file": "docs/plans/model-hub-contracts/opencode-overlay.md",
           "marker": "authority-consumer: protocol "

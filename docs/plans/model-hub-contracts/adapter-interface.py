@@ -89,7 +89,8 @@ class SearchResponse:
     http_status: int | None
     headers: Mapping[str, str]
     body: bytes | None
-    error: Literal["", "timeout", "connection", "redirect", "body_too_large", "invalid_endpoint"] = ""
+    error: Literal["", "timeout", "connection", "redirect", "body_too_large", "invalid_endpoint", "cancelled"] = ""
+    on_sent_fired: bool = False
 
 
 @dataclass(frozen=True)
