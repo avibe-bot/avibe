@@ -360,10 +360,10 @@ FAILED_WITH_PARTIAL = {**WEB_CALL, "status": "failed"}
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("case", "bound", "handles", "error", "sources", "executed"), [
     # No Source can run it: the record says which providers' Sources could.
-    ("no_candidate", None, [], "No Source can run web search right now. Add an API key from one of Anthropic, OpenAI, xAI as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.", [], False),
-    ("source_removed", (XAI, "grok-4.6"), [], "No Source can run web search right now. Add an API key from one of Anthropic, OpenAI, xAI as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.", [], False),
+    ("no_candidate", None, [], "No Source can run web search right now. Add an API key from one of Anthropic, DeepSeek, OpenAI, xAI as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.", [], False),
+    ("source_removed", (XAI, "grok-4.6"), [], "No Source can run web search right now. Add an API key from one of Anthropic, DeepSeek, OpenAI, xAI as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.", [], False),
     # A new base URL or credential is a new identity, which the turn's chain was not built for.
-    ("source_identity_changed", (XAI, "grok-4.6"), [], "No Source can run web search right now. Add an API key from one of Anthropic, OpenAI, xAI as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.", [], False),
+    ("source_identity_changed", (XAI, "grok-4.6"), [], "No Source can run web search right now. Add an API key from one of Anthropic, DeepSeek, OpenAI, xAI as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.", [], False),
     # The only candidate failed: its failure, and the Sources tried.
     ("provider_refused", (XAI, "grok-4.6"),
      [InvokeHandle(_outcome(RawOutcomeKind.HTTP_ERROR, status=429, code="rate_limit_error", source_id=XAI))],
