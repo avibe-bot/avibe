@@ -73,7 +73,8 @@ def fit_image(raw: bytes, mime_type: str) -> LoadedImage:
 
 
 def _downscale(image: Image.Image) -> LoadedImage:
-    """``image`` upright and within ``MAX_IMAGE_SIDE``: a JPEG or WebP stays one, anything else becomes a PNG."""
+    """``image`` upright and within ``MAX_IMAGE_SIDE``: a JPEG (a camera's MPO is one too) or WebP stays one, anything
+    else becomes a PNG."""
 
     source_format = image.format
     upright = ImageOps.exif_transpose(image)
@@ -82,7 +83,7 @@ def _downscale(image: Image.Image) -> LoadedImage:
         upright = upright.convert("RGBA" if upright.has_transparency_data else "RGB")
     upright.thumbnail((MAX_IMAGE_SIDE, MAX_IMAGE_SIDE), Image.Resampling.LANCZOS)
     out = io.BytesIO()
-    if source_format == "JPEG":
+    if source_format in ("JPEG", "MPO"):
         upright.save(out, "JPEG", quality=_LOSSY_QUALITY)
         mime_type = "image/jpeg"
     elif source_format == "WEBP":
