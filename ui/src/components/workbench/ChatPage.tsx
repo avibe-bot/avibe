@@ -2275,7 +2275,13 @@ export const ChatPage: React.FC = () => {
           : parsed?.fallback ?? t('chat.retryFailed'));
         return false;
       }
-      if (body?.author && body?.id && body?.state !== 'reserved' && !body?.queued) {
+      // The retry's input row joins the transcript like any other ingest, through
+      // the same type filter: Vibey's retry is a hidden control row (it resumes the
+      // transcript and writes no input), which no transcript read ever returns.
+      if (
+        body?.author && body?.id && body?.state !== 'reserved' && !body?.queued
+        && isTranscriptMessage(body as WorkbenchMessage)
+      ) {
         if (historicalWindowRef.current) await reloadLatestMessages();
         else appendMessage(body as WorkbenchMessage);
       }

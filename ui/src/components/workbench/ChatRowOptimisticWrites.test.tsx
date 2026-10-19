@@ -356,6 +356,30 @@ describe('the chat row under an optimistic write', () => {
     expect(screen.getByRole('button', { name: 'chat.retryRequested' })).toBeTruthy();
   });
 
+  it.each([
+    // Vibey resumes its transcript: the response is the hidden control row.
+    ['a hidden Vibey resume row', { type: 'agent_initiated', author: 'harness', source: 'harness', text: '' }, 0],
+    // A native backend continues with a visible `continue` input.
+    ['a visible continue input', { type: 'user', author: 'user', source: 'user', text: 'continue' }, 1],
+  ])('draws %s from the retry response only when the transcript shows it', async (_name, row, drawn) => {
+    await mountChat();
+    const failure = {
+      id: 'msg-failure', session_id: SESSION_ID, author: 'agent', source: 'agent',
+      type: 'notify', text: 'failed', content: {},
+      metadata: { event: 'backend_failure', turn_id: 'failed-turn', failure_id: 'failed-turn' },
+    } as WorkbenchMessage;
+    act(() => mocks.events?.onMessageNew?.(failure));
+    mocks.apiFetch.mockResolvedValue({
+      ok: true, status: 202,
+      json: async () => ({
+        id: 'msg-retry-input', session_id: SESSION_ID, content: {}, metadata: {},
+        state: 'accepted', delivery_state: 'accepted', ...row,
+      }),
+    });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'common.retry' })); });
+    expect(document.querySelectorAll('[data-message-id="msg-retry-input"]')).toHaveLength(drawn);
+  });
+
   it('updates an existing notify action without appending another message', async () => {
     await mountChat();
     const failure = {
