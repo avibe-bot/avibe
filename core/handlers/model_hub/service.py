@@ -934,8 +934,8 @@ def _vault_error(stderr: bytes) -> str:
     if isinstance(payload, dict):
         error = payload.get("error")
         if isinstance(error, dict):
-            message = str(error.get("message") or "").strip()
-            code = str(error.get("code") or "").strip()
+            message = str(error["message"]).strip() if "message" in error else ""
+            code = str(error["code"]).strip() if "code" in error else ""
             if message:
                 return f"{message} (code={code})" if code else message
         elif isinstance(error, str) and error.strip():
