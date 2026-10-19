@@ -2651,6 +2651,29 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
     await waitFor(() => expect(bubbleOpen()).toBe(false));
   });
 
+  it('lingers a reply that lands after its turn end, once the history it was not in has closed', async () => {
+    await runThenEnd(async (finish) => {
+      // History open, then the turn ends before its result.
+      await userEvent.click(screen.getByLabelText('pet.recentTurns'));
+      await waitFor(() => expect(document.querySelector('.pet-mini-detail.is-open')).not.toBeNull());
+      finish();
+      await emit((h) => h.onTurnEnd?.({ session_id: 'S' }));
+      await waitFor(() => expect(api.getTurnState).toHaveBeenCalled());
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    });
+    // Closed before the reply came: it was never seen there.
+    await userEvent.click(screen.getByLabelText('pet.recentTurns'));
+    await waitFor(() => expect(bubbleOpen()).toBe(false));
+    const late = message('late', 'S', { text: 'Late reply', read_at: null });
+    tails.S = [...tails.S, late];
+    await emit((h) => h.onMessageNew?.(late));
+    await waitFor(() => expect(bubbleOpen()).toBe(true));
+    act(() => { vi.advanceTimersByTime(9_800); });
+    expect(bubbleOpen()).toBe(true);
+    act(() => { vi.advanceTimersByTime(400); });
+    expect(bubbleOpen()).toBe(false);
+  });
+
   it('lingers once the reply arrives when the turn end came first', async () => {
     await runThenEnd(async (finish) => {
       finish();

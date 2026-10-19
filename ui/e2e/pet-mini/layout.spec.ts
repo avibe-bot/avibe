@@ -1018,6 +1018,21 @@ for (const theme of ['light', 'dark']) {
   });
 }
 
+test('a background completion arriving during the linger does not take over its summary', async ({ page }) => {
+  await page.clock.install();
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&running=1');
+  await page.clock.runFor(500);
+  await finishTurn(page);
+  await page.clock.runFor(1_000);
+  await expect(page.locator('.pet-mini-reply-toggle')).toContainText('已回复：做完了。');
+  await page.evaluate(() => window.petFixtureMessage({
+    id: 'background', author: 'agent', type: 'result', text: '后台任务也完成了。', read_at: null, metadata: { detached: true },
+  }));
+  await page.clock.runFor(500);
+  await expect(page.locator('.pet-mini-reply-toggle')).toContainText('已回复：做完了。');
+  await expect(page.locator('.pet-mini-reply-toggle')).not.toContainText('后台任务');
+});
+
 test('the pointer over the lingering reply holds it, and leaving leaves at least 3s', async ({ page }) => {
   await page.clock.install();
   await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&running=1');

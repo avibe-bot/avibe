@@ -47,6 +47,7 @@ const STACK_HEIGHT = 304; // 292px scroll box + 6px panel padding on each side.
 type FadeProfile = { size: number; ramp: readonly (readonly [number, number])[] };
 const CARD_FADE: FadeProfile = { size: 32, ramp: [] };
 // The history is denser text, so its band is taller and darker at the edge.
+const NO_REPLIES: ReadonlySet<string> = new Set();
 const HISTORY_FADE: FadeProfile = { size: 48, ramp: [[0.12, 0.35], [0.55, 0.7]] };
 // How close to the end of the history still counts as reading at the bottom.
 const HISTORY_STICK_PX = 8;
@@ -662,30 +663,39 @@ const PetSurface: React.FC = () => {
   // starts the linger and the bubble never closes in between. The server's
   // state alone: the local send grace running out is not a turn that ended.
   // A turn already over when the epoch first looks is history.
-  // `seen` is the last ended turn shown while the history was open (expansion
-  // confirmed): the user has looked at it, so only a later turn lingers. A
-  // history request still waiting on the shell changes nothing yet.
-  const [turnWatch, setTurnWatch] = useState(() => ({ epoch, running: data.serverRunning, ended: 0, seen: 0 }));
+  // One thing lingers: the reply of a turn this epoch watched end, pinned by
+  // its id. Everything about the linger is derived from that reply during
+  // render — whether there is one, what the summary shows, whether it was seen.
+  //
+  // `endedFor` is the latest input when the server's turn state was last seen
+  // going from running to done (the local send grace is not a turn ending).
+  // That turn's reply is the newest non-empty agent result after that input
+  // that is not a background run's detached completion (an exchange can hold
+  // an earlier answer from before this turn ran), or the promoted result
+  // that answers an earlier input (#2815). A stopped turn ends with an empty
+  // result and has none; a reply that lands after its turn end lingers then.
+  // `seen` holds the replies shown while the history was open (expansion
+  // confirmed by the shell); those do not linger again.
+  const inputId = exchange.user?.id ?? '';
+  const [turnWatch, setTurnWatch] = useState(() => ({ epoch, running: data.serverRunning, endedFor: null as string | null, seen: NO_REPLIES }));
   let watched = turnWatch;
-  if (watched.epoch !== epoch) watched = { epoch, running: data.serverRunning, ended: 0, seen: 0 };
+  if (watched.epoch !== epoch) watched = { epoch, running: data.serverRunning, endedFor: null, seen: NO_REPLIES };
   else if (watched.running !== data.serverRunning) {
-    watched = { ...watched, running: data.serverRunning, ended: data.serverRunning ? watched.ended : watched.ended + 1 };
+    watched = { ...watched, running: data.serverRunning, endedFor: data.serverRunning ? watched.endedFor : inputId };
   }
-  if (historyOpen && watched.seen !== watched.ended) watched = { ...watched, seen: watched.ended };
-  if (watched !== turnWatch) setTurnWatch(watched);
-  // Only a turn that produced a reply lingers: a non-empty agent result after
-  // the latest input, or the promoted result that answers an earlier input
-  // (#2815). A stopped turn ends with an empty result, and a turn whose end
-  // comes before its result lingers once that result is here.
-  const inputAt = exchange.user ? data.messages.findIndex((row) => row.id === exchange.user!.id) : -1;
-  // A background run's completion (`metadata.detached`) is not this turn's
-  // reply, as for the foreground's own terminal authority.
   const isTurnReply = (row: WorkbenchMessage) => row.author === 'agent' && row.type === 'result'
     && !isDetachedCompletionMessage(row) && Boolean(row.text?.trim());
-  const latestReply = exchange.results.at(-1);
-  const turnHasReply = data.messages.slice(inputAt + 1).some(isTurnReply)
-    || Boolean(exchange.answersEarlierInput && latestReply && isTurnReply(latestReply));
-  const endedTurn = watched.ended > watched.seen && turnHasReply ? String(watched.ended) : null;
+  const inputAt = exchange.user ? data.messages.findIndex((row) => row.id === exchange.user!.id) : -1;
+  const latestResult = exchange.results.at(-1);
+  const turnReply = watched.endedFor === inputId
+    ? data.messages.slice(inputAt + 1).reverse().find(isTurnReply)
+      ?? (exchange.answersEarlierInput && latestResult && isTurnReply(latestResult) ? latestResult : null)
+    : null;
+  if (historyOpen && turnReply && !watched.seen.has(turnReply.id)) {
+    watched = { ...watched, seen: new Set([...watched.seen, turnReply.id]) };
+  }
+  if (watched !== turnWatch) setTurnWatch(watched);
+  const lingerReply = turnReply && !watched.seen.has(turnReply.id) ? turnReply : null;
   // The bubble is drawn: the speech slot shows it rather than the input or the
   // dictation marquee. Every input to the linger (time, pointer) means
   // something only while this holds.
@@ -711,7 +721,7 @@ const PetSurface: React.FC = () => {
   }, []);
   const { lingeringId, keepAtLeast } = useReplyLinger({
     scope: epoch,
-    candidateId: endedTurn,
+    candidateId: lingerReply?.id ?? null,
     counting: documentVisible && replyOnScreen && !pointerOverBubble,
     keyboardHeld: () => {
       const node = bubbleRef.current;
@@ -889,6 +899,7 @@ const PetSurface: React.FC = () => {
             <MainReplyBubble
               open={historyOpen}
               onToggle={toggleHistory}
+              pinnedReply={lingeringId !== null ? lingerReply : null}
               epoch={epoch}
               voiceNeedsCloud={voice.cloudRequired}
               canChat={canChat}
@@ -1246,9 +1257,11 @@ const CardBody: React.FC<{ card: PetCard; expanded: boolean; t: (key: string, op
 
 type MainDetailProps = { epoch: PetSurfaceEpoch; voiceNeedsCloud: boolean; canChat: boolean; visible: boolean; binding: string; exchange: ReturnType<typeof latestExchange>; messages: WorkbenchMessage[]; failure: WorkbenchMessage | null; running: boolean; queued: boolean; markRead: (sessionId: string, untilMessageId?: string) => Promise<boolean>; onRead: () => void; vaultRequestIds: string[]; quickReplies: ReturnType<typeof openQuickReplies>; onChoose: (message: WorkbenchMessage, choice: string) => Promise<boolean>; uncertain: boolean; onInspect: () => void };
 
-const MainReplyBubble: React.FC<Omit<MainDetailProps, 'visible'> & { open: boolean; onToggle: () => void }> = ({ open, onToggle, ...props }) => {
+const MainReplyBubble: React.FC<Omit<MainDetailProps, 'visible'> & { open: boolean; onToggle: () => void; pinnedReply?: WorkbenchMessage | null }> = ({ open, onToggle, pinnedReply, ...props }) => {
   const { t } = useTranslation();
-  const last = props.exchange.results.at(-1);
+  // A lingering reply keeps its summary even if a later result (a background
+  // completion) arrives while it lingers.
+  const last = pinnedReply ?? props.exchange.results.at(-1);
   const summary = props.running ? t('pet.thinking')
     : props.failure ? `${t('pet.failedPrefix')} ${props.failure.text.trim()}`
         : last?.text?.trim() ? t('pet.repliedPrefix', { text: last.text.trim() })

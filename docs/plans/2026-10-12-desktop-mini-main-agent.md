@@ -177,25 +177,27 @@ Then, when Vibey's turn ends, the bubble shows the reply summary for
 **10 seconds of on-screen time** before it hides with the speech slot's
 transition (instant under reduced motion), taking no space and no clicks.
 
-- **A turn this epoch watched end.** The linger starts when the current epoch
-  (binding and authorization) sees the main session's server turn state go
-  from running to done. The local send grace (which shows "thinking" before
-  the server registers a turn) is not part of it: a grace that runs out is not
-  a turn that ended. Only a turn that produced a reply lingers: a non-empty
-  agent result after the latest input (not a background run's detached
-  completion), or the promoted result that answers an earlier input. A stopped turn (which ends with an empty result) or a turn
-  with no reply does not; if the turn's end comes before its result, the
-  bubble folds away and the reply lingers once it arrives.
-  It is derived while rendering from the last running value seen, so the
-  render that ends the turn starts the linger and the bubble never closes in
-  between; the only state is which ended turns have expired, per epoch. A turn
+- **The reply of a turn this epoch watched end.** One thing lingers: that
+  reply, pinned by its id, and everything about the linger is derived from it
+  while rendering. The turn end is the main session's server turn state going
+  from running to done while the current epoch (binding and authorization)
+  watches; the local send grace (which shows "thinking" before the server
+  registers a turn) is not part of it. The reply is the newest non-empty agent
+  result after the input of that turn, not a background run's detached
+  completion, or the promoted result that answers an earlier input. A stopped
+  turn (which ends with an empty result) or a turn with no reply does not
+  linger; a reply that lands after its turn end lingers once it arrives. The
+  summary shows the pinned reply for as long as it lingers, even if a later
+  result (a background completion) arrives. The render that ends the turn is
+  the render that starts the linger, so the bubble never closes in between;
+  the only state is which replies have expired or been seen, per epoch. A turn
   already over when the epoch first looks is history, so on first load an old,
   finished exchange starts hidden. A reply that appears without a watched turn
   end (a background or detached result, a turn that starts and ends while
   authorization is still resolving, or a turn so quick the pet never saw the
-  server report it running) does not linger; Vibey's badge still marks
-  it, and a Vibey click opens it. A turn that ends in failure keeps the bubble
-  shown through its failure notice (needs-you).
+  server report it running) does not linger; Vibey's badge still marks it, and
+  a Vibey click opens it. A turn that ends in failure keeps the bubble shown
+  through its failure notice (needs-you).
 - **On-screen time.** The 10s count only while the reply itself is on
   screen: the document is visible, the slot is drawing this bubble (not the
   input, the dictation marquee, or the loading and unavailable notices), its
@@ -212,11 +214,12 @@ transition (instant under reduced motion), taking no space and no clicks.
   again a second later. A pointer click never pins it. If the bubble goes
   while focus is inside, whether it folds away or is replaced (by the input,
   the dictation marquee, or a loading notice), focus moves to Vibey's button.
-- **Looked at means done.** A turn shown while the history is open (its
+- **Looked at means done.** A reply present while the history is open (its
   expansion confirmed by the shell) counts as seen and does not linger after,
   whether the history was opened from the lingering reply (a Vibey click or its
-  toggle row) or the turn ended while it was already open; closing the history
-  hides the bubble. While a history request still waits on the shell, the
+  toggle row) or the reply arrived while it was already open; closing the
+  history hides the bubble. A reply that arrives only after the history has
+  closed was not seen there, so it lingers. While a history request still waits on the shell, the
   reply keeps holding the bubble, and if the shell refuses, it plays out its
   time. A new running turn holds the bubble again, and its
   own result lingers anew.
