@@ -66,7 +66,9 @@ The user has an Anthropic API key and a DeepSeek API key, adds Tavily, and chang
 
 - `model_hub.sources[]` accepts `protocol: "search"` with `kind: "api_key"`, `supply_channel: "hub"`,
   `billing: "metered"`, `models: []`, no `base_url`, and a vendor whose catalog row is a tool-only search vendor.
-  Any other combination is refused.
+  Any other combination is refused when it is written. A saved `search` Source whose vendor a later catalog no
+  longer lists still loads: it stays in config, is never a candidate (an `unavailable` skip), and its row reads
+  "此服务已不再支持" with remove as its only action, so a release that drops a vendor never fails config loading.
 - A `search` Source never takes part in model supply: it is excluded from route candidates, Source order for
   backends, model discovery, protocol and credential probes that call a model, engine config rendering, and every
   backend's supply. It appears in the Sources list with the label "搜索服务" and "不提供模型".
@@ -89,6 +91,10 @@ The user has an Anthropic API key and a DeepSeek API key, adds Tavily, and chang
     error answers ("暂时无法验证新密钥，原密钥未改动，请稍后重试");
   - no free check (Exa): create and replacement both save with `verification_pending`, since nothing could verify
     the key before a search; the first successful search clears it.
+
+  A pending marker is cleared by any search outcome that proves the key authenticated: a success, or a 402 balance
+  or catalog-named limit answer, which clears it while setting its own blocker (§4.2), as a free-check `balance`
+  or `limit` result would.
 
   The response is the existing Source envelope.
 - **DeepSeek from the add dialog** uses the ordinary API-key create with the catalog's free check run before commit,
@@ -189,7 +195,9 @@ Hosted tools §6 holds, with these changes:
   before every model executor, and the user's other entries keep their order. The same insertion runs whenever a
   Source becomes search-capable without being added: once in the version event's config migration (an existing
   official DeepSeek Source), and in any later config write that makes it qualify (a DeepSeek relay retargeted to the
-  official endpoint).
+  official endpoint). Insertion moves an entry rather than adding one: a Source already in the saved order (a
+  relay's earlier model-executor entry) is taken out of its old position first, so the order never names a Source
+  twice.
 - **Argument check.** Before any candidate, the gateway rejects a query that is empty or only whitespace with the
   canonical tool's argument error, which the model can correct; no Source is tried or recorded.
 - **Skips.** A candidate is classified once, by the first reason that applies in the order `unavailable`,
@@ -306,9 +314,9 @@ Hosted tools §6 holds, with these changes:
   `contents.text` when content is on; the always-requested highlights are included in the search price), with
   `basis: "list"`. The page count is the length of a readable `results` array before the local bounds drop entries,
   so a response whose every row was rejected locally is still priced from it. When a per-page part applies but
-  the array is missing or unreadable and no valid reported cost exists, the cost is the search part marked as a lower bound
-  ("至少 $0.007") through the new `HostedCost.lower_bound`, and the ledger row carries `lower_bound: true` into the
-  Usage aggregate. When the vendor bills only
+  the array is missing or unreadable, the ledger row always carries `lower_bound: true` into the Usage aggregate,
+  since its list valuation lacks the pages even when a reported cost exists; and with no valid reported cost, the
+  call's cost is the search part marked as a lower bound ("至少 $0.007") through the new `HostedCost.lower_bound`. When the vendor bills only
   non-empty results (DeepSeek), a 200 whose `results` array is non-empty is billed even if every item fails the
   bounds, so it is recorded at the list price. Only a 200 whose `results` array is missing or unreadable leaves the
   charge unknown: the attempt records no cost (unpriced), and the ledger row adds no list-priced quantity but sets
@@ -524,7 +532,7 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 - Usage (`usage-summary.schema.json`, `api.md`'s Usage section, and the on-disk usage ledger): a service row keyed
   by Source and `service_id`, counting requests rather than model calls, with the additive `billable_requests`,
   `reported_usd`, `reported_requests`, `list_requests`, `list_pages`, `uncertain_requests` and `lower_bound` fields; the
-  summary's `kind: "service"` bucket-row branch, `services[]` (`ServiceUsage`) and `service_reported_usd` (§4.3); and load fixtures for released rows that lack them (§4.3).
+  summary's `kind: "service"` bucket-row branch, `services[]` (`ServiceUsage`, with `priced`), `service_reported_usd` and `excluded_service_requests` (§4.3); and load fixtures for released rows that lack them (§4.3).
 - `HOSTED_ERROR_CODES`: `search_query_too_long` and `search_sources_blocked`, with copy on every surface.
 - The recovery actions run in the controller, which owns the trial gate and the cooldowns. The UI process forwards
   them over the Model Hub RPC (`ModelHubRemoteService`) as `reenable_search_source(source_id)` (S1a) and
@@ -597,7 +605,7 @@ Hermetic, against stub vendor servers; no live upstream and no real keys.
 | Config | `protocol: "search"` accepted only in its combination; `prefer_native` and `services` round-trip and default; a release-before loader ignores the new `hosted_tools` fields |
 | Custody | the adapter call attaches the key, refuses redirects and non-catalog hosts, caps the body, and returns no key material; nothing outside the adapter reads the key |
 | Chain | automatic and saved order, and insertion before the first model executor in a saved order; service cooldown from `Retry-After` (a longer deadline is not shortened) and doubling backoff, scoped to (Source, service), with a DeepSeek model route unaffected, and not written by an attempt that started before a key replacement; the terminal reason for every mix of skips (a disabled Source decides it only when every candidate is disabled), with `record.attempts[]` present when nothing executed and a blocked model executor showing its own remedy; `services.<id>.enabled: false` takes a DeepSeek Source out of the order and keeps its models; query-length skip; each outcome row of §4.2; one deadline; metering, `failed_attempts` and `attempts`; DeepSeek official versus relay; settings changed mid-turn do not apply until the next turn; re-enable with and without a free check, a second press joining the in-flight check, only one request admitted while a re-enable trial is pending, and a restart before the trial leaves the Source blocked; a long cooldown is shown with `cooldown_until` and cleared by "立即重试"; a reported cost above the ceiling falls back to the list price; a Tavily `key.limit: null` is unlimited |
-| Usage | service rows add known costs to the totals without the lower-bound flag; only sent requests are metered; DeepSeek's empty results, non-200 responses, timeouts and failures before sending cost nothing, while an unreadable 200, or a lost connection or stop after sending (and a timeout for a vendor that does not declare it unbilled) records no cost, adds to `uncertain_requests` and sets the lower bound; a default Exa call is listed at the search price alone (highlights included); a tool-only Source appears only in `services[]` and validates against the closed schema; an Exa content call without a reported cost keeps its page surcharge across a restart; a non-200 attempt records $0; a superseded failure, from any fence or from a repair after it settled, shows no repair; the skip classification order; a service no longer in the catalog stays in `services[]` unpriced, with the lower-bound flag; `service_order` survives a reload and decides the automatic order; a reported cost survives a restart through the ledger; a price change revalues list-priced quantities under the new table date; a released ledger row without the new fields loads |
+| Usage | service rows add known costs to the totals without the lower-bound flag; only sent requests are metered; DeepSeek's empty results, non-200 responses, timeouts and failures before sending cost nothing, while an unreadable 200, or a lost connection or stop after sending (and a timeout for a vendor that does not declare it unbilled) records no cost, adds to `uncertain_requests` and sets the lower bound; a default Exa call is listed at the search price alone (highlights included); a tool-only Source appears only in `services[]` and validates against the closed schema; an Exa content call without a reported cost keeps its page surcharge across a restart; a non-200 attempt records $0; a superseded failure, from any fence or from a repair after it settled, shows no repair; the skip classification order; a service no longer in the catalog stays in `services[]` unpriced, with the lower-bound flag, and its saved Source still loads as unavailable; `service_order` survives a reload and decides the automatic order; a reported cost survives a restart through the ledger; a price change revalues list-priced quantities under the new table date; a released ledger row without the new fields loads |
 | Mapping | one recorded response per vendor maps to the canonical record with bounds; an empty results array is `completed` and ends the chain; unreadable bodies; a released native `HostedSource` row longer than the new bounds still loads |
 | Hop facts | `prefer_native` off declares the function on a native-capable hop, and a native result in history replays in the synthetic form |
 | UI | the card states, add dialog, service detail, Sources rows, copy in both locales |
