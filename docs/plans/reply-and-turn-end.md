@@ -114,7 +114,7 @@ trace, `error`, or a backend-failure `notify`. No partial index reads
 | Consumer | Today | After |
 | --- | --- | --- |
 | `communication_type_for_output` | non-terminal `result` → `output` | stays `result` |
-| silent-final promotion (`promote_turn_text_to_result`, `resumed_turn_text`, `last_turn_text`) | retypes earlier text to `result` | deleted; Run text from the remembered reply |
+| silent-final promotion (`promote_turn_text_to_result`, `resumed_turn_text`) | retypes earlier `output`/`interim` to `result` | PR 1: never for narration or in a Turn with a reply; PR 2: deleted; Run text from the remembered reply |
 | Run `result_text` / callback on a silent final | empty | the Turn's last visible reply |
 | Turn snapshot `result_text` on a silent final | empty | the Turn's last visible reply |
 | `_stream_chunk` default | `kind == "result"` completes the Turn | completion only when the caller says so |
@@ -129,11 +129,16 @@ trace, `error`, or a backend-failure `notify`. No partial index reads
 
 ## Deletions
 
-PR 1: the dispatcher downgrade, the silent-final promotion and its in-memory
-and transcript lookups, Vibey superseded→`output`.
+PR 1: the dispatcher downgrade, narration (`interim`) promotion, Vibey
+superseded→`output`. The silent-final promotion stays only for a stored
+`output` and only in a Turn that has no `result` reply, because Claude's
+pre-steer phase still emits `output` until PR 2 (Codex and OpenCode already
+choose their last visible reply themselves).
 
 PR 2: Claude's pre-steer `output` branch, Codex narration of the previous
-visible `agentMessage`, OpenCode's superseded replies as `assistant`.
+visible `agentMessage`, OpenCode's superseded replies as `assistant`, and the
+rest of the promotion (`promote_turn_text_to_result`, `resumed_turn_text`, the
+dispatcher's legacy `output` record).
 
 ## Compatibility
 
