@@ -2593,6 +2593,47 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
     }
   });
 
+  // Running, then the turn ends; the test supplies what the end delivers.
+  const runThenEnd = async (deliver: (finish: () => void) => Promise<void>) => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'], shouldAdvanceTime: true });
+    tails.S = [message('r0', 'S', { text: 'Earlier reply' }), message('u', 'S', { author: 'user', type: 'user', text: 'hello' })];
+    let running = true;
+    api.getTurnState.mockImplementation(async () => (running ? { ...idleTurn, in_flight: true, foreground: 'running' as const } : idleTurn));
+    mainSession('S');
+    render(<PetPage />);
+    await waitFor(() => expect(bubbleOpen()).toBe(true));
+    await deliver(() => { running = false; });
+  };
+
+  it('does not linger after a stopped turn, whose result is empty', async () => {
+    await runThenEnd(async (finish) => {
+      const silent = message('stop', 'S', { text: '', read_at: null });
+      tails.S = [...tails.S, silent];
+      finish();
+      await emit((h) => {
+        h.onMessageNew?.(silent);
+        h.onTurnEnd?.({ session_id: 'S' });
+      });
+    });
+    await waitFor(() => expect(bubbleOpen()).toBe(false));
+  });
+
+  it('lingers once the reply arrives when the turn end came first', async () => {
+    await runThenEnd(async (finish) => {
+      finish();
+      await emit((h) => h.onTurnEnd?.({ session_id: 'S' }));
+    });
+    await waitFor(() => expect(bubbleOpen()).toBe(false));
+    const late = message('late', 'S', { text: 'Late reply', read_at: null });
+    tails.S = [...tails.S, late];
+    await emit((h) => h.onMessageNew?.(late));
+    await waitFor(() => expect(bubbleOpen()).toBe(true));
+    act(() => { vi.advanceTimersByTime(9_800); });
+    expect(bubbleOpen()).toBe(true);
+    act(() => { vi.advanceTimersByTime(400); });
+    expect(bubbleOpen()).toBe(false);
+  });
+
   it('does not linger when a send grace runs out with no turn registered', async () => {
     tails.S = [message('u0', 'S', { author: 'user', type: 'user', text: 'earlier' }), message('r0', 'S', { text: 'Earlier reply' })];
     // The send is accepted and echoed back, so nothing local still holds the bubble.

@@ -181,7 +181,11 @@ transition (instant under reduced motion), taking no space and no clicks.
   (binding and authorization) sees the main session's server turn state go
   from running to done. The local send grace (which shows "thinking" before
   the server registers a turn) is not part of it: a grace that runs out is not
-  a turn that ended.
+  a turn that ended. Only a turn that produced a reply lingers: a non-empty
+  agent result after the latest input, or the promoted result that answers an
+  earlier input. A stopped turn (which ends with an empty result) or a turn
+  with no reply does not; if the turn's end comes before its result, the
+  bubble folds away and the reply lingers once it arrives.
   It is derived while rendering from the last running value seen, so the
   render that ends the turn starts the linger and the bubble never closes in
   between; the only state is which ended turns have expired, per epoch. A turn

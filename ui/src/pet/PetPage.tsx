@@ -668,7 +668,14 @@ const PetSurface: React.FC = () => {
     watched = { ...watched, running: data.serverRunning, ended: data.serverRunning ? watched.ended : watched.ended + 1 };
   }
   if (watched !== turnWatch) setTurnWatch(watched);
-  const endedTurn = watched.ended > 0 ? String(watched.ended) : null;
+  // Only a turn that produced a reply lingers: a non-empty agent result after
+  // the latest input, or the promoted result that answers an earlier input
+  // (#2815). A stopped turn ends with an empty result, and a turn whose end
+  // comes before its result lingers once that result is here.
+  const inputAt = exchange.user ? data.messages.findIndex((row) => row.id === exchange.user!.id) : -1;
+  const turnHasReply = data.messages.slice(inputAt + 1).some((row) => row.author === 'agent' && row.type === 'result' && Boolean(row.text?.trim()))
+    || Boolean(exchange.answersEarlierInput && exchange.results.at(-1)?.text?.trim());
+  const endedTurn = watched.ended > 0 && turnHasReply ? String(watched.ended) : null;
   // The bubble is drawn: the speech slot shows it rather than the input or the
   // dictation marquee. Every input to the linger (time, pointer) means
   // something only while this holds.
