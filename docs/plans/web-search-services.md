@@ -383,7 +383,13 @@ Hosted tools §6 holds, with these changes:
   The Web card (`HostedToolRow`) and the IM line read that one projection; the fixed copy of a known code never
   replaces it.
 - The projection also carries the executor kind, `service` or `model`: `service` exactly when
-  `executor_origin.api` is `"search_api"` (C-1's `ServiceExecutorOrigin`, §8). For a
+  `executor_origin.api` is `"search_api"` (C-1's `ServiceExecutorOrigin`, §8). When `execution` is absent (no
+  executor ran, for example the only service failed before sending), the kind and label come from the last tried
+  `attempts[]` entry: a `search` Source or a model Source with a search API is a service. With `attempts[]`, the
+  chain total is the sum over tried attempts, a service attempt contributing its `attempts[].cost` and a model
+  attempt its cost from `execution` or `failed_attempts[]` (matched by `source_id`); an attempt without a cost
+  makes the total a lower bound, as today. Without `attempts[]` (a model-only chain) the released projection is
+  unchanged. For a
   service it leaves `model` empty, so the Web card (`HostedToolRow`) and the IM line (`_ran`) render "通过 Tavily"
   without the catalog's service id. Model executors keep "via Anthropic API key · claude-haiku-5-5".
 - Every candidate that sent a request is metered on its Source; a skip is never metered. The Usage tab therefore
@@ -399,7 +405,8 @@ Hosted tools §6 holds, with these changes:
   the uncertainty is visible. Released ledger rows without these fields load as zero. The counters keep their
   relations on write and on read, as the model counters do (a corrupt or hand-edited row is repaired, not
   published): `billable_requests + uncertain_requests ≤ requests`, and `reported_requests ≤ billable_requests`,
-  `list_requests ≤ billable_requests`; an excess is reduced to the bound.
+  `list_requests ≤ billable_requests`; an excess is reduced to the bound. A quantity whose carrier count is zero is
+  zeroed: `list_pages` when `list_requests` is 0, `reported_usd` when `reported_requests` is 0.
 - Pricing presence is unchanged: `pricing` and every cost field appear exactly when the model price table can be
   read. Service quantities are then valued at the catalog prices shipped with the release, whose verification date
   is the new `pricing.service_price_date`; without a model table the summary carries counts only, for services as
@@ -408,8 +415,9 @@ Hosted tools §6 holds, with these changes:
   never dressed as a model and model `requests` never count service requests:
   - `UsageBucketRow` becomes `oneOf`: the released model row (no `kind`), or a service row with `kind: "service"`,
     `source_id`, `service_id`, `requests`, `billable_requests`, `uncertain_requests`, `list_requests`,
-    `list_pages` (per content type, Exa: `text`), `reported_usd`, `reported_requests`, and the optional `api_cost_usd` and
-    `api_cost_lower_bound`.
+    `list_pages` (per content type, Exa: `text`), `reported_requests`, and the cost fields `reported_usd`, `api_cost_usd` and
+    `api_cost_lower_bound`, which, like `service_reported_usd`, are present exactly when `pricing` is (the ledger
+    keeps them regardless; only the summary follows the presence rule).
   - A new top-level `services[]` (`ServiceUsage`) has one entry per (Source, `service_id`) with those counters,
     `label` (the Source's; null once the Source is removed, folded into the same "Removed providers" identity as
     model usage), `service_label` (the catalog's; null when a later release no longer has that catalog row, and the UI then
@@ -628,7 +636,7 @@ Hermetic, against stub vendor servers; no live upstream and no real keys.
 | Config | `protocol: "search"` accepted only in its combination; `prefer_native` and `services` round-trip and default; a release-before loader ignores the new `hosted_tools` fields |
 | Custody | the adapter call attaches the key, refuses redirects and non-catalog hosts, caps the body, and returns no key material; nothing outside the adapter reads the key |
 | Chain | automatic and saved order, and insertion before the first model executor in a saved order; service cooldown from `Retry-After` (a longer deadline is not shortened) and doubling backoff, scoped to (Source, service), with a DeepSeek model route unaffected, and not written by an attempt that started before a key replacement; the terminal reason for every mix of skips (a disabled Source decides it only when every candidate is disabled), with `record.attempts[]` present when nothing executed and a blocked model executor showing its own remedy; `services.<id>.enabled: false` takes a DeepSeek Source out of the order and keeps its models; query-length skip; each outcome row of §4.2; one deadline; metering, `failed_attempts` and `attempts`; DeepSeek official versus relay; settings changed mid-turn do not apply until the next turn; re-enable with and without a free check, a second press joining the in-flight check, only one request admitted while a re-enable trial is pending, and a restart before the trial leaves the Source blocked; a long cooldown is shown with `cooldown_until` and cleared by "立即重试"; a reported cost above the ceiling falls back to the list price; a Tavily `key.limit: null` is unlimited |
-| Usage | service rows add known costs to the totals without the lower-bound flag; only sent requests are metered; DeepSeek's empty results, non-200 responses, timeouts and failures before sending cost nothing, while an unreadable 200, or a lost connection or stop after sending (and a timeout for a vendor that does not declare it unbilled) records no cost, adds to `uncertain_requests` and sets the lower bound; a default Exa call is listed at the search price alone (highlights included); a tool-only Source appears only in `services[]` and validates against the closed schema; an Exa content call without a reported cost keeps its page surcharge across a restart; a non-200 attempt records $0, and so does a received non-200 whose body read then failed; a pre-send failure is a `failed` attempt with $0 and no metering; a superseded failure, from any fence or from a repair after it settled, shows no repair; the skip classification order; a service no longer in the catalog stays in `services[]` unpriced, with the lower-bound flag, and its saved Source still loads and is no candidate; `service_order` survives a reload and decides the automatic order; a reported cost survives a restart through the ledger; a price change revalues list-priced quantities under the new table date; a released ledger row without the new fields loads; an impossible counter set is repaired; a saved `results` above a lowered maximum loads clamped |
+| Usage | service rows add known costs to the totals without the lower-bound flag; only sent requests are metered; DeepSeek's empty results, non-200 responses, timeouts and failures before sending cost nothing, while an unreadable 200, or a lost connection or stop after sending (and a timeout for a vendor that does not declare it unbilled) records no cost, adds to `uncertain_requests` and sets the lower bound; a default Exa call is listed at the search price alone (highlights included); a tool-only Source appears only in `services[]` and validates against the closed schema; an Exa content call without a reported cost keeps its page surcharge across a restart; a non-200 attempt records $0, and so does a received non-200 whose body read then failed; a pre-send failure is a `failed` attempt with $0 and no metering; a superseded failure, from any fence or from a repair after it settled, shows no repair; the skip classification order; a service no longer in the catalog stays in `services[]` unpriced, with the lower-bound flag, and its saved Source still loads and is no candidate; `service_order` survives a reload and decides the automatic order; a reported cost survives a restart through the ledger; a price change revalues list-priced quantities under the new table date; a released ledger row without the new fields loads; an impossible counter set is repaired, orphaned pages or reported dollars included; a pre-send failure on the only service projects as that service with $0; a saved `results` above a lowered maximum loads clamped |
 | Mapping | one recorded response per vendor maps to the canonical record with bounds; an empty results array is `completed` and ends the chain; unreadable bodies; a released native `HostedSource` row longer than the new bounds still loads |
 | Hop facts | `prefer_native` off declares the function on a native-capable hop, and a native result in history replays in the synthetic form |
 | UI | the card states, add dialog, service detail, Sources rows, copy in both locales |
