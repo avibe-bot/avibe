@@ -2174,6 +2174,50 @@ async def test_a_reply_a_steer_superseded_is_a_result_and_the_turn_ends_once_aft
     assert harness.controller.terminal_texts == ["4." if final.startswith("<silent>") else final]
 
 
+async def test_a_silent_final_settles_only_with_a_reply_that_was_delivered(
+    engine, session, tmp_path, published, monkeypatch
+) -> None:
+    """Scenario: MESSAGE-DELIVERY-334 (Codex: remember Vibey replies only after successful dispatch).
+
+    The reply a steer superseded could not be delivered; the Turn's silent final then has no
+    delivered reply to settle with, so it settles with none rather than text nobody was shown.
+    """
+    generating, steered = asyncio.Event(), asyncio.Event()
+
+    async def answer(_request, _cancel):
+        generating.set()
+        await steered.wait()
+        yield Done(assistant("4."))
+
+    harness = _Harness(engine, tmp_path, "avibe", [answer, [Done(assistant("<silent>already answered</silent>"))]])
+    deliver = harness.controller.emit_agent_message
+
+    async def failing_reply(context, message_type, text, *args, **kwargs):
+        output = kwargs.get("output")
+        if message_type == "result" and output is not None and not output.completes_turn:
+            raise RuntimeError("the reply could not be delivered")
+        return await deliver(context, message_type, text, *args, **kwargs)
+
+    harness.controller.emit_agent_message = failing_reply
+    request = harness.request("2+2?")
+    turn_id = _turn(request.context)
+    running = asyncio.create_task(harness.agent.handle_message(request))
+    await generating.wait()
+    native = harness.controller.started[0]
+    delivery_id, attempt_id = harness.open_steer("thanks", turn_id, native)
+    receipt = await harness.agent.steer_active_turn(
+        SteerRequest(SESSION, turn_id, native, "thanks", attempt_id=attempt_id),
+        ActiveSteerTarget("runtime", turn_id, request.context, request, harness.agent),
+    )
+    assert receipt.outcome is SteerOutcome.ACCEPTED
+    harness.accept_steer(delivery_id, attempt_id, turn_id)
+    steered.set()
+    await running
+
+    assert len(harness.controller.terminals) == 1 and harness.controller.terminals[0]["is_error"] is False
+    assert harness.controller.terminal_texts == [""]
+
+
 async def test_a_silent_final_whose_run_failed_after_its_commit_is_typed_by_its_row(
     engine, session, tmp_path, published
 ) -> None:

@@ -83,27 +83,35 @@ part is delivered and typed exactly as a non-terminal reply would be.
 
 - A non-terminal, non-detached `result` is persisted and delivered as `result`
   (`communication_type_for_output` no longer returns `output` for it).
-- The backend says its last visible reply when the Turn ends. A Turn-end emit
-  with no text of its own that completes the Turn carries `settle_text`, the
-  backend's last visible reply in the Turn ("" only when there was none). It is
-  never displayed and adds no row, Web Push or unread. The dispatcher writes it
-  into the Turn snapshot (`terminal_evidence.result_text`) and settles every
-  attached Run with it through the one terminal path. Startup reconciliation,
-  late steers and restarts read that snapshot. The reply was recorded on the
-  Runs' output ledgers when it was delivered, so the settlement sets
-  `result_text` and the terminal status only (`append_output=False`; the
-  snapshot carries `result_recorded` so reconciliation does the same). Nothing
-  is reconstructed: no in-memory memo, no ledger selection, no restart lookup in
-  the dispatcher.
+- The backend says its last delivered reply when the Turn ends. A Turn-end
+  emit with no text of its own that completes the Turn carries `settle_text`,
+  the last reply the backend actually delivered in the Turn ("" only when there
+  was none). It is never displayed and adds no row, Web Push or unread. The
+  dispatcher writes it into the Turn snapshot (`terminal_evidence.result_text`)
+  and settles every attached Run with it under the terminal identity, through
+  the one terminal record master uses for every final. Startup reconciliation,
+  late steers and restarts read that snapshot. Nothing is reconstructed: no
+  in-memory memo, no ledger selection, no restart lookup in the dispatcher.
+- A Run's `result_payload.outputs` is its append-only delivery log (every reply
+  recorded when it was delivered, as every reply records its Run output) plus
+  the Turn end's settlement entry, which may repeat the last reply's text.
+- Producer rules: a producer updates its `settle_text` only after a reply's
+  dispatch succeeds, never before the emit, so a reply whose emit raised leaves
+  the previous delivered one. Every content-free end branch that completes a
+  Turn forwards it, and a duration footer is never promoted into a result body
+  when it is present; failure, stop and teardown ends carry none, since they
+  report their outcome, never an earlier answer.
 - A failed or stopped Turn reports its outcome, never an earlier reply, and a
   `level="silent"` end that carries text still records that text, as before.
 - Where `settle_text` comes from:
-  - Vibey: the last reply a steer superseded that the run delivered. A Turn
+  - Vibey: the last reply a steer superseded whose dispatch succeeded. A Turn
     rerun after a restart reads the Turn's own `result`/`output` rows
     (`last_turn_reply`, a forced `ix_messages_turn_id` SEARCH, off the loop).
-  - Claude: its completed pre-steer phase is now a non-terminal `result` and
-    becomes the request's `last_reply_text`; `emit_result_message` carries it
-    on a silent or empty final.
+  - Claude: its completed pre-steer phase is now a non-terminal `result` that
+    records its Run output; once dispatched it becomes the request's
+    `last_reply_text`, which every content-free branch of `emit_result_message`
+    (silent directive, empty with the duration footer on or off) and the
+    Activity-result end carry.
   - Codex and OpenCode: their terminal text already is the last visible reply
     (Codex keeps the last visible `agentMessage` as the result candidate and a
     silent message never displaces it; OpenCode substitutes the last visible
@@ -170,9 +178,12 @@ superseded replies as `assistant`, with the rest of the backend migration.
 
 ## Known by design
 
-- `settle_text` is the backend's word for its last reply, written as the Run
-  copy (citations written out). It is not re-read from the transcript, so a
-  reply that reached IM but whose row write failed still settles the Runs.
+- `settle_text` is the backend's word for its last delivered reply, written as
+  the Run copy (citations written out). It is not re-read from the transcript,
+  so a reply that reached IM but whose row write failed still settles the Runs.
+- A Turn that ended content-free lists its last reply twice in a Run's
+  `result_payload.outputs`: once as delivered, once as the settlement entry
+  under the terminal identity, as every final's terminal record is.
 - On the Web the thinking indicator stays until `turn.end`, so it can show
   briefly under a final reply while the runner commits the Turn.
 - In IM a reply that does not end the Turn is its own message without the done
@@ -190,17 +201,20 @@ Scenario `MESSAGE-DELIVERY-334` (`tests/scenarios/message_delivery/catalog.yaml`
   after both, and the Run settles with the last reply; a silent final after a
   visible reply settles with it and pushes nothing new; replies A, B, A with
   detached work on the same Run, a Turn end in a new process carrying A, and
-  startup reconciliation of a second Run all settle with A with no second
-  ledger entry; every attached Run, one steered in after the reply included,
-  settles with it; narration stays `assistant` and leaves the Run text empty;
+  startup reconciliation of a second Run all settle with A, each Run's outputs
+  being its delivery log plus one settlement entry; every attached Run, one
+  steered in after the reply included, settles with it; every content-free
+  branch of the base result path (silent directive, empty with the duration
+  footer on or off) settles with the reply and promotes no footer; narration stays `assistant` and leaves the Run text empty;
   a stop and a failure end the Turn once and carry no reply text; IM
   finalization (running indicator, status bubble) happens once, at the Turn end.
 - Vibey (owner boundary): a complete reply followed by a steered input commits
   and delivers as `result` and pushes once, the steered reply is a second
-  `result`, and the Turn ends once after both; a rerun after a restart settles
-  with the reply the dead process delivered and promotes no stored `output`.
-- Claude: a completed pre-steer phase emits a non-terminal `result` and becomes
-  the request's last reply.
+  `result`, and the Turn ends once after both; a reply whose emit raised is
+  not what a silent final settles with; a rerun after a restart settles with
+  the reply the dead process delivered and promotes no stored `output`.
+- Claude: a completed pre-steer phase emits a non-terminal `result` that
+  records its Run output and, once dispatched, becomes the request's last reply.
 - Activity grouping, fork completion, and the UI message-role helpers keep their
   rendering for single-reply Turns and treat a mid-Turn reply as a phase
   boundary.

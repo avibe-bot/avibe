@@ -6097,14 +6097,9 @@ class SQLiteBackgroundTaskStore:
         terminal_status: Optional[str] = None,
         error: Optional[str] = None,
         updated_at: Optional[str] = None,
-        append_output: bool = True,
         _conn: Any = None,
     ) -> dict[str, Any]:
-        """Append one idempotent Run output and optionally settle the Run once.
-
-        ``append_output=False`` settles with ``text`` as the terminal result only: it
-        is a reply the ledger already holds from its delivery.
-        """
+        """Append one idempotent Run output and optionally settle the Run once."""
 
         now = updated_at or _utc_now_iso()
         identity = str(output_id or "").strip()
@@ -6148,11 +6143,7 @@ class SQLiteBackgroundTaskStore:
             raw_outputs = result_payload.get("outputs")
             outputs = [dict(item) for item in raw_outputs if isinstance(item, dict)] if isinstance(raw_outputs, list) else []
             visible_text = str(text or "")
-            if (
-                append_output
-                and visible_text.strip()
-                and not any(str(item.get("id") or "") == identity for item in outputs)
-            ):
+            if visible_text.strip() and not any(str(item.get("id") or "") == identity for item in outputs):
                 output_entry: dict[str, Any] = {
                     "id": identity,
                     "text": visible_text,
@@ -6381,7 +6372,6 @@ class SQLiteBackgroundTaskStore:
         error: Optional[str] = None,
         deferred_run_ids: Sequence[str] = (),
         updated_at: Optional[str] = None,
-        append_output: bool = True,
         _durable_activity_blockers: Optional[set[str]] = None,
         _activity_session_ids: Sequence[str] = (),
     ) -> dict[str, dict[str, Any]]:
@@ -6391,11 +6381,6 @@ class SQLiteBackgroundTaskStore:
         Run write. Reserve SQLite's writer slot before reading participant state so
         cancellation cannot land after owner election but before a later participant
         is written with that owner's id.
-
-        ``append_output=False``: ``text`` is a reply already recorded on the Runs
-        when it was delivered (a Turn end's settle text), so it settles them as
-        their ``result_text`` without a second output entry
-        (docs/plans/reply-and-turn-end.md).
         """
 
         from core import failure_notices
@@ -6553,7 +6538,6 @@ class SQLiteBackgroundTaskStore:
                     terminal_status=run_terminal_status,
                     error=error,
                     updated_at=now,
-                    append_output=append_output,
                     _conn=conn,
                 )
         return results

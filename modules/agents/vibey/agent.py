@@ -1561,10 +1561,8 @@ class VibeyAgent(BaseAgent):
         body, citations = self._display_with_citations(message, final=False) if message is not None else ("", None)
         if not body.strip():
             return
-        if message_type == "result":
-            run.last_reply = materialize_citations(body, citations) or body
         try:
-            await self.controller.emit_agent_message(
+            delivered = await self.controller.emit_agent_message(
                 run.request.context,
                 message_type,
                 body,
@@ -1573,6 +1571,10 @@ class VibeyAgent(BaseAgent):
             )
         except Exception:
             logger.exception("Vibey could not show response %s", row_id)
+            return
+        if message_type == "result" and delivered:
+            # Only a reply the dispatcher accepted is what the Turn settles with.
+            run.last_reply = materialize_citations(body, citations) or body
 
     def _display_with_citations(
         self, message: AssistantMessage, *, final: bool, replied: bool = False, images: Sequence[HostedImage] = ()

@@ -722,6 +722,21 @@ class BaseAgent(ABC):
             if raw_suffix:
                 parts.append(raw_suffix)
             body = "\n".join(parts)
+            if not strip_silent_blocks(body).strip() and settle:
+                # A Turn that already replied ends content-free and settles with that
+                # reply; its footnote is not a reply of its own.
+                message_id = await self.controller.emit_agent_message(
+                    context,
+                    "result",
+                    "",
+                    parse_mode=parse_mode,
+                    is_error=is_error,
+                    output=output,
+                    **settle,
+                )
+                if request and settles_request:
+                    await self._remove_ack_reaction(request)
+                return message_id
             # Footer-only completion (show_duration on, no visible result/suffix):
             # promote the footnote to the visible body so a duration/token-only turn
             # is still delivered/persisted/streamed. An empty body would otherwise be

@@ -3,9 +3,10 @@
 Scenario: MESSAGE-DELIVERY-334. A reply is a ``result`` whether or not its emit
 also ends the Turn, so a Turn can reply more than once; only the Turn-end emit
 settles the Run, writes the Turn snapshot, commits the Turn, and finalizes the
-IM surfaces. A Turn end with no reply of its own carries the backend's last visible
+IM surfaces. A Turn end with no reply of its own carries the backend's last delivered
 reply (``settle_text``): it is never shown again, and every attached Run and the
-Turn snapshot settle with it, with no second Run output entry.
+Turn snapshot settle with it, under the terminal identity, through the terminal
+record every final uses. A Run's outputs are its delivery log plus that entry.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.message_output import MessageOutput, stop_output_for, terminal_turn_output
 from modules.agents.base import AgentRequest, BaseAgent
 from modules.im import MessageContext
+from modules.im.formatters.avibe_formatter import AvibeFormatter
 from storage.db import create_sqlite_engine, dispose_cached_sqlite_engines
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_sessions, messages
@@ -207,9 +209,12 @@ class ReplyAndTurnEndTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(controller.committed_turns), 1)
                 run = self.harness_run()
                 self.assertEqual((run["status"], run["result_text"]), ("succeeded", SECOND))
-                # Each reply is on the Run's output ledger once.
-                outputs = [entry["text"] for entry in run["result_payload"]["outputs"]]
-                self.assertEqual(outputs, [FIRST, SECOND])
+                # The delivery log, then the settlement entry under the terminal identity
+                # (a final that carries its reply is both at once).
+                outputs = [(entry["id"], entry["text"]) for entry in run["result_payload"]["outputs"]]
+                settled = [("terminal", SECOND)] if ends_with == "a content-free end" else []
+                self.assertEqual([text for _, text in outputs], [FIRST, SECOND, *[t for _, t in settled]])
+                self.assertEqual(outputs[-1][0], "terminal")
 
     async def test_a_silent_final_settles_with_the_last_reply_and_promotes_nothing(self):
         """Scenario: MESSAGE-DELIVERY-334."""
@@ -233,7 +238,9 @@ class ReplyAndTurnEndTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(controller.committed_turns), 1)
                 run = self.harness_run()
                 self.assertEqual((run["status"], run["result_text"]), ("succeeded", FIRST))
-                self.assertEqual([entry["text"] for entry in run["result_payload"]["outputs"]], [FIRST])
+                outputs = [(entry["id"], entry["text"]) for entry in run["result_payload"]["outputs"]]
+                self.assertEqual([text for _, text in outputs], [FIRST, FIRST])
+                self.assertEqual(outputs[-1], ("terminal", FIRST))
 
     async def test_the_end_settles_with_its_reply_through_restart_reconciliation_and_repeats(self):
         """Scenario: MESSAGE-DELIVERY-334 (Codex: resumed replies, older retries, identity after restart).
@@ -242,7 +249,8 @@ class ReplyAndTurnEndTests(unittest.IsolatedAsyncioTestCase):
         Run meanwhile; a new process ends the Turn content-free, carrying the
         backend's last reply. The attached Run settles with A, and a Run whose
         settlement only startup reconciliation reaches settles with A from the
-        Turn snapshot. Nothing is reconstructed and no reply is recorded twice.
+        Turn snapshot. Nothing is reconstructed: each Run's outputs are its
+        delivery log plus one settlement entry under the terminal identity.
         """
         from core.scheduled_tasks import ScheduledTaskService
 
@@ -279,8 +287,8 @@ class ReplyAndTurnEndTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((run["status"], run["result_text"]), ("succeeded", FIRST))
             self.assertEqual((late["status"], late["result_text"]), ("succeeded", FIRST))
             self.assertEqual(evidence["result_text"], FIRST)
-            self.assertEqual(self.ledger(), recorded)
-            self.assertEqual(self.ledger(reconciled), [])
+            self.assertEqual(self.ledger(), [*recorded, "terminal"])
+            self.assertEqual(self.ledger(reconciled), ["terminal"])
             # The settle text is never shown: the IM channel saw only the replies.
             self.assertEqual(
                 [sent[2] for sent in restarted.im_client.sent + controller.im_client.sent],
@@ -305,7 +313,36 @@ class ReplyAndTurnEndTests(unittest.IsolatedAsyncioTestCase):
             attached, late = self.harness_run(), self.harness_run(steered)
             self.assertEqual((attached["status"], attached["result_text"]), ("succeeded", FIRST))
             self.assertEqual((late["status"], late["result_text"]), ("succeeded", FIRST))
-            self.assertEqual(self.ledger(steered), [])
+            self.assertEqual(self.ledger(steered), ["terminal"])
+
+    async def test_every_content_free_end_of_the_base_result_path_settles_with_the_reply(self):
+        """Scenario: MESSAGE-DELIVERY-334 (Codex: forward settle_text through the duration-enabled branch).
+
+        Whichever way the base result path ends a Turn with nothing to show, it
+        carries the Turn's last delivered reply, and a duration footer never
+        becomes a reply of its own.
+        """
+        cases = {
+            "a silent directive": ("<silent>nothing to add</silent>", True),
+            "an empty result with the duration footer on": ("", True),
+            "an empty result with the duration footer off": ("", False),
+        }
+        for name, (final, show_duration) in cases.items():
+            with self.subTest(name), self.state():
+                controller = _Controller("avibe")
+                controller.config.show_duration = show_duration
+                controller.im_client.formatter = AvibeFormatter()
+                context = self.context()
+                await controller.emit_agent_message(context, "result", FIRST, output=REPLY)
+                request = SimpleNamespace(output=None, last_reply_text=FIRST)
+                await _Agent(controller).emit_result_message(context, final, duration_ms=83_000, request=request)
+
+                self.assertEqual(self.agent_rows(), [("result", FIRST)])
+                self.assertEqual(self.pushed_texts(), [FIRST])
+                [snapshot] = controller.snapshots
+                self.assertEqual(snapshot["terminal_evidence"]["result_text"], FIRST)
+                run = self.harness_run()
+                self.assertEqual((run["status"], run["result_text"]), ("succeeded", FIRST))
 
     async def test_a_reply_or_a_failure_keeps_its_type_attached_or_detached(self):
         """Scenario: MESSAGE-DELIVERY-334.

@@ -470,7 +470,7 @@ scenarios:
       - tests/test_backend_failure_retry.py::test_a_cut_vibey_turn_that_no_longer_qualifies_keeps_the_restart_notice
       - tests/test_agent_transcript.py::test_the_restart_reads_of_a_turns_context_tail_stay_bounded
   - id: MESSAGE-DELIVERY-334
-    name: A reply is a result whether or not it ends its Turn; a Turn may reply more than once (a steered input's answer is a second result, each notified once), and only the Turn end settles the Run, writes the Turn snapshot, hides the thinking indicator, and finalizes IM, once; a content-free end carries the backend's last visible reply (settle_text), with which every attached Run and the snapshot settle, across restarts, reconciliation and repeated replies, never recorded twice
+    name: A reply is a result whether or not it ends its Turn; a Turn may reply more than once (a steered input's answer is a second result, each notified once), and only the Turn end settles the Run, writes the Turn snapshot, hides the thinking indicator, and finalizes IM, once; a content-free end carries the backend's last delivered reply (settle_text), with which every attached Run (under the terminal identity) and the snapshot settle, on every content-free end branch, across restarts, reconciliation and repeated replies
     status: covered
     kind: regression
     layer: contract
@@ -479,6 +479,8 @@ scenarios:
       - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_a_silent_final_settles_with_the_last_reply_and_promotes_nothing
       - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_the_end_settles_with_its_reply_through_restart_reconciliation_and_repeats
       - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_every_attached_run_settles_with_the_turns_last_reply
+      - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_every_content_free_end_of_the_base_result_path_settles_with_the_reply
+      - tests/test_vibey_agent.py::test_a_silent_final_settles_only_with_a_reply_that_was_delivered
       - tests/test_claude_agent_sessions.py::ClaudeAgentSessionTests::test_steered_assistant_and_result_settle_the_pending_turn
       - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_a_reply_or_a_failure_keeps_its_type_attached_or_detached
       - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_only_a_reply_is_a_completed_turns_answer

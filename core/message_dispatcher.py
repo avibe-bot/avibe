@@ -1428,7 +1428,6 @@ class ConsolidatedMessageDispatcher:
         provenance: dict[str, Any],
         blocked_run_ids: frozenset[str],
         session_id: str | None = None,
-        appends_output: bool = True,
     ) -> list[str]:
         """Record a Turn's output on its Runs; may run off the loop.
 
@@ -1455,10 +1454,6 @@ class ConsolidatedMessageDispatcher:
         if not output_id:
             digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:20]
             output_id = f"content:{digest}"
-        # A reply recorded when it was delivered is not recorded again when the Turn's
-        # end settles the Run with it. Passed only when set, so a stand-in store
-        # without the keyword keeps working.
-        recorded_reply = {} if appends_output else {"append_output": False}
         record_turn_outputs = getattr(store, "record_turn_run_outputs", None)
         if callable(record_turn_outputs):
             deferred_run_ids = (
@@ -1483,7 +1478,6 @@ class ConsolidatedMessageDispatcher:
                     terminal_status=terminal_status,
                     error=terminal_error,
                     deferred_run_ids=deferred_run_ids,
-                    **recorded_reply,
                 )
             record_turn_outputs(
                 normalized_run_ids,
@@ -1495,7 +1489,6 @@ class ConsolidatedMessageDispatcher:
                 terminal_status=terminal_status,
                 error=terminal_error,
                 deferred_run_ids=deferred_run_ids,
-                **recorded_reply,
             )
             return deferred_run_ids
         get_run = getattr(store, "get_run", None)
@@ -1558,7 +1551,6 @@ class ConsolidatedMessageDispatcher:
                 }
                 if terminal_error is not None:
                     record_kwargs["error"] = terminal_error
-                record_kwargs.update(recorded_reply)
                 record_output(
                     run_id,
                     **record_kwargs,
@@ -1835,13 +1827,8 @@ class ConsolidatedMessageDispatcher:
         terminal_error: str | None = None,
         output_semantics: MessageOutput | None = None,
         log_label: str = "agent run terminal result",
-        appends_output: bool = True,
     ) -> None:
         """Record a Turn's terminal result on its Runs, off the controller loop.
-
-        ``appends_output=False``: the text is a reply already recorded on the Runs
-        when it was delivered (a Turn end's ``settle_text``), so it settles the Runs
-        without a second output entry (docs/plans/reply-and-turn-end.md).
 
         The write waits for SQLite's writer, which another process can hold for the
         whole busy timeout, so it runs on the runtime-work door (#2706). It keeps the
@@ -1892,7 +1879,6 @@ class ConsolidatedMessageDispatcher:
                     blocked_run_ids=blocked_run_ids,
                     session_id=str((getattr(context, "platform_specific", None) or {}).get("agent_session_id") or "")
                     or None,
-                    appends_output=appends_output,
                 )
             finally:
                 store.close()
@@ -2849,10 +2835,11 @@ class ConsolidatedMessageDispatcher:
         outputs remain in the current Turn, while detached outputs are delivered
         to the Session/IM surface without touching a newer Turn or its stream.
         The terminal emit is the Turn's end; an empty one is its content-free
-        form. ``settle_text`` is what the backend says its last visible reply in
-        the Turn was: never displayed, persisted, streamed or notified, it is the
-        Turn snapshot's ``result_text`` and settles every attached Run when the
-        Turn completed without text of its own (docs/plans/reply-and-turn-end.md).
+        form. ``settle_text`` is the backend's last delivered reply in the Turn:
+        never displayed, persisted, streamed or notified, it is the Turn snapshot's
+        ``result_text`` and settles every attached Run, under the terminal
+        identity, when the Turn completed without text of its own
+        (docs/plans/reply-and-turn-end.md).
 
         ``hosted`` is a ``toolcall``'s hosted-tool card (``core.hosted_activity``,
         ``HostedActivity.to_payload``). It rides on the persisted row for the Web
@@ -2955,11 +2942,11 @@ class ConsolidatedMessageDispatcher:
                 output_semantics,
             )
         # A Turn end that completes its Turn with no text of its own settles with the
-        # backend's last visible reply (``settle_text``): the Turn snapshot carries it
-        # and every attached Run settles with it, through the one terminal path. It
-        # was recorded on the Runs when it was delivered, so nothing is appended. A
-        # failed or stopped Turn reports its outcome instead, and a
-        # ``level="silent"`` end that carries text still records that text.
+        # backend's last delivered reply (``settle_text``): the Turn snapshot carries it
+        # and every attached Run settles with it, under the terminal identity, through
+        # the one terminal record every final uses. A failed or stopped Turn reports
+        # its outcome instead, and a ``level="silent"`` end that carries text still
+        # records that text.
         settles_with_reply = bool(
             mutates_turn_lifecycle
             and terminal_reason == "done"
@@ -2979,22 +2966,18 @@ class ConsolidatedMessageDispatcher:
             terminal_body = materialize_citations(terminal_body, citations)
             if settles_with_reply:
                 terminal_body = str(settle_text)
-            terminal_evidence = {
-                "result_text": self._fold_footer(terminal_body, result_footer),
-                "terminal_error": terminal_error,
-                "settles_run": output_semantics.settles_run,
-                "output_provenance": output_semantics.provenance(context),
-            }
-            if settles_with_reply:
-                # A late Run settles from this snapshot without recording the reply again.
-                terminal_evidence["result_recorded"] = True
             manager = getattr(self.controller, "session_turns", None)
             if manager is not None:
                 manager.on_terminal_result(
                     context,
                     is_error=is_error,
                     settled_by=self._turn_release_settlement(output_semantics),
-                    terminal_evidence=terminal_evidence,
+                    terminal_evidence={
+                        "result_text": self._fold_footer(terminal_body, result_footer),
+                        "terminal_error": terminal_error,
+                        "settles_run": output_semantics.settles_run,
+                        "output_provenance": output_semantics.provenance(context),
+                    },
                 )
         # ``level="silent"`` is the explicit visibility control (orthogonal to type):
         # the message already settled the dot above (for a terminal result), so here
@@ -3060,7 +3043,6 @@ class ConsolidatedMessageDispatcher:
                         is_error=is_error,
                         terminal_error=terminal_error,
                         output_semantics=output_semantics,
-                        appends_output=not settles_with_reply,
                     )
 
                 def settle_invisible_output() -> None:

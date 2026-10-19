@@ -4869,11 +4869,8 @@ class ClaudeAgent(BaseAgent):
                 completes_turn=False,
             )
             if activity is not None
-            else MessageOutput(
-                completes_turn=False,
-                completes_run=False,
-                records_run_output=False,
-            )
+            # A reply: recorded on the Turn's Runs when it is delivered, like any other.
+            else MessageOutput(completes_turn=False, completes_run=False)
         )
         emitted_text = text or (
             str(activity.metadata.get("summary") or "") if activity else ""
@@ -4888,7 +4885,8 @@ class ClaudeAgent(BaseAgent):
             output=output,
         )
         visible_reply = strip_silent_blocks(emitted_text).strip()
-        if request is not None and visible_reply:
+        if request is not None and visible_reply and message_id:
+            # Only a reply the dispatcher accepted is what the Turn settles with.
             request.last_reply_text = visible_reply
         if activity is None:
             return
@@ -5416,12 +5414,14 @@ class ClaudeAgent(BaseAgent):
             )
         visible_text = str(text or "")
         if not strip_silent_blocks(visible_text).strip():
+            last_reply = getattr(request, "last_reply_text", "") if request is not None else ""
             await self.controller.emit_agent_message(
                 context,
                 "result",
                 "",
                 is_error=(subtype or "").startswith("error"),
                 output=output,
+                **({"settle_text": last_reply} if last_reply else {}),
             )
             return
         message_id = await self.emit_result_message(
