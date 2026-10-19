@@ -6852,50 +6852,68 @@ class ModelHubService:
         call: ExecutorCall,
         candidate: ExecutorCandidate,
         *,
+        slot: ExecutorSlot | None = None,
         deadline: float,
         say: Callable[..., str],
-    ) -> _ExecutorAttempt:
+    ) -> _ExecutorAttempt | None:
         """Run DeepSeek's standalone Search/Fetch API directly, with its key from Avibe Vault."""
 
         source = candidate.source
-        base = (source.base_url or "https://api.deepseek.com").rstrip("/")
-        if base.endswith("/v1"):
-            base = base[:-3]
-        url = base + candidate.path
-        if call.tool == "web_fetch":
-            payload = {"url": call.arguments["url"]}
-        else:
-            payload = {"query": call.arguments["query"], "count": 10}
-        command = [
-            sys.executable,
-            "-m",
-            "vibe",
-            "vault",
-            "fetch",
-            "--auth",
-            candidate.vault_secret,
-            "--method",
-            "POST",
-            "--url",
-            url,
-            "--header",
-            "Content-Type: application/json",
-            "--data",
-            json.dumps(payload, ensure_ascii=True),
-            "--no-approval-wait",
-        ]
+
+        def direct_command(current: ExecutorCandidate) -> list[str]:
+            base = (current.source.base_url or "https://api.deepseek.com").rstrip("/")
+            if base.endswith("/v1"):
+                base = base[:-3]
+            if call.tool == "web_fetch":
+                payload = {"url": call.arguments["url"]}
+            else:
+                payload = {"query": call.arguments["query"], "count": 10}
+            return [
+                sys.executable,
+                "-m",
+                "vibe",
+                "vault",
+                "fetch",
+                "--auth",
+                current.vault_secret,
+                "--method",
+                "POST",
+                "--url",
+                base + current.path,
+                "--header",
+                "Content-Type: application/json",
+                "--data",
+                json.dumps(payload, ensure_ascii=True),
+                "--no-approval-wait",
+            ]
+
         failure_reason: Failure | None = None
         body: Any = None
+        process = None
         try:
-            process = await asyncio.create_subprocess_exec(
-                *command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                **isolated_subprocess_kwargs(console=False),
-            )
+            if slot is None:
+                process = await asyncio.create_subprocess_exec(
+                    *direct_command(candidate),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    **isolated_subprocess_kwargs(console=False),
+                )
+            else:
+                # Hold the Source mutation lock from the final admission through process start.
+                async with self._mutation_lock:
+                    admitted = await asyncio.to_thread(self._admitted_executor, slot, call.tool)
+                    if admitted is None:
+                        return None
+                    candidate = admitted
+                    source = candidate.source
+                    process = await asyncio.create_subprocess_exec(
+                        *direct_command(candidate),
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        **isolated_subprocess_kwargs(console=False),
+                    )
         except OSError as error:
             failure_reason = Failure(str(error), None)
-            process = None
         if process is not None:
             async def stop() -> None:
                 try:
@@ -7019,13 +7037,7 @@ class ModelHubService:
         if candidate is None:
             return None
         if candidate.direct:
-            # A Source removed or re-identified after the first admission must not start a direct call.
-            async with self._mutation_lock:
-                admitted = await asyncio.to_thread(self._admitted_executor, slot, tool)
-            if admitted is None:
-                return None
-            candidate = admitted
-            return await self._direct_search_attempt(call, candidate, deadline=deadline, say=say)
+            return await self._direct_search_attempt(call, candidate, slot=slot, deadline=deadline, say=say)
         source = candidate.source
         request = executor_request(call, source, model_id, candidate.declaration, candidate.include)
         stream = executor_streams(source)
