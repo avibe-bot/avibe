@@ -217,3 +217,20 @@ async def test_restored_poll_does_not_resend_a_persisted_superseded_reply(monkey
 
     assert final_text == "Callbacks noted."
     assert _reply_emits(restored) == [] and _assistant_emits(restored) == []
+
+
+async def test_an_undelivered_reply_is_not_recorded_as_emitted(monkeypatch):
+    """MESSAGE-DELIVERY-335: a reply the dispatcher could not deliver (no message id) is not
+    recorded as emitted, so a restored poll still owes it; the Turn still settles on the
+    steer's answer (a reply whose every send failed is not retried)."""
+
+    monkeypatch.setattr("modules.agents.opencode.poll_loop._POLL_INTERVAL_SECONDS", 0)
+    persisted: dict = {}
+    agent = _agent([], persisted)
+    agent.controller.emit_agent_message = AsyncMock(return_value=None)
+
+    final_text = await _live_poll(_turn(REPORT, "Callbacks noted."), agent)
+
+    assert final_text == "Callbacks noted."
+    assert [call.args[2] for call in agent.controller.emit_agent_message.await_args_list] == [REPORT]
+    assert "reply-a" not in persisted.get("emitted_assistant_messages", [])

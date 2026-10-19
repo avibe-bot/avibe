@@ -359,6 +359,11 @@ class _ResultSplit:
     links_whole: bool
 
 
+# The Turn-end read of a Turn's last delivered reply: three tries, and the pauses
+# between them (well under a second in all) before it is read as no reply.
+_TURN_REPLY_READ_BACKOFFS: tuple[Optional[float], ...] = (0.1, 0.3, None)
+
+
 class ConsolidatedMessageDispatcher:
     """Dispatch agent messages while preserving existing product behavior."""
 
@@ -2267,18 +2272,33 @@ class ConsolidatedMessageDispatcher:
         return {"turn_reply": (turn_id, run_copy)} if turn_id else {}
 
     async def _turn_last_reply(self, context: MessageContext) -> Optional[str]:
-        """The Run copy of the Turn's last delivered reply, read off the loop."""
+        """The Run copy of the Turn's last delivered reply, read off the loop.
+
+        Rule 5 is best effort (docs/plans/reply-and-turn-end.md): a read that still
+        fails after a short bounded retry is logged and read as no reply, so the Turn
+        settles with "" as a content-free end always did, rather than holding or
+        failing the Turn's end.
+        """
 
         turn_id = str((context.platform_specific or {}).get("turn_token") or "").strip()
         manager = getattr(self.controller, "session_turns", None)
         read = getattr(manager, "turn_last_reply", None)
         if not turn_id or not callable(read):
             return None
-        try:
-            return await self._run_off_loop(lambda: read(turn_id))
-        except Exception:
-            logger.warning("Failed to read the last reply of Turn %s", turn_id, exc_info=True)
-            return None
+        for attempt, backoff in enumerate(_TURN_REPLY_READ_BACKOFFS, start=1):
+            try:
+                return await self._run_off_loop(lambda: read(turn_id))
+            except Exception as err:
+                if backoff is None:
+                    logger.warning(
+                        "Failed to read the last reply of Turn %s after %d attempts; settling with no reply: %s",
+                        turn_id,
+                        attempt,
+                        err,
+                    )
+                    return None
+                await asyncio.sleep(backoff)
+        return None
 
     async def _record_suppressed_agent_run_terminal_result(
         self,

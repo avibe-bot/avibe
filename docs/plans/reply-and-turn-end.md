@@ -69,6 +69,14 @@ completion signal, and only that event does Turn-end work.
    copy for the durable Turn (`session_turn_replies`, one row per Turn), and a
    done Turn end with no reply of its own settles the Turn snapshot and every
    attached Run with it. Producers forward nothing and nothing reconstructs it.
+   Rule 5 is best effort, not exactly-once (an IM send is an external effect no
+   local record can commit with), with one degradation policy: the local
+   receipt is the record, written atomically with the reply's receipt row, so
+   when that row's write fails after an IM send the transcript and the record
+   both lack the reply and the end settles with the previous recorded reply, or
+   ""; a read of the record that still fails after a short bounded retry is
+   logged and read as no reply, so the end settles with "" rather than holding
+   or failing the Turn's end.
 6. The demotion and promotion patches are deleted. Stored `output`, `interim`
    and promoted rows keep rendering as they do today.
 7. Consumers that read `result` as the Turn's end move to the Turn-end signal
@@ -209,6 +217,14 @@ as `assistant`; the base result path's footer promotion.
   Turn still visibly ends: the thinking indicator hides on `turn.end`, the IM
   running reaction clears, and the concise status bubble collapses to its done
   line with the run time.
+- Rule 5 is best effort (rule 5's degradation policy): an IM reply whose row
+  write fails after its send has no receipt and no record, so the Turn settles
+  with the reply before it; a record read that keeps failing settles with "".
+- A reply whose every send failed is not retried (the dispatcher posts its
+  delivery-failed notice) and the Turn ends normally. OpenCode records a reply
+  as emitted only once the dispatcher returned delivery evidence, so a restored
+  poll still owes an undelivered one; Codex keeps no emitted state for a
+  flushed reply, so nothing marks a failed one delivered.
 - A Turn with no durable row (legacy and CLI paths) has no recorded reply, so
   its content-free end settles with empty text as before.
 - A Turn that ended content-free lists its last reply twice in a Run's

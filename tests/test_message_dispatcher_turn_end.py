@@ -108,6 +108,11 @@ def _live_turn(conn, scope_id: str) -> None:
     assert message_deliveries.materialize_start_acceptance(conn, turn_id="trn_1", evidence={"kind": "test"})
 
 
+@contextmanager
+def _no_logs():
+    yield
+
+
 class _Agent(BaseAgent):
     name = "stub"
 
@@ -407,6 +412,35 @@ class ReplyAndTurnEndTests(unittest.IsolatedAsyncioTestCase):
                         [entry["id"] for entry in run["result_payload"]["outputs"]],
                         ["out_1", "out_2", "out_3", "terminal"],
                     )
+
+    async def test_a_failed_last_reply_read_is_retried_then_read_as_none(self):
+        """Scenario: MESSAGE-DELIVERY-335: rule 5 is best effort. A read of the Turn's last
+        reply that fails is retried briefly; one that keeps failing is logged and read as
+        no reply, so the end settles with "" instead of holding or failing the Turn's end."""
+        for failures, expected in ((2, FIRST), (3, "")):
+            with self.subTest(failures=failures), self.state():
+                context = self.context()
+                await _Controller("avibe").emit_agent_message(context, "result", FIRST, output=REPLY)
+                restarted = _Controller("avibe")
+                read = restarted.session_turns.turn_last_reply
+                attempts = []
+
+                def flaky_read(turn_id, read=read, attempts=attempts, failures=failures):
+                    attempts.append(turn_id)
+                    if len(attempts) <= failures:
+                        raise RuntimeError("database is locked")
+                    return read(turn_id)
+
+                restarted.session_turns.turn_last_reply = flaky_read
+                with self.assertLogs("core.message_dispatcher", level="WARNING") if failures == 3 else _no_logs():
+                    await restarted.emit_agent_message(context, "result", "", output=terminal_turn_output())
+
+                self.assertEqual(len(attempts), 3)
+                [snapshot] = restarted.snapshots
+                self.assertEqual(snapshot["terminal_evidence"]["result_text"], expected)
+                self.assertEqual(len(restarted.committed_turns), 1)
+                run = self.harness_run()
+                self.assertEqual((run["status"], run["result_text"] or ""), ("succeeded", expected))
 
     async def test_a_reply_or_a_failure_keeps_its_type_attached_or_detached(self):
         """Scenario: MESSAGE-DELIVERY-334.

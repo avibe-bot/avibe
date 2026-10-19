@@ -513,8 +513,10 @@ class OpenCodePollLoop:
         (docs/plans/reply-and-turn-end.md): the last visible one rides the
         settlement, earlier visible ones are delivered first as replies that do
         not end the Turn, and a silent reply never displaces a visible one.
-        Emitted IDs are persisted so a restored poll does not deliver the same
-        reply again.
+        A reply's id is recorded as emitted, and persisted so a restored poll does
+        not deliver it again, only once the dispatcher returned delivery evidence;
+        a reply whose every send failed is not retried (the dispatcher already
+        told the user), and the Turn still ends.
         """
 
         settlement_id = _message_info(settlement_message).get("id")
@@ -553,7 +555,7 @@ class OpenCodePollLoop:
                 message_id,
                 settlement_id,
             )
-            await self._agent.controller.emit_agent_message(
+            delivered = await self._agent.controller.emit_agent_message(
                 context,
                 "result",
                 text,
@@ -564,6 +566,12 @@ class OpenCodePollLoop:
                     completes_turn=False, completes_run=False, idempotency_key=str(message_id)
                 ),
             )
+            if not delivered:
+                logger.warning(
+                    "OpenCode reply %s was not delivered; it stays unrecorded as emitted",
+                    message_id,
+                )
+                continue
             emitted_message_ids.add(message_id)
             self._persist_emitted_assistant_messages(session_id, emitted_message_ids)
         return final_text
