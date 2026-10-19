@@ -4876,7 +4876,7 @@ class ClaudeAgent(BaseAgent):
             str(activity.metadata.get("summary") or "") if activity else ""
         )
         # A completed phase is a reply like any other: a ``result`` that does not end
-        # the Turn (docs/plans/reply-and-turn-end.md), and the Turn's last reply so far.
+        # the Turn (docs/plans/reply-and-turn-end.md).
         message_id = await self.controller.emit_agent_message(
             context,
             "result",
@@ -4884,10 +4884,6 @@ class ClaudeAgent(BaseAgent):
             parse_mode="markdown",
             output=output,
         )
-        visible_reply = strip_silent_blocks(emitted_text).strip()
-        if request is not None and visible_reply and message_id:
-            # Only a reply the dispatcher accepted is what the Turn settles with.
-            request.last_reply_text = visible_reply
         if activity is None:
             return
         if strip_silent_blocks(emitted_text).strip():
@@ -5414,14 +5410,12 @@ class ClaudeAgent(BaseAgent):
             )
         visible_text = str(text or "")
         if not strip_silent_blocks(visible_text).strip():
-            last_reply = getattr(request, "last_reply_text", "") if request is not None else ""
             await self.controller.emit_agent_message(
                 context,
                 "result",
                 "",
                 is_error=(subtype or "").startswith("error"),
                 output=output,
-                **({"settle_text": last_reply} if last_reply else {}),
             )
             return
         message_id = await self.emit_result_message(

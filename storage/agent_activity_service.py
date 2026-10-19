@@ -40,7 +40,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from core.backend_failure import is_backend_failure_notification
 from storage import agent_events_service, messages_service
@@ -450,8 +450,12 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
         .where(session_turns.c.state == "terminal")
         .where(session_turns.c.terminal_outcome != "not_written")
         .where(session_turns.c.terminal_at.is_not(None))
+        # The Session's latest Turns in index order (``ix_session_turns_session_created``):
+        # a Session runs its Turns one at a time, so the latest created are the latest
+        # ended, and the scan stops at the window instead of sorting the whole history.
+        # The timeline is sorted by each terminal's own time below.
         .order_by(
-            func.julianday(session_turns.c.terminal_at).desc(),
+            session_turns.c.created_at.desc(),
             session_turns.c.id.desc(),
         )
         .limit(MESSAGE_SCAN_LIMIT)

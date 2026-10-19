@@ -2789,7 +2789,6 @@ class ConsolidatedMessageDispatcher:
         delivery: DeliveryEvidence | None = None,
         citations: Optional[CitationBundle] = None,
         hosted: Optional[dict] = None,
-        settle_text: Optional[str] = None,
     ) -> Optional[str]:
         """Centralized dispatch for agent messages.
 
@@ -2835,11 +2834,7 @@ class ConsolidatedMessageDispatcher:
         outputs remain in the current Turn, while detached outputs are delivered
         to the Session/IM surface without touching a newer Turn or its stream.
         The terminal emit is the Turn's end; an empty one is its content-free
-        form. ``settle_text`` is the backend's last delivered reply in the Turn:
-        never displayed, persisted, streamed or notified, it is the Turn snapshot's
-        ``result_text`` and settles every attached Run, under the terminal
-        identity, when the Turn completed without text of its own
-        (docs/plans/reply-and-turn-end.md).
+        form (docs/plans/reply-and-turn-end.md).
 
         ``hosted`` is a ``toolcall``'s hosted-tool card (``core.hosted_activity``,
         ``HostedActivity.to_payload``). It rides on the persisted row for the Web
@@ -2941,18 +2936,6 @@ class ConsolidatedMessageDispatcher:
                 context,
                 output_semantics,
             )
-        # A Turn end that completes its Turn with no text of its own settles with the
-        # backend's last delivered reply (``settle_text``): the Turn snapshot carries it
-        # and every attached Run settles with it, under the terminal identity, through
-        # the one terminal record every final uses. A failed or stopped Turn reports
-        # its outcome instead, and a ``level="silent"`` end that carries text still
-        # records that text.
-        settles_with_reply = bool(
-            mutates_turn_lifecycle
-            and terminal_reason == "done"
-            and not (text and text.strip())
-            and (settle_text or "").strip()
-        )
         # Persist the exact terminal body in the Turn snapshot before delivery.
         # A steer accepted after this Turn settles can then complete its Agent Run
         # without guessing from transcript order or requiring a live sink.
@@ -2964,8 +2947,6 @@ class ConsolidatedMessageDispatcher:
             # finalized, and an internal token must never be what a later steer
             # reads back as the turn's result.
             terminal_body = materialize_citations(terminal_body, citations)
-            if settles_with_reply:
-                terminal_body = str(settle_text)
             manager = getattr(self.controller, "session_turns", None)
             if manager is not None:
                 manager.on_terminal_result(
@@ -3034,11 +3015,10 @@ class ConsolidatedMessageDispatcher:
                 if canonical_type == "result" and output_semantics.settles_run:
                     # Run completion is independent from visible Message and Turn
                     # completion cardinality. A detached/empty final output may
-                    # settle its origin Run without touching the current Turn; a
-                    # Turn's end settles its Runs with the Turn's last reply.
+                    # settle its origin Run without touching the current Turn.
                     await self._record_agent_run_terminal_result(
                         context,
-                        str(settle_text) if settles_with_reply else materialize_citations(text, citations),
+                        materialize_citations(text, citations),
                         None,
                         is_error=is_error,
                         terminal_error=terminal_error,

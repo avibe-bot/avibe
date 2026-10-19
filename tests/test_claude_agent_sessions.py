@@ -1019,8 +1019,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         """A Result before the native input echo remains nonterminal.
 
         MESSAGE-DELIVERY-334: that completed phase is a reply, a ``result`` that does
-        not end the Turn and records its Run output, and once delivered it is the
-        request's last reply a silent final settles with.
+        not end the Turn and records its Run output.
         """
         controller = _StubController()
         controller._get_session_key = lambda _context: "session-1"
@@ -1104,8 +1103,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             request=pending_request,
         )
         # MESSAGE-DELIVERY-334: the completed pre-steer phase is a reply (``result``)
-        # that does not end the Turn, and the Turn's request remembers it as the reply
-        # a silent final would settle with.
+        # that does not end the Turn.
         controller.emit_agent_message.assert_any_await(
             context,
             "result",
@@ -1122,7 +1120,6 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         # A reply records its Run output like every other reply (Codex: record Claude
         # phase replies on attached Run ledgers).
         self.assertTrue(phase_output.records_run_output)
-        self.assertEqual(pending_request.last_reply_text, "primary final answer")
         self.assertNotIn(composite_key, agent._pending_requests)
 
     async def test_presteer_result_stays_visible_without_agent_initiated_turn(self):

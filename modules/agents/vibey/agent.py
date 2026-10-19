@@ -87,7 +87,7 @@ from core.services.agent_steering import (
     result as steer_result,
 )
 from core.backend_failure import emit_backend_failure
-from core.citations import CitationBundle, materialize_citations, register_text_citations
+from core.citations import CitationBundle, register_text_citations
 from core.hosted_activity import HostedActivity, hosted_line, native_activities, proxy_activity
 from core.message_output import MessageOutput, stop_output_for, terminal_output_for
 from core.native_dispatch_phase import mark_backend_dispatch_attempted
@@ -117,7 +117,6 @@ from storage.agent_transcript import (
     call_instance_result,
     committed_final,
     final_outcome,
-    last_turn_reply,
     render_text,
     text_parts,
 )
@@ -222,9 +221,6 @@ class _Run:
     tool_started: dict[str, float] = field(default_factory=dict)
     # Images the run's hosted calls generated, as (path, label), attached to its final reply.
     hosted_images: list[tuple[str, str]] = field(default_factory=list)
-    # The last reply a steer superseded that this run delivered (its written text): what the
-    # Turn settles with when its final is silent (docs/plans/reply-and-turn-end.md).
-    last_reply: str = ""
 
     @property
     def native_turn_id(self) -> str:
@@ -964,10 +960,9 @@ class VibeyAgent(BaseAgent):
                 )
             else:
                 # A reply the model chose to keep silent: the Turn's end with no reply of
-                # its own, which settles with the Turn's last visible reply, if any.
+                # its own; any earlier reply in the Turn was already delivered as one.
                 await self.controller.emit_agent_message(
-                    context, "result", "", output=terminal_output_for(request),
-                    **await self._settle_text(run),
+                    context, "result", "", output=terminal_output_for(request)
                 )
             return
         # Generated images are paid for and already announced: they reach the user
@@ -983,27 +978,11 @@ class VibeyAgent(BaseAgent):
         if reason in _COMPLETED and kind is None:
             # The run ended without a final reply by design (a terminating tool, a hook end).
             await self.controller.emit_agent_message(
-                context, "result", "", level="silent", output=terminal_output_for(request),
-                **await self._settle_text(run),
+                context, "result", "", level="silent", output=terminal_output_for(request)
             )
             return
         self._log_failure(run, reason, kind, origin, diagnostic)
         await self._fail(request, kind, diagnostic, reason=reason, refusal=run.refusal, source=source)
-
-    async def _settle_text(self, run: _Run) -> dict[str, str]:
-        """``settle_text`` for a Turn end with no reply of its own: the Turn's last visible reply.
-
-        The run's own, or for a Turn rerun after a restart the one the process that died
-        delivered, read from the Turn's rows (one index-keyed read, off the loop).
-        """
-        text = run.last_reply
-        if not text and (run.request.context.platform_specific or {}).get("vibey_resume") is True:
-            text = await asyncio.to_thread(self._turn_last_reply, run.session_id, run.turn_id) or ""
-        return {"settle_text": text} if text else {}
-
-    def _turn_last_reply(self, session_id: str, turn_id: str) -> Optional[str]:
-        with self._engine.connect() as conn:
-            return last_turn_reply(conn, session_id, turn_id)
 
     @staticmethod
     def _log_failure(
@@ -1562,7 +1541,7 @@ class VibeyAgent(BaseAgent):
         if not body.strip():
             return
         try:
-            delivered = await self.controller.emit_agent_message(
+            await self.controller.emit_agent_message(
                 run.request.context,
                 message_type,
                 body,
@@ -1571,10 +1550,6 @@ class VibeyAgent(BaseAgent):
             )
         except Exception:
             logger.exception("Vibey could not show response %s", row_id)
-            return
-        if message_type == "result" and delivered:
-            # Only a reply the dispatcher accepted is what the Turn settles with.
-            run.last_reply = materialize_citations(body, citations) or body
 
     def _display_with_citations(
         self, message: AssistantMessage, *, final: bool, replied: bool = False, images: Sequence[HostedImage] = ()

@@ -879,7 +879,7 @@ def delivered_committed_row(
         logger.debug("delivered_committed_row: lookup failed open", exc_info=True)
         return None
     content, metadata = row.get("content"), row.get("metadata")
-    if not messages_service.display_delivered(content):
+    if not isinstance(content, dict) or "kind" not in content:
         return None  # as committed: never delivered
     if outward and isinstance(metadata, dict) and metadata.get("delivery_suppressed") is True:
         return None

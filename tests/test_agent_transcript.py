@@ -552,17 +552,16 @@ async def test_a_reply_pending_input_superseded_commits_as_a_reply(engine, super
 async def test_the_restart_reads_of_a_turns_context_tail_stay_bounded(engine) -> None:
     """MESSAGE-DELIVERY-327 / MESSAGE-DELIVERY-333: restart recovery decides each cut Turn
     (``restart_resume_plan``, its restart streak included) and releases its runtime generation to
-    rerun it; the rerun finds the final it committed, its end asks whether that final was
-    delivered (on the controller loop), and a silent final reads the reply the Turn delivered
-    before the restart (MESSAGE-DELIVERY-334, off the loop). Every read is an indexed SEARCH
-    keyed by the Turn, a row id, or the Session's context tail: no scan, and a temporary sort only
-    over the Turn's own Deliveries or rows, never over the growing history."""
+    rerun it; the rerun finds the final it committed, and its end asks whether that final was
+    delivered, on the controller loop. Every read is an indexed SEARCH keyed by the Turn, a row id,
+    or the Session's context tail: no scan, and a temporary sort only over the Turn's own
+    Deliveries, never over the growing history."""
     from sqlalchemy import event
 
     from core.message_mirror import delivered_committed_row
     from core.restart_resume import restart_resume_plan, restart_streak
     from modules.im.base import MessageContext
-    from storage.agent_transcript import committed_final, last_turn_reply
+    from storage.agent_transcript import committed_final
     from storage.db import get_cached_sqlite_engine
 
     with engine.begin() as conn:
@@ -596,9 +595,6 @@ async def test_the_restart_reads_of_a_turns_context_tail_stay_bounded(engine) ->
             cut_turn = message_deliveries.get_turn(conn, "turn_cut")
             assert restart_resume_plan(conn, cut_turn) == "rerun"
             assert committed_final(conn, "ses_cut", "turn_cut") is None
-            # A silent final's settle text: the last reply the Turn delivered, from its own
-            # rows. This final was committed but never delivered, so it is not one.
-            assert last_turn_reply(conn, "ses_main", "turn_main") is None
         # The rerun's end, on the loop: the final's delivery.
         assert delivered_committed_row(rerun, final.row_id, outward=True) is None
         with engine.begin() as conn:
@@ -616,12 +612,10 @@ async def test_the_restart_reads_of_a_turns_context_tail_stay_bounded(engine) ->
         plans = [[row[-1] for row in raw.execute("EXPLAIN QUERY PLAN " + sql, params)] for sql, params in statements]
     finally:
         raw.close()
-    # ``ix_messages_turn_id`` keys a Message row by its Turn (``MESSAGE_TURN_ID_SQL``): ``(<expr>=?)``.
-    turn_keys = ("(turn_id=?)", "(current_target_turn_id=?)", "ix_messages_turn_id (<expr>=?)")
+    turn_keys = ("(turn_id=?)", "(current_target_turn_id=?)")
     bounded = re.compile(
         r"SEARCH \w+ USING (?:COVERING )?INDEX \w+ \((?:id=\?|delivery_id=\?|turn_id=\?|current_target_turn_id=\?"
         r"|session_id=\? AND context_seq>\?)\)"
-        r"|SEARCH messages USING INDEX ix_messages_turn_id \(<expr>=\?\)"
     )
     for (sql, _params), plan in zip(statements, plans):
         searches = [step for step in plan if step.startswith(("SEARCH", "SCAN"))]

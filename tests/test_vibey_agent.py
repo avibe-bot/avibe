@@ -2170,52 +2170,9 @@ async def test_a_reply_a_steer_superseded_is_a_result_and_the_turn_ends_once_aft
     assert sorted(results) == sorted(replies) and results[rows[1].row_id] == "4."
     assert [push["message_id"] for push in pushes] == replies
     assert sequence == [*replies, "turn.end"]
-    # The snapshot carries the Turn's last reply, which a silent end settles with.
-    assert harness.controller.terminal_texts == ["4." if final.startswith("<silent>") else final]
-
-
-async def test_a_silent_final_settles_only_with_a_reply_that_was_delivered(
-    engine, session, tmp_path, published, monkeypatch
-) -> None:
-    """Scenario: MESSAGE-DELIVERY-334 (Codex: remember Vibey replies only after successful dispatch).
-
-    The reply a steer superseded could not be delivered; the Turn's silent final then has no
-    delivered reply to settle with, so it settles with none rather than text nobody was shown.
-    """
-    generating, steered = asyncio.Event(), asyncio.Event()
-
-    async def answer(_request, _cancel):
-        generating.set()
-        await steered.wait()
-        yield Done(assistant("4."))
-
-    harness = _Harness(engine, tmp_path, "avibe", [answer, [Done(assistant("<silent>already answered</silent>"))]])
-    deliver = harness.controller.emit_agent_message
-
-    async def failing_reply(context, message_type, text, *args, **kwargs):
-        output = kwargs.get("output")
-        if message_type == "result" and output is not None and not output.completes_turn:
-            raise RuntimeError("the reply could not be delivered")
-        return await deliver(context, message_type, text, *args, **kwargs)
-
-    harness.controller.emit_agent_message = failing_reply
-    request = harness.request("2+2?")
-    turn_id = _turn(request.context)
-    running = asyncio.create_task(harness.agent.handle_message(request))
-    await generating.wait()
-    native = harness.controller.started[0]
-    delivery_id, attempt_id = harness.open_steer("thanks", turn_id, native)
-    receipt = await harness.agent.steer_active_turn(
-        SteerRequest(SESSION, turn_id, native, "thanks", attempt_id=attempt_id),
-        ActiveSteerTarget("runtime", turn_id, request.context, request, harness.agent),
-    )
-    assert receipt.outcome is SteerOutcome.ACCEPTED
-    harness.accept_steer(delivery_id, attempt_id, turn_id)
-    steered.set()
-    await running
-
-    assert len(harness.controller.terminals) == 1 and harness.controller.terminals[0]["is_error"] is False
-    assert harness.controller.terminal_texts == [""]
+    # The end's own text settles the Turn, as on master: a silent end carries none (settling
+    # it with the Turn's last reply is PR 2's typed Turn-end event).
+    assert harness.controller.terminal_texts == ["" if final.startswith("<silent>") else final]
 
 
 async def test_a_silent_final_whose_run_failed_after_its_commit_is_typed_by_its_row(
@@ -2631,9 +2588,8 @@ async def test_a_restart_rerun_ends_with_the_final_its_cut_run_committed(
     """MESSAGE-DELIVERY-333: the run a restart cut had committed the Turn's final, so the rerun
     ends with that row through the live end, with no model call. A final that process never sent
     to IM is delivered once, with the image that run generated; one whose delivery the dispatcher
-    recorded is not sent again; a silent final settles with the last reply that process
-    delivered, read from the Turn's rows (not one it committed and never dispatched), and
-    promotes nothing, not even a phase a released version stored as ``output``
+    recorded is not sent again; a silent final leaves the reply that process showed as it was
+    and promotes nothing, not even a phase a released version stored as ``output``
     (MESSAGE-DELIVERY-334)."""
     from dataclasses import replace
 
@@ -2663,9 +2619,6 @@ async def test_a_restart_rerun_ends_with_the_final_its_cut_run_committed(
             output=MessageOutput(completes_turn=False, completes_run=False, persisted_row_id=shown.row_id),
         )
         [shown] = harness.rows("result")
-        # A later reply that process committed but died before dispatching: never shown,
-        # so not what the Turn settles with (Codex: require delivery evidence).
-        await harness.agent.store.append_response(SESSION, assistant("Never shown."), final=False, superseded=True)
     image = tmp_path / "lighthouse.jpg"
     image.write_bytes(_JPEG)
     final = await harness.agent.store.append_response(
@@ -2699,13 +2652,11 @@ async def test_a_restart_rerun_ends_with_the_final_its_cut_run_committed(
 
     assert harness.provider.requests == [] and harness.controller.hub_calls == []
     assert harness.controller.terminals[-1] == {"turn": cut_turn, "is_error": False, "settled_by": "terminal_result"}
-    [result, *undelivered] = harness.rows("result")
-    assert [row["content_text"] for row in undelivered] == (["Never shown."] if case == "silent" else [])
+    [result] = harness.rows("result")
     if case == "silent":
         assert (result["id"], result["content_text"]) == (shown["id"], reply)
         assert [row["content_text"] for row in harness.rows("output")] == ["An earlier phase."]
         assert [name for name, _ in published if name == "message.updated"] == []
-        assert harness.controller.terminal_texts[-1] == reply
         return
     assert result["id"] == final.row_id and result["content_text"].startswith(answer)
     sent, uploads = harness.controller.im_client.sent, harness.controller.im_client.uploads

@@ -460,7 +460,7 @@ scenarios:
     layer: contract
     test: tests/test_vibey_agent.py::test_a_run_the_service_stop_cut_leaves_its_turn_open_for_its_restart_rerun
   - id: MESSAGE-DELIVERY-333
-    name: The rerun of a Turn whose final was committed ends with it through the live end, with no model call; a final not yet delivered is sent once, one already delivered is not sent again, a silent final settles with the reply the Turn showed before the restart, and the Turn stays open across another restart until then
+    name: The rerun of a Turn whose final was committed ends with it through the live end, with no model call; a final not yet delivered is sent once, one already delivered is not sent again, a silent final promotes nothing and leaves the reply the Turn showed before the restart as it was, and the Turn stays open across another restart until then
     status: covered
     kind: recovery
     layer: contract
@@ -470,17 +470,13 @@ scenarios:
       - tests/test_backend_failure_retry.py::test_a_cut_vibey_turn_that_no_longer_qualifies_keeps_the_restart_notice
       - tests/test_agent_transcript.py::test_the_restart_reads_of_a_turns_context_tail_stay_bounded
   - id: MESSAGE-DELIVERY-334
-    name: A reply is a result whether or not it ends its Turn; a Turn may reply more than once (a steered input's answer is a second result, each notified once), and only the Turn end settles the Run, writes the Turn snapshot, hides the thinking indicator, and finalizes IM, once; a content-free end carries the backend's last delivered reply (settle_text), with which every attached Run (under the terminal identity) and the snapshot settle, on every content-free end branch, across restarts, reconciliation and repeated replies
+    name: A reply is a result whether or not it ends its Turn; a Turn may reply more than once (a steered input's answer is a second result, each notified once), and only the Turn end settles the Run, writes the Turn snapshot, hides the thinking indicator, and finalizes IM, once; a silent final after a reply promotes nothing; the Activity read of a Session's terminal Turns stays an index-ordered SEARCH within its window
     status: covered
     kind: regression
     layer: contract
     test:
       - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_a_turn_replies_twice_and_ends_once_after_both
-      - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_a_silent_final_settles_with_the_last_reply_and_promotes_nothing
-      - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_the_end_settles_with_its_reply_through_restart_reconciliation_and_repeats
-      - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_every_attached_run_settles_with_the_turns_last_reply
-      - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_every_content_free_end_of_the_base_result_path_settles_with_the_reply
-      - tests/test_vibey_agent.py::test_a_silent_final_settles_only_with_a_reply_that_was_delivered
+      - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_a_silent_final_after_a_reply_promotes_nothing
       - tests/test_claude_agent_sessions.py::ClaudeAgentSessionTests::test_steered_assistant_and_result_settle_the_pending_turn
       - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_a_reply_or_a_failure_keeps_its_type_attached_or_detached
       - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_only_a_reply_is_a_completed_turns_answer
@@ -491,6 +487,7 @@ scenarios:
       - tests/test_dispatcher_stream_chunk.py::test_only_the_turn_end_sets_done_event
       - tests/test_session_fork.py::test_a_reply_while_the_source_turn_runs_is_not_its_completion
       - tests/test_agent_activity_service.py::test_nonterminal_output_completes_prior_activity_and_anchors_later_work
+      - tests/test_agent_activity_service.py::test_the_turn_terminal_read_stays_within_the_window
     supporting_tests:
       - ui/src/components/workbench/ChatPage.hydration.test.tsx
       - ui/src/lib/chatMessageTypes.test.ts

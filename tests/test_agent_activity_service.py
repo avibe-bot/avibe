@@ -2131,3 +2131,42 @@ def test_a_promotion_marker_counts_only_on_a_promoted_result(isolated_state):
         ("interrupted", "m_q1", 1),
         ("done", "m_r2", 1),
     ]
+
+
+def test_the_turn_terminal_read_stays_within_the_window(isolated_state):
+    """Every Activity refresh reads the Session's terminal Turns; a reply and a Turn end
+    each refresh it (MESSAGE-DELIVERY-334). The read walks ``ix_session_turns_session_created``
+    newest first and stops at its window: a SEARCH with no temporary sort, so a long-lived
+    Session's whole Turn history is never sorted (AGENTS.md "Controller Event Loop")."""
+    import sqlite3
+
+    from sqlalchemy import event
+
+    from config import paths
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        _seed_session(conn, session_id="ses_window")
+    statements: list[tuple[str, object]] = []
+
+    def capture(_conn, _cursor, statement, parameters, _context, _executemany):
+        statements.append((statement, parameters))
+
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        with engine.connect() as conn:
+            agent_activity_service.list_turn_groups(conn, session_id="ses_window")
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+
+    [(sql, params)] = [
+        (sql, params)
+        for sql, params in statements
+        if "FROM session_turns" in sql and "terminal_at IS NOT NULL" in sql and "JOIN" not in sql
+    ]
+    raw = sqlite3.connect(str(paths.get_sqlite_state_path()))
+    try:
+        plan = [row[-1] for row in raw.execute("EXPLAIN QUERY PLAN " + sql, params)]
+    finally:
+        raw.close()
+    assert plan == ["SEARCH session_turns USING INDEX ix_session_turns_session_created (session_id=?)"], plan

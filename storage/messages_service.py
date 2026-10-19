@@ -46,17 +46,6 @@ def _utc_now_iso() -> str:
     )
 
 
-def display_delivered(content: Any) -> bool:
-    """Whether an agent row a backend committed has been delivered.
-
-    The dispatcher's delivery of a committed row is the write of its display
-    (``persist_agent_message`` with ``existing_row_id``), which always sets
-    ``content.kind``; a row committed but never dispatched has only its
-    transcript payload. The one reading of that evidence, for every reader.
-    """
-    return isinstance(content, Mapping) and "kind" in content
-
-
 def canonical_message_timestamp(value: Any) -> str | None:
     """Return one lexically sortable UTC representation for Message timestamps."""
 
