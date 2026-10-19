@@ -420,3 +420,153 @@ def test_script_routes_reject_an_old_turn_before_reaching_computer_server() -> N
             },
         ),
     ]
+
+
+def test_driver_retired_session_keeps_cli_working_after_scripts_and_turns(
+    tmp_path,
+) -> None:
+    """A script ending, or a Turn ending, never leaves Computer Use dead.
+
+    Live acceptance: a script waited 300 s on ``avibe.confirm`` and timed out;
+    the driver's five-minute idle TTL had retired the named session meanwhile,
+    and every later CLI call in that Avibe Session, in this Turn and the next,
+    was refused with "session has ended". Here the fake driver retires the name
+    at those same points and each following CLI observe must still succeed.
+    """
+
+    from core.computer_server import ComputerUseServer
+    from core.computer_use import ComputerUseStatus
+    from tests.test_computer_server import DriverSessionUpstream, _state
+
+    async def exercise() -> tuple[list[dict], list[str]]:
+        state_path, state = _state(tmp_path)
+        driver = DriverSessionUpstream()
+        controller = SimpleNamespace(
+            computer_use_server=ComputerUseServer(
+                state_path=state_path,
+                status_reader=lambda: ComputerUseStatus("ready", None, state),
+                upstream_factory=lambda _state: asyncio.sleep(0, result=driver),
+            ),
+            computer_script_sessions=None,
+            controller_id="controller-test",
+            _session_id_from_context=lambda context: context.platform_specific[
+                "agent_session_id"
+            ],
+        )
+        app = internal_server.create_app(controller)
+        tasks = [asyncio.create_task(asyncio.sleep(60)) for _ in range(2)]
+        controller.session_turns.in_flight["ses-script"] = session_turns.Turn(
+            task=tasks[0],
+            context=_context("turn-1"),
+            logical_turn_id="turn-1",
+        )
+        outcomes: list[dict] = []
+        try:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://test",
+            ) as client:
+
+                async def open_script(timeout_seconds: float) -> str:
+                    opened = await client.post(
+                        "/internal/computer-script/open",
+                        json={
+                            "caller_session_id": "ses-script",
+                            "timeout_seconds": timeout_seconds,
+                        },
+                    )
+                    return opened.json()["connection_token"]
+
+                async def script_observe(token: str) -> dict:
+                    response = await client.post(
+                        "/internal/computer-script/request",
+                        json={
+                            "connection_token": token,
+                            "tool": "list_apps",
+                            "arguments": {},
+                            "descriptor": None,
+                        },
+                    )
+                    return response.json()
+
+                async def cli_observe() -> dict:
+                    response = await client.post(
+                        "/internal/computer-use",
+                        json={
+                            "caller_session_id": "ses-script",
+                            "tool": "list_apps",
+                            "arguments": {},
+                        },
+                    )
+                    return response.json()
+
+                # 1. A script times out (e.g. waiting on an unanswered confirm).
+                timed_out = await open_script(0.05)
+                outcomes.append(await script_observe(timed_out))
+                await asyncio.sleep(0.1)
+                outcomes.append(await script_observe(timed_out))
+                driver.expire_idle("ses-script")
+                outcomes.append(await cli_observe())
+
+                # 2. A script succeeds and closes its connection.
+                succeeded = await open_script(30)
+                outcomes.append(await script_observe(succeeded))
+                closed = await client.post(
+                    "/internal/computer-script/close",
+                    json={"connection_token": succeeded},
+                )
+                assert closed.json() == {"ok": True, "closed": True}
+                driver.expire_idle("ses-script")
+                outcomes.append(await cli_observe())
+
+                # 3. The next Turn of the same Avibe Session.
+                controller.session_turns.in_flight["ses-script"] = session_turns.Turn(
+                    task=tasks[1],
+                    context=_context("turn-2"),
+                    logical_turn_id="turn-2",
+                )
+                driver.expire_idle("ses-script")
+                outcomes.append(await cli_observe())
+                outcomes.append(await cli_observe())
+        finally:
+            controller.computer_script_sessions.close_all()
+            for task in tasks:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        names = [params["name"] for _method, params in driver.calls]
+        return outcomes, names
+
+    outcomes, names = asyncio.run(exercise())
+    (
+        script_first,
+        script_late,
+        cli_after_timeout,
+        script_ok,
+        cli_after_success,
+        cli_next_turn,
+        cli_next_turn_again,
+    ) = outcomes
+    assert script_first["ok"] is True
+    assert script_late["error"] == "script_timeout"
+    assert script_ok["ok"] is True
+    for cli in (cli_after_timeout, cli_after_success, cli_next_turn, cli_next_turn_again):
+        assert cli["ok"] is True, cli
+        assert cli["session_id"] == "ses-script"
+    assert names == [
+        "start_session",
+        "list_apps",  # script, before its timeout
+        "list_apps",  # CLI: refused, the driver retired the name
+        "start_session",
+        "list_apps",
+        "list_apps",  # successful script
+        "list_apps",  # CLI after the script closed: refused
+        "start_session",
+        "list_apps",
+        "list_apps",  # next Turn: refused
+        "start_session",
+        "list_apps",
+        "list_apps",  # still the same live driver session
+    ]
