@@ -986,23 +986,18 @@ def _resumed_turn_row(context: MessageContext, types: tuple[str, ...]) -> Option
 
     The dispatcher remembers what each Turn shows as it delivers it; what a rerun
     Turn showed before the restart was delivered by the process that died, so the
-    rerun's end reads it from the transcript (``last_turn_text``).
+    rerun's end reads it from the Turn's own rows (``last_turn_text``).
     """
 
     spec = context.platform_specific or {}
     session_id, turn_id = str(spec.get("agent_session_id") or ""), str(spec.get("turn_token") or "")
     if spec.get("vibey_resume") is not True or not session_id or not turn_id:
         return None
-    from storage import message_deliveries
     from storage.agent_transcript import last_turn_text
 
     try:
         with get_cached_sqlite_engine().connect() as conn:
-            turn = message_deliveries.get_turn(conn, turn_id)
-            if turn is None or turn["session_id"] != session_id:
-                return None
-            since = str(turn.get("started_at") or turn["created_at"])
-            return last_turn_text(conn, session_id, since=since, types=types)
+            return last_turn_text(conn, session_id, turn_id, types=types)
     except Exception:
         logger.debug("resumed turn lookup failed", exc_info=True)
         return None

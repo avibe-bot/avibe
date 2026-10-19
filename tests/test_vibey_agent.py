@@ -2612,6 +2612,11 @@ async def test_a_restart_rerun_ends_with_the_final_its_cut_run_committed(
             output=MessageOutput(completes_turn=False, completes_run=False, persisted_row_id=shown.row_id),
         )
         [shown] = harness.rows("result")
+        # Detached work reported into the same Session meanwhile is not this Turn's reply.
+        await harness.controller.emit_agent_message(
+            request.context, "result", "The nightly job finished.",
+            output=MessageOutput(completes_turn=False, completes_run=False, detached=True),
+        )
     image = tmp_path / "lighthouse.jpg"
     image.write_bytes(_JPEG)
     final = await harness.agent.store.append_response(
@@ -2645,7 +2650,7 @@ async def test_a_restart_rerun_ends_with_the_final_its_cut_run_committed(
 
     assert harness.provider.requests == [] and harness.controller.hub_calls == []
     assert harness.controller.terminals[-1] == {"turn": cut_turn, "is_error": False, "settled_by": "terminal_result"}
-    [result] = harness.rows("result")
+    [result] = [row for row in harness.rows("result") if not json.loads(row["metadata_json"] or "{}").get("detached")]
     if case == "silent":
         assert (result["id"], result["content_text"]) == (shown["id"], reply)
         assert harness.controller.terminal_texts[-1] == reply

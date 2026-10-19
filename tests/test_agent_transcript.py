@@ -553,10 +553,10 @@ async def test_the_restart_reads_of_a_turns_context_tail_stay_bounded(engine) ->
     """MESSAGE-DELIVERY-327 / MESSAGE-DELIVERY-333: restart recovery decides each cut Turn
     (``restart_resume_plan``, its restart streak included) and releases its runtime generation to
     rerun it; the rerun finds the final it committed, and its end asks whether that final was
-    delivered and what a silent final leaves as the result, the last two on the controller loop.
-    Every read is an indexed SEARCH keyed by the Turn, a row id, the Session's context tail, or the
-    Turn's own time window: no scan, and a temporary sort only over the Turn's own Deliveries, never
-    over the growing history."""
+    delivered and what a silent final settles with, the last two on the controller loop. Every
+    read is an indexed SEARCH keyed by the Turn, a row id, or the Session's context tail: no scan,
+    and a temporary sort only over the Turn's own Deliveries or rows, never over the growing
+    history."""
     from sqlalchemy import event
 
     from core.message_mirror import delivered_committed_row, resumed_turn_reply, resumed_turn_text
@@ -598,7 +598,7 @@ async def test_the_restart_reads_of_a_turns_context_tail_stay_bounded(engine) ->
             assert committed_final(conn, "ses_cut", "turn_cut") is None
             # What a silent final settles with: the Turn's last reply, or a legacy ``output``.
             for types in (("result",), ("output",)):
-                last_turn_text(conn, "ses_main", since="2026-01-01T00:00:00.000000Z", types=types)
+                last_turn_text(conn, "ses_main", "turn_main", types=types)
         # The rerun's end, on the loop: the final's delivery, and what a silent final settles with.
         assert delivered_committed_row(rerun, final.row_id, outward=True) is None
         assert resumed_turn_reply(rerun) == "两个文件。"
@@ -618,10 +618,12 @@ async def test_the_restart_reads_of_a_turns_context_tail_stay_bounded(engine) ->
         plans = [[row[-1] for row in raw.execute("EXPLAIN QUERY PLAN " + sql, params)] for sql, params in statements]
     finally:
         raw.close()
-    turn_keys = ("(turn_id=?)", "(current_target_turn_id=?)")
+    # ``ix_messages_turn_id`` keys a Message row by its Turn (``MESSAGE_TURN_ID_SQL``): ``(<expr>=?)``.
+    turn_keys = ("(turn_id=?)", "(current_target_turn_id=?)", "ix_messages_turn_id (<expr>=?)")
     bounded = re.compile(
         r"SEARCH \w+ USING (?:COVERING )?INDEX \w+ \((?:id=\?|delivery_id=\?|turn_id=\?|current_target_turn_id=\?"
-        r"|session_id=\? AND context_seq>\?|session_id=\? AND type=\? AND created_at>\?)\)"
+        r"|session_id=\? AND context_seq>\?)\)"
+        r"|SEARCH messages USING INDEX ix_messages_turn_id \(<expr>=\?\)"
     )
     for (sql, _params), plan in zip(statements, plans):
         searches = [step for step in plan if step.startswith(("SEARCH", "SCAN"))]

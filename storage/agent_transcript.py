@@ -68,7 +68,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Literal, Mapping, Optional, Sequence, TypeVar
 
-from sqlalchemy import and_, func, or_, select, text
+from sqlalchemy import and_, func, literal_column, or_, select, text
 from sqlalchemy.engine import Connection, Engine
 
 from core.agent_core.harness.fork import fork_point, latest_cut
@@ -89,7 +89,15 @@ from core.agent_core.messages import (
 from storage import agent_events_service, media_service, messages_service
 from storage.agent_session_rows import reserve_write_lock
 from storage.message_deliveries import TURN_OWNER_STATES
-from storage.models import agent_events, agent_sessions, message_deliveries, messages, scopes, session_turns
+from storage.models import (
+    MESSAGE_TURN_ID_SQL,
+    agent_events,
+    agent_sessions,
+    message_deliveries,
+    messages,
+    scopes,
+    session_turns,
+)
 from storage.vibey_recovery import VIBEY_RECOVERY_INPUT_PREDICATE
 
 INPUT_TYPES = ("user", "harness", "agent_initiated", "annotation")
@@ -867,31 +875,35 @@ def committed_final(conn: Connection, session_id: str, turn_id: str) -> Optional
     return None if unconsumed is not None else response
 
 
-def last_turn_text(conn: Connection, session_id: str, *, since: str, types: Sequence[str]) -> Optional[tuple[str, str]]:
-    """``(row_id, text)`` of the last visible text of ``types`` the Session's agent wrote since ``since``.
+def last_turn_text(conn: Connection, session_id: str, turn_id: str, *, types: Sequence[str]) -> Optional[tuple[str, str]]:
+    """``(row_id, text)`` of the last visible row of ``types`` the agent wrote for ``turn_id``.
 
     What a Turn that ends without a reply of its own settles with: its last reply
     (``result``), or the legacy ``output`` reply a silent final promotes
-    (``promote_turn_text_to_result``). A Session runs one Turn at a time, so with
-    ``since`` the Turn's start these are the Turn's own rows; each read is an
-    index-keyed ``SEARCH`` bounded by that window.
+    (``promote_turn_text_to_result``). Only the Turn's own rows count: a detached
+    completion is another Turn's work, even when it lands in the same Session while
+    this one runs. The read is an index-keyed ``SEARCH`` by the Turn
+    (``ix_messages_turn_id``), and its sort covers that Turn's rows alone.
     """
-    latest: Optional[tuple[str, str, str]] = None
-    for message_type in types:
-        row = conn.execute(
-            select(messages.c.created_at, messages.c.id, messages.c.content_text)
-            .where(
-                messages.c.session_id == session_id,
-                messages.c.type == message_type,
-                messages.c.created_at >= since,
-                messages.c.author == "agent",
-            )
-            .order_by(messages.c.created_at.desc(), messages.c.id.desc())
-            .limit(1)
-        ).first()
-        if row is not None and str(row.content_text or "").strip() and (latest is None or (row[0], row[1]) > latest[:2]):
-            latest = (str(row.created_at), str(row.id), str(row.content_text))
-    return (latest[1], latest[2]) if latest else None
+    detached = literal_column(
+        "coalesce(CASE WHEN (json_valid(metadata_json) = 1) THEN json_extract(metadata_json, '$.detached') END, 0)"
+    )
+    # Keyed by the Turn alone, so the planner seeks the Turn's rows rather than walk
+    # the Session's history by type; the Session is checked on the row it returns.
+    row = conn.execute(
+        select(messages.c.id, messages.c.session_id, messages.c.content_text)
+        .where(
+            literal_column(MESSAGE_TURN_ID_SQL) == turn_id,
+            messages.c.author == "agent",
+            messages.c.type.in_(tuple(types)),
+            detached != 1,
+        )
+        .order_by(messages.c.created_at.desc(), messages.c.id.desc())
+        .limit(1)
+    ).first()
+    if row is None or row.session_id != session_id or not str(row.content_text or "").strip():
+        return None
+    return str(row.id), str(row.content_text)
 
 
 def fork_link(conn: Connection, session_id: str) -> Optional[tuple[str, int]]:
