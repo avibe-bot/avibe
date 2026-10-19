@@ -264,7 +264,7 @@ const ExecutorOrder: React.FC<{ tool: HostedSearchToolStatus; lookup: SourceLook
                     <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
                       <SourceGlyph source={source} />
                       <span className="truncate font-semibold text-foreground" title={name}>{name}</span>
-                      <span className="truncate font-mono text-muted" title={candidate.label ?? candidate.model_id}>{candidate.label ?? candidate.model_id}</span>
+                      <span className="truncate font-mono text-muted" title={candidate.label || candidate.model_id}>{candidate.label || candidate.model_id}</span>
                       {source && <span className={cn('model-hub-pill border', ACCENT_PILL[source.kind === 'api_key' ? 'cyan' : sourceVisual(source).accent])}>{t(`settings.models.upstream.kind.${source.kind === 'subscription' ? 'subscription' : 'apiKey'}`)}</span>}
                     </span>
                     <ExecutorPrice candidate={candidate} />
