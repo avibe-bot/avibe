@@ -194,7 +194,7 @@ Hosted tools §6 holds, with these changes:
 | 200 with no results | ends with a `completed` record with no sources | none |
 | 401, or 403 that the catalog maps to the credential | next candidate | `needs_action`, invalid key (model-hub.md `credential.static_unauthorized`) |
 | 402 (balance exhausted) | next candidate | `needs_action`, balance (model-hub.md `credential.account_classified`) |
-| a plan or spending limit the catalog names (Tavily 432 plan limit, 433 pay-as-you-go limit) | next candidate | `needs_action`, the existing `models.source.needs_action.spend_limit_reached` detail and its raise-the-limit remedy |
+| a plan or spending limit the catalog names (Tavily 432 plan limit, 433 pay-as-you-go limit) | next candidate | `needs_action`, the existing `models.source.needs_action.spend_limit_reached` detail; the catalog row adds a vendor remedy line naming both repairs (Tavily: "在 Tavily 后台升级套餐（432）或提高按量上限（433）"), so no new state is needed |
 | 408, 429, 5xx, timeout, connection failure | next candidate | none; a service cooldown (below) |
 | 3xx (the redirect is refused, §3.3) | next candidate, `service_unavailable` | none |
 | other 4xx (a query the service refuses) | next candidate | none |
@@ -210,7 +210,8 @@ Hosted tools §6 holds, with these changes:
   without advice, and for a 408, 5xx, timeout, connection failure, refused redirect or unreadable body, the
   cooldown is 30 s, doubling on each consecutive failure up to 300 s. A success resets it, and a restart forgets
   it. It writes no Source health. A cooldown longer than 60 s is visible: the Tools read's candidate carries
-  `cooldown_until`, the row says "暂停至 HH:MM（服务要求稍后重试）", and its detail offers "立即重试", which clears the
+  `cooldown_until`, the row says "暂停至 HH:MM（服务要求稍后重试）" (with the date, "MM-DD HH:MM", when the deadline is
+  not today), and its detail offers "立即重试", which clears the
   cooldown (advancing its generation) so the next search may try the service.
 - **Recovery.** Replacing the key clears an invalid-key state, as for every Source. A `search` Source in the balance
   or limit state gets "重新启用" in its detail. For a balance state it runs the catalog's free check where one
@@ -392,8 +393,8 @@ states interactively.
 Status (latest success, or the Source's current health detail with its existing remedy copy; "重新启用" only for a
 tool-only `search` Source in a balance or limit state, §4.2, and the existing Source repair for DeepSeek), key (masked; "更换密钥",
 or for DeepSeek "使用供应商「DeepSeek」的 Key", managed under 供应商与路由), settings (results; page content only where
-the vendor returns page text, with its effect on price and on what the model reads), this month's requests and list
-cost with a link to Usage, and remove. A model Source with a search API (DeepSeek) has no remove here: it has a
+the vendor returns page text, with its effect on price and on what the model reads), this month's requests and the
+persisted cost (`reported_usd + list_usd`, labelled "按服务报告与 API 标价估算") with a link to Usage, and remove. A model Source with a search API (DeepSeek) has no remove here: it has a
 "用于网页搜索" switch (`services.<id>.enabled`), and its models stay.
 
 ### 6.4 Sources
@@ -434,6 +435,8 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 - `capability-evidence.schema.json`, and `status.latest_ok.mode` and `status.verified[].mode` in
   `hosted-tools-status.schema.json` with the UI's types: `mode: "service"`.
 - No new Source health detail: plan and spending limits reuse `models.source.needs_action.spend_limit_reached`.
+- `model-hub.md`'s settlement rule (the generation is minted at attempt start "and nowhere else"): "重新启用" and
+  key replacement also advance the Source generation, and the service cooldown has its own generation (§4.2).
 - The vendor catalog (`vibe/data/api_key_vendors.json` and its schema): search vendors and DeepSeek's search API row.
 - Usage (`usage-summary.schema.json`, `api.md`'s Usage section, and the on-disk usage ledger): a service row keyed
   by Source and `service_id`, counting requests rather than model calls, with the additive `billable_requests`,
