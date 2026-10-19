@@ -88,7 +88,7 @@ export const EXPECTED_RULES = {
   'no-compare-neg-zero': [2],
   'no-cond-assign': [2, 'except-parens'],
   'no-const-assign': [0],
-  'no-constant-binary-expression': [2],
+  'no-constant-binary-expression': [2, { checkRelationalComparisons: false }],
   'no-constant-condition': [2, { checkLoops: 'allExceptWhileTrue' }],
   'no-control-regex': [2],
   'no-debugger': [2],
@@ -122,9 +122,10 @@ export const EXPECTED_RULES = {
   'no-regex-spaces': [2],
   'no-self-assign': [2, { props: true }],
   'no-setter-return': [0],
-  'no-shadow-restricted-names': [2, { reportGlobalThis: false }],
+  'no-shadow-restricted-names': [2, { reportGlobalThis: true }],
   'no-sparse-arrays': [2],
   'no-this-before-super': [0],
+  'no-unassigned-vars': [2],
   'no-undef': [0, { typeof: false }],
   'no-unexpected-multiline': [2],
   'no-unreachable': [0],
@@ -134,7 +135,8 @@ export const EXPECTED_RULES = {
   'no-unused-expressions': [0, { allowShortCircuit: false, allowTernary: false, allowTaggedTemplates: false, enforceForJSX: false, ignoreDirectives: false }],
   'no-unused-labels': [2],
   'no-unused-private-class-members': [2],
-  'no-unused-vars': [0],
+  'no-unused-vars': [0, { vars: 'all', args: 'after-used', ignoreRestSiblings: false, caughtErrors: 'all', ignoreClassWithStaticInitBlock: false, ignoreUsingDeclarations: false, reportUsedIgnorePattern: false }],
+  'no-useless-assignment': [2],
   'no-useless-backreference': [2],
   'no-useless-catch': [2],
   'no-useless-escape': [2, { allowRegexCharacters: [] }],
@@ -143,7 +145,11 @@ export const EXPECTED_RULES = {
   'prefer-const': [2, { destructuring: 'any', ignoreReadBeforeAssign: false }],
   'prefer-rest-params': [2],
   'prefer-spread': [2],
-  'react-hooks/component-hook-factories': [2],
+  'preserve-caught-error': [2, { requireCatchParameter: false, errorClassNames: [] }],
+  // Hooks 7.1 removed component-hook-factories from recommended. Its 7.0.1
+  // compiler flag was already off in our configuration; 7.1.1's compatibility
+  // rule is a no-op, not a replacement guard. static-components stays enforced.
+  // See docs/maintenance/eslint-10-migration.md for the dual-version probes.
   'react-hooks/config': [2],
   'react-hooks/error-boundaries': [2],
   'react-hooks/exhaustive-deps': [1], // deliberate: the remaining warnings are ledgered, not fixed

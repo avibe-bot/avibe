@@ -1,5 +1,17 @@
 # React + TypeScript + Vite
 
+## Development toolchain
+
+Use Node.js `^20.19.0 || ^22.13.0 || >=24` (UI CI uses 22.14.0), then run
+`npm ci`. ESLint 10 does not support Node 22.12.x or Node 23.x.
+
+`npm run lint` checks the full TypeScript source domain against the reviewed
+per-file/per-rule debt ledger. Do not regenerate it merely to make new errors
+pass. The [ESLint 10 migration](../docs/maintenance/eslint-10-migration.md)
+records the paired tool upgrade and its one-time, unchanged-source baseline
+remeasurement. This development requirement does not change the separately
+packaged Show Runtime's Node contract.
+
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
 Currently, two official plugins are available:
