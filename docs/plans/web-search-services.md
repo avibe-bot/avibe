@@ -179,7 +179,7 @@ Hosted tools §6 holds, with these changes:
   `disabled`, `blocked`, `cooling`, `query_too_long`, so `query_too_long` names only a Source a shorter query would
   reach. A candidate can be skipped without a request, for one of five reasons: `blocked` (its Source is in
   `needs_action` or in a persistent `error`, the states admission already suppresses), `cooling` (a service cooldown, §4.2), `query_too_long` (the query exceeds what the service
-  accepts, DeepSeek 128 characters) or `unavailable` (the Source was removed, re-identified or refused by final
+  accepts: the catalog row's query limit, DeepSeek 128 characters and Tavily 400) or `unavailable` (the Source was removed, re-identified or refused by final
   admission after the turn froze its candidates, hosted tools §6) or `disabled` (a search-capable Source with
   `services.<id>.enabled: false`; the frozen list carries such Sources last, so they are reached only after every
   other candidate, and never sent a request). A skip costs nothing, writes no state, and is recorded in `attempts[]` (§4.3).
@@ -240,7 +240,8 @@ Hosted tools §6 holds, with these changes:
 - **The terminal reason of a failed call** follows one rule. With no candidate at all, it is today's no-provider
   reason, naming both remedies (add a search service, or an API key from a vendor that offers search). Otherwise it
   is chosen across every candidate, tried or skipped, by what can be acted on first:
-  1. a `query_too_long` skip: `search_query_too_long` ("搜索词超过 128 个字符，请缩短后重试"); the model can fix it at
+  1. a `query_too_long` skip: `search_query_too_long` ("搜索词超过 {limit} 个字符，请缩短后重试", with the largest
+     limit among the skipped candidates, so a query that short reaches at least one of them); the model can fix it at
      once and reach that candidate;
   2. a `blocked` or `disabled` skip: `search_sources_blocked`; the user repairs a Source or turns its search back
      on;
