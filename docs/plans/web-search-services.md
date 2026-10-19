@@ -169,10 +169,12 @@ Hosted tools §6 holds, with these changes:
   before every model executor, and the user's other entries keep their order. The same insertion applies once, in
   the version event's config migration, to an existing Source that becomes search-capable through the new catalog
   (an official DeepSeek Source in a saved order).
-- **Skips.** A candidate can be skipped without a request, for one of four reasons: `blocked` (its Source is in
+- **Skips.** A candidate can be skipped without a request, for one of five reasons: `blocked` (its Source is in
   `needs_action` or in a persistent `error`, the states admission already suppresses), `cooling` (a service cooldown, §4.2), `query_too_long` (the query exceeds what the service
   accepts, DeepSeek 128 characters) or `unavailable` (the Source was removed, re-identified or refused by final
-  admission after the turn froze its candidates, hosted tools §6). A skip costs nothing, writes no state, and is recorded in `attempts[]` (§4.3).
+  admission after the turn froze its candidates, hosted tools §6) or `disabled` (a search-capable Source with
+  `services.<id>.enabled: false`; the frozen list carries such Sources last, so they are reached only after every
+  other candidate, and never sent a request). A skip costs nothing, writes no state, and is recorded in `attempts[]` (§4.3).
 - **One attempt** sends the catalog's request for the canonical query, the turn's frozen `results` and `content`, and
   waits at most 30 s, inside the chain's single 180 s deadline.
 
@@ -223,7 +225,8 @@ Hosted tools §6 holds, with these changes:
   is chosen across every candidate, tried or skipped, by what can be acted on first:
   1. a `query_too_long` skip: `search_query_too_long` ("搜索词超过 128 个字符，请缩短后重试"); the model can fix it at
      once and reach that candidate;
-  2. a `blocked` skip: `search_sources_blocked`; the user repairs a Source;
+  2. a `blocked` or `disabled` skip: `search_sources_blocked`; the user repairs a Source or turns its search back
+     on;
   3. a sent request's failure: the last one, as today;
   4. a `cooling` or `unavailable` skip: `service_unavailable`; wait, or the Source changed and the next turn uses
      the new configuration.
@@ -253,21 +256,26 @@ Hosted tools §6 holds, with these changes:
   costs zero for an empty answer. Earlier billable attempts are `failed_attempts[]` as today; a service attempt is
   billable only when it answered 200.
 - `record.attempts[]` (new, on the `HostedRecord`, so it exists when nothing executed) lists, in chain order,
-  every candidate of the call other than the one `execution` names, whether it came before or after it, billable
-  or not, as `{source_id, label, error_code?, skipped?, needs_action?}`.
-  `skipped` is `blocked`, `cooling`, `query_too_long` or `unavailable` for a candidate that sent no request. A `blocked` entry
-  carries `needs_action`: the Source's existing health detail key at that moment, a `needs_action` or `error` detail
-  (for example `models.source.needs_action.credential_revoked`, `oauth_expired`, `spend_limit_reached` or
-  `models.source.error.unclassified`). The renderer shows that detail's existing remedy, so a model executor, or a
-  DeepSeek Source, gets its own repair (re-authorize, replace the key, top up, raise the limit), and only a
-  tool-only `search` Source in a balance or limit state adds "重新启用". `label` is the Source's display name when the attempt started, bounded to 64
-  characters. The projection shows the Source's current name and falls back to `label` for a Source removed since.
-  A failed search-service request always sets `error_code`: one of `service_key_invalid`,
-  `service_balance`, `service_limit`, `service_unavailable`, `service_refused` and `service_unreadable`, each with en
-  and zh copy. A model executor sets it only when its failure already carries a code (`FAILURE_CODES`); a provider's
-  free-text failure leaves it absent, and the note then says "失败" for that Source. The switch note reads this list,
-  naming failed requests and `blocked` skips; the other skips are left out of it
-  ("Tavily 密钥无效，已改用 DeepSeek"; with two or more, "Tavily、Exa 失败，已改用 DeepSeek"). `failed_attempts[]`
+  every candidate the chain reached, including the one `execution` names. Candidates after the one that completed
+  are not reached and not listed. Each entry is `{source_id, label, outcome, error_code?, skipped?, needs_action?}`:
+  - `outcome` is `completed`, `failed` (a request was sent and failed) or `skipped` (no request);
+  - `error_code` is set on a failed entry when the failure has a code. A failed search-service request always has
+    one of `service_key_invalid`, `service_balance`, `service_limit`, `service_unavailable`, `service_refused` and
+    `service_unreadable`, each with en and zh copy. A model executor has one only when its failure already carries
+    a code (`FAILURE_CODES`); otherwise the note says "失败" for that Source;
+  - `skipped` is `blocked`, `disabled`, `cooling`, `query_too_long` or `unavailable`;
+  - a `blocked` entry carries `needs_action`: the Source's existing health detail key at that moment, a
+    `needs_action` or `error` detail (for example `models.source.needs_action.credential_revoked`, `oauth_expired`,
+    `spend_limit_reached` or `models.source.error.unclassified`). The renderer shows that detail's existing remedy,
+    so a model executor or a DeepSeek Source gets its own repair (re-authorize, replace the key, top up, raise the
+    limit), and only a tool-only `search` Source in a balance or limit state adds "重新启用". A `disabled` entry's
+    remedy is turning "用于网页搜索" back on;
+  - `label` is the Source's display name when the chain reached it, bounded to 64 characters. The projection shows
+    the Source's current name and falls back to `label` for a Source removed since.
+
+  The switch note names the `failed` entries and the `blocked` and `disabled` skips before the completed one ("Tavily
+  密钥无效，已改用 DeepSeek"; with two or more, "Tavily、Exa 失败，已改用 DeepSeek"). A failed call's surfaces name
+  every failed and skipped Source with its remedy, whichever one supplied the terminal code. `failed_attempts[]`
   keeps its cost role.
 - `core/hosted_activity` projects `attempts[]`, with the Sources' current names, skips and remedies, into the
   shared activity payload (`HostedActivity.to_payload`). Its localized line renderer writes both the switch note
@@ -279,9 +287,10 @@ Hosted tools §6 holds, with these changes:
   without the catalog's service id. Model executors keep "via Anthropic API key · claude-haiku-5-5".
 - Every candidate that sent a request is metered on its Source; a skip is never metered. The Usage tab therefore
   shows real search requests per service. A service request reaches no model, so the usage ledger gains a service
-  row: the Source, the catalog's `service_id` in place of a model, the request count, and two additive fields,
-  `reported_usd` (the sum of reported costs) and `reported_requests` (how many requests it covers). The rest is
-  valued at the list price, as today. Released ledger rows without these fields load as zero. The label comes from
+  row: the Source, the catalog's `service_id` in place of a model, `requests` (sent), `billable_requests` (those
+  the catalog's billing rule charges: DeepSeek only a 200 with results, the others any 200), `reported_usd` (the sum
+  of reported costs) and `reported_requests` (the billable requests that sum covers). The cost is `reported_usd`
+  plus the other billable requests at list price. Released ledger rows without these fields load as zero. The label comes from
   the catalog, not from model inventory (§8).
 
 ## 5. Catalog: first batch
@@ -400,8 +409,8 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 - No new Source health detail: plan and spending limits reuse `models.source.needs_action.spend_limit_reached`.
 - The vendor catalog (`vibe/data/api_key_vendors.json` and its schema): search vendors and DeepSeek's search API row.
 - Usage (`usage-summary.schema.json`, `api.md`'s Usage section, and the on-disk usage ledger): a service row keyed
-  by Source and `service_id`, counting requests rather than model calls, with the additive `reported_usd` and
-  `reported_requests` fields and load fixtures for released rows that lack them (§4.3).
+  by Source and `service_id`, counting requests rather than model calls, with the additive `billable_requests`,
+  `reported_usd` and `reported_requests` fields and load fixtures for released rows that lack them (§4.3).
 - `HOSTED_ERROR_CODES`: `search_query_too_long` and `search_sources_blocked`, with copy on every surface.
 - `api.md`: the read and PUT changes, and the "重新启用" action for a `search` Source in `needs_action` (§4.2), with
   its `api-response.schema.json` branch.
@@ -455,7 +464,7 @@ Hermetic, against stub vendor servers; no live upstream and no real keys.
 | Config | `protocol: "search"` accepted only in its combination; `prefer_native` and `services` round-trip and default; a release-before loader ignores the new `hosted_tools` fields |
 | Custody | the adapter call attaches the key, refuses redirects and non-catalog hosts, caps the body, and returns no key material; nothing outside the adapter reads the key |
 | Chain | automatic and saved order, and insertion before the first model executor in a saved order; service cooldown from `Retry-After` (a longer deadline is not shortened) and doubling backoff, scoped to (Source, service), with a DeepSeek model route unaffected, and not written by an attempt that started before a key replacement; the terminal reason for every mix of skips, with `record.attempts[]` present when nothing executed and a blocked model executor showing its own remedy; `services.<id>.enabled: false` takes a DeepSeek Source out of the order and keeps its models; query-length skip; each outcome row of §4.2; one deadline; metering, `failed_attempts` and `attempts`; DeepSeek official versus relay; settings changed mid-turn do not apply until the next turn; re-enable with and without a free check |
-| Usage | only sent requests are metered; a reported cost survives a restart through the ledger; a released ledger row without the new fields loads |
+| Usage | only sent requests are metered, and DeepSeek's empty or failed requests cost nothing; a reported cost survives a restart through the ledger; a released ledger row without the new fields loads |
 | Mapping | one recorded response per vendor maps to the canonical record with bounds; an empty results array is `completed` and ends the chain; unreadable bodies; a released native `HostedSource` row longer than the new bounds still loads |
 | Hop facts | `prefer_native` off declares the function on a native-capable hop, and a native result in history replays in the synthetic form |
 | UI | the card states, add dialog, service detail, Sources rows, copy in both locales |
