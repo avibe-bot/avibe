@@ -155,6 +155,19 @@ _SEARCH_CHECK_CONNECT_TIMEOUT_SECONDS = 5.0
 _SEARCH_RESPONSE_HEADERS = frozenset({"content-type", "retry-after", "date", "content-length"})
 
 
+async def _read_bounded_search_body(content: Any) -> tuple[bytes | None, bool]:
+    """Read a response to EOF while stopping as soon as the cap is exceeded."""
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in content.iter_chunked(64 * 1024):
+        data = bytes(chunk)
+        total += len(data)
+        if total > _SEARCH_BODY_MAX_BYTES:
+            return None, True
+        chunks.append(data)
+    return b"".join(chunks), False
+
+
 def _search_check_matches(body: object, rule: Mapping[str, Any]) -> bool:
     if rule.get("status") is not None:
         # Status is checked by the caller; keep this predicate about body facts.
@@ -2052,14 +2065,15 @@ class CLIProxyEngineAdapter:
                     json=dict(payload) if payload is not None else None,
                     allow_redirects=False,
                 ) as response:
-                    body = await response.content.read(_SEARCH_BODY_MAX_BYTES + 1)
+                    body, body_too_large = await _read_bounded_search_body(response.content)
                     selected = {
                         name: value
                         for name, value in response.headers.items()
                         if name.lower() in _SEARCH_RESPONSE_HEADERS
                     }
-                    if len(body) > _SEARCH_BODY_MAX_BYTES:
+                    if body_too_large:
                         return SearchResponse(response.status, selected, None, "body_too_large")
+                    assert body is not None
                     if 300 <= response.status < 400:
                         return SearchResponse(response.status, selected, body, "redirect")
                     return SearchResponse(response.status, selected, body)

@@ -2276,8 +2276,9 @@ def test_search_free_check_uses_bounded_catalog_transport(monkeypatch):
             return {"vendor": "tavily"}
 
     class ResponseContent:
-        async def read(self, _limit):
-            return b'{"is_available": true}'
+        async def iter_chunked(self, _chunk_size):
+            yield b'{"is_available": '
+            yield b'true}'
 
     class Response:
         status = 200

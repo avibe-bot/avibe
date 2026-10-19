@@ -4023,39 +4023,56 @@ class ModelHubService:
         )
         source = ModelHubSourceConfig.from_payload(source.to_payload())
         nonce_claimed = False
+        release_nonce = True
         persisted = False
         credential_ref: str | None = None
+        credential_cleaned = False
         try:
             if client_nonce is not None:
                 async with self._mutation_lock:
                     self._claim_source_create_nonce_locked(client_nonce)
                     nonce_claimed = True
-            credential_ref = await self.adapter.provision_credential(
-                vendor, "search", key, None,
+            credential_ref = await _acquire_credential_ref_with_cancellation_ownership(
+                self,
+                self.adapter.provision_credential(
+                    vendor, "search", key, None,
+                ),
+                source.id,
             )
-            source.credential_ref = credential_ref
-            source.masked_credential = _mask_credential(key)
-            outcome = await self._search_free_check(source)
+            try:
+                source.credential_ref = credential_ref
+                source.masked_credential = _mask_credential(key)
+                outcome = await self._search_free_check(source)
+                if outcome in {"balance", "limit"}:
+                    source.state = ModelHubSourceStateConfig(
+                        status="needs_action",
+                        detail_key=(
+                            "models.source.needs_action.balance_exhausted"
+                            if outcome == "balance"
+                            else "models.source.needs_action.spend_limit_reached"
+                        ),
+                    )
+                elif outcome == "unknown":
+                    self._mark_source_unverified(source)
+                else:
+                    source.verification_pending = None
+                source = ModelHubSourceConfig.from_payload(source.to_payload())
+            except asyncio.CancelledError:
+                await _rollback_credential_before_settling(self, source.id, credential_ref)
+                credential_cleaned = True
+                raise
+            except Exception:
+                await _require_credential_cleanup(self, source.id, credential_ref)
+                credential_cleaned = True
+                raise
             if outcome == "invalid":
+                await _require_credential_cleanup(self, source.id, credential_ref)
+                credential_cleaned = True
                 raise ModelHubError(
                     "discovery_failed",
                     status=422,
                     detail="modelHub.errors.authentication_failed",
                 )
-            if outcome in {"balance", "limit"}:
-                source.state = ModelHubSourceStateConfig(
-                    status="needs_action",
-                    detail_key=(
-                        "models.source.needs_action.balance_exhausted"
-                        if outcome == "balance"
-                        else "models.source.needs_action.spend_limit_reached"
-                    ),
-                )
-            elif outcome == "unknown":
-                self._mark_source_unverified(source)
-            else:
-                source.verification_pending = None
-            source = ModelHubSourceConfig.from_payload(source.to_payload())
             async with self._mutation_lock:
                 await self._commit_new_source_locked(
                     source,
@@ -4064,16 +4081,26 @@ class ModelHubService:
                 persisted = True
             return self._source_creation_result(source.to_payload())
         except asyncio.CancelledError:
-            if credential_ref is not None and not self._persisted_credential(self.store.load(), source.id, credential_ref):
+            if (
+                credential_ref is not None
+                and not credential_cleaned
+                and not self._persisted_credential(self.store.load(), source.id, credential_ref)
+            ):
                 await self._revoke_search_credential(credential_ref)
             raise
+        except CredentialCleanupUnsettledError:
+            release_nonce = False
+            raise
         except Exception:
-            if credential_ref is not None and not persisted:
+            if credential_ref is not None and not persisted and not credential_cleaned:
                 try:
                     await self._revoke_search_credential(credential_ref)
                 except Exception:
                     logger.warning("Could not clean up search credential", exc_info=True)
             raise
+        finally:
+            if nonce_claimed and release_nonce:
+                self._source_create_nonces.discard(cast(str, client_nonce))
     async def create_source(self, payload: dict) -> dict:
         if not isinstance(payload, dict):
             raise ModelHubError("discovery_failed")
@@ -4431,13 +4458,17 @@ class ModelHubService:
         if not old_credential_ref:
             raise ModelHubError("discovery_failed")
         self._drop_search_reenable_trial(source.id)
-        replacement_ref = await self.adapter.provision_credential(
-            source.vendor,
-            "search",
-            key,
-            None,
-        )
         committed = False
+        replacement_ref = await _acquire_credential_ref_with_cancellation_ownership(
+            self,
+            self.adapter.provision_credential(
+                source.vendor,
+                "search",
+                key,
+                None,
+            ),
+            source.id,
+        )
         try:
             source.credential_ref = replacement_ref
             source.masked_credential = _mask_credential(key)

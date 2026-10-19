@@ -20,7 +20,7 @@ import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
 
 import { PROTOCOL_COPY_KEYS } from './addApiKeyState';
-import { API_KEY_VENDOR_PRESETS, apiKeyVendorPreset, CUSTOM_VENDOR } from './apiKeyVendors';
+import { API_KEY_VENDOR_PRESETS, modelApiKeyVendorPreset, CUSTOM_VENDOR } from './apiKeyVendors';
 import {
   draftNameValid,
   draftProtocol,
@@ -179,7 +179,7 @@ export const ApiKeySourceForm: React.FC<{
 }> = ({ draft, disabled, revealed, autoFocusKey, keyLabel, onChange, onToggleReveal, onSubmit }) => {
   const { t } = useTranslation();
   const vendorOptions = useVendorOptions();
-  const vendorPreset = apiKeyVendorPreset(draft.vendor);
+  const vendorPreset = modelApiKeyVendorPreset(draft.vendor);
   const nameValid = draftNameValid(draft);
 
   return (

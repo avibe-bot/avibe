@@ -219,6 +219,7 @@
       }
     },
     "SourceDeleteResponse": {
+      "type": "object",
       "required": ["ok", "contract_version", "removed_hops", "interrupted"],
       "additionalProperties": false,
       "properties": {

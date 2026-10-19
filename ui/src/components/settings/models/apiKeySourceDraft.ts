@@ -11,7 +11,7 @@
 //
 // Values, not a component, because a module exporting both opts out of fast
 // refresh — the same split `vendorMarks.ts` and `vendorGlyph.tsx` already make.
-import { apiKeyVendorPreset, CUSTOM_VENDOR } from './apiKeyVendors';
+import { modelApiKeyVendorPreset, CUSTOM_VENDOR } from './apiKeyVendors';
 import { apiFailure } from './modelsApi';
 import {
   SOURCE_DISPLAY_NAME_MAX_LENGTH,
@@ -53,7 +53,7 @@ export function selectVendor(draft: ApiKeySourceDraft, vendor: string): ApiKeySo
   return {
     ...draft,
     vendor,
-    baseUrl: apiKeyVendorPreset(vendor)?.official_base_url ?? '',
+    baseUrl: modelApiKeyVendorPreset(vendor)?.official_base_url ?? '',
     protocol: 'openai_chat',
   };
 }
@@ -61,7 +61,7 @@ export function selectVendor(draft: ApiKeySourceDraft, vendor: string): ApiKeySo
 /** The protocol that will actually be sent: a catalog vendor publishes one, so
  *  for those the segmented control is a statement rather than a question. */
 export const draftProtocol = (draft: ApiKeySourceDraft): SourceProtocol =>
-  apiKeyVendorPreset(draft.vendor)?.protocol ?? draft.protocol;
+  modelApiKeyVendorPreset(draft.vendor)?.protocol ?? draft.protocol;
 
 /** A name is optional; one that is only too long is not. */
 export const draftNameValid = (draft: ApiKeySourceDraft): boolean =>
