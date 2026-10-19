@@ -162,6 +162,7 @@ Hosted tools §6 holds, with these changes:
 | 402 (balance exhausted) | next candidate | `needs_action`, balance (model-hub.md `credential.account_classified`) |
 | a plan or spending limit the catalog names (Tavily 432 plan limit, 433 pay-as-you-go limit) | next candidate | `needs_action`, a new detail: limit reached, remedy "raise the limit or upgrade in the vendor's dashboard" |
 | 408, 429, 5xx, timeout, connection failure | next candidate | none |
+| 3xx (the redirect is refused, §3.3) | next candidate, `service_unavailable` | none |
 | other 4xx (a query the service refuses) | next candidate | none |
 | a body the mapping cannot read | next candidate | none |
 
@@ -177,7 +178,9 @@ Hosted tools §6 holds, with these changes:
 - A completed attempt writes positive evidence with `mode: "service"`, keyed by (Source, service id, `web_search`),
   through the same in-memory and hourly-file rule (hosted tools §3.2).
 - With no candidate, the `failed` record names both remedies: add a search service, or an API key from a vendor
-  that offers search.
+  that offers search. When candidates exist but every one is skipped for `needs_action`, the record is `failed` with
+  `error_code: "search_sources_blocked"`. It names those Sources and their repairs ("更换密钥" or "重新启用", in
+  模型 › 工具), never suggesting a new Source.
 - When the query's length skipped every candidate that was not tried, and no attempt failed, the record is `failed`
   with `error_code: "search_query_too_long"`. The text names the shortest limit ("搜索词超过 128 个字符，请缩短后重试"),
   so the model can retry with a shorter query; it never suggests adding a Source. When attempts also failed, the last
@@ -201,7 +204,8 @@ Hosted tools §6 holds, with these changes:
   costs zero for an empty answer. Earlier billable attempts are `failed_attempts[]` as today; a service attempt is
   billable only when it answered 200.
 - `execution.attempts[]` (new) lists every earlier attempt of the call in order, billable or not, as
-  `{source_id, error_code?}`. A search service always sets `error_code`: one of `service_key_invalid`,
+  `{source_id, label, error_code?}`. `label` is the Source's display name when the attempt started, bounded to 64
+  characters. The projection shows the Source's current name and falls back to `label` for a Source removed since. A search service always sets `error_code`: one of `service_key_invalid`,
   `service_balance`, `service_limit`, `service_unavailable`, `service_refused` and `service_unreadable`, each with en
   and zh copy. A model executor sets it only when its failure already carries a code (`FAILURE_CODES`); a provider's
   free-text failure leaves it absent, and the note then says "失败" for that Source. The switch note reads this list
@@ -321,7 +325,7 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 - The vendor catalog (`vibe/data/api_key_vendors.json` and its schema): search vendors and DeepSeek's search API row.
 - Usage (`usage-summary.schema.json`, `api.md`'s Usage section): a service row keyed by Source and `service_id`,
   counting requests rather than model calls, with reported or list cost (§4.3).
-- `HOSTED_ERROR_CODES`: `search_query_too_long`, with copy on every surface.
+- `HOSTED_ERROR_CODES`: `search_query_too_long` and `search_sources_blocked`, with copy on every surface.
 - `api.md`: the read and PUT changes, and the "重新启用" action for a `search` Source in `needs_action` (§4.2), with
   its `api-response.schema.json` branch.
 - The turn trace's `hosted_tools`: the frozen `prefer_native` and per-candidate `results` and `content` (§3.2).
